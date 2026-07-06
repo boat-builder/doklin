@@ -136,16 +136,25 @@ body,
   grid-area: tabs;
   display: flex;
   align-items: stretch;
-  gap: 2px;
   padding: 0 8px;
   background: var(--app-bg);
   border-bottom: 1px solid var(--app-border);
+}
+
+/* The tabs scroll inside the strip; the overflow chevron (if any) stays put
+   at the bar's right edge. */
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
 }
 
-.tab-bar::-webkit-scrollbar {
+.tab-strip::-webkit-scrollbar {
   height: 0;
 }
 
@@ -171,6 +180,19 @@ body,
   border-bottom: 1px solid var(--app-surface);
 }
 
+.tab.is-dragging {
+  opacity: 0.55;
+}
+
+/* Ghost tab: the file behind it couldn't be read (missing / unmounted). */
+.tab.is-missing {
+  opacity: 0.6;
+}
+
+.tab.is-missing .tab-label {
+  text-decoration: line-through;
+}
+
 .tab-main {
   display: flex;
   align-items: center;
@@ -183,6 +205,7 @@ body,
   color: inherit;
   font-size: 12px;
   cursor: pointer;
+  touch-action: none; /* horizontal drags reorder tabs; don't pan the strip */
 }
 
 .tab-label {
@@ -242,6 +265,177 @@ body,
 .tab-new:hover {
   background: var(--app-hover);
   color: var(--app-text);
+}
+
+/* Overflow menu: shown only when the strip actually scrolls. */
+
+.tab-overflow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+.tab-overflow-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+}
+
+.tab-overflow-btn:hover,
+.tab-overflow-btn[aria-expanded="true"] {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.tab-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  z-index: 30;
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+[data-theme="dark"] .tab-overflow-menu {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .tab-overflow-menu,
+  [data-theme="system"] .tab-overflow-menu {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.tab-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tab-overflow-item:hover {
+  background: var(--app-hover);
+}
+
+.tab-overflow-item.is-active .tab-overflow-label {
+  font-weight: 600;
+}
+
+.tab-overflow-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--app-text);
+}
+
+.tab-overflow-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-overflow-item.is-missing .tab-overflow-label {
+  text-decoration: line-through;
+  color: var(--app-text-muted);
+}
+
+/* ---------- Missing-file (ghost tab) state ---------- */
+
+.missing-file {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.missing-file-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.missing-file-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.missing-file-path {
+  font-size: 12px;
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.missing-file-hint {
+  font-size: 13px;
+  color: var(--app-text-muted);
+}
+
+.missing-file-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.missing-file-btn {
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.missing-file-btn:hover {
+  background: var(--app-hover);
 }
 
 /* ---------- Editor canvas ---------- */
