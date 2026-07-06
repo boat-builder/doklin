@@ -45,6 +45,7 @@ type Props = {
   initialMarkdown: string;
   onChange: (markdown: string) => void;
   onSearchState?: (info: SearchInfo) => void;
+  onFocusChange?: (focused: boolean) => void;
   // Fires once the ProseMirror view exists with the full document rendered —
   // the earliest point DOM-level work (e.g. restoring scroll) can stick.
   onReady?: () => void;
@@ -96,7 +97,7 @@ function scrollToCurrent(view: EditorView) {
 }
 
 const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
-  { initialMarkdown, onChange, onSearchState, onReady },
+  { initialMarkdown, onChange, onSearchState, onFocusChange, onReady },
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
@@ -109,6 +110,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onChangeRef.current = onChange;
   const onSearchStateRef = useRef(onSearchState);
   onSearchStateRef.current = onSearchState;
+  const onFocusChangeRef = useRef(onFocusChange);
+  onFocusChangeRef.current = onFocusChange;
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
@@ -206,6 +209,14 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       api.mounted((ctx) => {
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
+        // Emit the mounted doc's serialization as the baseline. markdownUpdated
+        // only fires on edit transactions — never on mount — so without this the
+        // host would mistake the first real edit (e.g. a paste into a fresh
+        // draft) for the load-normalization baseline and never autosave it.
+        onChangeRef.current(crepe.getMarkdown());
+        // Host visibility into editor focus (drives the empty-draft placeholder).
+        view.dom.addEventListener("focus", () => onFocusChangeRef.current?.(true));
+        view.dom.addEventListener("blur", () => onFocusChangeRef.current?.(false));
         const pending = pendingRef.current;
         if (pending) {
           pendingRef.current = null;
