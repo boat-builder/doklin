@@ -49,6 +49,23 @@ const dirname = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
 };
+const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+
+// Suggest a filename (no extension) for saving a draft: its first non-empty
+// line with markdown syntax and filesystem-hostile characters stripped, falling
+// back to the draft's Untitled-N title. Pre-fills the Save As prompt so naming
+// a note that already starts with a heading is just ⌘S + Enter.
+function suggestDraftFileName(md: string, fallback: string): string {
+  const line = md.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  const cleaned = line
+    .replace(/^[#>\s*+-]+/, "") // heading/quote/list markers
+    .replace(/[*_`~[\]]/g, "") // inline emphasis/link syntax
+    .replace(/[/\\:]/g, "-")
+    .trim()
+    .slice(0, 60)
+    .trim();
+  return cleaned || fallback;
+}
 
 type Theme = "system" | "light" | "sepia" | "dark";
 const THEMES: Theme[] = ["system", "light", "sepia", "dark"];
@@ -267,6 +284,10 @@ export default function App() {
   // back to the workspace root. Mirrored in a ref for async readers.
   const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection | null>(null);
   const sidebarSelectionRef = useRef<SidebarSelection | null>(null);
+  // The in-app Save As prompt (shown instead of the native save panel when a
+  // workspace decides the destination): the folder is fixed, only the name is
+  // asked for. null = closed.
+  const [savePrompt, setSavePrompt] = useState<{ dir: string; suggested: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => readStoredSidebarOpen());
   const [draftsOpen, setDraftsOpen] = useState<boolean>(() => readDraftsOpen());
   const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
@@ -1111,30 +1132,11 @@ export default function App() {
     [scheduleAutosave],
   );
 
-  const handleSave = useCallback(async () => {
-    const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-    if (!active) return;
-    if (active.kind === "file") {
-      // Real files autosave continuously; ⌘S just flushes any pending write.
-      flushPendingAutosave();
-      return;
-    }
-    // Promote a draft to a real file (Save As). The dialog starts where the
-    // user is working (VS Code-style): in the sidebar's selected folder (or the
-    // selected file's folder), else the workspace root, else the OS default.
-    const sel = sidebarSelectionRef.current;
-    const contextDir = sel
-      ? sel.kind === "dir"
-        ? sel.path
-        : dirname(sel.path)
-      : workspaceRoot;
-    const suggestedName = `${active.title ?? "untitled"}.md`;
-    const chosen = await saveDialog({
-      title: "Save markdown",
-      defaultPath: contextDir ? `${contextDir}/${suggestedName}` : suggestedName,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-    });
-    if (!chosen) return;
+  // Move the active draft's content into the real file `chosen`: write it,
+  // flip the tab in place, re-key any share, start watching the file, and
+  // delete the draft. The final step of every Save As path — the in-app prompt
+  // (workspace open) and the native dialog (no workspace) both end here.
+  const promoteDraftTo = useCallback(async (active: Tab, chosen: string) => {
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
@@ -1177,7 +1179,94 @@ export default function App() {
     writeDraftsMeta(rest);
     addRecent(chosen, "file");
     setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
-  }, [writeToDisk, flushPendingAutosave, addRecent, updateShares, scheduleSharePush, workspaceRoot]);
+  }, [writeToDisk, addRecent, updateShares, scheduleSharePush]);
+
+  const handleSave = useCallback(async () => {
+    const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (!active) return;
+    if (active.kind === "file") {
+      // Real files autosave continuously; ⌘S just flushes any pending write.
+      flushPendingAutosave();
+      return;
+    }
+    // Promote a draft to a real file (Save As). With a workspace open there is
+    // no Finder navigation (VS Code-style): the destination is already decided
+    // by context — the sidebar's selected folder, the selected file's folder,
+    // or the workspace root — so the in-app prompt only asks for a name.
+    const sel = sidebarSelectionRef.current;
+    const contextDir = sel
+      ? sel.kind === "dir"
+        ? sel.path
+        : dirname(sel.path)
+      : workspaceRoot;
+    const fallback = active.title ?? "untitled";
+    if (contextDir) {
+      setSavePrompt({
+        dir: contextDir,
+        suggested: suggestDraftFileName(currentMarkdownRef.current, fallback),
+      });
+      return;
+    }
+    // No workspace: the native Save dialog is the only way to pick a location.
+    const chosen = await saveDialog({
+      title: "Save markdown",
+      defaultPath: `${fallback}.md`,
+      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+    });
+    if (!chosen) return;
+    await promoteDraftTo(active, chosen);
+  }, [flushPendingAutosave, promoteDraftTo, workspaceRoot]);
+
+  // Commit the in-app Save As prompt. Returns an error message to show under
+  // the input (bad name, collision), or null once the draft is promoted.
+  const commitSavePrompt = useCallback(
+    async (name: string): Promise<string | null> => {
+      const sp = savePrompt;
+      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!sp || active?.kind !== "draft") {
+        setSavePrompt(null); // the draft went away under the prompt; nothing to save
+        return null;
+      }
+      const trimmed = name.trim();
+      if (!trimmed) return "A name is required.";
+      if (/[/\\:]/.test(trimmed)) return "Names can't contain /, \\ or :";
+      if (trimmed.startsWith(".")) return "Names can't start with a dot.";
+      const fileName = MD_EXT_RE.test(trimmed) ? trimmed : `${trimmed}.md`;
+      const target = `${sp.dir}/${fileName}`;
+      let exists = false;
+      try {
+        exists = await invoke<boolean>("path_exists", { path: target });
+      } catch {
+        // If the check itself fails, fall through — the write will surface it.
+      }
+      if (exists) return `"${fileName}" already exists in this folder.`;
+      setSavePrompt(null);
+      await promoteDraftTo(active, target);
+      return null;
+    },
+    [savePrompt, promoteDraftTo],
+  );
+
+  // The prompt's escape hatch: hand off to the native dialog (pre-filled with
+  // the typed name) for saving somewhere outside the workspace.
+  const browseSavePrompt = useCallback(
+    async (name: string) => {
+      const sp = savePrompt;
+      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      setSavePrompt(null);
+      if (!sp || active?.kind !== "draft") return;
+      const base = name.trim() || sp.suggested;
+      const fileName = MD_EXT_RE.test(base) ? base : `${base}.md`;
+      const chosen = await saveDialog({
+        title: "Save markdown",
+        defaultPath: `${sp.dir}/${fileName}`,
+        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+      });
+      if (!chosen) return;
+      await promoteDraftTo(active, chosen);
+    },
+    [savePrompt, promoteDraftTo],
+  );
 
   // Highlights are driven by the query alone, NOT by whether the find bar is
   // visible — so opening a workspace-search result can highlight the match
@@ -1453,6 +1542,19 @@ export default function App() {
           onKeep={keepMyVersion}
         />
       )}
+      {savePrompt && (
+        <SaveAsPrompt
+          dirLabel={
+            workspaceRoot && savePrompt.dir.startsWith(workspaceRoot)
+              ? `${basename(workspaceRoot)}${savePrompt.dir.slice(workspaceRoot.length)}`
+              : savePrompt.dir
+          }
+          suggested={savePrompt.suggested}
+          onCommit={commitSavePrompt}
+          onBrowse={(name) => void browseSavePrompt(name)}
+          onCancel={() => setSavePrompt(null)}
+        />
+      )}
       <main className="editor-wrap">
         {findOpen && activeTab && (
           <FindBar
@@ -1508,6 +1610,99 @@ export default function App() {
 }
 
 /* ---------- Subviews ---------- */
+
+// The in-app Save As prompt (vscode.dev-style quick input), shown instead of
+// the native save panel when a workspace fixes the destination folder. Enter
+// saves, Esc (or clicking away) cancels; "Choose location…" falls back to the
+// native dialog for saving outside the workspace. `.md` is appended
+// automatically unless the typed name already has a markdown extension.
+function SaveAsPrompt({
+  dirLabel,
+  suggested,
+  onCommit,
+  onBrowse,
+  onCancel,
+}: {
+  dirLabel: string;
+  suggested: string;
+  onCommit: (name: string) => Promise<string | null>;
+  onBrowse: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(suggested);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Guards double-submit while an async commit is in flight.
+  const busyRef = useRef(false);
+
+  useEffect(() => {
+    inputRef.current?.select(); // pre-filled name: typing replaces it wholesale
+  }, []);
+
+  const submit = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    const err = await onCommit(value);
+    busyRef.current = false;
+    if (err) {
+      setError(err);
+      inputRef.current?.focus();
+    }
+  };
+
+  return (
+    <div
+      className="saveas-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div className="saveas-panel" role="dialog" aria-label="Save note">
+        <div className="saveas-title">
+          Save to <span className="saveas-dir">{dirLabel}</span>
+        </div>
+        <div className="saveas-inputwrap">
+          <input
+            ref={inputRef}
+            className="saveas-input"
+            type="text"
+            value={value}
+            autoFocus
+            spellCheck={false}
+            aria-label="File name"
+            aria-invalid={error != null}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submit();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                onCancel();
+              }
+              e.stopPropagation(); // keep app-level shortcuts out of the prompt
+            }}
+          />
+          {!MD_EXT_RE.test(value) && <span className="saveas-ext">.md</span>}
+        </div>
+        {error && (
+          <div className="saveas-error" role="alert">
+            {error}
+          </div>
+        )}
+        <div className="saveas-footer">
+          <span className="saveas-hint">↩ Save &nbsp;·&nbsp; esc Cancel</span>
+          <button className="saveas-browse" onClick={() => onBrowse(value)}>
+            Choose location…
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ConflictBanner({
   onReload,

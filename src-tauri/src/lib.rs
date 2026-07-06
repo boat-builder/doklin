@@ -563,6 +563,14 @@ fn create_dir(path: String) -> Result<(), String> {
     }
 }
 
+/// True if anything (file or folder) exists at `path`. The in-app Save As
+/// prompt checks this before promoting a draft, because the promotion write
+/// itself is deliberately unconditional (Save As overwrites its target).
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
 #[tauri::command]
 fn list_md_tree(path: String) -> Result<TreeNode, String> {
     let root = PathBuf::from(&path);
@@ -1088,6 +1096,7 @@ pub fn run() {
             list_md_tree,
             create_file,
             create_dir,
+            path_exists,
             search_workspace,
             take_pending_open,
             take_pending_folder,

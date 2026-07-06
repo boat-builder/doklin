@@ -39,12 +39,18 @@ to another OS.
 
 Both real files and drafts auto-save 600ms after the last keystroke — files to
 their path, drafts to `app_data_dir/drafts/<id>.md`. For a real file `⌘S` just
-flushes the pending write; for a draft it opens a Save dialog and promotes the
-draft into the chosen `.md` file (removing the draft). The Save dialog starts
-in the sidebar's selected folder (or the selected file's folder), falling back
-to the workspace root — so saving from a workspace window lands in the
-workspace by default. Switching tabs and quitting also flush, so unsaved
-keystrokes aren't lost.
+flushes the pending write; for a draft it promotes the draft into a real `.md`
+file (removing the draft). Where the promotion happens is VS Code-style:
+
+- **Workspace open** — no Finder navigation. An in-app prompt asks only for a
+  name (pre-filled from the note's first line) and saves straight into the
+  context folder: the sidebar's selected folder, the selected file's folder,
+  or the workspace root. Name collisions are refused inline; a *Choose
+  location…* link falls back to the native dialog for saving outside the
+  workspace.
+- **No workspace** — the native Save dialog picks the location.
+
+Switching tabs and quitting also flush, so unsaved keystrokes aren't lost.
 
 ## Keyboard
 
