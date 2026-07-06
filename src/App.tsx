@@ -63,7 +63,10 @@ type RecentEntry = { path: string; kind: "file" | "folder" };
 // (drafts in app_data_dir/drafts/<id>.md, files at their real path) and autosaves
 // there, so disk — not memory — is the source of truth across tabs.
 type TabKind = "draft" | "file";
-type Tab = { id: string; kind: TabKind; path: string; title?: string };
+// `missing` marks a file tab whose path failed to read (drive unmounted, file
+// moved) — kept visible as a "ghost" tab instead of silently dropped. Every
+// activation re-checks the path, so the flag self-heals if the file returns.
+type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
 type DraftInfo = { id: string; path: string; snapshot: FileSnapshot; preview: string };
 type DraftRow = { id: string; path: string; title: string; preview: string };
 type DraftsMeta = Record<string, { seq: number }>;
@@ -267,6 +270,10 @@ export default function App() {
   // only once a first character lands.
   const [editorFocused, setEditorFocused] = useState(false);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
+  // Bumped after each autosave write of a draft lands on disk, so the drafts
+  // panel re-lists (list_drafts reads from disk, so the refresh has to follow
+  // the write, not the keystroke). The 600ms autosave debounce is the rate cap.
+  const [draftsRefreshToken, setDraftsRefreshToken] = useState(0);
   const deletedStackRef = useRef<{ path: string; trashPath: string; wasOpen: boolean }[]>([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
@@ -280,6 +287,10 @@ export default function App() {
   // latest value without stale closures (same pattern as pathRef/dirtyRef).
   const tabsRef = useRef<Tab[]>([]);
   const activeIdRef = useRef<string | null>(null);
+  // Per-tab scroll offsets, captured before the editor remounts on a switch and
+  // restored once the incoming editor is ready. DOM-level (.editor-wrap), so it
+  // needs no editor internals. In-memory only — a fresh launch starts at top.
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
@@ -422,6 +433,11 @@ export default function App() {
       // The remote mirror follows every successful disk write of a shared doc —
       // even one that resolves after switching tabs.
       scheduleSharePush(target);
+      // Same for the drafts panel: its previews come from disk, so re-list once
+      // a draft's write has landed (including a flush resolving after a switch).
+      if (tabsRef.current.some((t) => t.kind === "draft" && t.path === target)) {
+        setDraftsRefreshToken((n) => n + 1);
+      }
       // The active tab may have switched while this write was in flight (e.g. a
       // flush of the previous doc resolving after switching tabs). Only commit
       // baseline state if `target` is still the active path.
@@ -454,16 +470,18 @@ export default function App() {
     }, AUTOSAVE_DEBOUNCE_MS);
   }, [writeToDisk]);
 
-  const flushPendingAutosave = useCallback(() => {
+  // Returns the write promise so callers that must not outrun the write (the
+  // quit flush) can await it; fire-and-forget callers just ignore the result.
+  const flushPendingAutosave = useCallback((): Promise<void> => {
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
     const target = pathRef.current;
-    if (!target) return;
+    if (!target) return Promise.resolve();
     const snapshot = currentMarkdownRef.current;
-    if (snapshot === lastSavedRef.current) return;
-    void writeToDisk(target, snapshot);
+    if (snapshot === lastSavedRef.current) return Promise.resolve();
+    return writeToDisk(target, snapshot);
   }, [writeToDisk]);
 
   const addRecent = useCallback((p: string, kind: "file" | "folder") => {
@@ -477,8 +495,45 @@ export default function App() {
     });
   }, []);
 
+  // Snapshot the active tab's scroll offset — call this synchronously BEFORE
+  // anything that remounts the editor (tab switch, external reload).
+  const captureActiveScroll = useCallback(() => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    const wrap = document.querySelector(".editor-wrap");
+    if (wrap) scrollPositionsRef.current.set(id, wrap.scrollTop);
+  }, []);
+
+  // Restore the active tab's scroll offset. Runs from the editor's onReady; the
+  // rAF re-apply covers Crepe finishing layout a frame after mount (a too-early
+  // set gets clamped to 0 by a document that has no height yet).
+  const restoreActiveScroll = useCallback(() => {
+    const id = activeIdRef.current;
+    const wrap = document.querySelector(".editor-wrap");
+    if (!wrap) return;
+    const saved = (id ? scrollPositionsRef.current.get(id) : 0) ?? 0;
+    wrap.scrollTop = saved;
+    requestAnimationFrame(() => {
+      wrap.scrollTop = saved;
+    });
+  }, []);
+
+  // Flip a tab's `missing` flag (in place) and persist the session.
+  const setTabMissing = useCallback((id: string, missing: boolean) => {
+    const cur = tabsRef.current;
+    if (!cur.some((t) => t.id === id && !!t.missing !== missing)) return;
+    const next = cur.map((t) =>
+      t.id === id ? { ...t, missing: missing || undefined } : t,
+    );
+    tabsRef.current = next;
+    setTabs(next);
+    writeStoredSession(next, activeIdRef.current);
+  }, []);
+
   // Make `tab` the active document in the (single) editor: read its content from
   // disk, reset the per-doc refs, and remount the editor. Watch only real files.
+  // A failed read doesn't drop the tab — it becomes a "ghost" (missing) tab with
+  // no document loaded; a later activation retries and recovers automatically.
   const loadActiveContent = useCallback(async (tab: Tab) => {
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
@@ -486,13 +541,37 @@ export default function App() {
     }
     let contents = "";
     let snapshot: FileSnapshot | null = null;
+    let failed = false;
     try {
       const result = await invoke<ReadFileResult>("read_file", { path: tab.path });
       contents = result.contents;
       snapshot = result.snapshot;
     } catch (e) {
+      failed = true;
       console.error("read failed", tab.path, e);
     }
+    if (failed) {
+      // Ghost state: pathRef stays null so autosave can't recreate the file at
+      // its old path, and nothing is watched. The editor is not rendered.
+      setTabMissing(tab.id, true);
+      baselineCapturedRef.current = false;
+      pathRef.current = null;
+      currentMarkdownRef.current = "";
+      lastSavedRef.current = "";
+      snapshotRef.current = null;
+      setInitialMarkdown("");
+      setDirty(false);
+      setDocEmpty(true);
+      setEditorFocused(false); // the editor unmounts without firing blur
+      setConflict(null);
+      try {
+        await invoke("unwatch_file");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    setTabMissing(tab.id, false); // the file is back (or was never gone)
     baselineCapturedRef.current = false;
     pathRef.current = tab.path;
     currentMarkdownRef.current = contents;
@@ -517,11 +596,12 @@ export default function App() {
         // ignore
       }
     }
-  }, []);
+  }, [setTabMissing]);
 
   const switchTab = useCallback(
     async (id: string) => {
       if (id === activeIdRef.current) return;
+      captureActiveScroll(); // remember where the outgoing doc was scrolled
       flushPendingAutosave(); // persist the outgoing doc before switching
       const target = tabsRef.current.find((t) => t.id === id);
       if (!target) return;
@@ -530,7 +610,7 @@ export default function App() {
       writeStoredSession(tabsRef.current, id);
       await loadActiveContent(target);
     },
-    [flushPendingAutosave, loadActiveContent],
+    [captureActiveScroll, flushPendingAutosave, loadActiveContent],
   );
 
   // Ctrl+Tab / Ctrl+Shift+Tab: cycle to the next/previous tab in this window,
@@ -547,9 +627,18 @@ export default function App() {
     [switchTab],
   );
 
+  // Drag-to-reorder from the tab bar: adopt the new order (same tabs, same
+  // active doc — nothing to load or flush) and persist it.
+  const reorderTabs = useCallback((nextOrder: Tab[]) => {
+    tabsRef.current = nextOrder;
+    setTabs(nextOrder);
+    writeStoredSession(nextOrder, activeIdRef.current);
+  }, []);
+
   // Append a freshly-built tab and make it active.
   const appendAndActivate = useCallback(
     async (tab: Tab) => {
+      captureActiveScroll(); // remember where the outgoing doc was scrolled
       flushPendingAutosave(); // persist the outgoing doc before switching
       const nextTabs = [...tabsRef.current, tab];
       tabsRef.current = nextTabs;
@@ -559,7 +648,7 @@ export default function App() {
       writeStoredSession(nextTabs, tab.id);
       await loadActiveContent(tab);
     },
-    [flushPendingAutosave, loadActiveContent],
+    [captureActiveScroll, flushPendingAutosave, loadActiveContent],
   );
 
   // Open a path in a tab (dedupe by path). Used for files (picker/recents/sidebar/
@@ -568,7 +657,13 @@ export default function App() {
     async (p: string, kind: TabKind) => {
       const existing = tabsRef.current.find((t) => t.path === p);
       if (existing) {
-        await switchTab(existing.id);
+        if (existing.id === activeIdRef.current) {
+          // Re-opening the already-active tab is a no-op — unless it's a ghost,
+          // where it doubles as "the file might be back, try reading again".
+          if (existing.missing) await loadActiveContent(existing);
+        } else {
+          await switchTab(existing.id);
+        }
         return;
       }
       if (kind === "file") addRecent(p, "file");
@@ -584,7 +679,7 @@ export default function App() {
         await appendAndActivate({ id: uuid(), kind, path: p });
       }
     },
-    [switchTab, addRecent, appendAndActivate],
+    [switchTab, addRecent, appendAndActivate, loadActiveContent],
   );
 
   // ⌘N: create a brand-new empty draft and open it. Don't spawn a second empty
@@ -783,6 +878,9 @@ export default function App() {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
+    // The reload remounts the editor; re-capture first so the reader stays at
+    // the same place in the externally-changed document instead of jumping up.
+    captureActiveScroll();
     try {
       const result = await invoke<ReadFileResult>("read_file", { path: target });
       baselineCapturedRef.current = false;
@@ -796,7 +894,7 @@ export default function App() {
     } catch (e) {
       console.error("reload failed", e);
     }
-  }, []);
+  }, [captureActiveScroll]);
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
@@ -865,6 +963,7 @@ export default function App() {
         }
       }
 
+      scrollPositionsRef.current.delete(id);
       const idx = tabsRef.current.findIndex((t) => t.id === id);
       const remaining = tabsRef.current.filter((t) => t.id !== id);
       const nextActive =
@@ -910,11 +1009,12 @@ export default function App() {
     [closeTab, refreshDraftsPanel],
   );
 
-  // Keep the drafts panel in sync: refresh when it opens and whenever the open
-  // tabs change (new / close / promote all flow through here).
+  // Keep the drafts panel in sync: refresh when it opens, whenever the open
+  // tabs change (new / close / promote all flow through here), and after each
+  // autosaved draft write lands (so previews track live edits).
   useEffect(() => {
     if (draftsOpen) void refreshDraftsPanel();
-  }, [draftsOpen, tabs, refreshDraftsPanel]);
+  }, [draftsOpen, tabs, draftsRefreshToken, refreshDraftsPanel]);
 
   // Move a file to the system Trash (⌘⌫ from the sidebar). The backend returns
   // where the file landed inside the Trash so undoDelete can pull it straight
@@ -990,7 +1090,10 @@ export default function App() {
         console.error("migrate_scratch failed", e);
       }
 
-      // Restore the persisted session, dropping tabs whose file no longer exists.
+      // Restore the persisted session. A file tab whose path no longer reads is
+      // kept as a visible "ghost" (missing) tab rather than silently dropped —
+      // the disk may just be unmounted, and the user decides whether to close
+      // it. Drafts are app-managed; one that's gone really is gone → drop.
       const stored = readStoredSession();
       const restored: Tab[] = [];
       for (const t of stored.tabs) {
@@ -999,10 +1102,10 @@ export default function App() {
           restored.push(
             t.kind === "draft" && !t.title
               ? { ...t, title: `Untitled-${draftsMetaRef.current[t.id]?.seq ?? "?"}` }
-              : t,
+              : { ...t, missing: undefined }, // readable again → clear a stale flag
           );
         } catch {
-          // file or draft is gone → drop the tab
+          if (t.kind === "file") restored.push({ ...t, missing: true });
         }
       }
 
@@ -1074,6 +1177,29 @@ export default function App() {
       void un.then((f) => f());
     };
   }, [reloadFromDisk]);
+
+  // Robust quit flush: type-then-⌘Q within the autosave debounce would lose the
+  // last keystrokes if the process exits before the fire-and-forget write_file
+  // resolves. Intercept the close, await the pending write, then destroy the
+  // window for real. A second close request while the flush is in flight is let
+  // through untouched — the escape hatch if the write ever hangs.
+  const closingRef = useRef(false);
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const un = win.onCloseRequested(async (event) => {
+      if (closingRef.current) return;
+      closingRef.current = true;
+      event.preventDefault();
+      try {
+        await flushPendingAutosave();
+      } finally {
+        void win.destroy();
+      }
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [flushPendingAutosave]);
 
   const onMarkdownChange = useCallback(
     (md: string) => {
@@ -1227,7 +1353,8 @@ export default function App() {
         void openWorkspaceSearch();
       } else if (k === "f" && !e.shiftKey) {
         e.preventDefault();
-        if (activeIdRef.current) {
+        const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+        if (active && !active.missing) {
           setFindOpen(true);
           setFindFocusToken((t) => t + 1);
         }
@@ -1311,6 +1438,7 @@ export default function App() {
   if (!ready) return null;
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+  const activeMissing = activeTab?.missing === true;
   const showSidebar = workspaceRoot != null && sidebarOpen;
   const isDraft = activeTab?.kind === "draft";
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
@@ -1343,7 +1471,7 @@ export default function App() {
           </button>
         )}
       </div>
-      {activeTab && (
+      {activeTab && !activeMissing && (
         <ShareMenu
           key={activeTab.path}
           docTitle={docShareTitle(activeTab)}
@@ -1387,6 +1515,7 @@ export default function App() {
         onSwitch={(id) => void switchTab(id)}
         onClose={(id) => void closeTab(id)}
         onNewDraft={() => void newDraft()}
+        onReorder={reorderTabs}
       />
       {showSidebar && workspaceRoot && sidebarMode === "search" && (
         <WorkspaceSearch
@@ -1422,7 +1551,7 @@ export default function App() {
         />
       )}
       <main className="editor-wrap">
-        {findOpen && activeTab && (
+        {findOpen && activeTab && !activeMissing && (
           <FindBar
             query={findQuery}
             onQueryChange={setFindQuery}
@@ -1436,7 +1565,7 @@ export default function App() {
             focusToken={findFocusToken}
           />
         )}
-        {activeTab && (
+        {activeTab && !activeMissing && (
           <Editor
             key={loadKey}
             ref={editorRef}
@@ -1444,6 +1573,14 @@ export default function App() {
             onChange={onMarkdownChange}
             onSearchState={setFindInfo}
             onFocusChange={setEditorFocused}
+            onReady={restoreActiveScroll}
+          />
+        )}
+        {activeTab && activeMissing && (
+          <MissingFileState
+            path={activeTab.path}
+            onRetry={() => void loadActiveContent(activeTab)}
+            onCloseTab={() => void closeTab(activeTab.id)}
           />
         )}
         {(!activeTab || (isDraft && docEmpty && !editorFocused)) && (
@@ -1476,6 +1613,40 @@ export default function App() {
 }
 
 /* ---------- Subviews ---------- */
+
+// Shown in place of the editor when the active tab's file can't be read.
+// Deliberately read-only: typing here could recreate the file at a path that
+// may be a momentarily-unmounted drive. Re-activating the tab retries the read.
+function MissingFileState({
+  path,
+  onRetry,
+  onCloseTab,
+}: {
+  path: string;
+  onRetry: () => void;
+  onCloseTab: () => void;
+}) {
+  return (
+    <div className="missing-file">
+      <div className="missing-file-card">
+        <div className="missing-file-title">File not found</div>
+        <div className="missing-file-path">{path}</div>
+        <div className="missing-file-hint">
+          It may have been moved, renamed, or be on a disk that isn't mounted.
+          Switching back to this tab checks again.
+        </div>
+        <div className="missing-file-actions">
+          <button className="missing-file-btn" onClick={onRetry}>
+            Try again
+          </button>
+          <button className="missing-file-btn" onClick={onCloseTab}>
+            Close tab
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ConflictBanner({
   onReload,
