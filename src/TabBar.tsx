@@ -79,7 +79,7 @@ export default function TabBar({
         className="tab-new"
         onClick={onNewDraft}
         aria-label="New note"
-        title="New note (⌘N)"
+        title="New note (⌘N / ⌘T)"
       >
         <PlusIcon />
       </button>

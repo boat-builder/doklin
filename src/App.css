@@ -1100,6 +1100,80 @@ body,
   color: var(--app-text);
 }
 
+/* Explorer selection (click / right-click): a quieter highlight than the
+   active document, which keeps its stronger is-active treatment. */
+.tree-row.is-selected:not(.is-active) {
+  background: var(--app-hover);
+}
+
+/* ---------- Sidebar: inline create + context menu ---------- */
+
+.tree-create-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  color: var(--app-text-muted);
+}
+
+.tree-create-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--crepe-color-selected, var(--app-border));
+  border-radius: 4px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+}
+
+.tree-create-input[aria-invalid="true"] {
+  border-color: var(--crepe-color-error, #b91c1c);
+}
+
+.tree-create-error {
+  padding: 3px 6px 4px;
+  font-size: 11px;
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+/* Same visual language as .sidebar-menu, but positioned at the cursor. */
+.tree-context-menu {
+  position: fixed;
+  min-width: 170px;
+  padding: 6px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  z-index: 30;
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+[data-theme="dark"] .tree-context-menu {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .tree-context-menu,
+  [data-theme="system"] .tree-context-menu {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.sidebar-menu-item.is-danger {
+  color: var(--crepe-color-error, #b91c1c);
+}
+
 /* ---------- In-file find (⌘F) ---------- */
 
 /* Search match highlights painted by the ProseMirror decoration plugin. */

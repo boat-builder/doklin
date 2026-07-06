@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
-import Sidebar from "./Sidebar";
+import Sidebar, { type SidebarSelection } from "./Sidebar";
 import TabBar from "./TabBar";
 import DraftsPanel from "./DraftsPanel";
 import FindBar from "./FindBar";
@@ -45,6 +45,10 @@ type WindowInit = { isMain: boolean; folder: string | null; file: string | null 
 let isMainWindow = true;
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+const dirname = (p: string) => {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : p;
+};
 
 type Theme = "system" | "light" | "sepia" | "dark";
 const THEMES: Theme[] = ["system", "light", "sepia", "dark"];
@@ -257,6 +261,12 @@ export default function App() {
   // watch/conflict) keys off `path` alone — keep it that way; never branch file
   // handling on whether a workspace is open.
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  // The sidebar's selected row (file or folder). Lives here — not in Sidebar —
+  // because it is the creation context: saving a new draft defaults the save
+  // dialog into the selected folder (or next to the selected file), falling
+  // back to the workspace root. Mirrored in a ref for async readers.
+  const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection | null>(null);
+  const sidebarSelectionRef = useRef<SidebarSelection | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => readStoredSidebarOpen());
   const [draftsOpen, setDraftsOpen] = useState<boolean>(() => readDraftsOpen());
   const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
@@ -632,11 +642,17 @@ export default function App() {
     );
   }, []);
 
+  const selectSidebarEntry = useCallback((sel: SidebarSelection | null) => {
+    sidebarSelectionRef.current = sel;
+    setSidebarSelection(sel);
+  }, []);
+
   const setWorkspace = useCallback((root: string) => {
     setWorkspaceRoot(root);
     setSidebarOpen(true);
+    selectSidebarEntry(null); // a selection from the previous workspace is meaningless
     addRecent(root, "folder");
-  }, [addRecent]);
+  }, [addRecent, selectSidebarEntry]);
 
   const openFolderPicker = useCallback(async () => {
     try {
@@ -938,9 +954,10 @@ export default function App() {
         return;
       }
       deletedStackRef.current.push({ path: target, trashPath, wasOpen: !!openForFile });
+      if (sidebarSelectionRef.current?.path === target) selectSidebarEntry(null);
       setTreeRefreshToken((t) => t + 1);
     },
-    [closeTab],
+    [closeTab, selectSidebarEntry],
   );
 
   // Undo the most recent trash (⌘Z outside the editor): move the file back out
@@ -1102,10 +1119,19 @@ export default function App() {
       flushPendingAutosave();
       return;
     }
-    // Promote a draft to a real file (Save As).
+    // Promote a draft to a real file (Save As). The dialog starts where the
+    // user is working (VS Code-style): in the sidebar's selected folder (or the
+    // selected file's folder), else the workspace root, else the OS default.
+    const sel = sidebarSelectionRef.current;
+    const contextDir = sel
+      ? sel.kind === "dir"
+        ? sel.path
+        : dirname(sel.path)
+      : workspaceRoot;
+    const suggestedName = `${active.title ?? "untitled"}.md`;
     const chosen = await saveDialog({
       title: "Save markdown",
-      defaultPath: `${active.title ?? "untitled"}.md`,
+      defaultPath: contextDir ? `${contextDir}/${suggestedName}` : suggestedName,
       filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
     });
     if (!chosen) return;
@@ -1150,7 +1176,8 @@ export default function App() {
     draftsMetaRef.current = rest;
     writeDraftsMeta(rest);
     addRecent(chosen, "file");
-  }, [writeToDisk, flushPendingAutosave, addRecent, updateShares, scheduleSharePush]);
+    setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
+  }, [writeToDisk, flushPendingAutosave, addRecent, updateShares, scheduleSharePush, workspaceRoot]);
 
   // Highlights are driven by the query alone, NOT by whether the find bar is
   // visible — so opening a workspace-search result can highlight the match
@@ -1234,7 +1261,9 @@ export default function App() {
       } else if (k === "s" && !e.shiftKey) {
         e.preventDefault();
         void handleSave();
-      } else if (k === "n" && !e.shiftKey) {
+      } else if ((k === "n" || k === "t") && !e.shiftKey) {
+        // ⌘N and ⌘T both open a new untitled tab (⌘T is the macOS/VS Code
+        // "new tab" convention; the tab-per-document model makes them the same).
         e.preventDefault();
         void newDraft();
       } else if (k === "w" && !e.shiftKey) {
@@ -1404,11 +1433,14 @@ export default function App() {
         <Sidebar
           root={workspaceRoot}
           currentPath={activeFilePath}
+          selection={sidebarSelection}
           refreshToken={treeRefreshToken}
+          onSelect={selectSidebarEntry}
           onOpenFile={(p) => void openTab(p, "file")}
           onOpenFolder={openFolderPicker}
           onOpenFilePicker={openFilePicker}
           onRevealInFinder={revealInFinder}
+          onDeleteFile={(p) => void deleteFile(p)}
           onSwitchToSearch={() => {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);
