@@ -262,6 +262,10 @@ export default function App() {
   const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
   const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
   const [docEmpty, setDocEmpty] = useState(true);
+  // Whether the editor's contenteditable holds focus. An empty draft's
+  // placeholder card hides the moment the user clicks into the canvas, not
+  // only once a first character lands.
+  const [editorFocused, setEditorFocused] = useState(false);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
   const deletedStackRef = useRef<{ path: string; trashPath: string; wasOpen: boolean }[]>([]);
   const currentMarkdownRef = useRef<string>("");
@@ -497,6 +501,7 @@ export default function App() {
     setInitialMarkdown(contents);
     setDirty(false);
     setDocEmpty(contents.trim().length === 0);
+    setEditorFocused(false); // the remounted editor starts unfocused
     setConflict(null);
     setLoadKey((k) => k + 1);
     if (tab.kind === "file") {
@@ -822,6 +827,7 @@ export default function App() {
     setInitialMarkdown("");
     setDirty(false);
     setDocEmpty(true);
+    setEditorFocused(false);
     setConflict(null);
   }, []);
 
@@ -1073,6 +1079,9 @@ export default function App() {
     (md: string) => {
       currentMarkdownRef.current = md;
       setDocEmpty(md.trim().length === 0);
+      // The first onChange after a (re)mount is the editor's own mount-time
+      // serialization of the loaded doc (Editor emits it explicitly). Re-baseline
+      // on it so Milkdown's markdown normalization alone never counts as an edit.
       if (!baselineCapturedRef.current) {
         lastSavedRef.current = md;
         baselineCapturedRef.current = true;
@@ -1434,9 +1443,10 @@ export default function App() {
             initialMarkdown={initialMarkdown}
             onChange={onMarkdownChange}
             onSearchState={setFindInfo}
+            onFocusChange={setEditorFocused}
           />
         )}
-        {(!activeTab || (isDraft && docEmpty)) && (
+        {(!activeTab || (isDraft && docEmpty && !editorFocused)) && (
           <ScratchEmptyState
             noDoc={!activeTab}
             recents={recents}
