@@ -31,7 +31,7 @@ to another OS.
 ## Architecture
 
 - **Frontend**: React + Vite + Milkdown Crepe (`@milkdown/crepe`). Crepe is Milkdown's batteries-included preset — slash menu, block handles, toolbar, Notion-like keyboard shortcuts.
-- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning a pruned tree of folders that contain markdown), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for the initial CLI args. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running window.
+- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning every non-hidden folder plus the markdown files inside — empty folders stay visible so they can be creation targets), `create_file`/`create_dir` (fail if the name is taken; backing for the sidebar's inline New File/New Folder), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for the initial CLI args. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running window.
 - **File association**: Declared in `src-tauri/tauri.conf.json` under `bundle.fileAssociations`. Tauri injects `CFBundleDocumentTypes` into `Info.plist` at bundle time.
 - **CLI**: `scripts/install.sh` writes a small `doklin` shell shim that calls `open -a Doklin --args <files>`. macOS routes argv through LaunchServices to the bundled app.
 
@@ -39,13 +39,22 @@ to another OS.
 
 Both real files and drafts auto-save 600ms after the last keystroke — files to
 their path, drafts to `app_data_dir/drafts/<id>.md`. For a real file `⌘S` just
-flushes the pending write; for a draft it opens a Save dialog and promotes the
-draft into the chosen `.md` file (removing the draft). Switching tabs and
-quitting also flush, so unsaved keystrokes aren't lost.
+flushes the pending write; for a draft it promotes the draft into a real `.md`
+file (removing the draft). Where the promotion happens is VS Code-style:
+
+- **Workspace open** — no Finder navigation. An in-app prompt asks only for a
+  name (pre-filled from the note's first line) and saves straight into the
+  context folder: the sidebar's selected folder, the selected file's folder,
+  or the workspace root. Name collisions are refused inline; a *Choose
+  location…* link falls back to the native dialog for saving outside the
+  workspace.
+- **No workspace** — the native Save dialog picks the location.
+
+Switching tabs and quitting also flush, so unsaved keystrokes aren't lost.
 
 ## Keyboard
 
-- `⌘N` — new untitled draft (in a new tab)
+- `⌘N` / `⌘T` — new untitled draft (in a new tab)
 - `⌘W` — close the current tab
 - `⌘S` — flush the current file, or Save As to promote a draft
 - `⌘O` — open a file (in a new tab)
@@ -67,11 +76,18 @@ quitting also flush, so unsaved keystrokes aren't lost.
 - **Drafts panel** (`⌘⇧D`) — a left panel listing every draft with a one-line
   preview, independent of any workspace. Click to open/switch to a draft; the
   trash icon discards one. The active draft is highlighted.
-- **Sidebar** (`⌘\`, when a workspace is open) — collapsible tree of `.md` files
-  under the workspace root, to the right of the drafts panel. Folders that contain
-  no markdown are hidden. The folder name at the top is a menu: *Open folder…*,
-  *Open file…*, *Reveal in Finder*, *Close workspace*. A refresh button next to it
-  re-scans the workspace, and the tree auto-refreshes on window focus.
+- **Sidebar** (`⌘\`, when a workspace is open) — collapsible tree of folders and
+  `.md` files under the workspace root, to the right of the drafts panel.
+  Clicking a row selects it (VS Code-style); the selection is the creation
+  context for new files. Right-clicking a row (or empty space) opens a context
+  menu: *New File…* / *New Folder…* create inline — an input row appears in the
+  target folder (inside a right-clicked folder, next to a right-clicked file, at
+  the root from empty space); Enter commits, Esc cancels, and new files get
+  `.md` appended and open in a tab. Files also get *Delete* (to the Trash);
+  everything gets *Reveal in Finder*. The header has new-file/new-folder
+  buttons that act on the current selection. The folder name at the top is a
+  menu: *Open folder…*, *Open file…*, *Reveal in Finder*. A refresh button next
+  to it re-scans the workspace, and the tree auto-refreshes on window focus.
 - **Top-left** — toggles for the drafts panel and (when a workspace is open) the
   file sidebar.
 - **Bottom-left** — a small gear button opens a settings popover with file

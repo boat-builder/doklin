@@ -1294,6 +1294,199 @@ body,
   color: var(--app-text);
 }
 
+/* Explorer selection (click / right-click): a quieter highlight than the
+   active document, which keeps its stronger is-active treatment. */
+.tree-row.is-selected:not(.is-active) {
+  background: var(--app-hover);
+}
+
+/* ---------- Sidebar: inline create + context menu ---------- */
+
+.tree-create-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  color: var(--app-text-muted);
+}
+
+.tree-create-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--crepe-color-selected, var(--app-border));
+  border-radius: 4px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+}
+
+.tree-create-input[aria-invalid="true"] {
+  border-color: var(--crepe-color-error, #b91c1c);
+}
+
+.tree-create-error {
+  padding: 3px 6px 4px;
+  font-size: 11px;
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+/* Same visual language as .sidebar-menu, but positioned at the cursor. */
+.tree-context-menu {
+  position: fixed;
+  min-width: 170px;
+  padding: 6px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  z-index: 30;
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+[data-theme="dark"] .tree-context-menu {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .tree-context-menu,
+  [data-theme="system"] .tree-context-menu {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.sidebar-menu-item.is-danger {
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+/* ---------- Save As prompt (workspace save, no Finder) ---------- */
+
+/* Transparent click-catcher: the prompt is a quick input, not a modal — no
+   dimming, clicking anywhere else just dismisses it. */
+.saveas-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.saveas-panel {
+  position: fixed;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(440px, calc(100vw - 32px));
+  padding: 10px 12px 8px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+[data-theme="dark"] .saveas-panel {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .saveas-panel,
+  [data-theme="system"] .saveas-panel {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.saveas-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saveas-dir {
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.saveas-inputwrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--crepe-color-selected, var(--app-border));
+  border-radius: 6px;
+  background: var(--app-surface);
+}
+
+.saveas-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.saveas-input[aria-invalid="true"] {
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+.saveas-ext {
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.saveas-error {
+  padding: 5px 2px 0;
+  font-size: 11px;
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+.saveas-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 7px;
+}
+
+.saveas-hint {
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.saveas-browse {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.saveas-browse:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
 /* ---------- In-file find (⌘F) ---------- */
 
 /* Search match highlights painted by the ProseMirror decoration plugin. */

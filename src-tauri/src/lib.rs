@@ -298,9 +298,12 @@ fn is_hidden_or_ignored(name: &str) -> bool {
     )
 }
 
-/// Recursively walks `dir`, returning a pruned tree containing only directories
-/// that (transitively) contain markdown files. Returns None if the directory has
-/// no markdown descendants. Mutates `budget` to enforce a global entry cap.
+/// Recursively walks `dir`, returning a tree of every non-hidden directory and
+/// the markdown files inside. Directories are kept even when they (currently)
+/// contain no markdown — the sidebar creates files and folders in place, so an
+/// empty folder must stay visible as a creation target. Returns None only when
+/// the directory is unreadable or a traversal cap is hit. Mutates `budget` to
+/// enforce a global entry cap.
 fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return None;
@@ -346,10 +349,6 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
             name: f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             path: f.to_string_lossy().to_string(),
         });
-    }
-
-    if children.is_empty() {
-        return None;
     }
 
     Some(TreeNode::Dir {
@@ -520,6 +519,56 @@ fn watch_file(
 fn unwatch_file(store: State<'_, WatcherStore>) {
     let previous = store.0.lock().unwrap().take();
     drop(previous);
+}
+
+/// Creates a new empty file at `path`, refusing to clobber anything that already
+/// exists (the sidebar's inline-create flow surfaces the error next to the name
+/// input). The parent directory must already exist — creation targets always
+/// come from the visible tree.
+#[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    let name = path_buf
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path_buf)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("A file or folder named \"{}\" already exists", name))
+        }
+        Err(e) => Err(format!("create {}: {}", path, e)),
+    }
+}
+
+/// Creates a new directory at `path`. Same contract as `create_file`: fails if
+/// the name is taken, parent must exist.
+#[tauri::command]
+fn create_dir(path: String) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    let name = path_buf
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    match std::fs::create_dir(&path_buf) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("A file or folder named \"{}\" already exists", name))
+        }
+        Err(e) => Err(format!("create folder {}: {}", path, e)),
+    }
+}
+
+/// True if anything (file or folder) exists at `path`. The in-app Save As
+/// prompt checks this before promoting a draft, because the promotion write
+/// itself is deliberately unconditional (Save As overwrites its target).
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).exists()
 }
 
 #[tauri::command]
@@ -1045,6 +1094,9 @@ pub fn run() {
             watch_file,
             unwatch_file,
             list_md_tree,
+            create_file,
+            create_dir,
+            path_exists,
             search_workspace,
             take_pending_open,
             take_pending_folder,
