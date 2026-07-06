@@ -21,6 +21,7 @@
   --app-text-muted: rgba(55, 53, 47, 0.5);
   --app-border: rgba(55, 53, 47, 0.09);
   --app-hover: rgba(55, 53, 47, 0.06);
+  --app-accent: #2f6fdd;
   --app-dirty: #d29922;
   --app-toast-bg: rgba(55, 53, 47, 0.85);
   --app-toast-fg: #ffffff;
@@ -33,6 +34,7 @@
   --app-text-muted: rgba(60, 56, 53, 0.55);
   --app-border: rgba(60, 56, 53, 0.1);
   --app-hover: rgba(60, 56, 53, 0.06);
+  --app-accent: #8a6b3d;
   --app-dirty: #c08a3a;
   --app-toast-bg: rgba(60, 56, 53, 0.85);
   --app-toast-fg: #faf5ed;
@@ -45,6 +47,7 @@
   --app-text-muted: rgba(255, 255, 255, 0.45);
   --app-border: rgba(255, 255, 255, 0.08);
   --app-hover: rgba(255, 255, 255, 0.06);
+  --app-accent: #5c96f2;
   --app-dirty: #d29922;
   --app-toast-bg: rgba(0, 0, 0, 0.7);
   --app-toast-fg: #ebebeb;
@@ -60,6 +63,7 @@
     --app-text-muted: rgba(255, 255, 255, 0.45);
     --app-border: rgba(255, 255, 255, 0.08);
     --app-hover: rgba(255, 255, 255, 0.06);
+    --app-accent: #5c96f2;
     --app-dirty: #d29922;
     --app-toast-bg: rgba(0, 0, 0, 0.7);
     --app-toast-fg: #ebebeb;
@@ -1366,6 +1370,99 @@ body,
 
 .sidebar-menu-item.is-danger {
   color: var(--crepe-color-error, #b91c1c);
+}
+
+/* ---------- Sidebar: drag-to-move ---------- */
+
+/* The dragged row stays in place, dimmed; the ghost pill is the moving part. */
+.tree-row.is-drag-source {
+  opacity: 0.4;
+}
+
+/* Destination folder: a ring + tint on the folder row itself… */
+.tree-row.is-drop-target {
+  background: var(--app-hover);
+  box-shadow: inset 0 0 0 1.5px var(--app-accent, #4c8ffb);
+}
+
+/* …and a soft wash over the rows already inside it, so the whole drop
+   container reads as one region (VS Code-style). */
+.tree-row.is-drop-within {
+  background: var(--app-hover);
+}
+
+/* Dropping on empty space = move to the workspace root: ring the whole tree. */
+.sidebar-body.is-drop-root {
+  box-shadow: inset 0 0 0 1.5px var(--app-accent, #4c8ffb);
+  border-radius: 8px;
+  background: var(--app-hover);
+}
+
+/* The pill that follows the pointer: what's being moved, and where it lands. */
+.tree-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.12),
+    0 12px 32px rgba(0, 0, 0, 0.14);
+  pointer-events: none; /* never block elementFromPoint hit-testing */
+  will-change: transform;
+}
+
+.tree-drag-ghost.is-invalid {
+  opacity: 0.55;
+}
+
+.tree-drag-ghost-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-drag-ghost-dest {
+  flex-shrink: 0;
+  color: var(--app-accent, #4c8ffb);
+  font-weight: 600;
+}
+
+[data-theme="dark"] .tree-drag-ghost {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .tree-drag-ghost,
+  [data-theme="system"] .tree-drag-ghost {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* While a tree drag is live the cursor speaks for the whole app: grabbing over
+   a valid destination, not-allowed anywhere a drop would do nothing. */
+body.tree-dragging,
+body.tree-dragging * {
+  cursor: grabbing !important;
+}
+
+body.tree-dragging.tree-drag-invalid,
+body.tree-dragging.tree-drag-invalid * {
+  cursor: not-allowed !important;
 }
 
 /* ---------- Save As prompt (workspace save, no Finder) ---------- */

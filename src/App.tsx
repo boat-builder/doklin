@@ -303,7 +303,10 @@ export default function App() {
   // panel re-lists (list_drafts reads from disk, so the refresh has to follow
   // the write, not the keystroke). The 600ms autosave debounce is the rate cap.
   const [draftsRefreshToken, setDraftsRefreshToken] = useState(0);
-  const deletedStackRef = useRef<{ path: string; trashPath: string; wasOpen: boolean }[]>([]);
+  // Undo stack for trashed entries. `openPaths` are the file tabs that were
+  // closed by the delete (the entry itself for a file, everything under it for
+  // a folder) so ⌘Z can reopen them after restoring.
+  const deletedStackRef = useRef<{ path: string; trashPath: string; openPaths: string[] }[]>([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
   const baselineCapturedRef = useRef<boolean>(false);
@@ -1051,19 +1054,22 @@ export default function App() {
     if (draftsOpen) void refreshDraftsPanel();
   }, [draftsOpen, tabs, draftsRefreshToken, refreshDraftsPanel]);
 
-  // Move a file to the system Trash (⌘⌫ from the sidebar). The backend returns
-  // where the file landed inside the Trash so undoDelete can pull it straight
-  // back out — a true restore that leaves no stale copy. If the file is open in a
-  // tab, that tab is closed first (see below).
-  const deleteFile = useCallback(
-    async (target: string) => {
-      // Close the tab first (flushing its content while the file still exists),
-      // so the trash that follows can't be resurrected by a late autosave write
-      // and the watcher has already moved to a neighbor tab.
-      const openForFile = tabsRef.current.find(
-        (t) => t.kind === "file" && t.path === target,
+  // Move a file or folder to the system Trash (⌘⌫ / the sidebar's context
+  // menu). The backend returns where the entry landed inside the Trash so
+  // undoDelete can pull it straight back out — a true restore that leaves no
+  // stale copy. Any tabs on the entry (or inside it, for a folder) are closed
+  // first.
+  const deleteEntry = useCallback(
+    async (target: string, kind: "file" | "dir") => {
+      // Close affected tabs first (flushing their content while the files still
+      // exist), so the trash that follows can't be resurrected by a late
+      // autosave write and the watcher has already moved to a neighbor tab.
+      const affected = tabsRef.current.filter(
+        (t) =>
+          t.kind === "file" &&
+          (t.path === target || (kind === "dir" && t.path.startsWith(target + "/"))),
       );
-      if (openForFile) await closeTab(openForFile.id);
+      for (const t of affected) await closeTab(t.id);
       let trashPath: string;
       try {
         trashPath = await invoke<string>("trash_file", { path: target });
@@ -1072,15 +1078,22 @@ export default function App() {
         alert(`Could not delete ${target}\n${e}`);
         return;
       }
-      deletedStackRef.current.push({ path: target, trashPath, wasOpen: !!openForFile });
-      if (sidebarSelectionRef.current?.path === target) selectSidebarEntry(null);
+      deletedStackRef.current.push({
+        path: target,
+        trashPath,
+        openPaths: affected.map((t) => t.path),
+      });
+      const sel = sidebarSelectionRef.current;
+      if (sel && (sel.path === target || sel.path.startsWith(target + "/"))) {
+        selectSidebarEntry(null);
+      }
       setTreeRefreshToken((t) => t + 1);
     },
     [closeTab, selectSidebarEntry],
   );
 
-  // Undo the most recent trash (⌘Z outside the editor): move the file back out
-  // of the Trash to its original path and reopen it if it had been open.
+  // Undo the most recent trash (⌘Z outside the editor): move the entry back out
+  // of the Trash to its original path and reopen the tabs the delete closed.
   const undoDelete = useCallback(async () => {
     const entry = deletedStackRef.current.pop();
     if (!entry) return;
@@ -1095,8 +1108,105 @@ export default function App() {
       return;
     }
     setTreeRefreshToken((t) => t + 1);
-    if (entry.wasOpen) await openTab(entry.path, "file");
+    for (const p of entry.openPaths) await openTab(p, "file");
   }, [openTab]);
+
+  // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
+  // inline Rename both end here), then repoint every piece of state that keys
+  // off the old path: open tabs (including everything inside a moved folder),
+  // the active document's autosave target and watcher, recents, shares, and
+  // the sidebar selection. Returns an error message for the caller to surface
+  // (inline under the rename input, alert for a drop), or null on success.
+  const movePath = useCallback(
+    async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
+      // If the active document is about to move, land any pending autosave at
+      // the OLD path first — a debounced write firing mid-rename would
+      // otherwise recreate the file at the path it just left.
+      if (
+        pathRef.current &&
+        (pathRef.current === from || (kind === "dir" && pathRef.current.startsWith(from + "/")))
+      ) {
+        await flushPendingAutosave();
+      }
+      try {
+        await invoke("move_path", { from, to });
+      } catch (e) {
+        return String(e);
+      }
+      const remap = (p: string) =>
+        p === from
+          ? to
+          : kind === "dir" && p.startsWith(from + "/")
+            ? to + p.slice(from.length)
+            : p;
+
+      let tabsChanged = false;
+      const nextTabs = tabsRef.current.map((t) => {
+        const np = remap(t.path);
+        if (np === t.path) return t;
+        tabsChanged = true;
+        return { ...t, path: np };
+      });
+      if (tabsChanged) {
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+        writeStoredSession(nextTabs, activeIdRef.current);
+      }
+
+      // The active document moved: retarget autosave and re-watch the new path
+      // (the old watch died with the old path). The snapshot stays valid — a
+      // rename doesn't touch mtime or size.
+      if (pathRef.current) {
+        const np = remap(pathRef.current);
+        if (np !== pathRef.current) {
+          pathRef.current = np;
+          const active = nextTabs.find((t) => t.id === activeIdRef.current);
+          if (active?.kind === "file") {
+            try {
+              await invoke("watch_file", { path: np });
+            } catch (e) {
+              console.error("watch_file failed", e);
+            }
+          }
+        }
+      }
+
+      setRecents((prev) => {
+        let changed = false;
+        const next = prev.map((r) => {
+          const np = remap(r.path);
+          if (np === r.path) return r;
+          changed = true;
+          return { ...r, path: np };
+        });
+        if (!changed) return prev;
+        writeStoredRecents(next);
+        return next;
+      });
+
+      // Shares are keyed by absolute path; re-key so a moved doc keeps pushing.
+      updateShares((prev) => {
+        let changed = false;
+        const next: Record<string, ShareEntry> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          const nk = remap(k);
+          if (nk !== k) changed = true;
+          next[nk] = nk === k ? v : { ...v, path: nk };
+        }
+        return changed ? next : prev;
+      });
+
+      const sel = sidebarSelectionRef.current;
+      if (sel) {
+        const np = remap(sel.path);
+        if (np !== sel.path) selectSidebarEntry({ ...sel, path: np });
+      }
+
+      setTreeRefreshToken((t) => t + 1);
+      return null;
+    },
+    [flushPendingAutosave, updateShares, selectSidebarEntry],
+  );
 
   useEffect(() => {
     (async () => {
@@ -1486,7 +1596,7 @@ export default function App() {
         const active = tabsRef.current.find((tb) => tb.id === activeIdRef.current);
         if (active?.kind === "file") {
           e.preventDefault();
-          void deleteFile(active.path);
+          void deleteEntry(active.path, "file");
         }
       } else if (e.code === "KeyO") {
         // Use e.code, not e.key: on macOS holding ⌥ remaps e.key (⌥O → "ø").
@@ -1527,7 +1637,7 @@ export default function App() {
     handleSave,
     newDraft,
     closeTab,
-    deleteFile,
+    deleteEntry,
     openFolderPicker,
     openFilePicker,
     openFileInNewWindow,
@@ -1649,7 +1759,8 @@ export default function App() {
           onOpenFolder={openFolderPicker}
           onOpenFilePicker={openFilePicker}
           onRevealInFinder={revealInFinder}
-          onDeleteFile={(p) => void deleteFile(p)}
+          onDelete={(p, kind) => void deleteEntry(p, kind)}
+          onMovePath={movePath}
           onSwitchToSearch={() => {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);
