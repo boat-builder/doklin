@@ -1,0 +1,37 @@
+# Doklin share worker — deployment config template.
+#
+# Copy this file to wrangler.toml (which is gitignored — it holds your own
+# account/domain/bucket) and fill in the placeholders, then:
+#
+#   npx wrangler@4 r2 bucket create <your-bucket>   # bucket must exist BEFORE deploy
+#   npx wrangler@4 secret put SHARE_TOKEN           # the write-API bearer token
+#   npx wrangler@4 deploy
+#
+# See README.md in this directory for the full setup guide.
+
+name = "doklin-share"
+main = "src/index.js"
+compatibility_date = "2025-05-05"
+
+# Your Cloudflare account id (`npx wrangler@4 whoami`). Alternatively delete
+# this line and export CLOUDFLARE_ACCOUNT_ID when running wrangler.
+account_id = "<your-cloudflare-account-id>"
+
+# Simplest hosting: the worker is served at https://<name>.<subdomain>.workers.dev
+workers_dev = true
+
+# Custom domain instead: the zone must already be active on the same Cloudflare
+# account. Set workers_dev = false above and uncomment:
+# routes = [
+#   { pattern = "notes.example.com", custom_domain = true }
+# ]
+
+# Optional landing-page branding, shown at the root of your share domain so
+# visitors can see who is behind the links. Omit for a generic landing page.
+# [vars]
+# OWNER_NAME = "Your Name"
+# OWNER_LINK = "https://linkedin.com/in/your-handle"
+
+[[r2_buckets]]
+binding = "PAGES"                  # the worker code reads env.PAGES — leave as is
+bucket_name = "<your-bucket>"      # the R2 bucket you created above

@@ -1,0 +1,91 @@
+# Doklin — Development & internals
+
+Architecture, saving internals, and the full keyboard / UI / theme reference.
+Start here for any code change. For the share backend see
+[../share-worker/README.md](../share-worker/README.md); for tabs/drafts design
+notes see [tabs-drafts-followups.md](tabs-drafts-followups.md).
+
+## Run from source
+
+```sh
+pnpm install
+pnpm tauri dev
+```
+
+To build and install the app + `doklin` CLI shim, use `./scripts/install.sh` (see
+the top-level [README](../README.md#install)).
+
+## Platform (macOS only)
+
+Doklin currently targets macOS and uses a few macOS-specific APIs (Trash via
+`NSFileManager`, "Reveal in Finder", file associations). Every such spot in the
+Rust backend is tagged with the comment `macOS-only`:
+
+```sh
+grep -r "macOS-only" src-tauri
+```
+
+Grep for that tag to find every place that needs attention if you ever port it
+to another OS.
+
+## Architecture
+
+- **Frontend**: React + Vite + Milkdown Crepe (`@milkdown/crepe`). Crepe is Milkdown's batteries-included preset — slash menu, block handles, toolbar, Notion-like keyboard shortcuts.
+- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning a pruned tree of folders that contain markdown), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for the initial CLI args. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running window.
+- **File association**: Declared in `src-tauri/tauri.conf.json` under `bundle.fileAssociations`. Tauri injects `CFBundleDocumentTypes` into `Info.plist` at bundle time.
+- **CLI**: `scripts/install.sh` writes a small `doklin` shell shim that calls `open -a Doklin --args <files>`. macOS routes argv through LaunchServices to the bundled app.
+
+## Saving
+
+Both real files and drafts auto-save 600ms after the last keystroke — files to
+their path, drafts to `app_data_dir/drafts/<id>.md`. For a real file `⌘S` just
+flushes the pending write; for a draft it opens a Save dialog and promotes the
+draft into the chosen `.md` file (removing the draft). Switching tabs and
+quitting also flush, so unsaved keystrokes aren't lost.
+
+## Keyboard
+
+- `⌘N` — new untitled draft (in a new tab)
+- `⌘W` — close the current tab
+- `⌘S` — flush the current file, or Save As to promote a draft
+- `⌘O` — open a file (in a new tab)
+- `⌘⇧O` — open a folder as a workspace
+- `⌘\` — toggle the file sidebar (only when a workspace is open)
+- `⌘⇧D` — toggle the drafts panel
+- `⌘Z` / `⌘⇧Z` — undo / redo (also `⌘Y` for redo). `⌘Z` outside the editor
+  restores a file deleted with `⌘⌫` from the sidebar.
+- All Milkdown/Crepe inline-format shortcuts: `⌘B` bold, `⌘I` italic, `⌘K` link, etc.
+- `/` on a new line — slash menu (headings, lists, code blocks, tables, …)
+
+## UI elements
+
+- **Tab bar** — one row below the title strip; one tab per open document (drafts
+  and files), with a close `×` and a trailing `+` for a new draft. Middle-click
+  or `⌘W` closes a tab.
+- **Welcome screen** — shown when no document is open, or when the active tab is
+  an empty draft. Buttons for *New note*, *Open file*, and *Open folder*.
+- **Drafts panel** (`⌘⇧D`) — a left panel listing every draft with a one-line
+  preview, independent of any workspace. Click to open/switch to a draft; the
+  trash icon discards one. The active draft is highlighted.
+- **Sidebar** (`⌘\`, when a workspace is open) — collapsible tree of `.md` files
+  under the workspace root, to the right of the drafts panel. Folders that contain
+  no markdown are hidden. The folder name at the top is a menu: *Open folder…*,
+  *Open file…*, *Reveal in Finder*, *Close workspace*. A refresh button next to it
+  re-scans the workspace, and the tree auto-refreshes on window focus.
+- **Top-left** — toggles for the drafts panel and (when a workspace is open) the
+  file sidebar.
+- **Bottom-left** — a small gear button opens a settings popover with file
+  actions and the appearance picker.
+
+The open tabs + active tab, last opened workspace, panel visibility, and draft
+metadata are remembered in `localStorage` and restored on next launch.
+
+## Themes
+
+- **system** (default) — follows macOS appearance.
+- **light** — Notion-style pure white (`#ffffff`) with warm-dark text (`#37352f`).
+- **sepia** — paper / iA Writer feel, cream (`#faf5ed`) on warm-dark — easier on
+  the eyes than pure white in bright rooms.
+- **dark** — low-contrast dark gray (`#191919`/`#ebebeb`).
+
+Theme is persisted to `localStorage` under `doklin:theme`.
