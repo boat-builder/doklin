@@ -16,9 +16,11 @@ use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileI
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
+/// Folder waiting to be adopted by the main window on cold start. Files never
+/// go through here — an externally opened file always gets its own window (see
+/// `handle_external_open`), so it can't attach itself to a restored session.
 #[derive(Default)]
 struct PendingOpen {
-    file: Mutex<Option<String>>,
     folder: Mutex<Option<String>>,
 }
 
@@ -41,8 +43,9 @@ struct WindowRegistry(Mutex<HashMap<String, WindowContent>>);
 struct WindowSeq(Mutex<u32>);
 
 /// Flipped true once any window has reported its content. Until then an external
-/// open is treated as the cold-start path (handed to the first window via
-/// `PendingOpen`); afterwards it routes to a focused/new window.
+/// folder open is treated as the cold-start path (handed to the first window via
+/// `PendingOpen`); afterwards it routes to a focused/new window. File opens
+/// bypass this entirely — they always spawn their own window.
 #[derive(Default)]
 struct AppReady(AtomicBool);
 
@@ -172,57 +175,44 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
     }
 }
 
-/// Focus a window already showing this content, or spawn a new one. When we
-/// focus an existing folder window that doesn't yet have the requested file
-/// open, we ask just that window to open it as a tab. Must run on the main
+/// Focus a window already showing this content, or spawn a new one. A file is
+/// only ever *focused* in a window that already has it open — it is never
+/// injected as a tab into some other window's workspace. Must run on the main
 /// thread (window creation/focus is main-thread only on macOS).
 fn route_open(app: &AppHandle, folder: Option<String>, file: Option<String>) {
     if let Some(label) = find_window_for(app, &folder, &file) {
         if let Some(win) = app.get_webview_window(&label) {
             let _ = win.unminimize();
             let _ = win.set_focus();
-            if let Some(f) = &file {
-                let already_open = app
-                    .state::<WindowRegistry>()
-                    .0
-                    .lock()
-                    .ok()
-                    .and_then(|m| m.get(&label).map(|c| c.files.contains(f)))
-                    .unwrap_or(false);
-                if !already_open {
-                    // emit_to (not emit): emit broadcasts to every window; we
-                    // want only the focused one to open the file as a tab.
-                    let _ = app.emit_to(label.as_str(), "open-file", OpenFilePayload { path: f.clone() });
-                }
-            }
             return;
         }
     }
     spawn_open_window(app, folder, file);
 }
 
-/// Entry point for every external open (CLI second-instance, macOS file-open).
-/// Before any window has reported readiness this is a cold start, so the path is
-/// handed to the first window via `PendingOpen`; afterwards it routes to a
-/// focused or freshly spawned window.
+/// Entry point for every external open (initial CLI args, CLI second-instance,
+/// macOS file-open). A file open ALWAYS spawns its own window — it is never
+/// routed into an existing window, so a file that doesn't belong to a workspace
+/// can't attach itself to that workspace's window (or to the session the main
+/// window restores on cold start). Folder-only opens keep the focus-or-spawn
+/// routing (a window *is* its workspace), with the cold-start hand-off to the
+/// first window via `PendingOpen`. Must run on the main thread.
 fn handle_external_open(app: &AppHandle, folder: Option<PathBuf>, file: Option<PathBuf>) {
     let folder = folder.map(|p| p.to_string_lossy().to_string());
     let file = file.map(|p| p.to_string_lossy().to_string());
-    if folder.is_none() && file.is_none() {
+    if file.is_some() {
+        spawn_open_window(app, folder, file);
         return;
     }
+    let Some(folder) = folder else { return };
     let ready = app.state::<AppReady>().0.load(Ordering::SeqCst);
     if !ready {
-        let st = app.state::<PendingOpen>();
-        if let (Some(f), Ok(mut g)) = (&folder, st.folder.lock()) {
-            *g = Some(f.clone());
-        }
-        if let (Some(f), Ok(mut g)) = (&file, st.file.lock()) {
-            *g = Some(f.clone());
+        if let Ok(mut g) = app.state::<PendingOpen>().folder.lock() {
+            *g = Some(folder);
         }
         return;
     }
-    route_open(app, folder, file);
+    route_open(app, Some(folder), None);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -244,11 +234,6 @@ enum WriteError {
     Io { message: String },
     #[serde(rename = "conflict")]
     Conflict { current: FileSnapshot },
-}
-
-#[derive(Clone, Serialize)]
-struct OpenFilePayload {
-    path: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -726,11 +711,6 @@ fn search_workspace(
 }
 
 #[tauri::command]
-fn take_pending_open(state: State<'_, PendingOpen>) -> Option<String> {
-    state.file.lock().ok().and_then(|mut g| g.take())
-}
-
-#[tauri::command]
 fn take_pending_folder(state: State<'_, PendingOpen>) -> Option<String> {
     state.folder.lock().ok().and_then(|mut g| g.take())
 }
@@ -1070,8 +1050,9 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(
             |app, argv, _cwd| {
                 let (folder, file) = classify_argv(&argv);
-                // Route on the main thread: a second launch opens (or focuses) a
-                // window rather than reusing the existing one.
+                // Handle on the main thread: a second launch with a file spawns
+                // a new window; a folder focuses its workspace window or opens
+                // one. Nothing is ever merged into an existing window.
                 let handle = app.clone();
                 let _ = app.run_on_main_thread(move || {
                     handle_external_open(&handle, folder, file);
@@ -1098,7 +1079,6 @@ pub fn run() {
             create_dir,
             path_exists,
             search_workspace,
-            take_pending_open,
             take_pending_folder,
             register_window_content,
             take_window_init,
@@ -1115,17 +1095,10 @@ pub fn run() {
             delete_share_config
         ])
         .setup(move |app| {
-            let state = app.state::<PendingOpen>();
-            if let Some(p) = &initial_folder {
-                if let Ok(mut g) = state.folder.lock() {
-                    *g = Some(p.to_string_lossy().to_string());
-                }
-            }
-            if let Some(p) = &initial_file {
-                if let Ok(mut g) = state.file.lock() {
-                    *g = Some(p.to_string_lossy().to_string());
-                }
-            }
+            // Initial CLI args go through the same external-open path as every
+            // later open: a folder is handed to the main window (cold-start
+            // pending-open), a file spawns its own window immediately.
+            handle_external_open(app.handle(), initial_folder, initial_file);
             Ok(())
         })
         .build(tauri::generate_context!())
