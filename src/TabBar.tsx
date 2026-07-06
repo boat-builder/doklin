@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 type TabKind = "draft" | "file";
-type Tab = { id: string; kind: TabKind; path: string; title?: string };
+type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const stripMdExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd)$/i, "");
@@ -152,7 +152,7 @@ export default function TabBar({
               data-tab-id={t.id}
               className={`tab ${active ? "is-active" : ""} ${
                 t.id === draggingId ? "is-dragging" : ""
-              }`}
+              } ${t.missing ? "is-missing" : ""}`}
             >
               <button
                 ref={active ? activeRef : undefined}
@@ -228,7 +228,9 @@ export default function TabBar({
                     key={t.id}
                     role="menuitemradio"
                     aria-checked={active}
-                    className={`tab-overflow-item ${active ? "is-active" : ""}`}
+                    className={`tab-overflow-item ${active ? "is-active" : ""} ${
+                      t.missing ? "is-missing" : ""
+                    }`}
                     title={t.kind === "file" ? t.path : tabLabel(t)}
                     onClick={() => {
                       setMenuOpen(false);

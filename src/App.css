@@ -184,6 +184,15 @@ body,
   opacity: 0.55;
 }
 
+/* Ghost tab: the file behind it couldn't be read (missing / unmounted). */
+.tab.is-missing {
+  opacity: 0.6;
+}
+
+.tab.is-missing .tab-label {
+  text-decoration: line-through;
+}
+
 .tab-main {
   display: flex;
   align-items: center;
@@ -361,6 +370,72 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tab-overflow-item.is-missing .tab-overflow-label {
+  text-decoration: line-through;
+  color: var(--app-text-muted);
+}
+
+/* ---------- Missing-file (ghost tab) state ---------- */
+
+.missing-file {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.missing-file-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.missing-file-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.missing-file-path {
+  font-size: 12px;
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.missing-file-hint {
+  font-size: 13px;
+  color: var(--app-text-muted);
+}
+
+.missing-file-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.missing-file-btn {
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.missing-file-btn:hover {
+  background: var(--app-hover);
 }
 
 /* ---------- Editor canvas ---------- */

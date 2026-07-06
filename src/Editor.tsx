@@ -45,6 +45,9 @@ type Props = {
   initialMarkdown: string;
   onChange: (markdown: string) => void;
   onSearchState?: (info: SearchInfo) => void;
+  // Fires once the ProseMirror view exists with the full document rendered —
+  // the earliest point DOM-level work (e.g. restoring scroll) can stick.
+  onReady?: () => void;
 };
 
 // Estimated card height + gap used by the rail's overlap-avoidance stacking pass
@@ -93,7 +96,7 @@ function scrollToCurrent(view: EditorView) {
 }
 
 const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
-  { initialMarkdown, onChange, onSearchState },
+  { initialMarkdown, onChange, onSearchState, onReady },
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
@@ -106,6 +109,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onChangeRef.current = onChange;
   const onSearchStateRef = useRef(onSearchState);
   onSearchStateRef.current = onSearchState;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   // Right-side comment rail state. `comments` is derived from the doc's marks on
   // every update; activeId/editingId are transient UI state keyed by a comment's
@@ -223,6 +228,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         });
         report();
         recompute();
+        onReadyRef.current?.();
       });
       // Keep search count + comment rail fresh as the document changes.
       api.updated(() => {
