@@ -14,7 +14,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   heading, `**bold**` bolds inline, `/` opens a block menu, plus drag handles and
   a lossless markdown round-trip.
 - **Folder workspaces** — open a directory to get a collapsible sidebar of its
-  markdown files.
+  markdown files, with VS Code-style file management: create, rename, and
+  delete files and folders from the context menu, and drag rows onto a folder
+  (or empty space) to move them.
 - **Autosave** — real files save back to the same `.md`; drafts save to app
   storage. Nothing is lost on tab switch or quit.
 - **Publish & share** — one click publishes a document as a public web page,

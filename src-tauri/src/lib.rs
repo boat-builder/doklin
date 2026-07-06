@@ -563,6 +563,33 @@ fn create_dir(path: String) -> Result<(), String> {
     }
 }
 
+/// Moves (or renames) a file or folder from `from` to `to` via `fs::rename`.
+/// Refuses to clobber an existing destination — except when `from` and `to`
+/// resolve to the same entry, which is a case-only rename on macOS's default
+/// case-insensitive APFS ("notes.md" → "Notes.md") and must be allowed.
+/// Backs both the sidebar's inline Rename and its drag-and-drop move; both
+/// stay within one workspace, so the cross-volume limits of `rename` don't bite.
+#[tauri::command]
+fn move_path(from: String, to: String) -> Result<(), String> {
+    let from_buf = PathBuf::from(&from);
+    let to_buf = PathBuf::from(&to);
+    if !from_buf.exists() {
+        return Err(format!("\"{}\" no longer exists", from));
+    }
+    let same_entry = match (std::fs::canonicalize(&from_buf), std::fs::canonicalize(&to_buf)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if to_buf.exists() && !same_entry {
+        let name = to_buf
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| to.clone());
+        return Err(format!("A file or folder named \"{}\" already exists", name));
+    }
+    std::fs::rename(&from_buf, &to_buf).map_err(|e| format!("move {}: {}", from, e))
+}
+
 /// True if anything (file or folder) exists at `path`. The in-app Save As
 /// prompt checks this before promoting a draft, because the promotion write
 /// itself is deliberately unconditional (Save As overwrites its target).
@@ -1096,6 +1123,7 @@ pub fn run() {
             list_md_tree,
             create_file,
             create_dir,
+            move_path,
             path_exists,
             search_workspace,
             take_pending_open,

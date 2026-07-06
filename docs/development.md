@@ -31,7 +31,7 @@ to another OS.
 ## Architecture
 
 - **Frontend**: React + Vite + Milkdown Crepe (`@milkdown/crepe`). Crepe is Milkdown's batteries-included preset — slash menu, block handles, toolbar, Notion-like keyboard shortcuts.
-- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning every non-hidden folder plus the markdown files inside — empty folders stay visible so they can be creation targets), `create_file`/`create_dir` (fail if the name is taken; backing for the sidebar's inline New File/New Folder), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for the initial CLI args. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running window.
+- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning every non-hidden folder plus the markdown files inside — empty folders stay visible so they can be creation targets), `create_file`/`create_dir` (fail if the name is taken; backing for the sidebar's inline New File/New Folder), `move_path` (rename/move via `fs::rename`, refusing to clobber an existing destination except a case-only rename; backing for the sidebar's inline Rename and drag-to-move), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for the initial CLI args. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running window.
 - **File association**: Declared in `src-tauri/tauri.conf.json` under `bundle.fileAssociations`. Tauri injects `CFBundleDocumentTypes` into `Info.plist` at bundle time.
 - **CLI**: `scripts/install.sh` writes a small `doklin` shell shim that calls `open -a Doklin --args <files>`. macOS routes argv through LaunchServices to the bundled app.
 
@@ -83,8 +83,18 @@ Switching tabs and quitting also flush, so unsaved keystrokes aren't lost.
   menu: *New File…* / *New Folder…* create inline — an input row appears in the
   target folder (inside a right-clicked folder, next to a right-clicked file, at
   the root from empty space); Enter commits, Esc cancels, and new files get
-  `.md` appended and open in a tab. Files also get *Delete* (to the Trash);
-  everything gets *Reveal in Finder*. The header has new-file/new-folder
+  `.md` appended and open in a tab. Files and folders also get *Rename…*
+  (inline, same input row — open tabs, the autosave target, and shares follow
+  the new path) and *Delete* (to the Trash; deleting a folder closes any tabs
+  inside it, and `⌘Z` restores + reopens them); everything gets *Reveal in
+  Finder*. Rows can be dragged to move them (pointer-based, like the tab bar —
+  Tauri intercepts HTML5 drag): drop on a folder (or on a file, targeting its
+  folder) to move into it, or on empty space to move to the workspace root. A
+  ghost pill follows the pointer showing the item and destination, the target
+  folder is ringed, hovering a collapsed folder springs it open, the tree
+  auto-scrolls near its edges, and Esc cancels. Drops that wouldn't move
+  anything (same folder, a folder into itself) are refused with a not-allowed
+  cursor. The header has new-file/new-folder
   buttons that act on the current selection. The folder name at the top is a
   menu: *Open folder…*, *Open file…*, *Reveal in Finder*. A refresh button next
   to it re-scans the workspace, and the tree auto-refreshes on window focus.
