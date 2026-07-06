@@ -263,6 +263,10 @@ export default function App() {
   const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
   const [docEmpty, setDocEmpty] = useState(true);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
+  // Bumped after each autosave write of a draft lands on disk, so the drafts
+  // panel re-lists (list_drafts reads from disk, so the refresh has to follow
+  // the write, not the keystroke). The 600ms autosave debounce is the rate cap.
+  const [draftsRefreshToken, setDraftsRefreshToken] = useState(0);
   const deletedStackRef = useRef<{ path: string; trashPath: string; wasOpen: boolean }[]>([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
@@ -418,6 +422,11 @@ export default function App() {
       // The remote mirror follows every successful disk write of a shared doc —
       // even one that resolves after switching tabs.
       scheduleSharePush(target);
+      // Same for the drafts panel: its previews come from disk, so re-list once
+      // a draft's write has landed (including a flush resolving after a switch).
+      if (tabsRef.current.some((t) => t.kind === "draft" && t.path === target)) {
+        setDraftsRefreshToken((n) => n + 1);
+      }
       // The active tab may have switched while this write was in flight (e.g. a
       // flush of the previous doc resolving after switching tabs). Only commit
       // baseline state if `target` is still the active path.
@@ -450,16 +459,18 @@ export default function App() {
     }, AUTOSAVE_DEBOUNCE_MS);
   }, [writeToDisk]);
 
-  const flushPendingAutosave = useCallback(() => {
+  // Returns the write promise so callers that must not outrun the write (the
+  // quit flush) can await it; fire-and-forget callers just ignore the result.
+  const flushPendingAutosave = useCallback((): Promise<void> => {
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
     const target = pathRef.current;
-    if (!target) return;
+    if (!target) return Promise.resolve();
     const snapshot = currentMarkdownRef.current;
-    if (snapshot === lastSavedRef.current) return;
-    void writeToDisk(target, snapshot);
+    if (snapshot === lastSavedRef.current) return Promise.resolve();
+    return writeToDisk(target, snapshot);
   }, [writeToDisk]);
 
   const addRecent = useCallback((p: string, kind: "file" | "folder") => {
@@ -541,6 +552,14 @@ export default function App() {
     },
     [switchTab],
   );
+
+  // Drag-to-reorder from the tab bar: adopt the new order (same tabs, same
+  // active doc — nothing to load or flush) and persist it.
+  const reorderTabs = useCallback((nextOrder: Tab[]) => {
+    tabsRef.current = nextOrder;
+    setTabs(nextOrder);
+    writeStoredSession(nextOrder, activeIdRef.current);
+  }, []);
 
   // Append a freshly-built tab and make it active.
   const appendAndActivate = useCallback(
@@ -904,11 +923,12 @@ export default function App() {
     [closeTab, refreshDraftsPanel],
   );
 
-  // Keep the drafts panel in sync: refresh when it opens and whenever the open
-  // tabs change (new / close / promote all flow through here).
+  // Keep the drafts panel in sync: refresh when it opens, whenever the open
+  // tabs change (new / close / promote all flow through here), and after each
+  // autosaved draft write lands (so previews track live edits).
   useEffect(() => {
     if (draftsOpen) void refreshDraftsPanel();
-  }, [draftsOpen, tabs, refreshDraftsPanel]);
+  }, [draftsOpen, tabs, draftsRefreshToken, refreshDraftsPanel]);
 
   // Move a file to the system Trash (⌘⌫ from the sidebar). The backend returns
   // where the file landed inside the Trash so undoDelete can pull it straight
@@ -1068,6 +1088,29 @@ export default function App() {
       void un.then((f) => f());
     };
   }, [reloadFromDisk]);
+
+  // Robust quit flush: type-then-⌘Q within the autosave debounce would lose the
+  // last keystrokes if the process exits before the fire-and-forget write_file
+  // resolves. Intercept the close, await the pending write, then destroy the
+  // window for real. A second close request while the flush is in flight is let
+  // through untouched — the escape hatch if the write ever hangs.
+  const closingRef = useRef(false);
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const un = win.onCloseRequested(async (event) => {
+      if (closingRef.current) return;
+      closingRef.current = true;
+      event.preventDefault();
+      try {
+        await flushPendingAutosave();
+      } finally {
+        void win.destroy();
+      }
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [flushPendingAutosave]);
 
   const onMarkdownChange = useCallback(
     (md: string) => {
@@ -1378,6 +1421,7 @@ export default function App() {
         onSwitch={(id) => void switchTab(id)}
         onClose={(id) => void closeTab(id)}
         onNewDraft={() => void newDraft()}
+        onReorder={reorderTabs}
       />
       {showSidebar && workspaceRoot && sidebarMode === "search" && (
         <WorkspaceSearch

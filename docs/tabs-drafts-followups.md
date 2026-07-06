@@ -31,7 +31,7 @@ state), then snapshot/restore per tab on switch. Bigger lift than scroll; do it
 after #1. The fuller version is keeping a live editor instance per tab instead of
 remounting — much more memory/complexity, only if switch-jank really bites.
 
-## 3. Tab drag-to-reorder
+## 3. Tab drag-to-reorder — ✅ done
 
 **What:** Drag tabs left/right to reorder them; persist the new order.
 
@@ -42,7 +42,7 @@ array and calls a new `reorderTabs(nextOrder)` in `App.tsx` (which updates
 `tabsRef`/state and `writeStoredSession`). Keep it dependency-free with native
 pointer events, or a tiny dnd helper.
 
-## 4. Tab overflow menu
+## 4. Tab overflow menu — ✅ done
 
 **What:** When tabs exceed the bar width, show a chevron/“›” button that opens a
 dropdown listing all open tabs to jump to.
@@ -68,7 +68,7 @@ unmounted at launch). A visible ghost tab is more honest and lets them decide.
 struck-through in `TabBar.tsx`; on activation show an empty "file not found"
 state with a close action rather than loading content.
 
-## 6. Robust quit flush
+## 6. Robust quit flush — ✅ done
 
 **What:** Guarantee the last keystrokes are written on app quit, not just
 best-effort.
@@ -82,7 +82,7 @@ process can exit before it resolves if you type and immediately ⌘Q within the
 `await` the pending write (make `flushPendingAutosave` awaitable / return the
 write promise), then destroy the window. Guard against double-close.
 
-## 7. Live preview refresh in the drafts panel
+## 7. Live preview refresh in the drafts panel — ✅ done
 
 **What:** Update each draft's one-line preview in the drafts panel as you type,
 not just when tabs change.
