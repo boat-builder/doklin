@@ -23,8 +23,6 @@ import {
   type ShareEntry,
 } from "./share";
 
-type OpenFilePayload = { path: string };
-type OpenFolderPayload = { path: string };
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
 type ExternalChangePayload = { path: string; snapshot: FileSnapshot };
@@ -1267,9 +1265,11 @@ export default function App() {
         restored.push({ id: migrated.id, kind: "draft", path: migrated.path, title: `Untitled-${seq}` });
       }
 
-      // CLI / Finder launch ADDS to the session rather than replacing it.
+      // A CLI / Finder folder launch adopts the folder as this window's
+      // workspace, on top of the restored session. (Files never arrive here:
+      // an externally opened file always gets its own spawned window, so it
+      // can't attach itself to the restored workspace/session.)
       const pendingFolder = await invoke<string | null>("take_pending_folder");
-      const pendingFile = await invoke<string | null>("take_pending_open");
 
       if (restored.length > 0) {
         const activeId =
@@ -1284,29 +1284,20 @@ export default function App() {
         const active = restored.find((t) => t.id === activeId);
         if (active) await loadActiveContent(active);
       }
-      // Nothing to restore and no file arg → no tab open (welcome screen).
+      // Nothing to restore → no tab open (welcome screen).
 
       if (pendingFolder) setWorkspace(pendingFolder);
-      if (pendingFile) await openTab(pendingFile, "file");
       setReady(true);
     })();
-    const unFile = listen<OpenFilePayload>("open-file", (e) => {
-      void openTab(e.payload.path, "file");
-    });
-    const unFolder = listen<OpenFolderPayload>("open-folder", (e) => {
-      setWorkspace(e.payload.path);
-    });
-    return () => {
-      void unFile.then((f) => f());
-      void unFolder.then((f) => f());
-    };
   }, [openTab, setWorkspace, loadActiveContent]);
 
   // Report this window's content (workspace folder + open file paths) to the
-  // backend whenever it changes, so an external open can focus the window that
-  // already shows a path instead of opening a duplicate. The first report also
-  // marks the app "ready", flipping external opens from the cold-start
-  // pending-open path to window routing.
+  // backend whenever it changes, so folder opens and the in-app "open in new
+  // window" actions can focus the window that already shows a path instead of
+  // opening a duplicate. (External file opens always spawn a new window and
+  // never consult this registry.) The first report also marks the app "ready",
+  // flipping external folder opens from the cold-start pending-open path to
+  // window routing.
   useEffect(() => {
     const files = tabs.filter((t) => t.kind === "file").map((t) => t.path);
     void invoke("register_window_content", { folder: workspaceRoot, files });

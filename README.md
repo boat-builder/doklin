@@ -23,8 +23,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   backed by a self-hostable backend.
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
-  or run `doklin path/to/file.md`. Single-instance: a second launch routes into the
-  already-open window.
+  or run `doklin path/to/file.md`. A second launch talks to the running app: a
+  file always opens in its own new window (never merged into an existing
+  workspace window), while a folder focuses its workspace window or opens one.
 
 ## Install
 
