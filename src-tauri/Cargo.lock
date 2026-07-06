@@ -770,6 +770,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "doklin"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "notify-debouncer-full",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-single-instance",
+ "url",
+]
+
+[[package]]
 name = "dom_query"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2012,22 +2028,6 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
-]
-
-[[package]]
-name = "doklin"
-version = "0.1.0"
-dependencies = [
- "notify",
- "notify-debouncer-full",
- "objc2-foundation",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-single-instance",
- "url",
 ]
 
 [[package]]
