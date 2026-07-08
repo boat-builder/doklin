@@ -28,9 +28,13 @@ workers_dev = true
 
 # Optional landing-page branding, shown at the root of your share domain so
 # visitors can see who is behind the links. Omit for a generic landing page.
+# The root also shows a "Download Doklin for macOS" button; it points at
+# DOWNLOAD_URL, which defaults to the official GitHub release's stable
+# latest-download alias — set it to override, or to "" to hide the button.
 # [vars]
 # OWNER_NAME = "Your Name"
 # OWNER_LINK = "https://linkedin.com/in/your-handle"
+# DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg"
 
 [[r2_buckets]]
 binding = "PAGES"                  # the worker code reads env.PAGES — leave as is
