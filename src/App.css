@@ -624,6 +624,7 @@ body,
 }
 
 .settings-fab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -804,6 +805,46 @@ body,
 
 .settings-recents .settings-option-check {
   color: var(--app-text-muted);
+}
+
+.settings-option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.settings-option:disabled:hover {
+  background: transparent;
+}
+
+/* The "Update to vX.Y.Z" row, shown when a newer release is available. */
+.settings-option--update .settings-option-check,
+.settings-option--update .settings-option-label {
+  color: var(--app-accent);
+}
+
+.settings-option--update .settings-option-label {
+  font-weight: 600;
+}
+
+/* Footer line under the Updates section: current version / up-to-date / error. */
+.settings-update-status {
+  padding: 4px 10px 2px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  font-feature-settings: "tnum" 1;
+}
+
+/* Accent dot on the gear when an update is waiting (popover closed). */
+.settings-fab-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  border: 1.5px solid var(--app-bg);
+  pointer-events: none;
 }
 
 /* ---------- Scratchpad empty state ---------- */
