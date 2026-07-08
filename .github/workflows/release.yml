@@ -205,23 +205,26 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          DMG="dist/Doklin-${VERSION}-macos-universal.dmg"
+          # Dedicated staging dir — must NOT be `dist/`, which is the Vite
+          # frontend build output (pnpm build writes there); publishing dist/*
+          # would sweep index.html and the web assets into the release.
+          mkdir -p release-assets
+          DMG="release-assets/Doklin-${VERSION}-macos-universal.dmg"
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "$DMG"
           xcrun notarytool submit "$DMG" --wait \
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
           xcrun stapler staple "$DMG"
           # Version-less alias (copied AFTER stapling) for a stable
           # releases/latest/download/ URL, plus a checksum manifest.
-          cp "$DMG" dist/Doklin-macos-universal.dmg
-          (cd dist && shasum -a 256 *.dmg > SHA256SUMS)
-          ls -la dist
+          cp "$DMG" release-assets/Doklin-macos-universal.dmg
+          (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
+          ls -la release-assets
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.bump.outputs.tag }}
-          files: dist/*
+          files: release-assets/*
           make_latest: 'true'
           generate_release_notes: true
           fail_on_unmatched_files: true
