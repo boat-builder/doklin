@@ -5,7 +5,7 @@
 //! `macOS-only` so a future cross-platform effort can `grep "macOS-only"` to find
 //! every place that needs a portable fallback.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 /// Folder waiting to be adopted by the main window on cold start. Files never
 /// go through here — an externally opened file always gets its own window (see
@@ -24,18 +24,60 @@ struct PendingOpen {
     folder: Mutex<Option<String>>,
 }
 
-/// What a single window currently shows: its workspace folder (if any) and the
-/// real-file paths open in its tabs. The renderer keeps this current via
-/// `register_window_content`, so the backend can focus an existing window that
-/// already shows a path instead of opening a duplicate.
-#[derive(Default)]
+/// A window's frame in logical screen coordinates, captured from Moved/Resized
+/// events so the session can restore each window where the user left it.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct WindowGeometry {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// What a single window currently shows: its workspace folder (if any), the
+/// real-file paths open in its tabs (in tab order), the active tab's path, and
+/// its last-known frame. The renderer keeps the content current via
+/// `register_window_content`; geometry is tracked backend-side from window
+/// events. Serves double duty: live routing (focus an existing window that
+/// already shows a path instead of opening a duplicate) and session persistence
+/// (this is exactly what `session.json` stores per window).
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct WindowContent {
     folder: Option<String>,
-    files: HashSet<String>,
+    files: Vec<String>,
+    active_file: Option<String>,
+    geometry: Option<WindowGeometry>,
 }
 
 #[derive(Default)]
 struct WindowRegistry(Mutex<HashMap<String, WindowContent>>);
+
+/// The on-disk session (<app_data_dir>/session.json): every window open at the
+/// last snapshot, in stable `win_order`. Non-main windows are respawned from
+/// this on launch; the main window only takes its frame from here (its tabs
+/// restore from the renderer's localStorage session, which also covers drafts).
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedSession {
+    version: u32,
+    windows: Vec<PersistedWindow>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedWindow {
+    label: String,
+    #[serde(flatten)]
+    content: WindowContent,
+}
+
+/// Flipped true when the app starts quitting (⌘Q, or the exit that follows the
+/// last window closing), so the teardown's per-window Destroyed events don't
+/// prune those windows from the persisted session — the quit-time window set is
+/// exactly what the next launch restores.
+#[derive(Default)]
+struct Quitting(AtomicBool);
 
 /// Monotonic counter for spawned-window labels (`win-1`, `win-2`, …). Never
 /// reused within a process, so labels stay unique among live windows.
@@ -50,21 +92,116 @@ struct WindowSeq(Mutex<u32>);
 struct AppReady(AtomicBool);
 
 /// Initial content for spawned windows, keyed by window label. Populated by
-/// `spawn_open_window` before the window is built and drained by the renderer via
+/// `spawn_window` before the window is built and drained by the renderer via
 /// `take_window_init`. Passing content backend-side (rather than through the URL
 /// query) keeps it reliable in release builds, where the custom asset protocol
-/// can drop query strings.
+/// can drop query strings. `file` is a fresh external/in-app open (one file,
+/// recents-worthy); `files`/`active_file` carry a session-restored tab list.
+#[derive(Clone, Default)]
+struct PendingInit {
+    folder: Option<String>,
+    file: Option<String>,
+    files: Vec<String>,
+    active_file: Option<String>,
+    restored: bool,
+}
+
 #[derive(Default)]
-struct PendingWindowOpen(Mutex<HashMap<String, (Option<String>, Option<String>)>>);
+struct PendingWindowOpen(Mutex<HashMap<String, PendingInit>>);
 
 /// What a freshly-mounted window should become: whether it's the main window
-/// (owns the shared session) and the file/folder it was spawned to show.
+/// (owns the shared session) and what it was spawned to show — a fresh
+/// file/folder open, or (`restored`) a saved tab list from the last session.
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WindowInit {
     is_main: bool,
     folder: Option<String>,
     file: Option<String>,
+    files: Vec<String>,
+    active_file: Option<String>,
+    restored: bool,
+}
+
+/// Where the cross-launch window session lives.
+fn session_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("session.json"))
+}
+
+fn read_persisted_session(app: &AppHandle) -> PersistedSession {
+    session_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Snapshots the window registry to disk. Runs whenever a window's content
+/// changes, when a window closes, and at quit — so the file always reflects the
+/// windows a relaunch should bring back (a crash restores the last snapshot).
+fn persist_session(app: &AppHandle) {
+    let Some(path) = session_path(app) else { return };
+    let windows = {
+        let registry = app.state::<WindowRegistry>();
+        let Ok(map) = registry.0.lock() else { return };
+        let mut labels: Vec<String> = map.keys().cloned().collect();
+        labels.sort_by_key(|l| win_order(l));
+        labels
+            .into_iter()
+            .map(|label| PersistedWindow {
+                content: map[&label].clone(),
+                label,
+            })
+            .collect::<Vec<_>>()
+    };
+    let Ok(json) = serde_json::to_string_pretty(&PersistedSession { version: 1, windows }) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, json) {
+        eprintln!("failed to persist session: {}", e);
+    }
+}
+
+/// Refreshes the registry's frame snapshot for `label` from the live window.
+/// Fullscreen and minimized frames are skipped — restoring those transient
+/// coordinates would pin the window to a state it shouldn't reopen in. Runs on
+/// the main thread (called from the RunEvent loop).
+fn capture_window_geometry(app: &AppHandle, label: &str) {
+    let Some(win) = app.get_webview_window(label) else { return };
+    if win.is_fullscreen().unwrap_or(false) || win.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let Ok(scale) = win.scale_factor() else { return };
+    let Ok(pos) = win.outer_position() else { return };
+    let Ok(size) = win.inner_size() else { return };
+    let pos = pos.to_logical::<f64>(scale);
+    let size = size.to_logical::<f64>(scale);
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return;
+    }
+    if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {
+        map.entry(label.to_string()).or_default().geometry = Some(WindowGeometry {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+        });
+    }
+}
+
+/// True when the frame's title bar lands on a connected screen, so a session
+/// saved on a since-disconnected display doesn't restore a window off-screen.
+fn geometry_visible(app: &AppHandle, g: &WindowGeometry) -> bool {
+    let Ok(monitors) = app.available_monitors() else { return false };
+    let (px, py) = (g.x + g.width / 2.0, g.y + 12.0);
+    monitors.iter().any(|m| {
+        let scale = m.scale_factor();
+        let pos = m.position().to_logical::<f64>(scale);
+        let size = m.size().to_logical::<f64>(scale);
+        px >= pos.x && px <= pos.x + size.width && py >= pos.y && py <= pos.y + size.height
+    })
 }
 
 /// Stable cross-window ordering for ⌘` cycling: the config window ("main")
@@ -127,10 +264,18 @@ fn find_window_for(
     None
 }
 
-/// Opens a fresh window initialized with `folder`/`file`, passed through the URL
-/// query so the renderer can read its own initial content without racing on
-/// shared state. Must run on the main thread.
-fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<String>) {
+/// Builds a `win-N` window showing `init`. The init content is stashed for the
+/// renderer to drain via `take_window_init` once it mounts (reliable across dev
+/// and release builds), and the window registry is pre-seeded with the same
+/// content so external opens can route to this window before its renderer has
+/// registered. `geometry` (when it maps to a connected screen) fixes the frame;
+/// otherwise the window cascades off the lowest-ordered live window. Must run
+/// on the main thread.
+fn spawn_window(
+    app: &AppHandle,
+    init: PendingInit,
+    geometry: Option<WindowGeometry>,
+) -> Option<tauri::WebviewWindow> {
     let n = {
         let seq = app.state::<WindowSeq>();
         let mut g = seq.0.lock().unwrap();
@@ -139,10 +284,21 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
     };
     let label = format!("win-{}", n);
 
-    // Stash the initial content for this label; the renderer drains it via
-    // take_window_init once it mounts (reliable across dev and release builds).
+    let seed = WindowContent {
+        folder: init.folder.clone(),
+        files: if init.files.is_empty() {
+            init.file.clone().into_iter().collect()
+        } else {
+            init.files.clone()
+        },
+        active_file: init.active_file.clone().or_else(|| init.file.clone()),
+        geometry,
+    };
+    if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {
+        map.insert(label.clone(), seed);
+    }
     if let Ok(mut map) = app.state::<PendingWindowOpen>().0.lock() {
-        map.insert(label.clone(), (folder, file));
+        map.insert(label.clone(), init);
     }
 
     let mut builder = tauri::WebviewWindowBuilder::new(
@@ -153,8 +309,15 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
     .title("Doklin")
     .inner_size(960.0, 720.0)
     .min_inner_size(480.0, 320.0);
-    if let Some((x, y)) = cascade_position(app, n) {
-        builder = builder.position(x, y);
+    match geometry {
+        Some(g) if geometry_visible(app, &g) => {
+            builder = builder.position(g.x, g.y).inner_size(g.width, g.height);
+        }
+        _ => {
+            if let Some((x, y)) = cascade_position(app, n) {
+                builder = builder.position(x, y);
+            }
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -164,14 +327,38 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
             .traffic_light_position(tauri::LogicalPosition::new(16.0, 18.0));
     }
     match builder.build() {
-        // Bring the new window (and the app) to the foreground. When the spawn
-        // is triggered from the terminal shim, Doklin is a background app, so the
-        // window would otherwise open behind whatever is focused. set_focus
-        // activates the app and makes the window key.
-        Ok(win) => {
-            let _ = win.set_focus();
+        Ok(win) => Some(win),
+        Err(e) => {
+            eprintln!("failed to open new window: {}", e);
+            // Drop the stashes for the label that never materialized so a dead
+            // entry can't linger in the registry (and thus in session.json).
+            if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {
+                map.remove(&label);
+            }
+            if let Ok(mut map) = app.state::<PendingWindowOpen>().0.lock() {
+                map.remove(&label);
+            }
+            None
         }
-        Err(e) => eprintln!("failed to open new window: {}", e),
+    }
+}
+
+/// Opens a fresh window for an external/in-app file or folder open. Must run on
+/// the main thread.
+fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<String>) {
+    let init = PendingInit {
+        folder,
+        file,
+        files: Vec::new(),
+        active_file: None,
+        restored: false,
+    };
+    // Bring the new window (and the app) to the foreground. When the spawn
+    // is triggered from the terminal shim, Doklin is a background app, so the
+    // window would otherwise open behind whatever is focused. set_focus
+    // activates the app and makes the window key.
+    if let Some(win) = spawn_window(app, init, None) {
+        let _ = win.set_focus();
     }
 }
 
@@ -742,48 +929,55 @@ fn take_pending_folder(state: State<'_, PendingOpen>) -> Option<String> {
     state.folder.lock().ok().and_then(|mut g| g.take())
 }
 
-/// The renderer reports what this window currently shows (its workspace folder
-/// and the real files open in tabs) so external opens can focus the right
-/// window instead of duplicating it. Also marks the app "ready" so subsequent
-/// external opens route to windows rather than the cold-start pending-open path.
+/// The renderer reports what this window currently shows (its workspace folder,
+/// the real files open in tabs, and the active tab) so external opens can focus
+/// the right window instead of duplicating it, and so the persisted session
+/// tracks what a relaunch should restore. Also marks the app "ready" so
+/// subsequent external opens route to windows rather than the cold-start
+/// pending-open path. Geometry is tracked separately (window events), so only
+/// the content fields are replaced here.
 #[tauri::command]
 fn register_window_content(
+    app: AppHandle,
     window: tauri::Window,
     folder: Option<String>,
     files: Vec<String>,
+    active_file: Option<String>,
     registry: State<'_, WindowRegistry>,
     ready: State<'_, AppReady>,
 ) {
     if let Ok(mut map) = registry.0.lock() {
-        map.insert(
-            window.label().to_string(),
-            WindowContent {
-                folder,
-                files: files.into_iter().collect(),
-            },
-        );
+        let entry = map.entry(window.label().to_string()).or_default();
+        entry.folder = folder;
+        entry.files = files;
+        entry.active_file = active_file;
     }
     ready.0.store(true, Ordering::SeqCst);
+    persist_session(&app);
 }
 
 /// Tells a freshly-mounted window what it is and what to open. The label is the
 /// authority for window identity (read backend-side, never inferred in JS): only
 /// "main" owns the shared session; every other label is a spawned window that
-/// initializes from the file/folder stashed for it by `spawn_open_window`.
+/// initializes from the content stashed for it by `spawn_window` — a fresh
+/// file/folder open, or a restored tab list from the previous session.
 #[tauri::command]
 fn take_window_init(window: tauri::Window, pending: State<'_, PendingWindowOpen>) -> WindowInit {
     let label = window.label();
     let is_main = label == "main";
-    let (folder, file) = pending
+    let init = pending
         .0
         .lock()
         .ok()
         .and_then(|mut m| m.remove(label))
-        .unwrap_or((None, None));
+        .unwrap_or_default();
     WindowInit {
         is_main,
-        folder,
-        file,
+        folder: init.folder,
+        file: init.file,
+        files: init.files,
+        active_file: init.active_file,
+        restored: init.restored,
     }
 }
 
@@ -1096,6 +1290,7 @@ pub fn run() {
         .manage(WindowSeq::default())
         .manage(AppReady::default())
         .manage(PendingWindowOpen::default())
+        .manage(Quitting::default())
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
@@ -1123,10 +1318,79 @@ pub fn run() {
             delete_share_config
         ])
         .setup(move |app| {
+            let handle = app.handle().clone();
+            let saved = read_persisted_session(&handle);
+            let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
+            let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());
+            // When a cold-start external open matches a window the session is
+            // about to restore anyway, the restore covers it — spawning a fresh
+            // copy on top would duplicate the folder/file.
+            let mut folder_restored = false;
+            let mut file_restored = false;
+
+            for w in &saved.windows {
+                if w.label == "main" {
+                    // The config-created main window restores its own tabs from
+                    // the renderer's localStorage; only its frame (and a registry
+                    // seed, so an immediate quit keeps the entry and external
+                    // opens can dedupe against its folder) comes from here.
+                    if let Ok(mut map) = handle.state::<WindowRegistry>().0.lock() {
+                        map.insert(w.label.clone(), w.content.clone());
+                    }
+                    if let (Some(g), Some(main)) =
+                        (&w.content.geometry, handle.get_webview_window("main"))
+                    {
+                        if geometry_visible(&handle, g) {
+                            let _ = main.set_position(tauri::LogicalPosition::new(g.x, g.y));
+                            let _ = main.set_size(tauri::LogicalSize::new(g.width, g.height));
+                        }
+                    }
+                    continue;
+                }
+                let mut content = w.content.clone();
+                if content.folder.is_none() && content.files.is_empty() {
+                    continue; // an empty window isn't worth resurrecting
+                }
+                if initial_folder_str.is_some() && content.folder == initial_folder_str {
+                    folder_restored = true;
+                }
+                if let Some(f) = &initial_file_str {
+                    if content.files.contains(f) {
+                        // The externally-opened file rides the restored window —
+                        // as its active tab.
+                        content.active_file = Some(f.clone());
+                        file_restored = true;
+                    }
+                }
+                spawn_window(
+                    &handle,
+                    PendingInit {
+                        folder: content.folder.clone(),
+                        file: None,
+                        files: content.files.clone(),
+                        active_file: content.active_file.clone(),
+                        restored: true,
+                    },
+                    content.geometry,
+                );
+            }
+
+            // The config window starts hidden (tauri.conf.json) so the saved
+            // frame can be applied without a visible jump; show it now.
+            if let Some(main) = handle.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+            }
+
             // Initial CLI args go through the same external-open path as every
             // later open: a folder is handed to the main window (cold-start
-            // pending-open), a file spawns its own window immediately.
-            handle_external_open(app.handle(), initial_folder, initial_file);
+            // pending-open), a file spawns its own window immediately — unless
+            // a restored window already shows it (see above).
+            handle_external_open(
+                app.handle(),
+                if folder_restored { None } else { initial_folder },
+                if file_restored { None } else { initial_file },
+            );
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1147,6 +1411,43 @@ pub fn run() {
                 }
             }
         }
-        let _ = event;
+        match &event {
+            // The quitting window set is exactly what the next launch restores:
+            // flag the teardown (so any Destroyed events it produces don't prune
+            // entries) and snapshot the session with the final frames. BOTH exit
+            // events are handled because macOS quit paths differ: ⌘Q goes
+            // through NSApp terminate → tao fires only `Exit` (never
+            // ExitRequested), while exit()/last-window-close fire ExitRequested
+            // first. The double persist on the latter path is harmless.
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                app.state::<Quitting>().0.store(true, Ordering::SeqCst);
+                persist_session(app);
+            }
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Moved(_) | WindowEvent::Resized(_),
+                ..
+            } => {
+                capture_window_geometry(app, label);
+            }
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } => {
+                // A window the user closed mid-session shouldn't come back on
+                // relaunch. The main window is the exception: it exists every
+                // launch regardless, so its entry (frame + folder) is kept.
+                if !app.state::<Quitting>().0.load(Ordering::SeqCst) {
+                    if label != "main" {
+                        if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {
+                            map.remove(label);
+                        }
+                    }
+                    persist_session(app);
+                }
+            }
+            _ => {}
+        }
     });
 }
