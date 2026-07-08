@@ -61,7 +61,7 @@ export default function ShareSetup({
   onOpenExternal: (url: string) => void;
   onConfigChanged: (config: ShareConfig) => void;
 }) {
-  const [mode, setMode] = useState<"browser" | "agent" | "terminal">("browser");
+  const [mode, setMode] = useState<"agent" | "browser" | "terminal">("agent");
   const [freshToken] = useState(generateToken);
   const [endpoint, setEndpoint] = useState(config?.endpoint ?? "");
   const [token, setToken] = useState(config?.token ?? freshToken);
@@ -154,310 +154,316 @@ export default function ShareSetup({
           </button>
         </div>
         <div className="setup-body">
-          <p className="setup-intro">
-            Sharing publishes read-only copies of your notes through{" "}
-            <strong>your own Cloudflare account</strong> — one small worker in front of one R2
-            storage bucket, comfortably inside the free tier. It's a one-time setup, about ten
-            minutes, and everything happens in the Cloudflare website — the only thing this app
-            ever sees is the worker's address and a token.
-          </p>
-          <div className="setup-mode" role="tablist" aria-label="Setup method">
-            <button
-              role="tab"
-              aria-selected={mode === "browser"}
-              className={`setup-mode-btn ${mode === "browser" ? "is-active" : ""}`}
-              onClick={() => setMode("browser")}
-            >
-              In the browser
-            </button>
-            <button
-              role="tab"
-              aria-selected={mode === "agent"}
-              className={`setup-mode-btn ${mode === "agent" ? "is-active" : ""}`}
-              onClick={() => setMode("agent")}
-            >
-              With an AI agent
-            </button>
-            <button
-              role="tab"
-              aria-selected={mode === "terminal"}
-              className={`setup-mode-btn ${mode === "terminal" ? "is-active" : ""}`}
-              onClick={() => setMode("terminal")}
-            >
-              In the terminal
-            </button>
-          </div>
-          {mode === "browser" ? (
-            <p className="setup-intro">
-              No developer tools needed — just {link(CLOUDFLARE_SIGNUP_URL, "a free Cloudflare account")}{" "}
-              and this guide. Keep this window open while you work through{" "}
-              {link(CLOUDFLARE_DASH_URL, "the Cloudflare dashboard")}; exact menu labels can
-              drift a little as Cloudflare updates it.
-            </p>
-          ) : mode === "agent" ? (
-            <p className="setup-intro">
-              Hand the whole job to an AI coding agent — Claude Code or anything else that can
-              run shell commands on your machine. It needs{" "}
-              {link(NODE_URL, "Node.js")} and will sign in to{" "}
-              {link(CLOUDFLARE_SIGNUP_URL, "your Cloudflare account")} through a browser window
-              you approve. The only thing it hands back is your new endpoint URL.
-            </p>
-          ) : (
-            <p className="setup-intro">
-              For the terminal-inclined: you'll need{" "}
-              {link(CLOUDFLARE_SIGNUP_URL, "a free Cloudflare account")} and{" "}
-              {link(NODE_URL, "Node.js")}. Steps 2–6 run in the <code>share-worker</code> folder
-              from step 1.
-            </p>
-          )}
-          <ol className="setup-steps">
-            {mode === "browser" ? (
-              <>
-                <li className="setup-step">
-                  <div className="setup-step-title">Create a Cloudflare account</div>
-                  <div className="setup-step-note">
-                    {link(CLOUDFLARE_SIGNUP_URL, "Sign up")} (the free plan is all sharing
-                    needs), then log in to {link(CLOUDFLARE_DASH_URL, "the dashboard")}.
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Create the storage bucket</div>
-                  <div className="setup-step-note">
-                    In the dashboard's sidebar open <strong>R2 Object Storage</strong> →{" "}
-                    <strong>Create bucket</strong>. Name it anything — <code>doklin-pages</code>{" "}
-                    is a fine choice — and leave every option at its default. First time using
-                    R2? It asks for a payment method once; sharing fits well within the free
-                    allowance.
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Create the worker</div>
-                  <div className="setup-step-note">
-                    Sidebar → <strong>Workers &amp; Pages</strong> → <strong>Create</strong> →
-                    create a Worker from the <strong>Hello World</strong> starter. Name it{" "}
-                    <code>doklin-share</code> (the name becomes part of your share links) and hit{" "}
-                    <strong>Deploy</strong>. If Cloudflare asks you to pick a{" "}
-                    <code>workers.dev</code> subdomain first, choose one — that's your personal
-                    hosting address.
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Replace its code with the share worker</div>
-                  <div className="setup-step-note">
-                    On the worker's page choose <strong>Edit code</strong>. Select everything in
-                    the editor, delete it, paste the code from the button below, then{" "}
-                    <strong>Deploy</strong>. It's the app's open-source share worker — the same
-                    code you can read in the repo's <code>share-worker</code> folder.
-                  </div>
-                  <div className="setup-code-row">
-                    <button className="share-btn is-primary" onClick={() => void copyWorkerCode()}>
-                      {codeCopied ? "Copied ✓" : "Copy worker code"}
-                    </button>
-                    <span className="setup-code-size">
-                      ~{Math.round(workerCode.length / 1024)} KB of JavaScript
-                    </span>
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Connect the bucket to the worker</div>
-                  <div className="setup-step-note">
-                    On the worker's page: <strong>Settings</strong> → <strong>Bindings</strong> →{" "}
-                    <strong>Add</strong> → <strong>R2 bucket</strong>. Set the variable name to
-                    exactly <code>PAGES</code> and pick the bucket from step 2, then save. The
-                    worker refuses to run without this binding.
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Set the access token</div>
-                  <div className="setup-step-note">
-                    Still in <strong>Settings</strong> → <strong>Variables and Secrets</strong> →{" "}
-                    <strong>Add</strong>. Type <strong>Secret</strong>, name exactly{" "}
-                    <code>SHARE_TOKEN</code>, and for the value paste this token — generated just
-                    now, only shown here:
-                  </div>
-                  <TokenRow token={freshToken} />
-                  <div className="setup-step-note">
-                    Save (Cloudflare may redeploy the worker — that's fine). This token is what
-                    lets this app, and nothing else, publish pages.
-                  </div>
-                </li>
-              </>
-            ) : mode === "agent" ? (
-              <>
-                <li className="setup-step">
-                  <div className="setup-step-title">Copy the prompt for your agent</div>
-                  <div className="setup-step-note">
-                    Read it first — it's the complete job description, and it{" "}
-                    <strong>contains the access token</strong> for your new backend, so only
-                    hand it to an agent you trust on your own machine. The agent deploys from
-                    the app's public repo; nothing here is secret except that token.
-                  </div>
-                  <pre className="setup-prompt">{agentPrompt}</pre>
-                  <div className="setup-code-row">
-                    <button
-                      className="share-btn is-primary"
-                      onClick={() => void copyAgentPrompt()}
-                    >
-                      {promptCopied ? "Copied ✓" : "Copy prompt"}
-                    </button>
-                  </div>
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Run it and follow along</div>
-                  <div className="setup-step-note">
-                    Paste the prompt into the agent and let it work. It may pause for you twice:
-                    to complete the Cloudflare sign-in in a browser window, and — the first time
-                    an account uses R2 — to enable R2 in the dashboard (asks for a payment
-                    method; the free allowance covers sharing).
-                  </div>
-                </li>
-              </>
-            ) : (
-              <>
-                <li className="setup-step">
-                  <div className="setup-step-title">Get the worker code</div>
-                  <div className="setup-step-note">
-                    The backend lives in the app's open-source repo, in the{" "}
-                    <code>share-worker</code> folder. No git? Download the ZIP from{" "}
-                    {link(REPO_URL, "the GitHub page")} instead.
-                  </div>
-                  <Cmd text={`git clone ${REPO_URL}.git`} />
-                  <Cmd text="cd doklin/share-worker" />
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Sign in to Cloudflare from the terminal</div>
-                  <div className="setup-step-note">
-                    Opens a browser window to authorize wrangler, Cloudflare's deploy tool.
-                  </div>
-                  <Cmd text="npx wrangler@4 login" />
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Create your deployment config</div>
-                  <div className="setup-step-note">
-                    Then open <code>wrangler.toml</code> in any editor and fill in the two
-                    placeholders: <code>account_id</code> (printed by{" "}
-                    <code>npx wrangler@4 whoami</code>) and <code>bucket_name</code> — pick any
-                    name, e.g. <code>doklin-pages</code>.
-                  </div>
-                  <Cmd text="cp wrangler.toml.example wrangler.toml" />
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Create the storage bucket</div>
-                  <div className="setup-step-note">
-                    Use the same name you put in <code>wrangler.toml</code>. First time using R2?
-                    Enable it once under <strong>R2</strong> in the Cloudflare dashboard — it
-                    asks for a payment method, but sharing fits well within the free allowance.
-                  </div>
-                  <Cmd text="npx wrangler@4 r2 bucket create doklin-pages" />
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Store the app's write token</div>
-                  <div className="setup-step-note">
-                    When prompted for the value, paste this token — generated just now, only
-                    shown here (it's prefilled in the last step too):
-                  </div>
-                  <TokenRow token={freshToken} />
-                  <Cmd text="npx wrangler@4 secret put SHARE_TOKEN" />
-                </li>
-                <li className="setup-step">
-                  <div className="setup-step-title">Deploy the worker</div>
-                  <div className="setup-step-note">
-                    Prints your worker's public URL, like{" "}
-                    <code>https://doklin-share.your-name.workers.dev</code>. That URL is your
-                    endpoint.
-                  </div>
-                  <Cmd text="npx wrangler@4 deploy" />
-                </li>
-              </>
-            )}
-            <li className="setup-step">
-              <div className="setup-step-title">Connect this app</div>
-              <div className="setup-step-note">
-                {mode === "browser" ? (
+          <div className="setup-layout">
+            <aside className="setup-rail">
+              <p className="setup-intro">
+                Sharing publishes read-only copies of your notes through{" "}
+                <strong>your own Cloudflare account</strong> — one small worker in front of an R2
+                bucket, well inside the free tier. A one-time setup, about ten minutes.
+              </p>
+              <div className="setup-mode" role="tablist" aria-label="Setup method">
+                <button
+                  role="tab"
+                  aria-selected={mode === "agent"}
+                  className={`setup-mode-btn ${mode === "agent" ? "is-active" : ""}`}
+                  onClick={() => setMode("agent")}
+                >
+                  <span className="setup-mode-name">With an AI agent</span>
+                  <span className="setup-mode-sub">Hand it to Claude Code — fastest</span>
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={mode === "browser"}
+                  className={`setup-mode-btn ${mode === "browser" ? "is-active" : ""}`}
+                  onClick={() => setMode("browser")}
+                >
+                  <span className="setup-mode-name">In the browser</span>
+                  <span className="setup-mode-sub">Click through the dashboard</span>
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={mode === "terminal"}
+                  className={`setup-mode-btn ${mode === "terminal" ? "is-active" : ""}`}
+                  onClick={() => setMode("terminal")}
+                >
+                  <span className="setup-mode-name">In the terminal</span>
+                  <span className="setup-mode-sub">Run wrangler yourself</span>
+                </button>
+              </div>
+              <div className="setup-footer">
+                Want links on your own domain (like <code>notes.example.com</code>), or a branded
+                landing page? See {link(WORKER_GUIDE_URL, "the share-worker guide")}.
+              </div>
+            </aside>
+            <div className="setup-main">
+              {mode === "agent" ? (
+                <p className="setup-intro">
+                  Hand the whole job to an AI coding agent — Claude Code or anything else that can
+                  run shell commands on your machine. It needs {link(NODE_URL, "Node.js")} and
+                  signs in to {link(CLOUDFLARE_SIGNUP_URL, "your Cloudflare account")} through a
+                  browser window you approve. It hands back one endpoint URL.
+                </p>
+              ) : mode === "browser" ? (
+                <p className="setup-intro">
+                  No developer tools needed — just{" "}
+                  {link(CLOUDFLARE_SIGNUP_URL, "a free Cloudflare account")} and this guide. Keep
+                  this window open while you work through{" "}
+                  {link(CLOUDFLARE_DASH_URL, "the Cloudflare dashboard")}; exact menu labels can
+                  drift a little as Cloudflare updates it.
+                </p>
+              ) : (
+                <p className="setup-intro">
+                  For the terminal-inclined: you'll need{" "}
+                  {link(CLOUDFLARE_SIGNUP_URL, "a free Cloudflare account")} and{" "}
+                  {link(NODE_URL, "Node.js")}. Steps 2–6 run in the <code>share-worker</code>{" "}
+                  folder from step 1.
+                </p>
+              )}
+              <ol className="setup-steps">
+                {mode === "agent" ? (
                   <>
-                    The endpoint is your worker's URL — shown on its overview page, like{" "}
-                    <code>https://doklin-share.your-name.workers.dev</code>. The token is
-                    prefilled with the one above. Both are stored only on this Mac.
+                    <li className="setup-step">
+                      <div className="setup-step-title">Copy the prompt for your agent</div>
+                      <div className="setup-step-note">
+                        Read it first — it's the complete job description, and it{" "}
+                        <strong>contains the access token</strong> for your new backend, so only
+                        hand it to an agent you trust on your own machine. The agent deploys from
+                        the app's public repo; nothing here is secret except that token.
+                      </div>
+                      <pre className="setup-prompt">{agentPrompt}</pre>
+                      <div className="setup-code-row">
+                        <button
+                          className="share-btn is-primary"
+                          onClick={() => void copyAgentPrompt()}
+                        >
+                          {promptCopied ? "Copied ✓" : "Copy prompt"}
+                        </button>
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Run it and follow along</div>
+                      <div className="setup-step-note">
+                        Paste the prompt into the agent and let it work. It may pause for you
+                        twice: to complete the Cloudflare sign-in in a browser window, and — the
+                        first time an account uses R2 — to enable R2 in the dashboard (asks for a
+                        payment method; the free allowance covers sharing).
+                      </div>
+                    </li>
                   </>
-                ) : mode === "agent" ? (
+                ) : mode === "browser" ? (
                   <>
-                    Paste the <code>ENDPOINT</code> the agent reported when it finished. The
-                    token is prefilled with the one embedded in the prompt. Both are stored
-                    only on this Mac.
+                    <li className="setup-step">
+                      <div className="setup-step-title">Create a Cloudflare account</div>
+                      <div className="setup-step-note">
+                        {link(CLOUDFLARE_SIGNUP_URL, "Sign up")} (the free plan is all sharing
+                        needs), then log in to {link(CLOUDFLARE_DASH_URL, "the dashboard")}.
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Create the storage bucket</div>
+                      <div className="setup-step-note">
+                        In the dashboard's sidebar open <strong>R2 Object Storage</strong> →{" "}
+                        <strong>Create bucket</strong>. Name it anything — <code>doklin-pages</code>{" "}
+                        is a fine choice — and leave every option at its default. First time using
+                        R2? It asks for a payment method once; sharing fits well within the free
+                        allowance.
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Create the worker</div>
+                      <div className="setup-step-note">
+                        Sidebar → <strong>Workers &amp; Pages</strong> → <strong>Create</strong> →
+                        create a Worker from the <strong>Hello World</strong> starter. Name it{" "}
+                        <code>doklin-share</code> (the name becomes part of your share links) and
+                        hit <strong>Deploy</strong>. If Cloudflare asks you to pick a{" "}
+                        <code>workers.dev</code> subdomain first, choose one — that's your personal
+                        hosting address.
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Replace its code with the share worker</div>
+                      <div className="setup-step-note">
+                        On the worker's page choose <strong>Edit code</strong>. Select everything in
+                        the editor, delete it, paste the code from the button below, then{" "}
+                        <strong>Deploy</strong>. It's the app's open-source share worker — the same
+                        code you can read in the repo's <code>share-worker</code> folder.
+                      </div>
+                      <div className="setup-code-row">
+                        <button className="share-btn is-primary" onClick={() => void copyWorkerCode()}>
+                          {codeCopied ? "Copied ✓" : "Copy worker code"}
+                        </button>
+                        <span className="setup-code-size">
+                          ~{Math.round(workerCode.length / 1024)} KB of JavaScript
+                        </span>
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Connect the bucket to the worker</div>
+                      <div className="setup-step-note">
+                        On the worker's page: <strong>Settings</strong> → <strong>Bindings</strong> →{" "}
+                        <strong>Add</strong> → <strong>R2 bucket</strong>. Set the variable name to
+                        exactly <code>PAGES</code> and pick the bucket from step 2, then save. The
+                        worker refuses to run without this binding.
+                      </div>
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Set the access token</div>
+                      <div className="setup-step-note">
+                        Still in <strong>Settings</strong> → <strong>Variables and Secrets</strong> →{" "}
+                        <strong>Add</strong>. Type <strong>Secret</strong>, name exactly{" "}
+                        <code>SHARE_TOKEN</code>, and for the value paste this token — generated just
+                        now, only shown here:
+                      </div>
+                      <TokenRow token={freshToken} />
+                      <div className="setup-step-note">
+                        Save (Cloudflare may redeploy the worker — that's fine). This token is what
+                        lets this app, and nothing else, publish pages.
+                      </div>
+                    </li>
                   </>
                 ) : (
                   <>
-                    The endpoint is the URL deploy printed. The token is prefilled with the one
-                    above — replace it if you stored a different value. Both are stored only on
-                    this Mac.
+                    <li className="setup-step">
+                      <div className="setup-step-title">Get the worker code</div>
+                      <div className="setup-step-note">
+                        The backend lives in the app's open-source repo, in the{" "}
+                        <code>share-worker</code> folder. No git? Download the ZIP from{" "}
+                        {link(REPO_URL, "the GitHub page")} instead.
+                      </div>
+                      <Cmd text={`git clone ${REPO_URL}.git`} />
+                      <Cmd text="cd doklin/share-worker" />
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Sign in to Cloudflare from the terminal</div>
+                      <div className="setup-step-note">
+                        Opens a browser window to authorize wrangler, Cloudflare's deploy tool.
+                      </div>
+                      <Cmd text="npx wrangler@4 login" />
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Create your deployment config</div>
+                      <div className="setup-step-note">
+                        Then open <code>wrangler.toml</code> in any editor and fill in the two
+                        placeholders: <code>account_id</code> (printed by{" "}
+                        <code>npx wrangler@4 whoami</code>) and <code>bucket_name</code> — pick any
+                        name, e.g. <code>doklin-pages</code>.
+                      </div>
+                      <Cmd text="cp wrangler.toml.example wrangler.toml" />
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Create the storage bucket</div>
+                      <div className="setup-step-note">
+                        Use the same name you put in <code>wrangler.toml</code>. First time using R2?
+                        Enable it once under <strong>R2</strong> in the Cloudflare dashboard — it
+                        asks for a payment method, but sharing fits well within the free allowance.
+                      </div>
+                      <Cmd text="npx wrangler@4 r2 bucket create doklin-pages" />
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Store the app's write token</div>
+                      <div className="setup-step-note">
+                        When prompted for the value, paste this token — generated just now, only
+                        shown here (it's prefilled in the last step too):
+                      </div>
+                      <TokenRow token={freshToken} />
+                      <Cmd text="npx wrangler@4 secret put SHARE_TOKEN" />
+                    </li>
+                    <li className="setup-step">
+                      <div className="setup-step-title">Deploy the worker</div>
+                      <div className="setup-step-note">
+                        Prints your worker's public URL, like{" "}
+                        <code>https://doklin-share.your-name.workers.dev</code>. That URL is your
+                        endpoint.
+                      </div>
+                      <Cmd text="npx wrangler@4 deploy" />
+                    </li>
                   </>
                 )}
-              </div>
-              <div className="share-field">
-                <div className="share-field-label">Endpoint</div>
-                <input
-                  className="share-field-input"
-                  value={endpoint}
-                  onChange={(e) => {
-                    setEndpoint(e.target.value);
-                    setSaved(false);
-                  }}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  placeholder="https://doklin-share.your-name.workers.dev"
-                  aria-label="Share endpoint"
-                />
-              </div>
-              <div className="share-field">
-                <div className="share-field-label">Token</div>
-                <input
-                  className="share-field-input share-field-token"
-                  value={token}
-                  onChange={(e) => {
-                    setToken(e.target.value);
-                    setSaved(false);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void verifyAndSave();
-                  }}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  placeholder="the SHARE_TOKEN value"
-                  aria-label="Share token"
-                />
-              </div>
-              {saved ? (
-                <>
-                  <div className="setup-done">
-                    <CheckIcon /> Connected — sharing is ready. Open any note and hit{" "}
-                    <strong>Share</strong>.
+                <li className="setup-step">
+                  <div className="setup-step-title">Connect this app</div>
+                  <div className="setup-step-note">
+                    {mode === "agent" ? (
+                      <>
+                        Paste the <code>ENDPOINT</code> the agent reported when it finished. The
+                        token is already filled in — it's the one embedded in the prompt. Both are
+                        stored only on this Mac.
+                      </>
+                    ) : mode === "browser" ? (
+                      <>
+                        The endpoint is your worker's URL — shown on its overview page, like{" "}
+                        <code>https://doklin-share.your-name.workers.dev</code>. The token is
+                        already filled in with the one above. Both are stored only on this Mac.
+                      </>
+                    ) : (
+                      <>
+                        The endpoint is the URL deploy printed. The token is already filled in with
+                        the one above — replace it if you stored a different value. Both are stored
+                        only on this Mac.
+                      </>
+                    )}
                   </div>
-                  <div className="share-buttons">
-                    <button className="share-btn is-primary" onClick={onClose}>
-                      Done
-                    </button>
+                  <div className="share-field">
+                    <div className="share-field-label">Endpoint</div>
+                    <input
+                      className="share-field-input"
+                      value={endpoint}
+                      onChange={(e) => {
+                        setEndpoint(e.target.value);
+                        setSaved(false);
+                      }}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      placeholder="https://doklin-share.your-name.workers.dev"
+                      aria-label="Share endpoint"
+                    />
                   </div>
-                </>
-              ) : (
-                <div className="share-buttons">
-                  <button
-                    className="share-btn is-primary"
-                    onClick={() => void verifyAndSave()}
-                    disabled={busy}
-                  >
-                    {busy ? "Checking…" : "Verify & save"}
-                  </button>
-                </div>
-              )}
-              {error && <div className="share-error">{error}</div>}
-            </li>
-          </ol>
-          <div className="setup-footer">
-            Want the links on your own domain (like <code>notes.example.com</code>), or to brand
-            the landing page? See {link(WORKER_GUIDE_URL, "the share-worker guide")} in the
-            repo.
+                  <div className="share-field">
+                    <div className="share-field-label">Token</div>
+                    <input
+                      className="share-field-input share-field-token"
+                      value={token}
+                      onChange={(e) => {
+                        setToken(e.target.value);
+                        setSaved(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void verifyAndSave();
+                      }}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      placeholder="the SHARE_TOKEN value"
+                      aria-label="Share token"
+                    />
+                  </div>
+                  {saved ? (
+                    <>
+                      <div className="setup-done">
+                        <CheckIcon /> Connected — sharing is ready. Open any note and hit{" "}
+                        <strong>Share</strong>.
+                      </div>
+                      <div className="share-buttons">
+                        <button className="share-btn is-primary" onClick={onClose}>
+                          Done
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="share-buttons">
+                      <button
+                        className="share-btn is-primary"
+                        onClick={() => void verifyAndSave()}
+                        disabled={busy}
+                      >
+                        {busy ? "Checking…" : "Verify & save"}
+                      </button>
+                    </div>
+                  )}
+                  {error && <div className="share-error">{error}</div>}
+                </li>
+              </ol>
+            </div>
           </div>
         </div>
       </div>
