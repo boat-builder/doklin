@@ -1,0 +1,225 @@
+name: release
+
+# Every push to main cuts a release:
+#   1. `bump` computes the next version — a patch bump of the latest `v*` tag.
+#      To cut a minor/major instead, raise `version` in src-tauri/tauri.conf.json
+#      in your commit; a file version higher than the latest tag is used verbatim.
+#      The version is stamped into package.json, src-tauri/tauri.conf.json,
+#      Cargo.toml and Cargo.lock, committed back to main and tagged vX.Y.Z.
+#   2. `build-release` builds the universal macOS .dmg via Tauri (Developer ID
+#      signed + notarized + stapled — REQUIRED, the job fails loudly if the
+#      signing secrets are absent; there is no unsigned fallback) and publishes
+#      a GitHub Release for that tag, marked latest, so
+#        https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg
+#      always resolves to the newest build.
+#
+# The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
+# workflows from GITHUB_TOKEN pushes — so the bump cannot re-trigger this
+# workflow (the [skip ci] in its message is belt-and-braces). That is also why
+# the release builds in the SAME run instead of a separate on-tag workflow: a
+# GITHUB_TOKEN-pushed tag would not fire it.
+#
+# Signing secrets reuse bluesnake's exact names — copy the values over:
+#   MACOS_CERTIFICATE, MACOS_CERTIFICATE_PWD, MACOS_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+# (no KEYCHAIN_PWD needed — Tauri creates its own ephemeral keychain).
+#
+# workflow_dispatch cuts a release manually (same bump + build path).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push bump commit + tag, create the GitHub Release
+
+# Serialize runs: a second push during a release waits, then checks out the
+# just-bumped main head, so its version bump lands on top (never non-fast-forward).
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------- version bump
+  bump:
+    name: Bump version + tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main         # branch head (not the trigger SHA) — see concurrency note
+          fetch-depth: 0    # need all tags to find the latest release
+
+      - name: Compute next version
+        id: v
+        run: |
+          set -euo pipefail
+          file_v="$(jq -r .version src-tauri/tauri.conf.json)"
+          last_tag="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [ -z "$last_tag" ]; then
+            next="$file_v"   # first release ships the committed version as-is
+          else
+            tag_v="${last_tag#v}"
+            IFS=. read -r maj min pat <<<"$tag_v"
+            next="$maj.$min.$((pat+1))"
+            # A manually raised file version (minor/major bump) beats the auto patch bump.
+            if [ "$file_v" != "$tag_v" ] && \
+               [ "$(printf '%s\n%s\n' "$file_v" "$tag_v" | sort -V | tail -n1)" = "$file_v" ]; then
+              next="$file_v"
+            fi
+          fi
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            echo "::error::tag v$next already exists — delete it or raise the version in tauri.conf.json"
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$next (previous tag: ${last_tag:-none})"
+
+      - name: Stamp version into package.json, tauri.conf.json, Cargo.toml, Cargo.lock
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          # sed (first match only) instead of jq so the JSON formatting is untouched
+          sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"$VERSION\"/" package.json
+          sed -i -E "0,/\"version\": *\"[^\"]+\"/s//\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+          sed -i -E "0,/^version = \"[^\"]+\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
+          # sanity: all three now agree
+          for f in "$(jq -r .version package.json)" "$(jq -r .version src-tauri/tauri.conf.json)"; do
+            [ "$f" = "$VERSION" ] || { echo "::error::version stamp failed"; exit 1; }
+          done
+          grep -q "^version = \"$VERSION\"$" src-tauri/Cargo.toml || { echo "::error::Cargo.toml stamp failed"; exit 1; }
+          # Cargo.lock: only the doklin package entry (version is the line after name)
+          awk -v ver="$VERSION" '
+            prev == "name = \"doklin\"" && /^version = / { $0 = "version = \"" ver "\"" }
+            { prev = $0; print }
+          ' src-tauri/Cargo.lock > Cargo.lock.tmp
+          mv Cargo.lock.tmp src-tauri/Cargo.lock
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Files already at $VERSION (first release) — tagging without a commit"
+          else
+            git commit -m "chore: release v$VERSION [skip ci]"
+          fi
+          git tag "v$VERSION"
+          git push origin HEAD:main "refs/tags/v$VERSION"
+
+  # ---------------------------------------------- macOS build + GitHub Release
+  build-release:
+    name: Build .dmg (universal, signed + notarized) and release
+    needs: bump
+    runs-on: macos-14
+    timeout-minutes: 90   # first notarization on a quiet Apple account can be slow
+    env:
+      VERSION: ${{ needs.bump.outputs.version }}
+    steps:
+      # No unsigned fallback: fail here, before the expensive build, if any
+      # signing/notarization secret is missing.
+      - name: Require signing secrets
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          [ -n "$MACOS_CERTIFICATE" ]     || missing="$missing MACOS_CERTIFICATE"
+          [ -n "$MACOS_CERTIFICATE_PWD" ] || missing="$missing MACOS_CERTIFICATE_PWD"
+          [ -n "$MACOS_SIGNING_IDENTITY" ] || missing="$missing MACOS_SIGNING_IDENTITY"
+          [ -n "$APPLE_ID" ]              || missing="$missing APPLE_ID"
+          [ -n "$APPLE_PASSWORD" ]        || missing="$missing APPLE_PASSWORD"
+          [ -n "$APPLE_TEAM_ID" ]         || missing="$missing APPLE_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing signing secrets:$missing — copy them from the bluesnake repo settings"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.tag }}   # the exact stamped commit
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Tauri's bundler handles the whole signing story from env vars: imports
+      # the cert into an ephemeral keychain, codesigns with hardened runtime,
+      # notarizes the .app with notarytool, staples it, then signs the .dmg.
+      - name: Build, sign and notarize
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm tauri build --target universal-apple-darwin
+
+      # Assert the ticket is really attached — catches Tauri silently skipping
+      # notarization (e.g. an env var it didn't recognize).
+      - name: Verify signature + notarization
+        run: |
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Doklin.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
+
+      # Notarize + staple the DMG itself too (Tauri only notarizes the .app),
+      # so the downloaded .dmg passes Gatekeeper offline as well.
+      - name: Stage, notarize and staple the DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          DMG="dist/Doklin-${VERSION}-macos-universal.dmg"
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "$DMG"
+          xcrun notarytool submit "$DMG" --wait \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+          xcrun stapler staple "$DMG"
+          # Version-less alias (copied AFTER stapling) for a stable
+          # releases/latest/download/ URL, plus a checksum manifest.
+          cp "$DMG" dist/Doklin-macos-universal.dmg
+          (cd dist && shasum -a 256 *.dmg > SHA256SUMS)
+          ls -la dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump.outputs.tag }}
+          files: dist/*
+          make_latest: 'true'
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            **macOS** universal (Apple Silicon + Intel) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt.
