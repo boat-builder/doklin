@@ -31,7 +31,7 @@ to another OS.
 ## Architecture
 
 - **Frontend**: React + Vite + Milkdown Crepe (`@milkdown/crepe`). Crepe is Milkdown's batteries-included preset — slash menu, block handles, toolbar, Notion-like keyboard shortcuts.
-- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning every non-hidden folder plus the markdown files inside — empty folders stay visible so they can be creation targets), `create_file`/`create_dir` (fail if the name is taken; backing for the sidebar's inline New File/New Folder), `move_path` (rename/move via `fs::rename`, refusing to clobber an existing destination except a case-only rename; backing for the sidebar's inline Rename and drag-to-move), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for an initial CLI folder arg. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running process. Every externally opened *file* (double-click, CLI, cold or warm start) spawns its own window — it is never attached as a tab to an existing window's workspace or to the restored session; an externally opened *folder* focuses its existing workspace window or opens a new one.
+- **Backend**: Tauri 2 (Rust). Commands: `read_file`, `write_file`, `list_md_tree` (walks a directory, returning every non-hidden folder plus the markdown files inside — empty folders stay visible so they can be creation targets), `create_file`/`create_dir` (fail if the name is taken; backing for the sidebar's inline New File/New Folder), `move_path` (rename/move via `fs::rename`, refusing to clobber an existing destination except a case-only rename; backing for the sidebar's inline Rename and drag-to-move), `reveal_in_finder`, the draft lifecycle (`create_draft`, `list_drafts`, `delete_draft`, `migrate_scratch`), trash (`trash_file`/`restore_trashed`), plus pending-open hand-off for an initial CLI folder arg. `RunEvent::Opened` handles macOS open events for both files and folders. `tauri-plugin-single-instance` forwards CLI argv from a second `doklin` invocation into the running process. Every externally opened *file* (double-click, CLI, cold or warm start) spawns its own window — it is never attached as a tab to an existing window's workspace or to the restored session; an externally opened *folder* focuses its existing workspace window or opens a new one. The backend also persists the window session to `<app_data_dir>/session.json`: every window's folder, open file tabs, active tab, and frame, snapshotted on each content change and at quit. On launch, non-main windows (including externally-opened file windows) are respawned from it with their saved tabs and frames; a window the user closed mid-session is pruned and stays closed. The main window only takes its frame from the file — its tabs (which include drafts) restore from the renderer's `localStorage` session.
 - **File association**: Declared in `src-tauri/tauri.conf.json` under `bundle.fileAssociations`. Tauri injects `CFBundleDocumentTypes` into `Info.plist` at bundle time.
 - **CLI**: `scripts/install.sh` writes a small `doklin` shell shim that calls `open -a Doklin --args <files>`. macOS routes argv through LaunchServices to the bundled app.
 
@@ -104,7 +104,11 @@ Switching tabs and quitting also flush, so unsaved keystrokes aren't lost.
   actions and the appearance picker.
 
 The open tabs + active tab, last opened workspace, panel visibility, and draft
-metadata are remembered in `localStorage` and restored on next launch.
+metadata are remembered in `localStorage` and restored on next launch. Secondary
+windows survive a quit too: which windows were open, their folders/tabs, and
+their positions/sizes are restored from the backend's `session.json` (VS
+Code-style) — see Architecture. Closing a window mid-session removes it from
+the restore set; quitting (⌘Q) preserves everything.
 
 ## Themes
 

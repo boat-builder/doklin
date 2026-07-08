@@ -33,7 +33,14 @@ type Conflict = { diskSnapshot: FileSnapshot };
 
 const AUTOSAVE_DEBOUNCE_MS = 600;
 
-type WindowInit = { isMain: boolean; folder: string | null; file: string | null };
+type WindowInit = {
+  isMain: boolean;
+  folder: string | null;
+  file: string | null;
+  files: string[];
+  activeFile: string | null;
+  restored: boolean;
+};
 
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
@@ -41,6 +48,12 @@ type WindowInit = { isMain: boolean; folder: string | null; file: string | null 
 // window never clobbers the main window's session. Shared prefs (theme, recents,
 // drafts) stay shared across all windows.
 let isMainWindow = true;
+
+// The main window's workspace root, mirrored module-level (like isMainWindow)
+// so writeStoredSession can include it without threading it through every call
+// site. Deliberately kept even while the folder is unreadable (unmounted
+// drive), so the workspace self-heals on a later launch like ghost tabs do.
+let sessionWorkspaceRoot: string | null = null;
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const dirname = (p: string) => {
@@ -178,10 +191,14 @@ function writeStoredRecents(entries: RecentEntry[]) {
   }
 }
 
-function readStoredSession(): { tabs: Tab[]; activeId: string | null } {
+function readStoredSession(): {
+  tabs: Tab[];
+  activeId: string | null;
+  workspaceRoot: string | null;
+} {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return { tabs: [], activeId: null };
+    if (!raw) return { tabs: [], activeId: null, workspaceRoot: null };
     const parsed = JSON.parse(raw);
     const tabs: Tab[] = Array.isArray(parsed?.tabs)
       ? parsed.tabs.filter(
@@ -193,9 +210,11 @@ function readStoredSession(): { tabs: Tab[]; activeId: string | null } {
         )
       : [];
     const activeId = typeof parsed?.activeId === "string" ? parsed.activeId : null;
-    return { tabs, activeId };
+    const workspaceRoot =
+      typeof parsed?.workspaceRoot === "string" ? parsed.workspaceRoot : null;
+    return { tabs, activeId, workspaceRoot };
   } catch {
-    return { tabs: [], activeId: null };
+    return { tabs: [], activeId: null, workspaceRoot: null };
   }
 }
 
@@ -206,7 +225,12 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
   try {
     localStorage.setItem(
       SESSION_STORAGE_KEY,
-      JSON.stringify({ tabs, activeId, version: 1 }),
+      JSON.stringify({
+        tabs,
+        activeId,
+        workspaceRoot: sessionWorkspaceRoot,
+        version: 1,
+      }),
     );
   } catch {
     // ignore
@@ -765,10 +789,12 @@ export default function App() {
   }, []);
 
   const setWorkspace = useCallback((root: string) => {
+    sessionWorkspaceRoot = root;
     setWorkspaceRoot(root);
     setSidebarOpen(true);
     selectSidebarEntry(null); // a selection from the previous workspace is meaningless
     addRecent(root, "folder");
+    writeStoredSession(tabsRef.current, activeIdRef.current); // the root is part of the session
   }, [addRecent, selectSidebarEntry]);
 
   const openFolderPicker = useCallback(async () => {
@@ -1220,8 +1246,35 @@ export default function App() {
       const init = await invoke<WindowInit>("take_window_init");
       if (!init.isMain) {
         isMainWindow = false;
-        if (init.folder) setWorkspace(init.folder);
-        if (init.file) await openTab(init.file, "file");
+        if (init.restored) {
+          // A window brought back by quit-time session restore: re-adopt its
+          // folder and rebuild its file tabs directly — openTab/setWorkspace
+          // would reshuffle recents, and restoring isn't an "open". Unreadable
+          // paths stay visible as ghost tabs, same as the main window's restore.
+          if (init.folder) setWorkspaceRoot(init.folder);
+          const restored: Tab[] = [];
+          for (const p of init.files) {
+            try {
+              await invoke<ReadFileResult>("read_file", { path: p });
+              restored.push({ id: uuid(), kind: "file", path: p });
+            } catch {
+              restored.push({ id: uuid(), kind: "file", path: p, missing: true });
+            }
+          }
+          if (restored.length > 0) {
+            const active =
+              restored.find((t) => t.path === init.activeFile) ??
+              restored[restored.length - 1];
+            tabsRef.current = restored;
+            activeIdRef.current = active.id;
+            setTabs(restored);
+            setActiveId(active.id);
+            await loadActiveContent(active);
+          }
+        } else {
+          if (init.folder) setWorkspace(init.folder);
+          if (init.file) await openTab(init.file, "file");
+        }
         setReady(true);
         return;
       }
@@ -1241,6 +1294,9 @@ export default function App() {
       // the disk may just be unmounted, and the user decides whether to close
       // it. Drafts are app-managed; one that's gone really is gone → drop.
       const stored = readStoredSession();
+      // Adopt the stored root into the module mirror BEFORE any
+      // writeStoredSession below, so re-persisting the session can't wipe it.
+      sessionWorkspaceRoot = stored.workspaceRoot;
       const restored: Tab[] = [];
       for (const t of stored.tabs) {
         try {
@@ -1286,22 +1342,40 @@ export default function App() {
       }
       // Nothing to restore → no tab open (welcome screen).
 
-      if (pendingFolder) setWorkspace(pendingFolder);
+      if (pendingFolder) {
+        setWorkspace(pendingFolder);
+      } else if (stored.workspaceRoot) {
+        // Reopen the last workspace — via setWorkspaceRoot, not setWorkspace:
+        // restoring shouldn't force the sidebar open (its state is persisted
+        // separately) or reshuffle recents. A root that doesn't read right now
+        // stays in the stored session (see sessionWorkspaceRoot) but isn't
+        // shown, so an unmounted drive self-heals on a later launch.
+        const exists = await invoke<boolean>("path_exists", {
+          path: stored.workspaceRoot,
+        }).catch(() => false);
+        if (exists) setWorkspaceRoot(stored.workspaceRoot);
+      }
       setReady(true);
     })();
   }, [openTab, setWorkspace, loadActiveContent]);
 
-  // Report this window's content (workspace folder + open file paths) to the
-  // backend whenever it changes, so folder opens and the in-app "open in new
-  // window" actions can focus the window that already shows a path instead of
-  // opening a duplicate. (External file opens always spawn a new window and
-  // never consult this registry.) The first report also marks the app "ready",
-  // flipping external folder opens from the cold-start pending-open path to
-  // window routing.
+  // Report this window's content (workspace folder + open file paths + active
+  // tab) to the backend whenever it changes, so folder opens and the in-app
+  // "open in new window" actions can focus the window that already shows a path
+  // instead of opening a duplicate, and so the backend's persisted session
+  // (session.json) can respawn this window after a quit. (External file opens
+  // always spawn a new window and never consult this registry.) The first
+  // report also marks the app "ready", flipping external folder opens from the
+  // cold-start pending-open path to window routing.
   useEffect(() => {
     const files = tabs.filter((t) => t.kind === "file").map((t) => t.path);
-    void invoke("register_window_content", { folder: workspaceRoot, files });
-  }, [workspaceRoot, tabs]);
+    const active = tabs.find((t) => t.id === activeId);
+    void invoke("register_window_content", {
+      folder: workspaceRoot,
+      files,
+      activeFile: active?.kind === "file" ? active.path : null,
+    });
+  }, [workspaceRoot, tabs, activeId]);
 
   useEffect(() => {
     const un = listen<ExternalChangePayload>("file-externally-changed", (e) => {
