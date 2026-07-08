@@ -12,6 +12,7 @@ import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
 import ShareMenu from "./ShareMenu";
 import SharedPages from "./SharedPages";
+import ShareSetup from "./ShareSetup";
 import {
   deletePage,
   getShareConfig,
@@ -363,6 +364,7 @@ export default function App() {
   const sharesRef = useRef<Record<string, ShareEntry>>(shares);
   const [shareConfig, setShareConfig] = useState<ShareConfig | null>(null);
   const [sharedPagesOpen, setSharedPagesOpen] = useState(false);
+  const [shareSetupOpen, setShareSetupOpen] = useState(false);
   const sharePushTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
@@ -1797,6 +1799,7 @@ export default function App() {
           onShare={shareActiveDoc}
           onStopSharing={() => stopSharing(activeTab.path)}
           onOpenSharedPages={() => setSharedPagesOpen(true)}
+          onOpenSetupGuide={() => setShareSetupOpen(true)}
           onOpenExternal={openExternal}
           onConfigChanged={setShareConfig}
           onConfigDeleted={() => setShareConfig(null)}
@@ -1812,7 +1815,16 @@ export default function App() {
             void openTab(entry.path, entry.kind);
           }}
           onOpenExternal={openExternal}
+          onOpenSetup={() => setShareSetupOpen(true)}
           onStopSharing={(entry) => stopSharing(entry.path)}
+        />
+      )}
+      {shareSetupOpen && (
+        <ShareSetup
+          config={shareConfig}
+          onClose={() => setShareSetupOpen(false)}
+          onOpenExternal={openExternal}
+          onConfigChanged={setShareConfig}
         />
       )}
       {draftsOpen && (
@@ -1941,6 +1953,7 @@ export default function App() {
         canCopyWithComments={activeTab != null}
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
+        onOpenShareSetup={() => setShareSetupOpen(true)}
         update={update}
         onOpenExternal={openExternal}
       />
@@ -2117,6 +2130,7 @@ function Settings({
   canCopyWithComments,
   onCopyWithComments,
   onOpenSharedPages,
+  onOpenShareSetup,
   update,
   onOpenExternal,
 }: {
@@ -2132,6 +2146,7 @@ function Settings({
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
+  onOpenShareSetup: () => void;
   update: UpdateController;
   onOpenExternal: (url: string) => void;
 }) {
@@ -2276,6 +2291,17 @@ function Settings({
           >
             <span className="settings-option-check" />
             <span className="settings-option-label">Shared pages…</span>
+          </button>
+          <button
+            role="menuitem"
+            className="settings-option"
+            onClick={() => {
+              setOpen(false);
+              onOpenShareSetup();
+            }}
+          >
+            <span className="settings-option-check" />
+            <span className="settings-option-label">Sharing setup…</span>
           </button>
           {recents.length > 0 && (
             <>

@@ -1,9 +1,11 @@
 // Top-right share control for the active document: a pill button + popover.
 // Not shared → confirm dialog with an editable auto-generated address;
 // shared → the live link with copy / open / stop-sharing actions; a settings
-// view (shown automatically while unconfigured) stores the endpoint + token in
-// <app_data_dir>/share.json. App owns the registry and the actual push; this
-// component owns the UX.
+// view stores the endpoint + token in <app_data_dir>/share.json (verified
+// against the worker before saving). While unconfigured, sharing is gated:
+// the popover shows a prompt that routes to the setup guide instead of the
+// share form. App owns the registry and the actual push; this component owns
+// the UX.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -13,6 +15,7 @@ import {
   saveShareConfig,
   shareHost,
   shareUrl,
+  testShareConfig,
   SHARE_ID_RE,
   type ShareConfig,
   type ShareEntry,
@@ -25,6 +28,7 @@ export default function ShareMenu({
   onShare,
   onStopSharing,
   onOpenSharedPages,
+  onOpenSetupGuide,
   onOpenExternal,
   onConfigChanged,
   onConfigDeleted,
@@ -35,6 +39,7 @@ export default function ShareMenu({
   onShare: (id: string) => Promise<void>;
   onStopSharing: () => Promise<void>;
   onOpenSharedPages: () => void;
+  onOpenSetupGuide: () => void;
   onOpenExternal: (url: string) => void;
   onConfigChanged: (config: ShareConfig) => void;
   onConfigDeleted: () => void;
@@ -105,6 +110,7 @@ export default function ShareMenu({
     setError(null);
     try {
       const next = { endpoint, token };
+      await testShareConfig(next);
       await saveShareConfig(next);
       onConfigChanged(next);
       setView("main");
@@ -177,7 +183,15 @@ export default function ShareMenu({
   }, [entry, config]);
 
   const host = shareHost(config);
-  const showSettings = view === "settings" || !config;
+  // Unconfigured + not explicitly editing settings → the setup prompt. The
+  // share form itself only ever renders with a working config behind it.
+  const showSetupPrompt = !config && view !== "settings";
+  const showSettings = view === "settings";
+
+  const openGuide = useCallback(() => {
+    setOpen(false);
+    onOpenSetupGuide();
+  }, [onOpenSetupGuide]);
 
   return (
     <div ref={wrapRef} className="share-wrap">
@@ -193,7 +207,24 @@ export default function ShareMenu({
       </button>
       {open && (
         <div className="share-popover" role="dialog" aria-label="Share">
-          {showSettings ? (
+          {showSetupPrompt ? (
+            <>
+              <div className="share-heading">Sharing isn't set up yet</div>
+              <div className="share-note">
+                Sharing publishes read-only copies of your notes through your
+                own Cloudflare account (free). A one-time setup — about ten
+                minutes — is needed before the first share.
+              </div>
+              <div className="share-buttons">
+                <button className="share-btn is-primary" onClick={openGuide}>
+                  Set up sharing…
+                </button>
+                <button className="share-btn" onClick={openSettings}>
+                  I have a token
+                </button>
+              </div>
+            </>
+          ) : showSettings ? (
             <>
               <div className="share-heading">Sharing setup</div>
               <div className="share-note">
@@ -237,12 +268,9 @@ export default function ShareMenu({
                   onClick={() => void saveSettings()}
                   disabled={busy != null}
                 >
-                  {busy === "save" ? "Saving…" : "Save"}
+                  {busy === "save" ? "Checking…" : "Verify & save"}
                 </button>
-                <button
-                  className="share-btn"
-                  onClick={() => (config ? setView("main") : setOpen(false))}
-                >
+                <button className="share-btn" onClick={() => setView("main")}>
                   Cancel
                 </button>
                 {config && (
@@ -257,6 +285,11 @@ export default function ShareMenu({
                 )}
               </div>
               {error && <div className="share-error">{error}</div>}
+              <div className="share-footer-links">
+                <button className="share-all-link" onClick={openGuide}>
+                  Setup guide…
+                </button>
+              </div>
             </>
           ) : entry ? (
             <>
@@ -338,7 +371,7 @@ export default function ShareMenu({
               {error && <div className="share-error">{error}</div>}
             </>
           )}
-          {!showSettings && (
+          {!showSettings && !showSetupPrompt && (
             <div className="share-footer-links">
               <button
                 className="share-all-link"

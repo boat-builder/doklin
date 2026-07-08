@@ -12,6 +12,7 @@ export default function SharedPages({
   onClose,
   onOpenDoc,
   onOpenExternal,
+  onOpenSetup,
   onStopSharing,
 }: {
   shares: ShareEntry[];
@@ -19,6 +20,7 @@ export default function SharedPages({
   onClose: () => void;
   onOpenDoc: (entry: ShareEntry) => void;
   onOpenExternal: (url: string) => void;
+  onOpenSetup: () => void;
   onStopSharing: (entry: ShareEntry) => Promise<void>;
 }) {
   const [busyPath, setBusyPath] = useState<string | null>(null);
@@ -70,7 +72,22 @@ export default function SharedPages({
             <CloseIcon />
           </button>
         </div>
-        {shares.length === 0 ? (
+        {!config ? (
+          // Without a config there's no host to build links from and no way to
+          // push or stop shares — route to setup instead of a dead list.
+          <div className="shared-empty">
+            <div>Sharing isn't set up on this Mac yet.</div>
+            <button
+              className="share-btn is-primary shared-empty-action"
+              onClick={() => {
+                onClose();
+                onOpenSetup();
+              }}
+            >
+              Set up sharing…
+            </button>
+          </div>
+        ) : shares.length === 0 ? (
           <div className="shared-empty">
             Nothing is shared yet. Open a note and hit Share.
           </div>
