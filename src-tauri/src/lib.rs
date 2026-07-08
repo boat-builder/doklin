@@ -5,7 +5,7 @@
 //! `macOS-only` so a future cross-platform effort can `grep "macOS-only"` to find
 //! every place that needs a portable fallback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,6 +14,8 @@ use std::time::{Duration, UNIX_EPOCH};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 /// Folder waiting to be adopted by the main window on cold start. Files never
@@ -90,6 +92,17 @@ struct WindowSeq(Mutex<u32>);
 /// bypass this entirely — they always spawn their own window.
 #[derive(Default)]
 struct AppReady(AtomicBool);
+
+/// Labels of windows that still owe a `quit_flush_ack` for an in-flight quit.
+/// `None` means no quit is in progress. See `begin_quit_flush`.
+#[derive(Default)]
+struct QuitFlush(Mutex<Option<HashSet<String>>>);
+
+/// Menu id of the custom Quit item that replaces the predefined one (macOS-only).
+const QUIT_MENU_ID: &str = "doklin-quit-flush";
+/// How long a quit waits for window acks before exiting anyway — the escape
+/// hatch if a webview is hung, mid-load, or otherwise never answers.
+const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
 
 /// Initial content for spawned windows, keyed by window label. Populated by
 /// `spawn_window` before the window is built and drained by the renderer via
@@ -1013,6 +1026,83 @@ fn focus_next_window(window: tauri::Window, app: AppHandle, backward: bool) {
     });
 }
 
+/// macOS-only: the default app menu, but with the predefined Quit item swapped
+/// for a custom one (same title, same ⌘Q accelerator). The predefined item
+/// invokes `NSApp terminate:` directly, which tears the process down without
+/// firing any window CloseRequested events — so a ⌘Q within the renderer's
+/// autosave debounce would lose the last keystrokes. The custom item instead
+/// surfaces as a menu event handled by `begin_quit_flush`.
+///
+/// Known gap: Dock-icon → Quit (and logout/shutdown) still go straight through
+/// `terminate:` and can't be intercepted here.
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: tauri::Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let menu = Menu::default(handle)?;
+    // The app submenu is the menu's first entry; its last item is the
+    // predefined Quit (see tauri's Menu::default).
+    if let Some(app_submenu) = menu.items()?.first().and_then(|i| i.as_submenu().cloned()) {
+        if let Some(quit) = app_submenu.items()?.last() {
+            app_submenu.remove(quit)?;
+        }
+        app_submenu.append(&MenuItem::with_id(
+            handle,
+            QUIT_MENU_ID,
+            format!("Quit {}", handle.package_info().name),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?)?;
+    }
+    Ok(menu)
+}
+
+/// Quit, but let every window persist first: broadcast `quit-flush-requested`,
+/// which each renderer answers with `quit_flush_ack` once its pending autosave
+/// is on disk, then exit when all acks are in. A parallel timeout thread exits
+/// regardless, so a wedged window can only delay quit, never block it. Runs on
+/// the main thread (menu event), so it must not wait in place — the acks arrive
+/// over IPC that is itself pumped by the main run loop.
+fn begin_quit_flush(app: &AppHandle) {
+    let windows: Vec<String> = app.webview_windows().into_keys().collect();
+    {
+        let state = app.state::<QuitFlush>();
+        let mut pending = state.0.lock().unwrap();
+        if pending.is_some() {
+            return; // a quit is already in flight; let it finish
+        }
+        *pending = Some(windows.iter().cloned().collect());
+    }
+    if windows.is_empty() {
+        app.exit(0);
+        return;
+    }
+    let _ = app.emit("quit-flush-requested", ());
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(QUIT_FLUSH_TIMEOUT_MS));
+        handle.exit(0);
+    });
+}
+
+/// A renderer finished flushing its pending autosave ahead of quit. Once every
+/// window in the pending set has acked, exit for real (usually well before
+/// `begin_quit_flush`'s timeout). An ack with no quit in flight is a no-op.
+#[tauri::command]
+fn quit_flush_ack(window: tauri::Window, app: AppHandle, state: State<'_, QuitFlush>) {
+    let all_acked = {
+        let mut pending = state.0.lock().unwrap();
+        match pending.as_mut() {
+            Some(set) => {
+                set.remove(window.label());
+                set.is_empty()
+            }
+            None => false,
+        }
+    };
+    if all_acked {
+        app.exit(0);
+    }
+}
+
 #[derive(Serialize)]
 struct DraftInfo {
     id: String,
@@ -1288,8 +1378,20 @@ pub fn run() {
             .plugin(tauri_plugin_process::init());
     }
 
+    // macOS-only: custom Quit item (see build_app_menu) so ⌘Q flushes pending
+    // autosaves instead of terminating mid-debounce.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
+            if event.id() == QUIT_MENU_ID {
+                begin_quit_flush(app);
+            }
+        });
+    }
+
     let app = builder
         .plugin(tauri_plugin_dialog::init())
+        .manage(QuitFlush::default())
         .manage(PendingOpen::default())
         .manage(WatcherStore::default())
         .manage(WindowRegistry::default())
@@ -1321,7 +1423,8 @@ pub fn run() {
             restore_trashed,
             reveal_in_finder,
             open_external,
-            delete_share_config
+            delete_share_config,
+            quit_flush_ack
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1421,10 +1524,12 @@ pub fn run() {
             // The quitting window set is exactly what the next launch restores:
             // flag the teardown (so any Destroyed events it produces don't prune
             // entries) and snapshot the session with the final frames. BOTH exit
-            // events are handled because macOS quit paths differ: ⌘Q goes
-            // through NSApp terminate → tao fires only `Exit` (never
-            // ExitRequested), while exit()/last-window-close fire ExitRequested
-            // first. The double persist on the latter path is harmless.
+            // events are handled because macOS quit paths differ: ⌘Q surfaces as
+            // the custom menu item (see build_app_menu) whose flush ends in
+            // exit(), which — like last-window-close — fires ExitRequested first;
+            // but Dock-icon Quit still goes through NSApp terminate → tao fires
+            // only `Exit` (never ExitRequested). The double persist on the
+            // former path is harmless.
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                 app.state::<Quitting>().0.store(true, Ordering::SeqCst);
                 persist_session(app);

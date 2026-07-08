@@ -1419,6 +1419,25 @@ export default function App() {
     };
   }, [flushPendingAutosave]);
 
+  // The close-requested flush above never fires on ⌘Q: the app menu's Quit
+  // would invoke NSApp terminate:, which kills the process without any window
+  // close events. So the backend replaces it with a custom Quit item (see
+  // build_app_menu in lib.rs) that broadcasts this event instead; each window
+  // flushes its pending autosave, acks, and the backend exits once every
+  // window has acked (or its ~1s timeout fires).
+  useEffect(() => {
+    const un = listen("quit-flush-requested", async () => {
+      try {
+        await flushPendingAutosave();
+      } finally {
+        void invoke("quit_flush_ack");
+      }
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [flushPendingAutosave]);
+
   const onMarkdownChange = useCallback(
     (md: string) => {
       currentMarkdownRef.current = md;
