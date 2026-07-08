@@ -893,7 +893,9 @@ body,
   flex-direction: column;
   gap: 14px;
   width: 100%;
-  max-width: 320px;
+  /* wide enough that the three action buttons sit in one row without their
+     labels wrapping ("New note" / "Open file" / "Open folder") */
+  max-width: 480px;
 }
 
 .scratch-empty-hint {
@@ -931,6 +933,7 @@ body,
 .scratch-empty-button span:nth-of-type(1) {
   flex: 1;
   text-align: left;
+  white-space: nowrap;
 }
 
 .scratch-empty-kbd {
@@ -946,6 +949,11 @@ body,
   margin-top: 2px;
   max-height: 220px;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.scratch-empty-recents::-webkit-scrollbar {
+  display: none;
 }
 
 .scratch-empty-recents-label {
@@ -2471,7 +2479,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .setup-modal {
   width: 100%;
-  max-width: 600px;
+  max-width: 1040px;
   /* the overlay reserves 96px above / 24px below — never overflow it */
   max-height: calc(100vh - 120px);
   display: flex;
@@ -2537,36 +2545,68 @@ body.tree-dragging.tree-drag-invalid * {
   cursor: pointer;
 }
 
+/* Two-column layout: a left rail (intro + method picker + footer) beside the
+   scrolling column of steps. Wraps to a single column on narrow windows. */
+.setup-layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  align-items: flex-start;
+}
+
+.setup-rail {
+  flex: 0 0 260px;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.setup-main {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
 .setup-mode {
-  display: inline-flex;
-  gap: 2px;
-  margin: 2px 0 10px;
-  padding: 2px;
-  border: 1px solid var(--app-border);
-  border-radius: 7px;
-  background: var(--app-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .setup-mode-btn {
-  padding: 4px 10px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
   font: inherit;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  text-align: left;
+  color: var(--app-text);
   cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
 }
 
 .setup-mode-btn:hover {
-  color: var(--app-text);
+  border-color: var(--app-text-muted);
 }
 
 .setup-mode-btn.is-active {
+  border-color: var(--app-accent);
   background: var(--app-bg);
-  color: var(--app-text);
+  box-shadow: 0 0 0 1px var(--app-accent) inset;
+}
+
+.setup-mode-name {
+  font-size: 12.5px;
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  color: var(--app-text);
+}
+
+.setup-mode-sub {
+  font-size: 11px;
+  color: var(--app-text-muted);
 }
 
 .setup-code-row {
@@ -2707,10 +2747,10 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .setup-footer {
-  margin-top: 4px;
-  padding: 12px 2px 2px;
+  margin-top: 2px;
+  padding-top: 14px;
   border-top: 1px solid var(--app-border);
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.5;
   color: var(--app-text-muted);
 }
