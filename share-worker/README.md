@@ -95,16 +95,23 @@ You can also write that file directly instead of using the form.
 ### Landing page branding (optional)
 
 The root of your share domain serves a small landing page that vouches for the
-links ("every page here was published by a real person"). Brand it by adding to
+links ("every page here was published by a real person") and offers a **Download
+Doklin for macOS** button so visitors can grab the app. Brand it by adding to
 `wrangler.toml` and redeploying:
 
 ```toml
 [vars]
 OWNER_NAME = "Your Name"
 OWNER_LINK = "https://linkedin.com/in/your-handle"
+# DOWNLOAD_URL defaults to the official release below; set it to override, or
+# to "" to hide the download button entirely.
+DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg"
 ```
 
-Both are optional — without them the page stays generic.
+All three are optional — without `OWNER_*` the page stays generic, and the
+download button shows the official release unless you set/blank `DOWNLOAD_URL`.
+That download URL is a stable alias kept current by the repo's release workflow
+(`.github/workflows/release.yml`), so it always resolves to the newest build.
 
 ### Recreating `wrangler.toml` for an existing deployment
 
@@ -124,9 +131,11 @@ deployment (assumes a logged-in wrangler CLI):
 - `routes` — the host the app's share endpoint points at: check **Share →
   Sharing settings…** or the `endpoint` in `share.json`. If it's a
   `workers.dev` URL, use `workers_dev = true` and no `routes` instead.
-- `[vars] OWNER_NAME / OWNER_LINK` — open `https://<host>/` in a browser: if
-  the landing page is branded, restore these to match, or the next deploy
-  turns it generic.
+- `[vars] OWNER_NAME / OWNER_LINK / DOWNLOAD_URL` — open `https://<host>/` in a
+  browser: if the landing page is branded, restore `OWNER_*` to match, or the
+  next deploy turns it generic. Only set `DOWNLOAD_URL` if the live button
+  points somewhere other than the official release (or is hidden — then set it
+  to `""`); leaving it out restores the official-release default.
 
 Do **not** re-run `secret put SHARE_TOKEN` while rebuilding the config — the
 secret persists on the worker across deploys, and setting a new value would cut

@@ -307,28 +307,50 @@ function shellPage(title, message, status = 200) {
 }
 
 // The landing page exists to vouch for the domain: anyone handed a share link
-// can check the root and see who's behind it. Branding comes from the OWNER_NAME
-// / OWNER_LINK env vars (wrangler.toml [vars]); without them it stays generic.
+// can check the root and see who's behind it — and grab the app themselves.
+// Branding comes from the OWNER_NAME / OWNER_LINK env vars (wrangler.toml
+// [vars]); without them it stays generic. The "Download for macOS" button
+// points at DOWNLOAD_URL, defaulting to the official GitHub release's stable
+// latest-download alias (kept in sync by .github/workflows/release.yml). Set
+// DOWNLOAD_URL="" to hide the button entirely.
+const DEFAULT_DOWNLOAD_URL =
+  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
+
 function landingPage(env, url) {
   const host = url.hostname;
   const owner = typeof env.OWNER_NAME === "string" ? env.OWNER_NAME.trim() : "";
   const link = typeof env.OWNER_LINK === "string" ? env.OWNER_LINK.trim() : "";
   const isLinkedIn = /(^|\.)linkedin\.com\//i.test(link.replace(/^https?:\/\//, ""));
+  // Unset -> official release; set (even to "") -> respected verbatim, so a
+  // self-hoster can point elsewhere or blank it out.
+  const downloadUrl = (env.DOWNLOAD_URL === undefined ? DEFAULT_DOWNLOAD_URL : String(env.DOWNLOAD_URL)).trim();
 
   const title = owner ? `${host} — notes shared by ${owner}` : `${host} — shared notes`;
   const desc = owner
-    ? `Every page on this domain is a note personally published by ${owner}.`
-    : `Every page on this domain is a note published from a personal markdown editor.`;
+    ? `Every page on this domain is a note personally published by ${owner}, written in Doklin.`
+    : `Every page on this domain is a note published from Doklin, a personal markdown editor.`;
   const headline = owner ? `Notes shared by ${owner}` : `Notes shared on ${host}`;
   const copy = owner
-    ? `Every page on this domain is a note I published myself, straight from my own markdown editor. If someone sent you a ${host} link, it came from me — a real person, not a spammer.`
-    : `Every page on this domain is a note published straight from a personal markdown editor.`;
+    ? `Every page on this domain is a note I published myself, straight from Doklin — my own markdown editor. If someone sent you a ${host} link, it came from me — a real person, not a spammer.`
+    : `Every page on this domain is a note published straight from Doklin, a personal markdown editor.`;
 
+  const appleIcon = `<svg class="landing-apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>`;
   const linkedInIcon = `<svg class="landing-in" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`;
-  const button = link
-    ? `<a class="landing-btn" href="${escapeHtml(link)}" rel="me noopener">
+
+  const downloadButton = downloadUrl
+    ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download Doklin for macOS</a>
+  <p class="landing-sub">Free · Universal (Apple Silicon &amp; Intel)</p>`
+    : "";
+  const authorButton = link
+    ? `<a class="landing-btn landing-btn-ghost" href="${escapeHtml(link)}" rel="me noopener">
     ${isLinkedIn ? linkedInIcon : ""}${escapeHtml(owner ? (isLinkedIn ? `${owner} on LinkedIn` : `About ${owner}`) : "About the author")}
   </a>`
+    : "";
+  const actions = downloadButton || authorButton
+    ? `<div class="landing-actions">
+    ${downloadButton}
+    ${authorButton}
+  </div>`
     : "";
 
   const html = `<!doctype html>
@@ -350,7 +372,7 @@ function landingPage(env, url) {
   <div class="landing-mark"><span class="landing-dot" aria-hidden></span>${escapeHtml(host)}</div>
   <h1 class="landing-headline">${escapeHtml(headline)}</h1>
   <p class="landing-copy">${escapeHtml(copy)}</p>
-  ${button}
+  ${actions}
   <footer class="landing-footer">${escapeHtml(owner ? `© ${owner}` : host)}</footer>
 </main>
 </body>
@@ -399,21 +421,43 @@ const LANDING_CSS = `
   line-height: 1.65;
   color: var(--muted);
 }
+.landing-actions {
+  margin-top: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
 .landing-btn {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  margin-top: 30px;
-  padding: 11px 20px;
+  padding: 12px 22px;
   border-radius: 9px;
   background: var(--text);
   color: var(--bg);
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   text-decoration: none;
+  border: 1px solid var(--text);
   transition: opacity 0.12s;
 }
 .landing-btn:hover { opacity: 0.88; }
+/* Secondary action (author link): outlined, quieter than the download CTA. */
+.landing-btn-ghost {
+  margin-top: 14px;
+  padding: 9px 18px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-size: 14px;
+}
+.landing-btn-ghost:hover { opacity: 1; color: var(--text); }
+.landing-sub {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.landing-apple { width: 16px; height: 16px; margin-top: -2px; }
 .landing-in { width: 15px; height: 15px; }
 .landing-footer {
   position: fixed;
