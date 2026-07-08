@@ -22,7 +22,7 @@ import {
   type ShareConfig,
   type ShareEntry,
 } from "./share";
-import { useUpdateCheck, type UpdateStatus } from "./updater";
+import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -352,10 +352,9 @@ export default function App() {
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
 
-  // Update check: quiet GitHub-release diff on launch, plus a manual re-check
-  // from the Settings menu. See updater.ts.
-  const { status: updateStatus, checking: updateChecking, check: checkForUpdate } =
-    useUpdateCheck();
+  // In-app auto-update: quiet check on launch, plus manual re-check / one-click
+  // install from the Settings menu. See updater.ts.
+  const update = useUpdateCheck();
 
   // Public sharing: `shares` maps a document's absolute path to its live
   // share (see share.ts). Every successful disk write of a shared doc schedules
@@ -1923,9 +1922,7 @@ export default function App() {
         canCopyWithComments={activeTab != null}
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
-        updateStatus={updateStatus}
-        updateChecking={updateChecking}
-        onCheckUpdate={() => void checkForUpdate()}
+        update={update}
         onOpenExternal={openExternal}
       />
     </div>
@@ -2101,9 +2098,7 @@ function Settings({
   canCopyWithComments,
   onCopyWithComments,
   onOpenSharedPages,
-  updateStatus,
-  updateChecking,
-  onCheckUpdate,
+  update,
   onOpenExternal,
 }: {
   theme: Theme;
@@ -2118,9 +2113,7 @@ function Settings({
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
-  updateStatus: UpdateStatus | null;
-  updateChecking: boolean;
-  onCheckUpdate: () => void;
+  update: UpdateController;
   onOpenExternal: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -2144,13 +2137,30 @@ function Settings({
     };
   }, [open]);
 
-  const updateAvailable = updateStatus?.available ?? false;
+  const updateAvailable = update.phase === "available";
+  const updateBusy =
+    update.phase === "downloading" || update.phase === "installing";
+  const ver = update.current ? `v${update.current}` : "";
   let updateStatusText: string;
-  if (updateChecking) updateStatusText = "Checking for updates…";
-  else if (updateStatus?.error) updateStatusText = "Couldn't check for updates";
-  else if (updateAvailable) updateStatusText = `Current: v${updateStatus?.current}`;
-  else if (updateStatus) updateStatusText = `v${updateStatus.current} · Up to date`;
-  else updateStatusText = "";
+  switch (update.phase) {
+    case "checking":
+      updateStatusText = ver || "Checking for updates…";
+      break;
+    case "available":
+      updateStatusText = `Current: ${ver}`;
+      break;
+    case "installing":
+      updateStatusText = "Restarting…";
+      break;
+    case "error":
+      updateStatusText = ver ? `${ver} · Couldn't check` : "Couldn't check";
+      break;
+    case "downloading":
+      updateStatusText = "";
+      break;
+    default:
+      updateStatusText = ver ? `${ver} · Up to date` : "";
+  }
 
   return (
     <div ref={wrapRef} className="settings-wrap">
@@ -2298,39 +2308,67 @@ function Settings({
             <button
               role="menuitem"
               className="settings-option settings-option--update"
-              title={updateStatus?.notes || `Download Doklin v${updateStatus?.latest}`}
-              onClick={() => {
-                setOpen(false);
-                onOpenExternal(updateStatus!.url);
-              }}
+              title={
+                update.notes || `Install Doklin v${update.latest} and restart`
+              }
+              onClick={() => void update.install()}
             >
               <span className="settings-option-check">
                 <DownloadIcon />
               </span>
               <span className="settings-option-label">
-                Update to v{updateStatus?.latest}
+                Update to v{update.latest} &amp; Restart
               </span>
             </button>
+          ) : updateBusy ? (
+            <div className="settings-option is-progress" aria-live="polite">
+              <span className="settings-option-check">
+                <DownloadIcon />
+              </span>
+              <span className="settings-option-label">
+                {update.phase === "downloading"
+                  ? `Downloading… ${Math.round(update.progress * 100)}%`
+                  : "Installing…"}
+              </span>
+            </div>
           ) : (
             <button
               role="menuitem"
               className="settings-option"
-              disabled={updateChecking}
-              onClick={() => onCheckUpdate()}
+              disabled={update.phase === "checking"}
+              onClick={() => void update.check()}
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">
-                {updateChecking ? "Checking…" : "Check for updates"}
+                {update.phase === "checking" ? "Checking…" : "Check for updates"}
               </span>
             </button>
+          )}
+          {update.phase === "downloading" && (
+            <div className="settings-update-bar" aria-hidden>
+              <span style={{ width: `${Math.round(update.progress * 100)}%` }} />
+            </div>
           )}
           {updateStatusText && (
             <div
               className="settings-update-status"
-              title={updateStatus?.error ?? undefined}
+              title={update.error ?? undefined}
             >
               {updateStatusText}
             </div>
+          )}
+          {update.phase === "error" && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenExternal(RELEASES_PAGE);
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Download manually…</span>
+            </button>
           )}
         </div>
       )}

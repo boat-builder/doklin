@@ -1,152 +1,124 @@
-// Update check: compares the running app version against the latest published
-// GitHub release. Doklin ships a signed DMG via GitHub Releases (see
-// .github/workflows/release.yml), not the Tauri auto-updater — so there is no
-// updater manifest to swap the bundle in place. Instead we detect a newer
-// version and point the user at the release page to download the new DMG.
+// In-app auto-update, driven by Tauri's updater plugin. The plugin fetches the
+// GitHub `latest.json` manifest (endpoint + pubkey configured in
+// tauri.conf.json), and on install downloads the signed `.app.tar.gz`, verifies
+// it against the pubkey, swaps the bundle in place, and — via the process
+// plugin's relaunch() — restarts into the new version. One click, no browser,
+// no drag-to-Applications.
 //
-// The check is a plain browser `fetch` from the webview: CSP is disabled
-// (tauri.conf.json `security.csp: null`) and GitHub's API sends
-// `Access-Control-Allow-Origin: *`, so no HTTP plugin or Rust command is needed.
-// Opening the download page reuses the existing `open_external` command.
-import { useCallback, useEffect, useState } from "react";
+// The release pipeline (.github/workflows/release.yml) publishes the updater
+// artifacts + latest.json alongside the DMG; see that file for the CI side.
+import { useCallback, useEffect, useRef, useState } from "react";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 
-const REPO = "boat-builder/doklin";
-const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
-/** The rolling "latest release" page — fallback when a release has no html_url. */
-export const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
+/** The rolling release page — manual-download fallback when auto-update fails. */
+export const RELEASES_PAGE =
+  "https://github.com/boat-builder/doklin/releases/latest";
 
-export type UpdateStatus = {
-  /** The running app version, e.g. "0.1.0". */
+export type UpdatePhase =
+  | "checking" // querying the update manifest
+  | "uptodate" // no newer release
+  | "available" // a newer release exists, not yet installing
+  | "downloading" // fetching + verifying the new bundle
+  | "installing" // bundle swapped, about to relaunch
+  | "error"; // check or download failed
+
+export type UpdateState = {
+  phase: UpdatePhase;
+  /** The running app version. */
   current: string;
-  /** The latest published release version (tag minus the leading "v"), or null. */
+  /** The available version, set when phase === "available". */
   latest: string | null;
-  /** True when `latest` is strictly newer than `current`. */
-  available: boolean;
-  /** Where to send the user to download — the specific release page. */
-  url: string;
-  /** Release notes (GitHub release body), possibly empty. */
+  /** Release notes for the available version. */
   notes: string;
-  /** Epoch ms of when this check completed. */
-  checkedAt: number;
-  /** A human-readable reason the check couldn't complete, or null on success. */
+  /** Download progress in [0, 1] while phase === "downloading". */
+  progress: number;
+  /** A human-readable failure reason when phase === "error". */
   error: string | null;
 };
 
-type GithubRelease = {
-  tag_name?: string;
-  body?: string;
-  html_url?: string;
+export type UpdateController = UpdateState & {
+  /** Re-run the update check (the manual "Check for updates" button). */
+  check: () => Promise<void>;
+  /** Download, verify, install and relaunch into the available update. */
+  install: () => Promise<void>;
 };
 
-// Parse "X.Y.Z[-prerelease][+build]" (tolerating a leading "v"). Build metadata
-// is dropped; a missing/garbage version yields null so the caller can fall back
-// to a string compare.
-function parseSemver(v: string): { core: [number, number, number]; pre: string } | null {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-    v.trim(),
-  );
-  if (!m) return null;
-  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? "" };
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return "Update failed.";
 }
 
 /**
- * Compare two semver strings. Returns -1, 0, or 1 for a < b, a == b, a > b.
- * A full release outranks a pre-release of the same core (1.0.0 > 1.0.0-rc1).
- * Non-semver inputs fall back to a plain string comparison.
+ * Owns updater state: a quiet check on mount, a manual re-check, and the
+ * one-click download→verify→install→relaunch action.
  */
-export function compareVersions(a: string, b: string): number {
-  const pa = parseSemver(a);
-  const pb = parseSemver(b);
-  if (!pa || !pb) return a === b ? 0 : a < b ? -1 : 1;
-  for (let i = 0; i < 3; i++) {
-    if (pa.core[i] !== pb.core[i]) return pa.core[i] < pb.core[i] ? -1 : 1;
-  }
-  if (pa.pre === pb.pre) return 0;
-  if (!pa.pre) return 1; // a is a release, b is a pre-release of the same core
-  if (!pb.pre) return -1;
-  return pa.pre < pb.pre ? -1 : 1;
-}
-
-/** Fetch the latest release and diff it against the running version. Never throws. */
-export async function checkForUpdate(): Promise<UpdateStatus> {
-  const current = await getVersion();
-  const base: UpdateStatus = {
-    current,
+export function useUpdateCheck(): UpdateController {
+  const [state, setState] = useState<UpdateState>({
+    phase: "checking",
+    current: "",
     latest: null,
-    available: false,
-    url: RELEASES_PAGE,
     notes: "",
-    checkedAt: Date.now(),
+    progress: 0,
     error: null,
-  };
-  try {
-    const resp = await fetch(LATEST_API, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (resp.status === 404) {
-      return { ...base, error: "No releases published yet." };
-    }
-    if (
-      resp.status === 403 &&
-      resp.headers.get("X-RateLimit-Remaining") === "0"
-    ) {
-      return { ...base, error: "GitHub rate limit reached — try again later." };
-    }
-    if (!resp.ok) {
-      return { ...base, error: `Update check failed (HTTP ${resp.status}).` };
-    }
-    const data = (await resp.json()) as GithubRelease;
-    const latest = String(data.tag_name ?? "")
-      .trim()
-      .replace(/^v/, "");
-    if (!latest) {
-      return { ...base, error: "Latest release has no version tag." };
-    }
-    return {
-      ...base,
-      latest,
-      available: compareVersions(latest, current) > 0,
-      url: data.html_url || RELEASES_PAGE,
-      notes: String(data.body ?? "").trim(),
-    };
-  } catch (e) {
-    return {
-      ...base,
-      error: e instanceof Error ? e.message : "Update check failed.",
-    };
-  }
-}
+  });
+  // The Update handle returned by check(); needed to drive the install.
+  const updateRef = useRef<Update | null>(null);
 
-/**
- * Owns update-check state and runs one quiet check on mount. Returns the last
- * status, whether a check is in flight, and a `check` fn for the manual button.
- */
-export function useUpdateCheck() {
-  const [status, setStatus] = useState<UpdateStatus | null>(null);
-  const [checking, setChecking] = useState(true);
-
-  const check = useCallback(async () => {
-    setChecking(true);
+  const runCheck = useCallback(async () => {
+    setState((s) => ({ ...s, phase: "checking", error: null }));
     try {
-      const s = await checkForUpdate();
-      setStatus(s);
-      return s;
-    } finally {
-      setChecking(false);
+      const upd = await check();
+      updateRef.current = upd;
+      setState((s) => ({
+        ...s,
+        phase: upd ? "available" : "uptodate",
+        latest: upd?.version ?? null,
+        notes: upd?.body ?? "",
+        error: null,
+      }));
+    } catch (e) {
+      setState((s) => ({ ...s, phase: "error", error: errMsg(e) }));
+    }
+  }, []);
+
+  const install = useCallback(async () => {
+    const upd = updateRef.current;
+    if (!upd) return;
+    let total = 0;
+    let done = 0;
+    setState((s) => ({ ...s, phase: "downloading", progress: 0, error: null }));
+    try {
+      await upd.downloadAndInstall((ev) => {
+        if (ev.event === "Started") {
+          total = ev.data.contentLength ?? 0;
+          done = 0;
+        } else if (ev.event === "Progress") {
+          done += ev.data.chunkLength;
+          setState((s) => ({ ...s, progress: total ? done / total : 0 }));
+        } else if (ev.event === "Finished") {
+          setState((s) => ({ ...s, phase: "installing", progress: 1 }));
+        }
+      });
+      // Bundle swapped on disk — restart into the new version.
+      await relaunch();
+    } catch (e) {
+      setState((s) => ({ ...s, phase: "error", error: errMsg(e) }));
     }
   }, []);
 
   useEffect(() => {
     let alive = true;
-    void checkForUpdate().then((s) => {
-      if (alive) setStatus(s);
-      if (alive) setChecking(false);
+    void getVersion().then((v) => {
+      if (alive) setState((s) => ({ ...s, current: v }));
     });
+    void runCheck();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [runCheck]);
 
-  return { status, checking, check };
+  return { ...state, check: runCheck, install };
 }

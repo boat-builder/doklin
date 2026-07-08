@@ -16,11 +16,16 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 notify = "6"
 notify-debouncer-full = "0.3"
+
+# In-app auto-updater (desktop only, per Tauri's plugin guidance).
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
 
 # macOS-only: trashing files via NSFileManager (see trash_file in lib.rs). This
 # app currently targets macOS only — see the README. If we ever go cross-platform,
