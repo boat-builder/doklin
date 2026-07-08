@@ -24,6 +24,11 @@ name: release
 #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
 # (no KEYCHAIN_PWD needed — Tauri creates its own ephemeral keychain).
 #
+# Auto-updater signing (doklin-specific, generated with `tauri signer generate`):
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# These sign the .app.tar.gz the updater plugin installs; the matching public key
+# lives in src-tauri/tauri.conf.json (plugins.updater.pubkey).
+#
 # workflow_dispatch cuts a release manually (same bump + build path).
 
 on:
@@ -140,16 +145,22 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           missing=""
+          # Apple secrets — shared with bluesnake (see header comment).
           [ -n "$MACOS_CERTIFICATE" ]     || missing="$missing MACOS_CERTIFICATE"
           [ -n "$MACOS_CERTIFICATE_PWD" ] || missing="$missing MACOS_CERTIFICATE_PWD"
           [ -n "$MACOS_SIGNING_IDENTITY" ] || missing="$missing MACOS_SIGNING_IDENTITY"
           [ -n "$APPLE_ID" ]              || missing="$missing APPLE_ID"
           [ -n "$APPLE_PASSWORD" ]        || missing="$missing APPLE_PASSWORD"
           [ -n "$APPLE_TEAM_ID" ]         || missing="$missing APPLE_TEAM_ID"
+          # Updater key — doklin-specific, generated with `tauri signer generate`.
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]          || missing="$missing TAURI_SIGNING_PRIVATE_KEY"
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ] || missing="$missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           if [ -n "$missing" ]; then
-            echo "::error::missing signing secrets:$missing — copy them from the bluesnake repo settings"
+            echo "::error::missing signing secrets:$missing"
             exit 1
           fi
 
@@ -186,6 +197,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Signs the updater artifact (.app.tar.gz -> .sig) against the pubkey
+          # baked into tauri.conf.json. Required whenever createUpdaterArtifacts
+          # is enabled — the build fails without it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --target universal-apple-darwin
 
       # Assert the ticket is really attached — catches Tauri silently skipping
@@ -218,6 +234,39 @@ jobs:
           # releases/latest/download/ URL, plus a checksum manifest.
           cp "$DMG" release-assets/Doklin-macos-universal.dmg
           (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
+          ls -la release-assets
+
+      # Auto-updater artifacts: the signed .app.tar.gz that the updater plugin
+      # downloads and swaps in, plus the latest.json manifest the app polls at
+      # https://github.com/boat-builder/doklin/releases/latest/download/latest.json
+      # (the endpoint in tauri.conf.json). The .tar.gz + .sig are produced by the
+      # build (createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY); we publish
+      # them as-is and point both macOS arch keys at the one universal artifact.
+      - name: Stage updater artifacts + latest.json
+        env:
+          TAG: ${{ needs.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          MACOS_DIR="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          TARBALL="$(ls "$MACOS_DIR"/*.app.tar.gz | head -n1)"
+          SIG="$(cat "$MACOS_DIR"/*.app.tar.gz.sig)"
+          cp "$TARBALL" release-assets/Doklin.app.tar.gz
+          URL="https://github.com/boat-builder/doklin/releases/download/${TAG}/Doklin.app.tar.gz"
+          jq -n \
+            --arg v "$VERSION" \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sig "$SIG" \
+            --arg url "$URL" \
+            '{
+              version: $v,
+              notes: "Automatic update to Doklin v\($v). See the releases page for details.",
+              pub_date: $d,
+              platforms: {
+                "darwin-aarch64": { signature: $sig, url: $url },
+                "darwin-x86_64":  { signature: $sig, url: $url }
+              }
+            }' > release-assets/latest.json
+          echo "=== latest.json ==="; cat release-assets/latest.json
           ls -la release-assets
 
       - name: Publish GitHub Release

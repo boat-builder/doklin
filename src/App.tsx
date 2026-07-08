@@ -22,6 +22,7 @@ import {
   type ShareConfig,
   type ShareEntry,
 } from "./share";
+import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -350,6 +351,10 @@ export default function App() {
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+
+  // In-app auto-update: quiet check on launch, plus manual re-check / one-click
+  // install from the Settings menu. See updater.ts.
+  const update = useUpdateCheck();
 
   // Public sharing: `shares` maps a document's absolute path to its live
   // share (see share.ts). Every successful disk write of a shared doc schedules
@@ -1917,6 +1922,8 @@ export default function App() {
         canCopyWithComments={activeTab != null}
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
+        update={update}
+        onOpenExternal={openExternal}
       />
     </div>
   );
@@ -2091,6 +2098,8 @@ function Settings({
   canCopyWithComments,
   onCopyWithComments,
   onOpenSharedPages,
+  update,
+  onOpenExternal,
 }: {
   theme: Theme;
   onChange: (t: Theme) => void;
@@ -2104,6 +2113,8 @@ function Settings({
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
+  update: UpdateController;
+  onOpenExternal: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -2125,6 +2136,31 @@ function Settings({
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  const updateAvailable = update.phase === "available";
+  const updateBusy =
+    update.phase === "downloading" || update.phase === "installing";
+  const ver = update.current ? `v${update.current}` : "";
+  let updateStatusText: string;
+  switch (update.phase) {
+    case "checking":
+      updateStatusText = ver || "Checking for updates…";
+      break;
+    case "available":
+      updateStatusText = `Current: ${ver}`;
+      break;
+    case "installing":
+      updateStatusText = "Restarting…";
+      break;
+    case "error":
+      updateStatusText = ver ? `${ver} · Couldn't check` : "Couldn't check";
+      break;
+    case "downloading":
+      updateStatusText = "";
+      break;
+    default:
+      updateStatusText = ver ? `${ver} · Up to date` : "";
+  }
 
   return (
     <div ref={wrapRef} className="settings-wrap">
@@ -2266,16 +2302,85 @@ function Settings({
               <span className="settings-option-label">{THEME_LABEL[t]}</span>
             </button>
           ))}
+          <div className="settings-divider" />
+          <div className="settings-section-label">Updates</div>
+          {updateAvailable ? (
+            <button
+              role="menuitem"
+              className="settings-option settings-option--update"
+              title={
+                update.notes || `Install Doklin v${update.latest} and restart`
+              }
+              onClick={() => void update.install()}
+            >
+              <span className="settings-option-check">
+                <DownloadIcon />
+              </span>
+              <span className="settings-option-label">
+                Update to v{update.latest} &amp; Restart
+              </span>
+            </button>
+          ) : updateBusy ? (
+            <div className="settings-option is-progress" aria-live="polite">
+              <span className="settings-option-check">
+                <DownloadIcon />
+              </span>
+              <span className="settings-option-label">
+                {update.phase === "downloading"
+                  ? `Downloading… ${Math.round(update.progress * 100)}%`
+                  : "Installing…"}
+              </span>
+            </div>
+          ) : (
+            <button
+              role="menuitem"
+              className="settings-option"
+              disabled={update.phase === "checking"}
+              onClick={() => void update.check()}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">
+                {update.phase === "checking" ? "Checking…" : "Check for updates"}
+              </span>
+            </button>
+          )}
+          {update.phase === "downloading" && (
+            <div className="settings-update-bar" aria-hidden>
+              <span style={{ width: `${Math.round(update.progress * 100)}%` }} />
+            </div>
+          )}
+          {updateStatusText && (
+            <div
+              className="settings-update-status"
+              title={update.error ?? undefined}
+            >
+              {updateStatusText}
+            </div>
+          )}
+          {update.phase === "error" && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenExternal(RELEASES_PAGE);
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Download manually…</span>
+            </button>
+          )}
         </div>
       )}
       <button
         className="settings-fab"
         onClick={() => setOpen((o) => !o)}
-        aria-label="Settings"
+        aria-label={updateAvailable ? "Settings — update available" : "Settings"}
         aria-expanded={open}
-        title="Settings"
+        title={updateAvailable ? "Settings — update available" : "Settings"}
       >
         <GearIcon />
+        {updateAvailable && <span className="settings-fab-badge" aria-hidden />}
       </button>
     </div>
   );
@@ -2359,6 +2464,26 @@ function GearIcon() {
     >
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
     </svg>
   );
 }
