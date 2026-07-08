@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "doklin"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "notify",
  "notify-debouncer-full",
