@@ -189,6 +189,29 @@ export async function pageExists(config: ShareConfig, id: string): Promise<boole
   return true;
 }
 
+// Proves an endpoint + token pair before it's saved: one authenticated list
+// call shows the URL resolves, the token matches the worker's SHARE_TOKEN,
+// and whatever answered actually speaks the share-worker API — so a typo
+// fails here, with a specific message, instead of at the first share.
+export async function testShareConfig(config: ShareConfig): Promise<void> {
+  let res: Response;
+  try {
+    res = await apiFetch(config, "/api/pages");
+  } catch {
+    throw new Error("Could not reach that endpoint. Check the URL and your connection.");
+  }
+  if (res.status === 401) {
+    throw new Error(
+      "The endpoint answered but rejected the token. Paste the exact value stored as SHARE_TOKEN.",
+    );
+  }
+  if (!res.ok) throw new Error(`The endpoint answered with an error (${res.status}).`);
+  const body = (await res.json().catch(() => null)) as { pages?: unknown } | null;
+  if (!body || !Array.isArray(body.pages)) {
+    throw new Error("That URL answers, but not like a Doklin share worker.");
+  }
+}
+
 /* ---------- OG image ----------
    1200×630 card drawn with 2d canvas right in the webview, so the worker never
    needs an image library: the app's dark-theme surface, a warm accent tick

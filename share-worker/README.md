@@ -26,6 +26,14 @@ choose. This README is the guide for standing up your own backend.
 
 ## Set up your own backend
 
+**No terminal needed:** the desktop app ships a guided setup (gear menu →
+**Sharing setup…**, or the Share button while unconfigured) with three paths:
+a dashboard-only walkthrough (the app carries a bundled copy of this worker's
+code to paste into the Cloudflare dashboard editor — no git, no Node, no
+wrangler), a ready-made prompt to hand to an AI coding agent (Claude Code
+etc.) that runs the wrangler steps for you, and the CLI path below. In every
+case the app generates the token and verifies the connection at the end.
+
 Prerequisites: a Cloudflare account (free tier is fine) and the wrangler CLI.
 Use `npx -y wrangler@4` throughout — a globally installed `wrangler` may be too
 old. Authenticate once with `npx wrangler@4 login`, or headlessly by exporting
@@ -80,8 +88,10 @@ wrangler won't create the zone for you.
 
 ### Connect the app
 
-**Share → Sharing settings…** (the share popover opens straight into that form
-while unconfigured) → set the endpoint to your worker URL (no trailing slash)
+The app ships this whole guide built in: while sharing is unconfigured, the
+**Share** popover (and the gear menu's **Sharing setup…**) opens a step-by-step
+setup window that ends with the endpoint + token form, verified against the
+worker before saving. Set the endpoint to your worker URL (no trailing slash)
 and the token to the hex string from step 3. The app stores both in a
 machine-local file that never enters any repo —
 `~/Library/Application Support/com.sherin.doklin/share.json`:
