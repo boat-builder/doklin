@@ -122,7 +122,11 @@ jobs:
     name: Build .dmg (universal, signed + notarized) and release
     needs: bump
     runs-on: macos-14
-    timeout-minutes: 90   # first notarization on a quiet Apple account can be slow
+    # GitHub's hard per-job ceiling. Apple occasionally holds a submission far
+    # longer than any CI job can wait (bluesnake's account-warm-up took days) —
+    # if that happens the job fails; recover with "Re-run failed jobs", which
+    # reuses the bump job's tag and simply resubmits.
+    timeout-minutes: 360
     env:
       VERSION: ${{ needs.bump.outputs.version }}
     steps:
