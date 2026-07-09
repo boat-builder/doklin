@@ -191,15 +191,11 @@ jobs:
 
       # Dictation sidecar (doklin-stt: WhisperKit STT + MLX polish). Must exist
       # before `tauri build` — the bundler embeds it via externalBin and its
-      # Metal/resource bundles via resources. The binary is arm64-only (MLX is
-      # Apple-Silicon-only); the "universal" name satisfies the universal
-      # target, and on the few Intel Macs dictation simply reports unavailable
-      # while the rest of the app works.
+      # Metal/resource bundles via resources. The script builds a universal
+      # (arm64 + x86_64) binary and stages it under every triple name the
+      # per-arch passes of a universal tauri build ask for.
       - name: Build dictation sidecar
-        run: |
-          ./scripts/build-stt.sh Release
-          cp src-tauri/binaries/doklin-stt-aarch64-apple-darwin \
-             src-tauri/binaries/doklin-stt-universal-apple-darwin
+        run: ./scripts/build-stt.sh Release
 
       # Tauri's bundler handles the whole signing story from env vars: imports
       # the cert into an ephemeral keychain, codesigns with hardened runtime,
