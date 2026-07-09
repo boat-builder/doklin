@@ -7,13 +7,17 @@
 # automatically for SPM packages; a plain swift-build binary dies at runtime
 # with "Failed to load the default metallib".
 #
+# arm64 only: Doklin ships Apple Silicon-only, and the sidecar's MLX/Neural
+# Engine stack never ran on Intel anyway. The old universal build compiled
+# the (already heavy) MLX C++/Metal core twice for a dead x86_64 slice.
+#
 # Output goes to src-tauri/binaries/:
-#   doklin-stt-<target-triple>   the executable (Tauri externalBin naming; the
-#                                bundler strips the triple inside the .app)
-#   *.bundle                     SPM resource bundles. mlx-swift_Cmlx.bundle
-#                                holds the Metal kernels — the sidecar finds
-#                                them next to itself in dev, and in
-#                                Contents/Resources via Bundle.main when bundled.
+#   doklin-stt-aarch64-apple-darwin   the executable (Tauri externalBin naming;
+#                                     the bundler strips the triple in the .app)
+#   *.bundle                          SPM resource bundles. mlx-swift_Cmlx.bundle
+#                                     holds the Metal kernels — the sidecar finds
+#                                     them next to itself in dev, and in
+#                                     Contents/Resources via Bundle.main when bundled.
 #
 # Run this once before `cargo check` / `tauri dev` / `tauri build`: tauri-build
 # fails fast if the externalBin file is missing.
@@ -27,16 +31,16 @@ if ! xcrun metal --version >/dev/null 2>&1; then
     exit 1
 fi
 
-TRIPLE=$(rustc --print host-tuple 2>/dev/null || rustc -vV | sed -n 's/^host: //p')
 CONFIG=${1:-Release}
 
-echo "building doklin-stt ($CONFIG) for $TRIPLE via xcodebuild…"
+echo "building doklin-stt ($CONFIG, arm64) via xcodebuild…"
 xcodebuild \
     -scheme doklin-stt \
     -configuration "$CONFIG" \
     -destination "generic/platform=macOS" \
     -derivedDataPath .xcbuild \
     -skipPackagePluginValidation \
+    ARCHS=arm64 \
     build | grep -E "error|warning: .*doklin|BUILD" || true
 
 PRODUCTS=".xcbuild/Build/Products/$CONFIG"
@@ -44,23 +48,21 @@ if [[ ! -f "$PRODUCTS/doklin-stt" ]]; then
     echo "build failed: $PRODUCTS/doklin-stt missing" >&2
     exit 1
 fi
+# Guard the arm64-only invariant — a universal slice sneaking back in would
+# silently double the build time again.
+ARCHS_OUT=$(lipo -archs "$PRODUCTS/doklin-stt")
+if [[ "$ARCHS_OUT" != "arm64" ]]; then
+    echo "unexpected architectures '$ARCHS_OUT' (want arm64 only)" >&2
+    exit 1
+fi
 
 DEST="../binaries"
 mkdir -p "$DEST"
 
-# xcodebuild's generic/platform=macOS output is a universal (arm64 + x86_64)
-# Mach-O, so one file legitimately serves every triple name. Stage ALL of
-# them: a `tauri build --target universal-apple-darwin` compiles the app once
-# per arch, and each pass's build script requires the sidecar under its own
-# per-arch triple (the failed CI error was exactly `binaries/
-# doklin-stt-x86_64-apple-darwin doesn't exist`); the bundler then embeds the
-# -universal one.
-for name in "doklin-stt-$TRIPLE" \
-            doklin-stt-aarch64-apple-darwin \
-            doklin-stt-x86_64-apple-darwin \
-            doklin-stt-universal-apple-darwin; do
-    cp -f "$PRODUCTS/doklin-stt" "$DEST/$name"
-done
+cp -f "$PRODUCTS/doklin-stt" "$DEST/doklin-stt-aarch64-apple-darwin"
+# The directory is gitignored and never cleaned — drop the extra triple names
+# the old universal layout staged, so dev machines don't keep stale copies.
+rm -f "$DEST/doklin-stt-x86_64-apple-darwin" "$DEST/doklin-stt-universal-apple-darwin"
 # Resource bundles (Metal kernels etc.) must travel with the binary. Remove
 # old copies first — `cp -R` MERGES directories, which leaves stale (and
 # sometimes read-only) files behind and later breaks tauri-build's resource
