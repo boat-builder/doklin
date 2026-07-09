@@ -5,8 +5,10 @@
 // above that: the persisted config (<app_data_dir>/dictation.json, mirroring
 // share.json), the session state machine (hold-Space walkie-talkie gating),
 // the chunk pipeline (STT final → LLM polish → ordered commit into the
-// editor), the guards that keep polish from ever making things worse, and the
-// background rolling summary that gives the polish prompt document context.
+// editor), the guards that keep polish from ever making things worse, the
+// HUD's undo-polish control (revert the last utterance to its raw transcript,
+// available until the next talk-key press), and the background rolling
+// summary that gives the polish prompt document context.
 //
 // The editor stays a normal editor between utterances: typing is only
 // suspended (and the ghost-text anchor pinned) while the pipeline is busy —
@@ -119,6 +121,9 @@ export type DictationUiState = {
   level: number;
   interim: string;
   pendingChunks: number;
+  /// The last utterance's polish changed the text and can still be undone
+  /// (until the next talk-key press) — drives the HUD's revert control.
+  canRevert: boolean;
   stt: ModelStatus;
   llm: ModelStatus;
   error: string | null;
@@ -130,6 +135,7 @@ export const INITIAL_DICTATION_UI: DictationUiState = {
   level: 0,
   interim: "",
   pendingChunks: 0,
+  canRevert: false,
   stt: { status: "idle", progress: 0 },
   llm: { status: "idle", progress: 0 },
   error: null,
@@ -435,7 +441,15 @@ export class DictationController {
     this.sttDecoding = false;
     if (this.summaryTimer != null) window.clearTimeout(this.summaryTimer);
     this.summaryTimer = null;
-    this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", level: 0, pendingChunks: 0 };
+    this.ui = {
+      ...this.ui,
+      session: "idle",
+      gate: "paused",
+      interim: "",
+      level: 0,
+      pendingChunks: 0,
+      canRevert: false,
+    };
     this.push();
   }
 
@@ -462,6 +476,10 @@ export class DictationController {
     if (this.ui.session !== "active") return;
     if ((this.ui.gate === "listening") === open) return;
     if (open) {
+      // A new utterance supersedes the last one: the window to undo its
+      // polish closes now.
+      this.deps.getEditor()?.dictationClearRevert();
+      this.ui.canRevert = false;
       // First press since the pipeline drained: pin the ghost anchor at the
       // caret and suspend typing until everything has committed.
       if (!this.editorHeld) {
@@ -695,12 +713,32 @@ export class DictationController {
     while (this.chunks.length > 0 && this.chunks[0].status === "done") {
       const chunk = this.chunks.shift()!;
       if (chunk.text) {
-        editor?.dictationCommit(chunk.text);
+        editor?.dictationCommit(chunk.text, chunk.raw);
+        if (chunk.text !== chunk.raw) this.ui.canRevert = true;
         this.summaryDelta += (this.summaryDelta ? " " : "") + chunk.text;
         this.scheduleSummary(false);
       }
     }
     this.ui.pendingChunks = this.chunks.length;
+  }
+
+  /// Swap the last utterance's polished chunks back to the raw transcript
+  /// (HUD revert control). Chunks the user already edited are left alone.
+  revertPolish(): void {
+    const editor = this.deps.getEditor();
+    if (!editor) return;
+    const reverted = editor.dictationRevertPolish();
+    this.ui.canRevert = false;
+    if (reverted === 0) {
+      this.notice("Nothing to revert — that text has already changed.");
+      return;
+    }
+    this.deps.onInspect({
+      ts: Date.now(),
+      kind: "event",
+      title: `reverted ${reverted} polished chunk${reverted === 1 ? "" : "s"} to raw`,
+    });
+    this.push();
   }
 
   private refreshGhost(): void {
@@ -801,7 +839,7 @@ export class DictationController {
     this.chunks = [];
     this.editorHeld = false;
     this.sttDecoding = false;
-    this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", error: message };
+    this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", canRevert: false, error: message };
     this.push();
   }
 

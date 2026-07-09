@@ -2959,6 +2959,26 @@ body.tree-dragging.tree-drag-invalid * {
   color: #e5484d;
 }
 
+/* Last utterance was changed by polish; clicking restores the raw words. */
+.dictation-revert {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dictation-revert:hover {
+  border-color: var(--app-border);
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
 /* Chunks waiting on polish; clicking commits them as-is right now. */
 .dictation-pending {
   appearance: none;
