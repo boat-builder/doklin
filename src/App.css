@@ -473,6 +473,74 @@ body,
   }
 }
 
+/* ---------- MD/HTML document views ----------
+   A document can be a markdown file, a generated html rendition, or the pair.
+   In html view the markdown editor stays mounted but hidden (cursor, undo
+   history, and unsaved state survive toggling) and a sandboxed iframe owns the
+   canvas. */
+
+.view-toggle {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: 2px;
+  margin-left: 8px;
+  padding: 2px;
+  flex-shrink: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-bg);
+}
+
+.view-toggle-seg {
+  padding: 2px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.view-toggle-seg:hover:not(:disabled):not(.is-active) {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.view-toggle-seg.is-active {
+  background: var(--app-surface);
+  color: var(--app-text);
+  box-shadow: 0 0 0 1px var(--app-border);
+}
+
+/* The version that doesn't exist on disk: visible but clearly inert. */
+.view-toggle-seg:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.editor-wrap.is-html-view {
+  overflow: hidden; /* the iframe scrolls internally */
+}
+
+.editor-wrap.is-html-view .milkdown,
+.editor-wrap.is-html-view .comments-rail {
+  display: none;
+}
+
+.html-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  /* Most generated documents assume a white canvas; let them own the look. */
+  background: #ffffff;
+}
+
 .editor-wrap .milkdown .ProseMirror h1,
 .editor-wrap .milkdown .ProseMirror h2,
 .editor-wrap .milkdown .ProseMirror h3,

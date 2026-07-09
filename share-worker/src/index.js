@@ -4,13 +4,19 @@
 // root landing page; when unset it stays generic.
 //
 // Public surface (no auth):
-//   GET /<id>          rendered read-only page for pages/<id>.json in R2
+//   GET /<id>          rendered read-only page for pages/<id>.json in R2.
+//                      A page can carry a markdown document, an html rendition,
+//                      or both; with both, a pill on the page lets the reader
+//                      switch (?v=html selects the html rendition).
+//   GET /<id>?v=html   the html rendition, framed (sandboxed iframe -> /raw)
+//   GET /<id>/raw      the raw html rendition document
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //
 // Write API (Authorization: Bearer $SHARE_TOKEN — the desktop app only):
 //   GET    /api/pages            list shared pages (id, title, updatedAt)
 //   GET    /api/pages/<id>       page metadata (existence check)
-//   PUT    /api/pages/<id>       body {title, markdown} — create/update
+//   PUT    /api/pages/<id>       body {title, markdown?, html?} — create/update
+//                                (at least one of markdown/html required)
 //   PUT    /api/pages/<id>/og    body image/png — set the OG image
 //   DELETE /api/pages/<id>       stop sharing (removes page + OG image)
 
@@ -19,6 +25,7 @@ import { marked } from "../vendor/marked.esm.js";
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const RESERVED = new Set(["api", "robots.txt", "favicon.ico"]);
 const MAX_MARKDOWN_BYTES = 4 * 1024 * 1024;
+const MAX_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_OG_BYTES = 2 * 1024 * 1024;
 
 const CORS_HEADERS = {
@@ -50,6 +57,9 @@ export default {
 
     const ogMatch = path.match(/^\/([a-z0-9-]{1,64})\/og\.png$/);
     if (ogMatch && validId(ogMatch[1])) return serveOgImage(env, ogMatch[1]);
+
+    const rawMatch = path.match(/^\/([a-z0-9-]{1,64})\/raw$/);
+    if (rawMatch && validId(rawMatch[1])) return serveRawHtml(env, rawMatch[1]);
 
     const pageMatch = path.match(/^\/([a-z0-9-]{1,64})$/);
     if (pageMatch && validId(pageMatch[1])) {
@@ -114,16 +124,28 @@ async function handleApi(request, env, url) {
         return json({ error: "invalid json body" }, 400);
       }
       const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Untitled";
+      // A page carries a markdown document, an html rendition, or both. The
+      // app sends the full record every push (html read fresh from disk), so a
+      // missing field means that version no longer exists — not "keep prior".
       const markdown = typeof body.markdown === "string" ? body.markdown : null;
-      if (markdown === null) return json({ error: "markdown must be a string" }, 400);
-      if (markdown.length > MAX_MARKDOWN_BYTES) return json({ error: "markdown too large" }, 413);
+      const html = typeof body.html === "string" && body.html.length > 0 ? body.html : null;
+      if (markdown === null && html === null) {
+        return json({ error: "markdown or html must be a string" }, 400);
+      }
+      if (markdown !== null && markdown.length > MAX_MARKDOWN_BYTES) {
+        return json({ error: "markdown too large" }, 413);
+      }
+      if (html !== null && html.length > MAX_HTML_BYTES) {
+        return json({ error: "html too large" }, 413);
+      }
 
       const existing = await env.PAGES.get(pageKey);
       const prior = existing ? await existing.json().catch(() => null) : null;
       const now = new Date().toISOString();
       const record = {
         title,
-        markdown,
+        ...(markdown !== null ? { markdown } : {}),
+        ...(html !== null ? { html } : {}),
         createdAt: prior?.createdAt ?? now,
         updatedAt: now,
       };
@@ -216,6 +238,19 @@ function deriveDescription(md) {
   return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 }
 
+// First ~200 visible characters of an html rendition (tags stripped), used for
+// the description when a page has no markdown to derive it from.
+function deriveDescriptionFromHtml(html) {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
 async function servePage(env, id, url) {
   const obj = await env.PAGES.get(`pages/${id}.json`);
   if (!obj) return notFoundPage();
@@ -226,17 +261,17 @@ async function servePage(env, id, url) {
     return notFoundPage();
   }
 
+  const hasMd = typeof data.markdown === "string";
+  const hasHtml = typeof data.html === "string" && data.html.length > 0;
+  if (!hasMd && !hasHtml) return notFoundPage();
+
   const title = data.title || "Untitled";
-  const clean = stripComments(data.markdown || "");
-  const body = marked.parse(clean, { gfm: true, breaks: false, async: false });
-  const desc = deriveDescription(clean);
+  const clean = hasMd ? stripComments(data.markdown) : "";
+  const desc = hasMd ? deriveDescription(clean) : deriveDescriptionFromHtml(data.html);
   const ogImage = await env.PAGES.head(`pages/${id}.png`);
   const pageUrl = `${url.origin}/${id}`;
 
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
+  const head = `<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
@@ -250,10 +285,48 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="${pageUrl}/og.png">` : `<meta name="twitter:card" content="summary">`}
+<meta name="twitter:image" content="${pageUrl}/og.png">` : `<meta name="twitter:card" content="summary">`}`;
+
+  // With both versions present, the reader picks: a fixed pill toggles between
+  // the markdown page (/<id>) and the html rendition (/<id>?v=html).
+  const pill = (active) =>
+    hasMd && hasHtml
+      ? `<nav class="view-pill" aria-label="Document version">
+<a class="view-seg ${active === "md" ? "is-active" : ""}" href="${pageUrl}">MD</a>
+<a class="view-seg ${active === "html" ? "is-active" : ""}" href="${pageUrl}?v=html">HTML</a>
+</nav>`
+      : "";
+
+  const wantHtml = url.searchParams.get("v") === "html";
+  if (hasHtml && (wantHtml || !hasMd)) {
+    // The rendition is an arbitrary standalone document; framing it (instead of
+    // serving it at /<id> directly) keeps our meta tags, the toggle, and the
+    // sandbox — its scripts run under an opaque origin.
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+${head}
+<style>${PAGE_CSS}${FRAME_CSS}</style>
+</head>
+<body>
+${pill("html")}
+<iframe class="raw-frame" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
+</body>
+</html>`;
+    return new Response(html, {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+    });
+  }
+
+  const body = marked.parse(clean, { gfm: true, breaks: false, async: false });
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+${head}
 <style>${PAGE_CSS}</style>
 </head>
 <body>
+${pill("md")}
 <main class="doc">
 ${body}
 </main>
@@ -265,6 +338,29 @@ ${body}
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-cache",
+    },
+  });
+}
+
+// The html rendition, verbatim. Loaded by the ?v=html page's sandboxed iframe;
+// direct hits are fine too — the content is public either way.
+async function serveRawHtml(env, id) {
+  const obj = await env.PAGES.get(`pages/${id}.json`);
+  if (!obj) return new Response("not found", { status: 404 });
+  let data;
+  try {
+    data = await obj.json();
+  } catch {
+    return new Response("not found", { status: 404 });
+  }
+  if (typeof data.html !== "string" || data.html.length === 0) {
+    return new Response("not found", { status: 404 });
+  }
+  return new Response(data.html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+      "x-robots-tag": "noindex",
     },
   });
 }
@@ -574,6 +670,36 @@ main.doc {
 .doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
 .shell { text-align: center; padding-top: 20vh; }
 .muted { color: var(--muted); }
+/* MD/HTML version pill (only rendered when a page has both versions). */
+.view-pill {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.view-seg {
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-decoration: none;
+}
+.view-seg:hover { color: var(--text); }
+.view-seg.is-active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--border);
+}
 footer {
   max-width: 1080px;
   margin: 0 auto;
@@ -583,4 +709,18 @@ footer {
   text-align: center;
 }
 footer a { color: var(--muted); }
+`;
+
+/* The ?v=html page: the rendition owns the whole viewport; only the version
+   pill floats above it. */
+const FRAME_CSS = `
+html, body { height: 100%; overflow: hidden; }
+.raw-frame {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #ffffff;
+}
 `;

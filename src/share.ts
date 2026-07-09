@@ -2,14 +2,27 @@
 //
 // A share means: this local document (keyed by its absolute path) is published
 // read-only at <endpoint>/<id>. The registry lives in localStorage
-// ("doklin:shares"); the remote side holds {title, markdown} JSON plus an OG png
-// per page, written through the share worker's Bearer-token API
+// ("doklin:shares"); the remote side holds {title, markdown?, html?} JSON plus
+// an OG png per page, written through the share worker's Bearer-token API
 // (share-worker/src/index.js). The endpoint + token come from
 // <app_data_dir>/share.json — a machine-local file that never enters the repo.
+//
+// The remote mirrors the DISK: every push reads the files fresh, and each
+// entry fingerprints what was pushed so a reconciliation pass (app launch /
+// window focus) can re-push documents edited from outside the app.
 
 import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { stripComments } from "./criticMarkup";
+
+export type FileSnapshot = { mtime_ms: number; size: number };
+
+// What one rendition's local file looked like when it was last pushed: the
+// disk snapshot is a cheap pre-filter (stat, no read), the content hash is the
+// truth (a touched-but-identical file — git checkout, `touch` — must not count
+// as changed). Reconciliation compares the disk against these to decide
+// whether the remote copy is stale.
+export type PushedFingerprint = { snap: FileSnapshot | null; hash: string };
 
 export type ShareEntry = {
   id: string;
@@ -18,6 +31,10 @@ export type ShareEntry = {
   title: string;
   sharedAt: number;
   updatedAt: number;
+  // Fingerprints of the content last successfully pushed, per rendition
+  // (null = that version didn't exist at push time). Absent on entries from
+  // before reconciliation existed — the next pass re-pushes once to establish.
+  pushed?: { md: PushedFingerprint | null; html: PushedFingerprint | null };
 };
 
 export type ShareConfig = { endpoint: string; token: string };
@@ -150,18 +167,38 @@ function apiFetch(config: ShareConfig, path: string, init?: RequestInit): Promis
   });
 }
 
+// The two renditions a share can carry: the markdown document and/or a
+// standalone html version of it (see App.tsx's readShareParts).
+export type ShareParts = { markdown: string | null; html: string | null };
+
+// SHA-256 hex of a rendition's raw local content — the `hash` half of a
+// PushedFingerprint. Hashed pre-strip (comments intact), since reconciliation
+// only ever compares local content against local content.
+export async function contentHash(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
 // Publish (or update) a page. Comments are stripped before upload so editorial
-// notes never reach the public copy — same transform as plain ⌘C.
+// notes never reach the public copy — same transform as plain ⌘C. The full
+// record is sent every time (the worker doesn't merge), so a rendition that no
+// longer exists locally also disappears remotely.
 export async function pushPage(
   config: ShareConfig,
   id: string,
   title: string,
-  markdown: string,
+  parts: ShareParts,
 ): Promise<void> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title, markdown: stripComments(markdown) }),
+    body: JSON.stringify({
+      title,
+      markdown: parts.markdown === null ? null : stripComments(parts.markdown),
+      html: parts.html,
+    }),
   });
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
 }

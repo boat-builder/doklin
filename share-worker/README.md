@@ -12,11 +12,18 @@ choose. This README is the guide for standing up your own backend.
 ## How sharing works
 
 - The app's **Share** button publishes the active document: it `PUT`s
-  `{title, markdown}` to `/api/pages/<id>` and a canvas-rendered 1200×630 OG png
-  to `/api/pages/<id>/og`. CriticMarkup comments are stripped before upload (and
-  again in the worker, as defense in depth).
+  `{title, markdown?, html?}` to `/api/pages/<id>` and a canvas-rendered
+  1200×630 OG png to `/api/pages/<id>/og`. A document can be a markdown file,
+  a generated html rendition (same stem, `.html` next to the `.md`), or both —
+  whatever exists locally is pushed together. CriticMarkup comments are
+  stripped before upload (and again in the worker, as defense in depth).
 - Every autosave of a shared document re-pushes it (debounced), so the public
-  page tracks the local file.
+  page tracks the local file. Regenerating the html rendition while the
+  document is open re-pushes too.
+- When a page has both versions, the reader picks: a small MD/HTML pill on the
+  public page switches between `/<id>` (rendered markdown) and `/<id>?v=html`
+  (the html rendition, served in a sandboxed full-page iframe via
+  `/<id>/raw`).
 - **Stop sharing** `DELETE`s `/api/pages/<id>`, which removes both objects from
   the bucket — the link 404s from then on.
 - Pages render server-side with a vendored copy of `marked`
@@ -164,7 +171,7 @@ Old links keep working; only the app's write access is re-keyed.
 ## R2 layout
 
 ```
-pages/<id>.json   {title, markdown, createdAt, updatedAt}  (+ customMetadata for listing)
+pages/<id>.json   {title, markdown?, html?, createdAt, updatedAt}  (+ customMetadata for listing)
 pages/<id>.png    OG image
 ```
 
@@ -176,13 +183,15 @@ The write API the app depends on (all under the endpoint, requires
 ```
 GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt }] }
 GET    /api/pages/<id>       existence/metadata check
-PUT    /api/pages/<id>       body {title, markdown}  -> create/update
+PUT    /api/pages/<id>       body {title, markdown?, html?} -> create/update (at least one version)
 PUT    /api/pages/<id>/og    body image/png          -> set OG image
 DELETE /api/pages/<id>       stop sharing (remove page + OG image)
 ```
 
-Plus the public reads a browser hits (no auth): `GET /<id>` (rendered page) and
-`GET /<id>/og.png` (OG image).
+Plus the public reads a browser hits (no auth): `GET /<id>` (rendered
+markdown, or the html rendition when that's all the page has), `GET
+/<id>?v=html` (the html rendition, framed), `GET /<id>/raw` (the rendition
+verbatim), and `GET /<id>/og.png` (OG image).
 
 ## Using a non-Cloudflare / S3 backend
 
