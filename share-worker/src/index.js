@@ -372,31 +372,33 @@ function landingPage(env, url) {
   const desc = owner
     ? `${host} is where ${owner} publishes notes written in Doklin, a free, open-source markdown editor for macOS with on-device dictation.`
     : `${host} publishes notes written in Doklin, a free, open-source markdown editor for macOS with on-device dictation.`;
-  // Lead is fixed Doklin product copy (no domain, no owner name) so the page
-  // reads as a packaged Doklin page whose only editable-looking parts are the
-  // name in the headline and the footer. (headline is built as HTML below,
-  // because the name links to the owner's profile.)
-  const lead = `Doklin is a free and open-source markdown editor for macOS. It keeps your writing on your machine, and it's yours to download too.`;
+  // Lead is Doklin product copy. When there's an owner it opens with "Written
+  // in Doklin", a phrase moved out of the headline so the name can end the
+  // headline line and carry its profile badge cleanly. No domain, no name here,
+  // so the only editable-looking parts of the page are the headline name and
+  // the footer. (headline is built as HTML below, since the name is a link.)
+  const lead = owner
+    ? `Written in Doklin, a free and open-source markdown editor for macOS. It keeps your writing on your machine, and it's yours to download too.`
+    : `Doklin is a free and open-source markdown editor for macOS. It keeps your writing on your machine, and it's yours to download too.`;
 
   const appleIcon = `<svg class="landing-apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>`;
   const githubIcon = `<svg class="landing-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
-  // The owner's name in the headline is the profile link (this is the only
-  // place it lives now, pulled out of the footer row so the page reads as a
-  // packaged Doklin page). A small LinkedIn glyph marks it, or a generic
+  // The owner's name in the headline is the profile link (the only place it
+  // lives now). The name ends the headline line, so the link mark trails it in
+  // its own small tile. An enclosed badge reads as a "link" button, not as the
+  // word "in" sitting inside the sentence. LinkedIn glyph, or a generic
   // external-link glyph if OWNER_LINK is not a LinkedIn URL.
-  // viewBox is cropped to the glyph bounds so it sizes to the text cap height
-  // predictably (see .landing-name-badge svg). The badge sits before the name.
   const nameBadge = isLinkedIn
     ? `<svg viewBox="3.2 3.1 17.6 17.6" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`
     : `<svg viewBox="4 4 16 16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M8 5h11v11"/><path d="M19 5 5 19"/></svg>`;
   const nameHtml =
     owner && link
-      ? `<a class="landing-name" href="${escapeHtml(link)}" rel="me noopener"><span class="landing-name-badge">${nameBadge}</span>${escapeHtml(owner)}</a>`
+      ? `<a class="landing-name" href="${escapeHtml(link)}" rel="me noopener"><span class="landing-name-text">${escapeHtml(owner)}</span><span class="landing-name-badge">${nameBadge}</span></a>`
       : owner
         ? escapeHtml(owner)
         : "";
-  const headlineHtml = owner ? `Notes by ${nameHtml}, written in Doklin` : `Notes written in Doklin`;
+  const headlineHtml = owner ? `Notes by ${nameHtml}` : `Notes written in Doklin`;
 
   const featureCards = FEATURES.map(
     (f) => `<div class="landing-feature">
@@ -498,16 +500,25 @@ const LANDING_CSS = `
   text-decoration: none;
   white-space: nowrap;
 }
-.landing-name:hover { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.landing-name:hover .landing-name-text { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+/* Profile link mark: a small enclosed tile (echoing the feature icons) that
+   trails the name, so it reads as a link button rather than the word "in". */
 .landing-name-badge {
   display: inline-flex;
-  margin-right: 0.18em;
-  vertical-align: baseline;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  margin-left: 0.34em;
+  vertical-align: 0.05em;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
   color: var(--muted);
-  transition: color 0.12s;
+  transition: color 0.12s, border-color 0.12s;
 }
-.landing-name-badge svg { width: 0.72em; height: 0.72em; }
-.landing-name:hover .landing-name-badge { color: var(--accent); }
+.landing-name-badge svg { width: 0.6em; height: 0.6em; }
+.landing-name:hover .landing-name-badge { color: var(--accent); border-color: var(--accent); }
 .landing-lead {
   max-width: 34rem;
   margin: 15px auto 0;
