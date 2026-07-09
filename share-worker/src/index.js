@@ -322,23 +322,39 @@ const DEFAULT_DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
 const REPO_URL = "https://github.com/boat-builder/doklin";
 
-// Three feature cards. Icons are stroke SVGs tinted with --accent; text is
-// generic so it reads the same on any deployment. "Publish to your domain" is
-// the only nod to the share feature: one card among three, not the pitch.
+// Notion's mark (Google favicon service, embedded so the page stays fully
+// self-contained and no visitor request leaks to Google). Black glyph on a
+// transparent field; inverted to white in dark mode via .landing-logo.
+const NOTION_LOGO =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAMAAAD04JH5AAAAZlBMVEX///8AAADS0tJQUFCampo/Pz9kZGSsrKyoqKj19fXd3d3x8fHZ2dnr6+ulpaXPz8+ysrIxMTHk5OS/v79paWlYWFi5ubl0dHQiIiKMjIyGhobIyMh8fHxGRkYWFhYsLCwODg44ODi+YdwDAAAD/0lEQVR4nO2abcOqIAyGM03T1HzNTLP6/3/y2FOaDEyGuD4c748J7AJsG7jNZtWqVatWrdKnQ+JX0T4M92lAZjPwticnvBT2tTGGOkeLmXxN06qz/GZ8U7PVZtJNvONrmrv7V5tAl3nTTKOwnJzmd50TNevOboZRVqGCefesOF3TLsrQSbfta1n2b+TVRQPE0ibvOzu7WM6p8hLOTNVPI0XaP321GedZbe2jyk8OUwOVXZ8MB2ALVzZqVxbrXI79GD6mW9/rIlpZnMxurFIB4DrP9kthv3WTO8YBGI4OgqRBD/fZfeTLM6KiGy5HAxjxzFfgpbQfr8ICGIaWeHLoHWuNBlBypV/GbCSCA3ADai9C0MbPtI3ZbQA12Wi2xwIYN4k/0CHxtq29sCyyfNfAEVgVWADD4HIbN/D8qk0Q2mhtX9Ghy0IDGOcySt8LmsuHqjHd8QCa9Z8CxH1gogGIc7u4WHsnbUNq8Hao2XIA98fLXpQeW3tTQ88HaB55JmGP020GQP5nb+tNZ2JfZKoDKOb32gAwGdUiAHKBfEEATcfMFeAXAG2m8EksqQASNlP45OPaAdrEZJs6Hvi1Bp0/+YwmAL/NTDJ7kHmx/VPYWfcWwMMrdFMF88y2Bk5UC8Be8JjZhFOR94sD0j8tAFfB4zM3SLgcgOgxn+g6ywEcvO0p4m7OYLRcEOBP3C3a7dcA0BQ9gMFmZj8AePwagD32/gLAGKarPwEYXqsRAYCT8uAYTwRQlGyzT9wjArBB489FHBlAxbY7kQPA7IAewGUb2uQAnalOKTkA9An0AAHbtCAH2Fhs2yM5wAZcVdID+GzjmhwAnoV8cgDQp6EHAMexkhxgk7Ptk4gaAHjkBzkA9Mg3cgBxlkYJEIj6UQJAj0wPAD0yPYDP96MF4G6nyAH4rkoAokohSQDugkwJIIOjyANAj6wGICpikQUAHlkNQPQSyAJAj6wGILgJHAEQfFlnPbIawIavHhs7nufWETxhPbIiQDIF4A4RY7Zmjlk/RQC4kyzAsQQ+F2zE8K5YFYC7kB4AcHAG/JLY/xfPsIpMHgAGlgEA9FM1X2nj3P52hv/IgAAIRgFi0y5qK3ROle8Fo2U+4gcIAOBVST9avVUvAHDFAGwe+gEMFICrHcDHAQzqETVVdDVIgEGaCR2uvNy+puoTquV793Un0hVl7xKnvVUXtjlWcoTg77rwX6VeOiSen0bIkqoYAeB1nR7Ht71nyZj1tLdTrD5GFnzznn++4Kfe7xJliPOErXhXXukRTdcTAgkPnUo6X+0SW+b9FJfsyyruqqtmVh8Jj73iCWZ1ORWnlRQJDT50TVAKochNs53gKxFJNE9w1apVq1at+rX+AZWnOuBOYxBWAAAAAElFTkSuQmCC";
+
+// Five feature cards, shown as a compact strip under the lead. Text is generic
+// so it reads the same on any deployment. The first card uses Notion's mark to
+// make "Notion-style" land; the rest are stroke SVGs tinted with --accent.
 const FEATURES = [
   {
-    title: "On-device dictation",
-    desc: "Speak; it becomes clean text on your Mac.",
-    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="21.5"/><line x1="8.5" y1="21.5" x2="15.5" y2="21.5"/></svg>`,
+    title: "Notion-style editor",
+    desc: "on local, private files",
+    icon: `<img class="landing-logo" src="${NOTION_LOGO}" alt="Notion" width="19" height="19">`,
   },
   {
-    title: "Distraction-free editor",
-    desc: "Markdown that reads like a finished page.",
-    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><rect x="4.5" y="3" width="15" height="18" rx="2.5"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>`,
+    title: "Markdown for agents",
+    desc: "HTML for humans",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M8.5 8 4.5 12l4 4"/><path d="M15.5 8l4 4-4 4"/><line x1="13.5" y1="4.5" x2="10.5" y2="19.5"/></svg>`,
   },
   {
-    title: "Publish to your domain",
-    desc: "Turn any note into a page on a domain you host.",
+    title: "On-device AI",
+    desc: "dictation, plus LLM polish",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M12 3.2l1.7 4.6 4.6 1.7-4.6 1.7L12 15.8l-1.7-4.6L5.7 9.5l4.6-1.7z"/><path d="M18.6 14.6l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/></svg>`,
+  },
+  {
+    title: "Files and workspaces",
+    desc: "or a quick scratch note",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M3 7.5a2 2 0 0 1 2-2h3.3a2 2 0 0 1 1.4.6l1 1a2 2 0 0 0 1.4.6H19a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
+  },
+  {
+    title: "Instant sharing",
+    desc: "any page, one public URL",
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>`,
   },
 ];
@@ -360,10 +376,8 @@ function landingPage(env, url) {
   // implying the author made the tool.
   const headline = owner ? `Notes by ${owner}, written in Doklin` : `Notes written in Doklin`;
   // Lead stakes the domain to the owner, then introduces Doklin as a product
-  // anyone can download.
-  const lead = owner
-    ? `This is ${host}, where those notes are published. Doklin itself is a free, open-source markdown editor for macOS, and it's yours to download too.`
-    : `This is ${host}, where those notes are published. Doklin is a free, open-source markdown editor for macOS, and it's yours to download too.`;
+  // anyone can download. Reads the same with or without an owner name.
+  const lead = `This is ${host}, where those notes are published. They're written in Doklin, a free and open-source markdown editor for macOS, and it's yours to download too.`;
 
   const appleIcon = `<svg class="landing-apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>`;
   const linkedInIcon = `<svg class="landing-in" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`;
@@ -443,7 +457,7 @@ const LANDING_CSS = `
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 40px 24px 76px;
+  padding: 36px 24px 72px;
 }
 .landing-mark {
   display: inline-flex;
@@ -462,31 +476,32 @@ const LANDING_CSS = `
   box-shadow: 0 0 0 4px rgba(224, 122, 0, 0.14);
 }
 .landing-headline {
-  margin: 22px 0 0;
+  margin: 20px 0 0;
   max-width: 20ch;
-  font-size: clamp(28px, 4.6vw, 42px);
+  font-size: clamp(27px, 4.4vw, 41px);
   line-height: 1.14;
   font-weight: 700;
   letter-spacing: -0.025em;
 }
 .landing-lead {
   max-width: 34rem;
-  margin: 16px auto 0;
-  font-size: 16px;
-  line-height: 1.6;
+  margin: 15px auto 0;
+  font-size: 15.5px;
+  line-height: 1.58;
   color: var(--muted);
 }
 .landing-features {
-  margin: 34px auto 0;
+  margin: 30px auto 0;
   display: flex;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
-  max-width: 42rem;
+  max-width: 56rem;
   justify-content: center;
 }
 .landing-feature {
   flex: 1 1 0;
-  max-width: 13rem;
+  min-width: 0;
+  max-width: 10.5rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -496,27 +511,29 @@ const LANDING_CSS = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 38px;
+  height: 38px;
   border-radius: 11px;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--accent);
 }
-.landing-feature-icon svg { width: 20px; height: 20px; }
+.landing-feature-icon svg { width: 19px; height: 19px; }
+.landing-logo { width: 19px; height: 19px; display: block; }
+@media (prefers-color-scheme: dark) { .landing-logo { filter: invert(1); } }
 .landing-feature-title {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 .landing-feature-desc {
-  margin-top: 3px;
-  font-size: 12.5px;
-  line-height: 1.45;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
   color: var(--muted);
 }
 .landing-actions {
-  margin-top: 34px;
+  margin-top: 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -543,7 +560,7 @@ const LANDING_CSS = `
 }
 /* Quiet secondary links (owner profile + GitHub source), separated by a dot. */
 .landing-links {
-  margin-top: 20px;
+  margin-top: 18px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -567,13 +584,13 @@ const LANDING_CSS = `
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 18px;
+  bottom: 16px;
   font-size: 12px;
   color: var(--muted);
 }
-@media (max-width: 620px) {
-  .landing-features { flex-direction: column; align-items: center; gap: 16px; max-width: 21rem; }
-  .landing-feature { flex-direction: row; align-items: center; text-align: left; max-width: 21rem; gap: 13px; width: 100%; }
+@media (max-width: 720px) {
+  .landing-features { flex-direction: column; align-items: center; gap: 14px; max-width: 22rem; }
+  .landing-feature { flex-direction: row; align-items: center; text-align: left; max-width: 22rem; gap: 13px; width: 100%; }
   .landing-feature-desc { margin-top: 2px; }
 }
 `;
