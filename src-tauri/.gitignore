@@ -8,3 +8,9 @@
 
 # Bundler tooling fetched at build time
 /WixTools/
+
+# Dictation sidecar build output (scripts/build-stt.sh regenerates both)
+/stt-helper/.build/
+/stt-helper/.xcbuild/
+/stt-helper/.swiftpm/
+/binaries/

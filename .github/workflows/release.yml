@@ -126,7 +126,10 @@ jobs:
   build-release:
     name: Build .dmg (universal, signed + notarized) and release
     needs: bump
-    runs-on: macos-14
+    # macos-15 (arm64, Xcode 16.x default): the dictation sidecar's Swift deps
+    # (mlx-swift, WhisperKit 1.x) want a current toolchain; macos-14's default
+    # Xcode is too old.
+    runs-on: macos-15
     # GitHub's hard per-job ceiling. Apple occasionally holds a submission far
     # longer than any CI job can wait (bluesnake's account-warm-up took days) —
     # if that happens the job fails; recover with "Re-run failed jobs", which
@@ -186,6 +189,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Dictation sidecar (doklin-stt: WhisperKit STT + MLX polish). Must exist
+      # before `tauri build` — the bundler embeds it via externalBin and its
+      # Metal/resource bundles via resources. The binary is arm64-only (MLX is
+      # Apple-Silicon-only); the "universal" name satisfies the universal
+      # target, and on the few Intel Macs dictation simply reports unavailable
+      # while the rest of the app works.
+      - name: Build dictation sidecar
+        run: |
+          ./scripts/build-stt.sh Release
+          cp src-tauri/binaries/doklin-stt-aarch64-apple-darwin \
+             src-tauri/binaries/doklin-stt-universal-apple-darwin
+
       # Tauri's bundler handles the whole signing story from env vars: imports
       # the cert into an ephemeral keychain, codesigns with hardened runtime,
       # notarizes the .app with notarytool, staples it, then signs the .dmg.
@@ -211,6 +226,9 @@ jobs:
           APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Doklin.app"
           codesign --verify --deep --strict --verbose=2 "$APP"
           xcrun stapler validate "$APP"
+          # The dictation sidecar must be signed with the audio-input
+          # entitlement, or mic capture dies silently under hardened runtime.
+          codesign -d --entitlements - "$APP/Contents/MacOS/doklin-stt" | grep -q "device.audio-input"
 
       # Notarize + staple the DMG itself too (Tauri only notarizes the .app),
       # so the downloaded .dmg passes Gatekeeper offline as well.

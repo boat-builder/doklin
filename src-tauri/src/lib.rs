@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
+mod dictation;
+
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
@@ -1399,7 +1401,13 @@ pub fn run() {
         .manage(AppReady::default())
         .manage(PendingWindowOpen::default())
         .manage(Quitting::default())
+        .manage(dictation::Dictation::default())
         .invoke_handler(tauri::generate_handler![
+            dictation::dictation_init,
+            dictation::dictation_cmd,
+            dictation::dictation_request,
+            dictation::dictation_running,
+            dictation::dictation_shutdown,
             read_file,
             write_file,
             watch_file,
