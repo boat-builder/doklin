@@ -412,7 +412,7 @@ function landingPage(env, url) {
 
   const downloadButton = downloadUrl
     ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download for macOS</a>
-    <p class="landing-sub">Free · Universal · Apple Silicon and Intel</p>`
+    <p class="landing-sub">Free · For Apple silicon Macs</p>`
     : "";
 
   // One quiet link under the CTA: the project source. Fixed Doklin chrome, not
