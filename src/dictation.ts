@@ -7,6 +7,13 @@
 // chunk pipeline (STT final → optional LLM polish → ordered commit into the
 // editor), the guards that keep polish from ever making things worse, and the
 // background rolling summary that gives the polish prompt document context.
+//
+// Polish has no per-chunk time limit: a chunk waits until its correction
+// lands, visible as tinted ghost text and the HUD's pending pill. The user
+// skips the wait explicitly (pill click / Fast / second Esc); a generous
+// failsafe only catches a hung engine. Ending a session is a handshake —
+// stop the sidecar, let its last `final` and the polish queue drain, then
+// close — so the last utterance is never cut off.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -24,14 +31,12 @@ export type DictationConfig = {
   sttModel: string;
   /// MLX model id for the polish pass.
   llmModel: string;
-  /// Polish (LLM correction) on by default? The HUD toggle overrides per session.
+  /// Polish (LLM correction) on by default? Mirrors the last HUD choice.
   polish: boolean;
-  /// Default gating style for new sessions.
+  /// Gating style for new sessions; mirrors the last HUD choice.
   mode: DictationMode;
   /// Whisper language hint; "auto" lets the model detect.
   language: string;
-  /// Max time a chunk waits on the polish pass before committing raw.
-  latencyBudgetMs: number;
   /// Show the dictation inspector (advanced; prompt/response introspection).
   inspector: boolean;
 };
@@ -42,9 +47,12 @@ export const DEFAULT_DICTATION_CONFIG: DictationConfig = {
   polish: true,
   mode: "walkie",
   language: "auto",
-  latencyBudgetMs: 4000,
   inspector: false,
 };
+
+/// Polish has no UX timeout — this exists only to catch a hung engine, at
+/// which point the chunk commits raw and the HUD says something went wrong.
+const POLISH_FAILSAFE_MS = 30_000;
 
 let configPromise: Promise<DictationConfig> | null = null;
 
@@ -55,8 +63,17 @@ export function getDictationConfig(): Promise<DictationConfig> {
         const dir = await appDataDir();
         const path = await join(dir, "dictation.json");
         const result = await invoke<{ contents: string }>("read_file", { path });
-        const parsed = JSON.parse(result.contents);
-        return { ...DEFAULT_DICTATION_CONFIG, ...(parsed ?? {}) };
+        const parsed = JSON.parse(result.contents) as Partial<DictationConfig> | null;
+        const merged = { ...DEFAULT_DICTATION_CONFIG, ...(parsed ?? {}) };
+        // Known keys only, so retired settings don't linger in the file.
+        return {
+          sttModel: merged.sttModel,
+          llmModel: merged.llmModel,
+          polish: merged.polish,
+          mode: merged.mode,
+          language: merged.language,
+          inspector: merged.inspector,
+        };
       } catch {
         return { ...DEFAULT_DICTATION_CONFIG };
       }
@@ -198,6 +215,12 @@ export class DictationController {
   private reqSeq = 0;
   private chunks: Chunk[] = [];
 
+  // Stop handshake: the session closes once the sidecar confirmed it stopped
+  // (its last `final` is in) AND the polish queue drained.
+  private sidecarStopped = false;
+  private stopFallback: number | null = null;
+  private noticeTimer: number | null = null;
+
   // Rolling summary state — maintained in the background, invisible to the
   // user. `summary` is whatever the polish prompt gets; staleness is fine.
   private summary = "";
@@ -265,6 +288,8 @@ export class DictationController {
     if (this.ui.session !== "idle") return;
     const editor = this.deps.getEditor();
     if (!editor) return;
+    if (this.stopFallback != null) window.clearTimeout(this.stopFallback);
+    this.stopFallback = null;
     this.ui = {
       ...INITIAL_DICTATION_UI,
       session: "starting",
@@ -321,21 +346,55 @@ export class DictationController {
     window.setTimeout(() => this.waitForStt(), 250);
   }
 
-  async stop(): Promise<void> {
-    if (this.ui.session === "idle") return;
+  /// Graceful finish: stop the sidecar (it finalizes the utterance in
+  /// flight), wait for its last `final` and the polish queue to drain, then
+  /// close. Called again while stopping (second Esc), it stops waiting and
+  /// flushes pending chunks as raw text. `immediate` skips all waiting — for
+  /// contexts like tab switches where the target editor is going away.
+  async stop(immediate = false): Promise<void> {
+    if (this.ui.session === "idle") {
+      if (this.ui.error) {
+        this.ui.error = null;
+        this.push();
+      }
+      return;
+    }
+    if (this.ui.session === "stopping") {
+      this.flushPending();
+      this.finishStop();
+      return;
+    }
     this.ui.session = "stopping";
+    this.sidecarStopped = false;
     this.push();
     try {
       await invoke("dictation_cmd", { payload: { cmd: "stop" } });
     } catch {
-      // sidecar already gone
+      // Sidecar already gone — nothing to wait for.
+      this.finishStop();
+      return;
     }
-    // Give in-flight finals a moment to commit, then flush whatever is left
-    // as raw text — never drop the user's words.
-    window.setTimeout(() => this.finishStop(), 350);
+    if (immediate) {
+      this.finishStop();
+      return;
+    }
+    // The handshake may have completed during the await above.
+    if (this.ui.session !== "stopping") return;
+    // Failsafe only: the normal path ends via the sidecar's session-idle
+    // handshake plus the last polish commit (see maybeFinishStop).
+    this.stopFallback = window.setTimeout(() => this.finishStop(), POLISH_FAILSAFE_MS + 15_000);
+  }
+
+  private maybeFinishStop(): void {
+    if (this.ui.session !== "stopping" || !this.sidecarStopped) return;
+    if (this.chunks.length > 0) return;
+    this.finishStop();
   }
 
   private finishStop(): void {
+    if (this.ui.session === "idle") return;
+    if (this.stopFallback != null) window.clearTimeout(this.stopFallback);
+    this.stopFallback = null;
     for (const c of this.chunks) {
       if (c.status === "polishing") {
         c.status = "done";
@@ -349,6 +408,24 @@ export class DictationController {
     if (this.summaryTimer != null) window.clearTimeout(this.summaryTimer);
     this.summaryTimer = null;
     this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", level: 0, pendingChunks: 0 };
+    this.push();
+  }
+
+  /// Skip the polish queue: commit every pending chunk as raw text right now.
+  /// (Pending-pill click, flipping to Fast mid-session, or a second Esc.)
+  flushPending(): void {
+    let flushed = false;
+    for (const c of this.chunks) {
+      if (c.status === "polishing") {
+        c.status = "done";
+        c.text = c.raw;
+        flushed = true;
+      }
+    }
+    if (!flushed) return;
+    this.commitReady();
+    this.refreshGhost();
+    this.maybeFinishStop();
     this.push();
   }
 
@@ -367,6 +444,7 @@ export class DictationController {
       this.ui.gate = mode === "flow" ? "listening" : "paused";
       void invoke("dictation_cmd", { payload: { cmd: "mode", mode } }).catch(() => {});
     }
+    this.persistToggles();
     this.push();
   }
 
@@ -376,6 +454,32 @@ export class DictationController {
     if (polish && this.ui.llm.status === "idle") {
       void invoke("dictation_cmd", { payload: { cmd: "load_llm" } }).catch(() => {});
     }
+    // Fast means now — don't leave already-pending chunks waiting on polish.
+    if (!polish) this.flushPending();
+    this.persistToggles();
+    this.push();
+  }
+
+  /// The HUD toggles are the real controls; remember them as the defaults for
+  /// the next session (the settings modal no longer duplicates them).
+  private persistToggles(): void {
+    if (this.config.mode === this.ui.mode && this.config.polish === this.ui.polish) return;
+    this.config = { ...this.config, mode: this.ui.mode, polish: this.ui.polish };
+    void saveDictationConfig(this.config).catch(() => {});
+  }
+
+  /// Transient, non-fatal problem worth telling the user about — shown in the
+  /// HUD status line for a few seconds.
+  private notice(message: string): void {
+    this.ui.error = message;
+    if (this.noticeTimer != null) window.clearTimeout(this.noticeTimer);
+    this.noticeTimer = window.setTimeout(() => {
+      this.noticeTimer = null;
+      if (this.ui.error === message) {
+        this.ui.error = null;
+        this.push();
+      }
+    }, 6000);
     this.push();
   }
 
@@ -403,7 +507,12 @@ export class DictationController {
       }
       case "partial": {
         if (this.ui.session !== "active") break;
-        this.ui.interim = typeof ev.text === "string" ? ev.text : "";
+        const text = typeof ev.text === "string" ? ev.text : "";
+        // Walkie: the gate is closed between utterances — a non-empty partial
+        // arriving then is a stale echo of an already-finalized decode, and
+        // painting it would strand ghost text.
+        if (text && this.ui.mode === "walkie" && this.ui.gate === "paused") break;
+        this.ui.interim = text;
         this.refreshGhost();
         this.push();
         break;
@@ -424,10 +533,18 @@ export class DictationController {
           this.ui.gate = ev.state;
           this.push();
         }
+        // Stop handshake: the sidecar has finalized and gone idle — its last
+        // `final` (if any) is already in, so only the polish queue remains.
+        if (ev.state === "idle" && this.ui.session === "stopping") {
+          this.sidecarStopped = true;
+          this.maybeFinishStop();
+        }
         break;
       }
       case "exited": {
-        if (this.ui.session !== "idle") {
+        if (this.ui.session === "stopping") {
+          this.finishStop();
+        } else if (this.ui.session !== "idle") {
           this.fail("dictation engine stopped unexpectedly");
         }
         this.ui.stt = { status: "idle", progress: 0 };
@@ -436,10 +553,18 @@ export class DictationController {
         break;
       }
       case "error": {
+        const scope = String(ev.scope ?? "");
+        const message = String(ev.message ?? "");
+        if (scope === "mic") {
+          // No microphone = no session; without this the UI waits forever.
+          this.fail(message || "microphone unavailable");
+        } else if (scope === "stt" && this.ui.session !== "idle") {
+          this.notice(message || "transcription failed");
+        }
         this.deps.onInspect({
           ts: Date.now(),
           kind: "event",
-          title: `error(${String(ev.scope ?? "")}): ${String(ev.message ?? "")}`,
+          title: `error(${scope}): ${message}`,
         });
         break;
       }
@@ -479,10 +604,10 @@ export class DictationController {
     const ctx = editor?.dictationContext();
     const id = `c${this.reqSeq++}`;
     const started = performance.now();
-    const budget = this.config.latencyBudgetMs;
     let decision = "";
+    let res: Record<string, unknown> | null = null;
     try {
-      const res = await invoke<Record<string, unknown>>("dictation_request", {
+      res = await invoke<Record<string, unknown>>("dictation_request", {
         payload: {
           cmd: "correct",
           id,
@@ -492,8 +617,23 @@ export class DictationController {
           before: ctx?.before ?? "",
           after: ctx?.after ?? "",
         },
-        timeoutMs: budget,
+        timeoutMs: POLISH_FAILSAFE_MS,
       });
+    } catch (e) {
+      if (String(e) === "timeout") {
+        decision = `failsafe (${POLISH_FAILSAFE_MS / 1000}s) — engine unresponsive, committed raw`;
+        this.notice("Polish is not responding — inserted the raw transcription.");
+      } else {
+        decision = `error: ${String(e)}`;
+      }
+    }
+    // The user may have skipped this chunk (pill click / Fast / second Esc)
+    // while we waited — it's already committed raw; drop the late result.
+    if (chunk.status !== "polishing") {
+      this.inspectCorrection(chunk, res, decision || "late — chunk was already committed raw", performance.now() - started);
+      return;
+    }
+    if (res) {
       const rawOut = typeof res.text === "string" ? res.text.trim() : "";
       const out = stripContextEcho(rawOut, ctx?.before ?? "", ctx?.after ?? "");
       if (res.ok && correctionLooksSafe(chunk.raw, out)) {
@@ -502,14 +642,12 @@ export class DictationController {
       } else {
         decision = res.ok ? "rejected: rewrite guard" : `failed: ${String(res.message ?? "")}`;
       }
-      this.inspectCorrection(chunk, res, decision, performance.now() - started);
-    } catch (e) {
-      decision = String(e) === "timeout" ? `timeout (> ${budget}ms) — committed raw` : `error: ${String(e)}`;
-      this.inspectCorrection(chunk, null, decision, performance.now() - started);
     }
+    this.inspectCorrection(chunk, res, decision, performance.now() - started);
     chunk.status = "done";
     this.commitReady();
     this.refreshGhost();
+    this.maybeFinishStop();
     this.push();
   }
 
@@ -620,6 +758,8 @@ export class DictationController {
   }
 
   private fail(message: string): void {
+    if (this.stopFallback != null) window.clearTimeout(this.stopFallback);
+    this.stopFallback = null;
     const editor = this.deps.getEditor();
     editor?.dictationEnd();
     this.chunks = [];

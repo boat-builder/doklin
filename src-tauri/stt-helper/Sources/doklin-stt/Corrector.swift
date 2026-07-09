@@ -31,6 +31,10 @@ actor Corrector {
     private var container: ModelContainer?
     private var loading = false
     private var debug = false
+    /// Qwen3's hybrid checkpoints (e.g. Qwen3-8B) think out loud by default,
+    /// burning seconds per correction; "/no_think" is their documented off
+    /// switch. The 2507 instruct line has no thinking mode and never sees it.
+    private var noThink = false
 
     // Two-lane FIFO: corrections (user-visible latency) before summaries.
     private var lane0: [@Sendable () async -> Void] = []
@@ -46,25 +50,54 @@ actor Corrector {
         }
         loading = true
         defer { loading = false }
+        noThink = model.contains("Qwen3") && !model.contains("2507")
         do {
+            // Disk first: the hub loader phones HuggingFace even when every
+            // file is local. A complete cached folder loads directly (and
+            // offline); a corrupt one falls through to the network path.
+            if let dir = Self.cachedModelDir(downloadBase: downloadBase, model: model) {
+                do {
+                    try await loadContainer(ModelConfiguration(directory: dir), downloadBase: downloadBase)
+                    return
+                } catch {
+                    container = nil
+                    emitLog("cached polish model failed to load, re-downloading: \(error)")
+                }
+            }
             emitModel("llm", "downloading", progress: 0)
-            let hub = HubApi(downloadBase: downloadBase)
-            let config = ModelConfiguration(id: model)
-            container = try await LLMModelFactory.shared.loadContainer(hub: hub, configuration: config) {
-                progress in
-                emitModel("llm", "downloading", progress: progress.fractionCompleted)
-            }
-            // Prewarm: the first generate pays Metal pipeline compilation
-            // (~seconds). Burn it on a throwaway so the first real correction
-            // fits the latency budget.
-            emitModel("llm", "loading")
-            if let container {
-                _ = try? await generate(container, system: "Reply with OK.", user: "OK?", maxTokens: 3)
-            }
-            emitModel("llm", "ready")
+            try await loadContainer(ModelConfiguration(id: model), downloadBase: downloadBase)
         } catch {
             emitModel("llm", "error", message: String(describing: error))
         }
+    }
+
+    private func loadContainer(_ config: ModelConfiguration, downloadBase: URL) async throws {
+        let hub = HubApi(downloadBase: downloadBase)
+        container = try await LLMModelFactory.shared.loadContainer(hub: hub, configuration: config) {
+            progress in
+            emitModel("llm", "downloading", progress: progress.fractionCompleted)
+        }
+        // Prewarm: the first generate pays Metal pipeline compilation
+        // (~seconds). Burn it on a throwaway so the first real correction
+        // doesn't stall on it.
+        emitModel("llm", "loading")
+        if let container {
+            _ = try? await generate(container, system: "Reply with OK.", user: "OK?", maxTokens: 3)
+        }
+        emitModel("llm", "ready")
+    }
+
+    /// <base>/models/<org>/<name> with config, tokenizer, and weights present.
+    static func cachedModelDir(downloadBase: URL, model: String) -> URL? {
+        let dir = downloadBase.appendingPathComponent("models").appendingPathComponent(model)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: dir.appendingPathComponent("config.json").path),
+            fm.fileExists(atPath: dir.appendingPathComponent("tokenizer_config.json").path)
+                || fm.fileExists(atPath: dir.appendingPathComponent("tokenizer.json").path)
+        else { return nil }
+        let contents = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard contents.contains(where: { $0.hasSuffix(".safetensors") }) else { return nil }
+        return dir
     }
 
     var isReady: Bool { container != nil }
@@ -121,7 +154,7 @@ actor Corrector {
             return
         }
         let started = Date()
-        let system = Self.correctionSystemPrompt
+        let system = Self.correctionSystemPrompt + (noThink ? "\n/no_think" : "")
         let user = Self.correctionUserPrompt(req)
         do {
             let raw = try await generate(container, system: system, user: user, maxTokens: 1024)
@@ -150,7 +183,7 @@ actor Corrector {
             return
         }
         let started = Date()
-        let system = Self.summarySystemPrompt
+        let system = Self.summarySystemPrompt + (noThink ? "\n/no_think" : "")
         let user: String
         if req.summary.isEmpty {
             user = "DOCUMENT:\n\(req.docText)\n\nWrite the summary of DOCUMENT."
