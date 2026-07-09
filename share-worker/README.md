@@ -115,7 +115,7 @@ OWNER_NAME = "Your Name"
 OWNER_LINK = "https://linkedin.com/in/your-handle"
 # DOWNLOAD_URL defaults to the official release below; set it to override, or
 # to "" to hide the download button entirely.
-DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg"
+DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"
 ```
 
 All three are optional — without `OWNER_*` the page stays generic, and the

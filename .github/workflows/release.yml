@@ -6,11 +6,12 @@ name: release
 #      in your commit; a file version higher than the latest tag is used verbatim.
 #      The version is stamped into package.json, src-tauri/tauri.conf.json,
 #      Cargo.toml and Cargo.lock, committed back to main and tagged vX.Y.Z.
-#   2. `build-release` builds the universal macOS .dmg via Tauri (Developer ID
-#      signed + notarized + stapled — REQUIRED, the job fails loudly if the
-#      signing secrets are absent; there is no unsigned fallback) and publishes
-#      a GitHub Release for that tag, marked latest, so
-#        https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg
+#   2. `build-release` builds the Apple Silicon (arm64-only — Intel is not
+#      supported) macOS .dmg via Tauri (Developer ID signed + notarized +
+#      stapled — REQUIRED, the job fails loudly if the signing secrets are
+#      absent; there is no unsigned fallback) and publishes a GitHub Release
+#      for that tag, marked latest, so
+#        https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg
 #      always resolves to the newest build.
 #
 # The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
@@ -124,7 +125,7 @@ jobs:
 
   # ---------------------------------------------- macOS build + GitHub Release
   build-release:
-    name: Build .dmg (universal, signed + notarized) and release
+    name: Build .dmg (arm64, signed + notarized) and release
     needs: bump
     # macos-15 (arm64, Xcode 16.x default): the dictation sidecar's Swift deps
     # (mlx-swift, WhisperKit 1.x) want a current toolchain; macos-14's default
@@ -173,7 +174,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -189,17 +190,31 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Swift build cache for the dictation sidecar. Cold-compiling its
+      # dependency graph (MLX's C++/Metal core, WhisperKit,
+      # swift-transformers, …) takes ~10 minutes; with .xcbuild (DerivedData,
+      # which also holds the SPM checkouts) restored and Package.resolved
+      # unchanged, xcodebuild is an incremental near-no-op. The Xcode version
+      # is part of the key — DerivedData reused across toolchains invites
+      # module-cache corruption — and restore-keys still lets a dependency
+      # bump start from the previous DerivedData and rebuild only what changed.
+      - name: Xcode version (Swift cache key)
+        id: xcode
+        run: echo "version=$(xcodebuild -version | tr -d '\n' | tr ' ' '_')" >> "$GITHUB_OUTPUT"
+      - name: Cache sidecar Swift build
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/stt-helper/.xcbuild
+          key: stt-${{ steps.xcode.outputs.version }}-${{ hashFiles('src-tauri/stt-helper/Package.resolved') }}
+          restore-keys: |
+            stt-${{ steps.xcode.outputs.version }}-
+
       # Dictation sidecar (doklin-stt: WhisperKit STT + MLX polish). Must exist
       # before `tauri build` — the bundler embeds it via externalBin and its
-      # Metal/resource bundles via resources. The binary is arm64-only (MLX is
-      # Apple-Silicon-only); the "universal" name satisfies the universal
-      # target, and on the few Intel Macs dictation simply reports unavailable
-      # while the rest of the app works.
+      # Metal/resource bundles via resources. arm64-only, staged as the single
+      # aarch64 triple name.
       - name: Build dictation sidecar
-        run: |
-          ./scripts/build-stt.sh Release
-          cp src-tauri/binaries/doklin-stt-aarch64-apple-darwin \
-             src-tauri/binaries/doklin-stt-universal-apple-darwin
+        run: ./scripts/build-stt.sh Release
 
       # Tauri's bundler handles the whole signing story from env vars: imports
       # the cert into an ephemeral keychain, codesigns with hardened runtime,
@@ -217,18 +232,23 @@ jobs:
           # is enabled — the build fails without it.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --target universal-apple-darwin
+        run: pnpm tauri build --target aarch64-apple-darwin
 
       # Assert the ticket is really attached — catches Tauri silently skipping
       # notarization (e.g. an env var it didn't recognize).
       - name: Verify signature + notarization
         run: |
-          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Doklin.app"
+          APP="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Doklin.app"
           codesign --verify --deep --strict --verbose=2 "$APP"
           xcrun stapler validate "$APP"
           # The dictation sidecar must be signed with the audio-input
           # entitlement, or mic capture dies silently under hardened runtime.
           codesign -d --entitlements - "$APP/Contents/MacOS/doklin-stt" | grep -q "device.audio-input"
+          # arm64-only by design — fail if an x86_64 slice sneaks back in.
+          for bin in "$APP"/Contents/MacOS/*; do
+            archs="$(lipo -archs "$bin")"
+            [ "$archs" = "arm64" ] || { echo "::error::$bin is not arm64-only: $archs"; exit 1; }
+          done
 
       # Notarize + staple the DMG itself too (Tauri only notarizes the .app),
       # so the downloaded .dmg passes Gatekeeper offline as well.
@@ -243,14 +263,14 @@ jobs:
           # frontend build output (pnpm build writes there); publishing dist/*
           # would sweep index.html and the web assets into the release.
           mkdir -p release-assets
-          DMG="release-assets/Doklin-${VERSION}-macos-universal.dmg"
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "$DMG"
+          DMG="release-assets/Doklin-${VERSION}-macos-arm64.dmg"
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg "$DMG"
           xcrun notarytool submit "$DMG" --wait \
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
           xcrun stapler staple "$DMG"
           # Version-less alias (copied AFTER stapling) for a stable
           # releases/latest/download/ URL, plus a checksum manifest.
-          cp "$DMG" release-assets/Doklin-macos-universal.dmg
+          cp "$DMG" release-assets/Doklin-macos-arm64.dmg
           (cd release-assets && shasum -a 256 *.dmg > SHA256SUMS)
           ls -la release-assets
 
@@ -259,13 +279,14 @@ jobs:
       # https://github.com/boat-builder/doklin/releases/latest/download/latest.json
       # (the endpoint in tauri.conf.json). The .tar.gz + .sig are produced by the
       # build (createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY); we publish
-      # them as-is and point both macOS arch keys at the one universal artifact.
+      # them as-is. Only darwin-aarch64 is listed — Intel installs of old
+      # universal builds simply stop seeing updates.
       - name: Stage updater artifacts + latest.json
         env:
           TAG: ${{ needs.bump.outputs.tag }}
         run: |
           set -euo pipefail
-          MACOS_DIR="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          MACOS_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           TARBALL="$(ls "$MACOS_DIR"/*.app.tar.gz | head -n1)"
           SIG="$(cat "$MACOS_DIR"/*.app.tar.gz.sig)"
           cp "$TARBALL" release-assets/Doklin.app.tar.gz
@@ -280,8 +301,7 @@ jobs:
               notes: "Automatic update to Doklin v\($v). See the releases page for details.",
               pub_date: $d,
               platforms: {
-                "darwin-aarch64": { signature: $sig, url: $url },
-                "darwin-x86_64":  { signature: $sig, url: $url }
+                "darwin-aarch64": { signature: $sig, url: $url }
               }
             }' > release-assets/latest.json
           echo "=== latest.json ==="; cat release-assets/latest.json
@@ -296,4 +316,4 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            **macOS** universal (Apple Silicon + Intel) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt.
+            **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
