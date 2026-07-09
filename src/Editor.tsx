@@ -18,6 +18,7 @@ import {
   type SearchMeta,
 } from "./searchPlugin";
 import { criticActivePlugin, criticCopyPlugin, setActiveComment } from "./criticPlugin";
+import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import {
   criticCommentSchema,
   criticRemark,
@@ -31,14 +32,33 @@ import CommentsRail, { type RailComment } from "./CommentsRail";
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 
+// Document context handed to the dictation polish pass: enough surrounding
+// text for the LLM to disambiguate misheard words, never to rewrite them.
+export type DictationContext = {
+  docText: string;
+  headingPath: string;
+  before: string;
+  after: string;
+};
+
 // Imperative handle the host (App) uses to drive in-file search. Setting the
 // query is idempotent; next/prev advance the current match and scroll it into
 // view. Calls made before the editor has mounted are buffered (see pendingRef).
+//
+// The dictation* methods drive voice input: begin pins the ghost-text anchor
+// at the caret and suspends typing (dictation is a mode); setGhost paints the
+// in-flight transcript; commit inserts finalized text at the anchor (one undo
+// step per chunk); end restores normal editing.
 export type EditorHandle = {
   setSearch: (query: string, caseSensitive: boolean) => void;
   searchNext: () => void;
   searchPrev: () => void;
   clearSearch: () => void;
+  dictationBegin: () => boolean;
+  dictationSetGhost: (segments: GhostSegment[]) => void;
+  dictationCommit: (text: string) => void;
+  dictationEnd: () => void;
+  dictationContext: () => DictationContext | null;
 };
 
 type Props = {
@@ -96,11 +116,64 @@ function scrollToCurrent(view: EditorView) {
   if (m) scrollPosIntoView(view, m.from);
 }
 
+/* ---------- Dictation helpers ---------- */
+
+// Join a finalized dictation chunk onto the text before the anchor: add the
+// missing space between chunks, capitalize at paragraph starts and after
+// sentence enders. Whisper already punctuates within a chunk; this only fixes
+// the seams between chunks.
+function smartJoin(doc: import("@milkdown/kit/prose/model").Node, anchor: number, text: string): string {
+  let out = text.replace(/\s*\n+\s*/g, " ").trim();
+  if (!out) return "";
+  const before = doc.textBetween(Math.max(0, anchor - 8), anchor, "\n", "\n");
+  const atBlockStart = before === "" || before.endsWith("\n");
+  const last = before.slice(-1);
+  if (!atBlockStart && last && !/\s/.test(last) && !/^[,.;:!?)\]}»%]/.test(out)) {
+    out = " " + out;
+  }
+  if (atBlockStart || /[.!?…]["')\]]?\s*$/.test(before)) {
+    const lead = out.search(/\S/);
+    out = out.slice(0, lead) + out.charAt(lead).toUpperCase() + out.slice(lead + 1);
+  }
+  return out;
+}
+
+// Heading trail above a position ("Doc Title › Section › Subsection") plus the
+// text right before/after it — the structural context for the polish prompt.
+function dictationContextAt(doc: import("@milkdown/kit/prose/model").Node, anchor: number): DictationContext {
+  const levels: string[] = [];
+  doc.forEach((node, offset) => {
+    if (offset >= anchor) return;
+    if (node.type.name === "heading") {
+      const level = Math.max(1, Math.min(6, Number(node.attrs.level) || 1));
+      levels.length = level - 1; // entering h2 drops any stale h3+ trail
+      levels[level - 1] = node.textContent;
+    }
+  });
+  const headingPath = levels.filter(Boolean).join(" › ");
+
+  const before = doc.textBetween(Math.max(0, anchor - 700), anchor, "\n", " ");
+  const after = doc.textBetween(anchor, Math.min(doc.content.size, anchor + 400), "\n", " ");
+
+  let docText = doc.textBetween(0, doc.content.size, "\n", " ");
+  if (docText.length > 8000) {
+    // Keep both ends — openings carry titles/terms, the tail is what the user
+    // is dictating into.
+    docText = `${docText.slice(0, 4000)}\n[…]\n${docText.slice(-4000)}`;
+  }
+  return { docText, headingPath, before, after };
+}
+
 const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   { initialMarkdown, onChange, onSearchState, onFocusChange, onReady },
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
+  // True while a dictation session owns the editor: the editable prop
+  // (installed at mount) reads this, so typing is suspended for the session —
+  // dictation is a mode. Flips take effect on the next transaction, which
+  // begin/end always dispatch.
+  const dictatingRef = useRef(false);
   // A search request that arrived before the editor mounted (e.g. opening a
   // workspace-search result remounts the editor, then the query is applied).
   const pendingRef = useRef<{ query: string; caseSensitive: boolean } | null>(null);
@@ -202,6 +275,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(searchPlugin);
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
+    crepe.editor.use(ghostPlugin);
     crepe.on((api) => {
       api.markdownUpdated((_ctx, markdown) => {
         onChangeRef.current(markdown);
@@ -209,6 +283,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       api.mounted((ctx) => {
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
+        view.setProps({ editable: () => !dictatingRef.current });
         // Emit the mounted doc's serialization as the baseline. markdownUpdated
         // only fires on edit transactions — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
@@ -343,6 +418,44 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         if (!view) return;
         dispatchMeta(view, { kind: "clear" });
         report();
+      },
+      dictationBegin() {
+        const view = viewRef.current;
+        if (!view || dictatingRef.current) return false;
+        dictatingRef.current = true;
+        const pos = view.state.selection.head;
+        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "begin", pos }));
+        return true;
+      },
+      dictationSetGhost(segments) {
+        const view = viewRef.current;
+        if (!view || !dictatingRef.current) return;
+        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "segments", segments }));
+      },
+      dictationCommit(text) {
+        const view = viewRef.current;
+        if (!view || !dictatingRef.current) return;
+        const anchor = getGhostState(view.state)?.anchor;
+        if (anchor == null) return;
+        const joined = smartJoin(view.state.doc, anchor, text);
+        if (!joined) return;
+        view.dispatch(view.state.tr.insertText(joined, anchor, anchor));
+      },
+      dictationEnd() {
+        const view = viewRef.current;
+        if (!view) {
+          dictatingRef.current = false;
+          return;
+        }
+        dictatingRef.current = false;
+        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "end" }));
+        view.focus();
+      },
+      dictationContext() {
+        const view = viewRef.current;
+        if (!view) return null;
+        const anchor = getGhostState(view.state)?.anchor ?? view.state.selection.head;
+        return dictationContextAt(view.state.doc, anchor);
       },
     }),
     [],

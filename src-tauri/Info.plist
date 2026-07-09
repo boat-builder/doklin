@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's Info.plist by the Tauri bundler. The mic usage
+     string is required for TCC to even show the permission prompt; capture
+     itself happens in the doklin-stt sidecar, whose responsible process is
+     this app. -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Doklin uses the microphone for voice dictation — audio is transcribed on this Mac and never leaves it.</string>
+</dict>
+</plist>
