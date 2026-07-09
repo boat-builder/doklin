@@ -759,7 +759,12 @@ const PAGE_CSS = `
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); }
+/* The document flows vertically and never scrolls sideways — mirrors the app's
+   editor canvas. Wide blocks (code, tables) scroll within themselves; nothing
+   pushes a page-level horizontal scrollbar. The html rendition is exempt: it
+   lives in .raw-frame and scrolls internally, so it keeps horizontal scroll for
+   free when its document genuinely needs it. */
+html, body { margin: 0; padding: 0; background: var(--bg); overflow-x: hidden; }
 body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
