@@ -677,9 +677,10 @@ export default function App() {
   }, [dictationUi.session, dictationUi.mode]);
 
   // A dictation session is anchored to one document; switching or closing
-  // tabs ends it (pending chunks flush as raw text first).
+  // tabs ends it immediately (pending chunks flush as raw text first) — the
+  // graceful drain would land text in the wrong editor.
   useEffect(() => {
-    if (dictationUi.session !== "idle") void dictationRef.current?.stop();
+    if (dictationUi.session !== "idle") void dictationRef.current?.stop(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
@@ -2471,6 +2472,7 @@ export default function App() {
           ui={dictationUi}
           onSetMode={(m) => dictationRef.current?.setMode(m)}
           onSetPolish={(p) => dictationRef.current?.setPolish(p)}
+          onFlush={() => dictationRef.current?.flushPending()}
           onStop={() => void dictationRef.current?.stop()}
         />
       </main>

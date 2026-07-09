@@ -1,15 +1,74 @@
 // WhisperKit session: model download/load, then the streaming loop that turns
 // the gated mic buffer into `partial` and `final` events.
 //
-// The loop ticks every ~0.6 s. While the gate is open and the buffer has
-// voice, each tick re-transcribes the utterance-so-far and emits a `partial`
-// (the ghost text). An utterance *finalizes* — one last transcription of the
-// whole buffer, emitted as `final`, buffer cleared — when:
+// The loop ticks every ~0.15 s. While the gate is open and the buffer has
+// voice, a background decode re-transcribes the utterance-so-far; WhisperKit's
+// per-token callback streams its text into `stream`, and the loop emits the
+// growing text as `partial` events (the live ghost text). An utterance
+// *finalizes* — one last transcription of the whole buffer, emitted as
+// `final`, buffer cleared — when:
 //   • walkie mode: the gate closes (key released), or
 //   • flow mode: ~1 s of trailing silence after voice, or
 //   • either mode: the buffer nears Whisper's 30 s window.
+//
+// Finalize never races the partial decode: it cancels it (the token callback
+// returns false → WhisperKit early-stops), waits for the engine to go idle,
+// and only then takes the buffer. Utterances are never dropped — a failed
+// final decode is retried once, then surfaced as an `error` event.
 import Foundation
 import WhisperKit
+
+/// Cross-thread cancellation flag for an in-flight decode. WhisperKit invokes
+/// the token callback on a detached task, so this must be lock-protected.
+private final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var cancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+    func cancel() {
+        lock.lock()
+        flag = true
+        lock.unlock()
+    }
+}
+
+/// Latest streamed text from the in-flight partial decode. Token callbacks
+/// (detached, unordered) write; the transcriber's loop drains from actor
+/// context, so `partial` events stay strictly ordered against `final` and
+/// `session` events. Within one decode pass the text only grows (out-of-order
+/// callbacks can't regress it); a completed pass may shrink it, since Whisper
+/// sometimes revises earlier words on the fuller buffer.
+private final class StreamText: @unchecked Sendable {
+    private let lock = NSLock()
+    private var gen = -1
+    private var text = ""
+    private var dirty = false
+
+    func update(gen: Int, text: String, passComplete: Bool = false) {
+        lock.lock()
+        defer { lock.unlock() }
+        if gen != self.gen {
+            self.gen = gen
+            self.text = ""
+        }
+        guard passComplete || text.count > self.text.count else { return }
+        guard text != self.text else { return }
+        self.text = text
+        dirty = true
+    }
+
+    /// The freshest text, once, if it belongs to the current utterance.
+    func take(currentGen: Int) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard dirty, gen == currentGen else { return nil }
+        dirty = false
+        return text
+    }
+}
 
 actor Transcriber {
     enum Mode: String { case flow, walkie }
@@ -21,8 +80,13 @@ actor Transcriber {
     private var running = false
     private var mode: Mode = .flow
 
-    /// Serialize transcription calls (partial ticks vs finalize).
-    private var busy = false
+    /// One decode owns the engine at a time (partial or final).
+    private var decodeBusy = false
+    /// Cancels the in-flight partial decode when finalize wants the engine.
+    private var partialCancel: CancelFlag?
+    /// Bumped whenever the buffer is taken; stale partial text dies with it.
+    private var utteranceGen = 0
+    private let stream = StreamText()
 
     static let minSamples = Int(0.35 * AudioCapture.sampleRate)  // ignore blips <0.35s
     static let maxSamples = Int(28.0 * AudioCapture.sampleRate)  // force-finalize near 30s
@@ -41,6 +105,20 @@ actor Transcriber {
             emitModel("stt", "ready")
             return
         }
+        // Disk first: WhisperKit.download always phones the HuggingFace hub,
+        // even when every file is already local — seconds of "Downloading…"
+        // per cold start and a hard failure offline. A complete variant folder
+        // loads directly; a corrupt one falls through to the network path,
+        // which repairs it.
+        if let cached = Self.cachedModelFolder(downloadBase: downloadBase, variant: model) {
+            do {
+                try await loadWhisper(folder: cached)
+                return
+            } catch {
+                whisper = nil
+                emitLog("cached speech model failed to load, re-downloading: \(error)")
+            }
+        }
         do {
             emitModel("stt", "downloading", progress: 0)
             let folder = try await WhisperKit.download(
@@ -50,20 +128,43 @@ actor Transcriber {
             ) { progress in
                 emitModel("stt", "downloading", progress: progress.fractionCompleted)
             }
-            emitModel("stt", "loading")
-            let config = WhisperKitConfig(
-                verbose: false,
-                logLevel: .error,
-                prewarm: true,
-                load: true,
-                download: false
-            )
-            config.modelFolder = folder.path
-            whisper = try await WhisperKit(config)
-            emitModel("stt", "ready")
+            try await loadWhisper(folder: folder)
         } catch {
             emitModel("stt", "error", message: String(describing: error))
         }
+    }
+
+    private func loadWhisper(folder: URL) async throws {
+        emitModel("stt", "loading")
+        let config = WhisperKitConfig(
+            verbose: false,
+            logLevel: .error,
+            prewarm: true,
+            load: true,
+            download: false
+        )
+        config.modelFolder = folder.path
+        whisper = try await WhisperKit(config)
+        emitModel("stt", "ready")
+    }
+
+    /// A cached variant folder under <base>/models/argmaxinc/whisperkit-coreml
+    /// with every CoreML bundle present. Mirrors the layout WhisperKit's own
+    /// download creates (the repo prefixes its variants with "openai_whisper-").
+    static func cachedModelFolder(downloadBase: URL, variant: String) -> URL? {
+        let repo = downloadBase
+            .appendingPathComponent("models")
+            .appendingPathComponent("argmaxinc")
+            .appendingPathComponent("whisperkit-coreml")
+        let required = ["MelSpectrogram.mlmodelc", "AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "config.json"]
+        for name in ["openai_whisper-\(variant)", variant] {
+            let dir = repo.appendingPathComponent(name)
+            let complete = required.allSatisfy {
+                FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
+            }
+            if complete { return dir }
+        }
+        return nil
     }
 
     var isReady: Bool { whisper != nil }
@@ -123,8 +224,13 @@ actor Transcriber {
         }
     }
 
+    /// End the session. Emits the final `session: idle` even when no session
+    /// is running — the host uses that event as its stop handshake.
     func stop() async {
-        guard running else { return }
+        guard running else {
+            emit(["event": "session", "state": "idle"])
+            return
+        }
         running = false
         loopTask?.cancel()
         loopTask = nil
@@ -136,10 +242,15 @@ actor Transcriber {
 
     private func loop() async {
         while running && !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: 150_000_000)
             guard running, let cap = capture else { break }
-            let snap = cap.snapshot()
 
+            // Ghost text: emit the freshest streamed partial, actor-ordered.
+            if let text = stream.take(currentGen: utteranceGen), !text.isEmpty {
+                emit(["event": "partial", "text": text])
+            }
+
+            let snap = cap.snapshot()
             if snap.samples.count >= Self.maxSamples {
                 await finalize()
                 continue
@@ -148,34 +259,94 @@ actor Transcriber {
                 await finalize()
                 continue
             }
-            if snap.gate, snap.voiced, snap.samples.count >= Self.minSamples {
-                if let text = await transcribe(snap.samples), !text.isEmpty {
-                    emit(["event": "partial", "text": text])
-                }
+            if !decodeBusy, snap.gate, snap.voiced, snap.samples.count >= Self.minSamples {
+                startPartialDecode(snap.samples)
             } else if !snap.voiced {
                 cap.trimSilence(keepLast: 1.0)
             }
         }
     }
 
+    /// Kick off a background decode of the utterance-so-far. The token
+    /// callback streams text into `stream`; the loop emits it. Unawaited, so
+    /// gate/mode commands and finalize stay responsive mid-decode.
+    private func startPartialDecode(_ samples: [Float]) {
+        guard let whisper else { return }
+        decodeBusy = true
+        let flag = CancelFlag()
+        partialCancel = flag
+        let gen = utteranceGen
+        let stream = stream
+        let options = decodingOptions()
+        let callback: TranscriptionCallback = { progress in
+            if flag.cancelled { return false }
+            stream.update(gen: gen, text: progress.text)
+            return nil
+        }
+        Task {
+            let results = try? await whisper.transcribe(
+                audioArray: samples, decodeOptions: options, callback: callback)
+            self.partialDecodeDone(gen: gen, text: results.map(Self.joinText), cancelled: flag.cancelled)
+        }
+    }
+
+    private func partialDecodeDone(gen: Int, text: String?, cancelled: Bool) {
+        decodeBusy = false
+        partialCancel = nil
+        // A completed pass may legitimately shrink the text (Whisper revised
+        // earlier words); a cancelled one is superseded by the final.
+        if !cancelled, let text, !text.isEmpty {
+            stream.update(gen: gen, text: text, passComplete: true)
+        }
+    }
+
+    /// One last decode of the whole buffer → `final`. Cancels any in-flight
+    /// partial decode and waits for the engine — the buffer is only taken once
+    /// the decode can actually run, so an utterance can't be dropped by
+    /// unlucky timing. A decode failure is retried once, then reported.
     private func finalize() async {
+        guard capture != nil else { return }
+        partialCancel?.cancel()
+        while decodeBusy {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         guard let cap = capture else { return }
         let (samples, voiced) = cap.take()
+        utteranceGen += 1
         defer { emit(["event": "partial", "text": ""]) }  // clear any stale ghost
         guard voiced, samples.count >= Self.minSamples else { return }
-        guard var text = await transcribe(samples) else { return }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var decoded = await transcribeFinal(samples)
+        if decoded == nil {
+            decoded = await transcribeFinal(samples)
+        }
+        guard let decoded else {
+            emitError("stt", "could not transcribe the last utterance")
+            return
+        }
+        let text = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return }
         let secs = Double(samples.count) / AudioCapture.sampleRate
         if secs < 1.5 && Self.junkFinals.contains(text.lowercased()) { return }
         emit(["event": "final", "text": text, "secs": secs])
     }
 
-    private func transcribe(_ samples: [Float]) async -> String? {
-        guard let whisper, !busy else { return nil }
-        busy = true
-        defer { busy = false }
-        let options = DecodingOptions(
+    /// nil = the engine failed (worth retrying/reporting); "" = decoded nothing.
+    private func transcribeFinal(_ samples: [Float]) async -> String? {
+        guard let whisper else { return nil }
+        decodeBusy = true
+        defer { decodeBusy = false }
+        do {
+            let results = try await whisper.transcribe(
+                audioArray: samples, decodeOptions: decodingOptions())
+            return Self.joinText(results)
+        } catch {
+            emitLog("final transcription failed: \(error)")
+            return nil
+        }
+    }
+
+    private func decodingOptions() -> DecodingOptions {
+        DecodingOptions(
             task: .transcribe,
             language: language,
             temperature: 0,
@@ -183,15 +354,11 @@ actor Transcriber {
             skipSpecialTokens: true,
             withoutTimestamps: true
         )
-        do {
-            let results = try await whisper.transcribe(audioArray: samples, decodeOptions: options)
-            let text = results.map(\.text).joined(separator: " ")
-                .replacingOccurrences(of: "  ", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return text
-        } catch {
-            emitError("stt", String(describing: error))
-            return nil
-        }
+    }
+
+    private static func joinText(_ results: [TranscriptionResult]) -> String {
+        results.map(\.text).joined(separator: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

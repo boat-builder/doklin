@@ -2960,10 +2960,26 @@ body.tree-dragging.tree-drag-invalid * {
   font-style: italic;
 }
 
+.dictation-status.is-error {
+  color: #e5484d;
+}
+
+/* Chunks waiting on polish; clicking commits them as-is right now. */
 .dictation-pending {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
   flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 7px;
   font-size: 11px;
   color: var(--app-accent);
+  cursor: pointer;
+}
+
+.dictation-pending:hover {
+  border-color: var(--app-border);
+  background: var(--app-hover);
 }
 
 .dictation-seg {
@@ -3018,33 +3034,6 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-y: auto;
 }
 
-.dictation-choice {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dictation-choice-opt {
-  display: flex;
-  gap: 9px;
-  align-items: flex-start;
-  padding: 9px 11px;
-  border: 1px solid var(--app-border);
-  border-radius: 9px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  cursor: pointer;
-}
-
-.dictation-choice-opt.is-active {
-  border-color: var(--app-accent);
-  background: var(--app-hover);
-}
-
-.dictation-choice-opt input {
-  margin-top: 3px;
-}
-
 .dictation-check {
   display: flex;
   gap: 9px;
@@ -3056,10 +3045,6 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-check input {
   margin-top: 3px;
-}
-
-.dictation-budget {
-  max-width: 130px;
 }
 
 /* Inspector — advanced-only floating log panel. */

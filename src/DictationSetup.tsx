@@ -1,6 +1,8 @@
 // Dictation settings modal (Settings → "Dictation settings…"). Follows
-// ShareSetup's modal/field vocabulary. Everything here is a *default* —
-// the HUD's Flow/Walkie and Fast/Polished toggles override per session.
+// ShareSetup's modal/field vocabulary. Session controls live in the recording
+// bar, not here: Flow ⇄ Walkie and Fast ⇄ Polished are flipped there and
+// remembered between sessions. This modal only holds what you set rarely —
+// which models, which language, and the debug inspector.
 //
 // Nothing needs configuring for dictation to work: the defaults download
 // both models on first use and run fully on-device.
@@ -10,7 +12,6 @@ import {
   DEFAULT_DICTATION_CONFIG,
   saveDictationConfig,
   type DictationConfig,
-  type DictationMode,
 } from "./dictation";
 
 // WhisperKit variants in argmaxinc/whisperkit-coreml. Turbo is the accuracy
@@ -19,6 +20,13 @@ const STT_MODELS: { value: string; label: string }[] = [
   { value: "large-v3-v20240930", label: "Whisper large-v3-turbo — best accuracy (~1.5 GB)" },
   { value: "large-v3-v20240930_626MB", label: "Whisper large-v3-turbo compressed (~0.6 GB)" },
   { value: "small.en", label: "Whisper small English — fastest, lighter accuracy (~0.5 GB)" },
+];
+
+// MLX ids on Hugging Face. 4B is the speed/accuracy sweet spot; 8B is
+// noticeably better on tough audio and technical terms if the RAM is there.
+const LLM_MODELS: { value: string; label: string }[] = [
+  { value: "mlx-community/Qwen3-4B-Instruct-2507-4bit", label: "Qwen3 4B — fast, great for most dictation (~2.3 GB)" },
+  { value: "mlx-community/Qwen3-8B-4bit", label: "Qwen3 8B — best accuracy, wants 24 GB+ RAM (~4.5 GB)" },
 ];
 
 const LANGUAGES: { value: string; label: string }[] = [
@@ -42,15 +50,21 @@ export default function DictationSetup({
   onClose: () => void;
   onSaved: (c: DictationConfig) => void;
 }) {
-  const [mode, setMode] = useState<DictationMode>(config.mode);
-  const [polish, setPolish] = useState(config.polish);
   const [language, setLanguage] = useState(config.language);
   const [sttModel, setSttModel] = useState(config.sttModel);
   const [llmModel, setLlmModel] = useState(config.llmModel);
-  const [budget, setBudget] = useState(String(config.latencyBudgetMs));
   const [inspector, setInspector] = useState(config.inspector);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // A hand-edited dictation.json may name a model outside the presets; keep
+  // it selectable instead of silently overwriting it on save.
+  const sttOptions = STT_MODELS.some((m) => m.value === sttModel)
+    ? STT_MODELS
+    : [...STT_MODELS, { value: sttModel, label: `Custom — ${sttModel}` }];
+  const llmOptions = LLM_MODELS.some((m) => m.value === llmModel)
+    ? LLM_MODELS
+    : [...LLM_MODELS, { value: llmModel, label: `Custom — ${llmModel}` }];
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -62,14 +76,12 @@ export default function DictationSetup({
 
   const save = async () => {
     if (busy) return;
-    const budgetMs = Math.max(500, Math.min(15000, Number(budget) || DEFAULT_DICTATION_CONFIG.latencyBudgetMs));
     const next: DictationConfig = {
       sttModel: sttModel.trim() || DEFAULT_DICTATION_CONFIG.sttModel,
       llmModel: llmModel.trim() || DEFAULT_DICTATION_CONFIG.llmModel,
-      polish,
-      mode,
+      polish: config.polish,
+      mode: config.mode,
       language,
-      latencyBudgetMs: budgetMs,
       inspector,
     };
     setBusy(true);
@@ -105,40 +117,9 @@ export default function DictationSetup({
         <div className="setup-body">
           <p className="setup-intro">
             Everything runs on this Mac — audio and text never leave it. Models download
-            automatically on first use. The style and polish choices here are defaults; you can
-            flip both mid-dictation from the recording bar.
+            automatically on first use. Dictation style (Flow / Walkie-talkie) and Fast / Polished
+            are switched in the recording bar and remembered for next time.
           </p>
-
-          <div className="share-field">
-            <div className="share-field-label">Dictation style</div>
-            <div className="dictation-choice" role="radiogroup" aria-label="Dictation style">
-              <label className={`dictation-choice-opt ${mode === "walkie" ? "is-active" : ""}`}>
-                <input type="radio" name="dictation-mode" checked={mode === "walkie"} onChange={() => setMode("walkie")} />
-                <span>
-                  <strong>Walkie-talkie</strong> — hold <kbd>Space</kbd> to talk, release to think.
-                  The key never types into your note.
-                </span>
-              </label>
-              <label className={`dictation-choice-opt ${mode === "flow" ? "is-active" : ""}`}>
-                <input type="radio" name="dictation-mode" checked={mode === "flow"} onChange={() => setMode("flow")} />
-                <span>
-                  <strong>Flow</strong> — keeps listening until you finish; sentences commit on
-                  natural pauses.
-                </span>
-              </label>
-            </div>
-          </div>
-
-          <div className="share-field">
-            <label className="dictation-check">
-              <input type="checkbox" checked={polish} onChange={(e) => setPolish(e.target.checked)} />
-              <span>
-                <strong>Polish with an on-device language model</strong> — fixes misheard words,
-                homophones, and technical terms using your document as context. Adds a beat of
-                latency; turn it off (or flip to Fast in the bar) when speed matters more.
-              </span>
-            </label>
-          </div>
 
           <div className="share-field">
             <div className="share-field-label">Spoken language</div>
@@ -151,41 +132,23 @@ export default function DictationSetup({
 
           <div className="share-field">
             <div className="share-field-label">Speech model</div>
-            <select className="share-field-input" value={STT_MODELS.some((m) => m.value === sttModel) ? sttModel : STT_MODELS[0].value} onChange={(e) => setSttModel(e.target.value)}>
-              {STT_MODELS.map((m) => (
+            <select className="share-field-input" value={sttModel} onChange={(e) => setSttModel(e.target.value)}>
+              {sttOptions.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
             </select>
           </div>
 
           <div className="share-field">
-            <div className="share-field-label">Polish model (MLX id on Hugging Face)</div>
-            <input
-              className="share-field-input"
-              value={llmModel}
-              onChange={(e) => setLlmModel(e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              placeholder={DEFAULT_DICTATION_CONFIG.llmModel}
-            />
+            <div className="share-field-label">Polish model</div>
+            <select className="share-field-input" value={llmModel} onChange={(e) => setLlmModel(e.target.value)}>
+              {llmOptions.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
             <div className="setup-step-note">
-              Default is Qwen3-4B (~2.3 GB) — the sweet spot. Try{" "}
-              <code>mlx-community/Qwen3-8B-4bit</code> for tougher audio on a Mac with 24 GB+.
-            </div>
-          </div>
-
-          <div className="share-field">
-            <div className="share-field-label">Polish time budget (ms)</div>
-            <input
-              className="share-field-input dictation-budget"
-              value={budget}
-              onChange={(e) => setBudget(e.target.value.replace(/[^0-9]/g, ""))}
-              inputMode="numeric"
-            />
-            <div className="setup-step-note">
-              If polishing a chunk takes longer than this, the raw transcription is committed
-              instead — dictation never stalls on the model.
+              The polish pass only fixes what the speech model misheard — it never rewrites.
+              Chunks wait for it as ghost text; the ✦ pill in the recording bar skips the wait.
             </div>
           </div>
 
