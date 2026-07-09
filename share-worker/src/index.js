@@ -306,15 +306,19 @@ function shellPage(title, message, status = 200) {
   });
 }
 
-// The landing page exists to vouch for the domain: anyone handed a share link
-// can check the root and see who's behind it — and grab the app themselves.
-// Branding comes from the OWNER_NAME / OWNER_LINK env vars (wrangler.toml
-// [vars]); without them it stays generic. The "Download for macOS" button
+// The landing page answers two questions for anyone who lands on the domain
+// root: what doklin.cc is (a person's own place for notes they publish from
+// Doklin) and what Doklin is (a free, open-source Mac editor they can download,
+// which then walks them through hosting a share domain of their own). Owner
+// branding comes from the OWNER_NAME / OWNER_LINK env vars (wrangler.toml
+// [vars]); without them the page stays generic. The "Download for macOS" button
 // points at DOWNLOAD_URL, defaulting to the official GitHub release's stable
-// latest-download alias (kept in sync by .github/workflows/release.yml). Set
-// DOWNLOAD_URL="" to hide the button entirely.
+// latest-download alias (kept in sync by .github/workflows/release.yml); set
+// DOWNLOAD_URL="" to hide it. OWNER_LINK (typically a LinkedIn profile) and the
+// project's source on GitHub show as quiet links under the download button.
 const DEFAULT_DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
+const REPO_URL = "https://github.com/boat-builder/doklin";
 
 function landingPage(env, url) {
   const host = url.hostname;
@@ -327,31 +331,46 @@ function landingPage(env, url) {
 
   const title = owner ? `${host} — notes shared by ${owner}` : `${host} — shared notes`;
   const desc = owner
-    ? `Every page on this domain is a note personally published by ${owner}, written in Doklin.`
-    : `Every page on this domain is a note published from Doklin, a personal markdown editor.`;
+    ? `Every page on ${host} is a note personally published by ${owner} from Doklin, an open-source Mac editor.`
+    : `Every page on ${host} is a note published from Doklin, an open-source Mac markdown editor.`;
   const headline = owner ? `Notes shared by ${owner}` : `Notes shared on ${host}`;
-  const copy = owner
-    ? `Every page on this domain is a note I published myself, straight from Doklin — my own markdown editor. If someone sent you a ${host} link, it came from me — a real person, not a spammer.`
-    : `Every page on this domain is a note published straight from Doklin, a personal markdown editor.`;
+  // The lead is the point of the page: whose domain this is and why a link here
+  // is trustworthy. First person when we know the owner.
+  const lead = owner
+    ? `Every page on ${host} is a note I published myself, straight from Doklin — my own Mac editor. If a link here reached you, it came from me: a real person, not a spammer.`
+    : `Every page on ${host} is a note published straight from Doklin, a personal Mac markdown editor.`;
+  // Secondary: what the editor is. Kept neutral so it reads the same on any
+  // self-hosted deployment. The "domain of your own" line is the only nod to
+  // the share feature — deliberately light-touch; it isn't the app's headline.
+  const about = `Doklin is a free, open-source markdown editor for macOS with on-device dictation. It's yours to download — and it'll walk you through publishing notes to a domain of your own, like this one.`;
 
   const appleIcon = `<svg class="landing-apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>`;
   const linkedInIcon = `<svg class="landing-in" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`;
+  const githubIcon = `<svg class="landing-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
   const downloadButton = downloadUrl
     ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download Doklin for macOS</a>
-  <p class="landing-sub">Free · Universal (Apple Silicon &amp; Intel)</p>`
+    <p class="landing-sub">Free · Universal — Apple Silicon &amp; Intel</p>`
     : "";
-  const authorButton = link
-    ? `<a class="landing-btn landing-btn-ghost" href="${escapeHtml(link)}" rel="me noopener">
-    ${isLinkedIn ? linkedInIcon : ""}${escapeHtml(owner ? (isLinkedIn ? `${owner} on LinkedIn` : `About ${owner}`) : "About the author")}
-  </a>`
-    : "";
-  const actions = downloadButton || authorButton
-    ? `<div class="landing-actions">
+
+  // Quiet links under the CTA: the owner's profile (usually LinkedIn) and the
+  // project source. GitHub is always shown — it's how "open source" gets said.
+  const links = [];
+  if (link) {
+    const authorLabel = isLinkedIn
+      ? owner ? `${owner} on LinkedIn` : "On LinkedIn"
+      : owner ? `About ${owner}` : "About the author";
+    links.push(`<a class="landing-link" href="${escapeHtml(link)}" rel="me noopener">${isLinkedIn ? linkedInIcon : ""}${escapeHtml(authorLabel)}</a>`);
+  }
+  links.push(`<a class="landing-link" href="${REPO_URL}" rel="noopener">${githubIcon}Source on GitHub</a>`);
+  const linksRow = `<div class="landing-links">${links.join(`<span class="landing-link-sep" aria-hidden>·</span>`)}</div>`;
+
+  const actions = `<div class="landing-actions">
     ${downloadButton}
-    ${authorButton}
-  </div>`
-    : "";
+    ${linksRow}
+  </div>`;
+
+  const footer = owner ? `© ${owner} · Doklin is open source` : `${host} · Doklin is open source`;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -371,9 +390,11 @@ function landingPage(env, url) {
 <main class="landing">
   <div class="landing-mark"><span class="landing-dot" aria-hidden></span>${escapeHtml(host)}</div>
   <h1 class="landing-headline">${escapeHtml(headline)}</h1>
-  <p class="landing-copy">${escapeHtml(copy)}</p>
+  <p class="landing-lead">${escapeHtml(lead)}</p>
+  <hr class="landing-rule" aria-hidden>
+  <p class="landing-about">${escapeHtml(about)}</p>
   ${actions}
-  <footer class="landing-footer">${escapeHtml(owner ? `© ${owner}` : host)}</footer>
+  <footer class="landing-footer">${escapeHtml(footer)}</footer>
 </main>
 </body>
 </html>`;
@@ -390,35 +411,51 @@ const LANDING_CSS = `
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 24px;
+  padding: 40px 24px 84px;
 }
 .landing-mark {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 15px;
+  gap: 9px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   color: var(--muted);
 }
 .landing-dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: rgba(255, 145, 0, 0.9);
+  background: rgba(255, 145, 0, 0.95);
+  box-shadow: 0 0 0 4px rgba(255, 145, 0, 0.14);
 }
 .landing-headline {
-  margin: 20px 0 0;
-  font-size: clamp(30px, 5.5vw, 46px);
-  line-height: 1.15;
+  margin: 26px 0 0;
+  font-size: clamp(30px, 5vw, 44px);
+  line-height: 1.12;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.025em;
 }
-.landing-copy {
-  max-width: 540px;
-  margin: 16px auto 0;
-  font-size: 16px;
-  line-height: 1.65;
+.landing-lead {
+  max-width: 33rem;
+  margin: 18px auto 0;
+  font-size: 16.5px;
+  line-height: 1.62;
+  color: var(--text);
+  opacity: 0.82;
+}
+.landing-rule {
+  width: 44px;
+  height: 1px;
+  border: 0;
+  margin: 30px 0 0;
+  background: var(--border);
+}
+.landing-about {
+  max-width: 30rem;
+  margin: 26px auto 0;
+  font-size: 14px;
+  line-height: 1.6;
   color: var(--muted);
 }
 .landing-actions {
@@ -432,38 +469,48 @@ const LANDING_CSS = `
   align-items: center;
   gap: 9px;
   padding: 12px 22px;
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--text);
   color: var(--bg);
   font-size: 15px;
   font-weight: 600;
   text-decoration: none;
   border: 1px solid var(--text);
-  transition: opacity 0.12s;
+  transition: opacity 0.12s, transform 0.12s;
 }
-.landing-btn:hover { opacity: 0.88; }
-/* Secondary action (author link): outlined, quieter than the download CTA. */
-.landing-btn-ghost {
-  margin-top: 14px;
-  padding: 9px 18px;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  font-size: 14px;
-}
-.landing-btn-ghost:hover { opacity: 1; color: var(--text); }
+.landing-btn:hover { opacity: 0.9; transform: translateY(-1px); }
 .landing-sub {
   margin: 12px 0 0;
   font-size: 12.5px;
   color: var(--muted);
 }
+/* Quiet secondary links (owner profile + GitHub source), separated by a dot. */
+.landing-links {
+  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+}
+.landing-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 5px 7px;
+  border-radius: 6px;
+  transition: color 0.12s;
+}
+.landing-link:hover { color: var(--text); }
+.landing-link-sep { color: var(--muted); opacity: 0.5; }
 .landing-apple { width: 16px; height: 16px; margin-top: -2px; }
-.landing-in { width: 15px; height: 15px; }
+.landing-in, .landing-gh { width: 15px; height: 15px; }
 .landing-footer {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 22px;
+  bottom: 20px;
   font-size: 12px;
   color: var(--muted);
 }
