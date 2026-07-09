@@ -2955,11 +2955,6 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
-.dictation-status.is-interim {
-  color: var(--app-text);
-  font-style: italic;
-}
-
 .dictation-status.is-error {
   color: #e5484d;
 }

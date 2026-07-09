@@ -41,9 +41,6 @@ export default function DictationHud({
     status = modelStatusLine(ui);
   } else if (stopping) {
     status = ui.pendingChunks > 0 ? "Finishing — polishing the last words…" : "Finishing…";
-  } else if (ui.interim) {
-    status = ui.interim;
-    statusClass = "is-interim";
   } else if (listening) {
     status = "Listening…";
   } else if (ui.mode === "walkie") {

@@ -87,7 +87,11 @@ export const ghostPlugin = $prose(
           return DecorationSet.create(state.doc, [
             Decoration.widget(s.anchor, () => buildWidget(s.segments), {
               side: 1,
-              key: "dictation-ghost",
+              // The key is ProseMirror's redraw check: an unchanged key keeps
+              // the old DOM and never re-renders. Derive it from the content
+              // so streaming partials repaint — a constant key froze the ghost
+              // at the first text it ever painted.
+              key: s.segments.map((seg) => `${seg.state}:${seg.text}`).join("\u0000"),
             }),
           ]);
         },
