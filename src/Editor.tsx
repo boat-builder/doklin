@@ -19,6 +19,7 @@ import {
 } from "./searchPlugin";
 import { criticActivePlugin, criticCopyPlugin, setActiveComment } from "./criticPlugin";
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
+import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import {
   criticCommentSchema,
   criticRemark,
@@ -52,6 +53,11 @@ export type DictationContext = {
 // controller calls begin/end around each utterance batch — between them the
 // document is an ordinary editor. insertText types literal text at the caret
 // (the talk key doubles as the spacebar when tapped).
+//
+// When commit gets a `raw` that differs from the polished text, the landed
+// range is tracked (see polishRevert.ts): revertPolish swaps every still-
+// intact tracked range back to its raw transcript, clearRevert forgets them
+// (the controller calls it on each talk-key press).
 export type EditorHandle = {
   setSearch: (query: string, caseSensitive: boolean) => void;
   searchNext: () => void;
@@ -60,7 +66,9 @@ export type EditorHandle = {
   insertText: (text: string) => void;
   dictationBegin: () => boolean;
   dictationSetGhost: (segments: GhostSegment[]) => void;
-  dictationCommit: (text: string) => void;
+  dictationCommit: (text: string, raw?: string) => void;
+  dictationRevertPolish: () => number;
+  dictationClearRevert: () => void;
   dictationEnd: () => void;
   dictationContext: () => DictationContext | null;
 };
@@ -280,6 +288,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
     crepe.editor.use(ghostPlugin);
+    crepe.editor.use(polishRevertPlugin);
     crepe.on((api) => {
       api.markdownUpdated((_ctx, markdown) => {
         onChangeRef.current(markdown);
@@ -441,14 +450,50 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         if (!view || !dictatingRef.current) return;
         view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "segments", segments }));
       },
-      dictationCommit(text) {
+      dictationCommit(text, raw) {
         const view = viewRef.current;
         if (!view || !dictatingRef.current) return;
         const anchor = getGhostState(view.state)?.anchor;
         if (anchor == null) return;
         const joined = smartJoin(view.state.doc, anchor, text);
         if (!joined) return;
-        view.dispatch(view.state.tr.insertText(joined, anchor, anchor));
+        const tr = view.state.tr.insertText(joined, anchor, anchor);
+        if (raw != null && raw.trim() && raw !== text) {
+          tr.setMeta(revertKey, {
+            kind: "track",
+            entry: { from: anchor, to: anchor + joined.length, inserted: joined, raw },
+          });
+        }
+        view.dispatch(tr);
+      },
+      dictationRevertPolish() {
+        const view = viewRef.current;
+        if (!view) return 0;
+        const entries = getRevertEntries(view.state);
+        if (entries.length === 0) return 0;
+        // Front-to-back, remapping each entry through the replacements made
+        // so far, so every raw chunk re-joins (spacing, capitalization)
+        // against the already-reverted text before it. Only ranges that
+        // still read exactly what polish inserted are touched — user edits win.
+        let tr = view.state.tr;
+        let reverted = 0;
+        for (const e of [...entries].sort((a, b) => a.from - b.from)) {
+          const from = tr.mapping.map(e.from, 1);
+          const to = tr.mapping.map(e.to, -1);
+          if (to <= from || to > tr.doc.content.size) continue;
+          if (tr.doc.textBetween(from, to, "\n", "\n") !== e.inserted) continue;
+          const rawJoined = smartJoin(tr.doc, from, e.raw);
+          if (!rawJoined) continue;
+          tr = tr.insertText(rawJoined, from, to);
+          reverted++;
+        }
+        view.dispatch(tr.setMeta(revertKey, { kind: "clear" }));
+        return reverted;
+      },
+      dictationClearRevert() {
+        const view = viewRef.current;
+        if (!view || getRevertEntries(view.state).length === 0) return;
+        view.dispatch(view.state.tr.setMeta(revertKey, { kind: "clear" }));
       },
       dictationEnd() {
         const view = viewRef.current;

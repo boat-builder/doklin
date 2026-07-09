@@ -12,10 +12,12 @@ const BARS = 5;
 export default function DictationHud({
   ui,
   onFlush,
+  onRevert,
   onStop,
 }: {
   ui: DictationUiState;
   onFlush: () => void;
+  onRevert: () => void;
   onStop: () => void;
 }) {
   // Idle with an error still renders (how else would the user see it);
@@ -58,6 +60,15 @@ export default function DictationHud({
         })}
       </span>
       <span className={`dictation-status ${statusClass}`}>{status}</span>
+      {ui.canRevert && (
+        <button
+          className="dictation-revert"
+          onClick={onRevert}
+          title="Polish changed the last utterance — click to restore what you actually said"
+        >
+          ↩ raw
+        </button>
+      )}
       {ui.pendingChunks > 0 && (
         <button
           className="dictation-pending"

@@ -2588,6 +2588,7 @@ export default function App() {
         <DictationHud
           ui={dictationUi}
           onFlush={() => dictationRef.current?.flushPending()}
+          onRevert={() => dictationRef.current?.revertPolish()}
           onStop={() => void dictationRef.current?.stop()}
         />
       </main>
