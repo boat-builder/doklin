@@ -3,14 +3,20 @@
 // The Rust side (src-tauri/src/dictation.rs) hosts the doklin-stt sidecar and
 // forwards its NDJSON output as `dictation:event`. This module owns everything
 // above that: the persisted config (<app_data_dir>/dictation.json, mirroring
-// share.json), the session state machine (Flow / Walkie-talkie gating), the
-// chunk pipeline (STT final → optional LLM polish → ordered commit into the
+// share.json), the session state machine (hold-Space walkie-talkie gating),
+// the chunk pipeline (STT final → LLM polish → ordered commit into the
 // editor), the guards that keep polish from ever making things worse, and the
 // background rolling summary that gives the polish prompt document context.
 //
+// The editor stays a normal editor between utterances: typing is only
+// suspended (and the ghost-text anchor pinned) while the pipeline is busy —
+// from the talk-key press until the last chunk has committed. Once the
+// queues drain, the keyboard is the user's again; the next press re-pins at
+// the caret.
+//
 // Polish has no per-chunk time limit: a chunk waits until its correction
 // lands, visible as tinted ghost text and the HUD's pending pill. The user
-// skips the wait explicitly (pill click / Fast / second Esc); a generous
+// skips the wait explicitly (pill click / second Esc); a generous
 // failsafe only catches a hung engine. Ending a session is a handshake —
 // stop the sidecar, let its last `final` and the polish queue drain, then
 // close — so the last utterance is never cut off.
@@ -23,18 +29,12 @@ import type { GhostSegment } from "./ghostText";
 
 /* ---------- Config ---------- */
 
-export type DictationMode = "flow" | "walkie";
-
 export type DictationConfig = {
   /// WhisperKit variant in argmaxinc/whisperkit-coreml. The default is
   /// whisper large-v3-turbo (~1.5 GB, the accuracy tier this feature is for).
   sttModel: string;
   /// MLX model id for the polish pass.
   llmModel: string;
-  /// Polish (LLM correction) on by default? Mirrors the last HUD choice.
-  polish: boolean;
-  /// Gating style for new sessions; mirrors the last HUD choice.
-  mode: DictationMode;
   /// Whisper language hint; "auto" lets the model detect.
   language: string;
   /// Show the dictation inspector (advanced; prompt/response introspection).
@@ -44,8 +44,6 @@ export type DictationConfig = {
 export const DEFAULT_DICTATION_CONFIG: DictationConfig = {
   sttModel: "large-v3-v20240930",
   llmModel: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
-  polish: true,
-  mode: "walkie",
   language: "auto",
   inspector: false,
 };
@@ -69,8 +67,6 @@ export function getDictationConfig(): Promise<DictationConfig> {
         return {
           sttModel: merged.sttModel,
           llmModel: merged.llmModel,
-          polish: merged.polish,
-          mode: merged.mode,
           language: merged.language,
           inspector: merged.inspector,
         };
@@ -120,8 +116,6 @@ export type InspectorEntry = {
 export type DictationUiState = {
   session: "idle" | "starting" | "active" | "stopping";
   gate: "listening" | "paused";
-  mode: DictationMode;
-  polish: boolean;
   level: number;
   interim: string;
   pendingChunks: number;
@@ -133,8 +127,6 @@ export type DictationUiState = {
 export const INITIAL_DICTATION_UI: DictationUiState = {
   session: "idle",
   gate: "paused",
-  mode: "walkie",
-  polish: true,
   level: 0,
   interim: "",
   pendingChunks: 0,
@@ -221,6 +213,15 @@ export class DictationController {
   private stopFallback: number | null = null;
   private noticeTimer: number | null = null;
 
+  // Editor hold: typing is suspended and the ghost anchor pinned only while
+  // the pipeline is busy — from the talk-key press until the last chunk
+  // commits — so the document stays editable between utterances.
+  private editorHeld = false;
+  // True from a talk-key release until the sidecar's `utterance done` ack:
+  // the final decode is still running and its `final` may yet arrive, so the
+  // queues aren't really empty even though they look it.
+  private sttDecoding = false;
+
   // Rolling summary state — maintained in the background, invisible to the
   // user. `summary` is whatever the polish prompt gets; staleness is fine.
   private summary = "";
@@ -234,8 +235,6 @@ export class DictationController {
 
   async init(): Promise<void> {
     this.config = await getDictationConfig();
-    this.ui.mode = this.config.mode;
-    this.ui.polish = this.config.polish;
     if (!this.unlisten) {
       this.unlisten = await listen<SidecarEvent>("dictation:event", (e) => {
         this.handleEvent(e.payload);
@@ -259,10 +258,6 @@ export class DictationController {
     const before = this.config;
     configPromise = null;
     this.config = await getDictationConfig();
-    if (this.ui.session === "idle") {
-      this.ui.mode = this.config.mode;
-      this.ui.polish = this.config.polish;
-    }
     if (
       before.sttModel !== this.config.sttModel ||
       before.llmModel !== this.config.llmModel ||
@@ -286,15 +281,12 @@ export class DictationController {
 
   async start(): Promise<void> {
     if (this.ui.session !== "idle") return;
-    const editor = this.deps.getEditor();
-    if (!editor) return;
+    if (!this.deps.getEditor()) return;
     if (this.stopFallback != null) window.clearTimeout(this.stopFallback);
     this.stopFallback = null;
     this.ui = {
       ...INITIAL_DICTATION_UI,
       session: "starting",
-      mode: this.config.mode,
-      polish: this.config.polish,
       stt: this.ui.stt,
       llm: this.ui.llm,
     };
@@ -304,7 +296,6 @@ export class DictationController {
         config: {
           sttModel: this.config.sttModel,
           llmModel: this.config.llmModel,
-          llmEnabled: this.config.polish,
           language: this.config.language,
           debug: this.config.inspector,
         },
@@ -313,11 +304,9 @@ export class DictationController {
       this.fail(String(e));
       return;
     }
-    if (!editor.dictationBegin()) {
-      this.fail("editor not ready");
-      return;
-    }
     this.chunks = [];
+    this.editorHeld = false;
+    this.sttDecoding = false;
     this.summary = "";
     this.summaryDelta = "";
     // Session start is the earliest moment we can have a summary ready; the
@@ -332,10 +321,9 @@ export class DictationController {
     if (this.ui.session !== "starting") return;
     if (this.ui.stt.status === "ready") {
       void invoke("dictation_cmd", {
-        payload: { cmd: "start", mode: this.ui.mode },
+        payload: { cmd: "start" },
       }).catch((e) => this.fail(String(e)));
       this.ui.session = "active";
-      this.ui.gate = this.ui.mode === "flow" ? "listening" : "paused";
       this.push();
       return;
     }
@@ -405,6 +393,8 @@ export class DictationController {
     const editor = this.deps.getEditor();
     editor?.dictationEnd();
     this.chunks = [];
+    this.editorHeld = false;
+    this.sttDecoding = false;
     if (this.summaryTimer != null) window.clearTimeout(this.summaryTimer);
     this.summaryTimer = null;
     this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", level: 0, pendingChunks: 0 };
@@ -412,7 +402,7 @@ export class DictationController {
   }
 
   /// Skip the polish queue: commit every pending chunk as raw text right now.
-  /// (Pending-pill click, flipping to Fast mid-session, or a second Esc.)
+  /// (Pending-pill click or a second Esc.)
   flushPending(): void {
     let flushed = false;
     for (const c of this.chunks) {
@@ -426,46 +416,39 @@ export class DictationController {
     this.commitReady();
     this.refreshGhost();
     this.maybeFinishStop();
+    this.maybeReleaseEditor();
     this.push();
   }
 
   setGate(open: boolean): void {
-    if (this.ui.session !== "active" || this.ui.mode !== "walkie") return;
+    if (this.ui.session !== "active") return;
     if ((this.ui.gate === "listening") === open) return;
+    if (open) {
+      // First press since the pipeline drained: pin the ghost anchor at the
+      // caret and suspend typing until everything has committed.
+      if (!this.editorHeld) {
+        if (!this.deps.getEditor()?.dictationBegin()) return;
+        this.editorHeld = true;
+      }
+    } else {
+      // Release → the sidecar finalizes the utterance; hold the editor until
+      // its `utterance done` says the decode (and any `final`) is in.
+      this.sttDecoding = true;
+    }
     this.ui.gate = open ? "listening" : "paused";
     this.push();
     void invoke("dictation_cmd", { payload: { cmd: "gate", open } }).catch(() => {});
   }
 
-  setMode(mode: DictationMode): void {
-    if (this.ui.mode === mode) return;
-    this.ui.mode = mode;
-    if (this.ui.session === "active") {
-      this.ui.gate = mode === "flow" ? "listening" : "paused";
-      void invoke("dictation_cmd", { payload: { cmd: "mode", mode } }).catch(() => {});
-    }
-    this.persistToggles();
-    this.push();
-  }
-
-  setPolish(polish: boolean): void {
-    if (this.ui.polish === polish) return;
-    this.ui.polish = polish;
-    if (polish && this.ui.llm.status === "idle") {
-      void invoke("dictation_cmd", { payload: { cmd: "load_llm" } }).catch(() => {});
-    }
-    // Fast means now — don't leave already-pending chunks waiting on polish.
-    if (!polish) this.flushPending();
-    this.persistToggles();
-    this.push();
-  }
-
-  /// The HUD toggles are the real controls; remember them as the defaults for
-  /// the next session (the settings modal no longer duplicates them).
-  private persistToggles(): void {
-    if (this.config.mode === this.ui.mode && this.config.polish === this.ui.polish) return;
-    this.config = { ...this.config, mode: this.ui.mode, polish: this.ui.polish };
-    void saveDictationConfig(this.config).catch(() => {});
+  /// Dictation is only a mode while the pipeline is busy: once the mic is
+  /// closed, the last utterance decoded, and every chunk committed, hand the
+  /// editor back so the user can type between utterances.
+  private maybeReleaseEditor(): void {
+    if (!this.editorHeld || this.ui.session !== "active") return;
+    if (this.ui.gate !== "paused" || this.sttDecoding) return;
+    if (this.ui.interim || this.chunks.length > 0) return;
+    this.editorHeld = false;
+    this.deps.getEditor()?.dictationEnd();
   }
 
   /// Transient, non-fatal problem worth telling the user about — shown in the
@@ -508,10 +491,10 @@ export class DictationController {
       case "partial": {
         if (this.ui.session !== "active") break;
         const text = typeof ev.text === "string" ? ev.text : "";
-        // Walkie: the gate is closed between utterances — a non-empty partial
+        // The gate is closed between utterances — a non-empty partial
         // arriving then is a stale echo of an already-finalized decode, and
         // painting it would strand ghost text.
-        if (text && this.ui.mode === "walkie" && this.ui.gate === "paused") break;
+        if (text && this.ui.gate === "paused") break;
         this.ui.interim = text;
         this.refreshGhost();
         this.push();
@@ -528,7 +511,7 @@ export class DictationController {
       }
       case "session": {
         // Sidecar's view of the gate (e.g. force-finalize near the 30s window
-        // doesn't change it; gate/mode acks do). Trust it while active.
+        // doesn't change it; gate acks do). Trust it while active.
         if (this.ui.session === "active" && (ev.state === "listening" || ev.state === "paused")) {
           this.ui.gate = ev.state;
           this.push();
@@ -538,6 +521,16 @@ export class DictationController {
         if (ev.state === "idle" && this.ui.session === "stopping") {
           this.sidecarStopped = true;
           this.maybeFinishStop();
+        }
+        break;
+      }
+      case "utterance": {
+        // The finalize decode for the last talk-key release has completed;
+        // its `final` (if any) was already handled. If nothing is left in the
+        // queues the editor goes back to the user.
+        if (ev.state === "done") {
+          this.sttDecoding = false;
+          this.maybeReleaseEditor();
         }
         break;
       }
@@ -589,8 +582,9 @@ export class DictationController {
   private acceptFinal(raw: string): void {
     const chunk: Chunk = { id: this.chunkSeq++, raw, status: "polishing", text: raw };
     this.chunks.push(chunk);
-    const polishing = this.ui.polish && this.ui.llm.status === "ready";
-    if (!polishing) {
+    // The polish model may still be loading (first session); commit raw
+    // rather than hold text hostage to a download.
+    if (this.ui.llm.status !== "ready") {
       chunk.status = "done";
       this.commitReady();
       return;
@@ -627,8 +621,8 @@ export class DictationController {
         decision = `error: ${String(e)}`;
       }
     }
-    // The user may have skipped this chunk (pill click / Fast / second Esc)
-    // while we waited — it's already committed raw; drop the late result.
+    // The user may have skipped this chunk (pill click / second Esc) while
+    // we waited — it's already committed raw; drop the late result.
     if (chunk.status !== "polishing") {
       this.inspectCorrection(chunk, res, decision || "late — chunk was already committed raw", performance.now() - started);
       return;
@@ -648,6 +642,7 @@ export class DictationController {
     this.commitReady();
     this.refreshGhost();
     this.maybeFinishStop();
+    this.maybeReleaseEditor();
     this.push();
   }
 
@@ -682,7 +677,6 @@ export class DictationController {
   /* ---------- Rolling summary (background, low priority) ---------- */
 
   private scheduleSummary(initial: boolean): void {
-    if (!this.ui.polish) return;
     if (this.summaryTimer != null) window.clearTimeout(this.summaryTimer);
     this.summaryTimer = window.setTimeout(() => {
       this.summaryTimer = null;
@@ -763,6 +757,8 @@ export class DictationController {
     const editor = this.deps.getEditor();
     editor?.dictationEnd();
     this.chunks = [];
+    this.editorHeld = false;
+    this.sttDecoding = false;
     this.ui = { ...this.ui, session: "idle", gate: "paused", interim: "", error: message };
     this.push();
   }

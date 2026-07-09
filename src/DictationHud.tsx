@@ -1,25 +1,20 @@
 // The dictation HUD — the only chrome a session adds. Floats over the editor
 // bottom; nothing in the idle layout ever moves. Shows the recording state
-// (red = hearing you, amber = paused/thinking), a live level meter, the
-// current hint or error, and the two per-session toggles that get flipped
-// often enough to live here: Flow ⇄ Walkie and Fast ⇄ Polished. The pending
-// pill (✦ N = chunks waiting on polish) doubles as the skip button: polish
-// has no time limit, so the user decides when raw-now beats polished-later.
+// (red = hearing you, amber = paused/thinking), a live level meter, and the
+// current hint or error. The pending pill (✦ N = chunks waiting on polish)
+// doubles as the skip button: polish has no time limit, so the user decides
+// when raw-now beats polished-later.
 
-import type { DictationMode, DictationUiState } from "./dictation";
+import type { DictationUiState } from "./dictation";
 
 const BARS = 5;
 
 export default function DictationHud({
   ui,
-  onSetMode,
-  onSetPolish,
   onFlush,
   onStop,
 }: {
   ui: DictationUiState;
-  onSetMode: (m: DictationMode) => void;
-  onSetPolish: (p: boolean) => void;
   onFlush: () => void;
   onStop: () => void;
 }) {
@@ -43,10 +38,8 @@ export default function DictationHud({
     status = ui.pendingChunks > 0 ? "Finishing — polishing the last words…" : "Finishing…";
   } else if (listening) {
     status = "Listening…";
-  } else if (ui.mode === "walkie") {
-    status = "Hold Space to talk · Esc to finish";
   } else {
-    status = "Paused";
+    status = "Hold Space to talk · Esc to finish";
   }
 
   return (
@@ -74,42 +67,6 @@ export default function DictationHud({
           ✦ {ui.pendingChunks}
         </button>
       )}
-      {!idleError && (
-        <>
-          <span className="dictation-seg" role="group" aria-label="Dictation style">
-            <button
-              className={`dictation-seg-btn ${ui.mode === "flow" ? "is-active" : ""}`}
-              onClick={() => onSetMode("flow")}
-              title="Flow: keeps listening until you stop"
-            >
-              Flow
-            </button>
-            <button
-              className={`dictation-seg-btn ${ui.mode === "walkie" ? "is-active" : ""}`}
-              onClick={() => onSetMode("walkie")}
-              title="Walkie: hold Space to talk, release to think"
-            >
-              Walkie
-            </button>
-          </span>
-          <span className="dictation-seg" role="group" aria-label="Polish">
-            <button
-              className={`dictation-seg-btn ${!ui.polish ? "is-active" : ""}`}
-              onClick={() => onSetPolish(false)}
-              title="Commit raw transcription immediately"
-            >
-              Fast
-            </button>
-            <button
-              className={`dictation-seg-btn ${ui.polish ? "is-active" : ""}`}
-              onClick={() => onSetPolish(true)}
-              title="Run each chunk through the on-device polish model"
-            >
-              Polished
-            </button>
-          </span>
-        </>
-      )}
       <button
         className="dictation-close"
         onClick={onStop}
@@ -132,7 +89,7 @@ function modelStatusLine(ui: DictationUiState): string {
   }
   if (stt.status === "loading") return "Preparing speech model…";
   if (stt.status === "error") return `Speech model failed: ${stt.message ?? "unknown error"}`;
-  if (ui.polish && ui.llm.status === "downloading") {
+  if (ui.llm.status === "downloading") {
     return `Speech ready — downloading polish model… ${Math.round(ui.llm.progress * 100)}%`;
   }
   return "Starting…";

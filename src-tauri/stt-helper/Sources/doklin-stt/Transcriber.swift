@@ -6,10 +6,10 @@
 // per-token callback streams its text into `stream`, and the loop emits the
 // growing text as `partial` events (the live ghost text). An utterance
 // *finalizes* — one last transcription of the whole buffer, emitted as
-// `final`, buffer cleared — when:
-//   • walkie mode: the gate closes (key released), or
-//   • flow mode: ~1 s of trailing silence after voice, or
-//   • either mode: the buffer nears Whisper's 30 s window.
+// `final`, buffer cleared — when the gate closes (talk key released) or the
+// buffer nears Whisper's 30 s window. After a gate-close finalize the host
+// gets an `utterance done` ack: nothing more is coming for that release, so
+// it can hand the editor back to the keyboard.
 //
 // Finalize never races the partial decode: it cancels it (the token callback
 // returns false → WhisperKit early-stops), waits for the engine to go idle,
@@ -71,14 +71,11 @@ private final class StreamText: @unchecked Sendable {
 }
 
 actor Transcriber {
-    enum Mode: String { case flow, walkie }
-
     private var whisper: WhisperKit?
     private var capture: AudioCapture?
     private var loopTask: Task<Void, Never>?
     private var language: String?
     private var running = false
-    private var mode: Mode = .flow
 
     /// One decode owns the engine at a time (partial or final).
     private var decodeBusy = false
@@ -90,7 +87,6 @@ actor Transcriber {
 
     static let minSamples = Int(0.35 * AudioCapture.sampleRate)  // ignore blips <0.35s
     static let maxSamples = Int(28.0 * AudioCapture.sampleRate)  // force-finalize near 30s
-    static let flowSilence = 1.0  // seconds of quiet that ends a flow utterance
 
     // Whisper's favourite fabrications on silence/noise — dropped when the
     // buffer barely contained voice.
@@ -179,13 +175,12 @@ actor Transcriber {
         emitModel("stt", "idle")
     }
 
-    func start(mode: Mode) {
+    func start() {
         guard whisper != nil else {
             emitError("stt", "start before model ready")
             return
         }
         guard !running else { return }
-        self.mode = mode
         let cap = AudioCapture()
         do {
             try cap.start()
@@ -194,9 +189,9 @@ actor Transcriber {
             return
         }
         capture = cap
-        cap.setGate(mode == .flow)  // flow: hot mic; walkie: armed but closed
+        cap.setGate(false)  // armed but closed until the talk key opens it
         running = true
-        emit(["event": "session", "state": mode == .flow ? "listening" : "paused"])
+        emit(["event": "session", "state": "paused"])
         loopTask = Task { await self.loop() }
     }
 
@@ -207,20 +202,9 @@ actor Transcriber {
         emit(["event": "session", "state": open ? "listening" : "paused"])
         if was && !open {  // key released → utterance over
             await finalize()
-        }
-    }
-
-    func setMode(_ m: Mode) async {
-        guard running, let cap = capture else { return }
-        mode = m
-        if m == .flow && !cap.gateOpen {
-            cap.setGate(true)
-            emit(["event": "session", "state": "listening"])
-        }
-        if m == .walkie && cap.gateOpen {
-            cap.setGate(false)
-            emit(["event": "session", "state": "paused"])
-            await finalize()
+            // Ack: the decode for this release is done and its `final` (if
+            // any) already emitted — the host can unlock the editor.
+            emit(["event": "utterance", "state": "done"])
         }
     }
 
@@ -255,10 +239,6 @@ actor Transcriber {
                 await finalize()
                 continue
             }
-            if mode == .flow, snap.gate, snap.voiced, snap.silenceSecs > Self.flowSilence {
-                await finalize()
-                continue
-            }
             if !decodeBusy, snap.gate, snap.voiced, snap.samples.count >= Self.minSamples {
                 startPartialDecode(snap.samples)
             } else if !snap.voiced {
@@ -269,7 +249,7 @@ actor Transcriber {
 
     /// Kick off a background decode of the utterance-so-far. The token
     /// callback streams text into `stream`; the loop emits it. Unawaited, so
-    /// gate/mode commands and finalize stay responsive mid-decode.
+    /// gate commands and finalize stay responsive mid-decode.
     private func startPartialDecode(_ samples: [Float]) {
         guard let whisper else { return }
         decodeBusy = true

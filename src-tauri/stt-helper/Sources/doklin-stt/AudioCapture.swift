@@ -1,14 +1,17 @@
 // Microphone capture: AVAudioEngine tap → 16 kHz mono Float32 ring buffer.
 //
 // The capture is *gated*: samples only accumulate while the gate is open
-// (walkie-talkie mode closes it between utterances; flow mode leaves it open).
-// The engine itself keeps running for the whole session so the mic HUD level
-// meter stays live and reopening the gate is instant.
+// (the talk key closes it between utterances). The engine itself keeps
+// running for the whole session so the mic HUD level meter stays live and
+// reopening the gate is instant. While the gate is closed a short *pre-roll*
+// ring holds the last fraction of a second; opening the gate splices it in,
+// so speech that starts a beat before the talk key registers (the host waits
+// ~200 ms to tell a talk-hold from a spacebar tap) isn't clipped. It never
+// leaves the process and dies with the gate's next close.
 //
 // Energy bookkeeping (RMS per tap callback) doubles as a VAD-lite: the
-// transcribe loop finalizes an utterance after a silence window, and skips
-// transcribing buffers that never contained voice (Whisper hallucinates
-// "Thank you." on pure silence).
+// transcribe loop skips transcribing buffers that never contained voice
+// (Whisper hallucinates "Thank you." on pure silence).
 import AVFoundation
 import Foundation
 
@@ -16,6 +19,8 @@ final class AudioCapture {
     static let sampleRate = 16_000.0
     /// RMS above this counts as voice. Conservative; typical speech is >0.03.
     static let voiceRMS: Float = 0.012
+    /// Gate-closed lookback spliced in when the gate opens.
+    static let prerollSamples = Int(0.5 * sampleRate)
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
@@ -24,9 +29,9 @@ final class AudioCapture {
 
     private let lock = NSLock()
     private var samples: [Float] = []
+    private var preroll: [Float] = []
     private var gate = false
     private var voiced = false  // any voice since the last take()
-    private var lastVoice = Date.distantPast
     private var lastLevelEmit = Date.distantPast
 
     var gateOpen: Bool {
@@ -37,8 +42,11 @@ final class AudioCapture {
 
     func setGate(_ open: Bool) {
         lock.lock()
+        if open && !gate {
+            samples.append(contentsOf: preroll)
+        }
+        preroll.removeAll()
         gate = open
-        if open { lastVoice = Date() }  // arm the silence timer from the press
         lock.unlock()
     }
 
@@ -63,6 +71,7 @@ final class AudioCapture {
         engine.stop()
         lock.lock()
         samples.removeAll()
+        preroll.removeAll()
         voiced = false
         gate = false
         lock.unlock()
@@ -93,11 +102,15 @@ final class AudioCapture {
 
         lock.lock()
         let now = Date()
-        if rms > Self.voiceRMS {
-            lastVoice = now
-            if gate { voiced = true }
+        if rms > Self.voiceRMS, gate { voiced = true }
+        if gate {
+            samples.append(contentsOf: chunk)
+        } else {
+            preroll.append(contentsOf: chunk)
+            if preroll.count > Self.prerollSamples {
+                preroll.removeFirst(preroll.count - Self.prerollSamples)
+            }
         }
-        if gate { samples.append(contentsOf: chunk) }
         // Waveform feed for the HUD, throttled to ~12 Hz. Emitted gate-closed
         // too (at the real level) so the meter visibly flatlines when paused.
         let shouldEmit = now.timeIntervalSince(lastLevelEmit) > 0.08
@@ -111,10 +124,10 @@ final class AudioCapture {
     }
 
     /// Snapshot for the partial-transcription loop (buffer stays in place).
-    func snapshot() -> (samples: [Float], voiced: Bool, silenceSecs: Double, gate: Bool) {
+    func snapshot() -> (samples: [Float], voiced: Bool, gate: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        return (samples, voiced, Date().timeIntervalSince(lastVoice), gate)
+        return (samples, voiced, gate)
     }
 
     /// Take the utterance out of the buffer (finalize) and reset voice tracking.

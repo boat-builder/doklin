@@ -46,14 +46,18 @@ export type DictationContext = {
 // view. Calls made before the editor has mounted are buffered (see pendingRef).
 //
 // The dictation* methods drive voice input: begin pins the ghost-text anchor
-// at the caret and suspends typing (dictation is a mode); setGhost paints the
-// in-flight transcript; commit inserts finalized text at the anchor (one undo
-// step per chunk); end restores normal editing.
+// at the caret and suspends typing while the pipeline is busy; setGhost
+// paints the in-flight transcript; commit inserts finalized text at the
+// anchor (one undo step per chunk); end restores normal editing. The
+// controller calls begin/end around each utterance batch — between them the
+// document is an ordinary editor. insertText types literal text at the caret
+// (the talk key doubles as the spacebar when tapped).
 export type EditorHandle = {
   setSearch: (query: string, caseSensitive: boolean) => void;
   searchNext: () => void;
   searchPrev: () => void;
   clearSearch: () => void;
+  insertText: (text: string) => void;
   dictationBegin: () => boolean;
   dictationSetGhost: (segments: GhostSegment[]) => void;
   dictationCommit: (text: string) => void;
@@ -169,10 +173,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
-  // True while a dictation session owns the editor: the editable prop
-  // (installed at mount) reads this, so typing is suspended for the session —
-  // dictation is a mode. Flips take effect on the next transaction, which
-  // begin/end always dispatch.
+  // True while dictation owns the editor — from the talk-key press until the
+  // chunk pipeline drains. The editable prop (installed at mount) reads this,
+  // so typing is suspended exactly while spoken text is in flight. Flips take
+  // effect on the next transaction, which begin/end always dispatch.
   const dictatingRef = useRef(false);
   // A search request that arrived before the editor mounted (e.g. opening a
   // workspace-search result remounts the editor, then the query is applied).
@@ -418,6 +422,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         if (!view) return;
         dispatchMeta(view, { kind: "clear" });
         report();
+      },
+      insertText(text) {
+        const view = viewRef.current;
+        if (!view || dictatingRef.current || !view.hasFocus()) return;
+        view.dispatch(view.state.tr.insertText(text));
       },
       dictationBegin() {
         const view = viewRef.current;

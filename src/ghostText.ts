@@ -1,10 +1,11 @@
 // Dictation ghost text — the not-yet-committed transcript rendered at the
 // insertion point as a ProseMirror widget decoration.
 //
-// A dictation session pins an *anchor*: a doc position that starts at the
-// selection head and then maps through every transaction (bias forward, so
-// each committed chunk pushes it right and the ghost always trails the last
-// commit). Ghost segments carry a state that drives their tint:
+// While dictation holds the editor (talk-key press → pipeline drained) it
+// pins an *anchor*: a doc position that starts at the selection head and then
+// maps through every transaction (bias forward, so each committed chunk
+// pushes it right and the ghost always trails the last commit). Ghost
+// segments carry a state that drives their tint:
 //   "listening"  gray shimmer — live STT partial, still changing
 //   "polishing"  accent tint — STT finalized, waiting on the LLM polish pass
 // Committed text is ordinary document content inserted by the controller; the

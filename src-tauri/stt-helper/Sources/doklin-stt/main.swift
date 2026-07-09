@@ -1,19 +1,18 @@
 // doklin-stt entry point: NDJSON command loop over stdin/stdout.
 //
 // Commands (one JSON object per line on stdin):
-//   {"cmd":"init","dataDir":"…","sttModel":"…","llmModel":"…","llmEnabled":true,
+//   {"cmd":"init","dataDir":"…","sttModel":"…","llmModel":"…",
 //    "language":"en"|null,"debug":false}
-//   {"cmd":"start","mode":"flow"|"walkie"}     begin a dictation session
-//   {"cmd":"gate","open":true|false}           walkie talk-key press/release
-//   {"cmd":"mode","mode":"flow"|"walkie"}      switch style mid-session
+//   {"cmd":"start"}                            begin a dictation session
+//   {"cmd":"gate","open":true|false}           talk-key press/release
 //   {"cmd":"stop"}                             end session (finalizes pending)
-//   {"cmd":"load_llm"}                         load polish model on demand
 //   {"cmd":"correct",…}  {"cmd":"summarize",…} see Corrector.swift
 //   {"cmd":"shutdown"}
 //
-// Events (one JSON object per line on stdout): ready, model, session, level,
-// partial, final, correct, summary, error, log. The Rust host forwards them
-// to the webview verbatim; correct/summary answers are also matched by id.
+// Events (one JSON object per line on stdout): ready, model, session,
+// utterance, level, partial, final, correct, summary, error, log. The Rust
+// host forwards them to the webview verbatim; correct/summary answers are
+// also matched by id.
 import Foundation
 
 let transcriber = Transcriber()
@@ -91,30 +90,18 @@ func handle(_ line: String) async {
         language = (obj["language"] as? String).flatMap { $0.isEmpty || $0 == "auto" ? nil : $0 }
         if let secs = obj["idleUnloadSecs"] as? Double, secs > 0 { idleUnloadSecs = secs }
         await corrector.configure(debug: obj["debug"] as? Bool ?? false)
-        let wantLLM = obj["llmEnabled"] as? Bool ?? false
         Task { await transcriber.load(model: sttModel, downloadBase: modelsDir, language: language) }
-        if wantLLM {
-            Task { await corrector.load(model: llmModel, downloadBase: modelsDir) }
-        }
+        Task { await corrector.load(model: llmModel, downloadBase: modelsDir) }
         // Backstop: if init is never followed by a session, don't hold 4-5 GB
         // forever. A `start` cancels this.
         scheduleIdleUnload()
 
-    case "load_llm":
-        Task { await corrector.load(model: llmModel, downloadBase: modelsDir) }
-
     case "start":
         cancelIdleUnload()
-        let mode = Transcriber.Mode(rawValue: str(obj, "mode")) ?? .flow
-        await transcriber.start(mode: mode)
+        await transcriber.start()
 
     case "gate":
         await transcriber.setGate(obj["open"] as? Bool ?? false)
-
-    case "mode":
-        if let m = Transcriber.Mode(rawValue: str(obj, "mode")) {
-            await transcriber.setMode(m)
-        }
 
     case "stop":
         await transcriber.stop()
