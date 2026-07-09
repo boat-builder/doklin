@@ -2977,34 +2977,6 @@ body.tree-dragging.tree-drag-invalid * {
   background: var(--app-hover);
 }
 
-.dictation-seg {
-  flex-shrink: 0;
-  display: flex;
-  border: 1px solid var(--app-border);
-  border-radius: 7px;
-  overflow: hidden;
-}
-
-.dictation-seg-btn {
-  appearance: none;
-  border: none;
-  background: transparent;
-  padding: 3px 9px;
-  font-size: 11px;
-  color: var(--app-text-muted);
-  cursor: pointer;
-}
-
-.dictation-seg-btn:hover {
-  background: var(--app-hover);
-}
-
-.dictation-seg-btn.is-active {
-  background: var(--app-hover);
-  color: var(--app-text);
-  font-weight: 600;
-}
-
 .dictation-close {
   appearance: none;
   border: none;

@@ -1,8 +1,6 @@
 // Dictation settings modal (Settings → "Dictation settings…"). Follows
-// ShareSetup's modal/field vocabulary. Session controls live in the recording
-// bar, not here: Flow ⇄ Walkie and Fast ⇄ Polished are flipped there and
-// remembered between sessions. This modal only holds what you set rarely —
-// which models, which language, and the debug inspector.
+// ShareSetup's modal/field vocabulary. This modal only holds what you set
+// rarely — which models, which language, and the debug inspector.
 //
 // Nothing needs configuring for dictation to work: the defaults download
 // both models on first use and run fully on-device.
@@ -79,8 +77,6 @@ export default function DictationSetup({
     const next: DictationConfig = {
       sttModel: sttModel.trim() || DEFAULT_DICTATION_CONFIG.sttModel,
       llmModel: llmModel.trim() || DEFAULT_DICTATION_CONFIG.llmModel,
-      polish: config.polish,
-      mode: config.mode,
       language,
       inspector,
     };
@@ -117,8 +113,9 @@ export default function DictationSetup({
         <div className="setup-body">
           <p className="setup-intro">
             Everything runs on this Mac — audio and text never leave it. Models download
-            automatically on first use. Dictation style (Flow / Walkie-talkie) and Fast / Polished
-            are switched in the recording bar and remembered for next time.
+            automatically on first use. While dictating, hold Space to talk and release
+            to let the polish pass tidy the transcript; between utterances the document
+            stays editable as usual.
           </p>
 
           <div className="share-field">

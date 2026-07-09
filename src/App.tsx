@@ -671,43 +671,66 @@ export default function App() {
     if (dictationUi.session === "active" && dictationConfig?.inspector) setInspectorOpen(true);
   }, [dictationUi.session, dictationConfig?.inspector]);
 
-  // Session keyboard: dictation is a mode, so while it's active the keyboard
-  // belongs to it. Capture phase, so nothing reaches the editor or the global
-  // shortcut handler. Walkie: Space is the talk key (hold = record, release =
-  // think) and never types; Esc always ends the session.
+  // Session keyboard: while a dictation session is live, Space doubles as the
+  // talk key — held past a short threshold it opens the mic; a quick tap is
+  // just the spacebar (the keydown was swallowed, so the release types the
+  // space). Everything else passes through: the document stays editable
+  // between utterances, and the controller suspends typing on its own while
+  // the pipeline is busy. Esc ends the session. Capture phase, so the editor
+  // and the global shortcut handler never see the intercepted keys; text
+  // fields (find bar, comment cards, rename inputs) keep theirs.
   useEffect(() => {
     if (dictationUi.session === "idle") return;
     const ctl = dictationRef.current!;
-    const walkie = dictationUi.mode === "walkie";
+    const active = dictationUi.session === "active";
+    const HOLD_MS = 200;
+    let holdTimer: number | null = null;
+    const inTextField = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return false;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return true;
+      return t.isContentEditable && !t.closest(".milkdown");
+    };
     const isTalkKey = (e: KeyboardEvent) =>
-      walkie && e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey;
+      active && e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey;
     const down = (e: KeyboardEvent) => {
+      if (inTextField(e)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         void ctl.stop();
         return;
       }
-      if (isTalkKey(e)) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!e.repeat) ctl.setGate(true);
-      }
+      if (!isTalkKey(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      holdTimer = window.setTimeout(() => {
+        holdTimer = null;
+        ctl.setGate(true);
+      }, HOLD_MS);
     };
     const up = (e: KeyboardEvent) => {
-      if (isTalkKey(e)) {
-        e.preventDefault();
-        e.stopPropagation();
+      if (!isTalkKey(e) || inTextField(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (holdTimer != null) {
+        // Released before the hold threshold: an ordinary spacebar press.
+        window.clearTimeout(holdTimer);
+        holdTimer = null;
+        editorRef.current?.insertText(" ");
+      } else {
         ctl.setGate(false);
       }
     };
     window.addEventListener("keydown", down, true);
     window.addEventListener("keyup", up, true);
     return () => {
+      if (holdTimer != null) window.clearTimeout(holdTimer);
       window.removeEventListener("keydown", down, true);
       window.removeEventListener("keyup", up, true);
     };
-  }, [dictationUi.session, dictationUi.mode]);
+  }, [dictationUi.session]);
 
   // A dictation session is anchored to one document; switching or closing
   // tabs ends it immediately (pending chunks flush as raw text first) — the
@@ -2564,8 +2587,6 @@ export default function App() {
         )}
         <DictationHud
           ui={dictationUi}
-          onSetMode={(m) => dictationRef.current?.setMode(m)}
-          onSetPolish={(p) => dictationRef.current?.setPolish(p)}
           onFlush={() => dictationRef.current?.flushPending()}
           onStop={() => void dictationRef.current?.stop()}
         />

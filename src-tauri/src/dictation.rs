@@ -157,7 +157,7 @@ pub fn dictation_init(app: AppHandle, state: State<'_, Dictation>, mut config: V
     write_line(&state, &config)
 }
 
-/// Fire-and-forget session commands: start / gate / mode / stop / load_llm.
+/// Fire-and-forget session commands: start / gate / stop.
 #[tauri::command]
 pub fn dictation_cmd(state: State<'_, Dictation>, payload: Value) -> Result<(), String> {
     write_line(&state, &payload)
