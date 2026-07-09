@@ -2147,8 +2147,12 @@ export default function App() {
         e.preventDefault();
         void newDraft();
       } else if (k === "w" && !e.shiftKey) {
+        // ⌘W closes the active tab; with none left it closes the window (which
+        // flushes autosave then destroys — see onCloseRequested). ⌘⇧W always
+        // closes the window (native menu item). VS Code / Chrome convention.
         e.preventDefault();
         if (activeIdRef.current) void closeTab(activeIdRef.current);
+        else void getCurrentWindow().close();
       } else if (k === "backspace") {
         // ⌘⌫ moves the active file to the Trash — but only when focus is outside
         // the editor, so it stays Milkdown's delete-to-line-start while typing.

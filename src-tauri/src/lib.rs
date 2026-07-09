@@ -102,6 +102,10 @@ struct QuitFlush(Mutex<Option<HashSet<String>>>);
 
 /// Menu id of the custom Quit item that replaces the predefined one (macOS-only).
 const QUIT_MENU_ID: &str = "doklin-quit-flush";
+/// Menu id of the custom Close Window item that replaces the predefined ⌘W ones
+/// so ⌘W is free for the renderer's close-tab handler (macOS-only). See
+/// `build_app_menu`.
+const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
 /// How long a quit waits for window acks before exiting anyway — the escape
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
@@ -1115,6 +1119,36 @@ fn build_app_menu<R: tauri::Runtime>(handle: &AppHandle<R>) -> tauri::Result<Men
             Some("CmdOrCtrl+Q"),
         )?)?;
     }
+
+    // Free ⌘W for the renderer's close-tab handler (src/App.tsx). The default
+    // menu binds ⌘W to predefined "Close Window" items — on macOS there's one
+    // under both File and Window — and native menu key equivalents are dispatched
+    // before the key ever reaches the web view, so they'd shadow ⌘W-closes-tab.
+    // Drop those and add a single ⌘⇧W "Close Window" (the Chrome / VS Code
+    // convention), routed through CLOSE_WINDOW_MENU_ID so the window still closes
+    // via the normal CloseRequested path and its autosave flushes.
+    let mut added_close = false;
+    for kind in menu.items()? {
+        let Some(submenu) = kind.as_submenu() else { continue };
+        for item in submenu.items()? {
+            let Some(predefined) = item.as_predefined_menuitem() else { continue };
+            if predefined.text().ok().as_deref() != Some("Close Window") {
+                continue;
+            }
+            submenu.remove(predefined)?;
+            if !added_close {
+                submenu.append(&MenuItem::with_id(
+                    handle,
+                    CLOSE_WINDOW_MENU_ID,
+                    "Close Window",
+                    true,
+                    Some("CmdOrCtrl+Shift+W"),
+                )?)?;
+                added_close = true;
+            }
+        }
+    }
+
     Ok(menu)
 }
 
@@ -1454,6 +1488,16 @@ pub fn run() {
         builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
             if event.id() == QUIT_MENU_ID {
                 begin_quit_flush(app);
+            } else if event.id() == CLOSE_WINDOW_MENU_ID {
+                // ⌘⇧W: close the focused window via the normal CloseRequested
+                // path (the renderer flushes its autosave, then destroys it).
+                if let Some(win) = app
+                    .webview_windows()
+                    .into_values()
+                    .find(|w| w.is_focused().unwrap_or(false))
+                {
+                    let _ = win.close();
+                }
             }
         });
     }
