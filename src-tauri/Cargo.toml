@@ -20,6 +20,9 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# Dictation sidecar request/response plumbing (tauri already ships tokio; the
+# direct dep is for oneshot + timeout in src/dictation.rs).
+tokio = { version = "1", features = ["sync", "time"] }
 notify = "6"
 notify-debouncer-full = "0.3"
 

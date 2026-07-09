@@ -13,6 +13,17 @@ import WorkspaceSearch from "./WorkspaceSearch";
 import ShareMenu from "./ShareMenu";
 import SharedPages from "./SharedPages";
 import ShareSetup from "./ShareSetup";
+import DictationHud from "./DictationHud";
+import DictationInspector from "./DictationInspector";
+import DictationSetup from "./DictationSetup";
+import {
+  DictationController,
+  getDictationConfig,
+  INITIAL_DICTATION_UI,
+  type DictationConfig,
+  type DictationUiState,
+  type InspectorEntry,
+} from "./dictation";
 import {
   deletePage,
   getShareConfig,
@@ -442,6 +453,78 @@ export default function App() {
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
   // current index for the "3/12" readout.
   const editorRef = useRef<EditorHandle>(null);
+
+  // Voice dictation. The controller (src/dictation.ts) owns the session; React
+  // only mirrors its state for the HUD/inspector. Created once via ref so the
+  // sidecar event listener never re-registers.
+  const [dictationUi, setDictationUi] = useState<DictationUiState>(INITIAL_DICTATION_UI);
+  const [dictationConfig, setDictationConfig] = useState<DictationConfig | null>(null);
+  const [dictationSetupOpen, setDictationSetupOpen] = useState(false);
+  const [inspectorEntries, setInspectorEntries] = useState<InspectorEntry[]>([]);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const dictationRef = useRef<DictationController | null>(null);
+  if (!dictationRef.current) {
+    dictationRef.current = new DictationController({
+      getEditor: () => editorRef.current,
+      onState: (s) => setDictationUi(s),
+      onInspect: (entry) => setInspectorEntries((prev) => [entry, ...prev].slice(0, 200)),
+    });
+  }
+  useEffect(() => {
+    void dictationRef.current?.init();
+    void getDictationConfig().then(setDictationConfig);
+    return () => dictationRef.current?.dispose();
+  }, []);
+  // The inspector auto-opens with a session when enabled in settings.
+  useEffect(() => {
+    if (dictationUi.session === "active" && dictationConfig?.inspector) setInspectorOpen(true);
+  }, [dictationUi.session, dictationConfig?.inspector]);
+
+  // Session keyboard: dictation is a mode, so while it's active the keyboard
+  // belongs to it. Capture phase, so nothing reaches the editor or the global
+  // shortcut handler. Walkie: Space is the talk key (hold = record, release =
+  // think) and never types; Esc always ends the session.
+  useEffect(() => {
+    if (dictationUi.session === "idle") return;
+    const ctl = dictationRef.current!;
+    const walkie = dictationUi.mode === "walkie";
+    const isTalkKey = (e: KeyboardEvent) =>
+      walkie && e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey;
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        void ctl.stop();
+        return;
+      }
+      if (isTalkKey(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) ctl.setGate(true);
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (isTalkKey(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        ctl.setGate(false);
+      }
+    };
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    return () => {
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+    };
+  }, [dictationUi.session, dictationUi.mode]);
+
+  // A dictation session is anchored to one document; switching or closing
+  // tabs ends it (pending chunks flush as raw text first).
+  useEffect(() => {
+    if (dictationUi.session !== "idle") void dictationRef.current?.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findCase, setFindCase] = useState(false);
@@ -1720,6 +1803,10 @@ export default function App() {
       } else if (k === "d" && e.shiftKey) {
         e.preventDefault();
         setDraftsOpen((v) => !v);
+      } else if (k === "v" && e.shiftKey) {
+        // ⌘⇧V: start/finish voice dictation (same as the titlebar mic).
+        e.preventDefault();
+        void dictationRef.current?.toggle();
       } else if (k === "z" && !e.shiftKey) {
         // ⌘Z restores a trashed file — but only when focus is outside the
         // editor, so it stays as Milkdown's text-undo while typing.
@@ -1787,6 +1874,21 @@ export default function App() {
             aria-pressed={sidebarOpen}
           >
             <SidebarIcon />
+          </button>
+        )}
+        {activeTab && !activeMissing && (
+          <button
+            className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
+            onClick={() => void dictationRef.current?.toggle()}
+            title={
+              dictationUi.session === "idle"
+                ? "Start dictation (⌘⇧V)"
+                : "Finish dictation (Esc)"
+            }
+            aria-label="Toggle dictation"
+            aria-pressed={dictationUi.session !== "idle"}
+          >
+            <MicIcon />
           </button>
         )}
       </div>
@@ -1896,7 +1998,13 @@ export default function App() {
           onCancel={() => setSavePrompt(null)}
         />
       )}
-      <main className="editor-wrap">
+      <main
+        className={`editor-wrap ${
+          dictationUi.session !== "idle"
+            ? `is-dictating ${dictationUi.gate === "listening" && dictationUi.session === "active" ? "is-listening" : "is-paused"}`
+            : ""
+        }`}
+      >
         {findOpen && activeTab && !activeMissing && (
           <FindBar
             query={findQuery}
@@ -1939,7 +2047,30 @@ export default function App() {
             onOpenRecent={openRecent}
           />
         )}
+        <DictationHud
+          ui={dictationUi}
+          onSetMode={(m) => dictationRef.current?.setMode(m)}
+          onSetPolish={(p) => dictationRef.current?.setPolish(p)}
+          onStop={() => void dictationRef.current?.stop()}
+        />
       </main>
+      {inspectorOpen && dictationConfig?.inspector && (
+        <DictationInspector
+          entries={inspectorEntries}
+          onClear={() => setInspectorEntries([])}
+          onClose={() => setInspectorOpen(false)}
+        />
+      )}
+      {dictationSetupOpen && dictationConfig && (
+        <DictationSetup
+          config={dictationConfig}
+          onClose={() => setDictationSetupOpen(false)}
+          onSaved={(next) => {
+            setDictationConfig(next);
+            void dictationRef.current?.reloadConfig();
+          }}
+        />
+      )}
       <Settings
         theme={theme}
         onChange={setTheme}
@@ -1954,6 +2085,7 @@ export default function App() {
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
         onOpenShareSetup={() => setShareSetupOpen(true)}
+        onOpenDictationSetup={() => setDictationSetupOpen(true)}
         update={update}
         onOpenExternal={openExternal}
       />
@@ -2131,6 +2263,7 @@ function Settings({
   onCopyWithComments,
   onOpenSharedPages,
   onOpenShareSetup,
+  onOpenDictationSetup,
   update,
   onOpenExternal,
 }: {
@@ -2147,6 +2280,7 @@ function Settings({
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
   onOpenShareSetup: () => void;
+  onOpenDictationSetup: () => void;
   update: UpdateController;
   onOpenExternal: (url: string) => void;
 }) {
@@ -2302,6 +2436,19 @@ function Settings({
           >
             <span className="settings-option-check" />
             <span className="settings-option-label">Sharing setup…</span>
+          </button>
+          <div className="settings-divider" />
+          <div className="settings-section-label">Voice</div>
+          <button
+            role="menuitem"
+            className="settings-option"
+            onClick={() => {
+              setOpen(false);
+              onOpenDictationSetup();
+            }}
+          >
+            <span className="settings-option-check" />
+            <span className="settings-option-label">Dictation settings…</span>
           </button>
           {recents.length > 0 && (
             <>
@@ -2529,6 +2676,26 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+      <line x1="12" y1="18" x2="12" y2="22" />
     </svg>
   );
 }
