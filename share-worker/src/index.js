@@ -306,19 +306,42 @@ function shellPage(title, message, status = 200) {
   });
 }
 
-// The landing page answers two questions for anyone who lands on the domain
-// root: what doklin.cc is (a person's own place for notes they publish from
-// Doklin) and what Doklin is (a free, open-source Mac editor they can download,
-// which then walks them through hosting a share domain of their own). Owner
-// branding comes from the OWNER_NAME / OWNER_LINK env vars (wrangler.toml
-// [vars]); without them the page stays generic. The "Download for macOS" button
-// points at DOWNLOAD_URL, defaulting to the official GitHub release's stable
-// latest-download alias (kept in sync by .github/workflows/release.yml); set
-// DOWNLOAD_URL="" to hide it. OWNER_LINK (typically a LinkedIn profile) and the
-// project's source on GitHub show as quiet links under the download button.
+// The landing page reads like Doklin's own product page, personalized to the
+// deployment: the Doklin wordmark leads, and OWNER_NAME / OWNER_LINK (wrangler
+// .toml [vars]) fill in whose domain this is. It answers two things for a
+// visitor who followed a share link here: whose notes live on this domain, and
+// what Doklin is (a free, open-source Mac editor, with a three-feature pitch +
+// a download button). The editor is presented as a product the owner uses, not
+// one they own. Without OWNER_NAME the page stays a generic Doklin page. The
+// download button points at DOWNLOAD_URL, defaulting to the official GitHub
+// release's stable latest-download alias (kept in sync by
+// .github/workflows/release.yml); set DOWNLOAD_URL="" to hide it. OWNER_LINK
+// (typically a LinkedIn profile) and the project source on GitHub show as quiet
+// links under the button; GitHub is where "open source" gets said.
 const DEFAULT_DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
 const REPO_URL = "https://github.com/boat-builder/doklin";
+
+// Three feature cards. Icons are stroke SVGs tinted with --accent; text is
+// generic so it reads the same on any deployment. "Publish to your domain" is
+// the only nod to the share feature: one card among three, not the pitch.
+const FEATURES = [
+  {
+    title: "On-device dictation",
+    desc: "Speak; it becomes clean text on your Mac.",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="21.5"/><line x1="8.5" y1="21.5" x2="15.5" y2="21.5"/></svg>`,
+  },
+  {
+    title: "Distraction-free editor",
+    desc: "Markdown that reads like a finished page.",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><rect x="4.5" y="3" width="15" height="18" rx="2.5"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>`,
+  },
+  {
+    title: "Publish to your domain",
+    desc: "Turn any note into a page on a domain you host.",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>`,
+  },
+];
 
 function landingPage(env, url) {
   const host = url.hostname;
@@ -329,32 +352,40 @@ function landingPage(env, url) {
   // self-hoster can point elsewhere or blank it out.
   const downloadUrl = (env.DOWNLOAD_URL === undefined ? DEFAULT_DOWNLOAD_URL : String(env.DOWNLOAD_URL)).trim();
 
-  const title = owner ? `${host} — notes shared by ${owner}` : `${host} — shared notes`;
+  const title = owner ? `Notes by ${owner}, written in Doklin` : `Notes written in Doklin`;
   const desc = owner
-    ? `Every page on ${host} is a note personally published by ${owner} from Doklin, an open-source Mac editor.`
-    : `Every page on ${host} is a note published from Doklin, an open-source Mac markdown editor.`;
-  const headline = owner ? `Notes shared by ${owner}` : `Notes shared on ${host}`;
-  // The lead is the point of the page: whose domain this is and why a link here
-  // is trustworthy. First person when we know the owner.
+    ? `${host} is where ${owner} publishes notes written in Doklin, a free, open-source markdown editor for macOS with on-device dictation.`
+    : `${host} publishes notes written in Doklin, a free, open-source markdown editor for macOS with on-device dictation.`;
+  // Headline ties the notes to their author and to Doklin (the tool), without
+  // implying the author made the tool.
+  const headline = owner ? `Notes by ${owner}, written in Doklin` : `Notes written in Doklin`;
+  // Lead stakes the domain to the owner, then introduces Doklin as a product
+  // anyone can download.
   const lead = owner
-    ? `Every page on ${host} is a note I published myself, straight from Doklin — my own Mac editor. If a link here reached you, it came from me: a real person, not a spammer.`
-    : `Every page on ${host} is a note published straight from Doklin, a personal Mac markdown editor.`;
-  // Secondary: what the editor is. Kept neutral so it reads the same on any
-  // self-hosted deployment. The "domain of your own" line is the only nod to
-  // the share feature — deliberately light-touch; it isn't the app's headline.
-  const about = `Doklin is a free, open-source markdown editor for macOS with on-device dictation. It's yours to download — and it'll walk you through publishing notes to a domain of your own, like this one.`;
+    ? `This is ${host}, where those notes are published. Doklin itself is a free, open-source markdown editor for macOS, and it's yours to download too.`
+    : `This is ${host}, where those notes are published. Doklin is a free, open-source markdown editor for macOS, and it's yours to download too.`;
 
   const appleIcon = `<svg class="landing-apple" viewBox="0 0 384 512" fill="currentColor" aria-hidden><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>`;
   const linkedInIcon = `<svg class="landing-in" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`;
   const githubIcon = `<svg class="landing-gh" viewBox="0 0 16 16" fill="currentColor" aria-hidden><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
+  const featureCards = FEATURES.map(
+    (f) => `<div class="landing-feature">
+      <span class="landing-feature-icon">${f.icon}</span>
+      <div class="landing-feature-text">
+        <div class="landing-feature-title">${escapeHtml(f.title)}</div>
+        <div class="landing-feature-desc">${escapeHtml(f.desc)}</div>
+      </div>
+    </div>`
+  ).join("\n    ");
+
   const downloadButton = downloadUrl
-    ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download Doklin for macOS</a>
-    <p class="landing-sub">Free · Universal — Apple Silicon &amp; Intel</p>`
+    ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download for macOS</a>
+    <p class="landing-sub">Free · Universal · Apple Silicon and Intel</p>`
     : "";
 
   // Quiet links under the CTA: the owner's profile (usually LinkedIn) and the
-  // project source. GitHub is always shown — it's how "open source" gets said.
+  // project source. GitHub is always shown so "open source" is said once.
   const links = [];
   if (link) {
     const authorLabel = isLinkedIn
@@ -365,12 +396,7 @@ function landingPage(env, url) {
   links.push(`<a class="landing-link" href="${REPO_URL}" rel="noopener">${githubIcon}Source on GitHub</a>`);
   const linksRow = `<div class="landing-links">${links.join(`<span class="landing-link-sep" aria-hidden>·</span>`)}</div>`;
 
-  const actions = `<div class="landing-actions">
-    ${downloadButton}
-    ${linksRow}
-  </div>`;
-
-  const footer = owner ? `© ${owner} · Doklin is open source` : `${host} · Doklin is open source`;
+  const footer = owner ? `${host} · notes by ${owner}` : host;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -388,12 +414,16 @@ function landingPage(env, url) {
 </head>
 <body>
 <main class="landing">
-  <div class="landing-mark"><span class="landing-dot" aria-hidden></span>${escapeHtml(host)}</div>
+  <div class="landing-mark"><span class="landing-dot" aria-hidden></span>Doklin</div>
   <h1 class="landing-headline">${escapeHtml(headline)}</h1>
   <p class="landing-lead">${escapeHtml(lead)}</p>
-  <hr class="landing-rule" aria-hidden>
-  <p class="landing-about">${escapeHtml(about)}</p>
-  ${actions}
+  <div class="landing-features">
+    ${featureCards}
+  </div>
+  <div class="landing-actions">
+    ${downloadButton}
+    ${linksRow}
+  </div>
   <footer class="landing-footer">${escapeHtml(footer)}</footer>
 </main>
 </body>
@@ -404,6 +434,8 @@ function landingPage(env, url) {
 }
 
 const LANDING_CSS = `
+:root { --accent: rgba(224, 122, 0, 0.95); }
+@media (prefers-color-scheme: dark) { :root { --accent: rgba(255, 160, 40, 0.98); } }
 .landing {
   min-height: 100dvh;
   display: flex;
@@ -411,55 +443,80 @@ const LANDING_CSS = `
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 40px 24px 84px;
+  padding: 40px 24px 76px;
 }
 .landing-mark {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--muted);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 .landing-dot {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: rgba(255, 145, 0, 0.95);
-  box-shadow: 0 0 0 4px rgba(255, 145, 0, 0.14);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(224, 122, 0, 0.14);
 }
 .landing-headline {
-  margin: 26px 0 0;
-  font-size: clamp(30px, 5vw, 44px);
-  line-height: 1.12;
+  margin: 22px 0 0;
+  max-width: 20ch;
+  font-size: clamp(28px, 4.6vw, 42px);
+  line-height: 1.14;
   font-weight: 700;
   letter-spacing: -0.025em;
 }
 .landing-lead {
-  max-width: 33rem;
-  margin: 18px auto 0;
-  font-size: 16.5px;
-  line-height: 1.62;
-  color: var(--text);
-  opacity: 0.82;
-}
-.landing-rule {
-  width: 44px;
-  height: 1px;
-  border: 0;
-  margin: 30px 0 0;
-  background: var(--border);
-}
-.landing-about {
-  max-width: 30rem;
-  margin: 26px auto 0;
-  font-size: 14px;
+  max-width: 34rem;
+  margin: 16px auto 0;
+  font-size: 16px;
   line-height: 1.6;
   color: var(--muted);
 }
+.landing-features {
+  margin: 34px auto 0;
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  max-width: 42rem;
+  justify-content: center;
+}
+.landing-feature {
+  flex: 1 1 0;
+  max-width: 13rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+}
+.landing-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--accent);
+}
+.landing-feature-icon svg { width: 20px; height: 20px; }
+.landing-feature-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.landing-feature-desc {
+  margin-top: 3px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
 .landing-actions {
-  margin-top: 30px;
+  margin-top: 34px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -468,7 +525,7 @@ const LANDING_CSS = `
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  padding: 12px 22px;
+  padding: 12px 24px;
   border-radius: 10px;
   background: var(--text);
   color: var(--bg);
@@ -480,17 +537,17 @@ const LANDING_CSS = `
 }
 .landing-btn:hover { opacity: 0.9; transform: translateY(-1px); }
 .landing-sub {
-  margin: 12px 0 0;
+  margin: 11px 0 0;
   font-size: 12.5px;
   color: var(--muted);
 }
 /* Quiet secondary links (owner profile + GitHub source), separated by a dot. */
 .landing-links {
-  margin-top: 22px;
+  margin-top: 20px;
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
+  font-size: 13px;
 }
 .landing-link {
   display: inline-flex;
@@ -510,9 +567,14 @@ const LANDING_CSS = `
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 20px;
+  bottom: 18px;
   font-size: 12px;
   color: var(--muted);
+}
+@media (max-width: 620px) {
+  .landing-features { flex-direction: column; align-items: center; gap: 16px; max-width: 21rem; }
+  .landing-feature { flex-direction: row; align-items: center; text-align: left; max-width: 21rem; gap: 13px; width: 100%; }
+  .landing-feature-desc { margin-top: 2px; }
 }
 `;
 
