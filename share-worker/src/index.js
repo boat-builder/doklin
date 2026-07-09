@@ -319,7 +319,7 @@ function shellPage(title, message, status = 200) {
 // (typically a LinkedIn profile) and the project source on GitHub show as quiet
 // links under the button; GitHub is where "open source" gets said.
 const DEFAULT_DOWNLOAD_URL =
-  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
+  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
 const REPO_URL = "https://github.com/boat-builder/doklin";
 
 // Notion's mark (Google favicon service, embedded so the page stays fully
