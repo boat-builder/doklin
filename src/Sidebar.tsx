@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export type TreeNode =
-  | { kind: "file"; name: string; path: string }
+  // `paired` marks a markdown row that also has an html rendition folded into
+  // it (a same-stem .html sibling), so the tree can icon md-only, html-only,
+  // and bundled md+html rows distinctly. Absent/false for standalone html.
+  | { kind: "file"; name: string; path: string; paired?: boolean }
   | { kind: "dir"; name: string; path: string; children: TreeNode[] };
 
 // The explorer's selection (VS Code-style): the row last clicked or
@@ -71,6 +74,7 @@ const dirname = (p: string) => {
 // standalone html renditions. A tree row can also be an md+html pair — the
 // backend folds those into one row on the markdown path.
 const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
+const HTML_EXT_RE = /\.html$/i;
 
 export default function Sidebar({
   root,
@@ -849,7 +853,7 @@ function TreeItem({
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "file" })}
           title={node.path}
         >
-          <FileIcon />
+          <DocTypeIcon node={node} />
           <span className="tree-label">{stripDocExt(node.name)}</span>
         </button>
       </li>
@@ -1155,6 +1159,79 @@ function FileIcon() {
     >
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
+// The row glyph for a file, chosen by document type. Shape-only — all three
+// keep the same muted stroke as FolderIcon, so the type reads without any
+// color. A standalone .html gets the code-page mark; a markdown row with a
+// folded html rendition gets the stacked "pair" mark; plain markdown gets the
+// text-page mark.
+function DocTypeIcon({ node }: { node: Extract<TreeNode, { kind: "file" }> }) {
+  if (HTML_EXT_RE.test(node.name)) return <HtmlDocIcon />;
+  if (node.paired) return <BundledDocIcon />;
+  return <MarkdownDocIcon />;
+}
+
+function MarkdownDocIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+function HtmlDocIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <polyline points="10 12 8 15 10 18" />
+      <polyline points="14 12 16 15 14 18" />
+    </svg>
+  );
+}
+
+function BundledDocIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M15 2H9a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6z" />
+      <polyline points="15 2 15 6 19 6" />
+      <path d="M4 7v12a2 2 0 0 0 2 2h9" />
     </svg>
   );
 }

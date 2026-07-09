@@ -94,6 +94,11 @@ body,
   margin: 0;
   padding: 0;
   background: var(--app-bg);
+  /* Fixed-window app shell: the document itself never scrolls — every pane
+     (editor canvas, tab strip, sidebar, drafts) owns its own overflow. Clip
+     here so a stray pixel from a grid track or a fixed overlay can't leak out
+     into a window-level scrollbar. */
+  overflow: hidden;
 }
 
 /* ---------- App shell ----------
@@ -448,6 +453,10 @@ body,
   grid-area: main;
   position: relative;
   overflow-y: auto;
+  /* The document flows vertically; the content area never scrolls sideways.
+     Wide inner blocks (code, tables) scroll within themselves — nothing pushes
+     a horizontal scrollbar onto the canvas. */
+  overflow-x: hidden;
   background: var(--app-surface);
   min-width: 0;
 }

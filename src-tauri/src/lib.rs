@@ -450,6 +450,11 @@ enum TreeNode {
     File {
         name: String,
         path: String,
+        // True when this markdown row also has an html rendition folded into it
+        // (a same-stem .html sibling). Lets the sidebar mark md-only, html-only,
+        // and bundled md+html rows with distinct icons. Always false for a
+        // standalone html file (it renders as its own html row).
+        paired: bool,
     },
     Dir {
         name: String,
@@ -537,6 +542,10 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
 
     let md_stems: std::collections::HashSet<std::ffi::OsString> =
         files.iter().filter_map(|p| p.file_stem().map(|s| s.to_os_string())).collect();
+    // Stems of every html file in this directory, so a markdown row can report
+    // whether a same-stem rendition folded into it (`paired`).
+    let html_stems: std::collections::HashSet<std::ffi::OsString> =
+        html_files.iter().filter_map(|p| p.file_stem().map(|s| s.to_os_string())).collect();
     for h in html_files {
         let paired = h.file_stem().is_some_and(|s| md_stems.contains(s));
         if !paired {
@@ -554,9 +563,13 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
         }
     }
     for f in files {
+        // A markdown file whose stem matches an html file is a bundled pair; a
+        // standalone html file (or a markdown file with no rendition) is not.
+        let paired = is_markdown(&f) && f.file_stem().is_some_and(|s| html_stems.contains(s));
         children.push(TreeNode::File {
             name: f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             path: f.to_string_lossy().to_string(),
+            paired,
         });
     }
 
