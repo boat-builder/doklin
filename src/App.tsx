@@ -246,31 +246,66 @@ function writeStoredRecents(entries: RecentEntry[]) {
   }
 }
 
-function readStoredSession(): {
-  tabs: Tab[];
-  activeId: string | null;
-  workspaceRoot: string | null;
-} {
+// The persisted session is keyed by workspace root so each directory remembers
+// its OWN open tabs: opening directory B never shows directory A's tabs, and
+// reopening A brings A's tabs back. Tabs opened with no folder (a bare launch)
+// live under a sentinel key. `lastRoot` records which workspace to restore on a
+// bare launch, where the command line names no folder.
+type SessionEntry = { tabs: Tab[]; activeId: string | null };
+type StoredSessions = { lastRoot: string | null; sessions: Record<string, SessionEntry> };
+const NO_WORKSPACE_KEY = "<no-workspace>";
+const sessionKeyFor = (root: string | null) => root ?? NO_WORKSPACE_KEY;
+
+function sanitizeTabs(raw: unknown): Tab[] {
+  return Array.isArray(raw)
+    ? raw.filter(
+        (t: unknown): t is Tab =>
+          !!t &&
+          typeof (t as Tab).id === "string" &&
+          typeof (t as Tab).path === "string" &&
+          ((t as Tab).kind === "draft" || (t as Tab).kind === "file"),
+      )
+    : [];
+}
+
+// Read the whole keyed-session map, migrating a legacy v1 blob
+// ({ tabs, activeId, workspaceRoot }) into a single keyed entry on the way so an
+// existing user's open tabs survive the upgrade under their own workspace.
+function readAllSessions(): StoredSessions {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return { tabs: [], activeId: null, workspaceRoot: null };
+    if (!raw) return { lastRoot: null, sessions: {} };
     const parsed = JSON.parse(raw);
-    const tabs: Tab[] = Array.isArray(parsed?.tabs)
-      ? parsed.tabs.filter(
-          (t: unknown): t is Tab =>
-            !!t &&
-            typeof (t as Tab).id === "string" &&
-            typeof (t as Tab).path === "string" &&
-            ((t as Tab).kind === "draft" || (t as Tab).kind === "file"),
-        )
-      : [];
+    if (parsed?.version === 2 && parsed?.sessions && typeof parsed.sessions === "object") {
+      const sessions: Record<string, SessionEntry> = {};
+      for (const [key, val] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+        const v = val as { tabs?: unknown; activeId?: unknown };
+        sessions[key] = {
+          tabs: sanitizeTabs(v?.tabs),
+          activeId: typeof v?.activeId === "string" ? v.activeId : null,
+        };
+      }
+      const lastRoot = typeof parsed.lastRoot === "string" ? parsed.lastRoot : null;
+      return { lastRoot, sessions };
+    }
+    // Legacy v1 → keep the single blob under its workspace key.
+    const tabs = sanitizeTabs(parsed?.tabs);
     const activeId = typeof parsed?.activeId === "string" ? parsed.activeId : null;
     const workspaceRoot =
       typeof parsed?.workspaceRoot === "string" ? parsed.workspaceRoot : null;
-    return { tabs, activeId, workspaceRoot };
+    return {
+      lastRoot: workspaceRoot,
+      sessions: { [sessionKeyFor(workspaceRoot)]: { tabs, activeId } },
+    };
   } catch {
-    return { tabs: [], activeId: null, workspaceRoot: null };
+    return { lastRoot: null, sessions: {} };
   }
+}
+
+// The saved tabs/active for one workspace (empty if that directory was never
+// opened, or had no tabs when last left).
+function readStoredSession(root: string | null): SessionEntry {
+  return readAllSessions().sessions[sessionKeyFor(root)] ?? { tabs: [], activeId: null };
 }
 
 function writeStoredSession(tabs: Tab[], activeId: string | null) {
@@ -278,14 +313,17 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
   // by take_window_init, so they must not clobber the shared session key.
   if (!isMainWindow) return;
   try {
+    const all = readAllSessions();
+    const key = sessionKeyFor(sessionWorkspaceRoot);
+    // An empty workspace stores no entry (rather than a stub for every directory
+    // ever opened); it reads back as "no tabs" either way. `lastRoot` still
+    // points here so a later bare launch reopens this folder.
+    if (tabs.length === 0) delete all.sessions[key];
+    else all.sessions[key] = { tabs, activeId };
+    all.lastRoot = sessionWorkspaceRoot;
     localStorage.setItem(
       SESSION_STORAGE_KEY,
-      JSON.stringify({
-        tabs,
-        activeId,
-        workspaceRoot: sessionWorkspaceRoot,
-        version: 1,
-      }),
+      JSON.stringify({ version: 2, lastRoot: all.lastRoot, sessions: all.sessions }),
     );
   } catch {
     // ignore
@@ -372,11 +410,6 @@ export default function App() {
   const [draftsOpen, setDraftsOpen] = useState<boolean>(() => readDraftsOpen());
   const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
   const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
-  const [docEmpty, setDocEmpty] = useState(true);
-  // Whether the editor's contenteditable holds focus. An empty draft's
-  // placeholder card hides the moment the user clicks into the canvas, not
-  // only once a first character lands.
-  const [editorFocused, setEditorFocused] = useState(false);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
   // Bumped after each autosave write of a draft lands on disk, so the drafts
   // panel re-lists (list_drafts reads from disk, so the refresh has to follow
@@ -872,8 +905,6 @@ export default function App() {
       snapshotRef.current = null;
       setInitialMarkdown("");
       setDirty(false);
-      setDocEmpty(true);
-      setEditorFocused(false); // the editor unmounts without firing blur
       setConflict(null);
       htmlPathRef.current = null;
       setHtmlContent(null);
@@ -894,8 +925,6 @@ export default function App() {
     snapshotRef.current = htmlOnly ? null : snapshot;
     setInitialMarkdown(htmlOnly ? "" : contents);
     setDirty(false);
-    setDocEmpty(htmlOnly ? false : contents.trim().length === 0);
-    setEditorFocused(false); // the remounted editor starts unfocused
     setConflict(null);
 
     // Resolve the document's html rendition and which view to show. Markdown
@@ -956,6 +985,54 @@ export default function App() {
       }
     }
   }, [setTabMissing, applyDocView]);
+
+  // Re-materialize stored tab descriptors against disk: a readable tab keeps its
+  // identity (a draft regains its Untitled-N title; a stale `missing` flag
+  // clears), an unreadable FILE tab becomes a visible ghost, and an unreadable
+  // draft (app-managed, so truly gone) is dropped. Shared by the startup restore
+  // and in-app workspace switches.
+  const rebuildTabs = useCallback(async (stored: Tab[]): Promise<Tab[]> => {
+    const out: Tab[] = [];
+    for (const t of stored) {
+      try {
+        await invoke<ReadFileResult>("read_file", { path: t.path });
+        out.push(
+          t.kind === "draft" && !t.title
+            ? { ...t, title: `Untitled-${draftsMetaRef.current[t.id]?.seq ?? "?"}` }
+            : { ...t, missing: undefined }, // readable again → clear a stale flag
+        );
+      } catch {
+        if (t.kind === "file") out.push({ ...t, missing: true });
+      }
+    }
+    return out;
+  }, []);
+
+  // Reset to the "no document open" state (welcome screen). Clears the per-doc
+  // refs so autosave is a no-op and unmounts the editor.
+  const clearActiveDoc = useCallback(async () => {
+    if (autosaveTimerRef.current != null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    try {
+      await invoke("unwatch_file");
+    } catch {
+      // ignore
+    }
+    pathRef.current = null;
+    currentMarkdownRef.current = "";
+    lastSavedRef.current = "";
+    snapshotRef.current = null;
+    baselineCapturedRef.current = false;
+    setInitialMarkdown("");
+    setDirty(false);
+    setConflict(null);
+    htmlPathRef.current = null;
+    setHtmlContent(null);
+    setHasHtml(false);
+    applyDocView("md");
+  }, [applyDocView]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -1113,14 +1190,60 @@ export default function App() {
     writeStoredSession(tabsRef.current, activeIdRef.current); // the root is part of the session
   }, [addRecent, selectSidebarEntry]);
 
+  // Switch this window to a different workspace folder (File ▸ Open Folder, a
+  // recent, the sidebar). Because tabs are keyed by folder, we persist the
+  // outgoing folder's tabs under its own key, then load and install the incoming
+  // folder's — the same directory-scoped model a `doklin <dir>` launch uses.
+  // Document content lives on disk and autosaves, so swapping the tab set never
+  // loses edits.
+  const openWorkspace = useCallback(
+    async (root: string) => {
+      if (root === sessionWorkspaceRoot) {
+        setWorkspace(root); // already here — just resurface the sidebar/recents
+        return;
+      }
+      flushPendingAutosave(); // land the outgoing doc before we swap tabs
+      captureActiveScroll();
+      // Persist the outgoing workspace under its own key before switching, so
+      // returning to it later restores exactly these tabs.
+      writeStoredSession(tabsRef.current, activeIdRef.current);
+      // From here session writes target the incoming folder.
+      sessionWorkspaceRoot = root;
+      const session = readStoredSession(root);
+      const restored = await rebuildTabs(session.tabs);
+      const activeId =
+        restored.length === 0
+          ? null
+          : session.activeId && restored.some((t) => t.id === session.activeId)
+            ? session.activeId
+            : restored[restored.length - 1].id;
+      tabsRef.current = restored;
+      activeIdRef.current = activeId;
+      setTabs(restored);
+      setActiveId(activeId);
+      setWorkspace(root); // adopt root, open sidebar, add recent, persist session
+      const active = restored.find((t) => t.id === activeId);
+      if (active) await loadActiveContent(active);
+      else await clearActiveDoc(); // incoming folder has no tabs → welcome screen
+    },
+    [
+      flushPendingAutosave,
+      captureActiveScroll,
+      rebuildTabs,
+      setWorkspace,
+      loadActiveContent,
+      clearActiveDoc,
+    ],
+  );
+
   const openFolderPicker = useCallback(async () => {
     try {
       const chosen = await openDialog({ directory: true, multiple: false });
-      if (typeof chosen === "string") setWorkspace(chosen);
+      if (typeof chosen === "string") await openWorkspace(chosen);
     } catch (e) {
       console.error("open folder failed", e);
     }
-  }, [setWorkspace]);
+  }, [openWorkspace]);
 
   const openFilePicker = useCallback(async () => {
     try {
@@ -1170,10 +1293,10 @@ export default function App() {
 
   const openRecent = useCallback(
     (r: RecentEntry) => {
-      if (r.kind === "folder") setWorkspace(r.path);
+      if (r.kind === "folder") void openWorkspace(r.path);
       else void openTab(r.path, "file");
     },
-    [setWorkspace, openTab],
+    [openWorkspace, openTab],
   );
 
   // Copy the document verbatim — CriticMarkup markers and comments intact (the
@@ -1339,34 +1462,6 @@ export default function App() {
     },
     [captureActiveScroll, flushPendingAutosave, applyDocView, restoreActiveScroll],
   );
-
-  // Reset to the "no document open" state (welcome screen). Clears the per-doc
-  // refs so autosave is a no-op and unmounts the editor.
-  const clearActiveDoc = useCallback(async () => {
-    if (autosaveTimerRef.current != null) {
-      window.clearTimeout(autosaveTimerRef.current);
-      autosaveTimerRef.current = null;
-    }
-    try {
-      await invoke("unwatch_file");
-    } catch {
-      // ignore
-    }
-    pathRef.current = null;
-    currentMarkdownRef.current = "";
-    lastSavedRef.current = "";
-    snapshotRef.current = null;
-    baselineCapturedRef.current = false;
-    setInitialMarkdown("");
-    setDirty(false);
-    setDocEmpty(true);
-    setEditorFocused(false);
-    setConflict(null);
-    htmlPathRef.current = null;
-    setHtmlContent(null);
-    setHasHtml(false);
-    applyDocView("md");
-  }, [applyDocView]);
 
   // Close a tab. Empty drafts are auto-discarded (nothing to recover); drafts
   // with content persist and stay reachable from the drafts list. Closing the
@@ -1719,27 +1814,29 @@ export default function App() {
         console.error("migrate_scratch failed", e);
       }
 
-      // Restore the persisted session. A file tab whose path no longer reads is
-      // kept as a visible "ghost" (missing) tab rather than silently dropped —
-      // the disk may just be unmounted, and the user decides whether to close
-      // it. Drafts are app-managed; one that's gone really is gone → drop.
-      const stored = readStoredSession();
-      // Adopt the stored root into the module mirror BEFORE any
-      // writeStoredSession below, so re-persisting the session can't wipe it.
-      sessionWorkspaceRoot = stored.workspaceRoot;
-      const restored: Tab[] = [];
-      for (const t of stored.tabs) {
-        try {
-          await invoke<ReadFileResult>("read_file", { path: t.path });
-          restored.push(
-            t.kind === "draft" && !t.title
-              ? { ...t, title: `Untitled-${draftsMetaRef.current[t.id]?.seq ?? "?"}` }
-              : { ...t, missing: undefined }, // readable again → clear a stale flag
-          );
-        } catch {
-          if (t.kind === "file") restored.push({ ...t, missing: true });
-        }
-      }
+      // Which workspace are we opening? A CLI / Finder folder launch
+      // (pendingFolder) targets that folder; otherwise reopen the last-active
+      // workspace. Tabs are keyed by workspace, so we restore ONLY the target
+      // directory's own tabs — a different directory's tabs never leak in.
+      // (Files never arrive as a pending folder: an externally opened file
+      // always gets its own spawned window, so it can't attach to this session.)
+      const pendingFolder = await invoke<string | null>("take_pending_folder");
+      const all = readAllSessions();
+      const targetRoot = pendingFolder ?? all.lastRoot;
+      // Adopt the target root into the module mirror BEFORE any
+      // writeStoredSession below, so re-persisting keys tabs under the right
+      // folder rather than wiping the map.
+      sessionWorkspaceRoot = targetRoot;
+
+      // Restore that folder's persisted tabs. A file tab whose path no longer
+      // reads is kept as a visible "ghost" (missing) tab rather than silently
+      // dropped — the disk may just be unmounted, and the user decides whether
+      // to close it. Drafts are app-managed; one that's gone really is gone → drop.
+      const session = all.sessions[sessionKeyFor(targetRoot)] ?? {
+        tabs: [],
+        activeId: null,
+      };
+      const restored = await rebuildTabs(session.tabs);
 
       // Append the migrated scratchpad (if any) as a fresh draft tab.
       if (migrated) {
@@ -1751,16 +1848,10 @@ export default function App() {
         restored.push({ id: migrated.id, kind: "draft", path: migrated.path, title: `Untitled-${seq}` });
       }
 
-      // A CLI / Finder folder launch adopts the folder as this window's
-      // workspace, on top of the restored session. (Files never arrive here:
-      // an externally opened file always gets its own spawned window, so it
-      // can't attach itself to the restored workspace/session.)
-      const pendingFolder = await invoke<string | null>("take_pending_folder");
-
       if (restored.length > 0) {
         const activeId =
-          stored.activeId && restored.some((t) => t.id === stored.activeId)
-            ? stored.activeId
+          session.activeId && restored.some((t) => t.id === session.activeId)
+            ? session.activeId
             : restored[restored.length - 1].id;
         tabsRef.current = restored;
         activeIdRef.current = activeId;
@@ -1774,20 +1865,20 @@ export default function App() {
 
       if (pendingFolder) {
         setWorkspace(pendingFolder);
-      } else if (stored.workspaceRoot) {
+      } else if (targetRoot) {
         // Reopen the last workspace — via setWorkspaceRoot, not setWorkspace:
         // restoring shouldn't force the sidebar open (its state is persisted
         // separately) or reshuffle recents. A root that doesn't read right now
         // stays in the stored session (see sessionWorkspaceRoot) but isn't
         // shown, so an unmounted drive self-heals on a later launch.
         const exists = await invoke<boolean>("path_exists", {
-          path: stored.workspaceRoot,
+          path: targetRoot,
         }).catch(() => false);
-        if (exists) setWorkspaceRoot(stored.workspaceRoot);
+        if (exists) setWorkspaceRoot(targetRoot);
       }
       setReady(true);
     })();
-  }, [openTab, setWorkspace, loadActiveContent]);
+  }, [openTab, setWorkspace, loadActiveContent, rebuildTabs]);
 
   // Report this window's content (workspace folder + open file paths + active
   // tab) to the backend whenever it changes, so folder opens and the in-app
@@ -1894,7 +1985,6 @@ export default function App() {
   const onMarkdownChange = useCallback(
     (md: string) => {
       currentMarkdownRef.current = md;
-      setDocEmpty(md.trim().length === 0);
       // The first onChange after a (re)mount is the editor's own mount-time
       // serialization of the loaded doc (Editor emits it explicitly). Re-baseline
       // on it so Milkdown's markdown normalization alone never counts as an edit.
@@ -2086,14 +2176,14 @@ export default function App() {
     try {
       const chosen = await openDialog({ directory: true, multiple: false });
       if (typeof chosen === "string") {
-        setWorkspace(chosen);
+        await openWorkspace(chosen);
         setSidebarMode("search");
         setWsFocusToken((t) => t + 1);
       }
     } catch (e) {
       console.error("open folder failed", e);
     }
-  }, [workspaceRoot, setWorkspace]);
+  }, [workspaceRoot, openWorkspace]);
 
   // Open a workspace-search result: load the file, then seed the search query
   // so the match is highlighted and scrolled into view (WYSIWYG has no line to
@@ -2238,7 +2328,6 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const activeMissing = activeTab?.missing === true;
   const showSidebar = workspaceRoot != null && sidebarOpen;
-  const isDraft = activeTab?.kind === "draft";
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // html-only documents render in the iframe alone; there is no markdown
@@ -2440,7 +2529,6 @@ export default function App() {
             initialMarkdown={initialMarkdown}
             onChange={onMarkdownChange}
             onSearchState={setFindInfo}
-            onFocusChange={setEditorFocused}
             onReady={restoreActiveScroll}
           />
         )}
@@ -2462,9 +2550,11 @@ export default function App() {
             onCloseTab={() => void closeTab(activeTab.id)}
           />
         )}
-        {(!activeTab || (isDraft && docEmpty && !editorFocused)) && (
+        {/* Only when NO document is open (the welcome screen). An open note —
+            even an empty, unsaved draft — shows the bare editor, like an
+            untitled tab in VS Code. */}
+        {!activeTab && (
           <ScratchEmptyState
-            noDoc={!activeTab}
             recents={recents}
             onNewNote={() => void newDraft()}
             onOpenFile={openFilePicker}
@@ -3044,15 +3134,15 @@ function Settings({
   );
 }
 
+// The welcome screen shown when no document is open. (An open note, including
+// an empty unsaved draft, shows the bare editor instead — no overlay.)
 function ScratchEmptyState({
-  noDoc,
   recents,
   onNewNote,
   onOpenFile,
   onOpenFolder,
   onOpenRecent,
 }: {
-  noDoc: boolean;
   recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
@@ -3062,17 +3152,13 @@ function ScratchEmptyState({
   return (
     <div className="scratch-empty" aria-hidden={false}>
       <div className="scratch-empty-card">
-        <div className="scratch-empty-hint">
-          {noDoc ? "No note open" : "Start typing to jot a note"}
-        </div>
+        <div className="scratch-empty-hint">No note open</div>
         <div className="scratch-empty-actions">
-          {noDoc && (
-            <button className="scratch-empty-button" onClick={onNewNote}>
-              <FileIcon />
-              <span>New note</span>
-              <span className="scratch-empty-kbd">⌘N</span>
-            </button>
-          )}
+          <button className="scratch-empty-button" onClick={onNewNote}>
+            <FileIcon />
+            <span>New note</span>
+            <span className="scratch-empty-kbd">⌘N</span>
+          </button>
           <button className="scratch-empty-button" onClick={onOpenFile}>
             <FileIcon />
             <span>Open file</span>
