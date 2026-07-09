@@ -144,7 +144,8 @@ export default function DictationSetup({
               ))}
             </select>
             <div className="setup-step-note">
-              The polish pass only fixes what the speech model misheard — it never rewrites.
+              The polish pass cleans the transcript — fillers, stutters, self-corrections,
+              misheard words — without rewriting what you meant to say.
               Chunks wait for it as ghost text; the ✦ pill in the recording bar skips the wait.
             </div>
           </div>

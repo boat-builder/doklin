@@ -1,6 +1,7 @@
 // MLX "polish" pass: a quantized instruct model (default Qwen3-4B) that
-// corrects raw STT chunks — and, as a background job, maintains the rolling
-// document summary the correction prompt uses as context.
+// cleans raw STT chunks — fillers, stutters, self-corrections, misheard
+// words — and, as a background job, maintains the rolling document summary
+// the correction prompt uses as context.
 //
 // One model, one GPU: every request funnels through a two-lane queue where
 // corrections always run before summary jobs, so polish latency never waits
@@ -159,8 +160,10 @@ actor Corrector {
         do {
             let raw = try await generate(container, system: system, user: user, maxTokens: 1024)
             let text = Self.cleanModelOutput(raw)
+            // Empty output is legitimate (a filler-only chunk cleans to
+            // nothing); the frontend guard decides whether to accept it.
             var payload: [String: Any] = [
-                "event": "correct", "id": req.id, "ok": !text.isEmpty, "text": text,
+                "event": "correct", "id": req.id, "ok": true, "text": text,
                 "ms": Int(Date().timeIntervalSince(started) * 1000),
             ]
             if debug {
@@ -224,18 +227,36 @@ actor Corrector {
     // MARK: - Prompts
 
     static let correctionSystemPrompt = """
-        You correct speech-to-text transcripts. The user dictated text into a document; \
-        the STT engine may have misheard words, chosen wrong homophones, mangled technical \
-        terms or proper nouns, or garbled words from accented / non-native pronunciation.
+        You clean up speech-to-text dictation. The user dictated text into a document; the raw \
+        transcript carries speech artifacts and STT errors that must not land in the document. \
+        Turn the text between <chunk> and </chunk> into what the speaker meant to write:
 
-        Your ONLY job is to fix transcription errors, punctuation, and capitalization in the text \
-        between <chunk> and </chunk>.
-        - Do NOT rewrite, rephrase, restructure, shorten, expand, summarize, or "improve" style.
-        - Preserve the speaker's exact wording and meaning. Keep their phrasing even if informal.
-        - Use the surrounding context ONLY to disambiguate likely-misheard words and domain terms. \
-        NEVER copy any context text (summary, section, text before/after) into your output.
-        - If the chunk is already correct, return it unchanged.
-        Output ONLY the corrected chunk text — no tags, no quotes, no explanations, no markdown fences.
+        1. Remove filler sounds and filler words: "um", "uh", "erm", "hmm", and phrases like \
+        "you know", "I mean", "like", "sort of", "basically" when they carry no meaning.
+        2. Remove stutters and accidental repetitions ("the the", "I I think").
+        3. Apply self-corrections: when the speaker revises themselves ("Tuesday — uh no, wait, \
+        Wednesday", "ask John, I mean Jane"), keep ONLY the final version and drop the false \
+        start and the correction phrase itself.
+        4. Drop abandoned sentence fragments the speaker restarted.
+        5. Fix STT errors: misheard words, wrong homophones, mangled technical terms or proper \
+        nouns — use the surrounding context to pick the word the speaker actually said.
+        6. Fix punctuation, capitalization, and sentence boundaries. Write numbers, dates, \
+        times, and units in standard written form.
+
+        Rules:
+        - Preserve the speaker's meaning, tone, and word choice otherwise. Do NOT summarize, \
+        shorten ideas, add content, or "improve" style. Keep informal phrasing that was intended.
+        - Use the context (summary, section, text before/after) ONLY to disambiguate words. \
+        NEVER copy any context text into your output.
+        - If the chunk is only filler ("um", "uh"), output exactly [[empty]].
+        - If the chunk is already clean, return it unchanged.
+        Output ONLY the cleaned chunk text — no tags, no quotes, no explanations, no markdown fences.
+
+        Examples:
+        <chunk>um so the the meeting is at uh five thirty</chunk> → So the meeting is at 5:30.
+        <chunk>send it to John on Tuesday actually no make that Wednesday</chunk> → Send it to John on Wednesday.
+        <chunk>we deployed it with cube CTL yesterday</chunk> → We deployed it with kubectl yesterday.
+        <chunk>uh umm</chunk> → [[empty]]
         """
 
     static func correctionUserPrompt(_ req: CorrectRequest) -> String {
@@ -257,7 +278,8 @@ actor Corrector {
 
     /// Strip wrappers small models add despite instructions: markdown fences,
     /// surrounding quotes, echoed <chunk> tags, `<think>` blocks from
-    /// reasoning-tuned checkpoints.
+    /// reasoning-tuned checkpoints. Maps the [[empty]] sentinel (filler-only
+    /// chunk, see correction prompt) to an actual empty string.
     static func cleanModelOutput(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = s.range(of: "</think>") {
@@ -275,6 +297,8 @@ actor Corrector {
         if s.count > 1, s.hasPrefix("\""), s.hasSuffix("\"") {
             s = String(s.dropFirst().dropLast())
         }
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.lowercased() == "[[empty]]" { return "" }
+        return s
     }
 }

@@ -181,18 +181,56 @@ export function stripContextEcho(out: string, before: string, after: string): st
   return s;
 }
 
-// Reject a "correction" that rewrote instead of corrected: a real fix keeps
-// roughly the same shape. Character-length band + word-level overlap.
+// Filler sounds the polish pass is expected to delete. Used only by the
+// guard below to judge shrinkage against what raw looks like *after* the
+// expected cleanup, so dropping these never counts against the model.
+const FILLER_RE = /\b(?:u+m+|u+h+|erm+|hmm+|mm+h*|a+h+|e+r+)\b/gi;
+
+// Self-correction language: when raw contains one of these, the speaker
+// revised themselves mid-utterance and polish legitimately drops the false
+// start, so the guard allows a much deeper shrink.
+const CORRECTION_MARKER_RE =
+  /\b(?:no,? wait|wait,? no|wait,? actually|i mean|i meant|actually,? no|no,? actually|make that|scratch that|strike that)\b/i;
+
+/// Lowercased word list with fillers removed and immediate repeats
+/// ("the the") collapsed — the part of raw that should survive polish.
+function substantiveWords(text: string): string[] {
+  const words = text
+    .replace(FILLER_RE, " ")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}']+/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  return words.filter((w, i) => w !== words[i - 1]);
+}
+
+// Reject a "correction" that rewrote instead of cleaned. Polish is allowed to
+// delete fillers, stutters, false starts, and self-corrected text, so the
+// guard compares against the substantive part of raw and asks two questions:
+// did the output keep enough of it (anti-summarize), and is the output made
+// of raw's own words (anti-hallucination / anti-context-echo)?
 export function correctionLooksSafe(raw: string, out: string): boolean {
-  if (!out) return false;
-  const ratio = out.length / Math.max(1, raw.length);
-  if (ratio < 0.55 || ratio > 1.8) return false;
-  const rawWords = raw.toLowerCase().split(/\s+/).filter(Boolean);
-  const outWords = new Set(out.toLowerCase().split(/\s+/).filter(Boolean));
-  if (rawWords.length >= 6) {
-    let kept = 0;
-    for (const w of rawWords) if (outWords.has(w)) kept++;
-    if (kept / rawWords.length < 0.5) return false;
+  const rawCore = substantiveWords(raw);
+  const outWords = substantiveWords(out);
+  // A filler-only chunk ("um, uh") may legitimately clean to nothing; any
+  // other empty/near-empty result is the model going off the rails.
+  if (rawCore.length === 0) return outWords.length === 0;
+  if (outWords.length === 0) return false;
+  // Growth bound: corrections don't add material — a big expansion means the
+  // model echoed context or padded with its own prose.
+  if (out.length / Math.max(1, raw.length) > 1.8) return false;
+  // Shrink bound, against the filler-stripped raw. Self-correction markers
+  // license dropping whole false starts; otherwise most content must survive.
+  const minKeep = CORRECTION_MARKER_RE.test(raw) ? 0.25 : 0.5;
+  if (outWords.length / rawCore.length < minKeep) return false;
+  // The output should be built from raw's own (substantive) words; a few new
+  // ones are the point of polish (fixed mishears), but mostly-new text means
+  // a rewrite. Skip for tiny outputs where one changed word skews the ratio.
+  if (outWords.length >= 6) {
+    const rawSet = new Set(rawCore);
+    let fromRaw = 0;
+    for (const w of outWords) if (rawSet.has(w)) fromRaw++;
+    if (fromRaw / outWords.length < 0.6) return false;
   }
   return true;
 }
@@ -632,7 +670,11 @@ export class DictationController {
       const out = stripContextEcho(rawOut, ctx?.before ?? "", ctx?.after ?? "");
       if (res.ok && correctionLooksSafe(chunk.raw, out)) {
         chunk.text = out;
-        decision = out === chunk.raw ? "accepted (unchanged)" : "accepted";
+        decision = !out
+          ? "accepted (filler-only chunk, dropped)"
+          : out === chunk.raw
+            ? "accepted (unchanged)"
+            : "accepted";
       } else {
         decision = res.ok ? "rejected: rewrite guard" : `failed: ${String(res.message ?? "")}`;
       }
