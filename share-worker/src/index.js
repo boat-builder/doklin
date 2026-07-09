@@ -385,12 +385,14 @@ function landingPage(env, url) {
   // place it lives now, pulled out of the footer row so the page reads as a
   // packaged Doklin page). A small LinkedIn glyph marks it, or a generic
   // external-link glyph if OWNER_LINK is not a LinkedIn URL.
+  // viewBox is cropped to the glyph bounds so it sizes to the text cap height
+  // predictably (see .landing-name-badge svg). The badge sits before the name.
   const nameBadge = isLinkedIn
-    ? `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`
-    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M8 5h11v11"/><path d="M19 5 5 19"/></svg>`;
+    ? `<svg viewBox="3.2 3.1 17.6 17.6" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`
+    : `<svg viewBox="4 4 16 16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M8 5h11v11"/><path d="M19 5 5 19"/></svg>`;
   const nameHtml =
     owner && link
-      ? `<a class="landing-name" href="${escapeHtml(link)}" rel="me noopener">${escapeHtml(owner)}<span class="landing-name-badge">${nameBadge}</span></a>`
+      ? `<a class="landing-name" href="${escapeHtml(link)}" rel="me noopener"><span class="landing-name-badge">${nameBadge}</span>${escapeHtml(owner)}</a>`
       : owner
         ? escapeHtml(owner)
         : "";
@@ -499,12 +501,12 @@ const LANDING_CSS = `
 .landing-name:hover { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
 .landing-name-badge {
   display: inline-flex;
-  margin-left: 0.14em;
-  vertical-align: 0.08em;
+  margin-right: 0.18em;
+  vertical-align: baseline;
   color: var(--muted);
   transition: color 0.12s;
 }
-.landing-name-badge svg { width: 0.5em; height: 0.5em; }
+.landing-name-badge svg { width: 0.72em; height: 0.72em; }
 .landing-name:hover .landing-name-badge { color: var(--accent); }
 .landing-lead {
   max-width: 34rem;
