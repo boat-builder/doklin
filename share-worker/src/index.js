@@ -314,7 +314,7 @@ function shellPage(title, message, status = 200) {
 // latest-download alias (kept in sync by .github/workflows/release.yml). Set
 // DOWNLOAD_URL="" to hide the button entirely.
 const DEFAULT_DOWNLOAD_URL =
-  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-universal.dmg";
+  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
 
 function landingPage(env, url) {
   const host = url.hostname;
@@ -339,7 +339,7 @@ function landingPage(env, url) {
 
   const downloadButton = downloadUrl
     ? `<a class="landing-btn" href="${escapeHtml(downloadUrl)}">${appleIcon}Download Doklin for macOS</a>
-  <p class="landing-sub">Free · Universal (Apple Silicon &amp; Intel)</p>`
+  <p class="landing-sub">Free · Apple Silicon</p>`
     : "";
   const authorButton = link
     ? `<a class="landing-btn landing-btn-ghost" href="${escapeHtml(link)}" rel="me noopener">
