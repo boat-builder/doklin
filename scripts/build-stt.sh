@@ -48,7 +48,19 @@ fi
 DEST="../binaries"
 mkdir -p "$DEST"
 
-cp -f "$PRODUCTS/doklin-stt" "$DEST/doklin-stt-$TRIPLE"
+# xcodebuild's generic/platform=macOS output is a universal (arm64 + x86_64)
+# Mach-O, so one file legitimately serves every triple name. Stage ALL of
+# them: a `tauri build --target universal-apple-darwin` compiles the app once
+# per arch, and each pass's build script requires the sidecar under its own
+# per-arch triple (the failed CI error was exactly `binaries/
+# doklin-stt-x86_64-apple-darwin doesn't exist`); the bundler then embeds the
+# -universal one.
+for name in "doklin-stt-$TRIPLE" \
+            doklin-stt-aarch64-apple-darwin \
+            doklin-stt-x86_64-apple-darwin \
+            doklin-stt-universal-apple-darwin; do
+    cp -f "$PRODUCTS/doklin-stt" "$DEST/$name"
+done
 # Resource bundles (Metal kernels etc.) must travel with the binary. Remove
 # old copies first — `cp -R` MERGES directories, which leaves stale (and
 # sometimes read-only) files behind and later breaks tauri-build's resource
