@@ -25,14 +25,17 @@ import {
   type InspectorEntry,
 } from "./dictation";
 import {
+  contentHash,
   deletePage,
   getShareConfig,
   pushOgImage,
   pushPage,
   readShares,
   writeShares,
+  type PushedFingerprint,
   type ShareConfig,
   type ShareEntry,
+  type ShareParts,
 } from "./share";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 
@@ -74,6 +77,17 @@ const dirname = (p: string) => {
   return i > 0 ? p.slice(0, i) : p;
 };
 const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+const HTML_EXT_RE = /\.html$/i;
+
+// A document is a markdown file, an html file, or the pair: same stem, side by
+// side ("notes.md" + "notes.html" — the html is a generated *rendition* of the
+// markdown, not a separate document). The pair opens as ONE tab keyed on the
+// markdown path, with an in-editor MD/HTML view toggle.
+const isHtmlPath = (p: string) => HTML_EXT_RE.test(p);
+const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html";
+const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
+
+type DocView = "md" | "html";
 
 // Suggest a filename (no extension) for saving a draft: its first non-empty
 // line with markdown syntax and filesystem-hostile characters stripped, falling
@@ -125,12 +139,40 @@ const uuid = () =>
     : `id-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
 const tabTitle = (t: Tab) => (t.kind === "draft" ? t.title ?? "Untitled" : basename(t.path));
 // Title used on the public share page / OG image: the tab title, minus the
-// markdown extension for real files ("notes.md" shares as "notes").
+// document extension for real files ("notes.md" shares as "notes").
 const docShareTitle = (t: Tab) =>
   t.kind === "draft"
     ? t.title ?? "Untitled"
-    : basename(t.path).replace(/\.(md|markdown|mdown|mkd)$/i, "");
+    : basename(t.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
 const SHARE_PUSH_DEBOUNCE_MS = 1500;
+// Reconciliation (disk vs last-pushed fingerprints) runs at launch and on
+// window focus, but at most this often — focus events come in bursts.
+const SHARE_RECONCILE_MIN_MS = 15_000;
+
+// What a push reads from disk: each rendition's content plus the snapshot of
+// the file it came from, so the stored fingerprint describes exactly the bytes
+// that were published.
+type SharePartsOnDisk = ShareParts & {
+  mdSnap: FileSnapshot | null;
+  htmlSnap: FileSnapshot | null;
+};
+
+// Fingerprint freshly-pushed parts — what reconciliation later compares the
+// disk against.
+async function fingerprintParts(
+  parts: SharePartsOnDisk,
+): Promise<{ md: PushedFingerprint | null; html: PushedFingerprint | null }> {
+  return {
+    md:
+      parts.markdown === null
+        ? null
+        : { snap: parts.mdSnap, hash: await contentHash(parts.markdown) },
+    html:
+      parts.html === null
+        ? null
+        : { snap: parts.htmlSnap, hash: await contentHash(parts.html) },
+  };
+}
 const THEME_LABEL: Record<Theme, string> = {
   system: "System",
   light: "Light",
@@ -340,10 +382,13 @@ export default function App() {
   // panel re-lists (list_drafts reads from disk, so the refresh has to follow
   // the write, not the keystroke). The 600ms autosave debounce is the rate cap.
   const [draftsRefreshToken, setDraftsRefreshToken] = useState(0);
-  // Undo stack for trashed entries. `openPaths` are the file tabs that were
-  // closed by the delete (the entry itself for a file, everything under it for
-  // a folder) so ⌘Z can reopen them after restoring.
-  const deletedStackRef = useRef<{ path: string; trashPath: string; openPaths: string[] }[]>([]);
+  // Undo stack for trashed entries. `files` is everything one delete moved to
+  // the Trash (a markdown file's html rendition rides along); `openPaths` are
+  // the file tabs the delete closed (the entry itself for a file, everything
+  // under it for a folder) so ⌘Z can reopen them after restoring.
+  const deletedStackRef = useRef<
+    { files: { path: string; trashPath: string }[]; openPaths: string[] }[]
+  >([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
   const baselineCapturedRef = useRef<boolean>(false);
@@ -363,6 +408,26 @@ export default function App() {
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+
+  // md/html rendition state for the ACTIVE document. `hasHtml` = an html
+  // rendition exists on disk; `docView` = which version the editor area shows;
+  // `htmlContent` = the rendition's markup (fed to a sandboxed iframe).
+  // htmlPathRef mirrors the rendition path for async readers (watcher events,
+  // share pushes). The markdown editor stays mounted (hidden) in html view so
+  // toggling back keeps cursor, undo history, and unsaved state.
+  const [docView, setDocViewState] = useState<DocView>("md");
+  const docViewRef = useRef<DocView>("md");
+  const [hasHtml, setHasHtml] = useState(false);
+  const [htmlContent, setHtmlContent] = useState<string | null>(null);
+  const htmlPathRef = useRef<string | null>(null);
+  // Remembered view per document path (session-scoped): a tab you left on HTML
+  // comes back on HTML; an html file opened explicitly starts on HTML.
+  const viewPrefsRef = useRef<Map<string, DocView>>(new Map());
+
+  const applyDocView = useCallback((v: DocView) => {
+    docViewRef.current = v;
+    setDocViewState(v);
+  }, []);
 
   // In-app auto-update: quiet check on launch, plus manual re-check / one-click
   // install from the Settings menu. See updater.ts.
@@ -395,9 +460,51 @@ export default function App() {
     [],
   );
 
-  // Push the current content of a shared doc to its remote page. Content comes
-  // from the live editor when the doc is active, from disk otherwise. A title
-  // change (draft renamed / promoted) also refreshes the OG image.
+  // Assemble what a share push carries: the markdown document and/or its html
+  // rendition, always read fresh from DISK — the disk is what a share mirrors
+  // (in-editor keystrokes reach it through autosave, which schedules its own
+  // push). Reading and fingerprinting the same bytes keeps reconciliation
+  // honest. Returns null when the primary file is unreadable (source gone; the
+  // share stays until stopped explicitly).
+  const readShareParts = useCallback(
+    async (target: string): Promise<SharePartsOnDisk | null> => {
+      if (isHtmlPath(target)) {
+        try {
+          const r = await invoke<ReadFileResult>("read_file", { path: target });
+          return { markdown: null, mdSnap: null, html: r.contents, htmlSnap: r.snapshot };
+        } catch {
+          return null;
+        }
+      }
+      let markdown: string;
+      let mdSnap: FileSnapshot;
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path: target });
+        markdown = r.contents;
+        mdSnap = r.snapshot;
+      } catch {
+        return null;
+      }
+      let html: string | null = null;
+      let htmlSnap: FileSnapshot | null = null;
+      try {
+        const sibling = htmlSiblingOf(target);
+        if (await invoke<boolean>("path_exists", { path: sibling })) {
+          const r = await invoke<ReadFileResult>("read_file", { path: sibling });
+          html = r.contents;
+          htmlSnap = r.snapshot;
+        }
+      } catch {
+        // rendition unreadable right now; share the markdown alone
+      }
+      return { markdown, mdSnap, html, htmlSnap };
+    },
+    [],
+  );
+
+  // Push the current content of a shared doc to its remote page. Both
+  // renditions travel together (see readShareParts). A title change (draft
+  // renamed / promoted) also refreshes the OG image.
   const pushSharedNow = useCallback(
     async (target: string) => {
       const entry = sharesRef.current[target];
@@ -406,22 +513,15 @@ export default function App() {
       if (!config) return;
       const tab = tabsRef.current.find((t) => t.path === target);
       const title = tab ? docShareTitle(tab) : entry.title;
-      let contents: string;
-      if (pathRef.current === target) {
-        contents = currentMarkdownRef.current;
-      } else {
-        try {
-          contents = (await invoke<ReadFileResult>("read_file", { path: target })).contents;
-        } catch {
-          return; // source is gone; the share stays until stopped explicitly
-        }
-      }
+      const parts = await readShareParts(target);
+      if (!parts) return; // source is gone; the share stays until stopped explicitly
       try {
-        await pushPage(config, entry.id, title, contents);
+        await pushPage(config, entry.id, title, parts);
         if (title !== entry.title) await pushOgImage(config, entry.id, title);
+        const pushed = await fingerprintParts(parts);
         updateShares((prev) =>
           prev[target]
-            ? { ...prev, [target]: { ...prev[target], title, updatedAt: Date.now() } }
+            ? { ...prev, [target]: { ...prev[target], title, updatedAt: Date.now(), pushed } }
             : prev,
         );
       } catch (e) {
@@ -429,7 +529,7 @@ export default function App() {
         console.error("share push failed", target, e);
       }
     },
-    [updateShares],
+    [updateShares, readShareParts],
   );
 
   const scheduleSharePush = useCallback(
@@ -448,6 +548,64 @@ export default function App() {
     },
     [pushSharedNow],
   );
+
+  // Does `entry`'s local disk content differ from what was last pushed?
+  // Stat-first: a matching snapshot rules a file unchanged without reading it;
+  // otherwise read + hash decides (so a touched-but-identical file doesn't
+  // push). A missing fingerprint (entry from before reconciliation existed)
+  // counts as changed — one establishing push and it never re-fires.
+  const shareNeedsPush = useCallback(async (entry: ShareEntry): Promise<boolean> => {
+    const fp = entry.pushed;
+    if (!fp) return true;
+    const changed = async (
+      path: string,
+      pushed: PushedFingerprint | null,
+    ): Promise<boolean> => {
+      const snap = await invoke<FileSnapshot>("stat_file", { path }).catch(() => null);
+      if (!snap) return pushed !== null; // gone locally; the published copy is stale
+      if (!pushed) return true; // appeared since the last push
+      if (
+        pushed.snap &&
+        pushed.snap.mtime_ms === snap.mtime_ms &&
+        pushed.snap.size === snap.size
+      ) {
+        return false;
+      }
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path });
+        return (await contentHash(r.contents)) !== pushed.hash;
+      } catch {
+        return true; // vanished mid-check; the push path sorts it out
+      }
+    };
+    if (isHtmlPath(entry.path)) return changed(entry.path, fp.html);
+    if (await changed(entry.path, fp.md)) return true;
+    return changed(htmlSiblingOf(entry.path), fp.html);
+  }, []);
+
+  // Catch up every share with edits made outside the app — the html rendition
+  // regenerated by an AI tool is the common case, an externally rewritten
+  // markdown the rarer one. Event-driven pushes cover the active document;
+  // this pass covers background tabs, unopened files, and changes made while
+  // the app was closed. Runs in the main window only (one registry, one
+  // reconciler) and at most once per SHARE_RECONCILE_MIN_MS.
+  const lastReconcileRef = useRef(0);
+  const reconcileShares = useCallback(async () => {
+    if (!isMainWindow) return;
+    const entries = Object.values(sharesRef.current);
+    if (entries.length === 0) return;
+    const now = Date.now();
+    if (now - lastReconcileRef.current < SHARE_RECONCILE_MIN_MS) return;
+    lastReconcileRef.current = now;
+    if (!(await getShareConfig())) return;
+    for (const entry of entries) {
+      try {
+        if (await shareNeedsPush(entry)) scheduleSharePush(entry.path);
+      } catch (e) {
+        console.error("share reconcile failed", entry.path, e);
+      }
+    }
+  }, [shareNeedsPush, scheduleSharePush]);
 
   // In-file find (⌘F): a bar over the editor that drives the ProseMirror search
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
@@ -642,10 +800,12 @@ export default function App() {
   }, []);
 
   // Snapshot the active tab's scroll offset — call this synchronously BEFORE
-  // anything that remounts the editor (tab switch, external reload).
+  // anything that remounts the editor (tab switch, external reload). In html
+  // view the editor is hidden and the wrap doesn't scroll (the iframe scrolls
+  // internally) — capturing would clobber the saved markdown offset with 0.
   const captureActiveScroll = useCallback(() => {
     const id = activeIdRef.current;
-    if (!id) return;
+    if (!id || docViewRef.current === "html") return;
     const wrap = document.querySelector(".editor-wrap");
     if (wrap) scrollPositionsRef.current.set(id, wrap.scrollTop);
   }, []);
@@ -685,6 +845,10 @@ export default function App() {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
+    // An html-only document: rendered read-only, never loaded into the
+    // markdown editor and never an autosave target (pathRef stays null).
+    const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
+
     let contents = "";
     let snapshot: FileSnapshot | null = null;
     let failed = false;
@@ -710,6 +874,10 @@ export default function App() {
       setDocEmpty(true);
       setEditorFocused(false); // the editor unmounts without firing blur
       setConflict(null);
+      htmlPathRef.current = null;
+      setHtmlContent(null);
+      setHasHtml(false);
+      applyDocView("md");
       try {
         await invoke("unwatch_file");
       } catch {
@@ -719,19 +887,63 @@ export default function App() {
     }
     setTabMissing(tab.id, false); // the file is back (or was never gone)
     baselineCapturedRef.current = false;
-    pathRef.current = tab.path;
-    currentMarkdownRef.current = contents;
-    lastSavedRef.current = contents;
-    snapshotRef.current = snapshot;
-    setInitialMarkdown(contents);
+    pathRef.current = htmlOnly ? null : tab.path;
+    currentMarkdownRef.current = htmlOnly ? "" : contents;
+    lastSavedRef.current = htmlOnly ? "" : contents;
+    snapshotRef.current = htmlOnly ? null : snapshot;
+    setInitialMarkdown(htmlOnly ? "" : contents);
     setDirty(false);
-    setDocEmpty(contents.trim().length === 0);
+    setDocEmpty(htmlOnly ? false : contents.trim().length === 0);
     setEditorFocused(false); // the remounted editor starts unfocused
     setConflict(null);
+
+    // Resolve the document's html rendition and which view to show. Markdown
+    // files probe for a same-stem .html sibling; drafts are app-managed
+    // markdown and never have one.
+    let htmlPath: string | null = null;
+    if (htmlOnly) {
+      htmlPath = tab.path;
+    } else if (tab.kind === "file") {
+      const sibling = htmlSiblingOf(tab.path);
+      const exists = await invoke<boolean>("path_exists", { path: sibling }).catch(
+        () => false,
+      );
+      if (exists) htmlPath = sibling;
+    }
+    htmlPathRef.current = htmlPath;
+    setHasHtml(htmlPath != null);
+    const view: DocView =
+      htmlOnly || (htmlPath != null && viewPrefsRef.current.get(tab.path) === "html")
+        ? "html"
+        : "md";
+    applyDocView(view);
+    if (view === "html" && htmlPath) {
+      if (htmlOnly) {
+        setHtmlContent(contents);
+      } else {
+        try {
+          const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
+          setHtmlContent(r.contents);
+        } catch (e) {
+          console.error("read failed", htmlPath, e);
+          setHtmlContent(null);
+          applyDocView("md");
+        }
+      }
+    } else {
+      setHtmlContent(null);
+    }
     setLoadKey((k) => k + 1);
+
     if (tab.kind === "file") {
       try {
-        await invoke("watch_file", { path: tab.path });
+        // Watch the document pair: the markdown for the edit/conflict flow,
+        // the rendition so external regeneration re-renders (and re-pushes a
+        // share) live.
+        await invoke("watch_file", {
+          path: tab.path,
+          extra: htmlOnly ? null : htmlPath,
+        });
       } catch (e) {
         console.error("watch_file failed", e);
       }
@@ -742,7 +954,7 @@ export default function App() {
         // ignore
       }
     }
-  }, [setTabMissing]);
+  }, [setTabMissing, applyDocView]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -801,6 +1013,19 @@ export default function App() {
   // CLI) and for reopening a draft from the drafts list.
   const openTab = useCallback(
     async (p: string, kind: TabKind) => {
+      // An html file whose markdown sibling exists is a rendition of THAT
+      // document — open the pair as one tab keyed on the markdown path,
+      // starting on the view the user actually asked for.
+      if (kind === "file" && isHtmlPath(p)) {
+        const md = mdSiblingOf(p);
+        const paired = await invoke<boolean>("path_exists", { path: md }).catch(
+          () => false,
+        );
+        if (paired) {
+          viewPrefsRef.current.set(md, "html");
+          p = md;
+        }
+      }
       const existing = tabsRef.current.find((t) => t.path === p);
       if (existing) {
         if (existing.id === activeIdRef.current) {
@@ -900,7 +1125,9 @@ export default function App() {
     try {
       const chosen = await openDialog({
         multiple: false,
-        filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdown", "mkd"] }],
+        filters: [
+          { name: "Documents", extensions: ["md", "markdown", "mdown", "mkd", "html"] },
+        ],
       });
       if (typeof chosen === "string") await openTab(chosen, "file");
     } catch (e) {
@@ -915,7 +1142,9 @@ export default function App() {
     try {
       const chosen = await openDialog({
         multiple: false,
-        filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdown", "mkd"] }],
+        filters: [
+          { name: "Documents", extensions: ["md", "markdown", "mdown", "mkd", "html"] },
+        ],
       });
       if (typeof chosen === "string") {
         addRecent(chosen, "file");
@@ -980,13 +1209,19 @@ export default function App() {
       const config = await getShareConfig();
       if (!config) throw new Error("Sharing is not configured.");
       const title = docShareTitle(active);
-      await pushPage(config, id, title, currentMarkdownRef.current);
+      // Pushes read the disk; land any keystrokes still inside the autosave
+      // debounce so the first published copy is what the user is looking at.
+      await flushPendingAutosave();
+      const parts = await readShareParts(active.path);
+      if (!parts) throw new Error("Could not read the document.");
+      await pushPage(config, id, title, parts);
       try {
         await pushOgImage(config, id, title);
       } catch (e) {
         // The page is live either way; the link preview just won't have an image.
         console.error("og image upload failed", e);
       }
+      const pushed = await fingerprintParts(parts);
       const now = Date.now();
       updateShares((prev) => ({
         ...prev,
@@ -997,10 +1232,11 @@ export default function App() {
           title,
           sharedAt: now,
           updatedAt: now,
+          pushed,
         },
       }));
     },
-    [updateShares],
+    [updateShares, readShareParts, flushPendingAutosave],
   );
 
   // Delete the remote page and forget the share (the local file is untouched).
@@ -1045,10 +1281,14 @@ export default function App() {
       setDirty(false);
       setConflict(null);
       setLoadKey((k) => k + 1);
+      // The document just adopted outside edits; a live share follows them
+      // (covers both the watcher's auto-reload and the conflict banner's
+      // "Reload from disk").
+      if (sharesRef.current[target]) scheduleSharePush(target);
     } catch (e) {
       console.error("reload failed", e);
     }
-  }, [captureActiveScroll]);
+  }, [captureActiveScroll, scheduleSharePush]);
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
@@ -1058,6 +1298,46 @@ export default function App() {
       scheduleAutosave();
     }
   }, [scheduleAutosave]);
+
+  // The MD/HTML view toggle for the active document. Switching to HTML
+  // re-reads the rendition (freshest copy) and hides — not unmounts — the
+  // markdown editor, so switching back is instant and keeps cursor, undo
+  // history, and any unsaved state.
+  const selectDocView = useCallback(
+    async (v: DocView) => {
+      if (v === docViewRef.current) return;
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!tab) return;
+      if (v === "html") {
+        const htmlPath = htmlPathRef.current;
+        if (!htmlPath) return; // no rendition — the toggle side is disabled
+        captureActiveScroll(); // remember the markdown offset before hiding it
+        // Dictation is an editing mode and the html view is read-only: end an
+        // active session (its pending chunks flush) before hiding the editor.
+        await dictationRef.current?.stop();
+        flushPendingAutosave();
+        setFindOpen(false);
+        setFindQuery(""); // find targets the markdown editor only
+        let contents: string;
+        try {
+          contents = (await invoke<ReadFileResult>("read_file", { path: htmlPath }))
+            .contents;
+        } catch (e) {
+          console.error("read failed", htmlPath, e);
+          return; // rendition vanished from disk; stay on markdown
+        }
+        setHtmlContent(contents);
+        applyDocView("html");
+        viewPrefsRef.current.set(tab.path, "html");
+      } else {
+        if (tab.kind === "file" && isHtmlPath(tab.path)) return; // html-only doc
+        applyDocView("md");
+        viewPrefsRef.current.set(tab.path, "md");
+        restoreActiveScroll(); // the wrap regained height; put the reader back
+      }
+    },
+    [captureActiveScroll, flushPendingAutosave, applyDocView, restoreActiveScroll],
+  );
 
   // Reset to the "no document open" state (welcome screen). Clears the per-doc
   // refs so autosave is a no-op and unmounts the editor.
@@ -1081,7 +1361,11 @@ export default function App() {
     setDocEmpty(true);
     setEditorFocused(false);
     setConflict(null);
-  }, []);
+    htmlPathRef.current = null;
+    setHtmlContent(null);
+    setHasHtml(false);
+    applyDocView("md");
+  }, [applyDocView]);
 
   // Close a tab. Empty drafts are auto-discarded (nothing to recover); drafts
   // with content persist and stay reachable from the drafts list. Closing the
@@ -1194,9 +1478,28 @@ export default function App() {
         alert(`Could not delete ${target}\n${e}`);
         return;
       }
+      const files = [{ path: target, trashPath }];
+      // A markdown file's html rendition is trashed with it — they are one
+      // document. Best-effort: the markdown is already in the Trash.
+      if (kind === "file" && MD_EXT_RE.test(target)) {
+        const sibling = htmlSiblingOf(target);
+        const exists = await invoke<boolean>("path_exists", { path: sibling }).catch(
+          () => false,
+        );
+        if (exists) {
+          try {
+            files.push({
+              path: sibling,
+              trashPath: await invoke<string>("trash_file", { path: sibling }),
+            });
+          } catch (e) {
+            console.error("trash failed", e);
+            alert(`Deleted ${basename(target)} but not its HTML version.\n${e}`);
+          }
+        }
+      }
       deletedStackRef.current.push({
-        path: target,
-        trashPath,
+        files,
         openPaths: affected.map((t) => t.path),
       });
       const sel = sidebarSelectionRef.current;
@@ -1208,21 +1511,26 @@ export default function App() {
     [closeTab, selectSidebarEntry],
   );
 
-  // Undo the most recent trash (⌘Z outside the editor): move the entry back out
-  // of the Trash to its original path and reopen the tabs the delete closed.
+  // Undo the most recent trash (⌘Z outside the editor): move the entry (and
+  // any rendition trashed with it) back out of the Trash to its original path
+  // and reopen the tabs the delete closed.
   const undoDelete = useCallback(async () => {
     const entry = deletedStackRef.current.pop();
     if (!entry) return;
-    try {
-      await invoke("restore_trashed", {
-        trashPath: entry.trashPath,
-        originalPath: entry.path,
-      });
-    } catch (e) {
-      console.error("undo delete failed", e);
-      alert(`Could not restore ${entry.path}\n${e}`);
-      return;
+    let restoredAny = false;
+    for (const f of entry.files) {
+      try {
+        await invoke("restore_trashed", {
+          trashPath: f.trashPath,
+          originalPath: f.path,
+        });
+        restoredAny = true;
+      } catch (e) {
+        console.error("undo delete failed", e);
+        alert(`Could not restore ${f.path}\n${e}`);
+      }
     }
+    if (!restoredAny) return;
     setTreeRefreshToken((t) => t + 1);
     for (const p of entry.openPaths) await openTab(p, "file");
   }, [openTab]);
@@ -1248,6 +1556,24 @@ export default function App() {
         await invoke("move_path", { from, to });
       } catch (e) {
         return String(e);
+      }
+      // A markdown file's html rendition moves/renames with it — the pair is
+      // one document, and leaving the html behind would silently split it in
+      // two. Best-effort: the markdown has already moved.
+      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
+        const fromHtml = htmlSiblingOf(from);
+        const exists = await invoke<boolean>("path_exists", { path: fromHtml }).catch(
+          () => false,
+        );
+        if (exists) {
+          try {
+            await invoke("move_path", { from: fromHtml, to: htmlSiblingOf(to) });
+          } catch (e) {
+            window.alert(
+              `Moved "${basename(from)}" but not its HTML version.\n${e}`,
+            );
+          }
+        }
       }
       const remap = (p: string) =>
         p === from
@@ -1276,13 +1602,26 @@ export default function App() {
         const np = remap(pathRef.current);
         if (np !== pathRef.current) {
           pathRef.current = np;
+          // The rendition rode along (moved above) — follow it.
+          if (htmlPathRef.current) htmlPathRef.current = htmlSiblingOf(np);
           const active = nextTabs.find((t) => t.id === activeIdRef.current);
           if (active?.kind === "file") {
             try {
-              await invoke("watch_file", { path: np });
+              await invoke("watch_file", { path: np, extra: htmlPathRef.current });
             } catch (e) {
               console.error("watch_file failed", e);
             }
+          }
+        }
+      } else if (htmlPathRef.current) {
+        // Active html-only document: keep the rendition path and watch current.
+        const np = remap(htmlPathRef.current);
+        if (np !== htmlPathRef.current) {
+          htmlPathRef.current = np;
+          try {
+            await invoke("watch_file", { path: np });
+          } catch (e) {
+            console.error("watch_file failed", e);
           }
         }
       }
@@ -1469,6 +1808,22 @@ export default function App() {
 
   useEffect(() => {
     const un = listen<ExternalChangePayload>("file-externally-changed", (e) => {
+      // The active document's html rendition changed (e.g. regenerated by an
+      // AI tool): re-render it and mirror a live share. The markdown editor —
+      // and its dirty/conflict flow — is untouched.
+      if (e.payload.path === htmlPathRef.current) {
+        void (async () => {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: e.payload.path });
+            setHtmlContent(r.contents);
+          } catch {
+            return; // mid-rewrite; the next event covers it
+          }
+          const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+          if (active && sharesRef.current[active.path]) scheduleSharePush(active.path);
+        })();
+        return;
+      }
       if (e.payload.path !== pathRef.current) return;
       if (dirtyRef.current || conflictRef.current) {
         setConflict({ diskSnapshot: e.payload.snapshot });
@@ -1479,7 +1834,19 @@ export default function App() {
     return () => {
       void un.then((f) => f());
     };
-  }, [reloadFromDisk]);
+  }, [reloadFromDisk, scheduleSharePush]);
+
+  // Reconcile shares with edits made outside the app at the moments staleness
+  // becomes observable: once after launch/restore, then whenever the window
+  // regains focus (throttled inside reconcileShares). The watcher covers the
+  // active document in real time; this covers everything else.
+  useEffect(() => {
+    if (!ready) return;
+    void reconcileShares();
+    const onFocus = () => void reconcileShares();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [ready, reconcileShares]);
 
   // Robust quit flush: type-then-⌘Q within the autosave debounce would lose the
   // last keystrokes if the process exits before the fire-and-forget write_file
@@ -1573,8 +1940,16 @@ export default function App() {
       });
       scheduleSharePush(chosen);
     }
+    // The promoted file may have landed next to an existing html rendition of
+    // the same stem — adopt it (enables the toggle, watches the pair).
+    const sibling = htmlSiblingOf(chosen);
+    const siblingExists = await invoke<boolean>("path_exists", { path: sibling }).catch(
+      () => false,
+    );
+    htmlPathRef.current = siblingExists ? sibling : null;
+    setHasHtml(siblingExists);
     try {
-      await invoke("watch_file", { path: chosen });
+      await invoke("watch_file", { path: chosen, extra: htmlPathRef.current });
     } catch (e) {
       console.error("watch_file failed", e);
     }
@@ -1725,11 +2100,13 @@ export default function App() {
   // the "you landed here" cue; Esc clears it (see the keydown handler).
   const openResult = useCallback(
     async (p: string, query: string) => {
+      viewPrefsRef.current.set(p, "md"); // the match lives in the markdown
       await openTab(p, "file");
+      if (docViewRef.current === "html") await selectDocView("md");
       setFindCase(wsCase);
       setFindQuery(query);
     },
-    [openTab, wsCase],
+    [openTab, selectDocView, wsCase],
   );
 
   useEffect(() => {
@@ -1754,7 +2131,9 @@ export default function App() {
       } else if (k === "f" && !e.shiftKey) {
         e.preventDefault();
         const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-        if (active && !active.missing) {
+        // Find drives the markdown editor; there's nothing to search in the
+        // rendered html view.
+        if (active && !active.missing && docViewRef.current === "md") {
           setFindOpen(true);
           setFindFocusToken((t) => t + 1);
         }
@@ -1805,8 +2184,15 @@ export default function App() {
         setDraftsOpen((v) => !v);
       } else if (k === "v" && e.shiftKey) {
         // ⌘⇧V: start/finish voice dictation (same as the titlebar mic).
+        // Dictation types into the markdown editor; starting it from the html
+        // view brings the editable version forward first. (In html view a
+        // session is never active — entering the view stops it — so this
+        // toggle can only be a start.)
         e.preventDefault();
-        void dictationRef.current?.toggle();
+        void (async () => {
+          if (docViewRef.current === "html") await selectDocView("md");
+          await dictationRef.current?.toggle();
+        })();
       } else if (k === "z" && !e.shiftKey) {
         // ⌘Z restores a trashed file — but only when focus is outside the
         // editor, so it stays as Milkdown's text-undo while typing.
@@ -1833,6 +2219,7 @@ export default function App() {
     workspaceRoot,
     undoDelete,
     openWorkspaceSearch,
+    selectDocView,
   ]);
 
   useEffect(() => {
@@ -1849,6 +2236,10 @@ export default function App() {
   const isDraft = activeTab?.kind === "draft";
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
+  // html-only documents render in the iframe alone; there is no markdown
+  // version to edit, so the editor never mounts and the MD side is disabled.
+  const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
+  const showHtmlView = docView === "html" && !activeMissing;
 
   return (
     <div
@@ -1876,10 +2267,18 @@ export default function App() {
             <SidebarIcon />
           </button>
         )}
-        {activeTab && !activeMissing && (
+        {activeTab && !activeMissing && !activeIsHtmlDoc && (
           <button
             className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
-            onClick={() => void dictationRef.current?.toggle()}
+            onClick={() =>
+              // Dictation types into the markdown editor; from the html view,
+              // bring the editable version forward first (a session is never
+              // active there, so this is always a start).
+              void (async () => {
+                if (docViewRef.current === "html") await selectDocView("md");
+                await dictationRef.current?.toggle();
+              })()
+            }
             title={
               dictationUi.session === "idle"
                 ? "Start dictation (⌘⇧V)"
@@ -1947,6 +2346,16 @@ export default function App() {
         onClose={(id) => void closeTab(id)}
         onNewDraft={() => void newDraft()}
         onReorder={reorderTabs}
+        trailing={
+          activeTab && !activeMissing ? (
+            <ViewToggle
+              view={docView}
+              hasMd={!activeIsHtmlDoc}
+              hasHtml={hasHtml}
+              onSelect={(v) => void selectDocView(v)}
+            />
+          ) : null
+        }
       />
       {showSidebar && workspaceRoot && sidebarMode === "search" && (
         <WorkspaceSearch
@@ -1999,13 +2408,13 @@ export default function App() {
         />
       )}
       <main
-        className={`editor-wrap ${
+        className={`editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
           dictationUi.session !== "idle"
             ? `is-dictating ${dictationUi.gate === "listening" && dictationUi.session === "active" ? "is-listening" : "is-paused"}`
             : ""
         }`}
       >
-        {findOpen && activeTab && !activeMissing && (
+        {findOpen && activeTab && !activeMissing && docView === "md" && (
           <FindBar
             query={findQuery}
             onQueryChange={setFindQuery}
@@ -2019,7 +2428,7 @@ export default function App() {
             focusToken={findFocusToken}
           />
         )}
-        {activeTab && !activeMissing && (
+        {activeTab && !activeMissing && !activeIsHtmlDoc && (
           <Editor
             key={loadKey}
             ref={editorRef}
@@ -2028,6 +2437,17 @@ export default function App() {
             onSearchState={setFindInfo}
             onFocusChange={setEditorFocused}
             onReady={restoreActiveScroll}
+          />
+        )}
+        {activeTab && showHtmlView && htmlContent != null && (
+          // The rendition is arbitrary generated markup: render it isolated in
+          // a sandboxed frame (scripts run under an opaque origin — no access
+          // to the app, its storage, or Tauri IPC).
+          <iframe
+            className="html-preview"
+            title="HTML version"
+            sandbox="allow-scripts allow-popups"
+            srcDoc={htmlContent}
           />
         )}
         {activeTab && activeMissing && (
@@ -2094,6 +2514,46 @@ export default function App() {
 }
 
 /* ---------- Subviews ---------- */
+
+// The MD/HTML segmented toggle (right end of the tab bar). Both sides always
+// render so the control reads the same for every document; a side whose
+// version doesn't exist on disk is disabled.
+function ViewToggle({
+  view,
+  hasMd,
+  hasHtml,
+  onSelect,
+}: {
+  view: DocView;
+  hasMd: boolean;
+  hasHtml: boolean;
+  onSelect: (v: DocView) => void;
+}) {
+  return (
+    <div className="view-toggle" role="tablist" aria-label="Document view">
+      <button
+        role="tab"
+        aria-selected={view === "md"}
+        className={`view-toggle-seg ${view === "md" ? "is-active" : ""}`}
+        disabled={!hasMd}
+        title={hasMd ? "Markdown" : "No markdown version"}
+        onClick={() => onSelect("md")}
+      >
+        MD
+      </button>
+      <button
+        role="tab"
+        aria-selected={view === "html"}
+        className={`view-toggle-seg ${view === "html" ? "is-active" : ""}`}
+        disabled={!hasHtml}
+        title={hasHtml ? "HTML" : "No HTML version"}
+        onClick={() => onSelect("html")}
+      >
+        HTML
+      </button>
+    </div>
+  );
+}
 
 // The in-app Save As prompt (vscode.dev-style quick input), shown instead of
 // the native save panel when a workspace fixes the destination folder. Enter

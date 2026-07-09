@@ -67,7 +67,10 @@ const dirname = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
 };
-const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+// Extensions the tree shows (and hides in labels): markdown documents and
+// standalone html renditions. A tree row can also be an md+html pair — the
+// backend folds those into one row on the markdown path.
+const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 
 export default function Sidebar({
   root,
@@ -428,7 +431,8 @@ export default function Sidebar({
       if (!name) return "A name is required.";
       if (/[/\\:]/.test(name)) return "Names can't contain /, \\ or :";
       if (name.startsWith(".")) return "Names can't start with a dot.";
-      const fileName = pc.kind === "file" && !MD_EXT_RE.test(name) ? `${name}.md` : name;
+      // Bare names become markdown; an explicit .html (or md) extension is kept.
+      const fileName = pc.kind === "file" && !DOC_EXT_RE.test(name) ? `${name}.md` : name;
       const path = `${pc.parentDir}/${fileName}`;
       try {
         await invoke(pc.kind === "file" ? "create_file" : "create_dir", { path });
@@ -455,8 +459,8 @@ export default function Sidebar({
 
   // Commit the inline rename. Same contract as commitCreate: an error message
   // keeps the input open with the message under it, null closes it. The tree
-  // hides markdown extensions, so the input edits the stem and the original
-  // extension is carried over unless a markdown extension was typed.
+  // hides document extensions, so the input edits the stem and the original
+  // extension is carried over unless a document extension was typed.
   const commitRename = useCallback(
     async (rawName: string): Promise<string | null> => {
       const pr = pendingRename;
@@ -467,8 +471,8 @@ export default function Sidebar({
       if (name.startsWith(".")) return "Names can't start with a dot.";
       const oldName = basename(pr.path);
       let newName = name;
-      if (pr.kind === "file" && !MD_EXT_RE.test(name)) {
-        newName = `${name}${oldName.match(MD_EXT_RE)?.[0] ?? ".md"}`;
+      if (pr.kind === "file" && !DOC_EXT_RE.test(name)) {
+        newName = `${name}${oldName.match(DOC_EXT_RE)?.[0] ?? ".md"}`;
       }
       if (newName === oldName) {
         setPendingRename(null); // nothing changed
@@ -559,7 +563,7 @@ export default function Sidebar({
           <div className="sidebar-message">Loading…</div>
         )}
         {!error && tree && tree.kind === "dir" && tree.children.length === 0 && !showCreateAtRoot && (
-          <div className="sidebar-message">No markdown files</div>
+          <div className="sidebar-message">No files yet</div>
         )}
         {!error && tree && tree.kind === "dir" && (tree.children.length > 0 || showCreateAtRoot) && (
           <ul className="tree" role="tree">
@@ -622,7 +626,7 @@ export default function Sidebar({
           {dragging.kind === "dir" ? <FolderIcon /> : <FileIcon />}
           <span className="tree-drag-ghost-label">
             {dragging.kind === "file"
-              ? stripMdExt(basename(dragging.path))
+              ? stripDocExt(basename(dragging.path))
               : basename(dragging.path)}
           </span>
           {dropDir != null && (
@@ -818,7 +822,7 @@ function TreeItem({
           icon={<FileIcon />}
           placeholder="File name"
           ariaLabel={`Rename ${node.name}`}
-          initialValue={stripMdExt(node.name)}
+          initialValue={stripDocExt(node.name)}
           onCommit={onCommitRename}
           onCancel={onCancelRename}
         />
@@ -846,7 +850,7 @@ function TreeItem({
           title={node.path}
         >
           <FileIcon />
-          <span className="tree-label">{stripMdExt(node.name)}</span>
+          <span className="tree-label">{stripDocExt(node.name)}</span>
         </button>
       </li>
     );
@@ -1094,8 +1098,8 @@ function ContextMenu({
   );
 }
 
-function stripMdExt(name: string): string {
-  return name.replace(MD_EXT_RE, "");
+function stripDocExt(name: string): string {
+  return name.replace(DOC_EXT_RE, "");
 }
 
 /* ---------- Icons ---------- */

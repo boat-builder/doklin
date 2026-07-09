@@ -475,6 +475,13 @@ fn is_markdown(path: &Path) -> bool {
     }
 }
 
+fn is_html(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => ext.eq_ignore_ascii_case("html"),
+        None => false,
+    }
+}
+
 fn is_hidden_or_ignored(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
@@ -486,11 +493,14 @@ fn is_hidden_or_ignored(name: &str) -> bool {
 }
 
 /// Recursively walks `dir`, returning a tree of every non-hidden directory and
-/// the markdown files inside. Directories are kept even when they (currently)
-/// contain no markdown — the sidebar creates files and folders in place, so an
-/// empty folder must stay visible as a creation target. Returns None only when
-/// the directory is unreadable or a traversal cap is hit. Mutates `budget` to
-/// enforce a global entry cap.
+/// the markdown/html documents inside. An html file whose stem matches a
+/// markdown file in the same directory is a *rendition* of that document, not a
+/// separate one — it folds into the markdown row (the app discovers it by
+/// probing for the sibling path). Directories are kept even when they
+/// (currently) contain no documents — the sidebar creates files and folders in
+/// place, so an empty folder must stay visible as a creation target. Returns
+/// None only when the directory is unreadable or a traversal cap is hit.
+/// Mutates `budget` to enforce a global entry cap.
 fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return None;
@@ -499,6 +509,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut subdirs: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut html_files: Vec<PathBuf> = Vec::new();
 
     for entry in entries.flatten() {
         if *budget == 0 {
@@ -519,6 +530,17 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
             subdirs.push(path);
         } else if ft.is_file() && is_markdown(&path) {
             files.push(path);
+        } else if ft.is_file() && is_html(&path) {
+            html_files.push(path);
+        }
+    }
+
+    let md_stems: std::collections::HashSet<std::ffi::OsString> =
+        files.iter().filter_map(|p| p.file_stem().map(|s| s.to_os_string())).collect();
+    for h in html_files {
+        let paired = h.file_stem().is_some_and(|s| md_stems.contains(s));
+        if !paired {
+            files.push(h);
         }
     }
 
@@ -546,8 +568,9 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
 }
 
 struct WatcherState {
-    path: PathBuf,
-    last_snapshot: FileSnapshot,
+    // Every watched path with the snapshot last seen for it. One document can
+    // be watched as a pair — the markdown file plus its html rendition.
+    files: Vec<(PathBuf, FileSnapshot)>,
     _debouncer: Debouncer<RecommendedWatcher, FileIdMap>,
 }
 
@@ -571,16 +594,10 @@ fn stat_snapshot(path: &Path) -> std::io::Result<FileSnapshot> {
     Ok(FileSnapshot { mtime_ms, size })
 }
 
-fn handle_debounced_events(
-    store: &Arc<Mutex<Option<WatcherState>>>,
-    app: &AppHandle,
-    watched_path: &Path,
-) {
-    let new_snapshot = match stat_snapshot(watched_path) {
-        Ok(s) => s,
-        Err(_) => return, // file briefly missing during atomic rename; next event covers it
-    };
-
+// On any debounced event, re-stat every watched file and emit for the ones
+// whose snapshot moved. The store — not the closure — is the authority on what
+// is watched, so a stale debouncer firing after a re-watch is harmless.
+fn handle_debounced_events(store: &Arc<Mutex<Option<WatcherState>>>, app: &AppHandle) {
     let mut guard = match store.lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -589,22 +606,32 @@ fn handle_debounced_events(
         Some(s) => s,
         None => return,
     };
-    if state.path != watched_path {
-        return;
+    let mut changed: Vec<ExternalChangePayload> = Vec::new();
+    for (path, last_snapshot) in state.files.iter_mut() {
+        // A stat failure = file briefly missing during an atomic rename; the
+        // next event covers it.
+        if let Ok(new_snapshot) = stat_snapshot(path) {
+            if *last_snapshot != new_snapshot {
+                *last_snapshot = new_snapshot.clone();
+                changed.push(ExternalChangePayload {
+                    path: path.to_string_lossy().to_string(),
+                    snapshot: new_snapshot,
+                });
+            }
+        }
     }
-    if state.last_snapshot == new_snapshot {
-        return;
-    }
-    state.last_snapshot = new_snapshot.clone();
     drop(guard);
 
-    let _ = app.emit(
-        "file-externally-changed",
-        ExternalChangePayload {
-            path: watched_path.to_string_lossy().to_string(),
-            snapshot: new_snapshot,
-        },
-    );
+    for payload in changed {
+        let _ = app.emit("file-externally-changed", payload);
+    }
+}
+
+/// Lightweight stat for the share-reconciliation pass: lets the app ask "did
+/// this file change since the last push?" without reading its contents.
+#[tauri::command]
+fn stat_file(path: String) -> Result<FileSnapshot, String> {
+    stat_snapshot(Path::new(&path)).map_err(|e| format!("stat {}: {}", path, e))
 }
 
 #[tauri::command]
@@ -646,8 +673,10 @@ fn write_file(
 
     if let Ok(mut guard) = store.0.lock() {
         if let Some(state) = guard.as_mut() {
-            if state.path == path_buf {
-                state.last_snapshot = new_snapshot.clone();
+            for (watched, last_snapshot) in state.files.iter_mut() {
+                if *watched == path_buf {
+                    *last_snapshot = new_snapshot.clone();
+                }
             }
         }
     }
@@ -658,6 +687,7 @@ fn write_file(
 #[tauri::command]
 fn watch_file(
     path: String,
+    extra: Option<String>,
     app: AppHandle,
     store: State<'_, WatcherStore>,
 ) -> Result<FileSnapshot, String> {
@@ -671,7 +701,6 @@ fn watch_file(
 
     let store_arc = store.0.clone();
     let app_clone = app.clone();
-    let path_for_closure = path_buf.clone();
 
     let mut debouncer = new_debouncer(
         Duration::from_millis(250),
@@ -680,7 +709,7 @@ fn watch_file(
             if result.is_err() {
                 return;
             }
-            handle_debounced_events(&store_arc, &app_clone, &path_for_closure);
+            handle_debounced_events(&store_arc, &app_clone);
         },
     )
     .map_err(|e| format!("watcher init: {}", e))?;
@@ -693,9 +722,28 @@ fn watch_file(
         .cache()
         .add_root(&path_buf, RecursiveMode::NonRecursive);
 
+    let mut files = vec![(path_buf, snapshot.clone())];
+
+    // The companion rendition (a document's html next to its markdown) rides
+    // along best-effort: it may vanish between the caller's probe and here.
+    if let Some(extra) = extra {
+        let extra_buf = PathBuf::from(&extra);
+        if let Ok(extra_snapshot) = stat_snapshot(&extra_buf) {
+            if debouncer
+                .watcher()
+                .watch(&extra_buf, RecursiveMode::NonRecursive)
+                .is_ok()
+            {
+                debouncer
+                    .cache()
+                    .add_root(&extra_buf, RecursiveMode::NonRecursive);
+                files.push((extra_buf, extra_snapshot));
+            }
+        }
+    }
+
     *store.0.lock().unwrap() = Some(WatcherState {
-        path: path_buf,
-        last_snapshot: snapshot.clone(),
+        files,
         _debouncer: debouncer,
     });
 
@@ -1222,9 +1270,15 @@ fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, St
 
     let path_buf = PathBuf::from(&path);
     // Stop watching first so the impending removal doesn't surface as an
-    // external-change conflict for the file we're deleting.
+    // external-change conflict for the file we're deleting. Matching either
+    // half of a watched pair drops the whole watcher — by the time a watched
+    // document is trashed its tabs are already closed, so nothing re-arms it.
     if let Ok(mut guard) = store.0.lock() {
-        if guard.as_ref().map(|s| s.path == path_buf).unwrap_or(false) {
+        if guard
+            .as_ref()
+            .map(|s| s.files.iter().any(|(p, _)| *p == path_buf))
+            .unwrap_or(false)
+        {
             *guard = None;
         }
     }
@@ -1409,6 +1463,7 @@ pub fn run() {
             dictation::dictation_running,
             dictation::dictation_shutdown,
             read_file,
+            stat_file,
             write_file,
             watch_file,
             unwatch_file,

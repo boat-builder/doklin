@@ -4,9 +4,9 @@ type TabKind = "draft" | "file";
 type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
-const stripMdExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd)$/i, "");
+const stripDocExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
 const tabLabel = (t: Tab) =>
-  t.kind === "draft" ? t.title ?? "Untitled" : stripMdExt(basename(t.path));
+  t.kind === "draft" ? t.title ?? "Untitled" : stripDocExt(basename(t.path));
 
 type Props = {
   tabs: Tab[];
@@ -18,6 +18,9 @@ type Props = {
   onClose: (id: string) => void;
   onNewDraft: () => void;
   onReorder: (tabs: Tab[]) => void;
+  // Rendered at the bar's right edge, after the tab strip (the app puts the
+  // MD/HTML view toggle here).
+  trailing?: React.ReactNode;
 };
 
 // A press only becomes a drag after moving this far, so plain clicks (switch
@@ -32,6 +35,7 @@ export default function TabBar({
   onClose,
   onNewDraft,
   onReorder,
+  trailing,
 }: Props) {
   const activeRef = useRef<HTMLButtonElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
@@ -248,6 +252,7 @@ export default function TabBar({
           )}
         </div>
       )}
+      {trailing}
     </div>
   );
 }
