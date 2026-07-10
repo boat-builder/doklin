@@ -48,3 +48,6 @@ Desktop.ini
 # Deployment config — machine-local, holds your Cloudflare account/domain/bucket.
 # Copy share-worker/wrangler.toml.example to share-worker/wrangler.toml and fill in.
 share-worker/wrangler.toml
+# Local `wrangler dev` secrets (SHARE_TOKEN etc.) and its state directory.
+share-worker/.dev.vars
+share-worker/.wrangler/
