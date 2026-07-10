@@ -28,6 +28,7 @@ import { listen } from "@tauri-apps/api/event";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import type { EditorHandle } from "./Editor";
 import type { GhostSegment } from "./ghostText";
+import { DEFAULT_POLISH_PROMPT } from "./prompts";
 
 /* ---------- Config ---------- */
 
@@ -39,6 +40,9 @@ export type DictationConfig = {
   llmModel: string;
   /// Whisper language hint; "auto" lets the model detect.
   language: string;
+  /// Custom system prompt for the polish pass; "" means DEFAULT_POLISH_PROMPT,
+  /// so users who never customize keep tracking prompt improvements.
+  polishPrompt: string;
   /// Show the dictation inspector (advanced; prompt/response introspection).
   inspector: boolean;
 };
@@ -47,6 +51,7 @@ export const DEFAULT_DICTATION_CONFIG: DictationConfig = {
   sttModel: "large-v3-v20240930",
   llmModel: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
   language: "auto",
+  polishPrompt: "",
   inspector: false,
 };
 
@@ -70,6 +75,7 @@ export function getDictationConfig(): Promise<DictationConfig> {
           sttModel: merged.sttModel,
           llmModel: merged.llmModel,
           language: merged.language,
+          polishPrompt: merged.polishPrompt,
           inspector: merged.inspector,
         };
       } catch {
@@ -341,6 +347,9 @@ export class DictationController {
           sttModel: this.config.sttModel,
           llmModel: this.config.llmModel,
           language: this.config.language,
+          // Always send the effective prompt: the settings modal shows this
+          // exact text, and the sidecar's built-in copy is only a fallback.
+          polishPrompt: this.config.polishPrompt || DEFAULT_POLISH_PROMPT,
           debug: this.config.inspector,
         },
       });
