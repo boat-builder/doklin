@@ -30,11 +30,23 @@ const STT_MODELS: ModelOption[] = [
   { value: "small.en", label: "Whisper small (English)", detail: "Fastest, lighter accuracy · ~0.5 GB" },
 ];
 
-// MLX ids on Hugging Face. 4B is the speed/accuracy sweet spot; 8B is
-// noticeably better on tough audio and technical terms if the RAM is there.
+// MLX ids on Hugging Face — anything whose architecture mlx-swift-lm knows
+// (qwen3, qwen3_moe, gemma3, …) works here; these are the curated tiers.
+// The GB figure is the download; the "RAM" figure is total machine memory
+// the model wants free headroom within — it shares unified memory with
+// Whisper, the app, and macOS, and undersized machines don't crash but
+// thrash (the sidecar unloads the model on OS memory pressure).
+// Ordering is lightest → heaviest so the list reads as an upgrade path.
+// Hybrid-thinking checkpoints (8B, 14B) are fine: the sidecar appends
+// /no_think for Qwen3 ids without "2507" (Corrector.swift).
 const LLM_MODELS: ModelOption[] = [
-  { value: "mlx-community/Qwen3-4B-Instruct-2507-4bit", label: "Qwen3 4B", detail: "Fast, great for most dictation · ~2.3 GB" },
-  { value: "mlx-community/Qwen3-8B-4bit", label: "Qwen3 8B", detail: "Best accuracy, wants 24 GB+ RAM · ~4.5 GB" },
+  { value: "mlx-community/Qwen3-4B-Instruct-2507-4bit", label: "Qwen3 4B", detail: "Fast, great for most dictation · 16 GB+ RAM · ~2.3 GB" },
+  { value: "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ-2510", label: "Qwen3 4B (DWQ)", detail: "Same size and speed, distilled quantization for a small accuracy bump · 16 GB+ RAM · ~2.3 GB" },
+  { value: "mlx-community/Qwen3-8B-4bit", label: "Qwen3 8B", detail: "More accurate on tough audio and technical terms · 16 GB+ RAM · ~4.5 GB" },
+  { value: "mlx-community/Qwen3-8B-8bit", label: "Qwen3 8B (high fidelity)", detail: "8B with fewer quantization artifacts — try this if 8B mangles words · 24 GB+ RAM · ~8.7 GB" },
+  { value: "mlx-community/Qwen3-14B-4bit", label: "Qwen3 14B", detail: "Smarter on tricky phrasing and context; noticeably slower · 32 GB+ RAM · ~8.3 GB" },
+  { value: "mlx-community/gemma-3-12b-it-qat-4bit", label: "Gemma 3 12B", detail: "Different model family, strong instruction-following; slower · 32 GB+ RAM · ~7 GB" },
+  { value: "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit", label: "Qwen3 30B (MoE)", detail: "Best accuracy, and fast — only 3B active per token · 48 GB+ RAM · ~17 GB" },
 ];
 
 const LANGUAGES: { value: string; label: string }[] = [
