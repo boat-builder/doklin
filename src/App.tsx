@@ -13,6 +13,7 @@ import WorkspaceSearch from "./WorkspaceSearch";
 import ShareMenu from "./ShareMenu";
 import SharedPages from "./SharedPages";
 import ShareSetup from "./ShareSetup";
+import ShareFolder from "./ShareFolder";
 import DictationHud from "./DictationHud";
 import DictationInspector from "./DictationInspector";
 import DictationSetup from "./DictationSetup";
@@ -25,13 +26,21 @@ import {
   type InspectorEntry,
 } from "./dictation";
 import {
+  collectionManifestHash,
   contentHash,
   deletePage,
+  generateShareId,
   getShareConfig,
+  pageExists,
+  pushCollection,
   pushOgImage,
   pushPage,
+  readCollections,
   readShares,
+  writeCollections,
   writeShares,
+  type CollectionEntry,
+  type CollectionItem,
   type PushedFingerprint,
   type ShareConfig,
   type ShareEntry,
@@ -144,6 +153,26 @@ const docShareTitle = (t: Tab) =>
   t.kind === "draft"
     ? t.title ?? "Untitled"
     : basename(t.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
+// Same, for a path with no open tab to derive it from (background pushes,
+// folder-share manifests): the filename minus the document extension.
+const pathShareTitle = (p: string) =>
+  basename(p).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
+
+// The innermost folder share containing `path`, if any — the collection a
+// file's include/remove toggle binds to. With nested folder shares, the
+// nearest one wins; a file belongs to at most one collection.
+function nearestCollection(
+  collections: Record<string, CollectionEntry>,
+  path: string,
+): CollectionEntry | null {
+  let best: CollectionEntry | null = null;
+  for (const c of Object.values(collections)) {
+    if (path.startsWith(c.path + "/") && (!best || c.path.length > best.path.length)) {
+      best = c;
+    }
+  }
+  return best;
+}
 const SHARE_PUSH_DEBOUNCE_MS = 1500;
 // Reconciliation (disk vs last-pushed fingerprints) runs at launch and on
 // window focus, but at most this often — focus events come in bursts.
@@ -418,9 +447,15 @@ export default function App() {
   // Undo stack for trashed entries. `files` is everything one delete moved to
   // the Trash (a markdown file's html rendition rides along); `openPaths` are
   // the file tabs the delete closed (the entry itself for a file, everything
-  // under it for a folder) so ⌘Z can reopen them after restoring.
+  // under it for a folder) so ⌘Z can reopen them after restoring;
+  // `memberships` are the folder-share listings the delete removed, so undo
+  // can put the pages back on their TOC.
   const deletedStackRef = useRef<
-    { files: { path: string; trashPath: string }[]; openPaths: string[] }[]
+    {
+      files: { path: string; trashPath: string }[];
+      openPaths: string[];
+      memberships: { dir: string; member: string }[];
+    }[]
   >([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
@@ -493,6 +528,101 @@ export default function App() {
     [],
   );
 
+  // Folder shares: `collections` maps a directory's absolute path to its
+  // published collection page (see share.ts). Members are ordinary entries in
+  // `shares`; the collection carries only the membership list and pushes a
+  // manifest — the public table of contents — whenever it changes.
+  const [collections, setCollections] = useState<Record<string, CollectionEntry>>(() =>
+    readCollections(),
+  );
+  const collectionsRef = useRef<Record<string, CollectionEntry>>(collections);
+  const collectionPushTimersRef = useRef<Map<string, number>>(new Map());
+  // shareFolderTarget = the directory whose share dialog (create or manage) is
+  // open; null = closed.
+  const [shareFolderTarget, setShareFolderTarget] = useState<string | null>(null);
+
+  const updateCollections = useCallback(
+    (mut: (prev: Record<string, CollectionEntry>) => Record<string, CollectionEntry>) => {
+      const next = mut(collectionsRef.current);
+      collectionsRef.current = next;
+      writeCollections(next);
+      setCollections(next);
+    },
+    [],
+  );
+
+  // What a manifest push carries: each member's page id, display title (the
+  // filename, so the TOC tracks renames immediately), and folder-relative
+  // path (how the TOC groups into directories). Members whose share is gone
+  // or that no longer live under the folder are simply not listed.
+  const collectionItemsFor = useCallback((entry: CollectionEntry): CollectionItem[] => {
+    const items: CollectionItem[] = [];
+    for (const m of entry.members) {
+      const share = sharesRef.current[m];
+      if (!share || !m.startsWith(entry.path + "/")) continue;
+      items.push({ id: share.id, title: pathShareTitle(m), path: m.slice(entry.path.length + 1) });
+    }
+    items.sort((a, b) => a.path.localeCompare(b.path));
+    return items;
+  }, []);
+
+  // Push a folder share's manifest if it differs from what's live (hash-
+  // guarded, so redundant schedules collapse to nothing). A title change also
+  // re-renders the OG image, same as pages.
+  const pushCollectionNow = useCallback(
+    async (dirPath: string) => {
+      const entry = collectionsRef.current[dirPath];
+      if (!entry) return;
+      const config = await getShareConfig();
+      if (!config) return;
+      const items = collectionItemsFor(entry);
+      const hash = await collectionManifestHash(entry.title, items);
+      if (hash === entry.pushedHash && entry.title === entry.pushedTitle) return;
+      try {
+        if (hash !== entry.pushedHash) {
+          await pushCollection(config, entry.id, entry.title, items);
+        }
+        if (entry.title !== entry.pushedTitle) {
+          await pushOgImage(config, entry.id, entry.title);
+        }
+        updateCollections((prev) =>
+          prev[dirPath]
+            ? {
+                ...prev,
+                [dirPath]: {
+                  ...prev[dirPath],
+                  updatedAt: Date.now(),
+                  pushedHash: hash,
+                  pushedTitle: entry.title,
+                },
+              }
+            : prev,
+        );
+      } catch (e) {
+        // Offline or the worker hiccuped; reconciliation retries via the hash.
+        console.error("collection push failed", dirPath, e);
+      }
+    },
+    [collectionItemsFor, updateCollections],
+  );
+
+  const scheduleCollectionPush = useCallback(
+    (dirPath: string) => {
+      if (!collectionsRef.current[dirPath]) return;
+      const timers = collectionPushTimersRef.current;
+      const existing = timers.get(dirPath);
+      if (existing != null) window.clearTimeout(existing);
+      timers.set(
+        dirPath,
+        window.setTimeout(() => {
+          timers.delete(dirPath);
+          void pushCollectionNow(dirPath);
+        }, SHARE_PUSH_DEBOUNCE_MS),
+      );
+    },
+    [pushCollectionNow],
+  );
+
   // Assemble what a share push carries: the markdown document and/or its html
   // rendition, always read fresh from DISK — the disk is what a share mirrors
   // (in-editor keystrokes reach it through autosave, which schedules its own
@@ -536,8 +666,9 @@ export default function App() {
   );
 
   // Push the current content of a shared doc to its remote page. Both
-  // renditions travel together (see readShareParts). A title change (draft
-  // renamed / promoted) also refreshes the OG image.
+  // renditions travel together (see readShareParts), and so does the folder-
+  // share back-reference (the public page's "back to the folder" crumb). A
+  // title change (rename / draft promoted) also refreshes the OG image.
   const pushSharedNow = useCallback(
     async (target: string) => {
       const entry = sharesRef.current[target];
@@ -545,11 +676,21 @@ export default function App() {
       const config = await getShareConfig();
       if (!config) return;
       const tab = tabsRef.current.find((t) => t.path === target);
-      const title = tab ? docShareTitle(tab) : entry.title;
+      const title =
+        tab ? docShareTitle(tab) : entry.kind === "file" ? pathShareTitle(target) : entry.title;
+      const collection = entry.collectionId
+        ? (Object.values(collectionsRef.current).find((c) => c.id === entry.collectionId) ?? null)
+        : null;
       const parts = await readShareParts(target);
       if (!parts) return; // source is gone; the share stays until stopped explicitly
       try {
-        await pushPage(config, entry.id, title, parts);
+        await pushPage(
+          config,
+          entry.id,
+          title,
+          parts,
+          collection ? { id: collection.id, title: collection.title } : null,
+        );
         if (title !== entry.title) await pushOgImage(config, entry.id, title);
         const pushed = await fingerprintParts(parts);
         updateShares((prev) =>
@@ -626,7 +767,8 @@ export default function App() {
   const reconcileShares = useCallback(async () => {
     if (!isMainWindow) return;
     const entries = Object.values(sharesRef.current);
-    if (entries.length === 0) return;
+    const colEntries = Object.values(collectionsRef.current);
+    if (entries.length === 0 && colEntries.length === 0) return;
     const now = Date.now();
     if (now - lastReconcileRef.current < SHARE_RECONCILE_MIN_MS) return;
     lastReconcileRef.current = now;
@@ -638,7 +780,20 @@ export default function App() {
         console.error("share reconcile failed", entry.path, e);
       }
     }
-  }, [shareNeedsPush, scheduleSharePush]);
+    // A folder share's manifest is derived state (member ids, names, relative
+    // paths); recompute it and re-push when it drifts from what's live — this
+    // also catches a push that failed offline (the stored hash never updated).
+    for (const c of colEntries) {
+      try {
+        const hash = await collectionManifestHash(c.title, collectionItemsFor(c));
+        if (hash !== c.pushedHash || c.title !== c.pushedTitle) {
+          scheduleCollectionPush(c.path);
+        }
+      } catch (e) {
+        console.error("collection reconcile failed", c.path, e);
+      }
+    }
+  }, [shareNeedsPush, scheduleSharePush, collectionItemsFor, scheduleCollectionPush]);
 
   // In-file find (⌘F): a bar over the editor that drives the ProseMirror search
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
@@ -1387,6 +1542,7 @@ export default function App() {
   );
 
   // Delete the remote page and forget the share (the local file is untouched).
+  // A page that was included in a folder share also drops off that TOC.
   const stopSharing = useCallback(
     async (target: string) => {
       const entry = sharesRef.current[target];
@@ -1404,8 +1560,211 @@ export default function App() {
         const { [target]: _gone, ...rest } = prev;
         return rest;
       });
+      for (const c of Object.values(collectionsRef.current)) {
+        if (!c.members.includes(target)) continue;
+        updateCollections((prev) =>
+          prev[c.path]
+            ? {
+                ...prev,
+                [c.path]: {
+                  ...prev[c.path],
+                  members: prev[c.path].members.filter((m) => m !== target),
+                },
+              }
+            : prev,
+        );
+        scheduleCollectionPush(c.path);
+      }
     },
-    [updateShares],
+    [updateShares, updateCollections, scheduleCollectionPush],
+  );
+
+  // Publish a folder (or the whole workspace) as a collection page at
+  // <endpoint>/<id>. Nothing inside is shared by that act alone — membership
+  // is explicit, so the TOC starts empty. Throws so the dialog can surface
+  // the error (including the "worker needs redeploying" case).
+  const shareFolder = useCallback(
+    async (dirPath: string, id: string) => {
+      const config = await getShareConfig();
+      if (!config) throw new Error("Sharing is not configured.");
+      const title = basename(dirPath);
+      await pushCollection(config, id, title, []);
+      try {
+        await pushOgImage(config, id, title);
+      } catch (e) {
+        // The page is live either way; the link preview just won't have an image.
+        console.error("og image upload failed", e);
+      }
+      const hash = await collectionManifestHash(title, []);
+      const now = Date.now();
+      updateCollections((prev) => ({
+        ...prev,
+        [dirPath]: {
+          id,
+          path: dirPath,
+          title,
+          members: [],
+          sharedAt: now,
+          updatedAt: now,
+          pushedHash: hash,
+          pushedTitle: title,
+        },
+      }));
+    },
+    [updateCollections],
+  );
+
+  // Delete the collection page and forget the folder share. Member pages
+  // either stay live as standalone shares (their public crumb disappears on
+  // the next push) or stop too — the dialog asks which.
+  const stopSharingFolder = useCallback(
+    async (dirPath: string, alsoStopPages: boolean) => {
+      const entry = collectionsRef.current[dirPath];
+      if (!entry) return;
+      const config = await getShareConfig();
+      if (!config) throw new Error("Sharing is not configured.");
+      await deletePage(config, entry.id);
+      const timers = collectionPushTimersRef.current;
+      const pending = timers.get(dirPath);
+      if (pending != null) {
+        window.clearTimeout(pending);
+        timers.delete(dirPath);
+      }
+      const members = entry.members;
+      updateCollections((prev) => {
+        const { [dirPath]: _gone, ...rest } = prev;
+        return rest;
+      });
+      for (const m of members) {
+        const share = sharesRef.current[m];
+        if (!share || share.collectionId !== entry.id) continue;
+        if (alsoStopPages) {
+          try {
+            await stopSharing(m);
+          } catch (e) {
+            console.error("stop sharing member failed", m, e);
+          }
+        } else {
+          updateShares((prev) => {
+            const cur = prev[m];
+            if (!cur) return prev;
+            const { collectionId: _c, ...rest } = cur;
+            return { ...prev, [m]: rest };
+          });
+          scheduleSharePush(m);
+        }
+      }
+    },
+    [stopSharing, updateCollections, updateShares, scheduleSharePush],
+  );
+
+  // Include a file in (or remove it from) a folder share. Including a not-yet-
+  // shared file publishes it first — an ordinary page share with a generated
+  // address — then lists it; including an already-shared page just lists it.
+  // Removing only delists: the page share survives with its URL intact.
+  const setCollectionMembership = useCallback(
+    async (filePath: string, dirPath: string, include: boolean) => {
+      const collection = collectionsRef.current[dirPath];
+      if (!collection) return;
+      const config = await getShareConfig();
+      if (!config) throw new Error("Sharing is not configured.");
+      if (include) {
+        if (!filePath.startsWith(collection.path + "/")) return;
+        const existing = sharesRef.current[filePath];
+        if (!existing) {
+          // Land any in-flight keystrokes if this is the open document, so the
+          // first published copy matches the screen.
+          await flushPendingAutosave();
+          const parts = await readShareParts(filePath);
+          if (!parts) throw new Error("Could not read the document.");
+          // Random ids virtually never collide, but a stale page under a
+          // recycled id would be silently overwritten — probe once.
+          let id = generateShareId();
+          if (await pageExists(config, id).catch(() => false)) id = generateShareId();
+          const title = pathShareTitle(filePath);
+          await pushPage(config, id, title, parts, {
+            id: collection.id,
+            title: collection.title,
+          });
+          try {
+            await pushOgImage(config, id, title);
+          } catch (e) {
+            console.error("og image upload failed", e);
+          }
+          const pushed = await fingerprintParts(parts);
+          const now = Date.now();
+          const created: ShareEntry = {
+            id,
+            path: filePath,
+            kind: "file",
+            title,
+            sharedAt: now,
+            updatedAt: now,
+            pushed,
+            collectionId: collection.id,
+          };
+          updateShares((prev) => ({ ...prev, [filePath]: created }));
+        } else {
+          updateShares((prev) =>
+            prev[filePath]
+              ? { ...prev, [filePath]: { ...prev[filePath], collectionId: collection.id } }
+              : prev,
+          );
+          // Re-push so the public page gains its folder crumb.
+          scheduleSharePush(filePath);
+        }
+        // A page belongs to at most one folder share; moving it here delists
+        // it from any other collection that still claims it.
+        for (const other of Object.values(collectionsRef.current)) {
+          if (other.path === dirPath || !other.members.includes(filePath)) continue;
+          updateCollections((prev) =>
+            prev[other.path]
+              ? {
+                  ...prev,
+                  [other.path]: {
+                    ...prev[other.path],
+                    members: prev[other.path].members.filter((m) => m !== filePath),
+                  },
+                }
+              : prev,
+          );
+          scheduleCollectionPush(other.path);
+        }
+        updateCollections((prev) => {
+          const cur = prev[dirPath];
+          if (!cur || cur.members.includes(filePath)) return prev;
+          return { ...prev, [dirPath]: { ...cur, members: [...cur.members, filePath] } };
+        });
+      } else {
+        updateCollections((prev) => {
+          const cur = prev[dirPath];
+          if (!cur || !cur.members.includes(filePath)) return prev;
+          return {
+            ...prev,
+            [dirPath]: { ...cur, members: cur.members.filter((m) => m !== filePath) },
+          };
+        });
+        if (sharesRef.current[filePath]?.collectionId === collection.id) {
+          updateShares((prev) => {
+            const cur = prev[filePath];
+            if (!cur) return prev;
+            const { collectionId: _c, ...rest } = cur;
+            return { ...prev, [filePath]: rest };
+          });
+          // Re-push so the public page loses its folder crumb.
+          scheduleSharePush(filePath);
+        }
+      }
+      scheduleCollectionPush(dirPath);
+    },
+    [
+      flushPendingAutosave,
+      readShareParts,
+      updateShares,
+      updateCollections,
+      scheduleSharePush,
+      scheduleCollectionPush,
+    ],
   );
 
   const reloadFromDisk = useCallback(async () => {
@@ -1617,9 +1976,36 @@ export default function App() {
           }
         }
       }
+      // A deleted member drops off its folder share's TOC (the published page
+      // itself stays live — delete ≠ unshare, same as standalone shares). A
+      // deleted folder that IS a shared folder (or contains one) is left
+      // frozen instead: its collection page stays live for cleanup from
+      // Shared pages, and undo restores everything exactly as it was.
+      const memberships: { dir: string; member: string }[] = [];
+      for (const c of Object.values(collectionsRef.current)) {
+        if (c.path === target || c.path.startsWith(target + "/")) continue;
+        const gone = c.members.filter(
+          (m) => m === target || (kind === "dir" && m.startsWith(target + "/")),
+        );
+        if (gone.length === 0) continue;
+        for (const m of gone) memberships.push({ dir: c.path, member: m });
+        updateCollections((prev) =>
+          prev[c.path]
+            ? {
+                ...prev,
+                [c.path]: {
+                  ...prev[c.path],
+                  members: prev[c.path].members.filter((m) => !gone.includes(m)),
+                },
+              }
+            : prev,
+        );
+        scheduleCollectionPush(c.path);
+      }
       deletedStackRef.current.push({
         files,
         openPaths: affected.map((t) => t.path),
+        memberships,
       });
       const sel = sidebarSelectionRef.current;
       if (sel && (sel.path === target || sel.path.startsWith(target + "/"))) {
@@ -1627,7 +2013,7 @@ export default function App() {
       }
       setTreeRefreshToken((t) => t + 1);
     },
-    [closeTab, selectSidebarEntry],
+    [closeTab, selectSidebarEntry, updateCollections, scheduleCollectionPush],
   );
 
   // Undo the most recent trash (⌘Z outside the editor): move the entry (and
@@ -1651,8 +2037,20 @@ export default function App() {
     }
     if (!restoredAny) return;
     setTreeRefreshToken((t) => t + 1);
+    // Restored members return to the folder shares that listed them (when
+    // those shares still exist).
+    const tocDirs = new Set<string>();
+    for (const { dir, member } of entry.memberships) {
+      updateCollections((prev) =>
+        prev[dir] && !prev[dir].members.includes(member)
+          ? { ...prev, [dir]: { ...prev[dir], members: [...prev[dir].members, member] } }
+          : prev,
+      );
+      if (collectionsRef.current[dir]) tocDirs.add(dir);
+    }
+    for (const d of tocDirs) scheduleCollectionPush(d);
     for (const p of entry.openPaths) await openTab(p, "file");
-  }, [openTab]);
+  }, [openTab, updateCollections, scheduleCollectionPush]);
 
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint every piece of state that keys
@@ -1758,17 +2156,69 @@ export default function App() {
         return next;
       });
 
-      // Shares are keyed by absolute path; re-key so a moved doc keeps pushing.
+      // Shares are keyed by absolute path; re-key so a moved doc keeps
+      // pushing, and re-push each renamed doc so the public page picks up its
+      // new title (and, for folder-share members, a fresh crumb).
+      const renamedShares: string[] = [];
       updateShares((prev) => {
         let changed = false;
         const next: Record<string, ShareEntry> = {};
         for (const [k, v] of Object.entries(prev)) {
           const nk = remap(k);
-          if (nk !== k) changed = true;
+          if (nk !== k) {
+            changed = true;
+            renamedShares.push(nk);
+          }
           next[nk] = nk === k ? v : { ...v, path: nk };
         }
         return changed ? next : prev;
       });
+
+      // Folder shares are keyed by directory path too: re-key a renamed/moved
+      // collection (its title follows the folder name while it still matches),
+      // re-key member paths, and delist members that moved OUT of their folder
+      // — their page shares stay live, they just leave the TOC. Anything that
+      // changed re-pushes its manifest.
+      {
+        const prev = collectionsRef.current;
+        const next: Record<string, CollectionEntry> = {};
+        const tocPushes: string[] = [];
+        const delisted: string[] = [];
+        let changed = false;
+        for (const [k, v] of Object.entries(prev)) {
+          const nk = remap(k);
+          let entry = nk === k ? v : { ...v, path: nk, title: v.title === basename(k) ? basename(nk) : v.title };
+          const moved = entry.members.map(remap);
+          const kept = moved.filter((m) => m.startsWith(entry.path + "/"));
+          for (const m of moved) {
+            if (!m.startsWith(entry.path + "/")) delisted.push(m);
+          }
+          const membersChanged =
+            kept.length !== entry.members.length ||
+            kept.some((m, i) => m !== entry.members[i]);
+          if (membersChanged) entry = { ...entry, members: kept };
+          if (nk !== k || membersChanged) {
+            changed = true;
+            tocPushes.push(nk);
+          }
+          next[nk] = entry;
+        }
+        if (changed) {
+          updateCollections(() => next);
+          for (const m of delisted) {
+            if (!sharesRef.current[m]?.collectionId) continue;
+            updateShares((p) => {
+              const cur = p[m];
+              if (!cur) return p;
+              const { collectionId: _c, ...rest } = cur;
+              return { ...p, [m]: rest };
+            });
+            if (!renamedShares.includes(m)) renamedShares.push(m); // drop the crumb
+          }
+          for (const d of tocPushes) scheduleCollectionPush(d);
+        }
+      }
+      for (const p of renamedShares) scheduleSharePush(p);
 
       const sel = sidebarSelectionRef.current;
       if (sel) {
@@ -1779,7 +2229,14 @@ export default function App() {
       setTreeRefreshToken((t) => t + 1);
       return null;
     },
-    [flushPendingAutosave, updateShares, selectSidebarEntry],
+    [
+      flushPendingAutosave,
+      updateShares,
+      updateCollections,
+      scheduleSharePush,
+      scheduleCollectionPush,
+      selectSidebarEntry,
+    ],
   );
 
   useEffect(() => {
@@ -2357,6 +2814,11 @@ export default function App() {
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
   const showHtmlView = docView === "html" && !activeMissing;
+  // The folder share the active document's include/remove toggle binds to
+  // (drafts have no directory, so never a collection).
+  const activeShareCollection = activeFilePath
+    ? nearestCollection(collections, activeFilePath)
+    : null;
 
   return (
     <div
@@ -2414,8 +2876,21 @@ export default function App() {
           docTitle={docShareTitle(activeTab)}
           entry={shares[activeTab.path] ?? null}
           config={shareConfig}
+          collection={
+            activeShareCollection && activeFilePath
+              ? {
+                  entry: activeShareCollection,
+                  included: activeShareCollection.members.includes(activeFilePath),
+                }
+              : null
+          }
           onShare={shareActiveDoc}
           onStopSharing={() => stopSharing(activeTab.path)}
+          onToggleCollection={(include) =>
+            activeShareCollection && activeFilePath
+              ? setCollectionMembership(activeFilePath, activeShareCollection.path, include)
+              : Promise.resolve()
+          }
           onOpenSharedPages={() => setSharedPagesOpen(true)}
           onOpenSetupGuide={() => setShareSetupOpen(true)}
           onOpenExternal={openExternal}
@@ -2426,15 +2901,44 @@ export default function App() {
       {sharedPagesOpen && (
         <SharedPages
           shares={Object.values(shares).sort((a, b) => b.sharedAt - a.sharedAt)}
+          collections={Object.values(collections).sort((a, b) => b.sharedAt - a.sharedAt)}
           config={shareConfig}
           onClose={() => setSharedPagesOpen(false)}
           onOpenDoc={(entry) => {
             setSharedPagesOpen(false);
             void openTab(entry.path, entry.kind);
           }}
+          onManageCollection={(entry) => {
+            setSharedPagesOpen(false);
+            setShareFolderTarget(entry.path);
+          }}
           onOpenExternal={openExternal}
           onOpenSetup={() => setShareSetupOpen(true)}
           onStopSharing={(entry) => stopSharing(entry.path)}
+        />
+      )}
+      {shareFolderTarget && (
+        <ShareFolder
+          dirPath={shareFolderTarget}
+          collection={collections[shareFolderTarget] ?? null}
+          shares={shares}
+          config={shareConfig}
+          onShare={(id) => shareFolder(shareFolderTarget, id)}
+          onStopSharing={async (alsoStopPages) => {
+            // Close only once the stop went through, so a failure (offline,
+            // bad token) surfaces in the still-open dialog.
+            await stopSharingFolder(shareFolderTarget, alsoStopPages);
+            setShareFolderTarget(null);
+          }}
+          onToggleMember={(path, include) =>
+            setCollectionMembership(path, shareFolderTarget, include)
+          }
+          onClose={() => setShareFolderTarget(null)}
+          onOpenExternal={openExternal}
+          onOpenSetup={() => {
+            setShareFolderTarget(null);
+            setShareSetupOpen(true);
+          }}
         />
       )}
       {shareSetupOpen && (
@@ -2492,6 +2996,8 @@ export default function App() {
           currentPath={activeFilePath}
           selection={sidebarSelection}
           refreshToken={treeRefreshToken}
+          shares={shares}
+          collections={collections}
           onSelect={selectSidebarEntry}
           onOpenFile={(p) => void openTab(p, "file")}
           onOpenFolder={openFolderPicker}
@@ -2499,6 +3005,13 @@ export default function App() {
           onRevealInFinder={revealInFinder}
           onDelete={(p, kind) => void deleteEntry(p, kind)}
           onMovePath={movePath}
+          onShareFolder={(dir) => setShareFolderTarget(dir)}
+          onToggleMembership={(path, dir, include) =>
+            void setCollectionMembership(path, dir, include).catch((e) => {
+              console.error("membership toggle failed", e);
+              window.alert(e instanceof Error ? e.message : String(e));
+            })
+          }
           onSwitchToSearch={() => {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);

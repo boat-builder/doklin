@@ -17,6 +17,7 @@ import {
   shareUrl,
   testShareConfig,
   SHARE_ID_RE,
+  type CollectionEntry,
   type ShareConfig,
   type ShareEntry,
 } from "./share";
@@ -25,8 +26,10 @@ export default function ShareMenu({
   docTitle,
   entry,
   config,
+  collection,
   onShare,
   onStopSharing,
+  onToggleCollection,
   onOpenSharedPages,
   onOpenSetupGuide,
   onOpenExternal,
@@ -36,8 +39,14 @@ export default function ShareMenu({
   docTitle: string;
   entry: ShareEntry | null;
   config: ShareConfig | null;
+  // The folder share this document sits inside (nearest one), if any, and
+  // whether the document is currently on its table of contents.
+  collection: { entry: CollectionEntry; included: boolean } | null;
   onShare: (id: string) => Promise<void>;
   onStopSharing: () => Promise<void>;
+  // Include in / remove from the surrounding folder share. Including an
+  // unshared document publishes it first (App handles both steps).
+  onToggleCollection: (include: boolean) => Promise<void>;
   onOpenSharedPages: () => void;
   onOpenSetupGuide: () => void;
   onOpenExternal: (url: string) => void;
@@ -47,7 +56,9 @@ export default function ShareMenu({
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"main" | "settings">("main");
   const [slug, setSlug] = useState("");
-  const [busy, setBusy] = useState<"share" | "stop" | "save" | "forget" | null>(null);
+  const [busy, setBusy] = useState<"share" | "stop" | "save" | "forget" | "collection" | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [endpointInput, setEndpointInput] = useState("");
@@ -181,6 +192,19 @@ export default function ShareMenu({
       console.error("copy link failed", e);
     }
   }, [entry, config]);
+
+  const toggleCollection = useCallback(async () => {
+    if (!collection || busy) return;
+    setBusy("collection");
+    setError(null);
+    try {
+      await onToggleCollection(!collection.included);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [collection, busy, onToggleCollection]);
 
   const host = shareHost(config);
   // Unconfigured + not explicitly editing settings → the setup prompt. The
@@ -371,6 +395,36 @@ export default function ShareMenu({
               {error && <div className="share-error">{error}</div>}
             </>
           )}
+          {!showSettings && !showSetupPrompt && collection && (
+            <div className="share-collection">
+              <div className="share-collection-text">
+                <button
+                  className="share-collection-name"
+                  onClick={() => onOpenExternal(shareUrl(config, collection.entry.id))}
+                  title={shareUrl(config, collection.entry.id)}
+                >
+                  <FolderGlyph />
+                  <span>{collection.entry.title}</span>
+                </button>
+                <span className="share-collection-hint">
+                  {collection.included ? "On the folder page" : "Not on the folder page"}
+                </span>
+              </div>
+              <button
+                className="share-btn"
+                onClick={() => void toggleCollection()}
+                disabled={busy != null}
+              >
+                {busy === "collection"
+                  ? collection.included
+                    ? "Removing…"
+                    : "Including…"
+                  : collection.included
+                    ? "Remove"
+                    : "Include"}
+              </button>
+            </div>
+          )}
           {!showSettings && !showSetupPrompt && (
             <div className="share-footer-links">
               <button
@@ -390,6 +444,24 @@ export default function ShareMenu({
         </div>
       )}
     </div>
+  );
+}
+
+function FolderGlyph() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
   );
 }
 
