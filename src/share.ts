@@ -41,10 +41,8 @@ export type ShareEntry = {
   // Membership is always explicit — sharing a folder shares no files by
   // itself, and sharing a file inside a shared folder doesn't enroll it.
   collectionId?: string;
-  // Which connection (ShareConnection.id) this page was published to. Absent
-  // on entries from before multi-connection support — those belong to the
-  // migrated v1 connection, and App stamps them on launch.
-  connectionId?: string;
+  // Which connection (ShareConnection.id) this page was published to.
+  connectionId: string;
 };
 
 // A folder (or whole-workspace) share: one published "collection" page whose
@@ -64,9 +62,9 @@ export type CollectionEntry = {
   pushedHash?: string;
   // Title baked into the last-pushed OG image; a mismatch re-renders it.
   pushedTitle?: string;
-  // Which connection this collection lives on (see ShareEntry.connectionId).
-  // Members can only be pages on the same connection.
-  connectionId?: string;
+  // Which connection this collection lives on. Members can only be pages on
+  // the same connection.
+  connectionId: string;
 };
 
 // One member reference inside a pushed manifest: the page's id, its display
@@ -105,6 +103,7 @@ export function readShares(): Record<string, ShareEntry> {
         e &&
         typeof e.id === "string" &&
         typeof e.path === "string" &&
+        typeof e.connectionId === "string" &&
         (e.kind === "draft" || e.kind === "file")
       ) {
         out[path] = e;
@@ -139,6 +138,7 @@ export function readCollections(): Record<string, CollectionEntry> {
         typeof e.id === "string" &&
         typeof e.path === "string" &&
         typeof e.title === "string" &&
+        typeof e.connectionId === "string" &&
         Array.isArray(e.members)
       ) {
         out[path] = { ...e, members: e.members.filter((m) => typeof m === "string") };
@@ -162,11 +162,6 @@ export function writeCollections(collections: Record<string, CollectionEntry>) {
 
 const EMPTY_CONNECTIONS: ShareConnectionsState = { connections: [], defaultId: null };
 
-// The id the v1 single-config file migrates to. Deterministic, so every
-// window and every launch reads the same identity out of an unmigrated file —
-// entries stamped with it stay valid even before the file is rewritten as v2.
-export const MIGRATED_CONNECTION_ID = "primary";
-
 // Canonical endpoint shape: no surrounding whitespace, no trailing slash.
 // Everything that stores or compares endpoints (saves, dedupe) must run
 // through this, or "same endpoint" checks quietly stop matching.
@@ -179,67 +174,41 @@ export function newConnectionId(): string {
 }
 
 // THE resolution rule for which connection owns an entry — every path that
-// renders a link or pushes/deletes must agree, so it lives here once. A
-// stamped entry maps to its connection or, when that was removed, to null
-// (degrade, don't guess). An unstamped entry predates multi-connection
-// support: it was published to the v1 connection, so prefer the migrated id,
-// then the default — stable across windows even before stamping runs.
+// renders a link or pushes/deletes must agree, so it lives here once. An
+// entry maps to its connection or, when that connection was removed, to null
+// (degrade, don't guess).
 export function resolveConnection(
   state: ShareConnectionsState,
-  entry: { connectionId?: string } | null,
+  entry: { connectionId: string } | null,
 ): ShareConnection | null {
   if (!entry) return null;
-  if (entry.connectionId) {
-    return state.connections.find((c) => c.id === entry.connectionId) ?? null;
-  }
-  return (
-    state.connections.find((c) => c.id === MIGRATED_CONNECTION_ID) ??
-    state.connections.find((c) => c.id === state.defaultId) ??
-    state.connections[0] ??
-    null
-  );
+  return state.connections.find((c) => c.id === entry.connectionId) ?? null;
 }
 
-// v2 file: {version: 2, connections: [{id, endpoint, token}], defaultId,
-// endpoint, token} — the top-level endpoint/token mirror the default
-// connection so an app build from before multi-connection support keeps
-// reading the same file happily. v1 file: bare {endpoint, token}.
+// File shape: {version: 2, connections: [{id, endpoint, token}], defaultId}.
+// Anything else — missing, malformed, hand-truncated — reads as unconfigured.
 function parseConnections(contents: string): ShareConnectionsState {
   const parsed = JSON.parse(contents);
-  if (Array.isArray(parsed?.connections)) {
-    const connections: ShareConnection[] = [];
-    for (const c of parsed.connections) {
-      if (
-        c &&
-        typeof c.id === "string" &&
-        typeof c.endpoint === "string" &&
-        typeof c.token === "string" &&
-        c.endpoint.trim() &&
-        !connections.some((seen) => seen.id === c.id)
-      ) {
-        connections.push({ id: c.id, endpoint: normalizeEndpoint(c.endpoint), token: c.token });
-      }
+  if (!Array.isArray(parsed?.connections)) return EMPTY_CONNECTIONS;
+  const connections: ShareConnection[] = [];
+  for (const c of parsed.connections) {
+    if (
+      c &&
+      typeof c.id === "string" &&
+      typeof c.endpoint === "string" &&
+      typeof c.token === "string" &&
+      c.endpoint.trim() &&
+      !connections.some((seen) => seen.id === c.id)
+    ) {
+      connections.push({ id: c.id, endpoint: normalizeEndpoint(c.endpoint), token: c.token });
     }
-    if (connections.length > 0) {
-      const defaultId =
-        typeof parsed.defaultId === "string" &&
-        connections.some((c) => c.id === parsed.defaultId)
-          ? parsed.defaultId
-          : connections[0].id;
-      return { connections, defaultId };
-    }
-    // A connections array that yields nothing valid (hand-edited, truncated)
-    // falls through to the top-level mirror — v2 files always carry one.
   }
-  if (typeof parsed?.endpoint === "string" && typeof parsed?.token === "string") {
-    const conn: ShareConnection = {
-      id: MIGRATED_CONNECTION_ID,
-      endpoint: normalizeEndpoint(parsed.endpoint),
-      token: parsed.token,
-    };
-    return { connections: [conn], defaultId: conn.id };
-  }
-  return EMPTY_CONNECTIONS;
+  if (connections.length === 0) return EMPTY_CONNECTIONS;
+  const defaultId =
+    typeof parsed.defaultId === "string" && connections.some((c) => c.id === parsed.defaultId)
+      ? parsed.defaultId
+      : connections[0].id;
+  return { connections, defaultId };
 }
 
 // Reads <app_data_dir>/share.json once and caches the result for the session.
@@ -262,9 +231,9 @@ export function getConnections(): Promise<ShareConnectionsState> {
   return connectionsPromise;
 }
 
-// Writes <app_data_dir>/share.json (v2 shape) and refreshes the session cache.
-// An empty list deletes the file — sharing turns unconfigured, existing pages
-// stay live remotely.
+// Writes <app_data_dir>/share.json and refreshes the session cache. An empty
+// list deletes the file — sharing turns unconfigured, existing pages stay
+// live remotely.
 export async function saveConnections(state: ShareConnectionsState): Promise<ShareConnectionsState> {
   if (state.connections.length === 0) {
     await invoke("delete_share_config");
@@ -278,11 +247,7 @@ export async function saveConnections(state: ShareConnectionsState): Promise<Sha
   const path = await join(dir, "share.json");
   await invoke("write_file", {
     path,
-    contents: `${JSON.stringify(
-      { endpoint: def.endpoint, token: def.token, version: 2, ...next },
-      null,
-      2,
-    )}\n`,
+    contents: `${JSON.stringify({ version: 2, ...next }, null, 2)}\n`,
     expected: null, // settings file: last write wins
   });
   connectionsPromise = Promise.resolve(next);

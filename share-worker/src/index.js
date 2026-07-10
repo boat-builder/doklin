@@ -1,11 +1,9 @@
 // Doklin share worker — serves public share pages from an R2 bucket.
 //
 // The root of the domain serves a landing page. Its branding lives in the
-// app-managed site config (site.json in R2, written via PUT /api/site); the
-// OWNER_NAME / OWNER_LINK / DOWNLOAD_URL env vars (wrangler.toml [vars]) are
-// the fallback for deployments that predate the API. When the site config
-// names a rootPageId, that shared page IS the root — replacing the landing
-// page entirely.
+// app-managed site config (site.json in R2, written via PUT /api/site). When
+// the site config names a rootPageId, that shared page IS the root —
+// replacing the landing page entirely.
 //
 // Public surface (no auth):
 //   GET /              landing page (or the rootPageId page from site.json)
@@ -415,7 +413,8 @@ function deriveDescriptionFromHtml(html) {
 }
 
 // The app-managed site config: landing branding + optional root page. A
-// missing or corrupt object is just "no config" — env vars take over.
+// missing or corrupt object is just "no config" — the landing page stays
+// generic.
 async function readSiteConfig(env) {
   const obj = await env.PAGES.get(SITE_KEY);
   if (!obj) return {};
@@ -445,7 +444,7 @@ async function serveRoot(env, url) {
       }
     }
   }
-  return landingPage(env, url, site);
+  return landingPage(url, site);
 }
 
 async function servePage(env, id, url) {
@@ -741,17 +740,17 @@ function shellPage(title, message, status = 200) {
 }
 
 // The landing page reads like Doklin's own product page, personalized to the
-// deployment: the Doklin wordmark leads, and OWNER_NAME / OWNER_LINK (wrangler
-// .toml [vars]) fill in whose domain this is. It answers two things for a
-// visitor who followed a share link here: whose notes live on this domain, and
-// what Doklin is (a free, open-source Mac editor, with a three-feature pitch +
-// a download button). The editor is presented as a product the owner uses, not
-// one they own. Without OWNER_NAME the page stays a generic Doklin page. The
-// download button points at DOWNLOAD_URL, defaulting to the official GitHub
-// release's stable latest-download alias (kept in sync by
-// .github/workflows/release.yml); set DOWNLOAD_URL="" to hide it. OWNER_LINK
-// (typically a LinkedIn profile) and the project source on GitHub show as quiet
-// links under the button; GitHub is where "open source" gets said.
+// deployment: the Doklin wordmark leads, and the site config's ownerName /
+// ownerLink fill in whose domain this is. It answers two things for a visitor
+// who followed a share link here: whose notes live on this domain, and what
+// Doklin is (a free, open-source Mac editor, with a feature pitch + a download
+// button). The editor is presented as a product the owner uses, not one they
+// own. Without ownerName the page stays a generic Doklin page. The download
+// button points at the site config's downloadUrl, defaulting to the official
+// GitHub release's stable latest-download alias (kept in sync by
+// .github/workflows/release.yml); set downloadUrl to "" to hide it. ownerLink
+// (typically a LinkedIn profile) and the project source on GitHub show as
+// quiet links under the button; GitHub is where "open source" gets said.
 const DEFAULT_DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
 const REPO_URL = "https://github.com/boat-builder/doklin";
@@ -793,32 +792,15 @@ const FEATURES = [
   },
 ];
 
-function landingPage(env, url, site = {}) {
+function landingPage(url, site = {}) {
   const host = url.hostname;
-  // The app-managed site config wins; the env vars back-fill deployments that
-  // were branded via wrangler.toml before the config API existed.
-  const owner =
-    typeof site.ownerName === "string" && site.ownerName.trim()
-      ? site.ownerName.trim()
-      : typeof env.OWNER_NAME === "string"
-        ? env.OWNER_NAME.trim()
-        : "";
-  const link =
-    typeof site.ownerLink === "string" && site.ownerLink.trim()
-      ? site.ownerLink.trim()
-      : typeof env.OWNER_LINK === "string"
-        ? env.OWNER_LINK.trim()
-        : "";
+  const owner = typeof site.ownerName === "string" ? site.ownerName.trim() : "";
+  const link = typeof site.ownerLink === "string" ? site.ownerLink.trim() : "";
   const isLinkedIn = /(^|\.)linkedin\.com\//i.test(link.replace(/^https?:\/\//, ""));
   // Unset -> official release; set (even to "") -> respected verbatim, so a
-  // self-hoster can point elsewhere or blank it out. Site config first, then
-  // the env var.
+  // self-hoster can point elsewhere or blank it out.
   const downloadUrl = (
-    typeof site.downloadUrl === "string"
-      ? site.downloadUrl
-      : env.DOWNLOAD_URL === undefined
-        ? DEFAULT_DOWNLOAD_URL
-        : String(env.DOWNLOAD_URL)
+    typeof site.downloadUrl === "string" ? site.downloadUrl : DEFAULT_DOWNLOAD_URL
   ).trim();
 
   const title = owner ? `Notes by ${owner}, written in Doklin` : `Notes written in Doklin`;
@@ -841,7 +823,7 @@ function landingPage(env, url, site = {}) {
   // lives now). The name ends the headline line, so the link mark trails it in
   // its own small tile. An enclosed badge reads as a "link" button, not as the
   // word "in" sitting inside the sentence. LinkedIn glyph, or a generic
-  // external-link glyph if OWNER_LINK is not a LinkedIn URL.
+  // external-link glyph if the profile link is not a LinkedIn URL.
   const nameBadge = isLinkedIn
     ? `<svg viewBox="3.2 3.1 17.6 17.6" fill="currentColor" aria-hidden><path d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.36V9h3.41v1.56h.05c.47-.9 1.63-1.85 3.36-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12 2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.55V9h3.57v11.45z"/></svg>`
     : `<svg viewBox="4 4 16 16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden><path d="M8 5h11v11"/><path d="M19 5 5 19"/></svg>`;

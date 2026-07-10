@@ -99,11 +99,28 @@ routes = [
 
 On the next `npx wrangler@4 deploy`, wrangler creates the Custom Domain binding
 and provisions the DNS record + TLS certificate automatically (cert issuance can
-take a minute or two on first deploy). An apex domain works the same way. If
+take a minute or two on first deploy). An apex domain (`example.com`) and a
+subdomain of a zone you already run on Cloudflare (`notes.example.com`) work
+the same way — for the subdomain case there's nothing else to do, since the
+zone is already there. One depth limit on the free plan: Universal SSL covers
+only one label under the zone, so `notes.example.com` is fine but
+`a.b.example.com` needs Cloudflare's paid Advanced Certificate Manager. If
 deploy reports the zone isn't found, add the domain to Cloudflare first —
 wrangler won't create the zone for you. Dashboard-only alternative (no
 wrangler): on the worker's page, **Settings → Domains & Routes → Add →
 Custom Domain**.
+
+### Several domains on one account
+
+The app can hold several connections (one per domain), and each is a full
+separate stack: its own worker, its own bucket, its own token. Worker and
+bucket names are unique per Cloudflare account, so give every setup fresh
+names — the app's agent prompt derives them from the domain
+(`doklin-share-notes-example-com` / `doklin-pages-notes-example-com`). Two
+warnings worth respecting: deploying with an existing worker's `name`
+doesn't error — it silently updates that worker and, after `secret put`,
+overwrites its token, cutting off the other domain's connection; and
+pointing two workers at one bucket publishes every page on both domains.
 
 ### Connect the app
 
@@ -111,12 +128,19 @@ The app ships this whole guide built in: while sharing is unconfigured, the
 **Share** popover (and the gear menu's **Sharing setup…**) opens a step-by-step
 setup window that ends with the endpoint + token form, verified against the
 worker before saving. Set the endpoint to your worker URL (no trailing slash)
-and the token to the hex string from step 3. The app stores both in a
-machine-local file that never enters any repo —
+and the token to the hex string from step 3. The app can hold several such
+connections (one per domain) and stores them in a machine-local file that
+never enters any repo —
 `~/Library/Application Support/com.sherin.doklin/share.json`:
 
 ```json
-{ "endpoint": "https://<name>.<your-subdomain>.workers.dev", "token": "<the hex token>" }
+{
+  "version": 2,
+  "connections": [
+    { "id": "c-xxxxxxxxxx", "endpoint": "https://<name>.<your-subdomain>.workers.dev", "token": "<the hex token>" }
+  ],
+  "defaultId": "c-xxxxxxxxxx"
+}
 ```
 
 You can also write that file directly instead of using the form.
@@ -139,22 +163,10 @@ worker's `/api/site` endpoint:
    table of contents the root. The default landing page is gone until you
    unset it.
 
-The old way still works as a fallback for deployments that predate `/api/site`
-(the app-written config wins when both exist): add to `wrangler.toml` and
-redeploy:
-
-```toml
-[vars]
-OWNER_NAME = "Your Name"
-OWNER_LINK = "https://linkedin.com/in/your-handle"
-# DOWNLOAD_URL defaults to the official release below; set it to override, or
-# to "" to hide the download button entirely.
-DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"
-```
-
-The download URL default is a stable alias kept current by the repo's release
-workflow (`.github/workflows/release.yml`), so it always resolves to the newest
-build.
+The download button defaults to the official GitHub release's stable
+latest-download alias, kept current by the repo's release workflow
+(`.github/workflows/release.yml`). Point it elsewhere — or hide it with `""` —
+via the `downloadUrl` field of `PUT /api/site`.
 
 ### Recreating `wrangler.toml` for an existing deployment
 
@@ -172,12 +184,11 @@ deployment (assumes a logged-in wrangler CLI):
   `npx wrangler@4 deployments list --name <name>`.
 - `bucket_name` — `npx wrangler@4 r2 bucket list`.
 - `routes` — the host the app's share endpoint points at: check **Share →
-  Sharing settings…** or the `endpoint` in `share.json`. If it's a
-  `workers.dev` URL, use `workers_dev = true` and no `routes` instead.
-- `[vars] OWNER_NAME / OWNER_LINK / DOWNLOAD_URL` — usually unnecessary: if
-  the branding was set from the app it lives in the bucket (`site.json`) and
-  survives redeploys. Only restore these if the live landing page is branded
-  but `GET /api/site` returns an empty config (a pre-`/api/site` deployment).
+  Sharing settings…** or the connection's `endpoint` in `share.json`. If it's
+  a `workers.dev` URL, use `workers_dev = true` and no `routes` instead.
+
+Landing-page branding needs nothing here — it lives in the bucket
+(`site.json`) and survives redeploys.
 
 Do **not** re-run `secret put SHARE_TOKEN` while rebuilding the config — the
 secret persists on the worker across deploys, and setting a new value would cut

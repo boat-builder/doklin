@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import workerCode from "virtual:share-worker-code";
 import {
   fetchSiteConfig,
+  generateShareId,
   newConnectionId,
   normalizeEndpoint,
   pushSiteConfig,
@@ -59,15 +60,25 @@ function cleanDomain(raw: string): string {
 // must hand back is the endpoint URL. With a domain, the agent also binds the
 // worker to it as a Cloudflare Custom Domain — pausing for the one step only
 // the user can do (pointing nameservers at Cloudflare).
-function buildAgentPrompt(token: string, domain: string): string {
+//
+// Every domain is its own stack — worker, bucket, token — and worker/bucket
+// names are unique per Cloudflare account, so the names carry the domain
+// (dots → dashes). A same-name deploy wouldn't error: it would silently
+// UPDATE the first domain's worker and overwrite its token. Without a domain
+// the first setup keeps the clean "doklin-share" name; adding another
+// workers.dev backend gets a random suffix instead (passed in by the modal).
+function buildAgentPrompt(token: string, domain: string, suffix: string): string {
+  const slug = domain ? domain.replace(/\./g, "-") : suffix;
+  const workerName = slug ? `doklin-share-${slug}` : "doklin-share";
+  const bucketName = slug ? `doklin-pages-${slug}` : "doklin-pages";
   const target = domain
     ? `one Cloudflare Worker in front of one R2 bucket, serving at my domain https://${domain}`
     : `one Cloudflare Worker in front of one R2 bucket`;
   const tomlStep = domain
-    ? `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Keep name = "doklin-share". Set bucket_name to "doklin-pages" (or another name if you must). Set workers_dev = false, and set routes = [{ pattern = "${domain}", custom_domain = true }].`
-    : `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Keep name = "doklin-share". Set bucket_name to "doklin-pages" (or another name if you must).`;
+    ? `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Set name = "${workerName}" and bucket_name = "${bucketName}". Set workers_dev = false, and set routes = [{ pattern = "${domain}", custom_domain = true }].`
+    : `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Set name = "${workerName}" and bucket_name = "${bucketName}".`;
   const deployStep = domain
-    ? `Deploy: \`npx -y wrangler@4 deploy\`. Wrangler binds the domain and provisions DNS + TLS itself. If it errors because the zone ${domain.split(".").slice(-2).join(".")} is not on this Cloudflare account, pause and ask me to add the domain in the Cloudflare dashboard (Account Home → Add a domain, free plan) and to point my registrar's nameservers at Cloudflare — then retry once the zone is active. First-deploy certificate issuance can take a minute or two.`
+    ? `Deploy: \`npx -y wrangler@4 deploy\`. Wrangler binds the domain and provisions DNS + TLS itself — if ${domain} sits under a zone already active on the account (e.g. a subdomain of a domain I use with Cloudflare), that's everything. If it errors because the domain's zone is not on this Cloudflare account, pause and ask me to add the registrable domain in the Cloudflare dashboard (Account Home → Add a domain, free plan) and to point my registrar's nameservers at Cloudflare — then retry once the zone is active. First-deploy certificate issuance can take a minute or two.`
     : `Deploy: \`npx -y wrangler@4 deploy\`. Note the printed workers.dev URL.`;
   const endpoint = domain ? `https://${domain}` : `<the worker URL, no trailing slash>`;
   return `Set up the self-hosted sharing backend for the Doklin app on my Cloudflare account: ${target}.
@@ -75,7 +86,7 @@ function buildAgentPrompt(token: string, domain: string): string {
 1. Clone ${REPO_URL} (shallow is fine) into a temporary directory and work in its share-worker/ folder. The folder's README.md has details if you need them; these steps are the whole job.
 2. Run \`npx -y wrangler@4 whoami\`. If it says not logged in, run \`npx -y wrangler@4 login\` and ask me to complete the sign-in in the browser window it opens.
 3. ${tomlStep}
-4. Create the bucket: \`npx -y wrangler@4 r2 bucket create doklin-pages\`. If the account has never enabled R2, pause and ask me to enable R2 once in the Cloudflare dashboard (it may require adding a payment method; the free allowance covers this use).
+4. Create the bucket: \`npx -y wrangler@4 r2 bucket create ${bucketName}\`. If the account has never enabled R2, pause and ask me to enable R2 once in the Cloudflare dashboard (it may require adding a payment method; the free allowance covers this use). If the bucket already exists, pause and ask me how to proceed: it may be a leftover from an earlier setup that's fine to reuse, or it may be live behind another Doklin domain — reusing that one would publish every page on both domains. Only continue with it if I confirm; otherwise I'll give you a different name (update bucket_name in wrangler.toml to match).
 5. Store the app's write token as the worker secret: run \`npx -y wrangler@4 secret put SHARE_TOKEN\` and give it exactly this value:
 ${token}
 6. ${deployStep}
@@ -101,6 +112,10 @@ export default function ShareSetup({
 }) {
   const [mode, setMode] = useState<"agent" | "browser" | "terminal">("agent");
   const [freshToken] = useState(generateToken);
+  // Uniquifies worker/bucket names when adding a second workers.dev backend
+  // (with a domain the names derive from the domain instead — see
+  // buildAgentPrompt). Stable for the life of the modal, like the token.
+  const [nameSuffix] = useState(() => (isAddingAnother ? generateShareId(4) : ""));
   const [domain, setDomain] = useState("");
   const [endpoint, setEndpoint] = useState("");
   const [token, setToken] = useState(freshToken);
@@ -123,7 +138,11 @@ export default function ShareSetup({
 
   const cleanedDomain = cleanDomain(domain);
   const domainValid = cleanedDomain === "" || DOMAIN_RE.test(cleanedDomain);
-  const agentPrompt = buildAgentPrompt(freshToken, domainValid ? cleanedDomain : "");
+  const agentPrompt = buildAgentPrompt(
+    freshToken,
+    domainValid ? cleanedDomain : "",
+    nameSuffix,
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -258,9 +277,10 @@ export default function ShareSetup({
                 {isAddingAnother ? (
                   <>
                     Each domain is its own backend on{" "}
-                    <strong>your Cloudflare account</strong> — one worker, one
-                    bucket, one token. Set it up like the first one; the app
-                    lets you pick a domain per share.
+                    <strong>your Cloudflare account</strong> — its own worker,
+                    bucket, and token, under fresh names (worker and bucket
+                    names are unique per account). The app lets you pick a
+                    domain per share.
                   </>
                 ) : (
                   <>
@@ -414,9 +434,16 @@ export default function ShareSetup({
                       <div className="setup-step-note">
                         In the dashboard's sidebar open <strong>R2 Object Storage</strong> →{" "}
                         <strong>Create bucket</strong>. Name it anything — <code>doklin-pages</code>{" "}
-                        is a fine choice — and leave every option at its default. First time using
-                        R2? It asks for a payment method once; sharing fits well within the free
-                        allowance.
+                        is a fine choice{isAddingAnother ? (
+                          <>
+                            {" "}— but each domain needs its <strong>own</strong> bucket: don't
+                            pick one that another Doklin setup already uses, or every page would
+                            publish on both domains
+                          </>
+                        ) : (
+                          ""
+                        )}. Leave every option at its default. First time using R2? It asks for a
+                        payment method once; sharing fits well within the free allowance.
                       </div>
                     </li>
                     <li className="setup-step">
@@ -424,8 +451,12 @@ export default function ShareSetup({
                       <div className="setup-step-note">
                         Sidebar → <strong>Workers &amp; Pages</strong> → <strong>Create</strong> →
                         create a Worker from the <strong>Hello World</strong> starter. Name it{" "}
-                        <code>doklin-share</code> (the name becomes part of your share links) and
-                        hit <strong>Deploy</strong>. If Cloudflare asks you to pick a{" "}
+                        <code>doklin-share</code> (the name becomes part of your share links
+                        {isAddingAnother
+                          ? "; names are unique per account, so a second setup needs a fresh one — suffix it with the domain, like "
+                          : ""}
+                        {isAddingAnother ? <code>doklin-share-notes</code> : ""}) and hit{" "}
+                        <strong>Deploy</strong>. If Cloudflare asks you to pick a{" "}
                         <code>workers.dev</code> subdomain first, choose one — that's your personal
                         hosting address.
                       </div>
@@ -503,6 +534,16 @@ export default function ShareSetup({
                         name, e.g. <code>doklin-pages</code>. For links on your own domain, also set{" "}
                         <code>workers_dev = false</code> and the <code>routes</code> block (the file
                         shows how; the domain's zone must already be on your account).
+                        {isAddingAnother ? (
+                          <>
+                            {" "}Adding to an account with an existing Doklin setup? Use fresh,
+                            unique <code>name</code> and <code>bucket_name</code> values — a
+                            same-name deploy overwrites the other domain's worker, and two workers
+                            on one bucket publish every page on both domains.
+                          </>
+                        ) : (
+                          ""
+                        )}
                       </div>
                       <Cmd text="cp wrangler.toml.example wrangler.toml" />
                     </li>

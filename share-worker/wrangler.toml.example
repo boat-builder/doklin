@@ -26,18 +26,9 @@ workers_dev = true
 #   { pattern = "notes.example.com", custom_domain = true }
 # ]
 
-# Optional landing-page branding, shown at the root of your share domain so
-# visitors can see who is behind the links. You normally don't need these:
-# the app writes the same branding through the worker API (Sharing settings →
-# landing page) and that takes precedence. These env vars are the fallback —
-# useful to survive a bucket wipe or to keep branding fully in deploy config.
-# The root also shows a "Download Doklin for macOS" button; it points at
-# DOWNLOAD_URL, which defaults to the official GitHub release's stable
-# latest-download alias — set it to override, or to "" to hide the button.
-# [vars]
-# OWNER_NAME = "Your Name"
-# OWNER_LINK = "https://linkedin.com/in/your-handle"
-# DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"
+# Landing-page branding (your name at the root of the share domain) is set
+# from the app — Sharing settings → landing page — and stored in the bucket,
+# so it needs nothing here and survives redeploys.
 
 [[r2_buckets]]
 binding = "PAGES"                  # the worker code reads env.PAGES — leave as is
