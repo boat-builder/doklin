@@ -38,6 +38,7 @@ import {
   readCollections,
   readShares,
   readWorkspaceConnectionMap,
+  resolveConnection,
   saveConnections,
   shareUrl,
   writeCollections,
@@ -573,36 +574,30 @@ export default function App() {
   );
 
   // Load the configured connections, and stamp registry entries from before
-  // multi-connection support with the connection they were published to (v1
-  // had exactly one, so the default is it). Stamping runs in the main window
-  // only — one registry, one writer.
+  // multi-connection support with the connection they were published to
+  // (resolveConnection maps an unstamped entry to the migrated v1
+  // connection). Stamping runs in the main window only — one registry, one
+  // writer.
   useEffect(() => {
     void getConnections().then((st) => {
       setShareConns(st);
-      if (!isMainWindow || !st.defaultId) return;
-      const def = st.defaultId;
-      updateShares((prev) => {
+      if (!isMainWindow || st.connections.length === 0) return;
+      const stamp = <T extends { connectionId?: string }>(
+        prev: Record<string, T>,
+      ): Record<string, T> => {
         let changed = false;
         const next = { ...prev };
         for (const [p, e] of Object.entries(next)) {
-          if (!e.connectionId) {
-            next[p] = { ...e, connectionId: def };
-            changed = true;
-          }
+          if (e.connectionId) continue;
+          const conn = resolveConnection(st, e);
+          if (!conn) continue;
+          next[p] = { ...e, connectionId: conn.id };
+          changed = true;
         }
         return changed ? next : prev;
-      });
-      updateCollections((prev) => {
-        let changed = false;
-        const next = { ...prev };
-        for (const [p, e] of Object.entries(next)) {
-          if (!e.connectionId) {
-            next[p] = { ...e, connectionId: def };
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
+      };
+      updateShares(stamp);
+      updateCollections(stamp);
     });
   }, [updateShares, updateCollections]);
 
@@ -617,17 +612,12 @@ export default function App() {
     [],
   );
 
-  // Which connection an entry belongs to. Entries with no stamp yet (created
-  // before multi-connection support, not yet migrated) belong to the default.
-  // null = that connection has been removed; pushes skip, stops forget locally.
+  // Which connection an entry belongs to (share.ts's resolveConnection, fed
+  // from the session cache). null = that connection has been removed; pushes
+  // skip, stops forget locally.
   const connectionForEntry = useCallback(
-    async (entry: { connectionId?: string }): Promise<ShareConnection | null> => {
-      const st = await getConnections();
-      if (entry.connectionId) {
-        return st.connections.find((c) => c.id === entry.connectionId) ?? null;
-      }
-      return st.connections.find((c) => c.id === st.defaultId) ?? st.connections[0] ?? null;
-    },
+    async (entry: { connectionId?: string }): Promise<ShareConnection | null> =>
+      resolveConnection(await getConnections(), entry),
     [],
   );
 
@@ -640,17 +630,8 @@ export default function App() {
   // Render-time mirror of connectionForEntry, driven by state instead of the
   // session cache so the UI re-resolves when connections change.
   const connectionForEntrySync = useCallback(
-    (entry: { connectionId?: string } | null): ShareConnection | null => {
-      if (!entry) return null;
-      if (entry.connectionId) {
-        return shareConns.connections.find((c) => c.id === entry.connectionId) ?? null;
-      }
-      return (
-        shareConns.connections.find((c) => c.id === shareConns.defaultId) ??
-        shareConns.connections[0] ??
-        null
-      );
-    },
+    (entry: { connectionId?: string } | null): ShareConnection | null =>
+      resolveConnection(shareConns, entry),
     [shareConns],
   );
 
@@ -1870,7 +1851,10 @@ export default function App() {
       if (include) {
         if (!filePath.startsWith(collection.path + "/")) return;
         const existing = sharesRef.current[filePath];
-        if (existing && existing.connectionId && existing.connectionId !== config.id) {
+        // Compare RESOLVED connections, so an unstamped legacy page (which
+        // lives wherever resolveConnection says) can't slip onto a foreign
+        // collection's TOC and 404 there.
+        if (existing && (await connectionForEntry(existing))?.id !== config.id) {
           throw new Error(
             "This page is shared on a different domain. A folder share can only list pages on its own domain — stop sharing the page first.",
           );
@@ -1910,9 +1894,18 @@ export default function App() {
           };
           updateShares((prev) => ({ ...prev, [filePath]: created }));
         } else {
+          // The guard above proved the page resolves to this connection —
+          // make the stamp explicit while we're here.
           updateShares((prev) =>
             prev[filePath]
-              ? { ...prev, [filePath]: { ...prev[filePath], collectionId: collection.id } }
+              ? {
+                  ...prev,
+                  [filePath]: {
+                    ...prev[filePath],
+                    collectionId: collection.id,
+                    connectionId: config.id,
+                  },
+                }
               : prev,
           );
           // Re-push so the public page gains its folder crumb.
@@ -3120,6 +3113,7 @@ export default function App() {
               ? {
                   entry: activeShareCollection,
                   included: activeShareCollection.members.includes(activeFilePath),
+                  connection: connectionForEntrySync(activeShareCollection),
                 }
               : null
           }

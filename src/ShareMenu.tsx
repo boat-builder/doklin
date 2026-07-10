@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   generateShareId,
   newConnectionId,
+  normalizeEndpoint,
   pageExists,
   shareHost,
   shareUrl,
@@ -57,9 +58,14 @@ export default function ShareMenu({
   globalDefaultId: string | null;
   // How many local entries live on a connection — quoted before removing it.
   shareCountFor: (connectionId: string) => number;
-  // The folder share this document sits inside (nearest one), if any, and
-  // whether the document is currently on its table of contents.
-  collection: { entry: CollectionEntry; included: boolean } | null;
+  // The folder share this document sits inside (nearest one), if any, whether
+  // the document is currently on its table of contents, and the connection
+  // that folder share lives on (its links must use THAT domain).
+  collection: {
+    entry: CollectionEntry;
+    included: boolean;
+    connection: ShareConnection | null;
+  } | null;
   // True when something outside (the tree's "Share…" context item) asked for
   // the popover to open; consumed once acted on.
   autoOpen: boolean;
@@ -160,7 +166,7 @@ export default function ShareMenu({
 
   const saveEditing = useCallback(async () => {
     if (busy || !editing) return;
-    const endpoint = endpointInput.trim().replace(/\/+$/, "");
+    const endpoint = normalizeEndpoint(endpointInput);
     const token = tokenInput.trim();
     if (!/^https?:\/\/\S+$/.test(endpoint)) {
       setError("The endpoint must be an http(s) URL.");
@@ -401,11 +407,14 @@ export default function ShareMenu({
                         {confirmRemove === c.id ? (
                           <div className="share-conn-actions">
                             <span className="share-conn-hint">
-                              {shareCountFor(c.id) > 0
-                                ? `${shareCountFor(c.id)} shared ${
-                                    shareCountFor(c.id) === 1 ? "page stays" : "pages stay"
-                                  } live but can't be updated from here.`
-                                : "Nothing shared here."}
+                              {(() => {
+                                const count = shareCountFor(c.id);
+                                return count > 0
+                                  ? `${count} shared ${
+                                      count === 1 ? "page stays" : "pages stay"
+                                    } live but can't be updated from here.`
+                                  : "Nothing shared here.";
+                              })()}
                             </span>
                             <button
                               className="share-btn is-danger"
@@ -605,11 +614,14 @@ export default function ShareMenu({
                 <button
                   className="share-collection-name"
                   onClick={() =>
-                    onOpenExternal(
-                      shareUrl(entryConnection ?? selectedConn, collection.entry.id),
-                    )
+                    collection.connection &&
+                    onOpenExternal(shareUrl(collection.connection, collection.entry.id))
                   }
-                  title={shareUrl(entryConnection ?? selectedConn, collection.entry.id)}
+                  title={
+                    collection.connection
+                      ? shareUrl(collection.connection, collection.entry.id)
+                      : collection.entry.title
+                  }
                 >
                   <FolderGlyph />
                   <span>{collection.entry.title}</span>

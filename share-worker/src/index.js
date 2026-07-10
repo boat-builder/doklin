@@ -437,7 +437,9 @@ async function serveRoot(env, url) {
     const obj = await env.PAGES.get(`pages/${site.rootPageId}.json`);
     if (obj) {
       try {
-        return renderPage(env, site.rootPageId, await obj.json(), url);
+        // `await`, not a bare return: a rejection inside the render must land
+        // in this catch so the domain root degrades instead of 500ing.
+        return await renderPage(env, site.rootPageId, await obj.json(), url);
       } catch {
         // corrupt page object; fall through to the landing page
       }

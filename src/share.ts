@@ -167,12 +167,37 @@ const EMPTY_CONNECTIONS: ShareConnectionsState = { connections: [], defaultId: n
 // entries stamped with it stay valid even before the file is rewritten as v2.
 export const MIGRATED_CONNECTION_ID = "primary";
 
-function normalizeEndpoint(endpoint: string): string {
+// Canonical endpoint shape: no surrounding whitespace, no trailing slash.
+// Everything that stores or compares endpoints (saves, dedupe) must run
+// through this, or "same endpoint" checks quietly stop matching.
+export function normalizeEndpoint(endpoint: string): string {
   return endpoint.trim().replace(/\/+$/, "");
 }
 
 export function newConnectionId(): string {
   return `c-${generateShareId(10)}`;
+}
+
+// THE resolution rule for which connection owns an entry — every path that
+// renders a link or pushes/deletes must agree, so it lives here once. A
+// stamped entry maps to its connection or, when that was removed, to null
+// (degrade, don't guess). An unstamped entry predates multi-connection
+// support: it was published to the v1 connection, so prefer the migrated id,
+// then the default — stable across windows even before stamping runs.
+export function resolveConnection(
+  state: ShareConnectionsState,
+  entry: { connectionId?: string } | null,
+): ShareConnection | null {
+  if (!entry) return null;
+  if (entry.connectionId) {
+    return state.connections.find((c) => c.id === entry.connectionId) ?? null;
+  }
+  return (
+    state.connections.find((c) => c.id === MIGRATED_CONNECTION_ID) ??
+    state.connections.find((c) => c.id === state.defaultId) ??
+    state.connections[0] ??
+    null
+  );
 }
 
 // v2 file: {version: 2, connections: [{id, endpoint, token}], defaultId,
@@ -195,11 +220,16 @@ function parseConnections(contents: string): ShareConnectionsState {
         connections.push({ id: c.id, endpoint: normalizeEndpoint(c.endpoint), token: c.token });
       }
     }
-    const defaultId =
-      typeof parsed.defaultId === "string" && connections.some((c) => c.id === parsed.defaultId)
-        ? parsed.defaultId
-        : (connections[0]?.id ?? null);
-    return { connections, defaultId };
+    if (connections.length > 0) {
+      const defaultId =
+        typeof parsed.defaultId === "string" &&
+        connections.some((c) => c.id === parsed.defaultId)
+          ? parsed.defaultId
+          : connections[0].id;
+      return { connections, defaultId };
+    }
+    // A connections array that yields nothing valid (hand-edited, truncated)
+    // falls through to the top-level mirror — v2 files always carry one.
   }
   if (typeof parsed?.endpoint === "string" && typeof parsed?.token === "string") {
     const conn: ShareConnection = {
@@ -400,19 +430,6 @@ export type SiteConfig = {
   rootPageId?: string;
   updatedAt?: string;
 };
-
-export type WorkerMeta = { version: number; features: string[] };
-
-// What the deployed worker supports. null = it predates /api/meta (v1: pages
-// + collections at most); throws when the endpoint can't be reached at all.
-export async function fetchWorkerMeta(config: ShareConfig): Promise<WorkerMeta | null> {
-  const res = await apiFetch(config, "/api/meta");
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`version check failed (${res.status})`);
-  const body = (await res.json().catch(() => null)) as WorkerMeta | null;
-  if (!body || typeof body.version !== "number") return null;
-  return { version: body.version, features: Array.isArray(body.features) ? body.features : [] };
-}
 
 export async function fetchSiteConfig(config: ShareConfig): Promise<SiteConfig> {
   const res = await apiFetch(config, "/api/site");

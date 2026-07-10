@@ -15,7 +15,9 @@ import workerCode from "virtual:share-worker-code";
 import {
   fetchSiteConfig,
   newConnectionId,
+  normalizeEndpoint,
   pushSiteConfig,
+  shareHost,
   ShareWorkerOutdatedError,
   testShareConfig,
   type ShareConnection,
@@ -133,7 +135,7 @@ export default function ShareSetup({
 
   const verifyAndSave = async () => {
     if (busy) return;
-    const cleanEndpoint = endpoint.trim().replace(/\/+$/, "");
+    const cleanEndpoint = normalizeEndpoint(endpoint);
     const cleanToken = token.trim();
     if (!/^https?:\/\/\S+$/.test(cleanEndpoint)) {
       setError("The endpoint must be an http(s) URL — your worker's address.");
@@ -658,7 +660,7 @@ export default function ShareSetup({
                                 className="setup-link"
                                 onClick={() => onOpenExternal(`${savedConn.endpoint}/`)}
                               >
-                                {savedConn.endpoint.replace(/^https?:\/\//, "")}
+                                {shareHost(savedConn)}
                               </button>
                             </div>
                           ) : (
