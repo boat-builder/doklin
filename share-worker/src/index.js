@@ -7,7 +7,11 @@
 //   GET /<id>          rendered read-only page for pages/<id>.json in R2.
 //                      A page can carry a markdown document, an html rendition,
 //                      or both; with both, a pill on the page lets the reader
-//                      switch (?v=html selects the html rendition).
+//                      switch (?v=html selects the html rendition). A page
+//                      stored with kind:"collection" is a folder/workspace
+//                      share instead: it renders as a table-of-contents home
+//                      page linking to its member pages, and each member page
+//                      shows a "back to the folder" crumb.
 //   GET /<id>?v=html   the html rendition, framed (sandboxed iframe -> /raw)
 //   GET /<id>/raw      the raw html rendition document
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
@@ -15,8 +19,13 @@
 // Write API (Authorization: Bearer $SHARE_TOKEN — the desktop app only):
 //   GET    /api/pages            list shared pages (id, title, updatedAt)
 //   GET    /api/pages/<id>       page metadata (existence check)
-//   PUT    /api/pages/<id>       body {title, markdown?, html?} — create/update
-//                                (at least one of markdown/html required)
+//   PUT    /api/pages/<id>       body {title, markdown?, html?, collection?}
+//                                — create/update a page (at least one of
+//                                markdown/html required; collection {id,title}
+//                                back-references the folder share it's in) —
+//                                or body {title, kind:"collection", items} to
+//                                create/update a folder share (items are
+//                                {id, title, path} member references)
 //   PUT    /api/pages/<id>/og    body image/png — set the OG image
 //   DELETE /api/pages/<id>       stop sharing (removes page + OG image)
 
@@ -27,6 +36,7 @@ const RESERVED = new Set(["api", "robots.txt", "favicon.ico"]);
 const MAX_MARKDOWN_BYTES = 4 * 1024 * 1024;
 const MAX_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_OG_BYTES = 2 * 1024 * 1024;
+const MAX_COLLECTION_ITEMS = 1000;
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -71,6 +81,14 @@ export default {
 
 function validId(id) {
   return ID_RE.test(id) && !RESERVED.has(id);
+}
+
+// A manifest item's path is relative to the shared folder: forward slashes,
+// no leading/trailing slash, no traversal, sane length. Only used to group
+// the TOC — the link target is always the item's page id.
+function validItemPath(p) {
+  if (typeof p !== "string" || p.length === 0 || p.length > 512) return false;
+  return p.split("/").every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
 }
 
 /* ---------- Write API ---------- */
@@ -124,6 +142,56 @@ async function handleApi(request, env, url) {
         return json({ error: "invalid json body" }, 400);
       }
       const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Untitled";
+      // A collection is a folder/workspace share: no document of its own, just
+      // a manifest of member pages (each an ordinary page in this bucket). The
+      // public side renders it as a table-of-contents home page. The manifest
+      // is the full membership every push — a missing item means "no longer
+      // included", not "keep prior".
+      if (body.kind === "collection") {
+        const rawItems = Array.isArray(body.items) ? body.items : null;
+        if (!rawItems) return json({ error: "items must be an array" }, 400);
+        if (rawItems.length > MAX_COLLECTION_ITEMS) {
+          return json({ error: "too many items" }, 413);
+        }
+        const items = [];
+        for (const it of rawItems) {
+          if (!it || typeof it !== "object") return json({ error: "invalid item" }, 400);
+          if (typeof it.id !== "string" || !validId(it.id)) {
+            return json({ error: "invalid item id" }, 400);
+          }
+          if (!validItemPath(it.path)) return json({ error: "invalid item path" }, 400);
+          const itemTitle =
+            typeof it.title === "string" && it.title.trim()
+              ? it.title.trim().slice(0, 256)
+              : "Untitled";
+          items.push({ id: it.id, title: itemTitle, path: it.path });
+        }
+        const existing = await env.PAGES.get(pageKey);
+        const prior = existing ? await existing.json().catch(() => null) : null;
+        const now = new Date().toISOString();
+        const record = {
+          kind: "collection",
+          title,
+          items,
+          createdAt: prior?.createdAt ?? now,
+          updatedAt: now,
+        };
+        await env.PAGES.put(pageKey, JSON.stringify(record), {
+          httpMetadata: { contentType: "application/json" },
+          customMetadata: {
+            title: title.slice(0, 256),
+            kind: "collection",
+            updatedAt: now,
+            createdAt: record.createdAt,
+          },
+        });
+        return json({
+          id,
+          url: `${url.origin}/${id}`,
+          createdAt: record.createdAt,
+          updatedAt: now,
+        });
+      }
       // A page carries a markdown document, an html rendition, or both. The
       // app sends the full record every push (html read fresh from disk), so a
       // missing field means that version no longer exists — not "keep prior".
@@ -138,6 +206,24 @@ async function handleApi(request, env, url) {
       if (html !== null && html.length > MAX_HTML_BYTES) {
         return json({ error: "html too large" }, 413);
       }
+      // A member of a folder share carries a back-reference so its public page
+      // can show a "back to the folder" crumb. Sent (or omitted) on every push,
+      // like the renditions: absent means "not in a folder share".
+      let collection = null;
+      if (
+        body.collection &&
+        typeof body.collection === "object" &&
+        typeof body.collection.id === "string" &&
+        validId(body.collection.id)
+      ) {
+        collection = {
+          id: body.collection.id,
+          title:
+            typeof body.collection.title === "string" && body.collection.title.trim()
+              ? body.collection.title.trim().slice(0, 256)
+              : "Untitled",
+        };
+      }
 
       const existing = await env.PAGES.get(pageKey);
       const prior = existing ? await existing.json().catch(() => null) : null;
@@ -146,6 +232,7 @@ async function handleApi(request, env, url) {
         title,
         ...(markdown !== null ? { markdown } : {}),
         ...(html !== null ? { html } : {}),
+        ...(collection ? { collection } : {}),
         createdAt: prior?.createdAt ?? now,
         updatedAt: now,
       };
@@ -261,6 +348,8 @@ async function servePage(env, id, url) {
     return notFoundPage();
   }
 
+  if (data.kind === "collection") return serveCollection(env, id, data, url);
+
   const hasMd = typeof data.markdown === "string";
   const hasHtml = typeof data.html === "string" && data.html.length > 0;
   if (!hasMd && !hasHtml) return notFoundPage();
@@ -287,6 +376,14 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="${pageUrl}/og.png">` : `<meta name="twitter:card" content="summary">`}`;
 
+  // A member of a folder share gets a fixed "back to the folder" crumb (the
+  // mirror of the view pill on the other side), so a reader who arrived from
+  // the folder's home page — or landed here directly — can reach the rest.
+  const crumb =
+    data.collection && typeof data.collection.id === "string" && validId(data.collection.id)
+      ? `<a class="home-crumb" href="/${data.collection.id}"><span class="home-crumb-arrow">←</span><span class="home-crumb-label">${escapeHtml(data.collection.title || "Home")}</span></a>`
+      : "";
+
   // With both versions present, the reader picks: a fixed pill toggles between
   // the markdown page (/<id>) and the html rendition (/<id>?v=html).
   const pill = (active) =>
@@ -309,6 +406,7 @@ ${head}
 <style>${PAGE_CSS}${FRAME_CSS}</style>
 </head>
 <body>
+${crumb}
 ${pill("html")}
 <iframe class="raw-frame" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
 </body>
@@ -326,9 +424,136 @@ ${head}
 <style>${PAGE_CSS}</style>
 </head>
 <body>
+${crumb}
 ${pill("md")}
 <main class="doc">
 ${body}
+</main>
+<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+    },
+  });
+}
+
+/* ---------- Collection (folder share) home pages ---------- */
+
+// Rebuild the folder structure from the members' relative paths. Only
+// directories that contain at least one included page exist here — the
+// manifest never describes anything the owner didn't include.
+function buildCollectionTree(items) {
+  const root = { dirs: new Map(), files: [] };
+  for (const it of items) {
+    const segs = it.path.split("/").filter(Boolean);
+    let node = root;
+    for (const seg of segs.slice(0, -1)) {
+      if (!node.dirs.has(seg)) node.dirs.set(seg, { dirs: new Map(), files: [] });
+      node = node.dirs.get(seg);
+    }
+    node.files.push(it);
+  }
+  return root;
+}
+
+function countTreePages(node) {
+  let n = node.files.length;
+  for (const d of node.dirs.values()) n += countTreePages(d);
+  return n;
+}
+
+// Stroke-only glyphs matching the desktop sidebar's icons.
+const TOC_PAGE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>`;
+const TOC_DIR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
+const TOC_CHEVRON = `<svg class="toc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>`;
+
+// Directories first, then pages, both alphabetical — the same order the
+// desktop sidebar shows. Top-level folders start open, deeper ones closed
+// (native <details>, so large trees stay scannable without any script).
+function renderTocLevel(node, depth) {
+  const dirs = [...node.dirs.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
+  );
+  const files = [...node.files].sort((a, b) =>
+    a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+  );
+  const parts = [];
+  for (const [name, child] of dirs) {
+    const count = countTreePages(child);
+    parts.push(`<details class="toc-dir"${depth === 0 ? " open" : ""}>
+<summary>${TOC_CHEVRON}${TOC_DIR_ICON}<span class="toc-dir-name">${escapeHtml(name)}</span><span class="toc-count">${count} ${count === 1 ? "page" : "pages"}</span></summary>
+<div class="toc-children">${renderTocLevel(child, depth + 1)}</div>
+</details>`);
+  }
+  for (const f of files) {
+    parts.push(
+      `<a class="toc-page" href="/${f.id}">${TOC_PAGE_ICON}<span class="toc-page-title">${escapeHtml(f.title)}</span></a>`,
+    );
+  }
+  return parts.join("\n");
+}
+
+// The folder share's home page: title, page count, and the table of contents.
+async function serveCollection(env, id, data, url) {
+  const title = data.title || "Untitled";
+  const items = Array.isArray(data.items)
+    ? data.items.filter(
+        (it) =>
+          it &&
+          typeof it.id === "string" &&
+          validId(it.id) &&
+          typeof it.path === "string" &&
+          it.path.length > 0,
+      )
+    : [];
+  const count = items.length;
+  const desc = `${count} shared ${count === 1 ? "page" : "pages"} on ${url.hostname}`;
+  const ogImage = await env.PAGES.head(`pages/${id}.png`);
+  const pageUrl = `${url.origin}/${id}`;
+  const updated = data.updatedAt ? new Date(data.updatedAt) : null;
+  const updatedLabel =
+    updated && !Number.isNaN(updated.getTime())
+      ? updated.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
+      : null;
+
+  const head = `<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(desc)}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${escapeHtml(url.hostname)}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(desc)}">
+<meta property="og:url" content="${pageUrl}">
+${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="${pageUrl}/og.png">` : `<meta name="twitter:card" content="summary">`}`;
+
+  const toc =
+    count === 0
+      ? `<p class="toc-empty">Nothing here yet.</p>`
+      : renderTocLevel(buildCollectionTree(items), 0);
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+${head}
+<style>${PAGE_CSS}</style>
+</head>
+<body>
+<main class="doc toc">
+<h1 class="toc-title">${escapeHtml(title)}</h1>
+<p class="toc-meta">${count} ${count === 1 ? "page" : "pages"}${updatedLabel ? ` · updated ${escapeHtml(updatedLabel)}` : ""}</p>
+<nav class="toc-tree" aria-label="Pages">
+${toc}
+</nav>
 </main>
 <footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
 </body>
@@ -875,6 +1100,77 @@ footer {
   text-align: center;
 }
 footer a { color: var(--muted); }
+/* "Back to the folder" crumb on pages that belong to a folder share — the
+   view pill's mirror image, pinned top-left. */
+.home-crumb {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 40vw;
+  padding: 4px 12px 4px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+.home-crumb:hover { color: var(--text); }
+.home-crumb-arrow { font-weight: 400; flex: none; }
+.home-crumb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Folder share home page: the table of contents. */
+main.toc { max-width: 640px; }
+.toc-title { font-size: 28px; line-height: 1.25; margin: 20px 0 0; letter-spacing: -0.01em; }
+.toc-meta { margin: 0; padding: 4px 0 0; font-size: 13px; color: var(--muted); }
+.toc-tree { margin-top: 26px; display: flex; flex-direction: column; }
+.doc .toc-page {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 15px;
+}
+.doc .toc-page:hover { background: var(--surface); text-decoration: none; }
+.toc-page svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.toc-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toc-dir { margin: 1px 0; }
+.toc-dir > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.toc-dir > summary::-webkit-details-marker { display: none; }
+.toc-dir > summary:hover { background: var(--surface); }
+.toc-dir > summary svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.toc-dir > summary .toc-chevron { width: 11px; height: 11px; transition: transform 0.12s; }
+.toc-dir[open] > summary .toc-chevron { transform: rotate(90deg); }
+.toc-dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toc-count { margin-left: 4px; font-size: 12px; font-weight: 400; color: var(--muted); flex: none; }
+.toc-children {
+  margin-left: 15px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+}
+.toc-empty { color: var(--muted); }
 `;
 
 /* The ?v=html page: the rendition owns the whole viewport; only the version

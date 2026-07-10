@@ -1,24 +1,36 @@
 // "Shared pages" modal: every live share on the configured backend, newest
-// first. Clicking a
-// row opens the source document in a tab; each row can copy its link, open it
-// in the browser, or stop sharing (which deletes the remote copy).
+// first — shared folders (collections) in their own group above the pages.
+// Clicking a page row opens the source document in a tab; each row can copy
+// its link, open it in the browser, or stop sharing (which deletes the remote
+// copy). Folder rows route to the folder-share dialog for management, since
+// stopping a folder needs its keep-or-stop-the-pages choice.
 
 import { useEffect, useState } from "react";
-import { shareHost, shareUrl, type ShareConfig, type ShareEntry } from "./share";
+import {
+  shareHost,
+  shareUrl,
+  type CollectionEntry,
+  type ShareConfig,
+  type ShareEntry,
+} from "./share";
 
 export default function SharedPages({
   shares,
+  collections,
   config,
   onClose,
   onOpenDoc,
+  onManageCollection,
   onOpenExternal,
   onOpenSetup,
   onStopSharing,
 }: {
   shares: ShareEntry[];
+  collections: CollectionEntry[];
   config: ShareConfig | null;
   onClose: () => void;
   onOpenDoc: (entry: ShareEntry) => void;
+  onManageCollection: (entry: CollectionEntry) => void;
   onOpenExternal: (url: string) => void;
   onOpenSetup: () => void;
   onStopSharing: (entry: ShareEntry) => Promise<void>;
@@ -36,11 +48,11 @@ export default function SharedPages({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const copy = async (entry: ShareEntry) => {
+  const copyUrl = async (key: string, id: string) => {
     try {
-      await navigator.clipboard.writeText(shareUrl(config, entry.id));
-      setCopiedPath(entry.path);
-      window.setTimeout(() => setCopiedPath((p) => (p === entry.path ? null : p)), 1600);
+      await navigator.clipboard.writeText(shareUrl(config, id));
+      setCopiedPath(key);
+      window.setTimeout(() => setCopiedPath((p) => (p === key ? null : p)), 1600);
     } catch (e) {
       console.error("copy link failed", e);
     }
@@ -87,48 +99,94 @@ export default function SharedPages({
               Set up sharing…
             </button>
           </div>
-        ) : shares.length === 0 ? (
+        ) : shares.length === 0 && collections.length === 0 ? (
           <div className="shared-empty">
             Nothing is shared yet. Open a note and hit Share.
           </div>
         ) : (
-          <ul className="shared-list">
-            {shares.map((s) => (
-              <li key={s.path} className="shared-row">
-                <button
-                  className="shared-row-main"
-                  onClick={() => onOpenDoc(s)}
-                  title={`Open ${s.path}`}
-                >
-                  <span className="shared-row-title">{s.title}</span>
-                  <span
-                    className="shared-row-url"
-                    title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
-                  >
-                    {host}/{s.id}
-                  </span>
-                </button>
-                <div className="shared-row-actions">
-                  <button className="share-btn" onClick={() => void copy(s)}>
-                    {copiedPath === s.path ? "Copied" : "Copy"}
-                  </button>
-                  <button
-                    className="share-btn"
-                    onClick={() => onOpenExternal(shareUrl(config, s.id))}
-                  >
-                    Open
-                  </button>
-                  <button
-                    className="share-btn is-danger"
-                    onClick={() => void stop(s)}
-                    disabled={busyPath === s.path}
-                  >
-                    {busyPath === s.path ? "Stopping…" : "Stop"}
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <>
+            {collections.length > 0 && (
+              <>
+                <div className="shared-section-label">Folders</div>
+                <ul className="shared-list">
+                  {collections.map((c) => (
+                    <li key={c.path} className="shared-row">
+                      <button
+                        className="shared-row-main"
+                        onClick={() => onManageCollection(c)}
+                        title={`Manage the share for ${c.path}`}
+                      >
+                        <span className="shared-row-title">{c.title}</span>
+                        <span
+                          className="shared-row-url"
+                          title={`Updated ${new Date(c.updatedAt).toLocaleString()}`}
+                        >
+                          {host}/{c.id} · {c.members.length}{" "}
+                          {c.members.length === 1 ? "page" : "pages"}
+                        </span>
+                      </button>
+                      <div className="shared-row-actions">
+                        <button className="share-btn" onClick={() => void copyUrl(c.path, c.id)}>
+                          {copiedPath === c.path ? "Copied" : "Copy"}
+                        </button>
+                        <button
+                          className="share-btn"
+                          onClick={() => onOpenExternal(shareUrl(config, c.id))}
+                        >
+                          Open
+                        </button>
+                        <button className="share-btn" onClick={() => onManageCollection(c)}>
+                          Manage
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {collections.length > 0 && shares.length > 0 && (
+              <div className="shared-section-label">Pages</div>
+            )}
+            {shares.length > 0 && (
+              <ul className="shared-list">
+                {shares.map((s) => (
+                  <li key={s.path} className="shared-row">
+                    <button
+                      className="shared-row-main"
+                      onClick={() => onOpenDoc(s)}
+                      title={`Open ${s.path}`}
+                    >
+                      <span className="shared-row-title">{s.title}</span>
+                      <span
+                        className="shared-row-url"
+                        title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
+                      >
+                        {host}/{s.id}
+                      </span>
+                    </button>
+                    <div className="shared-row-actions">
+                      <button className="share-btn" onClick={() => void copyUrl(s.path, s.id)}>
+                        {copiedPath === s.path ? "Copied" : "Copy"}
+                      </button>
+                      <button
+                        className="share-btn"
+                        onClick={() => onOpenExternal(shareUrl(config, s.id))}
+                      >
+                        Open
+                      </button>
+                      <button
+                        className="share-btn is-danger"
+                        onClick={() => void stop(s)}
+                        disabled={busyPath === s.path}
+                      >
+                        {busyPath === s.path ? "Stopping…" : "Stop"}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
         {error && <div className="share-error">{error}</div>}
       </div>
