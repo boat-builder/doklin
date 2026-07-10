@@ -2641,6 +2641,208 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
+/* ---------- Connections (multi-domain) ---------- */
+
+/* Domain picker inside the share-address row: styled like the static prefix
+   it replaces, native select chrome removed. */
+.share-conn-select {
+  flex-shrink: 0;
+  max-width: 55%;
+  padding: 0 2px 0 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.share-conn-select:hover {
+  color: var(--app-text);
+}
+
+/* "Use this domain for this workspace" checkbox under the picker. */
+.share-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.share-remember input {
+  margin: 0;
+}
+
+/* The connections list in the sharing-settings view. */
+.share-conn-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.share-conn-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+}
+
+.share-conn-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.share-conn-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--app-text);
+}
+
+.share-conn-default {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid var(--app-border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--app-text-muted);
+}
+
+.share-conn-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.share-conn-actions .share-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.share-conn-actions .share-btn.is-danger {
+  margin-left: 0;
+}
+
+.share-conn-hint {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+/* ---------- Site strip in the shared-pages modal ---------- */
+
+/* One row per connection: the domain (opens its root), what its front page
+   currently is, and the landing-page branding form behind a toggle. */
+.shared-sites {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 8px;
+}
+
+.shared-site {
+  padding: 7px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+}
+
+.shared-site-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shared-site-host {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.shared-site-host:hover {
+  text-decoration: underline;
+}
+
+.shared-site-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+
+.shared-site-form {
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
+.shared-site-form .share-buttons {
+  align-items: center;
+}
+
+.shared-site-hint {
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+/* "A newer worker is available" banner. */
+.shared-outdated {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+/* "home" mark on the row whose page is the domain root. */
+.shared-home-badge {
+  margin-left: 7px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid var(--app-border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--app-text-muted);
+  vertical-align: 1px;
+}
+
 /* ---------- Folder-share dialog ---------- */
 
 .folder-share-modal {

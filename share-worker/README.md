@@ -83,6 +83,9 @@ With the template's `workers_dev = true`, the worker is live at
 
 ### Custom domain (optional)
 
+The app's setup guide can do this for you: the **AI agent** path asks for your
+domain and hands the agent the steps below. Doing it yourself:
+
 The domain's zone must already be active on the **same** Cloudflare account
 (added in the dashboard, nameservers pointed at Cloudflare). Then in
 `wrangler.toml` set:
@@ -98,7 +101,9 @@ On the next `npx wrangler@4 deploy`, wrangler creates the Custom Domain binding
 and provisions the DNS record + TLS certificate automatically (cert issuance can
 take a minute or two on first deploy). An apex domain works the same way. If
 deploy reports the zone isn't found, add the domain to Cloudflare first —
-wrangler won't create the zone for you.
+wrangler won't create the zone for you. Dashboard-only alternative (no
+wrangler): on the worker's page, **Settings → Domains & Routes → Add →
+Custom Domain**.
 
 ### Connect the app
 
@@ -116,12 +121,27 @@ machine-local file that never enters any repo —
 
 You can also write that file directly instead of using the form.
 
-### Landing page branding (optional)
+### The root page: branding it, or replacing it
 
 The root of your share domain serves a small landing page that vouches for the
 links ("every page here was published by a real person") and offers a **Download
-Doklin for macOS** button so visitors can grab the app. Brand it by adding to
-`wrangler.toml` and redeploying:
+Doklin for macOS** button so visitors can grab the app. You have three levels of
+control, no redeploy needed for the first two — the app writes them through the
+worker's `/api/site` endpoint:
+
+1. **Default** — the generic landing page, out of the box.
+2. **Branded** — put your name (linking to your profile) on it: in the app,
+   the last setup step offers it, and **Sharing settings** can change it any
+   time.
+3. **Replaced** — any page you've shared can *become* the root: pick **Use as
+   home page** in the app's Shared pages list (`rootPageId` in the site
+   config). Write the page in the editor — or share a folder and make its
+   table of contents the root. The default landing page is gone until you
+   unset it.
+
+The old way still works as a fallback for deployments that predate `/api/site`
+(the app-written config wins when both exist): add to `wrangler.toml` and
+redeploy:
 
 ```toml
 [vars]
@@ -132,10 +152,9 @@ OWNER_LINK = "https://linkedin.com/in/your-handle"
 DOWNLOAD_URL = "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"
 ```
 
-All three are optional — without `OWNER_*` the page stays generic, and the
-download button shows the official release unless you set/blank `DOWNLOAD_URL`.
-That download URL is a stable alias kept current by the repo's release workflow
-(`.github/workflows/release.yml`), so it always resolves to the newest build.
+The download URL default is a stable alias kept current by the repo's release
+workflow (`.github/workflows/release.yml`), so it always resolves to the newest
+build.
 
 ### Recreating `wrangler.toml` for an existing deployment
 
@@ -155,11 +174,10 @@ deployment (assumes a logged-in wrangler CLI):
 - `routes` — the host the app's share endpoint points at: check **Share →
   Sharing settings…** or the `endpoint` in `share.json`. If it's a
   `workers.dev` URL, use `workers_dev = true` and no `routes` instead.
-- `[vars] OWNER_NAME / OWNER_LINK / DOWNLOAD_URL` — open `https://<host>/` in a
-  browser: if the landing page is branded, restore `OWNER_*` to match, or the
-  next deploy turns it generic. Only set `DOWNLOAD_URL` if the live button
-  points somewhere other than the official release (or is hidden — then set it
-  to `""`); leaving it out restores the official-release default.
+- `[vars] OWNER_NAME / OWNER_LINK / DOWNLOAD_URL` — usually unnecessary: if
+  the branding was set from the app it lives in the bucket (`site.json`) and
+  survives redeploys. Only restore these if the live landing page is branded
+  but `GET /api/site` returns an empty config (a pre-`/api/site` deployment).
 
 Do **not** re-run `secret put SHARE_TOKEN` while rebuilding the config — the
 secret persists on the worker across deploys, and setting a new value would cut
@@ -178,6 +196,7 @@ Old links keep working; only the app's write access is re-keyed.
 ## R2 layout
 
 ```
+site.json         {ownerName?, ownerLink?, downloadUrl?, rootPageId?, updatedAt}  (app-managed site config)
 pages/<id>.json   {title, markdown?, html?, collection?, createdAt, updatedAt}  (+ customMetadata for listing)
                   or {kind: "collection", title, items: [{id, title, path}], createdAt, updatedAt}
 pages/<id>.png    OG image
@@ -189,6 +208,9 @@ The write API the app depends on (all under the endpoint, requires
 `Authorization: Bearer <token>`):
 
 ```
+GET    /api/meta             worker version + features -> { version, features: [...] }
+GET    /api/site             site config -> { site: {ownerName?, ownerLink?, downloadUrl?, rootPageId?} }
+PUT    /api/site             body = the same object, full record every time (missing field = unset)
 GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt }] }
 GET    /api/pages/<id>       existence/metadata check
 PUT    /api/pages/<id>       body {title, markdown?, html?, collection?} -> create/update a page
@@ -201,9 +223,10 @@ PUT    /api/pages/<id>/og    body image/png          -> set OG image
 DELETE /api/pages/<id>       stop sharing (remove page + OG image)
 ```
 
-Folder shares need a worker deployed from this version of the code or newer —
-an older worker rejects collection pushes with a 400, which the app surfaces
-as "redeploy your worker".
+Folder shares, `/api/site`, and `/api/meta` need a worker deployed from this
+version of the code or newer — an older worker rejects collection pushes with
+a 400 and 404s the site/meta routes, which the app surfaces as "redeploy your
+worker".
 
 Plus the public reads a browser hits (no auth): `GET /<id>` (rendered
 markdown, or the html rendition when that's all the page has), `GET

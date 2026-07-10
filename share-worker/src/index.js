@@ -1,9 +1,14 @@
 // Doklin share worker — serves public share pages from an R2 bucket.
 //
-// Optional env vars (wrangler.toml [vars]): OWNER_NAME / OWNER_LINK brand the
-// root landing page; when unset it stays generic.
+// The root of the domain serves a landing page. Its branding lives in the
+// app-managed site config (site.json in R2, written via PUT /api/site); the
+// OWNER_NAME / OWNER_LINK / DOWNLOAD_URL env vars (wrangler.toml [vars]) are
+// the fallback for deployments that predate the API. When the site config
+// names a rootPageId, that shared page IS the root — replacing the landing
+// page entirely.
 //
 // Public surface (no auth):
+//   GET /              landing page (or the rootPageId page from site.json)
 //   GET /<id>          rendered read-only page for pages/<id>.json in R2.
 //                      A page can carry a markdown document, an html rendition,
 //                      or both; with both, a pill on the page lets the reader
@@ -17,6 +22,12 @@
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //
 // Write API (Authorization: Bearer $SHARE_TOKEN — the desktop app only):
+//   GET    /api/meta             worker version + feature list, so the app can
+//                                tell an outdated deployment from a broken one
+//   GET    /api/site             the site config (landing branding + root page)
+//   PUT    /api/site             body {ownerName?, ownerLink?, downloadUrl?,
+//                                rootPageId?} — full record every time, like
+//                                page pushes (a missing field means unset)
 //   GET    /api/pages            list shared pages (id, title, updatedAt)
 //   GET    /api/pages/<id>       page metadata (existence check)
 //   PUT    /api/pages/<id>       body {title, markdown?, html?, collection?}
@@ -31,12 +42,23 @@
 
 import { marked } from "../vendor/marked.esm.js";
 
+// Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
+// (never had /api/meta, so the app infers it from a 404), 2 = site config +
+// root page override.
+const WORKER_VERSION = 2;
+const WORKER_FEATURES = ["pages", "collections", "site", "root-page"];
+
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const RESERVED = new Set(["api", "robots.txt", "favicon.ico"]);
+// Landing branding + root page, app-managed. Lives outside the pages/ prefix
+// so listings never see it.
+const SITE_KEY = "site.json";
 const MAX_MARKDOWN_BYTES = 4 * 1024 * 1024;
 const MAX_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_OG_BYTES = 2 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS = 1000;
+const MAX_SITE_TEXT = 120;
+const MAX_SITE_URL = 512;
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -57,7 +79,7 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed", { status: 405 });
     }
-    if (path === "/") return landingPage(env, url);
+    if (path === "/") return serveRoot(env, url);
     if (path === "/robots.txt") {
       return new Response("User-agent: *\nAllow: /\n", {
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -110,6 +132,60 @@ async function handleApi(request, env, url) {
   }
 
   const parts = url.pathname.split("/").filter(Boolean); // ["api", "pages", id?, "og"?]
+
+  // Version probe: lets the app distinguish "this worker predates feature X"
+  // (404 here) from "the endpoint is broken", and prompt a redeploy.
+  if (parts[1] === "meta") {
+    if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
+    return json({ version: WORKER_VERSION, features: WORKER_FEATURES });
+  }
+
+  if (parts[1] === "site" && parts.length === 2) {
+    if (request.method === "GET") {
+      return json({ site: await readSiteConfig(env) });
+    }
+    if (request.method === "PUT") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "invalid json body" }, 400);
+      }
+      const site = {};
+      if (typeof body.ownerName === "string" && body.ownerName.trim()) {
+        site.ownerName = body.ownerName.trim().slice(0, MAX_SITE_TEXT);
+      }
+      if (typeof body.ownerLink === "string" && body.ownerLink.trim()) {
+        const link = body.ownerLink.trim();
+        if (!/^https?:\/\/\S+$/.test(link) || link.length > MAX_SITE_URL) {
+          return json({ error: "ownerLink must be an http(s) url" }, 400);
+        }
+        site.ownerLink = link;
+      }
+      // downloadUrl keeps the env var's three-way semantics: absent = official
+      // release, "" = hide the button, a url = use it verbatim.
+      if (typeof body.downloadUrl === "string") {
+        const dl = body.downloadUrl.trim();
+        if (dl && (!/^https?:\/\/\S+$/.test(dl) || dl.length > MAX_SITE_URL)) {
+          return json({ error: "downloadUrl must be an http(s) url or empty" }, 400);
+        }
+        site.downloadUrl = dl;
+      }
+      if (body.rootPageId !== undefined && body.rootPageId !== null) {
+        if (typeof body.rootPageId !== "string" || !validId(body.rootPageId)) {
+          return json({ error: "invalid rootPageId" }, 400);
+        }
+        site.rootPageId = body.rootPageId;
+      }
+      site.updatedAt = new Date().toISOString();
+      await env.PAGES.put(SITE_KEY, JSON.stringify(site), {
+        httpMetadata: { contentType: "application/json" },
+      });
+      return json({ site });
+    }
+    return json({ error: "method not allowed" }, 405);
+  }
+
   if (parts[1] !== "pages") return json({ error: "not found" }, 404);
 
   if (parts.length === 2) {
@@ -338,6 +414,40 @@ function deriveDescriptionFromHtml(html) {
   return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 }
 
+// The app-managed site config: landing branding + optional root page. A
+// missing or corrupt object is just "no config" — env vars take over.
+async function readSiteConfig(env) {
+  const obj = await env.PAGES.get(SITE_KEY);
+  if (!obj) return {};
+  try {
+    const parsed = await obj.json();
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// The domain root: the rootPageId page when the site config names one (a
+// custom home page — it can even be a collection's table of contents), the
+// landing page otherwise. A dangling rootPageId (page unshared since) falls
+// back to the landing page rather than 404ing the domain root.
+async function serveRoot(env, url) {
+  const site = await readSiteConfig(env);
+  if (typeof site.rootPageId === "string" && validId(site.rootPageId)) {
+    const obj = await env.PAGES.get(`pages/${site.rootPageId}.json`);
+    if (obj) {
+      try {
+        // `await`, not a bare return: a rejection inside the render must land
+        // in this catch so the domain root degrades instead of 500ing.
+        return await renderPage(env, site.rootPageId, await obj.json(), url);
+      } catch {
+        // corrupt page object; fall through to the landing page
+      }
+    }
+  }
+  return landingPage(env, url, site);
+}
+
 async function servePage(env, id, url) {
   const obj = await env.PAGES.get(`pages/${id}.json`);
   if (!obj) return notFoundPage();
@@ -347,7 +457,10 @@ async function servePage(env, id, url) {
   } catch {
     return notFoundPage();
   }
+  return renderPage(env, id, data, url);
+}
 
+async function renderPage(env, id, data, url) {
   if (data.kind === "collection") return serveCollection(env, id, data, url);
 
   const hasMd = typeof data.markdown === "string";
@@ -680,14 +793,33 @@ const FEATURES = [
   },
 ];
 
-function landingPage(env, url) {
+function landingPage(env, url, site = {}) {
   const host = url.hostname;
-  const owner = typeof env.OWNER_NAME === "string" ? env.OWNER_NAME.trim() : "";
-  const link = typeof env.OWNER_LINK === "string" ? env.OWNER_LINK.trim() : "";
+  // The app-managed site config wins; the env vars back-fill deployments that
+  // were branded via wrangler.toml before the config API existed.
+  const owner =
+    typeof site.ownerName === "string" && site.ownerName.trim()
+      ? site.ownerName.trim()
+      : typeof env.OWNER_NAME === "string"
+        ? env.OWNER_NAME.trim()
+        : "";
+  const link =
+    typeof site.ownerLink === "string" && site.ownerLink.trim()
+      ? site.ownerLink.trim()
+      : typeof env.OWNER_LINK === "string"
+        ? env.OWNER_LINK.trim()
+        : "";
   const isLinkedIn = /(^|\.)linkedin\.com\//i.test(link.replace(/^https?:\/\//, ""));
   // Unset -> official release; set (even to "") -> respected verbatim, so a
-  // self-hoster can point elsewhere or blank it out.
-  const downloadUrl = (env.DOWNLOAD_URL === undefined ? DEFAULT_DOWNLOAD_URL : String(env.DOWNLOAD_URL)).trim();
+  // self-hoster can point elsewhere or blank it out. Site config first, then
+  // the env var.
+  const downloadUrl = (
+    typeof site.downloadUrl === "string"
+      ? site.downloadUrl
+      : env.DOWNLOAD_URL === undefined
+        ? DEFAULT_DOWNLOAD_URL
+        : String(env.DOWNLOAD_URL)
+  ).trim();
 
   const title = owner ? `Notes by ${owner}, written in Doklin` : `Notes written in Doklin`;
   const desc = owner

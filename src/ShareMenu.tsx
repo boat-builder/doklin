@@ -1,31 +1,36 @@
 // Top-right share control for the active document: a pill button + popover.
-// Not shared → confirm dialog with an editable auto-generated address;
-// shared → the live link with copy / open / stop-sharing actions; a settings
-// view stores the endpoint + token in <app_data_dir>/share.json (verified
-// against the worker before saving). While unconfigured, sharing is gated:
-// the popover shows a prompt that routes to the setup guide instead of the
-// share form. App owns the registry and the actual push; this component owns
-// the UX.
+// Not shared → confirm dialog with an editable auto-generated address (plus a
+// domain picker when several connections are configured); shared → the live
+// link with copy / open / stop-sharing actions; a settings view manages the
+// configured connections (each an endpoint + token pair in
+// <app_data_dir>/share.json, verified against its worker before saving).
+// While unconfigured, sharing is gated: the popover shows a prompt that
+// routes to the setup guide instead of the share form. App owns the registry
+// and the actual push; this component owns the UX.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  deleteShareConfig,
   generateShareId,
+  newConnectionId,
+  normalizeEndpoint,
   pageExists,
-  saveShareConfig,
   shareHost,
   shareUrl,
   testShareConfig,
   SHARE_ID_RE,
   type CollectionEntry,
-  type ShareConfig,
+  type ShareConnection,
   type ShareEntry,
 } from "./share";
 
 export default function ShareMenu({
   docTitle,
   entry,
-  config,
+  entryConnection,
+  connections,
+  defaultConnectionId,
+  globalDefaultId,
+  shareCountFor,
   collection,
   autoOpen,
   onAutoOpenConsumed,
@@ -35,20 +40,37 @@ export default function ShareMenu({
   onOpenSharedPages,
   onOpenSetupGuide,
   onOpenExternal,
-  onConfigChanged,
-  onConfigDeleted,
+  onSaveConnection,
+  onRemoveConnection,
+  onMakeDefault,
+  onRememberWorkspaceConnection,
 }: {
   docTitle: string;
   entry: ShareEntry | null;
-  config: ShareConfig | null;
-  // The folder share this document sits inside (nearest one), if any, and
-  // whether the document is currently on its table of contents.
-  collection: { entry: CollectionEntry; included: boolean } | null;
+  // The connection `entry` was published to; null when the entry's connection
+  // has been removed (the page is out of reach — stop just forgets it).
+  entryConnection: ShareConnection | null;
+  connections: ShareConnection[];
+  // Where a NEW share goes unless the picker says otherwise: the workspace's
+  // remembered connection, falling back to the global default.
+  defaultConnectionId: string | null;
+  // The global default (settings shows/sets it; may differ from the above).
+  globalDefaultId: string | null;
+  // How many local entries live on a connection — quoted before removing it.
+  shareCountFor: (connectionId: string) => number;
+  // The folder share this document sits inside (nearest one), if any, whether
+  // the document is currently on its table of contents, and the connection
+  // that folder share lives on (its links must use THAT domain).
+  collection: {
+    entry: CollectionEntry;
+    included: boolean;
+    connection: ShareConnection | null;
+  } | null;
   // True when something outside (the tree's "Share…" context item) asked for
   // the popover to open; consumed once acted on.
   autoOpen: boolean;
   onAutoOpenConsumed: () => void;
-  onShare: (id: string) => Promise<void>;
+  onShare: (id: string, connectionId: string) => Promise<void>;
   onStopSharing: () => Promise<void>;
   // Include in / remove from the surrounding folder share. Including an
   // unshared document publishes it first (App handles both steps).
@@ -56,15 +78,25 @@ export default function ShareMenu({
   onOpenSharedPages: () => void;
   onOpenSetupGuide: () => void;
   onOpenExternal: (url: string) => void;
-  onConfigChanged: (config: ShareConfig) => void;
-  onConfigDeleted: () => void;
+  onSaveConnection: (conn: ShareConnection) => Promise<void>;
+  onRemoveConnection: (id: string) => Promise<void>;
+  onMakeDefault: (id: string) => Promise<void>;
+  // null while no workspace folder is open (nothing to remember against).
+  onRememberWorkspaceConnection: ((connectionId: string) => void) | null;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"main" | "settings">("main");
+  // settings sub-state: which connection is being edited ("new" = adding one).
+  const [editing, setEditing] = useState<ShareConnection | "new" | null>(null);
+  // Connection id pending a remove confirmation.
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [slug, setSlug] = useState("");
-  const [busy, setBusy] = useState<"share" | "stop" | "save" | "forget" | "collection" | null>(
-    null,
-  );
+  // The picker's choice for a new share; null = follow defaultConnectionId.
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
+  const [rememberForWorkspace, setRememberForWorkspace] = useState(false);
+  const [busy, setBusy] = useState<
+    "share" | "stop" | "save" | "remove" | "collection" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [endpointInput, setEndpointInput] = useState("");
@@ -97,12 +129,14 @@ export default function ShareMenu({
         setCopied(false);
         setSlug(generateShareId());
         setView("main");
-        setEndpointInput(config?.endpoint ?? "");
-        setTokenInput(config?.token ?? "");
+        setEditing(null);
+        setConfirmRemove(null);
+        setSelectedConnId(null);
+        setRememberForWorkspace(false);
       }
       return next;
     });
-  }, [config]);
+  }, []);
 
   // The tree's "Share…" context item lands here: open the popover as if the
   // pill was clicked (same reset), once per request.
@@ -114,14 +148,25 @@ export default function ShareMenu({
 
   const openSettings = useCallback(() => {
     setError(null);
-    setEndpointInput(config?.endpoint ?? "");
-    setTokenInput(config?.token ?? "");
+    setConfirmRemove(null);
+    // With nothing configured, settings IS the add-a-token form.
+    setEditing(connections.length === 0 ? "new" : null);
+    setEndpointInput("");
+    setTokenInput("");
     setView("settings");
-  }, [config]);
+  }, [connections.length]);
 
-  const saveSettings = useCallback(async () => {
-    if (busy) return;
-    const endpoint = endpointInput.trim().replace(/\/+$/, "");
+  const startEditing = useCallback((target: ShareConnection | "new") => {
+    setError(null);
+    setConfirmRemove(null);
+    setEditing(target);
+    setEndpointInput(target === "new" ? "" : target.endpoint);
+    setTokenInput(target === "new" ? "" : target.token);
+  }, []);
+
+  const saveEditing = useCallback(async () => {
+    if (busy || !editing) return;
+    const endpoint = normalizeEndpoint(endpointInput);
     const token = tokenInput.trim();
     if (!/^https?:\/\/\S+$/.test(endpoint)) {
       setError("The endpoint must be an http(s) URL.");
@@ -134,35 +179,46 @@ export default function ShareMenu({
     setBusy("save");
     setError(null);
     try {
-      const next = { endpoint, token };
-      await testShareConfig(next);
-      await saveShareConfig(next);
-      onConfigChanged(next);
-      setView("main");
+      await testShareConfig({ endpoint, token });
+      await onSaveConnection({
+        id: editing === "new" ? newConnectionId() : editing.id,
+        endpoint,
+        token,
+      });
+      setEditing(null);
+      if (connections.length === 0) setView("main");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [busy, endpointInput, tokenInput, onConfigChanged]);
+  }, [busy, editing, endpointInput, tokenInput, onSaveConnection, connections.length]);
 
-  const forgetConfig = useCallback(async () => {
-    if (busy) return;
-    setBusy("forget");
-    setError(null);
-    try {
-      await deleteShareConfig();
-      onConfigDeleted();
-      setTokenInput("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, onConfigDeleted]);
+  const removeConn = useCallback(
+    async (id: string) => {
+      if (busy) return;
+      setBusy("remove");
+      setError(null);
+      try {
+        await onRemoveConnection(id);
+        setConfirmRemove(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, onRemoveConnection],
+  );
+
+  // The connection a new share would go to right now.
+  const selectedConn =
+    connections.find((c) => c.id === (selectedConnId ?? defaultConnectionId)) ??
+    connections[0] ??
+    null;
 
   const confirmShare = useCallback(async () => {
-    if (!config || busy) return;
+    if (!selectedConn || busy) return;
     const id = slug.trim().toLowerCase();
     if (!SHARE_ID_RE.test(id) || id === "api") {
       setError("Use 3–64 characters: a–z, 0–9, dashes.");
@@ -171,17 +227,18 @@ export default function ShareMenu({
     setBusy("share");
     setError(null);
     try {
-      if (await pageExists(config, id)) {
+      if (await pageExists(selectedConn, id)) {
         setError("That address is already taken.");
         return;
       }
-      await onShare(id);
+      await onShare(id, selectedConn.id);
+      if (rememberForWorkspace) onRememberWorkspaceConnection?.(selectedConn.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [config, slug, busy, onShare]);
+  }, [selectedConn, slug, busy, onShare, rememberForWorkspace, onRememberWorkspaceConnection]);
 
   const stop = useCallback(async () => {
     if (busy) return;
@@ -197,15 +254,15 @@ export default function ShareMenu({
   }, [busy, onStopSharing]);
 
   const copy = useCallback(async () => {
-    if (!entry) return;
+    if (!entry || !entryConnection) return;
     try {
-      await navigator.clipboard.writeText(shareUrl(config, entry.id));
+      await navigator.clipboard.writeText(shareUrl(entryConnection, entry.id));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch (e) {
       console.error("copy link failed", e);
     }
-  }, [entry, config]);
+  }, [entry, entryConnection]);
 
   const toggleCollection = useCallback(async () => {
     if (!collection || busy) return;
@@ -220,10 +277,9 @@ export default function ShareMenu({
     }
   }, [collection, busy, onToggleCollection]);
 
-  const host = shareHost(config);
   // Unconfigured + not explicitly editing settings → the setup prompt. The
-  // share form itself only ever renders with a working config behind it.
-  const showSetupPrompt = !config && view !== "settings";
+  // share form itself only ever renders with a working connection behind it.
+  const showSetupPrompt = connections.length === 0 && view !== "settings";
   const showSettings = view === "settings";
 
   const openGuide = useCallback(() => {
@@ -250,8 +306,9 @@ export default function ShareMenu({
               <div className="share-heading">Sharing isn't set up yet</div>
               <div className="share-note">
                 Sharing publishes read-only copies of your notes through your
-                own Cloudflare account (free). A one-time setup — about ten
-                minutes — is needed before the first share.
+                own Cloudflare account (free) — on your own domain if you have
+                one. A one-time setup, about ten minutes, before the first
+                share.
               </div>
               <div className="share-buttons">
                 <button className="share-btn is-primary" onClick={openGuide}>
@@ -264,64 +321,153 @@ export default function ShareMenu({
             </>
           ) : showSettings ? (
             <>
-              <div className="share-heading">Sharing setup</div>
-              <div className="share-note">
-                Where pages get published, and the token that authorizes this
-                app. Both are stored only on this machine
-                (<code>share.json</code> in the app data folder); the token must
-                match the share worker's <code>SHARE_TOKEN</code> secret.
-              </div>
-              <div className="share-field">
-                <div className="share-field-label">Endpoint</div>
-                <input
-                  className="share-field-input"
-                  value={endpointInput}
-                  onChange={(e) => setEndpointInput(e.target.value)}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  placeholder="https://your-share-worker.example.com"
-                  aria-label="Share endpoint"
-                />
-              </div>
-              <div className="share-field">
-                <div className="share-field-label">Token</div>
-                <input
-                  className="share-field-input share-field-token"
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void saveSettings();
-                  }}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  placeholder="paste the share token"
-                  aria-label="Share token"
-                />
-              </div>
-              <div className="share-buttons">
-                <button
-                  className="share-btn is-primary"
-                  onClick={() => void saveSettings()}
-                  disabled={busy != null}
-                >
-                  {busy === "save" ? "Checking…" : "Verify & save"}
-                </button>
-                <button className="share-btn" onClick={() => setView("main")}>
-                  Cancel
-                </button>
-                {config && (
-                  <button
-                    className="share-btn is-danger"
-                    onClick={() => void forgetConfig()}
-                    disabled={busy != null}
-                    title="Delete share.json from this Mac. Already-shared pages stay live."
-                  >
-                    {busy === "forget" ? "Removing…" : "Remove token"}
-                  </button>
-                )}
-              </div>
+              <div className="share-heading">Sharing settings</div>
+              {editing ? (
+                <>
+                  <div className="share-note">
+                    {editing === "new" ? (
+                      <>
+                        Connect a share backend: its URL and the token that
+                        authorizes this app (the worker's{" "}
+                        <code>SHARE_TOKEN</code> secret). Stored only on this
+                        machine.
+                      </>
+                    ) : (
+                      <>
+                        Update this connection — the URL pages publish under,
+                        and the token that must match the worker's{" "}
+                        <code>SHARE_TOKEN</code> secret.
+                      </>
+                    )}
+                  </div>
+                  <div className="share-field">
+                    <div className="share-field-label">Endpoint</div>
+                    <input
+                      className="share-field-input"
+                      value={endpointInput}
+                      onChange={(e) => setEndpointInput(e.target.value)}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      placeholder="https://notes.example.com"
+                      aria-label="Share endpoint"
+                    />
+                  </div>
+                  <div className="share-field">
+                    <div className="share-field-label">Token</div>
+                    <input
+                      className="share-field-input share-field-token"
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveEditing();
+                      }}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      placeholder="paste the share token"
+                      aria-label="Share token"
+                    />
+                  </div>
+                  <div className="share-buttons">
+                    <button
+                      className="share-btn is-primary"
+                      onClick={() => void saveEditing()}
+                      disabled={busy != null}
+                    >
+                      {busy === "save" ? "Checking…" : "Verify & save"}
+                    </button>
+                    <button
+                      className="share-btn"
+                      onClick={() =>
+                        connections.length === 0 ? setView("main") : setEditing(null)
+                      }
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="share-note">
+                    The domains this app publishes to. New shares go to the
+                    default; the share dialog can pick per page.
+                  </div>
+                  <ul className="share-conn-list">
+                    {connections.map((c) => (
+                      <li key={c.id} className="share-conn-row">
+                        <div className="share-conn-main">
+                          <span className="share-conn-host" title={c.endpoint}>
+                            {shareHost(c)}
+                          </span>
+                          {c.id === globalDefaultId && (
+                            <span className="share-conn-default">default</span>
+                          )}
+                        </div>
+                        {confirmRemove === c.id ? (
+                          <div className="share-conn-actions">
+                            <span className="share-conn-hint">
+                              {(() => {
+                                const count = shareCountFor(c.id);
+                                return count > 0
+                                  ? `${count} shared ${
+                                      count === 1 ? "page stays" : "pages stay"
+                                    } live but can't be updated from here.`
+                                  : "Nothing shared here.";
+                              })()}
+                            </span>
+                            <button
+                              className="share-btn is-danger"
+                              onClick={() => void removeConn(c.id)}
+                              disabled={busy != null}
+                            >
+                              {busy === "remove" ? "Removing…" : "Confirm"}
+                            </button>
+                            <button
+                              className="share-btn"
+                              onClick={() => setConfirmRemove(null)}
+                            >
+                              Keep
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="share-conn-actions">
+                            {c.id !== globalDefaultId && (
+                              <button
+                                className="share-btn"
+                                onClick={() => void onMakeDefault(c.id)}
+                                title="New shares go here unless picked otherwise"
+                              >
+                                Make default
+                              </button>
+                            )}
+                            <button className="share-btn" onClick={() => startEditing(c)}>
+                              Edit
+                            </button>
+                            <button
+                              className="share-btn is-danger"
+                              onClick={() => setConfirmRemove(c.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="share-buttons">
+                    <button className="share-btn is-primary" onClick={openGuide}>
+                      Add a domain…
+                    </button>
+                    <button className="share-btn" onClick={() => startEditing("new")}>
+                      I have a token
+                    </button>
+                    <button className="share-btn" onClick={() => setView("main")}>
+                      Back
+                    </button>
+                  </div>
+                </>
+              )}
               {error && <div className="share-error">{error}</div>}
               <div className="share-footer-links">
                 <button className="share-all-link" onClick={openGuide}>
@@ -334,32 +480,54 @@ export default function ShareMenu({
               <div className="share-heading" title={docTitle}>
                 {docTitle}
               </div>
-              <div className="share-note">
-                Anyone with the link can view this page. It updates as you save.
-              </div>
-              <div className="share-url-row">
-                <span className="share-url" title={shareUrl(config, entry.id)}>
-                  {host}/{entry.id}
-                </span>
-              </div>
-              <div className="share-buttons">
-                <button className="share-btn is-primary" onClick={() => void copy()}>
-                  {copied ? "Copied" : "Copy link"}
-                </button>
-                <button
-                  className="share-btn"
-                  onClick={() => onOpenExternal(shareUrl(config, entry.id))}
-                >
-                  Open
-                </button>
-                <button
-                  className="share-btn is-danger"
-                  onClick={() => void stop()}
-                  disabled={busy != null}
-                >
-                  {busy === "stop" ? "Stopping…" : "Stop sharing"}
-                </button>
-              </div>
+              {entryConnection ? (
+                <>
+                  <div className="share-note">
+                    Anyone with the link can view this page. It updates as you
+                    save.
+                  </div>
+                  <div className="share-url-row">
+                    <span className="share-url" title={shareUrl(entryConnection, entry.id)}>
+                      {shareHost(entryConnection)}/{entry.id}
+                    </span>
+                  </div>
+                  <div className="share-buttons">
+                    <button className="share-btn is-primary" onClick={() => void copy()}>
+                      {copied ? "Copied" : "Copy link"}
+                    </button>
+                    <button
+                      className="share-btn"
+                      onClick={() => onOpenExternal(shareUrl(entryConnection, entry.id))}
+                    >
+                      Open
+                    </button>
+                    <button
+                      className="share-btn is-danger"
+                      onClick={() => void stop()}
+                      disabled={busy != null}
+                    >
+                      {busy === "stop" ? "Stopping…" : "Stop sharing"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="share-note">
+                    The domain this page was shared on is no longer configured
+                    here. The public copy stays live; stopping only forgets it
+                    on this Mac.
+                  </div>
+                  <div className="share-buttons">
+                    <button
+                      className="share-btn is-danger"
+                      onClick={() => void stop()}
+                      disabled={busy != null}
+                    >
+                      {busy === "stop" ? "Forgetting…" : "Forget share"}
+                    </button>
+                  </div>
+                </>
+              )}
               {error && <div className="share-error">{error}</div>}
             </>
           ) : (
@@ -372,7 +540,25 @@ export default function ShareMenu({
                 as you save.
               </div>
               <div className="share-url-row">
-                <span className="share-url-prefix">{host}/</span>
+                {connections.length > 1 ? (
+                  <select
+                    className="share-conn-select"
+                    value={selectedConn?.id ?? ""}
+                    onChange={(e) => {
+                      setSelectedConnId(e.target.value);
+                      setRememberForWorkspace(false);
+                    }}
+                    aria-label="Share domain"
+                  >
+                    {connections.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {shareHost(c)}/
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="share-url-prefix">{shareHost(selectedConn)}/</span>
+                )}
                 <input
                   className="share-slug-input"
                   value={slug}
@@ -394,6 +580,19 @@ export default function ShareMenu({
                   <RefreshIcon />
                 </button>
               </div>
+              {connections.length > 1 &&
+                onRememberWorkspaceConnection &&
+                selectedConn &&
+                selectedConn.id !== defaultConnectionId && (
+                  <label className="share-remember">
+                    <input
+                      type="checkbox"
+                      checked={rememberForWorkspace}
+                      onChange={(e) => setRememberForWorkspace(e.target.checked)}
+                    />
+                    <span>Use this domain for this workspace from now on</span>
+                  </label>
+                )}
               <div className="share-buttons">
                 <button
                   className="share-btn is-primary"
@@ -414,8 +613,15 @@ export default function ShareMenu({
               <div className="share-collection-text">
                 <button
                   className="share-collection-name"
-                  onClick={() => onOpenExternal(shareUrl(config, collection.entry.id))}
-                  title={shareUrl(config, collection.entry.id)}
+                  onClick={() =>
+                    collection.connection &&
+                    onOpenExternal(shareUrl(collection.connection, collection.entry.id))
+                  }
+                  title={
+                    collection.connection
+                      ? shareUrl(collection.connection, collection.entry.id)
+                      : collection.entry.title
+                  }
                 >
                   <FolderGlyph />
                   <span>{collection.entry.title}</span>

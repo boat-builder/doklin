@@ -15,7 +15,7 @@ import {
   shareUrl,
   SHARE_ID_RE,
   type CollectionEntry,
-  type ShareConfig,
+  type ShareConnection,
   type ShareEntry,
 } from "./share";
 
@@ -33,8 +33,10 @@ function collectFiles(node: TreeNode, out: string[] = []): string[] {
 export default function ShareFolder({
   dirPath,
   collection,
+  collectionConnection,
   shares,
-  config,
+  connections,
+  defaultConnectionId,
   onShare,
   onStopSharing,
   onToggleMember,
@@ -44,9 +46,14 @@ export default function ShareFolder({
 }: {
   dirPath: string;
   collection: CollectionEntry | null;
+  // The connection `collection` was published to; null when that connection
+  // has been removed (links unknown, stop only forgets locally).
+  collectionConnection: ShareConnection | null;
   shares: Record<string, ShareEntry>;
-  config: ShareConfig | null;
-  onShare: (id: string) => Promise<void>;
+  connections: ShareConnection[];
+  // Where a NEW folder share goes unless the picker says otherwise.
+  defaultConnectionId: string | null;
+  onShare: (id: string, connectionId: string) => Promise<void>;
   onStopSharing: (alsoStopPages: boolean) => Promise<void>;
   onToggleMember: (path: string, include: boolean) => Promise<void>;
   onClose: () => void;
@@ -56,6 +63,8 @@ export default function ShareFolder({
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [slug, setSlug] = useState(() => generateShareId());
+  // The picker's choice when creating; null = follow defaultConnectionId.
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +74,12 @@ export default function ShareFolder({
   const [stopBusy, setStopBusy] = useState(false);
 
   const folderName = basename(dirPath);
+  // Existing share → its own connection; creating → the picker's choice.
+  const selectedConn =
+    connections.find((c) => c.id === (selectedConnId ?? defaultConnectionId)) ??
+    connections[0] ??
+    null;
+  const config = collection ? collectionConnection : selectedConn;
   const host = shareHost(config);
   const memberSet = useMemo(() => new Set(collection?.members ?? []), [collection]);
 
@@ -92,7 +107,7 @@ export default function ShareFolder({
   }, [dirPath]);
 
   const confirmShare = useCallback(async () => {
-    if (!config || shareBusy) return;
+    if (!selectedConn || shareBusy) return;
     const id = slug.trim().toLowerCase();
     if (!SHARE_ID_RE.test(id) || id === "api") {
       setError("Use 3–64 characters: a–z, 0–9, dashes.");
@@ -101,17 +116,17 @@ export default function ShareFolder({
     setShareBusy(true);
     setError(null);
     try {
-      if (await pageExists(config, id)) {
+      if (await pageExists(selectedConn, id)) {
         setError("That address is already taken.");
         return;
       }
-      await onShare(id);
+      await onShare(id, selectedConn.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setShareBusy(false);
     }
-  }, [config, slug, shareBusy, onShare]);
+  }, [selectedConn, slug, shareBusy, onShare]);
 
   const setPathsBusy = useCallback((paths: string[], busy: boolean) => {
     setBusyPaths((prev) => {
@@ -214,7 +229,7 @@ export default function ShareFolder({
           </button>
         </div>
 
-        {!config ? (
+        {connections.length === 0 ? (
           <div className="shared-empty">
             <div>Sharing isn't set up on this Mac yet.</div>
             <button
@@ -239,7 +254,22 @@ export default function ShareFolder({
               choose which documents to include, one by one, after.
             </div>
             <div className="share-url-row">
-              <span className="share-url-prefix">{host}/</span>
+              {connections.length > 1 ? (
+                <select
+                  className="share-conn-select"
+                  value={selectedConn?.id ?? ""}
+                  onChange={(e) => setSelectedConnId(e.target.value)}
+                  aria-label="Share domain"
+                >
+                  {connections.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {shareHost(c)}/
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="share-url-prefix">{host}/</span>
+              )}
               <input
                 className="share-slug-input"
                 value={slug}
@@ -309,23 +339,31 @@ export default function ShareFolder({
           </div>
         ) : (
           <div className="folder-share-body">
-            <div className="share-url-row">
-              <span className="share-url" title={shareUrl(config, collection.id)}>
-                {host}/{collection.id}
-              </span>
-              <button
-                className="share-btn folder-share-url-btn"
-                onClick={() => void copy("link", shareUrl(config, collection.id))}
-              >
-                {copied === "link" ? "Copied" : "Copy"}
-              </button>
-              <button
-                className="share-btn folder-share-url-btn"
-                onClick={() => onOpenExternal(shareUrl(config, collection.id))}
-              >
-                Open
-              </button>
-            </div>
+            {config ? (
+              <div className="share-url-row">
+                <span className="share-url" title={shareUrl(config, collection.id)}>
+                  {host}/{collection.id}
+                </span>
+                <button
+                  className="share-btn folder-share-url-btn"
+                  onClick={() => void copy("link", shareUrl(config, collection.id))}
+                >
+                  {copied === "link" ? "Copied" : "Copy"}
+                </button>
+                <button
+                  className="share-btn folder-share-url-btn"
+                  onClick={() => onOpenExternal(shareUrl(config, collection.id))}
+                >
+                  Open
+                </button>
+              </div>
+            ) : (
+              <div className="share-note">
+                The domain this folder was shared on is no longer configured
+                here — the public page stays live, but it can't be updated or
+                deleted from this Mac. Stopping only forgets it locally.
+              </div>
+            )}
             <div className="share-note">
               Anyone with the link sees a table of contents of the pages you
               include below — and only those. Each included page also has its
@@ -388,7 +426,7 @@ function ChecklistItem({
   memberSet: Set<string>;
   busyPaths: Set<string>;
   shares: Record<string, ShareEntry>;
-  config: ShareConfig;
+  config: ShareConnection | null;
   copiedPath: string | null;
   onToggleFile: (path: string, include: boolean) => void;
   onToggleDir: (node: TreeNode) => void;
@@ -415,7 +453,7 @@ function ChecklistItem({
           <span className="folder-share-name">{stripDocExt(node.name)}</span>
         </label>
         {busy && <span className="folder-share-busy">…</span>}
-        {!busy && included && share && (
+        {!busy && included && share && config && (
           <button
             className="folder-share-copy"
             onClick={() => onCopyLink(node.path, shareUrl(config, share.id))}

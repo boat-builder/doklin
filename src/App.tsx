@@ -30,20 +30,25 @@ import {
   contentHash,
   deletePage,
   generateShareId,
-  getShareConfig,
+  getConnections,
   pageExists,
   pushCollection,
   pushOgImage,
   pushPage,
   readCollections,
   readShares,
+  readWorkspaceConnectionMap,
+  resolveConnection,
+  saveConnections,
   shareUrl,
   writeCollections,
   writeShares,
+  writeWorkspaceConnectionMap,
   type CollectionEntry,
   type CollectionItem,
   type PushedFingerprint,
-  type ShareConfig,
+  type ShareConnection,
+  type ShareConnectionsState,
   type ShareEntry,
   type ShareParts,
 } from "./share";
@@ -507,14 +512,15 @@ export default function App() {
   // a debounced push of the same content to the remote page.
   const [shares, setShares] = useState<Record<string, ShareEntry>>(() => readShares());
   const sharesRef = useRef<Record<string, ShareEntry>>(shares);
-  const [shareConfig, setShareConfig] = useState<ShareConfig | null>(null);
+  // The configured share backends. State mirrors share.ts's session cache for
+  // rendering; callbacks read the cache directly (`await getConnections()`).
+  const [shareConns, setShareConns] = useState<ShareConnectionsState>({
+    connections: [],
+    defaultId: null,
+  });
   const [sharedPagesOpen, setSharedPagesOpen] = useState(false);
   const [shareSetupOpen, setShareSetupOpen] = useState(false);
   const sharePushTimersRef = useRef<Map<string, number>>(new Map());
-
-  useEffect(() => {
-    void getShareConfig().then(setShareConfig);
-  }, []);
 
   // The ref is the writable source of truth and updates synchronously (a React
   // state updater only runs at render time — too late for code that reads the
@@ -567,6 +573,147 @@ export default function App() {
     [],
   );
 
+  // Load the configured connections, and stamp registry entries from before
+  // multi-connection support with the connection they were published to
+  // (resolveConnection maps an unstamped entry to the migrated v1
+  // connection). Stamping runs in the main window only — one registry, one
+  // writer.
+  useEffect(() => {
+    void getConnections().then((st) => {
+      setShareConns(st);
+      if (!isMainWindow || st.connections.length === 0) return;
+      const stamp = <T extends { connectionId?: string }>(
+        prev: Record<string, T>,
+      ): Record<string, T> => {
+        let changed = false;
+        const next = { ...prev };
+        for (const [p, e] of Object.entries(next)) {
+          if (e.connectionId) continue;
+          const conn = resolveConnection(st, e);
+          if (!conn) continue;
+          next[p] = { ...e, connectionId: conn.id };
+          changed = true;
+        }
+        return changed ? next : prev;
+      };
+      updateShares(stamp);
+      updateCollections(stamp);
+    });
+  }, [updateShares, updateCollections]);
+
+  // Persist a connections change and refresh both the session cache and the
+  // rendered state.
+  const changeConnections = useCallback(
+    async (mut: (prev: ShareConnectionsState) => ShareConnectionsState) => {
+      const next = await saveConnections(mut(await getConnections()));
+      setShareConns(next);
+      return next;
+    },
+    [],
+  );
+
+  // Which connection an entry belongs to (share.ts's resolveConnection, fed
+  // from the session cache). null = that connection has been removed; pushes
+  // skip, stops forget locally.
+  const connectionForEntry = useCallback(
+    async (entry: { connectionId?: string }): Promise<ShareConnection | null> =>
+      resolveConnection(await getConnections(), entry),
+    [],
+  );
+
+  // Per-workspace default connection: consulted before the global default
+  // when a new share is created, written from the share popover's picker.
+  const [workspaceConnMap, setWorkspaceConnMap] = useState<Record<string, string>>(() =>
+    readWorkspaceConnectionMap(),
+  );
+
+  // Render-time mirror of connectionForEntry, driven by state instead of the
+  // session cache so the UI re-resolves when connections change.
+  const connectionForEntrySync = useCallback(
+    (entry: { connectionId?: string } | null): ShareConnection | null =>
+      resolveConnection(shareConns, entry),
+    [shareConns],
+  );
+
+  // Where a NEW share goes: the workspace's remembered connection if it still
+  // exists, the global default otherwise.
+  const workspaceKey = workspaceRoot ?? "";
+  const mappedConn = workspaceConnMap[workspaceKey];
+  const defaultConnectionId =
+    mappedConn && shareConns.connections.some((c) => c.id === mappedConn)
+      ? mappedConn
+      : shareConns.defaultId;
+
+  const rememberWorkspaceConnection = useCallback(
+    (connectionId: string) => {
+      setWorkspaceConnMap((prev) => {
+        const next = { ...prev, [workspaceKey]: connectionId };
+        writeWorkspaceConnectionMap(next);
+        return next;
+      });
+    },
+    [workspaceKey],
+  );
+
+  // Add or update a connection. An endpoint that matches an existing
+  // connection updates it in place (same id — entries keep resolving), which
+  // is what re-running the setup guide or rotating a token should do.
+  const saveConnection = useCallback(
+    async (conn: ShareConnection) => {
+      await changeConnections((prev) => {
+        const existing =
+          prev.connections.find((c) => c.id === conn.id) ??
+          prev.connections.find((c) => c.endpoint === conn.endpoint);
+        const connections = existing
+          ? prev.connections.map((c) =>
+              c.id === existing.id ? { ...conn, id: existing.id } : c,
+            )
+          : [...prev.connections, conn];
+        return { connections, defaultId: prev.defaultId ?? conn.id };
+      });
+    },
+    [changeConnections],
+  );
+
+  const removeConnection = useCallback(
+    async (id: string) => {
+      await changeConnections((prev) => ({
+        connections: prev.connections.filter((c) => c.id !== id),
+        defaultId: prev.defaultId === id ? null : prev.defaultId,
+      }));
+      setWorkspaceConnMap((prev) => {
+        const next = Object.fromEntries(
+          Object.entries(prev).filter(([, v]) => v !== id),
+        );
+        writeWorkspaceConnectionMap(next);
+        return next;
+      });
+    },
+    [changeConnections],
+  );
+
+  const makeDefaultConnection = useCallback(
+    async (id: string) => {
+      await changeConnections((prev) => ({ ...prev, defaultId: id }));
+    },
+    [changeConnections],
+  );
+
+  // How many local entries (pages + folder shares) live on a connection —
+  // shown before removing one, since those pages stay live but lose their
+  // update path from this Mac.
+  const shareCountFor = useCallback(
+    (connectionId: string) => {
+      const owns = (e: { connectionId?: string }) =>
+        (e.connectionId ?? shareConns.defaultId) === connectionId;
+      return (
+        Object.values(shares).filter(owns).length +
+        Object.values(collections).filter(owns).length
+      );
+    },
+    [shares, collections, shareConns.defaultId],
+  );
+
   // What a manifest push carries: each member's page id, display title (the
   // filename, so the TOC tracks renames immediately), and folder-relative
   // path (how the TOC groups into directories). Members whose share is gone
@@ -589,7 +736,7 @@ export default function App() {
     async (dirPath: string) => {
       const entry = collectionsRef.current[dirPath];
       if (!entry) return;
-      const config = await getShareConfig();
+      const config = await connectionForEntry(entry);
       if (!config) return;
       const items = collectionItemsFor(entry);
       const hash = await collectionManifestHash(entry.title, items);
@@ -619,7 +766,7 @@ export default function App() {
         console.error("collection push failed", dirPath, e);
       }
     },
-    [collectionItemsFor, updateCollections],
+    [collectionItemsFor, updateCollections, connectionForEntry],
   );
 
   const scheduleCollectionPush = useCallback(
@@ -689,7 +836,7 @@ export default function App() {
     async (target: string) => {
       const entry = sharesRef.current[target];
       if (!entry) return;
-      const config = await getShareConfig();
+      const config = await connectionForEntry(entry);
       if (!config) return;
       const tab = tabsRef.current.find((t) => t.path === target);
       const title =
@@ -719,7 +866,7 @@ export default function App() {
         console.error("share push failed", target, e);
       }
     },
-    [updateShares, readShareParts],
+    [updateShares, readShareParts, connectionForEntry],
   );
 
   const scheduleSharePush = useCallback(
@@ -788,7 +935,7 @@ export default function App() {
     const now = Date.now();
     if (now - lastReconcileRef.current < SHARE_RECONCILE_MIN_MS) return;
     lastReconcileRef.current = now;
-    if (!(await getShareConfig())) return;
+    if ((await getConnections()).connections.length === 0) return;
     for (const entry of entries) {
       try {
         if (await shareNeedsPush(entry)) scheduleSharePush(entry.path);
@@ -1518,13 +1665,15 @@ export default function App() {
     );
   }, []);
 
-  // Publish the active document at <endpoint>/<id> and record the share.
-  // Throws on failure so the share popover can surface the error.
+  // Publish the active document at <endpoint>/<id> on the given connection
+  // and record the share. Throws on failure so the share popover can surface
+  // the error.
   const shareActiveDoc = useCallback(
-    async (id: string) => {
+    async (id: string, connectionId: string) => {
       const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
       if (!active) throw new Error("No document open.");
-      const config = await getShareConfig();
+      const st = await getConnections();
+      const config = st.connections.find((c) => c.id === connectionId);
       if (!config) throw new Error("Sharing is not configured.");
       const title = docShareTitle(active);
       // Pushes read the disk; land any keystrokes still inside the autosave
@@ -1551,6 +1700,7 @@ export default function App() {
           sharedAt: now,
           updatedAt: now,
           pushed,
+          connectionId: config.id,
         },
       }));
     },
@@ -1558,14 +1708,19 @@ export default function App() {
   );
 
   // Delete the remote page and forget the share (the local file is untouched).
-  // A page that was included in a folder share also drops off that TOC.
+  // A page that was included in a folder share also drops off that TOC. If the
+  // connection it was published on has since been removed, the remote copy is
+  // out of reach — forget the entry locally rather than trapping it forever.
   const stopSharing = useCallback(
     async (target: string) => {
       const entry = sharesRef.current[target];
       if (!entry) return;
-      const config = await getShareConfig();
-      if (!config) throw new Error("Sharing is not configured.");
-      await deletePage(config, entry.id);
+      const config = await connectionForEntry(entry);
+      if (config) {
+        await deletePage(config, entry.id);
+      } else {
+        console.warn("share connection removed; forgetting entry locally", target);
+      }
       const timers = sharePushTimersRef.current;
       const pending = timers.get(target);
       if (pending != null) {
@@ -1592,16 +1747,18 @@ export default function App() {
         scheduleCollectionPush(c.path);
       }
     },
-    [updateShares, updateCollections, scheduleCollectionPush],
+    [updateShares, updateCollections, scheduleCollectionPush, connectionForEntry],
   );
 
   // Publish a folder (or the whole workspace) as a collection page at
-  // <endpoint>/<id>. Nothing inside is shared by that act alone — membership
-  // is explicit, so the TOC starts empty. Throws so the dialog can surface
-  // the error (including the "worker needs redeploying" case).
+  // <endpoint>/<id> on the given connection. Nothing inside is shared by that
+  // act alone — membership is explicit, so the TOC starts empty. Throws so
+  // the dialog can surface the error (including the "worker needs
+  // redeploying" case).
   const shareFolder = useCallback(
-    async (dirPath: string, id: string) => {
-      const config = await getShareConfig();
+    async (dirPath: string, id: string, connectionId: string) => {
+      const st = await getConnections();
+      const config = st.connections.find((c) => c.id === connectionId);
       if (!config) throw new Error("Sharing is not configured.");
       const title = basename(dirPath);
       await pushCollection(config, id, title, []);
@@ -1624,6 +1781,7 @@ export default function App() {
           updatedAt: now,
           pushedHash: hash,
           pushedTitle: title,
+          connectionId: config.id,
         },
       }));
     },
@@ -1632,14 +1790,18 @@ export default function App() {
 
   // Delete the collection page and forget the folder share. Member pages
   // either stay live as standalone shares (their public crumb disappears on
-  // the next push) or stop too — the dialog asks which.
+  // the next push) or stop too — the dialog asks which. A removed connection
+  // forgets locally, like stopSharing.
   const stopSharingFolder = useCallback(
     async (dirPath: string, alsoStopPages: boolean) => {
       const entry = collectionsRef.current[dirPath];
       if (!entry) return;
-      const config = await getShareConfig();
-      if (!config) throw new Error("Sharing is not configured.");
-      await deletePage(config, entry.id);
+      const config = await connectionForEntry(entry);
+      if (config) {
+        await deletePage(config, entry.id);
+      } else {
+        console.warn("share connection removed; forgetting folder share locally", dirPath);
+      }
       const timers = collectionPushTimersRef.current;
       const pending = timers.get(dirPath);
       if (pending != null) {
@@ -1671,7 +1833,7 @@ export default function App() {
         }
       }
     },
-    [stopSharing, updateCollections, updateShares, scheduleSharePush],
+    [stopSharing, updateCollections, updateShares, scheduleSharePush, connectionForEntry],
   );
 
   // Include a file in (or remove it from) a folder share. Including a not-yet-
@@ -1682,11 +1844,21 @@ export default function App() {
     async (filePath: string, dirPath: string, include: boolean) => {
       const collection = collectionsRef.current[dirPath];
       if (!collection) return;
-      const config = await getShareConfig();
+      // Members live on the collection's connection — the TOC links stay on
+      // one domain.
+      const config = await connectionForEntry(collection);
       if (!config) throw new Error("Sharing is not configured.");
       if (include) {
         if (!filePath.startsWith(collection.path + "/")) return;
         const existing = sharesRef.current[filePath];
+        // Compare RESOLVED connections, so an unstamped legacy page (which
+        // lives wherever resolveConnection says) can't slip onto a foreign
+        // collection's TOC and 404 there.
+        if (existing && (await connectionForEntry(existing))?.id !== config.id) {
+          throw new Error(
+            "This page is shared on a different domain. A folder share can only list pages on its own domain — stop sharing the page first.",
+          );
+        }
         if (!existing) {
           // Land any in-flight keystrokes if this is the open document, so the
           // first published copy matches the screen.
@@ -1718,12 +1890,22 @@ export default function App() {
             updatedAt: now,
             pushed,
             collectionId: collection.id,
+            connectionId: config.id,
           };
           updateShares((prev) => ({ ...prev, [filePath]: created }));
         } else {
+          // The guard above proved the page resolves to this connection —
+          // make the stamp explicit while we're here.
           updateShares((prev) =>
             prev[filePath]
-              ? { ...prev, [filePath]: { ...prev[filePath], collectionId: collection.id } }
+              ? {
+                  ...prev,
+                  [filePath]: {
+                    ...prev[filePath],
+                    collectionId: collection.id,
+                    connectionId: config.id,
+                  },
+                }
               : prev,
           );
           // Re-push so the public page gains its folder crumb.
@@ -1780,6 +1962,7 @@ export default function App() {
       updateCollections,
       scheduleSharePush,
       scheduleCollectionPush,
+      connectionForEntry,
     ],
   );
 
@@ -1794,14 +1977,23 @@ export default function App() {
     [openTab],
   );
 
-  // Copy a share link from the tree without opening anything.
-  const copyShareLink = useCallback(async (id: string) => {
-    try {
-      await navigator.clipboard.writeText(shareUrl(await getShareConfig(), id));
-    } catch (e) {
-      console.error("copy link failed", e);
-    }
-  }, []);
+  // Copy a share link from the tree without opening anything. The id belongs
+  // to some registry entry; the link must use THAT entry's connection.
+  const copyShareLink = useCallback(
+    async (id: string) => {
+      try {
+        const entry =
+          Object.values(sharesRef.current).find((e) => e.id === id) ??
+          Object.values(collectionsRef.current).find((c) => c.id === id);
+        const conn = entry ? await connectionForEntry(entry) : null;
+        if (!conn) return;
+        await navigator.clipboard.writeText(shareUrl(conn, id));
+      } catch (e) {
+        console.error("copy link failed", e);
+      }
+    },
+    [connectionForEntry],
+  );
 
   const reloadFromDisk = useCallback(async () => {
     const target = pathRef.current;
@@ -2911,12 +3103,17 @@ export default function App() {
           key={activeTab.path}
           docTitle={docShareTitle(activeTab)}
           entry={shares[activeTab.path] ?? null}
-          config={shareConfig}
+          entryConnection={connectionForEntrySync(shares[activeTab.path] ?? null)}
+          connections={shareConns.connections}
+          defaultConnectionId={defaultConnectionId}
+          globalDefaultId={shareConns.defaultId}
+          shareCountFor={shareCountFor}
           collection={
             activeShareCollection && activeFilePath
               ? {
                   entry: activeShareCollection,
                   included: activeShareCollection.members.includes(activeFilePath),
+                  connection: connectionForEntrySync(activeShareCollection),
                 }
               : null
           }
@@ -2932,15 +3129,20 @@ export default function App() {
           onOpenSharedPages={() => setSharedPagesOpen(true)}
           onOpenSetupGuide={() => setShareSetupOpen(true)}
           onOpenExternal={openExternal}
-          onConfigChanged={setShareConfig}
-          onConfigDeleted={() => setShareConfig(null)}
+          onSaveConnection={saveConnection}
+          onRemoveConnection={removeConnection}
+          onMakeDefault={makeDefaultConnection}
+          onRememberWorkspaceConnection={
+            workspaceRoot ? rememberWorkspaceConnection : null
+          }
         />
       )}
       {sharedPagesOpen && (
         <SharedPages
           shares={Object.values(shares).sort((a, b) => b.sharedAt - a.sharedAt)}
           collections={Object.values(collections).sort((a, b) => b.sharedAt - a.sharedAt)}
-          config={shareConfig}
+          connections={shareConns.connections}
+          connectionFor={connectionForEntrySync}
           onClose={() => setSharedPagesOpen(false)}
           onOpenDoc={(entry) => {
             setSharedPagesOpen(false);
@@ -2959,9 +3161,15 @@ export default function App() {
         <ShareFolder
           dirPath={shareFolderTarget}
           collection={collections[shareFolderTarget] ?? null}
+          collectionConnection={connectionForEntrySync(
+            collections[shareFolderTarget] ?? null,
+          )}
           shares={shares}
-          config={shareConfig}
-          onShare={(id) => shareFolder(shareFolderTarget, id)}
+          connections={shareConns.connections}
+          defaultConnectionId={defaultConnectionId}
+          onShare={(id, connectionId) =>
+            shareFolder(shareFolderTarget, id, connectionId)
+          }
           onStopSharing={async (alsoStopPages) => {
             // Close only once the stop went through, so a failure (offline,
             // bad token) surfaces in the still-open dialog.
@@ -2981,10 +3189,10 @@ export default function App() {
       )}
       {shareSetupOpen && (
         <ShareSetup
-          config={shareConfig}
+          isAddingAnother={shareConns.connections.length > 0}
           onClose={() => setShareSetupOpen(false)}
           onOpenExternal={openExternal}
-          onConfigChanged={setShareConfig}
+          onConnectionSaved={saveConnection}
         />
       )}
       {draftsOpen && (

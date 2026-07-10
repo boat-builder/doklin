@@ -1,11 +1,13 @@
-// Public sharing — registry, config, API client, and OG image rendering.
+// Public sharing — registry, connections, API client, and OG image rendering.
 //
 // A share means: this local document (keyed by its absolute path) is published
 // read-only at <endpoint>/<id>. The registry lives in localStorage
 // ("doklin:shares"); the remote side holds {title, markdown?, html?} JSON plus
 // an OG png per page, written through the share worker's Bearer-token API
-// (share-worker/src/index.js). The endpoint + token come from
+// (share-worker/src/index.js). The endpoints + tokens come from
 // <app_data_dir>/share.json — a machine-local file that never enters the repo.
+// Several connections (one per domain/backend) can be configured at once;
+// every entry records which one it was published to.
 //
 // The remote mirrors the DISK: every push reads the files fresh, and each
 // entry fingerprints what was pushed so a reconciliation pass (app launch /
@@ -39,6 +41,10 @@ export type ShareEntry = {
   // Membership is always explicit — sharing a folder shares no files by
   // itself, and sharing a file inside a shared folder doesn't enroll it.
   collectionId?: string;
+  // Which connection (ShareConnection.id) this page was published to. Absent
+  // on entries from before multi-connection support — those belong to the
+  // migrated v1 connection, and App stamps them on launch.
+  connectionId?: string;
 };
 
 // A folder (or whole-workspace) share: one published "collection" page whose
@@ -58,6 +64,9 @@ export type CollectionEntry = {
   pushedHash?: string;
   // Title baked into the last-pushed OG image; a mismatch re-renders it.
   pushedTitle?: string;
+  // Which connection this collection lives on (see ShareEntry.connectionId).
+  // Members can only be pages on the same connection.
+  connectionId?: string;
 };
 
 // One member reference inside a pushed manifest: the page's id, its display
@@ -65,10 +74,24 @@ export type CollectionEntry = {
 // public TOC into directories).
 export type CollectionItem = { id: string; title: string; path: string };
 
+// The wire-level credentials the API client needs. A ShareConnection carries
+// these plus an identity, so it can be passed anywhere a ShareConfig goes.
 export type ShareConfig = { endpoint: string; token: string };
+
+// One configured share backend. Entries reference connections by id, so links
+// keep resolving to the right domain no matter what's added or removed later.
+export type ShareConnection = { id: string; endpoint: string; token: string };
+
+export type ShareConnectionsState = {
+  connections: ShareConnection[];
+  // The connection new shares go to when nothing more specific applies (the
+  // per-workspace map below wins when set).
+  defaultId: string | null;
+};
 
 const SHARES_STORAGE_KEY = "doklin:shares";
 const COLLECTIONS_STORAGE_KEY = "doklin:collections";
+const WORKSPACE_CONNECTIONS_KEY = "doklin:share-connection-by-root";
 
 export function readShares(): Record<string, ShareEntry> {
   try {
@@ -135,51 +158,163 @@ export function writeCollections(collections: Record<string, CollectionEntry>) {
   }
 }
 
-// Reads <app_data_dir>/share.json once and caches the result for the session.
-// A missing or malformed file just means sharing is unconfigured (null).
-let configPromise: Promise<ShareConfig | null> | null = null;
+/* ---------- Connections (share.json) ---------- */
 
-export function getShareConfig(): Promise<ShareConfig | null> {
-  if (!configPromise) {
-    configPromise = (async () => {
+const EMPTY_CONNECTIONS: ShareConnectionsState = { connections: [], defaultId: null };
+
+// The id the v1 single-config file migrates to. Deterministic, so every
+// window and every launch reads the same identity out of an unmigrated file —
+// entries stamped with it stay valid even before the file is rewritten as v2.
+export const MIGRATED_CONNECTION_ID = "primary";
+
+// Canonical endpoint shape: no surrounding whitespace, no trailing slash.
+// Everything that stores or compares endpoints (saves, dedupe) must run
+// through this, or "same endpoint" checks quietly stop matching.
+export function normalizeEndpoint(endpoint: string): string {
+  return endpoint.trim().replace(/\/+$/, "");
+}
+
+export function newConnectionId(): string {
+  return `c-${generateShareId(10)}`;
+}
+
+// THE resolution rule for which connection owns an entry — every path that
+// renders a link or pushes/deletes must agree, so it lives here once. A
+// stamped entry maps to its connection or, when that was removed, to null
+// (degrade, don't guess). An unstamped entry predates multi-connection
+// support: it was published to the v1 connection, so prefer the migrated id,
+// then the default — stable across windows even before stamping runs.
+export function resolveConnection(
+  state: ShareConnectionsState,
+  entry: { connectionId?: string } | null,
+): ShareConnection | null {
+  if (!entry) return null;
+  if (entry.connectionId) {
+    return state.connections.find((c) => c.id === entry.connectionId) ?? null;
+  }
+  return (
+    state.connections.find((c) => c.id === MIGRATED_CONNECTION_ID) ??
+    state.connections.find((c) => c.id === state.defaultId) ??
+    state.connections[0] ??
+    null
+  );
+}
+
+// v2 file: {version: 2, connections: [{id, endpoint, token}], defaultId,
+// endpoint, token} — the top-level endpoint/token mirror the default
+// connection so an app build from before multi-connection support keeps
+// reading the same file happily. v1 file: bare {endpoint, token}.
+function parseConnections(contents: string): ShareConnectionsState {
+  const parsed = JSON.parse(contents);
+  if (Array.isArray(parsed?.connections)) {
+    const connections: ShareConnection[] = [];
+    for (const c of parsed.connections) {
+      if (
+        c &&
+        typeof c.id === "string" &&
+        typeof c.endpoint === "string" &&
+        typeof c.token === "string" &&
+        c.endpoint.trim() &&
+        !connections.some((seen) => seen.id === c.id)
+      ) {
+        connections.push({ id: c.id, endpoint: normalizeEndpoint(c.endpoint), token: c.token });
+      }
+    }
+    if (connections.length > 0) {
+      const defaultId =
+        typeof parsed.defaultId === "string" &&
+        connections.some((c) => c.id === parsed.defaultId)
+          ? parsed.defaultId
+          : connections[0].id;
+      return { connections, defaultId };
+    }
+    // A connections array that yields nothing valid (hand-edited, truncated)
+    // falls through to the top-level mirror — v2 files always carry one.
+  }
+  if (typeof parsed?.endpoint === "string" && typeof parsed?.token === "string") {
+    const conn: ShareConnection = {
+      id: MIGRATED_CONNECTION_ID,
+      endpoint: normalizeEndpoint(parsed.endpoint),
+      token: parsed.token,
+    };
+    return { connections: [conn], defaultId: conn.id };
+  }
+  return EMPTY_CONNECTIONS;
+}
+
+// Reads <app_data_dir>/share.json once and caches the result for the session.
+// A missing or malformed file just means sharing is unconfigured.
+let connectionsPromise: Promise<ShareConnectionsState> | null = null;
+
+export function getConnections(): Promise<ShareConnectionsState> {
+  if (!connectionsPromise) {
+    connectionsPromise = (async () => {
       try {
         const dir = await appDataDir();
         const path = await join(dir, "share.json");
         const result = await invoke<{ contents: string }>("read_file", { path });
-        const parsed = JSON.parse(result.contents);
-        if (typeof parsed?.endpoint === "string" && typeof parsed?.token === "string") {
-          return {
-            endpoint: parsed.endpoint.replace(/\/+$/, ""),
-            token: parsed.token,
-          };
-        }
+        return parseConnections(result.contents);
       } catch {
-        // fall through
+        return EMPTY_CONNECTIONS;
       }
-      return null;
     })();
   }
-  return configPromise;
+  return connectionsPromise;
 }
 
-// Writes <app_data_dir>/share.json and refreshes the session cache, so sharing
-// can be configured (or the token rotated) from inside the app.
-export async function saveShareConfig(config: ShareConfig): Promise<void> {
+// Writes <app_data_dir>/share.json (v2 shape) and refreshes the session cache.
+// An empty list deletes the file — sharing turns unconfigured, existing pages
+// stay live remotely.
+export async function saveConnections(state: ShareConnectionsState): Promise<ShareConnectionsState> {
+  if (state.connections.length === 0) {
+    await invoke("delete_share_config");
+    connectionsPromise = Promise.resolve(EMPTY_CONNECTIONS);
+    return EMPTY_CONNECTIONS;
+  }
+  const def =
+    state.connections.find((c) => c.id === state.defaultId) ?? state.connections[0];
+  const next: ShareConnectionsState = { connections: state.connections, defaultId: def.id };
   const dir = await appDataDir();
   const path = await join(dir, "share.json");
   await invoke("write_file", {
     path,
-    contents: `${JSON.stringify({ endpoint: config.endpoint, token: config.token }, null, 2)}\n`,
+    contents: `${JSON.stringify(
+      { endpoint: def.endpoint, token: def.token, version: 2, ...next },
+      null,
+      2,
+    )}\n`,
     expected: null, // settings file: last write wins
   });
-  configPromise = Promise.resolve(config);
+  connectionsPromise = Promise.resolve(next);
+  return next;
 }
 
-// Deletes <app_data_dir>/share.json from disk; sharing turns unconfigured
-// until a new token is saved. Existing shares stay live remotely.
-export async function deleteShareConfig(): Promise<void> {
-  await invoke("delete_share_config");
-  configPromise = Promise.resolve(null);
+/* ---------- Per-workspace default connection ---------- */
+
+// workspaceRoot (absolute path, or "" for no folder open) -> connection id.
+// Consulted before the global default when a share is created.
+export function readWorkspaceConnectionMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_CONNECTIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, string> = {};
+    for (const [root, id] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof id === "string") out[root] = id;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeWorkspaceConnectionMap(map: Record<string, string>) {
+  try {
+    localStorage.setItem(WORKSPACE_CONNECTIONS_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
 }
 
 // Mirrors the worker's rules (plus "api" etc. are reserved there; a random id
@@ -270,16 +405,48 @@ export async function pushPage(
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
 }
 
-// Thrown when the deployed worker predates folder shares (its PUT validation
-// rejects a body with no markdown/html) — the fix is redeploying the worker,
+// Thrown when the deployed worker predates a feature the app just used —
+// folder shares (an old PUT validation 400s manifests) or the site config API
+// (an old router 404s /api/site). The fix is always redeploying the worker,
 // so the UI can route to the setup guide instead of showing a bare error.
 export class ShareWorkerOutdatedError extends Error {
   constructor() {
     super(
-      "Your share worker doesn't support folder shares yet. Redeploy it with the latest worker code — the setup guide has it.",
+      "Your share worker is an older version. Redeploy it with the latest worker code — the setup guide has it.",
     );
     this.name = "ShareWorkerOutdatedError";
   }
+}
+
+/* ---------- Site config (landing page branding + root page) ---------- */
+
+// Mirror of the worker's site.json: landing-page branding plus the optional
+// page that replaces the landing page entirely. Full record every push, like
+// pages — a missing field means unset.
+export type SiteConfig = {
+  ownerName?: string;
+  ownerLink?: string;
+  downloadUrl?: string;
+  rootPageId?: string;
+  updatedAt?: string;
+};
+
+export async function fetchSiteConfig(config: ShareConfig): Promise<SiteConfig> {
+  const res = await apiFetch(config, "/api/site");
+  if (res.status === 404) throw new ShareWorkerOutdatedError();
+  if (!res.ok) throw new Error(`site config read failed (${res.status})`);
+  const body = (await res.json().catch(() => null)) as { site?: SiteConfig } | null;
+  return body?.site && typeof body.site === "object" ? body.site : {};
+}
+
+export async function pushSiteConfig(config: ShareConfig, site: SiteConfig): Promise<void> {
+  const res = await apiFetch(config, "/api/site", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(site),
+  });
+  if (res.status === 404) throw new ShareWorkerOutdatedError();
+  if (!res.ok) throw new Error(`site config update failed (${res.status})`);
 }
 
 // Publish (or update) a folder share's manifest. Like pushPage, the full
