@@ -9,13 +9,14 @@
 //   GET /              landing page (or the rootPageId page from site.json)
 //   GET /<id>          rendered read-only page for pages/<id>.json in R2.
 //                      A page can carry a markdown document, an html rendition,
-//                      or both; with both, a pill on the page lets the reader
-//                      switch (?v=html selects the html rendition). A page
-//                      stored with kind:"collection" is a folder/workspace
-//                      share instead: it renders as a table-of-contents home
-//                      page linking to its member pages, and each member page
-//                      shows a "back to the folder" crumb.
-//   GET /<id>?v=html   the html rendition, framed (sandboxed iframe -> /raw)
+//                      or both; with both, the html rendition (the polished,
+//                      human-facing one) is what the link opens on, and a pill
+//                      on the page lets the reader switch (?v=md selects the
+//                      markdown document). A page stored with kind:"collection"
+//                      is a folder/workspace share instead: it renders as a
+//                      table-of-contents home page linking to its member pages,
+//                      and each member page shows a "back to the folder" crumb.
+//   GET /<id>?v=md     the markdown document (when the page also has html)
 //   GET /<id>/raw      the raw html rendition document
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //
@@ -32,9 +33,11 @@
 //                                — create/update a page (at least one of
 //                                markdown/html required; collection {id,title}
 //                                back-references the folder share it's in) —
-//                                or body {title, kind:"collection", items} to
-//                                create/update a folder share (items are
-//                                {id, title, path} member references)
+//                                or body {title, kind:"collection", items,
+//                                description?} to create/update a folder share
+//                                (items are {id, title, path} member
+//                                references; description shows under the
+//                                public TOC's title)
 //   PUT    /api/pages/<id>/og    body image/png — set the OG image
 //   DELETE /api/pages/<id>       stop sharing (removes page + OG image)
 
@@ -42,9 +45,9 @@ import { marked } from "../vendor/marked.esm.js";
 
 // Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
-// root page override.
-const WORKER_VERSION = 2;
-const WORKER_FEATURES = ["pages", "collections", "site", "root-page"];
+// root page override, 3 = collection descriptions.
+const WORKER_VERSION = 3;
+const WORKER_FEATURES = ["pages", "collections", "site", "root-page", "collection-description"];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const RESERVED = new Set(["api", "robots.txt", "favicon.ico"]);
@@ -55,6 +58,12 @@ const MAX_MARKDOWN_BYTES = 4 * 1024 * 1024;
 const MAX_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_OG_BYTES = 2 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS = 1000;
+const MAX_COLLECTION_DESCRIPTION = 500;
+// A folder share's TOC adapts to its size: up to this many pages it renders
+// as a flat list of cards (a small share is usually THE deliverable — a
+// handful of documents handed to stakeholders — and a three-row tree reads
+// as sparse, not curated); past it, the compact collapsible tree takes over.
+const TOC_CARDS_MAX = 8;
 const MAX_SITE_TEXT = 120;
 const MAX_SITE_URL = 512;
 
@@ -240,12 +249,19 @@ async function handleApi(request, env, url) {
               : "Untitled";
           items.push({ id: it.id, title: itemTitle, path: it.path });
         }
+        // Owner-written blurb under the public TOC's title. Sent (or omitted)
+        // every push like everything else: absent means "no description".
+        const description =
+          typeof body.description === "string" && body.description.trim()
+            ? body.description.trim().slice(0, MAX_COLLECTION_DESCRIPTION)
+            : null;
         const existing = await env.PAGES.get(pageKey);
         const prior = existing ? await existing.json().catch(() => null) : null;
         const now = new Date().toISOString();
         const record = {
           kind: "collection",
           title,
+          ...(description ? { description } : {}),
           items,
           createdAt: prior?.createdAt ?? now,
           updatedAt: now,
@@ -497,17 +513,19 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
       : "";
 
   // With both versions present, the reader picks: a fixed pill toggles between
-  // the markdown page (/<id>) and the html rendition (/<id>?v=html).
+  // the html rendition (/<id> — the polished, human-facing default, opposite
+  // of the editor which leads with the markdown source) and the markdown page
+  // (/<id>?v=md).
   const pill = (active) =>
     hasMd && hasHtml
       ? `<nav class="view-pill" aria-label="Document version">
-<a class="view-seg ${active === "md" ? "is-active" : ""}" href="${pageUrl}">MD</a>
-<a class="view-seg ${active === "html" ? "is-active" : ""}" href="${pageUrl}?v=html">HTML</a>
+<a class="view-seg ${active === "md" ? "is-active" : ""}" href="${pageUrl}?v=md">MD</a>
+<a class="view-seg ${active === "html" ? "is-active" : ""}" href="${pageUrl}">HTML</a>
 </nav>`
       : "";
 
-  const wantHtml = url.searchParams.get("v") === "html";
-  if (hasHtml && (wantHtml || !hasMd)) {
+  const wantMd = url.searchParams.get("v") === "md";
+  if (hasHtml && !(hasMd && wantMd)) {
     // The rendition is an arbitrary standalone document; framing it (instead of
     // serving it at /<id> directly) keeps our meta tags, the toggle, and the
     // sandbox — its scripts run under an opaque origin.
@@ -578,14 +596,25 @@ function countTreePages(node) {
   return n;
 }
 
-// Stroke-only glyphs matching the desktop sidebar's icons.
+function countTreeDirs(node) {
+  let n = node.dirs.size;
+  for (const d of node.dirs.values()) n += countTreeDirs(d);
+  return n;
+}
+
+// Stroke-only glyphs matching the desktop sidebar's icons. Page and folder
+// icons sit in small bordered tiles (.toc-icon); the chevron and arrow are
+// bare row-trailing marks.
 const TOC_PAGE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>`;
 const TOC_DIR_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
-const TOC_CHEVRON = `<svg class="toc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>`;
+const TOC_CHEVRON = `<svg class="toc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>`;
+const TOC_ARROW = `<svg class="toc-page-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`;
 
 // Directories first, then pages, both alphabetical — the same order the
 // desktop sidebar shows. Top-level folders start open, deeper ones closed
 // (native <details>, so large trees stay scannable without any script).
+// Page rows reveal a trailing arrow on hover; directory rows trail their
+// page count and a rotating disclosure chevron.
 function renderTocLevel(node, depth) {
   const dirs = [...node.dirs.entries()].sort((a, b) =>
     a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
@@ -597,21 +626,42 @@ function renderTocLevel(node, depth) {
   for (const [name, child] of dirs) {
     const count = countTreePages(child);
     parts.push(`<details class="toc-dir"${depth === 0 ? " open" : ""}>
-<summary>${TOC_CHEVRON}${TOC_DIR_ICON}<span class="toc-dir-name">${escapeHtml(name)}</span><span class="toc-count">${count} ${count === 1 ? "page" : "pages"}</span></summary>
+<summary><span class="toc-icon">${TOC_DIR_ICON}</span><span class="toc-dir-name">${escapeHtml(name)}</span><span class="toc-count">${count}</span>${TOC_CHEVRON}</summary>
 <div class="toc-children">${renderTocLevel(child, depth + 1)}</div>
 </details>`);
   }
   for (const f of files) {
     parts.push(
-      `<a class="toc-page" href="/${f.id}">${TOC_PAGE_ICON}<span class="toc-page-title">${escapeHtml(f.title)}</span></a>`,
+      `<a class="toc-page" href="/${f.id}"><span class="toc-icon">${TOC_PAGE_ICON}</span><span class="toc-page-title">${escapeHtml(f.title)}</span>${TOC_ARROW}</a>`,
     );
   }
   return parts.join("\n");
 }
 
-// The folder share's home page: title, page count, and the table of contents.
+// The small-share TOC: every page as one card, flat, sorted by where it lives
+// and then by name. Folder structure doesn't earn a tree at this size — each
+// card just wears its folder path as a quiet subtitle.
+function renderTocCards(items) {
+  const dirOf = (p) => p.split("/").slice(0, -1).join("/");
+  const sorted = [...items].sort(
+    (a, b) =>
+      dirOf(a.path).localeCompare(dirOf(b.path), undefined, { sensitivity: "base" }) ||
+      a.title.localeCompare(b.title, undefined, { sensitivity: "base" }),
+  );
+  return sorted
+    .map((it) => {
+      const dir = dirOf(it.path).split("/").filter(Boolean).join(" / ");
+      return `<a class="toc-card" href="/${it.id}"><span class="toc-icon">${TOC_PAGE_ICON}</span><span class="toc-card-text"><span class="toc-card-title">${escapeHtml(it.title)}</span>${dir ? `<span class="toc-card-path">${escapeHtml(dir)}</span>` : ""}</span>${TOC_ARROW}</a>`;
+    })
+    .join("\n");
+}
+
+// The folder share's home page: title, an optional owner-written description,
+// page count, and the table of contents — cards for a handful of pages, the
+// collapsible tree for more (see TOC_CARDS_MAX).
 async function serveCollection(env, id, data, url) {
   const title = data.title || "Untitled";
+  const description = typeof data.description === "string" ? data.description.trim() : "";
   const items = Array.isArray(data.items)
     ? data.items.filter(
         (it) =>
@@ -623,7 +673,8 @@ async function serveCollection(env, id, data, url) {
       )
     : [];
   const count = items.length;
-  const desc = `${count} shared ${count === 1 ? "page" : "pages"} on ${url.hostname}`;
+  const desc =
+    description || `${count} shared ${count === 1 ? "page" : "pages"} on ${url.hostname}`;
   const ogImage = await env.PAGES.head(`pages/${id}.png`);
   const pageUrl = `${url.origin}/${id}`;
   const updated = data.updatedAt ? new Date(data.updatedAt) : null;
@@ -648,10 +699,23 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="${pageUrl}/og.png">` : `<meta name="twitter:card" content="summary">`}`;
 
+  const tree = buildCollectionTree(items);
+  const useCards = count > 0 && count <= TOC_CARDS_MAX;
   const toc =
     count === 0
-      ? `<p class="toc-empty">Nothing here yet.</p>`
-      : renderTocLevel(buildCollectionTree(items), 0);
+      ? `<div class="toc-empty">Nothing here yet.</div>`
+      : useCards
+        ? renderTocCards(items)
+        : renderTocLevel(tree, 0);
+  // The tree mode's meta also counts folders — at that size the shape of the
+  // share is part of the story. Cards flatten folders away, so it'd be noise.
+  const dirCount = useCards ? 0 : countTreeDirs(tree);
+  const sep = `<span class="toc-meta-sep" aria-hidden="true"></span>`;
+  const meta = [
+    `${count} ${count === 1 ? "page" : "pages"}`,
+    ...(dirCount > 0 ? [`${dirCount} ${dirCount === 1 ? "folder" : "folders"}`] : []),
+    ...(updatedLabel ? [`Updated ${escapeHtml(updatedLabel)}`] : []),
+  ].join(sep);
 
   const html = `<!doctype html>
 <html lang="en">
@@ -661,9 +725,12 @@ ${head}
 </head>
 <body>
 <main class="doc toc">
+<header class="toc-head">
 <h1 class="toc-title">${escapeHtml(title)}</h1>
-<p class="toc-meta">${count} ${count === 1 ? "page" : "pages"}${updatedLabel ? ` · updated ${escapeHtml(updatedLabel)}` : ""}</p>
-<nav class="toc-tree" aria-label="Pages">
+${description ? `<p class="toc-desc">${escapeHtml(description)}</p>` : ""}
+<p class="toc-meta">${meta}</p>
+</header>
+<nav class="toc-tree${useCards ? " toc-cards" : ""}" aria-label="Pages">
 ${toc}
 </nav>
 </main>
@@ -1104,7 +1171,12 @@ const PAGE_CSS = `
    lives in .raw-frame and scrolls internally, so it keeps horizontal scroll for
    free when its document genuinely needs it. */
 html, body { margin: 0; padding: 0; background: var(--bg); overflow-x: hidden; }
+/* Sticky footer: the body fills the viewport and the footer rides its bottom
+   edge, so a one-line page doesn't leave "shared via …" floating mid-screen. */
 body {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
   font-size: 16px;
@@ -1115,6 +1187,7 @@ body {
 }
 ::selection { background: var(--selection); }
 main.doc {
+  width: 100%;
   max-width: 1080px;
   margin: 0 auto;
   padding: 48px 64px 96px;
@@ -1206,8 +1279,10 @@ main.doc {
   box-shadow: 0 0 0 1px var(--border);
 }
 footer {
+  width: 100%;
   max-width: 1080px;
-  margin: 0 auto;
+  /* margin-top: auto pins it to the flex column's bottom edge. */
+  margin: auto auto 0;
   padding: 24px 64px 48px;
   font-size: 12px;
   color: var(--muted);
@@ -1239,52 +1314,196 @@ footer a { color: var(--muted); }
 .home-crumb:hover { color: var(--text); }
 .home-crumb-arrow { font-weight: 400; flex: none; }
 .home-crumb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Folder share home page: the table of contents. */
-main.toc { max-width: 640px; }
-.toc-title { font-size: 28px; line-height: 1.25; margin: 20px 0 0; letter-spacing: -0.01em; }
-.toc-meta { margin: 0; padding: 4px 0 0; font-size: 13px; color: var(--muted); }
-.toc-tree { margin-top: 26px; display: flex; flex-direction: column; }
+/* Folder share home page: the table of contents. A quiet editorial cover —
+   title, optional description, a hairline rule — over a list of tappable
+   rows: icon tile, title, and a trailing arrow that slides in on hover.
+   Directories are native <details> rows with a count and a rotating chevron
+   on the right, their children inset behind a hairline. */
+main.toc { max-width: 680px; }
+.toc-head { padding: 34px 0 24px; border-bottom: 1px solid var(--border); }
+.toc-title {
+  margin: 0;
+  font-size: clamp(28px, 5.4vw, 36px);
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.toc-desc {
+  margin: 12px 0 0;
+  max-width: 40rem;
+  font-size: 16.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.toc-meta {
+  margin: 16px 0 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.toc-meta-sep {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin: 0 8px;
+  vertical-align: 2.5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.toc-tree { margin-top: 20px; display: flex; flex-direction: column; gap: 2px; }
+/* Icon tile shared by page and directory rows — echoes the landing page's
+   feature icons, and gives every row a steady left rhythm. */
+.toc-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  transition: color 0.12s;
+}
+.toc-icon svg { width: 16px; height: 16px; }
 .doc .toc-page {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  border-radius: 6px;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
   color: var(--text);
   text-decoration: none;
   font-size: 15px;
+  font-weight: 500;
+  transition: background 0.12s;
 }
 .doc .toc-page:hover { background: var(--surface); text-decoration: none; }
-.toc-page svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.doc .toc-page:hover .toc-icon { background: var(--bg); color: var(--text); }
 .toc-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toc-dir { margin: 1px 0; }
+.toc-page-arrow {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+.doc .toc-page:hover .toc-page-arrow { opacity: 1; transform: none; }
+.toc-dir { margin: 0; }
 .toc-dir > summary {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 10px;
-  border-radius: 6px;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
   cursor: pointer;
   list-style: none;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text);
   user-select: none;
   -webkit-user-select: none;
+  transition: background 0.12s;
 }
 .toc-dir > summary::-webkit-details-marker { display: none; }
 .toc-dir > summary:hover { background: var(--surface); }
-.toc-dir > summary svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
-.toc-dir > summary .toc-chevron { width: 11px; height: 11px; transition: transform 0.12s; }
-.toc-dir[open] > summary .toc-chevron { transform: rotate(90deg); }
+.toc-dir > summary:hover .toc-icon { background: var(--bg); color: var(--text); }
 .toc-dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toc-count { margin-left: 4px; font-size: 12px; font-weight: 400; color: var(--muted); flex: none; }
-.toc-children {
-  margin-left: 15px;
-  padding-left: 9px;
-  border-left: 1px solid var(--border);
+.toc-count {
+  margin-left: auto;
+  flex: none;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-align: center;
+  color: var(--muted);
 }
-.toc-empty { color: var(--muted); }
+.toc-dir > summary .toc-chevron {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+.toc-dir[open] > summary .toc-chevron { transform: rotate(90deg); }
+.toc-children {
+  margin: 2px 0 6px 27px;
+  padding-left: 13px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.toc-empty {
+  margin-top: 20px;
+  padding: 44px 24px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+}
+/* Small shares (≤ TOC_CARDS_MAX pages) list every page as a card: the share
+   IS the deliverable, so each document gets real presence — bigger tile,
+   bigger title, its folder as a quiet subtitle — instead of a sparse tree. */
+.toc-cards { gap: 10px; }
+.doc .toc-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 15px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+.doc .toc-card:hover { background: var(--surface); text-decoration: none; }
+.doc .toc-card:hover .toc-icon { background: var(--bg); color: var(--text); }
+.toc-card .toc-icon { width: 36px; height: 36px; border-radius: 10px; }
+.toc-card .toc-icon svg { width: 17px; height: 17px; }
+.toc-card-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.toc-card-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toc-card-path {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A quiet staggered rise on load, so three cards and three hundred rows both
+   land with the same life. Top-level rows only, delays capped — deep trees
+   don't turn into a marquee. */
+@media (prefers-reduced-motion: no-preference) {
+  .toc-head, .toc-tree > * { animation: toc-enter 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .toc-tree > *:nth-child(1) { animation-delay: 60ms; }
+  .toc-tree > *:nth-child(2) { animation-delay: 95ms; }
+  .toc-tree > *:nth-child(3) { animation-delay: 130ms; }
+  .toc-tree > *:nth-child(4) { animation-delay: 165ms; }
+  .toc-tree > *:nth-child(5) { animation-delay: 200ms; }
+  .toc-tree > *:nth-child(6) { animation-delay: 235ms; }
+  .toc-tree > *:nth-child(7) { animation-delay: 270ms; }
+  .toc-tree > *:nth-child(n + 8) { animation-delay: 300ms; }
+}
+@keyframes toc-enter {
+  from { opacity: 0; transform: translateY(7px); }
+}
 `;
 
 /* The ?v=html page: the rendition owns the whole viewport; only the version

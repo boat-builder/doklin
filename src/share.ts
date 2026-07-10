@@ -53,7 +53,10 @@ export type CollectionEntry = {
   id: string;
   path: string; // absolute directory path
   // Defaults to the folder name; a rename follows it while it still matches.
+  // Editable in the folder-share dialog — a custom title stops following.
   title: string;
+  // Owner-written blurb shown under the public TOC's title. Absent = none.
+  description?: string;
   members: string[]; // absolute paths of included files, each with a ShareEntry
   sharedAt: number;
   updatedAt: number;
@@ -334,6 +337,52 @@ function apiFetch(config: ShareConfig, path: string, init?: RequestInit): Promis
 // standalone html version of it (see App.tsx's readShareParts).
 export type ShareParts = { markdown: string | null; html: string | null };
 
+/* ---------- Document titles ---------- */
+
+// A document that opens with an H1 has named itself — the public page, the
+// TOC row, and the OG image should all say that, not the file name. Only a
+// LEADING heading counts (nothing above it but blank lines, comments aside):
+// an H1 halfway down is a section, not a title. Inline markdown is stripped
+// so "# **Q3** plan" titles as "Q3 plan".
+function markdownLeadTitle(md: string): string | null {
+  const lines = stripComments(md).split("\n");
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  const m = lines[i]?.match(/^#[ \t]+(.+?)[ \t]*#*[ \t]*$/);
+  if (!m) return null;
+  const text = m[1]
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+  return text ? text.slice(0, 256) : null;
+}
+
+// An html-only document's <title> plays the same role as a markdown H1.
+function htmlDocTitle(html: string): string | null {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return null;
+  const text = m[1]
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.slice(0, 256) : null;
+}
+
+// The share title a document gives ITSELF, or null to fall back to the file
+// name. The markdown is the document of record, so its lead H1 wins; the
+// html <title> only speaks for html-only shares.
+export function deriveDocTitle(parts: ShareParts): string | null {
+  if (parts.markdown !== null) return markdownLeadTitle(parts.markdown);
+  if (parts.html !== null) return htmlDocTitle(parts.html);
+  return null;
+}
+
 // SHA-256 hex of a rendition's raw local content — the `hash` half of a
 // PushedFingerprint. Hashed pre-strip (comments intact), since reconciliation
 // only ever compares local content against local content.
@@ -383,6 +432,29 @@ export class ShareWorkerOutdatedError extends Error {
   }
 }
 
+/* ---------- Worker version (update detection) ---------- */
+
+// The WORKER_VERSION constant baked into a worker build, read from its
+// source. The app bundles the latest worker code (virtual:share-worker-code),
+// so parsing that — rather than mirroring a constant here — means app and
+// worker can never drift apart silently. 0 = unparseable, which disables
+// update nags rather than inventing them.
+export function parseWorkerVersion(code: string): number {
+  const m = code.match(/^const WORKER_VERSION = (\d+);$/m);
+  return m ? Number(m[1]) : 0;
+}
+
+// The version a live deployment reports. /api/meta arrived in version 2, so a
+// 404 positively identifies a version-1 worker; anything else (offline, bad
+// token, server error) throws — unknown must not read as outdated.
+export async function fetchWorkerVersion(config: ShareConfig): Promise<number> {
+  const res = await apiFetch(config, "/api/meta");
+  if (res.status === 404) return 1;
+  if (!res.ok) throw new Error(`version check failed (${res.status})`);
+  const body = (await res.json().catch(() => null)) as { version?: unknown } | null;
+  return typeof body?.version === "number" && body.version > 0 ? body.version : 1;
+}
+
 /* ---------- Site config (landing page branding + root page) ---------- */
 
 // Mirror of the worker's site.json: landing-page branding plus the optional
@@ -415,18 +487,24 @@ export async function pushSiteConfig(config: ShareConfig, site: SiteConfig): Pro
 }
 
 // Publish (or update) a folder share's manifest. Like pushPage, the full
-// membership is sent every time; the worker stores it verbatim and renders
-// the TOC from it.
+// record is sent every time (a worker predating descriptions just ignores
+// that field); the worker stores it verbatim and renders the TOC from it.
 export async function pushCollection(
   config: ShareConfig,
   id: string,
   title: string,
   items: CollectionItem[],
+  description?: string | null,
 ): Promise<void> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ title, kind: "collection", items }),
+    body: JSON.stringify({
+      title,
+      kind: "collection",
+      items,
+      ...(description ? { description } : {}),
+    }),
   });
   // An up-to-date worker only 400s a collection push on malformed items (which
   // the app never sends); a pre-collections worker 400s every such body.
@@ -438,8 +516,9 @@ export async function pushCollection(
 export function collectionManifestHash(
   title: string,
   items: CollectionItem[],
+  description?: string | null,
 ): Promise<string> {
-  return contentHash(JSON.stringify({ title, items }));
+  return contentHash(JSON.stringify({ title, description: description ?? null, items }));
 }
 
 export async function pushOgImage(config: ShareConfig, id: string, title: string): Promise<void> {

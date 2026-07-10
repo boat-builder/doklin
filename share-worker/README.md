@@ -20,16 +20,20 @@ choose. This README is the guide for standing up your own backend.
 - Every autosave of a shared document re-pushes it (debounced), so the public
   page tracks the local file. Regenerating the html rendition while the
   document is open re-pushes too.
-- When a page has both versions, the reader picks: a small MD/HTML pill on the
-  public page switches between `/<id>` (rendered markdown) and `/<id>?v=html`
-  (the html rendition, served in a sandboxed full-page iframe via
-  `/<id>/raw`).
+- When a page has both versions, the link opens on the html rendition (the
+  polished, human-facing one — the opposite of the editor, which leads with
+  the markdown source), and a small MD/HTML pill on the public page switches
+  to `/<id>?v=md` (rendered markdown). The rendition is served in a sandboxed
+  full-page iframe via `/<id>/raw`.
 - **Stop sharing** `DELETE`s `/api/pages/<id>`, which removes both objects from
   the bucket — the link 404s from then on.
 - **Folder shares**: sharing a folder (or the whole workspace) publishes a
   *collection* — a page stored with `kind: "collection"` whose public side is
-  a table-of-contents home linking to the member pages. Sharing a folder
-  shares no documents by itself: the app pushes the membership list
+  a table-of-contents home linking to the member pages, under an owner-set
+  title and optional description. The TOC adapts to its size: a handful of
+  pages (≤ 8) renders as a flat list of cards, each wearing its folder path
+  as a subtitle; more than that renders as a collapsible tree. Sharing a
+  folder shares no documents by itself: the app pushes the membership list
   explicitly, and only listed pages appear. Members are ordinary pages that
   carry a `collection: {id, title}` back-reference, which renders as a
   "← back to the folder" crumb on their public page.
@@ -209,7 +213,7 @@ Old links keep working; only the app's write access is re-keyed.
 ```
 site.json         {ownerName?, ownerLink?, downloadUrl?, rootPageId?, updatedAt}  (app-managed site config)
 pages/<id>.json   {title, markdown?, html?, collection?, createdAt, updatedAt}  (+ customMetadata for listing)
-                  or {kind: "collection", title, items: [{id, title, path}], createdAt, updatedAt}
+                  or {kind: "collection", title, description?, items: [{id, title, path}], createdAt, updatedAt}
 pages/<id>.png    OG image
 ```
 
@@ -227,9 +231,10 @@ GET    /api/pages/<id>       existence/metadata check
 PUT    /api/pages/<id>       body {title, markdown?, html?, collection?} -> create/update a page
                              (at least one of markdown/html; collection {id, title} marks
                              folder-share membership and renders the back-home crumb)
-                             or body {title, kind: "collection", items} -> create/update a
-                             folder share (items = [{id, title, path}], path relative to the
-                             shared folder; drives the public table of contents)
+                             or body {title, kind: "collection", items, description?} ->
+                             create/update a folder share (items = [{id, title, path}], path
+                             relative to the shared folder; drives the public table of
+                             contents; description shows under the TOC's title)
 PUT    /api/pages/<id>/og    body image/png          -> set OG image
 DELETE /api/pages/<id>       stop sharing (remove page + OG image)
 ```
@@ -239,10 +244,24 @@ version of the code or newer — an older worker rejects collection pushes with
 a 400 and 404s the site/meta routes, which the app surfaces as "redeploy your
 worker".
 
-Plus the public reads a browser hits (no auth): `GET /<id>` (rendered
-markdown, or the html rendition when that's all the page has), `GET
-/<id>?v=html` (the html rendition, framed), `GET /<id>/raw` (the rendition
+Plus the public reads a browser hits (no auth): `GET /<id>` (the html
+rendition when the page has one — framed — otherwise rendered markdown),
+`GET /<id>?v=md` (rendered markdown), `GET /<id>/raw` (the rendition
 verbatim), and `GET /<id>/og.png` (OG image).
+
+## Updating a deployed worker
+
+The app probes each backend's `/api/meta` on launch and compares it against
+the `WORKER_VERSION` in the worker code it bundles. When a deployment lags,
+the settings gear shows an update badge and **Settings → Update share
+worker…** opens a guided redeploy: paste the new code over the old one in the
+Cloudflare dashboard's worker editor (this swaps only the code — the R2
+binding, the `SHARE_TOKEN` secret, and any custom domain survive), or hand
+the dialog's prompt to an AI agent to run the wrangler deploy. The dialog's
+"Check again" verifies the live version afterwards. Updating by hand works
+the same way: any of the setup paths above, deployed over the **same worker
+name** — a different name creates a second worker instead of updating this
+one.
 
 ## Using a non-Cloudflare / S3 backend
 

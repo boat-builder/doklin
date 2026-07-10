@@ -2377,6 +2377,12 @@ body.tree-dragging.tree-drag-invalid * {
   border-color: var(--crepe-color-selected, var(--app-text-muted));
 }
 
+.share-field-textarea {
+  display: block;
+  resize: none;
+  line-height: 1.45;
+}
+
 .share-field-token {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
@@ -2974,6 +2980,75 @@ body.tree-dragging.tree-drag-invalid * {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 12px;
+}
+
+/* ---------- Share worker update dialog ---------- */
+
+.worker-update-modal {
+  max-width: 560px;
+}
+
+.worker-update-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* One card per outdated connection. */
+.worker-update-conn {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.worker-update-conn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.worker-update-host {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.worker-update-vers {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+
+.worker-update-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-accent, var(--app-text));
+}
+
+.worker-update-agent {
+  margin-top: 10px;
+}
+
+.worker-update-agent > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.worker-update-agent > summary:hover {
+  color: var(--app-text);
 }
 
 /* ---------- Sharing setup guide ---------- */
