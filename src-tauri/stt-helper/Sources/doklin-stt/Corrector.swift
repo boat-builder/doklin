@@ -32,6 +32,10 @@ actor Corrector {
     private var container: ModelContainer?
     private var loading = false
     private var debug = false
+    /// Correction system prompt from the host's `init` (the user-edited or
+    /// default text from src/prompts.ts). nil → the built-in
+    /// `correctionSystemPrompt`, kept as a fallback for hosts that send none.
+    private var customSystemPrompt: String?
     /// Qwen3's hybrid checkpoints (e.g. Qwen3-8B) think out loud by default,
     /// burning seconds per correction; "/no_think" is their documented off
     /// switch. The 2507 instruct line has no thinking mode and never sees it.
@@ -42,7 +46,10 @@ actor Corrector {
     private var lane1: [@Sendable () async -> Void] = []
     private var pumping = false
 
-    func configure(debug: Bool) { self.debug = debug }
+    func configure(debug: Bool, systemPrompt: String? = nil) {
+        self.debug = debug
+        self.customSystemPrompt = systemPrompt
+    }
 
     func load(model: String, downloadBase: URL) async {
         guard container == nil, !loading else {
@@ -155,7 +162,7 @@ actor Corrector {
             return
         }
         let started = Date()
-        let system = Self.correctionSystemPrompt + (noThink ? "\n/no_think" : "")
+        let system = (customSystemPrompt ?? Self.correctionSystemPrompt) + (noThink ? "\n/no_think" : "")
         let user = Self.correctionUserPrompt(req)
         do {
             let raw = try await generate(container, system: system, user: user, maxTokens: 1024)
@@ -226,6 +233,9 @@ actor Corrector {
 
     // MARK: - Prompts
 
+    /// Fallback only — the host normally sends the effective prompt via
+    /// `init.polishPrompt`. Mirrored in src/prompts.ts (where the Dictation
+    /// settings modal shows and edits it); keep the two texts in sync.
     static let correctionSystemPrompt = """
         You clean up speech-to-text dictation. The user dictated text into a document; the raw \
         transcript carries speech artifacts and STT errors that must not land in the document. \

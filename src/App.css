@@ -3016,22 +3016,322 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text);
 }
 
-/* Dictation settings modal bits (extends the setup-modal vocabulary). */
-.dictation-setup .setup-body {
-  overflow-y: auto;
+/* Dictation settings modal — a compact preferences card in the shared-modal
+   shell: grouped rows, control on the right, macOS-settings style. Long-form
+   settings (the polish instructions) drill into a subview that widens the
+   card; the header grows a back arrow. */
+.dictation-setup {
+  max-width: 440px;
+  transition: max-width 0.18s ease;
 }
 
-.dictation-check {
-  display: flex;
-  gap: 9px;
-  align-items: flex-start;
-  font-size: 12.5px;
-  line-height: 1.5;
+.dictation-setup--wide {
+  max-width: 600px;
+}
+
+.dictation-setup .shared-modal-title {
+  flex: 1;
+}
+
+.dictation-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
   cursor: pointer;
 }
 
-.dictation-check input {
+.dictation-back:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.dictation-setup-body {
+  overflow-y: auto;
+  padding: 0 2px 2px;
+}
+
+.dictation-intro {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--app-text-muted);
+}
+
+.dictation-rows {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+}
+
+.dictation-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 16px;
+  padding: 10px 12px;
+}
+
+.dictation-row + .dictation-row {
+  border-top: 1px solid var(--app-border);
+}
+
+.dictation-row--toggle {
+  cursor: pointer;
+}
+
+/* A row that navigates to a subview (button element; needs its own reset). */
+.dictation-row--nav {
+  width: 100%;
+  margin: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.dictation-row--nav:hover {
+  background: var(--app-hover);
+}
+
+.dictation-row-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  justify-self: end;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.dictation-row-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--app-text);
+}
+
+.dictation-row-caption {
+  grid-column: 1 / -1;
   margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+}
+
+.dictation-select {
+  position: relative;
+  justify-self: end;
+  max-width: 240px;
+}
+
+.dictation-select select {
+  -webkit-appearance: none;
+  appearance: none;
+  max-width: 100%;
+  padding: 4px 24px 4px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.dictation-select select:hover {
+  background: var(--app-hover);
+}
+
+.dictation-select select:focus-visible {
+  border-color: var(--crepe-color-selected, var(--app-text-muted));
+}
+
+.dictation-select::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--app-text-muted);
+  border-bottom: 1.5px solid var(--app-text-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+/* Inspector toggle switch. */
+.dictation-switch {
+  position: relative;
+  justify-self: end;
+  width: 34px;
+  height: 20px;
+  flex: none;
+}
+
+.dictation-switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.dictation-switch-track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-text) 16%, transparent);
+  transition: background 0.15s;
+  pointer-events: none;
+}
+
+.dictation-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.dictation-switch input:checked + .dictation-switch-track {
+  background: var(--app-accent);
+}
+
+.dictation-switch input:checked + .dictation-switch-track::after {
+  transform: translateX(14px);
+}
+
+.dictation-switch input:focus-visible + .dictation-switch-track {
+  box-shadow: 0 0 0 2px var(--app-bg), 0 0 0 3.5px var(--app-accent);
+}
+
+.dictation-footnote {
+  margin: 10px 2px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+}
+
+/* Polish-instructions subview: the editable system prompt above a read-only
+   render of the request template it is wrapped in. */
+.dictation-prompt-editor {
+  width: 100%;
+  /* Leave room below the fold cue for the request-template card. */
+  height: clamp(160px, 28vh, 280px);
+  min-height: 120px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  outline: none;
+}
+
+.dictation-prompt-editor:focus {
+  border-color: var(--crepe-color-selected, var(--app-text-muted));
+}
+
+.dictation-prompt-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  min-height: 18px;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+
+.dictation-prompt-reset {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--app-accent);
+  cursor: pointer;
+}
+
+.dictation-prompt-reset:hover {
+  text-decoration: underline;
+}
+
+.dictation-template {
+  margin-top: 14px;
+}
+
+.dictation-template-title {
+  margin-bottom: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--app-text-muted);
+}
+
+.dictation-template-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--app-text-muted);
+}
+
+.dictation-template-var {
+  margin: 0 1px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  color: var(--app-accent);
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.dictation-template-lit {
+  color: var(--app-text-muted);
+}
+
+.dictation-template-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+}
+
+.dictation-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 2px 0;
 }
 
 /* Inspector — advanced-only floating log panel. */

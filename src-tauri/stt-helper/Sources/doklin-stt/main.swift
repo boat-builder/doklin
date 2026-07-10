@@ -2,7 +2,7 @@
 //
 // Commands (one JSON object per line on stdin):
 //   {"cmd":"init","dataDir":"…","sttModel":"…","llmModel":"…",
-//    "language":"en"|null,"debug":false}
+//    "language":"en"|null,"polishPrompt":"…","debug":false}
 //   {"cmd":"start"}                            begin a dictation session
 //   {"cmd":"gate","open":true|false}           talk-key press/release
 //   {"cmd":"stop"}                             end session (finalizes pending)
@@ -89,7 +89,10 @@ func handle(_ line: String) async {
         if case let m = str(obj, "llmModel"), !m.isEmpty { llmModel = m }
         language = (obj["language"] as? String).flatMap { $0.isEmpty || $0 == "auto" ? nil : $0 }
         if let secs = obj["idleUnloadSecs"] as? Double, secs > 0 { idleUnloadSecs = secs }
-        await corrector.configure(debug: obj["debug"] as? Bool ?? false)
+        let polishPrompt = str(obj, "polishPrompt")
+        await corrector.configure(
+            debug: obj["debug"] as? Bool ?? false,
+            systemPrompt: polishPrompt.isEmpty ? nil : polishPrompt)
         Task { await transcriber.load(model: sttModel, downloadBase: modelsDir, language: language) }
         Task { await corrector.load(model: llmModel, downloadBase: modelsDir) }
         // Backstop: if init is never followed by a session, don't hold 4-5 GB
