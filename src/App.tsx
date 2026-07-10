@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -14,6 +14,8 @@ import ShareMenu from "./ShareMenu";
 import SharedPages from "./SharedPages";
 import ShareSetup from "./ShareSetup";
 import ShareFolder from "./ShareFolder";
+import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
+import workerCode from "virtual:share-worker-code";
 import DictationHud from "./DictationHud";
 import DictationInspector from "./DictationInspector";
 import DictationSetup from "./DictationSetup";
@@ -29,9 +31,12 @@ import {
   collectionManifestHash,
   contentHash,
   deletePage,
+  deriveDocTitle,
+  fetchWorkerVersion,
   generateShareId,
   getConnections,
   pageExists,
+  parseWorkerVersion,
   pushCollection,
   pushOgImage,
   pushPage,
@@ -85,6 +90,10 @@ let isMainWindow = true;
 // site. Deliberately kept even while the folder is unreadable (unmounted
 // drive), so the workspace self-heals on a later launch like ghost tabs do.
 let sessionWorkspaceRoot: string | null = null;
+
+// The worker version this app build ships (parsed from the bundled worker
+// source, so it can't drift from the code the setup/update flows hand out).
+const BUNDLED_WORKER_VERSION = parseWorkerVersion(workerCode);
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const dirname = (p: string) => {
@@ -522,6 +531,56 @@ export default function App() {
   const [shareSetupOpen, setShareSetupOpen] = useState(false);
   const sharePushTimersRef = useRef<Map<string, number>>(new Map());
 
+  // Deployed-worker versions, probed via /api/meta once per connection set
+  // (plus "Check again" in the update dialog). Drives the "update your share
+  // worker" indication — the app carries the latest worker code but can't
+  // deploy it itself (it holds only the share token, never Cloudflare account
+  // credentials), so the dialog guides the redeploy instead. A failed probe
+  // stays unknown: offline must not read as outdated.
+  const [workerVersions, setWorkerVersions] = useState<Record<string, number>>({});
+  // The outdated list captured when the dialog opens, so a card can flip to
+  // "Updated ✓" instead of vanishing the moment its recheck succeeds.
+  const [workerUpdateList, setWorkerUpdateList] = useState<OutdatedWorker[] | null>(null);
+
+  useEffect(() => {
+    if (BUNDLED_WORKER_VERSION <= 0) return;
+    let cancelled = false;
+    for (const conn of shareConns.connections) {
+      void fetchWorkerVersion(conn)
+        .then((version) => {
+          if (cancelled) return;
+          setWorkerVersions((prev) =>
+            prev[conn.id] === version ? prev : { ...prev, [conn.id]: version },
+          );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [shareConns.connections]);
+
+  const recheckWorkerVersion = useCallback(async (conn: ShareConnection) => {
+    const version = await fetchWorkerVersion(conn);
+    setWorkerVersions((prev) =>
+      prev[conn.id] === version ? prev : { ...prev, [conn.id]: version },
+    );
+    return version;
+  }, []);
+
+  const outdatedWorkers = useMemo<OutdatedWorker[]>(
+    () =>
+      BUNDLED_WORKER_VERSION > 0
+        ? shareConns.connections.flatMap((conn) => {
+            const version = workerVersions[conn.id];
+            return typeof version === "number" && version < BUNDLED_WORKER_VERSION
+              ? [{ conn, version }]
+              : [];
+          })
+        : [],
+    [shareConns.connections, workerVersions],
+  );
+
   // The ref is the writable source of truth and updates synchronously (a React
   // state updater only runs at render time — too late for code that reads the
   // registry right after mutating it); state/localStorage follow.
@@ -691,15 +750,21 @@ export default function App() {
   );
 
   // What a manifest push carries: each member's page id, display title (the
-  // filename, so the TOC tracks renames immediately), and folder-relative
-  // path (how the TOC groups into directories). Members whose share is gone
-  // or that no longer live under the folder are simply not listed.
+  // share's title — the document's lead H1 when it has one, the filename
+  // otherwise — so the TOC names pages the way the pages name themselves),
+  // and folder-relative path (how the TOC groups into directories). Members
+  // whose share is gone or that no longer live under the folder are simply
+  // not listed.
   const collectionItemsFor = useCallback((entry: CollectionEntry): CollectionItem[] => {
     const items: CollectionItem[] = [];
     for (const m of entry.members) {
       const share = sharesRef.current[m];
       if (!share || !m.startsWith(entry.path + "/")) continue;
-      items.push({ id: share.id, title: pathShareTitle(m), path: m.slice(entry.path.length + 1) });
+      items.push({
+        id: share.id,
+        title: share.title || pathShareTitle(m),
+        path: m.slice(entry.path.length + 1),
+      });
     }
     items.sort((a, b) => a.path.localeCompare(b.path));
     return items;
@@ -715,11 +780,11 @@ export default function App() {
       const config = await connectionForEntry(entry);
       if (!config) return;
       const items = collectionItemsFor(entry);
-      const hash = await collectionManifestHash(entry.title, items);
+      const hash = await collectionManifestHash(entry.title, items, entry.description);
       if (hash === entry.pushedHash && entry.title === entry.pushedTitle) return;
       try {
         if (hash !== entry.pushedHash) {
-          await pushCollection(config, entry.id, entry.title, items);
+          await pushCollection(config, entry.id, entry.title, items, entry.description);
         }
         if (entry.title !== entry.pushedTitle) {
           await pushOgImage(config, entry.id, entry.title);
@@ -815,13 +880,16 @@ export default function App() {
       const config = await connectionForEntry(entry);
       if (!config) return;
       const tab = tabsRef.current.find((t) => t.path === target);
-      const title =
-        tab ? docShareTitle(tab) : entry.kind === "file" ? pathShareTitle(target) : entry.title;
       const collection = entry.collectionId
         ? (Object.values(collectionsRef.current).find((c) => c.id === entry.collectionId) ?? null)
         : null;
       const parts = await readShareParts(target);
       if (!parts) return; // source is gone; the share stays until stopped explicitly
+      // The document names itself when it opens with an H1 (html-only pages:
+      // their <title>); only untitled documents fall back to the file name.
+      const title =
+        deriveDocTitle(parts) ??
+        (tab ? docShareTitle(tab) : entry.kind === "file" ? pathShareTitle(target) : entry.title);
       try {
         await pushPage(
           config,
@@ -837,12 +905,15 @@ export default function App() {
             ? { ...prev, [target]: { ...prev[target], title, updatedAt: Date.now(), pushed } }
             : prev,
         );
+        // The folder TOC names this page by its share title — retitling the
+        // document renames its row there too.
+        if (title !== entry.title && collection) scheduleCollectionPush(collection.path);
       } catch (e) {
         // Offline or the worker hiccuped; the next save retries.
         console.error("share push failed", target, e);
       }
     },
-    [updateShares, readShareParts, connectionForEntry],
+    [updateShares, readShareParts, connectionForEntry, scheduleCollectionPush],
   );
 
   const scheduleSharePush = useCallback(
@@ -924,7 +995,7 @@ export default function App() {
     // also catches a push that failed offline (the stored hash never updated).
     for (const c of colEntries) {
       try {
-        const hash = await collectionManifestHash(c.title, collectionItemsFor(c));
+        const hash = await collectionManifestHash(c.title, collectionItemsFor(c), c.description);
         if (hash !== c.pushedHash || c.title !== c.pushedTitle) {
           scheduleCollectionPush(c.path);
         }
@@ -1651,12 +1722,13 @@ export default function App() {
       const st = await getConnections();
       const config = st.connections.find((c) => c.id === connectionId);
       if (!config) throw new Error("Sharing is not configured.");
-      const title = docShareTitle(active);
       // Pushes read the disk; land any keystrokes still inside the autosave
       // debounce so the first published copy is what the user is looking at.
       await flushPendingAutosave();
       const parts = await readShareParts(active.path);
       if (!parts) throw new Error("Could not read the document.");
+      // Lead H1 (html-only: <title>) over file name — same rule as re-pushes.
+      const title = deriveDocTitle(parts) ?? docShareTitle(active);
       await pushPage(config, id, title, parts);
       try {
         await pushOgImage(config, id, title);
@@ -1744,7 +1816,7 @@ export default function App() {
         // The page is live either way; the link preview just won't have an image.
         console.error("og image upload failed", e);
       }
-      const hash = await collectionManifestHash(title, []);
+      const hash = await collectionManifestHash(title, [], null);
       const now = Date.now();
       updateCollections((prev) => ({
         ...prev,
@@ -1812,6 +1884,40 @@ export default function App() {
     [stopSharing, updateCollections, updateShares, scheduleSharePush, connectionForEntry],
   );
 
+  // Retitle a folder share and/or set the description shown under its public
+  // TOC's title. A cleared title falls back to the folder name (and resumes
+  // following renames, since it matches again). A title change also re-pushes
+  // every member page — their "back to the folder" crumbs carry the title.
+  const setCollectionMeta = useCallback(
+    (dirPath: string, title: string, description: string) => {
+      const entry = collectionsRef.current[dirPath];
+      if (!entry) return;
+      const nextTitle = title.trim().slice(0, 256) || basename(dirPath);
+      const nextDesc = description.trim().slice(0, 500);
+      if (nextTitle === entry.title && nextDesc === (entry.description ?? "")) return;
+      updateCollections((prev) => {
+        const cur = prev[dirPath];
+        if (!cur) return prev;
+        const { description: _gone, ...rest } = cur;
+        return {
+          ...prev,
+          [dirPath]: {
+            ...rest,
+            title: nextTitle,
+            ...(nextDesc ? { description: nextDesc } : {}),
+          },
+        };
+      });
+      scheduleCollectionPush(dirPath);
+      if (nextTitle !== entry.title) {
+        for (const m of entry.members) {
+          if (sharesRef.current[m]?.collectionId === entry.id) scheduleSharePush(m);
+        }
+      }
+    },
+    [updateCollections, scheduleCollectionPush, scheduleSharePush],
+  );
+
   // Include a file in (or remove it from) a folder share. Including a not-yet-
   // shared file publishes it first — an ordinary page share with a generated
   // address — then lists it; including an already-shared page just lists it.
@@ -1842,7 +1948,7 @@ export default function App() {
           // recycled id would be silently overwritten — probe once.
           let id = generateShareId();
           if (await pageExists(config, id).catch(() => false)) id = generateShareId();
-          const title = pathShareTitle(filePath);
+          const title = deriveDocTitle(parts) ?? pathShareTitle(filePath);
           await pushPage(config, id, title, parts, {
             id: collection.id,
             title: collection.title,
@@ -3121,6 +3227,9 @@ export default function App() {
           }}
           onOpenExternal={openExternal}
           onOpenSetup={() => setShareSetupOpen(true)}
+          onOpenWorkerUpdate={
+            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
+          }
           onStopSharing={(entry) => stopSharing(entry.path)}
         />
       )}
@@ -3146,6 +3255,9 @@ export default function App() {
           onToggleMember={(path, include) =>
             setCollectionMembership(path, shareFolderTarget, include)
           }
+          onUpdateMeta={(title, description) =>
+            setCollectionMeta(shareFolderTarget, title, description)
+          }
           onClose={() => setShareFolderTarget(null)}
           onOpenExternal={openExternal}
           onOpenSetup={() => {
@@ -3160,6 +3272,15 @@ export default function App() {
           onClose={() => setShareSetupOpen(false)}
           onOpenExternal={openExternal}
           onConnectionSaved={saveConnection}
+        />
+      )}
+      {workerUpdateList && workerUpdateList.length > 0 && (
+        <WorkerUpdate
+          outdated={workerUpdateList}
+          latestVersion={BUNDLED_WORKER_VERSION}
+          onRecheck={recheckWorkerVersion}
+          onOpenExternal={openExternal}
+          onClose={() => setWorkerUpdateList(null)}
         />
       )}
       {draftsOpen && (
@@ -3359,6 +3480,8 @@ export default function App() {
         onOpenShareSetup={() => setShareSetupOpen(true)}
         onOpenDictationSetup={() => setDictationSetupOpen(true)}
         update={update}
+        workerUpdateCount={outdatedWorkers.length}
+        onOpenWorkerUpdate={() => setWorkerUpdateList(outdatedWorkers)}
         onOpenExternal={openExternal}
       />
     </div>
@@ -3577,6 +3700,8 @@ function Settings({
   onOpenShareSetup,
   onOpenDictationSetup,
   update,
+  workerUpdateCount,
+  onOpenWorkerUpdate,
   onOpenExternal,
 }: {
   theme: Theme;
@@ -3594,6 +3719,10 @@ function Settings({
   onOpenShareSetup: () => void;
   onOpenDictationSetup: () => void;
   update: UpdateController;
+  // How many configured share backends run an older worker than this build
+  // ships; > 0 lights the badge and shows the update item under Sharing.
+  workerUpdateCount: number;
+  onOpenWorkerUpdate: () => void;
   onOpenExternal: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -3749,6 +3878,24 @@ function Settings({
             <span className="settings-option-check" />
             <span className="settings-option-label">Sharing setup…</span>
           </button>
+          {workerUpdateCount > 0 && (
+            <button
+              role="menuitem"
+              className="settings-option settings-option--update"
+              title="A newer share worker is available for your domain — a quick redeploy picks it up"
+              onClick={() => {
+                setOpen(false);
+                onOpenWorkerUpdate();
+              }}
+            >
+              <span className="settings-option-check">
+                <DownloadIcon />
+              </span>
+              <span className="settings-option-label">
+                Update share worker{workerUpdateCount > 1 ? `s (${workerUpdateCount})` : "…"}
+              </span>
+            </button>
+          )}
           <div className="settings-divider" />
           <div className="settings-section-label">Voice</div>
           <button
@@ -3879,12 +4026,18 @@ function Settings({
       <button
         className="settings-fab"
         onClick={() => setOpen((o) => !o)}
-        aria-label={updateAvailable ? "Settings — update available" : "Settings"}
+        aria-label={
+          updateAvailable || workerUpdateCount > 0 ? "Settings — update available" : "Settings"
+        }
         aria-expanded={open}
-        title={updateAvailable ? "Settings — update available" : "Settings"}
+        title={
+          updateAvailable || workerUpdateCount > 0 ? "Settings — update available" : "Settings"
+        }
       >
         <GearIcon />
-        {updateAvailable && <span className="settings-fab-badge" aria-hidden />}
+        {(updateAvailable || workerUpdateCount > 0) && (
+          <span className="settings-fab-badge" aria-hidden />
+        )}
       </button>
     </div>
   );

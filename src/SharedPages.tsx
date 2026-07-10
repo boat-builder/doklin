@@ -46,6 +46,7 @@ export default function SharedPages({
   onManageCollection,
   onOpenExternal,
   onOpenSetup,
+  onOpenWorkerUpdate,
   onStopSharing,
 }: {
   shares: ShareEntry[];
@@ -58,6 +59,9 @@ export default function SharedPages({
   onManageCollection: (entry: CollectionEntry) => void;
   onOpenExternal: (url: string) => void;
   onOpenSetup: () => void;
+  // Non-null when App's version probe found a worker older than the bundled
+  // code — routes the outdated banner to the guided update dialog.
+  onOpenWorkerUpdate: (() => void) | null;
   onStopSharing: (entry: ShareEntry) => Promise<void>;
 }) {
   const [busyPath, setBusyPath] = useState<string | null>(null);
@@ -247,18 +251,19 @@ export default function SharedPages({
           </div>
         ) : (
           <>
-            {anyOutdated && (
+            {(anyOutdated || onOpenWorkerUpdate) && (
               <div className="shared-outdated">
-                A newer share worker is available — redeploy it to manage your
-                landing page and home page from here.
+                A newer share worker is available — a quick redeploy picks up
+                the latest features. Your pages keep working meanwhile.
                 <button
                   className="share-all-link"
                   onClick={() => {
                     onClose();
-                    onOpenSetup();
+                    if (onOpenWorkerUpdate) onOpenWorkerUpdate();
+                    else onOpenSetup();
                   }}
                 >
-                  How?
+                  Update…
                 </button>
               </div>
             )}

@@ -40,6 +40,7 @@ export default function ShareFolder({
   onShare,
   onStopSharing,
   onToggleMember,
+  onUpdateMeta,
   onClose,
   onOpenExternal,
   onOpenSetup,
@@ -56,6 +57,9 @@ export default function ShareFolder({
   onShare: (id: string, connectionId: string) => Promise<void>;
   onStopSharing: (alsoStopPages: boolean) => Promise<void>;
   onToggleMember: (path: string, include: boolean) => Promise<void>;
+  // Commit the public TOC's title + description (App pushes, debounced). An
+  // empty title means "back to the folder name".
+  onUpdateMeta: (title: string, description: string) => void;
   onClose: () => void;
   onOpenExternal: (url: string) => void;
   onOpenSetup: () => void;
@@ -74,6 +78,27 @@ export default function ShareFolder({
   const [stopBusy, setStopBusy] = useState(false);
 
   const folderName = basename(dirPath);
+
+  // Drafts of the public page's title + description, committed on blur (and
+  // on close, via commitMetaRef — Escape or an overlay click must not eat an
+  // edit). Re-seeded whenever the dialog starts showing a different share.
+  const [titleDraft, setTitleDraft] = useState(collection?.title ?? "");
+  const [descDraft, setDescDraft] = useState(collection?.description ?? "");
+  const [metaSeededFor, setMetaSeededFor] = useState(collection?.id ?? null);
+  if (collection && metaSeededFor !== collection.id) {
+    setMetaSeededFor(collection.id);
+    setTitleDraft(collection.title);
+    setDescDraft(collection.description ?? "");
+  }
+  const commitMeta = useCallback(() => {
+    onUpdateMeta(titleDraft, descDraft);
+  }, [onUpdateMeta, titleDraft, descDraft]);
+  const commitMetaRef = useRef(commitMeta);
+  commitMetaRef.current = commitMeta;
+  const close = useCallback(() => {
+    if (collection) commitMetaRef.current();
+    onClose();
+  }, [collection, onClose]);
   // Existing share → its own connection; creating → the picker's choice.
   const selectedConn =
     connections.find((c) => c.id === (selectedConnId ?? defaultConnectionId)) ??
@@ -85,11 +110,11 @@ export default function ShareFolder({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") close();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [close]);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,7 +236,7 @@ export default function ShareFolder({
     <div
       className="shared-overlay"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) close();
       }}
     >
       <div
@@ -224,7 +249,7 @@ export default function ShareFolder({
           <div className="shared-modal-title">
             {collection ? folderName : `Share “${folderName}”`}
           </div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close">
+          <button className="shared-modal-close" onClick={close} aria-label="Close">
             <CloseIcon />
           </button>
         </div>
@@ -299,7 +324,7 @@ export default function ShareFolder({
               >
                 {shareBusy ? "Sharing…" : "Share folder"}
               </button>
-              <button className="share-btn" onClick={onClose}>
+              <button className="share-btn" onClick={close}>
                 Cancel
               </button>
             </div>
@@ -364,6 +389,35 @@ export default function ShareFolder({
                 deleted from this Mac. Stopping only forgets it locally.
               </div>
             )}
+            <div className="share-field">
+              <div className="share-field-label">Title</div>
+              <input
+                className="share-field-input"
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={commitMeta}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                }}
+                placeholder={folderName}
+                maxLength={256}
+                spellCheck={false}
+                aria-label="Public page title"
+              />
+            </div>
+            <div className="share-field">
+              <div className="share-field-label">Description</div>
+              <textarea
+                className="share-field-input share-field-textarea"
+                value={descDraft}
+                onChange={(e) => setDescDraft(e.target.value)}
+                onBlur={commitMeta}
+                placeholder="Optional — shown under the title on the public page"
+                maxLength={500}
+                rows={2}
+                aria-label="Public page description"
+              />
+            </div>
             <div className="share-note">
               Anyone with the link sees a table of contents of the pages you
               include below — and only those. Each included page also has its
