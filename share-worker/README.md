@@ -26,6 +26,13 @@ choose. This README is the guide for standing up your own backend.
   `/<id>/raw`).
 - **Stop sharing** `DELETE`s `/api/pages/<id>`, which removes both objects from
   the bucket — the link 404s from then on.
+- **Folder shares**: sharing a folder (or the whole workspace) publishes a
+  *collection* — a page stored with `kind: "collection"` whose public side is
+  a table-of-contents home linking to the member pages. Sharing a folder
+  shares no documents by itself: the app pushes the membership list
+  explicitly, and only listed pages appear. Members are ordinary pages that
+  carry a `collection: {id, title}` back-reference, which renders as a
+  "← back to the folder" crumb on their public page.
 - Pages render server-side with a vendored copy of `marked`
   (`vendor/marked.esm.js`, pinned) and CSS that mirrors the app's reading view,
   honoring light/dark via `prefers-color-scheme`. Shared pages carry
@@ -171,7 +178,8 @@ Old links keep working; only the app's write access is re-keyed.
 ## R2 layout
 
 ```
-pages/<id>.json   {title, markdown?, html?, createdAt, updatedAt}  (+ customMetadata for listing)
+pages/<id>.json   {title, markdown?, html?, collection?, createdAt, updatedAt}  (+ customMetadata for listing)
+                  or {kind: "collection", title, items: [{id, title, path}], createdAt, updatedAt}
 pages/<id>.png    OG image
 ```
 
@@ -183,10 +191,19 @@ The write API the app depends on (all under the endpoint, requires
 ```
 GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt }] }
 GET    /api/pages/<id>       existence/metadata check
-PUT    /api/pages/<id>       body {title, markdown?, html?} -> create/update (at least one version)
+PUT    /api/pages/<id>       body {title, markdown?, html?, collection?} -> create/update a page
+                             (at least one of markdown/html; collection {id, title} marks
+                             folder-share membership and renders the back-home crumb)
+                             or body {title, kind: "collection", items} -> create/update a
+                             folder share (items = [{id, title, path}], path relative to the
+                             shared folder; drives the public table of contents)
 PUT    /api/pages/<id>/og    body image/png          -> set OG image
 DELETE /api/pages/<id>       stop sharing (remove page + OG image)
 ```
+
+Folder shares need a worker deployed from this version of the code or newer —
+an older worker rejects collection pushes with a 400, which the app surfaces
+as "redeploy your worker".
 
 Plus the public reads a browser hits (no auth): `GET /<id>` (rendered
 markdown, or the html rendition when that's all the page has), `GET

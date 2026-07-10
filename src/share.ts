@@ -35,11 +35,40 @@ export type ShareEntry = {
   // (null = that version didn't exist at push time). Absent on entries from
   // before reconciliation existed — the next pass re-pushes once to establish.
   pushed?: { md: PushedFingerprint | null; html: PushedFingerprint | null };
+  // The folder share (CollectionEntry.id) this page is included in, if any.
+  // Membership is always explicit — sharing a folder shares no files by
+  // itself, and sharing a file inside a shared folder doesn't enroll it.
+  collectionId?: string;
 };
+
+// A folder (or whole-workspace) share: one published "collection" page whose
+// public side is a table-of-contents home linking to the member pages. The
+// members are ordinary ShareEntry pages — the collection only carries the
+// membership list, so every page keeps its own URL and its own sync machinery.
+export type CollectionEntry = {
+  id: string;
+  path: string; // absolute directory path
+  // Defaults to the folder name; a rename follows it while it still matches.
+  title: string;
+  members: string[]; // absolute paths of included files, each with a ShareEntry
+  sharedAt: number;
+  updatedAt: number;
+  // Hash of the manifest last successfully pushed (title + items), so
+  // reconciliation can tell a stale remote TOC without a network read.
+  pushedHash?: string;
+  // Title baked into the last-pushed OG image; a mismatch re-renders it.
+  pushedTitle?: string;
+};
+
+// One member reference inside a pushed manifest: the page's id, its display
+// title, and its path relative to the shared folder (used only to group the
+// public TOC into directories).
+export type CollectionItem = { id: string; title: string; path: string };
 
 export type ShareConfig = { endpoint: string; token: string };
 
 const SHARES_STORAGE_KEY = "doklin:shares";
+const COLLECTIONS_STORAGE_KEY = "doklin:collections";
 
 export function readShares(): Record<string, ShareEntry> {
   try {
@@ -67,6 +96,40 @@ export function readShares(): Record<string, ShareEntry> {
 export function writeShares(shares: Record<string, ShareEntry>) {
   try {
     localStorage.setItem(SHARES_STORAGE_KEY, JSON.stringify(shares));
+  } catch {
+    // ignore
+  }
+}
+
+// Folder shares, keyed by absolute directory path (mirrors the shares
+// registry's shape and lifetime).
+export function readCollections(): Record<string, CollectionEntry> {
+  try {
+    const raw = localStorage.getItem(COLLECTIONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, CollectionEntry> = {};
+    for (const [path, e] of Object.entries(parsed as Record<string, CollectionEntry>)) {
+      if (
+        e &&
+        typeof e.id === "string" &&
+        typeof e.path === "string" &&
+        typeof e.title === "string" &&
+        Array.isArray(e.members)
+      ) {
+        out[path] = { ...e, members: e.members.filter((m) => typeof m === "string") };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeCollections(collections: Record<string, CollectionEntry>) {
+  try {
+    localStorage.setItem(COLLECTIONS_STORAGE_KEY, JSON.stringify(collections));
   } catch {
     // ignore
   }
@@ -184,12 +247,15 @@ export async function contentHash(text: string): Promise<string> {
 // Publish (or update) a page. Comments are stripped before upload so editorial
 // notes never reach the public copy — same transform as plain ⌘C. The full
 // record is sent every time (the worker doesn't merge), so a rendition that no
-// longer exists locally also disappears remotely.
+// longer exists locally also disappears remotely — and so does the collection
+// back-reference (the public page's "back to the folder" crumb) when the page
+// is no longer included in a folder share.
 export async function pushPage(
   config: ShareConfig,
   id: string,
   title: string,
   parts: ShareParts,
+  collection?: { id: string; title: string } | null,
 ): Promise<void> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
@@ -198,9 +264,50 @@ export async function pushPage(
       title,
       markdown: parts.markdown === null ? null : stripComments(parts.markdown),
       html: parts.html,
+      ...(collection ? { collection } : {}),
     }),
   });
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
+}
+
+// Thrown when the deployed worker predates folder shares (its PUT validation
+// rejects a body with no markdown/html) — the fix is redeploying the worker,
+// so the UI can route to the setup guide instead of showing a bare error.
+export class ShareWorkerOutdatedError extends Error {
+  constructor() {
+    super(
+      "Your share worker doesn't support folder shares yet. Redeploy it with the latest worker code — the setup guide has it.",
+    );
+    this.name = "ShareWorkerOutdatedError";
+  }
+}
+
+// Publish (or update) a folder share's manifest. Like pushPage, the full
+// membership is sent every time; the worker stores it verbatim and renders
+// the TOC from it.
+export async function pushCollection(
+  config: ShareConfig,
+  id: string,
+  title: string,
+  items: CollectionItem[],
+): Promise<void> {
+  const res = await apiFetch(config, `/api/pages/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title, kind: "collection", items }),
+  });
+  // An up-to-date worker only 400s a collection push on malformed items (which
+  // the app never sends); a pre-collections worker 400s every such body.
+  if (res.status === 400) throw new ShareWorkerOutdatedError();
+  if (!res.ok) throw new Error(`upload failed (${res.status})`);
+}
+
+// Fingerprint of a manifest as it would be pushed, for reconciliation.
+export function collectionManifestHash(
+  title: string,
+  items: CollectionItem[],
+): Promise<string> {
+  return contentHash(JSON.stringify({ title, items }));
 }
 
 export async function pushOgImage(config: ShareConfig, id: string, title: string): Promise<void> {

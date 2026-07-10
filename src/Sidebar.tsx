@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { CollectionEntry, ShareEntry } from "./share";
 
 export type TreeNode =
   // `paired` marks a markdown row that also has an html rendition folded into
@@ -46,6 +47,11 @@ type Props = {
   currentPath: string | null;
   selection: SidebarSelection | null;
   refreshToken: number;
+  // The share registries, for row badges and the context menu's share items:
+  // a shared file/folder gets a quiet dot; folders offer share/manage, files
+  // inside a shared folder offer include/remove.
+  shares: Record<string, ShareEntry>;
+  collections: Record<string, CollectionEntry>;
   onSelect: (sel: SidebarSelection | null) => void;
   onOpenFile: (path: string) => void;
   onOpenFolder: () => void;
@@ -55,6 +61,10 @@ type Props = {
   // Move/rename `from` to `to` on disk and repoint app state (tabs, watcher…).
   // Resolves to an error message to surface, or null on success.
   onMovePath: (from: string, to: string, kind: "file" | "dir") => Promise<string | null>;
+  // Open the folder-share dialog for a directory (create or manage).
+  onShareFolder: (dirPath: string) => void;
+  // Include/remove a file in the folder share rooted at `dirPath`.
+  onToggleMembership: (path: string, dirPath: string, include: boolean) => void;
   onSwitchToSearch: () => void;
 };
 
@@ -81,6 +91,8 @@ export default function Sidebar({
   currentPath,
   selection,
   refreshToken,
+  shares,
+  collections,
   onSelect,
   onOpenFile,
   onOpenFolder,
@@ -88,6 +100,8 @@ export default function Sidebar({
   onRevealInFinder,
   onDelete,
   onMovePath,
+  onShareFolder,
+  onToggleMembership,
   onSwitchToSearch,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -507,6 +521,26 @@ export default function Sidebar({
   const rootName = useMemo(() => basename(root), [root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
 
+  // The shared-row badge sets: any shared file, and any folder with a live
+  // collection page (the workspace root's badge lives on the header instead).
+  const sharedFilePaths = useMemo(() => new Set(Object.keys(shares)), [shares]);
+  const sharedDirPaths = useMemo(() => new Set(Object.keys(collections)), [collections]);
+
+  // The innermost folder share containing `path` — what a file's
+  // include/remove context item binds to.
+  const nearestCollectionFor = useCallback(
+    (path: string): CollectionEntry | null => {
+      let best: CollectionEntry | null = null;
+      for (const c of Object.values(collections)) {
+        if (path.startsWith(c.path + "/") && (!best || c.path.length > best.path.length)) {
+          best = c;
+        }
+      }
+      return best;
+    },
+    [collections],
+  );
+
   const ctxItems: ContextMenuItem[] = useMemo(() => {
     if (!ctxMenu) return [];
     const { target } = ctxMenu;
@@ -518,6 +552,30 @@ export default function Sidebar({
         onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
       },
     ];
+    if (target.kind === "file") {
+      const col = nearestCollectionFor(target.path);
+      if (col) {
+        const included = col.members.includes(target.path);
+        items.push({
+          label: included ? `Remove from “${col.title}”` : `Include in “${col.title}”`,
+          onClick: () => onToggleMembership(target.path, col.path, !included),
+        });
+      }
+    } else {
+      const dirPath = target.kind === "root" ? root : target.path;
+      const isWorkspace = dirPath === root;
+      const shared = sharedDirPaths.has(dirPath);
+      items.push({
+        label: shared
+          ? isWorkspace
+            ? "Manage workspace share…"
+            : "Manage folder share…"
+          : isWorkspace
+            ? "Share workspace…"
+            : "Share folder…",
+        onClick: () => onShareFolder(dirPath),
+      });
+    }
     if (target.kind !== "root") {
       items.push({
         label: "Rename…",
@@ -530,7 +588,19 @@ export default function Sidebar({
       });
     }
     return items;
-  }, [ctxMenu, startCreate, startRename, createDirFor, onRevealInFinder, onDelete, root]);
+  }, [
+    ctxMenu,
+    startCreate,
+    startRename,
+    createDirFor,
+    onRevealInFinder,
+    onDelete,
+    onShareFolder,
+    onToggleMembership,
+    nearestCollectionFor,
+    sharedDirPaths,
+    root,
+  ]);
 
   return (
     <aside className="sidebar" aria-label="File browser">
@@ -538,9 +608,11 @@ export default function Sidebar({
         name={rootName}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
+        workspaceShared={sharedDirPaths.has(root)}
         onOpenFolder={onOpenFolder}
         onOpenFile={onOpenFilePicker}
         onRevealInFinder={() => onRevealInFinder(root)}
+        onShareWorkspace={() => onShareFolder(root)}
         onRefresh={() => void refresh()}
         onSwitchToSearch={onSwitchToSearch}
         onNewFile={() => startCreate("file", createDirFor(selection))}
@@ -595,6 +667,8 @@ export default function Sidebar({
                 dragPath={dragging?.path ?? null}
                 dropDir={dropDir === root ? null : dropDir}
                 dnd={dnd}
+                sharedFilePaths={sharedFilePaths}
+                sharedDirPaths={sharedDirPaths}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
                 onSelect={onSelect}
@@ -646,9 +720,11 @@ function SidebarHeader({
   name,
   menuOpen,
   setMenuOpen,
+  workspaceShared,
   onOpenFolder,
   onOpenFile,
   onRevealInFinder,
+  onShareWorkspace,
   onRefresh,
   onSwitchToSearch,
   onNewFile,
@@ -657,9 +733,11 @@ function SidebarHeader({
   name: string;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
+  workspaceShared: boolean;
   onOpenFolder: () => void;
   onOpenFile: () => void;
   onRevealInFinder: () => void;
+  onShareWorkspace: () => void;
   onRefresh: () => void;
   onSwitchToSearch: () => void;
   onNewFile: () => void;
@@ -761,6 +839,17 @@ function SidebarHeader({
           >
             Reveal in Finder
           </button>
+          <button
+            role="menuitem"
+            className="sidebar-menu-item"
+            onClick={() => {
+              setMenuOpen(false);
+              onShareWorkspace();
+            }}
+          >
+            {workspaceShared ? "Manage workspace share…" : "Share workspace…"}
+            {workspaceShared && <span className="tree-share-dot" aria-hidden />}
+          </button>
         </div>
       )}
     </div>
@@ -779,6 +868,8 @@ function TreeItem({
   dragPath,
   dropDir,
   dnd,
+  sharedFilePaths,
+  sharedDirPaths,
   onToggle,
   onOpenFile,
   onSelect,
@@ -802,6 +893,9 @@ function TreeItem({
   dragPath: string | null;
   dropDir: string | null;
   dnd: TreeDnd;
+  // Rows in these sets carry the quiet "live share" dot.
+  sharedFilePaths: Set<string>;
+  sharedDirPaths: Set<string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onSelect: (sel: SidebarSelection) => void;
@@ -855,6 +949,9 @@ function TreeItem({
         >
           <DocTypeIcon node={node} />
           <span className="tree-label">{stripDocExt(node.name)}</span>
+          {sharedFilePaths.has(node.path) && (
+            <span className="tree-share-dot" title="Shared" aria-hidden />
+          )}
         </button>
       </li>
     );
@@ -899,6 +996,9 @@ function TreeItem({
             <ChevronRightIcon />
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
+          {sharedDirPaths.has(node.path) && (
+            <span className="tree-share-dot" title="Folder is shared" aria-hidden />
+          )}
         </button>
       )}
       {!isCollapsed && (
@@ -927,6 +1027,8 @@ function TreeItem({
               dragPath={dragPath}
               dropDir={dropDir}
               dnd={dnd}
+              sharedFilePaths={sharedFilePaths}
+              sharedDirPaths={sharedDirPaths}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onSelect={onSelect}
