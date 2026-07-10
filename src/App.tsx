@@ -37,6 +37,7 @@ import {
   pushPage,
   readCollections,
   readShares,
+  shareUrl,
   writeCollections,
   writeShares,
   type CollectionEntry,
@@ -540,6 +541,21 @@ export default function App() {
   // shareFolderTarget = the directory whose share dialog (create or manage) is
   // open; null = closed.
   const [shareFolderTarget, setShareFolderTarget] = useState<string | null>(null);
+  // A context-menu "Share…" on a tree file: the document opens first, then the
+  // share popover pops once the ShareMenu for that path is mounted (it's keyed
+  // by the active path, so this outlives the remount).
+  const [pendingSharePopover, setPendingSharePopover] = useState<string | null>(null);
+
+  // A pending popover request only survives while its document is the active
+  // tab — navigating away (or a failed open) cancels it instead of leaving a
+  // surprise popover for the next visit.
+  useEffect(() => {
+    if (!pendingSharePopover) return;
+    const active = tabs.find((t) => t.id === activeId);
+    if (!active || active.kind !== "file" || active.path !== pendingSharePopover) {
+      setPendingSharePopover(null);
+    }
+  }, [pendingSharePopover, tabs, activeId]);
 
   const updateCollections = useCallback(
     (mut: (prev: Record<string, CollectionEntry>) => Record<string, CollectionEntry>) => {
@@ -1767,6 +1783,26 @@ export default function App() {
     ],
   );
 
+  // "Share…" from the tree's context menu: sharing needs the user to pick an
+  // address, and that form lives in the ShareMenu popover — so open the
+  // document and pop the dialog rather than inventing a second share form.
+  const shareFileFromTree = useCallback(
+    async (target: string) => {
+      await openTab(target, "file");
+      setPendingSharePopover(target);
+    },
+    [openTab],
+  );
+
+  // Copy a share link from the tree without opening anything.
+  const copyShareLink = useCallback(async (id: string) => {
+    try {
+      await navigator.clipboard.writeText(shareUrl(await getShareConfig(), id));
+    } catch (e) {
+      console.error("copy link failed", e);
+    }
+  }, []);
+
   const reloadFromDisk = useCallback(async () => {
     const target = pathRef.current;
     if (!target) return;
@@ -2884,6 +2920,8 @@ export default function App() {
                 }
               : null
           }
+          autoOpen={pendingSharePopover === activeTab.path}
+          onAutoOpenConsumed={() => setPendingSharePopover(null)}
           onShare={shareActiveDoc}
           onStopSharing={() => stopSharing(activeTab.path)}
           onToggleCollection={(include) =>
@@ -3006,6 +3044,14 @@ export default function App() {
           onDelete={(p, kind) => void deleteEntry(p, kind)}
           onMovePath={movePath}
           onShareFolder={(dir) => setShareFolderTarget(dir)}
+          onShareFile={(p) => void shareFileFromTree(p)}
+          onStopSharingFile={(p) =>
+            void stopSharing(p).catch((e) => {
+              console.error("stop sharing failed", e);
+              window.alert(e instanceof Error ? e.message : String(e));
+            })
+          }
+          onCopyShareLink={(id) => void copyShareLink(id)}
           onToggleMembership={(path, dir, include) =>
             void setCollectionMembership(path, dir, include).catch((e) => {
               console.error("membership toggle failed", e);

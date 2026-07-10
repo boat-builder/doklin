@@ -27,6 +27,8 @@ export default function ShareMenu({
   entry,
   config,
   collection,
+  autoOpen,
+  onAutoOpenConsumed,
   onShare,
   onStopSharing,
   onToggleCollection,
@@ -42,6 +44,10 @@ export default function ShareMenu({
   // The folder share this document sits inside (nearest one), if any, and
   // whether the document is currently on its table of contents.
   collection: { entry: CollectionEntry; included: boolean } | null;
+  // True when something outside (the tree's "Share…" context item) asked for
+  // the popover to open; consumed once acted on.
+  autoOpen: boolean;
+  onAutoOpenConsumed: () => void;
   onShare: (id: string) => Promise<void>;
   onStopSharing: () => Promise<void>;
   // Include in / remove from the surrounding folder share. Including an
@@ -97,6 +103,14 @@ export default function ShareMenu({
       return next;
     });
   }, [config]);
+
+  // The tree's "Share…" context item lands here: open the popover as if the
+  // pill was clicked (same reset), once per request.
+  useEffect(() => {
+    if (!autoOpen) return;
+    onAutoOpenConsumed();
+    if (!open) toggle();
+  }, [autoOpen, onAutoOpenConsumed, open, toggle]);
 
   const openSettings = useCallback(() => {
     setError(null);
