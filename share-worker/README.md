@@ -110,6 +110,18 @@ wrangler won't create the zone for you. Dashboard-only alternative (no
 wrangler): on the worker's page, **Settings → Domains & Routes → Add →
 Custom Domain**.
 
+### Several domains on one account
+
+The app can hold several connections (one per domain), and each is a full
+separate stack: its own worker, its own bucket, its own token. Worker and
+bucket names are unique per Cloudflare account, so give every setup fresh
+names — the app's agent prompt derives them from the domain
+(`doklin-share-notes-example-com` / `doklin-pages-notes-example-com`). Two
+warnings worth respecting: deploying with an existing worker's `name`
+doesn't error — it silently updates that worker and, after `secret put`,
+overwrites its token, cutting off the other domain's connection; and
+pointing two workers at one bucket publishes every page on both domains.
+
 ### Connect the app
 
 The app ships this whole guide built in: while sharing is unconfigured, the
