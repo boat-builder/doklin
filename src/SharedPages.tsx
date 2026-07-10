@@ -52,7 +52,7 @@ export default function SharedPages({
   collections: CollectionEntry[];
   connections: ShareConnection[];
   // Which connection an entry was published to (null = since removed).
-  connectionFor: (entry: { connectionId?: string }) => ShareConnection | null;
+  connectionFor: (entry: { connectionId: string }) => ShareConnection | null;
   onClose: () => void;
   onOpenDoc: (entry: ShareEntry) => void;
   onManageCollection: (entry: CollectionEntry) => void;
@@ -156,7 +156,7 @@ export default function SharedPages({
   // Make (or stop making) an entry's page the domain root. Full-record PUT:
   // everything else in the site config rides along unchanged.
   const setHomePage = async (
-    entry: { id: string; path: string; connectionId?: string },
+    entry: { id: string; path: string; connectionId: string },
     make: boolean,
   ) => {
     const conn = connectionFor(entry);
@@ -214,7 +214,7 @@ export default function SharedPages({
 
   const anyOutdated = connections.some((c) => sites[c.id]?.kind === "outdated");
 
-  const rowHost = (entry: { connectionId?: string }) => shareHost(connectionFor(entry));
+  const rowHost = (entry: { connectionId: string }) => shareHost(connectionFor(entry));
 
   return (
     <div
