@@ -2625,6 +2625,12 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
+/* A share whose local source is gone: the published copy is still live, and
+   this flag says "stop it from here if that wasn't intended". */
+.shared-row-missing {
+  color: var(--app-dirty, #d29922);
+}
+
 /* Section labels in the shared-pages modal (Folders / Pages). */
 .shared-section-label {
   margin: 10px 6px 4px;

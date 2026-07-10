@@ -4,8 +4,14 @@
 // its link, open it in the browser, or stop sharing (which deletes the remote
 // copy). Folder rows route to the folder-share dialog for management, since
 // stopping a folder needs its keep-or-stop-the-pages choice.
+//
+// The registry is keyed by local path, so a share whose source was deleted or
+// moved outside the app stays listed (the published copy is still live) —
+// those rows get a "file missing" flag, and this modal is where such orphans
+// get stopped manually.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   shareHost,
   shareUrl,
@@ -38,6 +44,7 @@ export default function SharedPages({
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [missing, setMissing] = useState<Set<string>>(() => new Set());
   const host = shareHost(config);
 
   useEffect(() => {
@@ -47,6 +54,28 @@ export default function SharedPages({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Flag rows whose local source no longer exists. Keyed on the joined path
+  // list (the arrays are rebuilt every App render) so the stat sweep runs on
+  // real membership changes, not every keystroke elsewhere.
+  const pathsKey = useMemo(
+    () => [...shares.map((s) => s.path), ...collections.map((c) => c.path)].join("\n"),
+    [shares, collections],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const gone = new Set<string>();
+      for (const path of pathsKey.split("\n").filter(Boolean)) {
+        const exists = await invoke<boolean>("path_exists", { path }).catch(() => true);
+        if (!exists) gone.add(path);
+      }
+      if (!cancelled) setMissing(gone);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pathsKey]);
 
   const copyUrl = async (key: string, id: string) => {
     try {
@@ -123,6 +152,9 @@ export default function SharedPages({
                         >
                           {host}/{c.id} · {c.members.length}{" "}
                           {c.members.length === 1 ? "page" : "pages"}
+                          {missing.has(c.path) && (
+                            <span className="shared-row-missing"> · folder missing</span>
+                          )}
                         </span>
                       </button>
                       <div className="shared-row-actions">
@@ -162,6 +194,9 @@ export default function SharedPages({
                         title={`Updated ${new Date(s.updatedAt).toLocaleString()}`}
                       >
                         {host}/{s.id}
+                        {missing.has(s.path) && (
+                          <span className="shared-row-missing"> · file missing</span>
+                        )}
                       </span>
                     </button>
                     <div className="shared-row-actions">

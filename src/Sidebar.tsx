@@ -63,6 +63,13 @@ type Props = {
   onMovePath: (from: string, to: string, kind: "file" | "dir") => Promise<string | null>;
   // Open the folder-share dialog for a directory (create or manage).
   onShareFolder: (dirPath: string) => void;
+  // Share a file: opens the document and pops the share dialog (the address
+  // picker lives there).
+  onShareFile: (path: string) => void;
+  // Stop sharing a file's page (deletes the remote copy).
+  onStopSharingFile: (path: string) => void;
+  // Copy the public link for a share id (file page or folder).
+  onCopyShareLink: (id: string) => void;
   // Include/remove a file in the folder share rooted at `dirPath`.
   onToggleMembership: (path: string, dirPath: string, include: boolean) => void;
   onSwitchToSearch: () => void;
@@ -101,6 +108,9 @@ export default function Sidebar({
   onDelete,
   onMovePath,
   onShareFolder,
+  onShareFile,
+  onStopSharingFile,
+  onCopyShareLink,
   onToggleMembership,
   onSwitchToSearch,
 }: Props) {
@@ -552,7 +562,17 @@ export default function Sidebar({
         onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
       },
     ];
+    let sharedFileEntry: ShareEntry | null = null;
     if (target.kind === "file") {
+      sharedFileEntry = shares[target.path] ?? null;
+      if (sharedFileEntry) {
+        items.push({
+          label: "Copy share link",
+          onClick: () => onCopyShareLink(sharedFileEntry!.id),
+        });
+      } else {
+        items.push({ label: "Share…", onClick: () => onShareFile(target.path) });
+      }
       const col = nearestCollectionFor(target.path);
       if (col) {
         const included = col.members.includes(target.path);
@@ -564,9 +584,15 @@ export default function Sidebar({
     } else {
       const dirPath = target.kind === "root" ? root : target.path;
       const isWorkspace = dirPath === root;
-      const shared = sharedDirPaths.has(dirPath);
+      const sharedDir = collections[dirPath] ?? null;
+      if (sharedDir) {
+        items.push({
+          label: "Copy share link",
+          onClick: () => onCopyShareLink(sharedDir.id),
+        });
+      }
       items.push({
-        label: shared
+        label: sharedDir
           ? isWorkspace
             ? "Manage workspace share…"
             : "Manage folder share…"
@@ -581,6 +607,13 @@ export default function Sidebar({
         label: "Rename…",
         onClick: () => startRename({ path: target.path, kind: target.kind as "file" | "dir" }),
       });
+      if (sharedFileEntry) {
+        items.push({
+          label: "Stop sharing",
+          danger: true,
+          onClick: () => onStopSharingFile(target.path),
+        });
+      }
       items.push({
         label: "Delete",
         danger: true,
@@ -596,9 +629,13 @@ export default function Sidebar({
     onRevealInFinder,
     onDelete,
     onShareFolder,
+    onShareFile,
+    onStopSharingFile,
+    onCopyShareLink,
     onToggleMembership,
     nearestCollectionFor,
-    sharedDirPaths,
+    shares,
+    collections,
     root,
   ]);
 
