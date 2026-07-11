@@ -21,6 +21,13 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   storage. Nothing is lost on tab switch or quit.
 - **Publish & share** — one click publishes a document as a public web page,
   backed by a self-hostable backend.
+- **Cloud sync** — sync a workspace to that same backend (your own Cloudflare
+  worker + R2 bucket): it backs up automatically, follows you to another Mac,
+  and can be shared with people you invite — they install Doklin, paste a
+  one-time invite link, and the workspace syncs to their machine with edits
+  flowing both ways. Concurrent edits merge; overlapping ones become a
+  conflict copy; every revision stays restorable from per-file version
+  history. No accounts — invites mint per-device tokens the owner can revoke.
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin path/to/file.md`. A second launch talks to the running app: a

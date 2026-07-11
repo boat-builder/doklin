@@ -15,6 +15,17 @@ import SharedPages from "./SharedPages";
 import ShareSetup from "./ShareSetup";
 import ShareFolder from "./ShareFolder";
 import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
+import CloudSync from "./CloudSync";
+import ConnectBackend from "./ConnectBackend";
+import HistoryPanel from "./HistoryPanel";
+import {
+  reportSyncActivity,
+  syncDevice,
+  syncReloadConnections,
+  syncStatus,
+  type SyncPresenceEvent,
+  type SyncWorkspaceStatus,
+} from "./sync";
 import workerCode from "virtual:share-worker-code";
 import DictationHud from "./DictationHud";
 import DictationInspector from "./DictationInspector";
@@ -541,6 +552,19 @@ export default function App() {
   // The outdated list captured when the dialog opens, so a card can flip to
   // "Updated ✓" instead of vanishing the moment its recheck succeeds.
   const [workerUpdateList, setWorkerUpdateList] = useState<OutdatedWorker[] | null>(null);
+  // Cloud sync: engine statuses (seeded once, then live via "sync-status"
+  // events), other people's presence per workspace, and the dialogs. The
+  // engines are app-wide (one per synced workspace, in the Rust process);
+  // every window renders the same truth.
+  const [syncStatuses, setSyncStatuses] = useState<SyncWorkspaceStatus[]>([]);
+  const [syncPresence, setSyncPresence] = useState<
+    Record<string, SyncPresenceEvent["devices"]>
+  >({});
+  const [syncDeviceName, setSyncDeviceName] = useState("This Mac");
+  const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
+  const [connectBackendOpen, setConnectBackendOpen] = useState(false);
+  // Absolute path of the doc whose version history is open. null = closed.
+  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
   useEffect(() => {
     if (BUNDLED_WORKER_VERSION <= 0) return;
@@ -707,6 +731,9 @@ export default function App() {
           : [...prev.connections, conn];
         return { connections, defaultId: prev.defaultId ?? conn.id };
       });
+      // Sync engines resolve their token from share.json at spawn — a rotated
+      // or re-saved token needs them respawned to pick it up.
+      void syncReloadConnections().catch(() => {});
     },
     [changeConnections],
   );
@@ -724,6 +751,7 @@ export default function App() {
         writeWorkspaceConnectionMap(next);
         return next;
       });
+      void syncReloadConnections().catch(() => {});
     },
     [changeConnections],
   );
@@ -1159,6 +1187,9 @@ export default function App() {
       // The remote mirror follows every successful disk write of a shared doc —
       // even one that resolves after switching tabs.
       scheduleSharePush(target);
+      // Presence: an autosave landing is the definition of "actively editing"
+      // — the sync engine heartbeats it to other members of the workspace.
+      reportSyncActivity(target);
       // Same for the drafts panel: its previews come from disk, so re-list once
       // a draft's write has landed (including a flush resolving after a switch).
       if (tabsRef.current.some((t) => t.kind === "draft" && t.path === target)) {
@@ -2763,6 +2794,53 @@ export default function App() {
     };
   }, [flushPendingAutosave]);
 
+  // Cloud sync wiring: seed the engine statuses once, then track events.
+  useEffect(() => {
+    void syncStatus()
+      .then(setSyncStatuses)
+      .catch(() => {}); // engine not ready yet — the first event seeds it
+    void syncDevice()
+      .then((d) => setSyncDeviceName(d.name))
+      .catch(() => {});
+    const unStatus = listen<SyncWorkspaceStatus>("sync-status", (e) => {
+      const s = e.payload;
+      setSyncStatuses((prev) => {
+        const rest = prev.filter((x) => x.wsId !== s.wsId);
+        return s.phase === "removed"
+          ? rest
+          : [...rest, s].sort((a, b) => a.name.localeCompare(b.name));
+      });
+    });
+    const unPresence = listen<SyncPresenceEvent>("sync-presence", (e) => {
+      setSyncPresence((prev) => ({ ...prev, [e.payload.wsId]: e.payload.devices }));
+    });
+    // Sync wrote/moved/removed workspace files — the tree re-lists from disk.
+    // (The open document reloads through the existing file watcher.)
+    const unApplied = listen("sync-applied", () => {
+      setTreeRefreshToken((t) => t + 1);
+    });
+    return () => {
+      void unStatus.then((f) => f());
+      void unPresence.then((f) => f());
+      void unApplied.then((f) => f());
+    };
+  }, []);
+
+  // The current workspace's sync status (null = not a synced workspace), and
+  // other people's presence keyed by absolute path for the sidebar.
+  const syncedWorkspace = useMemo(
+    () => syncStatuses.find((s) => workspaceRoot != null && s.root === workspaceRoot) ?? null,
+    [syncStatuses, workspaceRoot],
+  );
+  const presenceByPath = useMemo(() => {
+    if (!syncedWorkspace || !workspaceRoot) return {};
+    const out: Record<string, string> = {};
+    for (const d of syncPresence[syncedWorkspace.wsId] ?? []) {
+      if (d.path) out[`${workspaceRoot}/${d.path}`] = d.name;
+    }
+    return out;
+  }, [syncPresence, syncedWorkspace, workspaceRoot]);
+
   const onMarkdownChange = useCallback(
     (md: string) => {
       currentMarkdownRef.current = md;
@@ -3121,6 +3199,12 @@ export default function App() {
     ? nearestCollection(collections, activeFilePath)
     : null;
 
+  // Presence truth-telling: which document this window has focused. Autosaves
+  // renew it (writeToDisk); switching away (or to a draft) clears it.
+  useEffect(() => {
+    reportSyncActivity(activeFilePath);
+  }, [activeFilePath]);
+
   return (
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
@@ -3283,6 +3367,61 @@ export default function App() {
           onClose={() => setWorkerUpdateList(null)}
         />
       )}
+      {cloudSyncOpen && (
+        <CloudSync
+          workspaceRoot={workspaceRoot}
+          workspaceName={workspaceRoot ? basename(workspaceRoot) : null}
+          connections={shareConns.connections}
+          defaultConnectionId={defaultConnectionId}
+          statuses={syncStatuses}
+          deviceName={syncDeviceName}
+          onClose={() => setCloudSyncOpen(false)}
+          onOpenShareSetup={() => {
+            setCloudSyncOpen(false);
+            setShareSetupOpen(true);
+          }}
+          onOpenWorkerUpdate={
+            outdatedWorkers.length > 0
+              ? () => {
+                  setCloudSyncOpen(false);
+                  setWorkerUpdateList(outdatedWorkers);
+                }
+              : null
+          }
+          onOpenConnectBackend={() => {
+            setCloudSyncOpen(false);
+            setConnectBackendOpen(true);
+          }}
+        />
+      )}
+      {connectBackendOpen && (
+        <ConnectBackend
+          deviceName={syncDeviceName}
+          onSaveConnection={saveConnection}
+          onOpenWorkspace={(root) => void openWorkspace(root)}
+          onClose={() => setConnectBackendOpen(false)}
+        />
+      )}
+      {historyTarget &&
+        syncedWorkspace &&
+        workspaceRoot &&
+        (() => {
+          const connection =
+            shareConns.connections.find((c) => c.id === syncedWorkspace.connectionId) ?? null;
+          const rel = historyTarget.startsWith(`${workspaceRoot}/`)
+            ? historyTarget.slice(workspaceRoot.length + 1)
+            : null;
+          return connection && rel ? (
+            <HistoryPanel
+              docPath={historyTarget}
+              relPath={rel}
+              wsId={syncedWorkspace.wsId}
+              connection={connection}
+              onClose={() => setHistoryTarget(null)}
+              onOpenFile={(p) => void openTab(p, "file")}
+            />
+          ) : null;
+        })()}
       {draftsOpen && (
         <DraftsPanel
           drafts={draftRows}
@@ -3358,6 +3497,9 @@ export default function App() {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);
           }}
+          presence={presenceByPath}
+          syncPhase={syncedWorkspace?.phase ?? null}
+          onFileHistory={syncedWorkspace ? (p) => setHistoryTarget(p) : null}
         />
       )}
       {conflict && (
@@ -3478,6 +3620,11 @@ export default function App() {
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
         onOpenShareSetup={() => setShareSetupOpen(true)}
+        onOpenCloudSync={() => setCloudSyncOpen(true)}
+        onOpenConnectBackend={() => setConnectBackendOpen(true)}
+        syncAttention={syncStatuses.some(
+          (s) => s.phase === "pending-deletes" || s.phase === "revoked" || s.phase === "error",
+        )}
         onOpenDictationSetup={() => setDictationSetupOpen(true)}
         update={update}
         workerUpdateCount={outdatedWorkers.length}
@@ -3698,6 +3845,9 @@ function Settings({
   onCopyWithComments,
   onOpenSharedPages,
   onOpenShareSetup,
+  onOpenCloudSync,
+  onOpenConnectBackend,
+  syncAttention,
   onOpenDictationSetup,
   update,
   workerUpdateCount,
@@ -3717,6 +3867,11 @@ function Settings({
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
   onOpenShareSetup: () => void;
+  onOpenCloudSync: () => void;
+  onOpenConnectBackend: () => void;
+  // True when a synced workspace needs a decision (held deletions, revoked
+  // access, an error) — dots the Cloud sync item.
+  syncAttention: boolean;
   onOpenDictationSetup: () => void;
   update: UpdateController;
   // How many configured share backends run an older worker than this build
@@ -3855,7 +4010,20 @@ function Settings({
             </>
           )}
           <div className="settings-divider" />
-          <div className="settings-section-label">Sharing</div>
+          <div className="settings-section-label">Cloud</div>
+          <button
+            role="menuitem"
+            className="settings-option"
+            onClick={() => {
+              setOpen(false);
+              onOpenCloudSync();
+            }}
+          >
+            <span className="settings-option-check">
+              {syncAttention && <span className="sync-attention-dot" aria-hidden />}
+            </span>
+            <span className="settings-option-label">Cloud sync…</span>
+          </button>
           <button
             role="menuitem"
             className="settings-option"
@@ -3872,17 +4040,28 @@ function Settings({
             className="settings-option"
             onClick={() => {
               setOpen(false);
+              onOpenConnectBackend();
+            }}
+          >
+            <span className="settings-option-check" />
+            <span className="settings-option-label">Connect to a shared backend…</span>
+          </button>
+          <button
+            role="menuitem"
+            className="settings-option"
+            onClick={() => {
+              setOpen(false);
               onOpenShareSetup();
             }}
           >
             <span className="settings-option-check" />
-            <span className="settings-option-label">Sharing setup…</span>
+            <span className="settings-option-label">Backend setup…</span>
           </button>
           {workerUpdateCount > 0 && (
             <button
               role="menuitem"
               className="settings-option settings-option--update"
-              title="A newer share worker is available for your domain — a quick redeploy picks it up"
+              title="A newer backend worker is available for your domain — a quick redeploy picks it up"
               onClick={() => {
                 setOpen(false);
                 onOpenWorkerUpdate();
@@ -3892,7 +4071,7 @@ function Settings({
                 <DownloadIcon />
               </span>
               <span className="settings-option-label">
-                Update share worker{workerUpdateCount > 1 ? `s (${workerUpdateCount})` : "…"}
+                Update backend worker{workerUpdateCount > 1 ? `s (${workerUpdateCount})` : "…"}
               </span>
             </button>
           )}

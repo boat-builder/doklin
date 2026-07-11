@@ -1,19 +1,20 @@
-// "Update share worker" dialog. Shown when a deployed worker reports an older
-// WORKER_VERSION than the code this app build carries (probed via /api/meta on
-// launch). The app can't push the update itself — by design it holds only the
-// worker's share token, never Cloudflare account credentials, and two of the
-// three setup paths leave no wrangler state on this Mac — so this dialog makes
-// the redeploy as close to one click as honesty allows: the primary path is a
-// single paste in the Cloudflare dashboard's code editor (which preserves the
-// bucket binding, the SHARE_TOKEN secret, and any custom domain, swapping only
-// the code), the fallback hands a self-contained prompt to an AI agent, and
-// "Check again" verifies the live version from in here.
+// "Update backend worker" dialog. Shown when a deployed worker reports an
+// older WORKER_VERSION than the code this app build carries (probed via
+// /api/meta on launch). The app can't push the update itself — by design it
+// holds only the worker's share token, never Cloudflare account credentials,
+// and two of the three setup paths leave no wrangler state on this Mac — so
+// this dialog makes the redeploy as close to one click as honesty allows: the
+// primary path is a single paste in the Cloudflare dashboard's code editor
+// (which preserves the bucket binding, the SHARE_TOKEN secret, and any custom
+// domain, swapping only the code), the fallback hands a self-contained prompt
+// to an AI agent — which just downloads the release's one-file worker bundle
+// and redeploys under the same name — and "Check again" verifies the live
+// version from in here.
 
 import { useEffect, useState } from "react";
 import workerCode from "virtual:share-worker-code";
-import { shareHost, type ShareConnection } from "./share";
+import { shareHost, WORKER_BUNDLE_URL, type ShareConnection } from "./share";
 
-const REPO_URL = "https://github.com/boat-builder/doklin";
 const CLOUDFLARE_WORKERS_URL = "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
 
 export type OutdatedWorker = { conn: ShareConnection; version: number };
@@ -50,16 +51,26 @@ function buildUpdatePrompt(conn: ShareConnection): string {
   const nameStep = certain
     ? `The worker is named "${worker}" — that's the first label of its workers.dev hostname.`
     : `The worker should be named "${worker}" (the Doklin setup derives names from the domain). Confirm it exists: \`npx -y wrangler@4 deployments list --name ${worker}\`. If that errors, ask me for the exact name — I can see it in the Cloudflare dashboard under Workers & Pages.`;
-  const tomlStep = domain
-    ? `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami, set name and bucket_name from steps 3–4, set workers_dev = false, and set routes = [{ pattern = "${domain}", custom_domain = true }].`
-    : `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami and set name and bucket_name from steps 3–4.`;
-  return `Update my Doklin share worker to the latest code. It serves at ${conn.endpoint} and runs on my Cloudflare account. This is a code-only update: its R2 bucket binding, its SHARE_TOKEN secret, and its domain setup must come through unchanged — all three survive a same-name redeploy, so do not recreate or modify any of them.
+  const routesLines = domain
+    ? `workers_dev = false
+routes = [{ pattern = "${domain}", custom_domain = true }]`
+    : `workers_dev = true`;
+  return `Update my Doklin backend worker to the latest code. It serves at ${conn.endpoint} and runs on my Cloudflare account. This is a code-only update: its R2 bucket binding, its SHARE_TOKEN secret, and its domain setup must come through unchanged — all three survive a same-name redeploy, so do not recreate or modify any of them.
 
-1. Clone ${REPO_URL} (shallow is fine) into a temporary directory and work in its share-worker/ folder.
+1. Make an empty working directory and download the latest worker (a single ready-to-deploy file, published with every Doklin release):
+curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-worker.js
 2. Run \`npx -y wrangler@4 whoami\`. If it says not logged in, run \`npx -y wrangler@4 login\` and ask me to complete the sign-in in the browser window it opens.
 3. ${nameStep}
 4. Its R2 bucket should be named "${bucket}". Check with \`npx -y wrangler@4 r2 bucket list\`; if that name isn't in the list, ask me which bucket the worker uses (dashboard → the worker → Settings → Bindings) instead of guessing.
-5. ${tomlStep}
+5. Next to the downloaded file, write wrangler.toml with exactly this (name/bucket from steps 3–4, account_id from whoami):
+name = "${worker}"
+main = "doklin-worker.js"
+compatibility_date = "2025-05-05"
+account_id = "<from whoami>"
+${routesLines}
+[[r2_buckets]]
+binding = "PAGES"
+bucket_name = "${bucket}"
 6. Deploy: \`npx -y wrangler@4 deploy\`. This must UPDATE the existing worker, never create a second one — the name in wrangler.toml is what decides. If anything suggests a new worker appeared (a fresh workers.dev URL that isn't ${conn.endpoint}, a "created" rather than "updated" message), delete what you just made with \`npx -y wrangler@4 delete --name <that-name>\` and go back to step 3.
 7. That's the whole job. Tell me when the deploy succeeds — I'll press "Check again" in the Doklin app, which verifies the live version with its own token.
 
@@ -139,20 +150,21 @@ export default function WorkerUpdate({
         className="shared-modal worker-update-modal"
         role="dialog"
         aria-modal="true"
-        aria-label="Update share worker"
+        aria-label="Update backend worker"
       >
         <div className="shared-modal-header">
-          <div className="shared-modal-title">Update share worker</div>
+          <div className="shared-modal-title">Update backend worker</div>
           <button className="shared-modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
         </div>
         <div className="worker-update-body">
           <div className="share-note">
-            This app ships a newer version of the share worker than{" "}
+            This app ships a newer version of the backend worker than{" "}
             {outdated.length === 1 ? "your deployment runs" : "some of your deployments run"}.
-            Sharing keeps working meanwhile — the update unlocks what this app version added.
-            It swaps only the worker's code: your pages, token, and domain stay put.
+            Everything keeps working meanwhile — the update unlocks what this app version
+            added (cloud sync needs worker v4). It swaps only the worker's code: your pages,
+            synced files, token, and domain stay put.
           </div>
           {outdated.map(({ conn, version }) => {
             const host = shareHost(conn);
