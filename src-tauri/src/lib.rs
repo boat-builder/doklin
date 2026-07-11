@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 mod dictation;
+mod sync;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
@@ -491,7 +492,7 @@ fn is_html(path: &Path) -> bool {
     }
 }
 
-fn is_hidden_or_ignored(name: &str) -> bool {
+pub(crate) fn is_hidden_or_ignored(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
@@ -1311,10 +1312,25 @@ fn migrate_scratch(app: AppHandle, id: String) -> Result<Option<String>, String>
 /// a true restore that leaves no stale copy behind. NSFileManager (rather than
 /// the Finder/AppleScript route) is what hands back the resulting Trash URL.
 #[cfg(target_os = "macos")]
-#[tauri::command]
-fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, String> {
+pub(crate) fn trash_path_impl(path: &str) -> Result<String, String> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
 
+    let ns_path = NSString::from_str(path);
+    let url = NSURL::fileURLWithPath(&ns_path);
+    let mut resulting = None;
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting))
+        .map_err(|e| format!("trash {}: {}", path, e))?;
+
+    resulting
+        .and_then(|u| u.path())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("trash {}: no resulting trash path", path))
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, String> {
     let path_buf = PathBuf::from(&path);
     // Stop watching first so the impending removal doesn't surface as an
     // external-change conflict for the file we're deleting. Matching either
@@ -1330,17 +1346,7 @@ fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, St
         }
     }
 
-    let ns_path = NSString::from_str(&path);
-    let url = NSURL::fileURLWithPath(&ns_path);
-    let mut resulting = None;
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting))
-        .map_err(|e| format!("trash {}: {}", path, e))?;
-
-    resulting
-        .and_then(|u| u.path())
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("trash {}: no resulting trash path", path))
+    trash_path_impl(&path)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1513,12 +1519,23 @@ pub fn run() {
         .manage(PendingWindowOpen::default())
         .manage(Quitting::default())
         .manage(dictation::Dictation::default())
+        .manage(sync::SyncManager::default())
         .invoke_handler(tauri::generate_handler![
             dictation::dictation_init,
             dictation::dictation_cmd,
             dictation::dictation_request,
             dictation::dictation_running,
             dictation::dictation_shutdown,
+            sync::sync_enable,
+            sync::sync_connect,
+            sync::sync_disable,
+            sync::sync_status,
+            sync::sync_now,
+            sync::sync_pause,
+            sync::sync_set_activity,
+            sync::sync_confirm_deletes,
+            sync::sync_device,
+            sync::sync_reload_connections,
             read_file,
             stat_file,
             write_file,
@@ -1548,6 +1565,8 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Cloud sync: one background engine per configured workspace.
+            sync::init(&handle);
             let saved = read_persisted_session(&handle);
             let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
             let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());

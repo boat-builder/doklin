@@ -246,14 +246,14 @@ export default function SharedPages({
                 onOpenSetup();
               }}
             >
-              Set up sharing…
+              Set up your backend…
             </button>
           </div>
         ) : (
           <>
             {(anyOutdated || onOpenWorkerUpdate) && (
               <div className="shared-outdated">
-                A newer share worker is available — a quick redeploy picks up
+                A newer backend worker is available — a quick redeploy picks up
                 the latest features. Your pages keep working meanwhile.
                 <button
                   className="share-all-link"

@@ -290,6 +290,14 @@ export function writeWorkspaceConnectionMap(map: Record<string, string>) {
 // hand-edited slug is validated against the same shape).
 export const SHARE_ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
+// The single-file worker bundle every release publishes (see
+// scripts/bundle-worker.mjs + the release workflow). Setup and update
+// instructions point agents/terminals here so deploying a backend is one
+// download — no clone, no build. `latest` is deliberate: a newer worker is
+// always compatible with an older app (the API only grows).
+export const WORKER_BUNDLE_URL =
+  "https://github.com/boat-builder/doklin/releases/latest/download/doklin-worker.js";
+
 // No 0/1/i/l/o — a share id should survive being read off a screen or aloud.
 const ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz";
 

@@ -307,12 +307,12 @@ export default function ShareMenu({
               <div className="share-note">
                 Sharing publishes read-only copies of your notes through your
                 own Cloudflare account (free) — on your own domain if you have
-                one. A one-time setup, about ten minutes, before the first
-                share.
+                one. A one-time setup, about ten minutes, and the same backend
+                also powers private cloud sync.
               </div>
               <div className="share-buttons">
                 <button className="share-btn is-primary" onClick={openGuide}>
-                  Set up sharing…
+                  Set up your backend…
                 </button>
                 <button className="share-btn" onClick={openSettings}>
                   I have a token

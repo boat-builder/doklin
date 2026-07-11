@@ -307,6 +307,13 @@ jobs:
           echo "=== latest.json ==="; cat release-assets/latest.json
           ls -la release-assets
 
+      # One-file backend worker, downloadable at the stable alias
+      #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-worker.js
+      # — what the app's setup/update instructions tell agents and terminals to
+      # fetch, so nobody has to clone or build anything to deploy a backend.
+      - name: Bundle backend worker (release asset)
+        run: node scripts/bundle-worker.mjs release-assets/doklin-worker.js
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:

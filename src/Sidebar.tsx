@@ -73,6 +73,13 @@ type Props = {
   // Include/remove a file in the folder share rooted at `dirPath`.
   onToggleMembership: (path: string, dirPath: string, include: boolean) => void;
   onSwitchToSearch: () => void;
+  // Cloud sync (all absent/null when the workspace isn't synced): other
+  // people's presence keyed by absolute path ("Alice" is editing this doc),
+  // the engine phase for the header indicator, and the version-history opener
+  // for file rows.
+  presence?: Record<string, string>;
+  syncPhase?: string | null;
+  onFileHistory?: ((path: string) => void) | null;
 };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
@@ -113,6 +120,9 @@ export default function Sidebar({
   onCopyShareLink,
   onToggleMembership,
   onSwitchToSearch,
+  presence = {},
+  syncPhase = null,
+  onFileHistory = null,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -602,6 +612,12 @@ export default function Sidebar({
         onClick: () => onShareFolder(dirPath),
       });
     }
+    if (target.kind === "file" && onFileHistory) {
+      items.push({
+        label: "Version history…",
+        onClick: () => onFileHistory(target.path),
+      });
+    }
     if (target.kind !== "root") {
       items.push({
         label: "Rename…",
@@ -633,6 +649,7 @@ export default function Sidebar({
     onStopSharingFile,
     onCopyShareLink,
     onToggleMembership,
+    onFileHistory,
     nearestCollectionFor,
     shares,
     collections,
@@ -646,6 +663,7 @@ export default function Sidebar({
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         workspaceShared={sharedDirPaths.has(root)}
+        syncPhase={syncPhase}
         onOpenFolder={onOpenFolder}
         onOpenFile={onOpenFilePicker}
         onRevealInFinder={() => onRevealInFinder(root)}
@@ -706,6 +724,7 @@ export default function Sidebar({
                 dnd={dnd}
                 sharedFilePaths={sharedFilePaths}
                 sharedDirPaths={sharedDirPaths}
+                presence={presence}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
                 onSelect={onSelect}
@@ -758,6 +777,7 @@ function SidebarHeader({
   menuOpen,
   setMenuOpen,
   workspaceShared,
+  syncPhase,
   onOpenFolder,
   onOpenFile,
   onRevealInFinder,
@@ -771,6 +791,9 @@ function SidebarHeader({
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
   workspaceShared: boolean;
+  // Engine phase when this workspace syncs (null = not synced): drives the
+  // quiet cloud indicator next to the workspace name.
+  syncPhase: string | null;
   onOpenFolder: () => void;
   onOpenFile: () => void;
   onRevealInFinder: () => void;
@@ -810,6 +833,21 @@ function SidebarHeader({
         title="Workspace menu"
       >
         <span className="sidebar-header-name">{name}</span>
+        {syncPhase && (
+          <span
+            className={`sync-dot sidebar-sync-dot ${
+              syncPhase === "idle"
+                ? "is-ok"
+                : syncPhase === "syncing"
+                  ? "is-busy"
+                  : syncPhase === "paused" || syncPhase === "offline"
+                    ? "is-warn"
+                    : "is-bad"
+            }`}
+            title={`Cloud sync: ${syncPhase}`}
+            aria-label={`Cloud sync: ${syncPhase}`}
+          />
+        )}
         <ChevronDownIcon />
       </button>
       <button
@@ -907,6 +945,7 @@ function TreeItem({
   dnd,
   sharedFilePaths,
   sharedDirPaths,
+  presence,
   onToggle,
   onOpenFile,
   onSelect,
@@ -933,6 +972,8 @@ function TreeItem({
   // Rows in these sets carry the quiet "live share" dot.
   sharedFilePaths: Set<string>;
   sharedDirPaths: Set<string>;
+  // Absolute path -> the name of the person editing it right now.
+  presence: Record<string, string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onSelect: (sel: SidebarSelection) => void;
@@ -986,6 +1027,14 @@ function TreeItem({
         >
           <DocTypeIcon node={node} />
           <span className="tree-label">{stripDocExt(node.name)}</span>
+          {presence[node.path] && (
+            <span
+              className="tree-presence"
+              title={`${presence[node.path]} is editing this document right now`}
+            >
+              {presence[node.path]}
+            </span>
+          )}
           {sharedFilePaths.has(node.path) && (
             <span className="tree-share-dot" title="Shared" aria-hidden />
           )}
@@ -1066,6 +1115,7 @@ function TreeItem({
               dnd={dnd}
               sharedFilePaths={sharedFilePaths}
               sharedDirPaths={sharedDirPaths}
+              presence={presence}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onSelect={onSelect}

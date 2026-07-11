@@ -1,14 +1,17 @@
-// "Set up sharing" guide: a step-by-step modal that walks through standing up
-// the Cloudflare backend (R2 bucket + share worker) and ends by verifying +
-// saving the connection from inside the app. Three paths, one per tab:
-// the default hands the whole job — including putting the links on the user's
-// own domain — to an AI coding agent via a copyable prompt; the browser tab
-// runs entirely in the Cloudflare dashboard — the app carries the worker code
-// itself (bundled at build time, see vite.config.ts), generates the token,
-// and the user just clicks and pastes; the terminal tab is the classic
-// wrangler walkthrough. Cloudflare + R2 is the only supported backend.
-// A successful connect ends with an optional branding step that writes the
-// landing page's owner name/link through the worker's site API.
+// Backend setup guide: a step-by-step modal that walks through standing up
+// the Cloudflare backend (R2 bucket + worker) that powers BOTH publishing
+// and cloud sync, ending by verifying + saving the connection from inside
+// the app. Three paths, one per tab: the default hands the whole job —
+// including putting the links on the user's own domain — to an AI coding
+// agent via a copyable prompt; the browser tab runs entirely in the
+// Cloudflare dashboard — the app carries the worker code itself (bundled at
+// build time, see vite.config.ts), generates the token, and the user just
+// clicks and pastes; the terminal tab is the classic wrangler walkthrough.
+// The agent and terminal paths fetch the one-file worker bundle every
+// release publishes (WORKER_BUNDLE_URL) — no clone, no build. Cloudflare +
+// R2 is the only supported backend. A successful connect ends with an
+// optional branding step that writes the landing page's owner name/link
+// through the worker's site API.
 
 import { useEffect, useState } from "react";
 import workerCode from "virtual:share-worker-code";
@@ -21,6 +24,7 @@ import {
   shareHost,
   ShareWorkerOutdatedError,
   testShareConfig,
+  WORKER_BUNDLE_URL,
   type ShareConnection,
   type SiteConfig,
 } from "./share";
@@ -53,13 +57,12 @@ function cleanDomain(raw: string): string {
 }
 
 // The hand-off prompt for an AI coding agent (Claude Code etc.) with shell
-// access. It deploys from the public repo's source — deliberately no embedded
-// worker code: 85 KB of JS would bloat the prompt past usefulness and drift
-// from the canonical source, while cloning a public repo is trivial for an
-// agent. The app's generated token rides along, so the only value the agent
-// must hand back is the endpoint URL. With a domain, the agent also binds the
-// worker to it as a Cloudflare Custom Domain — pausing for the one step only
-// the user can do (pointing nameservers at Cloudflare).
+// access. It deploys the one-file worker bundle every release publishes
+// (WORKER_BUNDLE_URL) — one download instead of a clone, and always the
+// canonical build. The app's generated token rides along, so the only value
+// the agent must hand back is the endpoint URL. With a domain, the agent also
+// binds the worker to it as a Cloudflare Custom Domain — pausing for the one
+// step only the user can do (pointing nameservers at Cloudflare).
 //
 // Every domain is its own stack — worker, bucket, token — and worker/bucket
 // names are unique per Cloudflare account, so the names carry the domain
@@ -74,18 +77,29 @@ function buildAgentPrompt(token: string, domain: string, suffix: string): string
   const target = domain
     ? `one Cloudflare Worker in front of one R2 bucket, serving at my domain https://${domain}`
     : `one Cloudflare Worker in front of one R2 bucket`;
-  const tomlStep = domain
-    ? `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Set name = "${workerName}" and bucket_name = "${bucketName}". Set workers_dev = false, and set routes = [{ pattern = "${domain}", custom_domain = true }].`
-    : `Copy wrangler.toml.example to wrangler.toml. Fill in account_id from whoami. Set name = "${workerName}" and bucket_name = "${bucketName}".`;
+  const routesLines = domain
+    ? `workers_dev = false
+routes = [{ pattern = "${domain}", custom_domain = true }]`
+    : `workers_dev = true`;
   const deployStep = domain
     ? `Deploy: \`npx -y wrangler@4 deploy\`. Wrangler binds the domain and provisions DNS + TLS itself — if ${domain} sits under a zone already active on the account (e.g. a subdomain of a domain I use with Cloudflare), that's everything. If it errors because the domain's zone is not on this Cloudflare account, pause and ask me to add the registrable domain in the Cloudflare dashboard (Account Home → Add a domain, free plan) and to point my registrar's nameservers at Cloudflare — then retry once the zone is active. First-deploy certificate issuance can take a minute or two.`
     : `Deploy: \`npx -y wrangler@4 deploy\`. Note the printed workers.dev URL.`;
   const endpoint = domain ? `https://${domain}` : `<the worker URL, no trailing slash>`;
-  return `Set up the self-hosted sharing backend for the Doklin app on my Cloudflare account: ${target}.
+  return `Set up the self-hosted backend for the Doklin app on my Cloudflare account: ${target}. It powers Doklin's page publishing and its private cloud sync.
 
-1. Clone ${REPO_URL} (shallow is fine) into a temporary directory and work in its share-worker/ folder. The folder's README.md has details if you need them; these steps are the whole job.
+1. Make an empty working directory. Download the worker (a single ready-to-deploy JavaScript file, the app's open-source backend):
+curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-worker.js
+If that URL 404s, fall back to cloning ${REPO_URL} (shallow is fine) and use its share-worker/ folder for the remaining steps with main = "src/index.js" instead.
 2. Run \`npx -y wrangler@4 whoami\`. If it says not logged in, run \`npx -y wrangler@4 login\` and ask me to complete the sign-in in the browser window it opens.
-3. ${tomlStep}
+3. Next to the downloaded file, write wrangler.toml with exactly this (fill account_id from whoami):
+name = "${workerName}"
+main = "doklin-worker.js"
+compatibility_date = "2025-05-05"
+account_id = "<from whoami>"
+${routesLines}
+[[r2_buckets]]
+binding = "PAGES"
+bucket_name = "${bucketName}"
 4. Create the bucket: \`npx -y wrangler@4 r2 bucket create ${bucketName}\`. If the account has never enabled R2, pause and ask me to enable R2 once in the Cloudflare dashboard (it may require adding a payment method; the free allowance covers this use). If the bucket already exists, pause and ask me how to proceed: it may be a leftover from an earlier setup that's fine to reuse, or it may be live behind another Doklin domain — reusing that one would publish every page on both domains. Only continue with it if I confirm; otherwise I'll give you a different name (update bucket_name in wrangler.toml to match).
 5. Store the app's write token as the worker secret: run \`npx -y wrangler@4 secret put SHARE_TOKEN\` and give it exactly this value:
 ${token}
@@ -261,10 +275,10 @@ export default function ShareSetup({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="setup-modal" role="dialog" aria-modal="true" aria-label="Set up sharing">
+      <div className="setup-modal" role="dialog" aria-modal="true" aria-label="Set up your backend">
         <div className="shared-modal-header">
           <div className="shared-modal-title">
-            {isAddingAnother ? "Add a share domain" : "Set up sharing"}
+            {isAddingAnother ? "Add another backend" : "Set up your backend"}
           </div>
           <button className="shared-modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon />
@@ -280,14 +294,15 @@ export default function ShareSetup({
                     <strong>your Cloudflare account</strong> — its own worker,
                     bucket, and token, under fresh names (worker and bucket
                     names are unique per account). The app lets you pick a
-                    domain per share.
+                    domain per share and per synced workspace.
                   </>
                 ) : (
                   <>
-                    Sharing publishes read-only copies of your notes through{" "}
-                    <strong>your own Cloudflare account</strong> — one small worker in front of an
-                    R2 bucket, well inside the free tier. A one-time setup, about ten minutes,
-                    and your links can live on your own domain.
+                    One small worker in front of an R2 bucket on{" "}
+                    <strong>your own Cloudflare account</strong>, well inside the free tier —
+                    it publishes pages you share <em>and</em> privately syncs your workspaces
+                    across machines and people. A one-time setup, about ten minutes, and your
+                    links can live on your own domain.
                   </>
                 )}
               </p>
@@ -348,10 +363,9 @@ export default function ShareSetup({
                 <p className="setup-intro">
                   For the terminal-inclined: you'll need{" "}
                   {link(CLOUDFLARE_SIGNUP_URL, "a free Cloudflare account")} and{" "}
-                  {link(NODE_URL, "Node.js")}. Steps 2–6 run in the <code>share-worker</code>{" "}
-                  folder from step 1. Own domain? Set <code>routes</code> in{" "}
-                  <code>wrangler.toml</code> before deploying —{" "}
-                  {link(WORKER_GUIDE_URL, "see the guide")}.
+                  {link(NODE_URL, "Node.js")}. Steps 2–6 run in the folder from step 1. Own
+                  domain? Set <code>routes</code> in <code>wrangler.toml</code> before
+                  deploying — {link(WORKER_GUIDE_URL, "see the guide")}.
                 </p>
               )}
               <ol className="setup-steps">
@@ -393,8 +407,9 @@ export default function ShareSetup({
                       <div className="setup-step-note">
                         Read it first — it's the complete job description, and it{" "}
                         <strong>contains the access token</strong> for your new backend, so only
-                        hand it to an agent you trust on your own machine. The agent deploys from
-                        the app's public repo; nothing here is secret except that token.
+                        hand it to an agent you trust on your own machine. The agent deploys the
+                        worker file published with every app release; nothing here is secret
+                        except that token.
                       </div>
                       <pre className="setup-prompt">{agentPrompt}</pre>
                       <div className="setup-code-row">
@@ -462,12 +477,12 @@ export default function ShareSetup({
                       </div>
                     </li>
                     <li className="setup-step">
-                      <div className="setup-step-title">Replace its code with the share worker</div>
+                      <div className="setup-step-title">Replace its code with the Doklin worker</div>
                       <div className="setup-step-note">
                         On the worker's page choose <strong>Edit code</strong>. Select everything in
                         the editor, delete it, paste the code from the button below, then{" "}
-                        <strong>Deploy</strong>. It's the app's open-source share worker — the same
-                        code you can read in the repo's <code>share-worker</code> folder.
+                        <strong>Deploy</strong>. It's the app's open-source backend worker — the
+                        same code you can read in the repo's <code>share-worker</code> folder.
                       </div>
                       <div className="setup-code-row">
                         <button className="share-btn is-primary" onClick={() => void copyWorkerCode()}>
@@ -509,14 +524,14 @@ export default function ShareSetup({
                 ) : (
                   <>
                     <li className="setup-step">
-                      <div className="setup-step-title">Get the worker code</div>
+                      <div className="setup-step-title">Download the worker</div>
                       <div className="setup-step-note">
-                        The backend lives in the app's open-source repo, in the{" "}
-                        <code>share-worker</code> folder. No git? Download the ZIP from{" "}
-                        {link(REPO_URL, "the GitHub page")} instead.
+                        One ready-to-deploy file — the app's open-source backend, published with
+                        every release (the source lives in the repo's <code>share-worker</code>{" "}
+                        folder, {link(REPO_URL, "read it on GitHub")}).
                       </div>
-                      <Cmd text={`git clone ${REPO_URL}.git`} />
-                      <Cmd text="cd doklin/share-worker" />
+                      <Cmd text="mkdir doklin-backend && cd doklin-backend" />
+                      <Cmd text={`curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-worker.js`} />
                     </li>
                     <li className="setup-step">
                       <div className="setup-step-title">Sign in to Cloudflare from the terminal</div>
@@ -528,12 +543,12 @@ export default function ShareSetup({
                     <li className="setup-step">
                       <div className="setup-step-title">Create your deployment config</div>
                       <div className="setup-step-note">
-                        Then open <code>wrangler.toml</code> in any editor and fill in the two
-                        placeholders: <code>account_id</code> (printed by{" "}
-                        <code>npx wrangler@4 whoami</code>) and <code>bucket_name</code> — pick any
-                        name, e.g. <code>doklin-pages</code>. For links on your own domain, also set{" "}
-                        <code>workers_dev = false</code> and the <code>routes</code> block (the file
-                        shows how; the domain's zone must already be on your account).
+                        Seven lines, pasted as one command. Rename the bucket if you like — the
+                        create step below must match. More than one Cloudflare account on your
+                        login? Add <code>account_id = "…"</code> (printed by{" "}
+                        <code>npx wrangler@4 whoami</code>). For links on your own domain, use{" "}
+                        <code>workers_dev = false</code> plus a <code>routes</code> line instead —{" "}
+                        {link(WORKER_GUIDE_URL, "see the guide")}.
                         {isAddingAnother ? (
                           <>
                             {" "}Adding to an account with an existing Doklin setup? Use fresh,
@@ -545,16 +560,28 @@ export default function ShareSetup({
                           ""
                         )}
                       </div>
-                      <Cmd text="cp wrangler.toml.example wrangler.toml" />
+                      <Cmd
+                        text={`cat > wrangler.toml << 'EOF'
+name = "doklin-share${isAddingAnother ? `-${nameSuffix}` : ""}"
+main = "doklin-worker.js"
+compatibility_date = "2025-05-05"
+workers_dev = true
+[[r2_buckets]]
+binding = "PAGES"
+bucket_name = "doklin-pages${isAddingAnother ? `-${nameSuffix}` : ""}"
+EOF`}
+                      />
                     </li>
                     <li className="setup-step">
                       <div className="setup-step-title">Create the storage bucket</div>
                       <div className="setup-step-note">
                         Use the same name you put in <code>wrangler.toml</code>. First time using R2?
                         Enable it once under <strong>R2</strong> in the Cloudflare dashboard — it
-                        asks for a payment method, but sharing fits well within the free allowance.
+                        asks for a payment method, but this use fits well within the free allowance.
                       </div>
-                      <Cmd text="npx wrangler@4 r2 bucket create doklin-pages" />
+                      <Cmd
+                        text={`npx wrangler@4 r2 bucket create doklin-pages${isAddingAnother ? `-${nameSuffix}` : ""}`}
+                      />
                     </li>
                     <li className="setup-step">
                       <div className="setup-step-title">Store the app's write token</div>

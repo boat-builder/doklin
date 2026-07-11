@@ -264,7 +264,7 @@ export default function ShareFolder({
                 onOpenSetup();
               }}
             >
-              Set up sharing…
+              Set up your backend…
             </button>
           </div>
         ) : stopBusy && !collection ? (

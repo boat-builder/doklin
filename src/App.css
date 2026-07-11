@@ -3955,3 +3955,220 @@ body.tree-dragging.tree-drag-invalid * {
   max-height: 180px;
   overflow-y: auto;
 }
+
+/* ---------- Cloud sync ---------- */
+
+/* Engine-state dot: green synced, pulsing amber while syncing, amber for
+   paused/offline, red when something needs a decision. */
+.sync-dot {
+  flex: none;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-text-muted);
+}
+.sync-dot.is-ok { background: #3fb950; }
+.sync-dot.is-busy { background: #d29922; animation: sync-pulse 1.2s ease-in-out infinite; }
+.sync-dot.is-warn { background: #d29922; }
+.sync-dot.is-bad { background: #e5534b; }
+@keyframes sync-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.sidebar-sync-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+}
+
+/* Gear-menu attention dot on the Cloud sync item. */
+.sync-attention-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e5534b;
+}
+
+/* "Alice" chip on a tree row while she's editing that doc. */
+.tree-presence {
+  flex: none;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+}
+
+/* The Cloud sync / Connect / History dialogs ride the shared modal chrome. */
+.sync-modal {
+  width: min(660px, calc(100vw - 64px));
+}
+
+.sync-body {
+  padding: 4px 20px 18px;
+  overflow-y: auto;
+  max-height: min(72vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-body .shared-section-label {
+  margin-top: 10px;
+}
+
+.sync-conn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sync-conn-row .shared-section-label { margin: 0; }
+.sync-conn-select { max-width: 280px; }
+
+.sync-enable p { margin: 0 0 10px; font-size: 13px; line-height: 1.55; }
+
+.sync-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+  margin: 0;
+}
+
+.sync-error {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #e5534b;
+}
+
+.sync-foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--app-border);
+  font-size: 12.5px;
+  color: var(--app-text-muted);
+}
+
+.sync-ws-row .shared-row-main { min-width: 0; }
+.sync-ws-row .shared-row-title { display: inline-flex; align-items: center; gap: 7px; }
+
+.sync-ws-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-deletes {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #e5534b 40%, transparent);
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.sync-deletes .share-buttons { margin-top: 8px; }
+
+.sync-invite-form,
+.sync-invite-result {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-invite-link code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--app-hover);
+  font-size: 11.5px;
+  word-break: break-all;
+  user-select: all;
+}
+
+.sync-ws-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sync-ws-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+/* Version history: revision rail + preview pane. */
+.sync-history-modal { width: min(860px, calc(100vw - 64px)); }
+
+.sync-history-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 14px;
+  min-height: 320px;
+}
+
+.sync-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  max-height: min(56vh, 520px);
+  border-right: 1px solid var(--app-border);
+  padding-right: 10px;
+}
+
+.sync-history-rev {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.sync-history-rev:hover { background: var(--app-hover); }
+.sync-history-rev.is-active { background: color-mix(in srgb, var(--app-accent) 14%, transparent); }
+.sync-history-rev-title { font-size: 13px; font-weight: 600; }
+.sync-history-rev-meta { font-size: 11.5px; color: var(--app-text-muted); }
+
+.sync-history-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sync-history-pre {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-hover);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow: auto;
+  max-height: min(46vh, 430px);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
