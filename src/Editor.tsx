@@ -384,6 +384,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       }
     },
     // findComment closes over `comments`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [comments],
   );
 
@@ -395,6 +396,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       setActiveId((a) => (a === id ? null : a));
       if (view && c) removeComment(view, c.from, c.to);
     },
+    // findComment closes over `comments`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [comments],
   );
 
