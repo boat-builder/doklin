@@ -1534,6 +1534,7 @@ pub fn run() {
             sync::sync_pause,
             sync::sync_set_activity,
             sync::sync_confirm_deletes,
+            sync::sync_set_shares,
             sync::sync_device,
             sync::sync_reload_connections,
             read_file,

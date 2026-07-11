@@ -22,6 +22,7 @@ import {
   reportSyncActivity,
   syncDevice,
   syncReloadConnections,
+  syncSetShares,
   syncStatus,
   type SyncPresenceEvent,
   type SyncWorkspaceStatus,
@@ -656,6 +657,97 @@ export default function App() {
     [],
   );
 
+  /* ---------- Synced-workspace share mirroring, outbound half ----------
+     For documents under a cloud-synced root, the workspace manifest is the
+     shared truth of what's published where (everyone on the backend reads
+     it, so nobody double-publishes and whoever edits a shared file keeps
+     its public page fresh). Every local share mutation queues a matching
+     manifest op here; the inbound half — the mirror effect further down —
+     applies everyone else's ops to this device's registry. Shares published
+     to a DIFFERENT backend than the workspace syncs to stay machine-local,
+     exactly as before. */
+
+  const syncStatusesRef = useRef<SyncWorkspaceStatus[]>([]);
+  const syncDeviceNameRef = useRef("This Mac");
+
+  // The synced workspace whose root contains `path`, if any.
+  const syncWsForPath = useCallback(
+    (path: string): SyncWorkspaceStatus | null =>
+      syncStatusesRef.current.find(
+        (s) => path === s.root || path.startsWith(s.root + "/"),
+      ) ?? null,
+    [],
+  );
+
+  // Queue the manifest op mirroring the CURRENT registry state of `absPath`:
+  // share present → publish/update its record, absent → forget it. The
+  // engine persists ops and carries them on its next won CAS, so this is
+  // fire-and-forget even offline.
+  const queueShareOp = useCallback(
+    (absPath: string) => {
+      const ws = syncWsForPath(absPath);
+      if (!ws || absPath === ws.root) return;
+      const rel = absPath.slice(ws.root.length + 1);
+      const entry = sharesRef.current[absPath];
+      if (entry && (entry.connectionId !== ws.connectionId || entry.kind !== "file")) return;
+      void syncSetShares(ws.wsId, {
+        [rel]: entry
+          ? {
+              id: entry.id,
+              path: rel,
+              cid: entry.collectionId ?? null,
+              title: entry.title,
+              by: syncDeviceNameRef.current,
+              at: Date.now(),
+            }
+          : null,
+      }).catch(() => {});
+    },
+    [syncWsForPath],
+  );
+
+  // Same, for folder shares. Pass `removedId` when the collection entry has
+  // already been dropped from the registry (a stop) — the id can't be read
+  // back then.
+  const queueCollectionOp = useCallback(
+    (dirPath: string, removedId?: string) => {
+      const ws = syncWsForPath(dirPath);
+      if (!ws) return;
+      if (removedId) {
+        void syncSetShares(ws.wsId, {}, { [removedId]: null }).catch(() => {});
+        return;
+      }
+      const entry = collectionsRef.current[dirPath];
+      if (!entry || entry.connectionId !== ws.connectionId) return;
+      const rel = dirPath === ws.root ? "" : dirPath.slice(ws.root.length + 1);
+      void syncSetShares(
+        ws.wsId,
+        {},
+        {
+          [entry.id]: {
+            path: rel,
+            title: entry.title,
+            desc: entry.description ?? null,
+            by: syncDeviceNameRef.current,
+            at: Date.now(),
+          },
+        },
+      ).catch(() => {});
+    },
+    [syncWsForPath],
+  );
+
+  // The workspace id a push should stamp its page with: set exactly when the
+  // document lives in a synced workspace published to the SAME backend — the
+  // worker then lets every member of the workspace manage the page.
+  const wsStampFor = useCallback(
+    (absPath: string, connectionId: string): string | null => {
+      const ws = syncWsForPath(absPath);
+      return ws && ws.connectionId === connectionId ? ws.wsId : null;
+    },
+    [syncWsForPath],
+  );
+
   // Load the configured connections into render state.
   useEffect(() => {
     void getConnections().then(setShareConns);
@@ -812,7 +904,14 @@ export default function App() {
       if (hash === entry.pushedHash && entry.title === entry.pushedTitle) return;
       try {
         if (hash !== entry.pushedHash) {
-          await pushCollection(config, entry.id, entry.title, items, entry.description);
+          await pushCollection(
+            config,
+            entry.id,
+            entry.title,
+            items,
+            entry.description,
+            wsStampFor(entry.path, entry.connectionId),
+          );
         }
         if (entry.title !== entry.pushedTitle) {
           await pushOgImage(config, entry.id, entry.title);
@@ -835,7 +934,7 @@ export default function App() {
         console.error("collection push failed", dirPath, e);
       }
     },
-    [collectionItemsFor, updateCollections, connectionForEntry],
+    [collectionItemsFor, updateCollections, connectionForEntry, wsStampFor],
   );
 
   const scheduleCollectionPush = useCallback(
@@ -925,6 +1024,7 @@ export default function App() {
           title,
           parts,
           collection ? { id: collection.id, title: collection.title } : null,
+          wsStampFor(target, entry.connectionId),
         );
         if (title !== entry.title) await pushOgImage(config, entry.id, title);
         const pushed = await fingerprintParts(parts);
@@ -941,7 +1041,7 @@ export default function App() {
         console.error("share push failed", target, e);
       }
     },
-    [updateShares, readShareParts, connectionForEntry, scheduleCollectionPush],
+    [updateShares, readShareParts, connectionForEntry, scheduleCollectionPush, wsStampFor],
   );
 
   const scheduleSharePush = useCallback(
@@ -1774,7 +1874,7 @@ export default function App() {
       if (!parts) throw new Error("Could not read the document.");
       // Lead H1 (html-only: <title>) over file name — same rule as re-pushes.
       const title = deriveDocTitle(parts) ?? docShareTitle(active);
-      await pushPage(config, id, title, parts);
+      await pushPage(config, id, title, parts, null, wsStampFor(active.path, config.id));
       try {
         await pushOgImage(config, id, title);
       } catch (e) {
@@ -1796,8 +1896,10 @@ export default function App() {
           connectionId: config.id,
         },
       }));
+      // In a synced workspace: tell everyone else this document is published.
+      queueShareOp(active.path);
     },
-    [updateShares, readShareParts, flushPendingAutosave],
+    [updateShares, readShareParts, flushPendingAutosave, wsStampFor, queueShareOp],
   );
 
   // Delete the remote page and forget the share (the local file is untouched).
@@ -1839,8 +1941,10 @@ export default function App() {
         );
         scheduleCollectionPush(c.path);
       }
+      // In a synced workspace: the entry is gone, so this queues a "forget".
+      queueShareOp(target);
     },
-    [updateShares, updateCollections, scheduleCollectionPush, connectionForEntry],
+    [updateShares, updateCollections, scheduleCollectionPush, connectionForEntry, queueShareOp],
   );
 
   // Publish a folder (or the whole workspace) as a collection page at
@@ -1854,7 +1958,7 @@ export default function App() {
       const config = st.connections.find((c) => c.id === connectionId);
       if (!config) throw new Error("Sharing is not configured.");
       const title = basename(dirPath);
-      await pushCollection(config, id, title, []);
+      await pushCollection(config, id, title, [], null, wsStampFor(dirPath, config.id));
       try {
         await pushOgImage(config, id, title);
       } catch (e) {
@@ -1877,8 +1981,9 @@ export default function App() {
           connectionId: config.id,
         },
       }));
+      queueCollectionOp(dirPath);
     },
-    [updateCollections],
+    [updateCollections, wsStampFor, queueCollectionOp],
   );
 
   // Delete the collection page and forget the folder share. Member pages
@@ -1906,6 +2011,10 @@ export default function App() {
         const { [dirPath]: _gone, ...rest } = prev;
         return rest;
       });
+      // In a synced workspace: forget the collection everywhere. The engine
+      // also releases every member share's listing bit manifest-side, so the
+      // per-member ops below are only needed where the entry itself changes.
+      queueCollectionOp(dirPath, entry.id);
       for (const m of members) {
         const share = sharesRef.current[m];
         if (!share || share.collectionId !== entry.id) continue;
@@ -1926,7 +2035,14 @@ export default function App() {
         }
       }
     },
-    [stopSharing, updateCollections, updateShares, scheduleSharePush, connectionForEntry],
+    [
+      stopSharing,
+      updateCollections,
+      updateShares,
+      scheduleSharePush,
+      connectionForEntry,
+      queueCollectionOp,
+    ],
   );
 
   // Retitle a folder share and/or set the description shown under its public
@@ -1954,13 +2070,14 @@ export default function App() {
         };
       });
       scheduleCollectionPush(dirPath);
+      queueCollectionOp(dirPath);
       if (nextTitle !== entry.title) {
         for (const m of entry.members) {
           if (sharesRef.current[m]?.collectionId === entry.id) scheduleSharePush(m);
         }
       }
     },
-    [updateCollections, scheduleCollectionPush, scheduleSharePush],
+    [updateCollections, scheduleCollectionPush, scheduleSharePush, queueCollectionOp],
   );
 
   // Include a file in (or remove it from) a folder share. Including a not-yet-
@@ -1994,10 +2111,14 @@ export default function App() {
           let id = generateShareId();
           if (await pageExists(config, id).catch(() => false)) id = generateShareId();
           const title = deriveDocTitle(parts) ?? pathShareTitle(filePath);
-          await pushPage(config, id, title, parts, {
-            id: collection.id,
-            title: collection.title,
-          });
+          await pushPage(
+            config,
+            id,
+            title,
+            parts,
+            { id: collection.id, title: collection.title },
+            wsStampFor(filePath, config.id),
+          );
           try {
             await pushOgImage(config, id, title);
           } catch (e) {
@@ -2072,6 +2193,8 @@ export default function App() {
         }
       }
       scheduleCollectionPush(dirPath);
+      // In a synced workspace: the entry (and its listing bit) changed.
+      queueShareOp(filePath);
     },
     [
       flushPendingAutosave,
@@ -2081,6 +2204,8 @@ export default function App() {
       scheduleSharePush,
       scheduleCollectionPush,
       connectionForEntry,
+      wsStampFor,
+      queueShareOp,
     ],
   );
 
@@ -2561,10 +2686,21 @@ export default function App() {
             });
             if (!renamedShares.includes(m)) renamedShares.push(m); // drop the crumb
           }
-          for (const d of tocPushes) scheduleCollectionPush(d);
+          for (const d of tocPushes) {
+            scheduleCollectionPush(d);
+            // Synced workspaces track folder shares by directory path, and
+            // directories aren't files — a moved folder needs telling.
+            queueCollectionOp(d);
+          }
         }
       }
-      for (const p of renamedShares) scheduleSharePush(p);
+      // File shares need no rename ops (the engine follows moves by file
+      // identity), but a delisted member's entry changed — and re-sending a
+      // renamed one is a harmless refresh.
+      for (const p of renamedShares) {
+        scheduleSharePush(p);
+        queueShareOp(p);
+      }
 
       const sel = sidebarSelectionRef.current;
       if (sel) {
@@ -2582,6 +2718,8 @@ export default function App() {
       scheduleSharePush,
       scheduleCollectionPush,
       selectSidebarEntry,
+      queueShareOp,
+      queueCollectionOp,
     ],
   );
 
@@ -2814,7 +2952,10 @@ export default function App() {
       .then(setSyncStatuses)
       .catch(() => {}); // engine not ready yet — the first event seeds it
     void syncDevice()
-      .then((d) => setSyncDeviceName(d.name))
+      .then((d) => {
+        setSyncDeviceName(d.name);
+        syncDeviceNameRef.current = d.name;
+      })
       .catch(() => {});
     const unStatus = listen<SyncWorkspaceStatus>("sync-status", (e) => {
       const s = e.payload;
@@ -2849,6 +2990,12 @@ export default function App() {
     };
   }, [reconcileShares]);
 
+  // Callbacks (share hooks, the mirror below) read statuses through the ref;
+  // render-time consumers use the state. Keep them in lockstep.
+  useEffect(() => {
+    syncStatusesRef.current = syncStatuses;
+  }, [syncStatuses]);
+
   // The current workspace's sync status (null = not a synced workspace), and
   // other people's presence keyed by absolute path for the sidebar.
   const syncedWorkspace = useMemo(
@@ -2863,6 +3010,236 @@ export default function App() {
     }
     return out;
   }, [syncPresence, syncedWorkspace, workspaceRoot]);
+
+  /* ---------- Synced-workspace share mirroring, inbound half ----------
+     The workspace manifest carries the share registry for documents under a
+     synced root (the outbound helpers near updateShares put it there). This
+     applies it: entries appear, re-point, and vanish here as people share,
+     move, and stop things on other machines — which is what makes the whole
+     feature: the sidebar badge and ShareMenu show "already shared" instead
+     of minting a duplicate page, and mirrored entries land WITHOUT push
+     fingerprints, so the ordinary reconcile pass establishes each with one
+     push. That last part is the freshness guarantee — whoever edits a
+     shared file re-publishes it from their own machine, no waiting for the
+     original sharer to come online.
+
+     Disambiguation rules, per entry, matched by page id:
+       in the manifest            → mirror its fields, mark wsSynced
+       absent + wsSynced          → someone unshared it remotely: drop the
+                                    entry (only while the engine is settled —
+                                    a mid-sync snapshot isn't evidence)
+       absent + never wsSynced    → predates sync here: publish it (backfill)
+     Path disagreements are arbitrated by the disk: local file still present
+     means our rename hasn't pushed yet (keep), gone means theirs applied
+     (adopt). Entries shared to a DIFFERENT backend than the workspace's are
+     out of scope entirely and stay machine-local. */
+  const mirrorBusyRef = useRef(false);
+  useEffect(() => {
+    if (!isMainWindow || syncStatuses.length === 0) return;
+    if (mirrorBusyRef.current) return; // the next status event re-runs us
+    let cancelled = false;
+    mirrorBusyRef.current = true;
+    (async () => {
+      let touched = false;
+      for (const ws of syncStatuses) {
+        if (ws.phase === "removed") continue;
+        const inRoot = (p: string) => p.startsWith(ws.root + "/");
+        const absOf = (rel: string) => (rel === "" ? ws.root : `${ws.root}/${rel}`);
+        const settled = ws.phase === "idle" || ws.phase === "pending-deletes";
+
+        const effShares = new Map(ws.shares.map((s) => [s.id, s]));
+        const effCols = new Map(ws.collections.map((c) => [c.id, c]));
+        const localShares = Object.values(sharesRef.current).filter(
+          (e) => e.kind === "file" && inRoot(e.path) && e.connectionId === ws.connectionId,
+        );
+        const localCols = Object.values(collectionsRef.current).filter(
+          (e) => (e.path === ws.root || inRoot(e.path)) && e.connectionId === ws.connectionId,
+        );
+
+        // Probe the disk once per path disagreement, before the sync pass.
+        const gone = new Map<string, boolean>();
+        const probe = async (abs: string) => {
+          if (!gone.has(abs)) {
+            const exists = await invoke<boolean>("path_exists", { path: abs }).catch(
+              () => true,
+            );
+            gone.set(abs, !exists);
+          }
+        };
+        for (const e of localShares) {
+          const eff = effShares.get(e.id);
+          if (eff && absOf(eff.path) !== e.path) await probe(e.path);
+        }
+        for (const c of localCols) {
+          const eff = effCols.get(c.id);
+          if (eff && absOf(eff.path) !== c.path) await probe(c.path);
+        }
+        if (cancelled) return;
+
+        // Registry deltas, assembled synchronously against fresh refs.
+        const nextShares: Record<string, ShareEntry> = { ...sharesRef.current };
+        let sharesChanged = false;
+        const backfillShares: string[] = [];
+        const seenIds = new Set<string>();
+        for (const e of localShares) {
+          const cur = nextShares[e.path];
+          if (!cur || cur.id !== e.id) continue; // mutated underneath us — next pass
+          seenIds.add(e.id);
+          const eff = effShares.get(e.id);
+          if (!eff) {
+            if (cur.wsSynced && settled) {
+              delete nextShares[e.path];
+              sharesChanged = true;
+            } else if (!cur.wsSynced) {
+              backfillShares.push(e.path);
+            }
+            continue;
+          }
+          let entry = cur;
+          const effAbs = absOf(eff.path);
+          if (effAbs !== entry.path && gone.get(entry.path)) {
+            delete nextShares[entry.path];
+            entry = { ...entry, path: effAbs };
+          }
+          const cid = eff.cid ?? undefined;
+          if (entry.collectionId !== cid || !entry.wsSynced) {
+            entry = { ...entry, wsSynced: true };
+            if (cid) entry.collectionId = cid;
+            else delete entry.collectionId;
+          }
+          if (entry !== cur) {
+            nextShares[entry.path] = entry;
+            sharesChanged = true;
+          }
+        }
+        for (const eff of ws.shares) {
+          // Dead shares (file deleted, page kept) grow no new entries; the
+          // machines that already list them keep theirs, same as a local
+          // delete has always behaved.
+          if (!eff.alive || seenIds.has(eff.id)) continue;
+          const abs = absOf(eff.path);
+          if (nextShares[abs]) continue; // occupied by another share — local wins
+          const at = eff.at || Date.now();
+          nextShares[abs] = {
+            id: eff.id,
+            path: abs,
+            kind: "file",
+            title: eff.title || pathShareTitle(abs),
+            sharedAt: at,
+            updatedAt: at,
+            ...(eff.cid ? { collectionId: eff.cid } : {}),
+            connectionId: ws.connectionId,
+            ...(eff.by ? { sharedBy: eff.by } : {}),
+            wsSynced: true,
+          };
+          sharesChanged = true;
+        }
+
+        // Collections second: their membership derives from the share
+        // entries as just mirrored (cid pointers), so the lists can't drift.
+        const membersFor = (cid: string) =>
+          Object.values(nextShares)
+            .filter(
+              (e) =>
+                e.collectionId === cid &&
+                inRoot(e.path) &&
+                e.connectionId === ws.connectionId &&
+                effShares.get(e.id)?.alive !== false,
+            )
+            .map((e) => e.path)
+            .sort();
+        const nextCols: Record<string, CollectionEntry> = { ...collectionsRef.current };
+        let colsChanged = false;
+        const backfillCols: string[] = [];
+        const seenColIds = new Set<string>();
+        for (const c of localCols) {
+          const cur = nextCols[c.path];
+          if (!cur || cur.id !== c.id) continue;
+          seenColIds.add(c.id);
+          const eff = effCols.get(c.id);
+          if (!eff) {
+            if (cur.wsSynced && settled) {
+              delete nextCols[c.path];
+              colsChanged = true;
+            } else if (!cur.wsSynced) {
+              backfillCols.push(c.path);
+            }
+            continue;
+          }
+          let entry = cur;
+          const effAbs = absOf(eff.path);
+          if (effAbs !== entry.path && gone.get(entry.path)) {
+            delete nextCols[entry.path];
+            entry = { ...entry, path: effAbs };
+          }
+          const desc = eff.desc ?? undefined;
+          const members = membersFor(c.id);
+          const sameMembers =
+            members.length === entry.members.length &&
+            members.every((m, i) => m === entry.members[i]);
+          if (
+            entry.title !== eff.title ||
+            (entry.description ?? undefined) !== desc ||
+            !sameMembers ||
+            !entry.wsSynced
+          ) {
+            entry = { ...entry, title: eff.title || entry.title, members, wsSynced: true };
+            if (desc) entry.description = desc;
+            else delete entry.description;
+          }
+          if (entry !== cur) {
+            nextCols[entry.path] = entry;
+            colsChanged = true;
+          }
+        }
+        for (const eff of ws.collections) {
+          if (seenColIds.has(eff.id)) continue;
+          const abs = absOf(eff.path);
+          if (nextCols[abs]) continue;
+          const at = eff.at || Date.now();
+          const title = eff.title || basename(abs);
+          nextCols[abs] = {
+            id: eff.id,
+            path: abs,
+            title,
+            ...(eff.desc ? { description: eff.desc } : {}),
+            members: membersFor(eff.id),
+            sharedAt: at,
+            updatedAt: at,
+            // Skip the redundant OG render (the sharer made one for this
+            // title); the absent pushedHash still gives the TOC its one
+            // establishing push.
+            pushedTitle: title,
+            connectionId: ws.connectionId,
+            ...(eff.by ? { sharedBy: eff.by } : {}),
+            wsSynced: true,
+          };
+          colsChanged = true;
+        }
+
+        if (sharesChanged) updateShares(() => nextShares);
+        if (colsChanged) updateCollections(() => nextCols);
+        touched = touched || sharesChanged || colsChanged;
+        for (const p of backfillShares) queueShareOp(p);
+        for (const p of backfillCols) queueCollectionOp(p);
+      }
+      // New mirror entries carry no fingerprints; let reconciliation
+      // establish (and thereby freshness-check) them now, not on next focus.
+      if (!cancelled && touched) void reconcileShares();
+    })().finally(() => {
+      mirrorBusyRef.current = false;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    syncStatuses,
+    updateShares,
+    updateCollections,
+    queueShareOp,
+    queueCollectionOp,
+    reconcileShares,
+  ]);
 
   const onMarkdownChange = useCallback(
     (md: string) => {
@@ -2912,6 +3289,9 @@ export default function App() {
           : prev;
       });
       scheduleSharePush(chosen);
+      // The draft may have landed inside a synced workspace: publish the
+      // share record there too.
+      queueShareOp(chosen);
     }
     // The promoted file may have landed next to an existing html rendition of
     // the same stem — adopt it (enables the toggle, watches the pair).
@@ -2937,7 +3317,7 @@ export default function App() {
     writeDraftsMeta(rest);
     addRecent(chosen, "file");
     setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
-  }, [writeToDisk, addRecent, updateShares, scheduleSharePush]);
+  }, [writeToDisk, addRecent, updateShares, scheduleSharePush, queueShareOp]);
 
   const handleSave = useCallback(async () => {
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);

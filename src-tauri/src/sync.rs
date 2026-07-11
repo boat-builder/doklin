@@ -78,6 +78,51 @@ pub(crate) struct Manifest {
     pub files: BTreeMap<String, ManifestFile>,
     #[serde(default)]
     pub tombstones: BTreeMap<String, Tombstone>,
+    /// Public-share registry for this workspace, keyed by fileId: every
+    /// device (and every person on the backend) sees the same "this file is
+    /// published at that page" truth, so nobody double-publishes and whoever
+    /// edits a shared file keeps its public page fresh. A share may outlive
+    /// its file (key no longer in `files`): deleting a document doesn't
+    /// unpublish it — that stays an explicit act, same as local-only shares.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shares: BTreeMap<String, ShareRef>,
+    /// Folder shares (public table-of-contents pages), keyed by page id.
+    /// Membership isn't stored here — it's each file share's `cid` — so the
+    /// two can't drift apart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub collections: BTreeMap<String, CollectionRef>,
+}
+
+/// One published file: which public page it feeds, where the file lives (the
+/// engine re-points `path` whenever the file moves, so the share follows
+/// renames without anyone's help), and which folder share lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ShareRef {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// One folder share: the directory it covers ("" = the workspace root) and
+/// the title/description its public TOC renders under.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CollectionRef {
+    pub path: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -263,6 +308,16 @@ pub(crate) struct WorkspaceState {
     pub manifest: Manifest,
     /// fileId -> last-synced local state.
     pub files: BTreeMap<String, FileState>,
+    /// Share edits this device owes the manifest, keyed by workspace-relative
+    /// path: Some = publish/update the share record, None = forget it. Kept
+    /// (and persisted, so an offline share survives a restart) until a won
+    /// CAS carries them; a set on a path with no manifest file yet stays
+    /// pending until the file lands.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub share_ops: BTreeMap<String, Option<ShareRef>>,
+    /// Same, for folder shares — keyed by collection (page) id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub collection_ops: BTreeMap<String, Option<CollectionRef>>,
 }
 
 /* ---------- Status reporting ---------- */
@@ -280,6 +335,42 @@ pub struct WsStatus {
     pub pending_deletes: u32,
     pub last_sync_ms: Option<u64>,
     pub error: Option<String>,
+    /// The workspace's share registry as this device believes it: the last
+    /// applied manifest overlaid with this device's not-yet-committed ops —
+    /// so a share the user just made shows up here immediately, not a CAS
+    /// later. The frontend mirrors these into its localStorage registry.
+    pub shares: Vec<WsShare>,
+    pub collections: Vec<WsCollection>,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WsShare {
+    /// Workspace-relative path.
+    pub path: String,
+    /// Public page id.
+    pub id: String,
+    /// Folder share (collection page id) this file is listed on, if any.
+    pub cid: Option<String>,
+    pub title: String,
+    pub by: String,
+    pub at: u64,
+    /// False when the shared file has been deleted (its page lives on until
+    /// stopped, but it should drop off TOCs and grow no mirror entries).
+    pub alive: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WsCollection {
+    /// Public page id of the TOC.
+    pub id: String,
+    /// Workspace-relative directory ("" = the workspace root).
+    pub path: String,
+    pub title: String,
+    pub desc: Option<String>,
+    pub by: String,
+    pub at: u64,
 }
 
 /* ---------- Small helpers ---------- */
@@ -559,7 +650,87 @@ impl<R: Remote> Engine<R> {
         let _ = write_json(&self.cfg.state_dir.join("state.json"), &self.state);
     }
 
+    /// The share registry as this device believes it: the last applied
+    /// manifest, overlaid with the ops the user has queued here but a CAS
+    /// hasn't carried yet — so the frontend's mirror never sees its own
+    /// fresh share as "missing" and un-mirrors it.
+    fn effective_shares(&self) -> (Vec<WsShare>, Vec<WsCollection>) {
+        let m = &self.state.manifest;
+        let mut shares: BTreeMap<String, WsShare> = BTreeMap::new();
+        for (fid, s) in &m.shares {
+            shares.insert(
+                s.path.clone(),
+                WsShare {
+                    path: s.path.clone(),
+                    id: s.id.clone(),
+                    cid: s.cid.clone(),
+                    title: s.title.clone(),
+                    by: s.by.clone(),
+                    at: s.at,
+                    alive: m.files.contains_key(fid),
+                },
+            );
+        }
+        for (path, op) in &self.state.share_ops {
+            match op {
+                Some(s) => {
+                    shares.insert(
+                        path.clone(),
+                        WsShare {
+                            path: path.clone(),
+                            id: s.id.clone(),
+                            cid: s.cid.clone(),
+                            title: s.title.clone(),
+                            by: s.by.clone(),
+                            at: s.at,
+                            alive: true,
+                        },
+                    );
+                }
+                None => {
+                    shares.remove(path);
+                }
+            }
+        }
+        let mut cols: BTreeMap<String, WsCollection> = BTreeMap::new();
+        for (cid, c) in &m.collections {
+            cols.insert(
+                cid.clone(),
+                WsCollection {
+                    id: cid.clone(),
+                    path: c.path.clone(),
+                    title: c.title.clone(),
+                    desc: c.desc.clone(),
+                    by: c.by.clone(),
+                    at: c.at,
+                },
+            );
+        }
+        for (cid, op) in &self.state.collection_ops {
+            match op {
+                Some(c) => {
+                    cols.insert(
+                        cid.clone(),
+                        WsCollection {
+                            id: cid.clone(),
+                            path: c.path.clone(),
+                            title: c.title.clone(),
+                            desc: c.desc.clone(),
+                            by: c.by.clone(),
+                            at: c.at,
+                        },
+                    );
+                }
+                None => {
+                    cols.remove(cid);
+                }
+            }
+        }
+        (shares.into_values().collect(), cols.into_values().collect())
+    }
+
     fn set_status(&self, phase: &str, error: Option<String>) {
+        let (shares, collections) = self.effective_shares();
         let status = WsStatus {
             ws_id: self.cfg.ws_id.clone(),
             name: self.cfg.name.clone(),
@@ -569,6 +740,8 @@ impl<R: Remote> Engine<R> {
             pending_deletes: self.held_deletes.len() as u32,
             last_sync_ms: if phase == "idle" { Some(now_ms()) } else { None },
             error,
+            shares,
+            collections,
         };
         if let Ok(mut map) = self.statuses.lock() {
             // Keep the last successful sync time visible through later states.
@@ -660,8 +833,25 @@ impl<R: Remote> Engine<R> {
             let scan = scan_local(&self.cfg.root).map_err(RemoteError::Other)?;
             let staged = self.stage_local(&scan, &remote_manifest).await?;
 
+            // 3½. What the manifest would become, share bookkeeping folded in
+            //     (renamed shares re-pointed, dead shares re-bound, pending
+            //     share ops overlaid).
+            let mut next = remote_manifest.clone();
+            let rollover = self.build_manifest(&mut next, &staged);
+            let (op_files, op_cols) = self.apply_share_state(&mut next);
+            let shares_changed = next.shares != remote_manifest.shares
+                || next.collections != remote_manifest.collections;
+
             // Remote moved under us but we have nothing to say: adopt theirs.
-            if staged.is_empty() {
+            if staged.is_empty() && !shares_changed {
+                // Ops that resolved to exactly what the manifest already says
+                // are spent — a CAS carrying no change would be pure waste.
+                for k in &op_files {
+                    self.state.share_ops.remove(k);
+                }
+                for k in &op_cols {
+                    self.state.collection_ops.remove(k);
+                }
                 self.state.manifest = remote_manifest;
                 self.state.manifest_etag = Some(remote_etag);
                 self.persist_state();
@@ -681,10 +871,17 @@ impl<R: Remote> Engine<R> {
                     .await?;
             }
 
-            let mut next = remote_manifest.clone();
-            let rollover = self.build_manifest(&mut next, &staged);
             match self.remote.put_manifest(&next, &remote_etag).await {
                 Ok(new_etag) => {
+                    // The ops the manifest now carries are done; unresolved
+                    // ones (a share for a file that hasn't landed yet) stay
+                    // pending for a later cycle.
+                    for k in &op_files {
+                        self.state.share_ops.remove(k);
+                    }
+                    for k in &op_cols {
+                        self.state.collection_ops.remove(k);
+                    }
                     self.commit_staged(&staged, &next, new_etag);
                     changed_paths.extend(staged.pushes.iter().map(|p| p.path.clone()));
                     self.roll_archives(rollover).await;
@@ -1077,6 +1274,104 @@ impl<R: Remote> Engine<R> {
         rollover
     }
 
+    /// Fold this device's share bookkeeping into the manifest about to be
+    /// published. Three passes, in order:
+    ///   1. rename-follow — shares are fileId-keyed, so a moved file carries
+    ///      its share; only the recorded path needs re-pointing.
+    ///   2. re-bind — a dead share (fileId gone) whose path holds a share-less
+    ///      file again (delete + recreate, an edit-beats-delete resurrection)
+    ///      adopts the new fileId, so the page keeps flowing.
+    ///   3. pending ops — the user's share/unshare edits, keyed by relative
+    ///      path (files) or page id (collections).
+    /// Returns the op keys that made it in; the caller clears them only once
+    /// the CAS carrying them wins.
+    fn apply_share_state(&self, next: &mut Manifest) -> (Vec<String>, Vec<String>) {
+        let live_paths: Vec<(String, String)> = next
+            .shares
+            .keys()
+            .filter_map(|fid| next.files.get(fid).map(|f| (fid.clone(), f.path.clone())))
+            .collect();
+        for (fid, path) in live_paths {
+            if let Some(s) = next.shares.get_mut(&fid) {
+                s.path = path;
+            }
+        }
+
+        let rebinds: Vec<(String, String)> = next
+            .shares
+            .iter()
+            .filter(|(fid, _)| !next.files.contains_key(*fid))
+            .filter_map(|(fid, s)| {
+                next.files
+                    .iter()
+                    .find(|(lfid, lf)| lf.path == s.path && !next.shares.contains_key(*lfid))
+                    .map(|(lfid, _)| (fid.clone(), lfid.clone()))
+            })
+            .collect();
+        for (dead, live) in rebinds {
+            if let Some(s) = next.shares.remove(&dead) {
+                next.shares.insert(live, s);
+            }
+        }
+
+        let mut op_files = Vec::new();
+        for (path, op) in &self.state.share_ops {
+            match op {
+                Some(share) => {
+                    let target = next
+                        .files
+                        .iter()
+                        .find(|(_, f)| &f.path == path)
+                        .map(|(fid, _)| fid.clone())
+                        .or_else(|| {
+                            // No live file — a dead share at this path can
+                            // still be updated (or re-pointed) in place.
+                            next.shares
+                                .iter()
+                                .find(|(fid, s)| {
+                                    &s.path == path && !next.files.contains_key(*fid)
+                                })
+                                .map(|(fid, _)| fid.clone())
+                        });
+                    if let Some(fid) = target {
+                        let mut s = share.clone();
+                        s.path = path.clone();
+                        next.shares.insert(fid, s);
+                        op_files.push(path.clone());
+                    }
+                    // Otherwise the file hasn't landed in the manifest yet:
+                    // the op stays pending and rides a later cycle.
+                }
+                None => {
+                    next.shares.retain(|_, s| &s.path != path);
+                    op_files.push(path.clone());
+                }
+            }
+        }
+
+        let mut op_cols = Vec::new();
+        for (cid, op) in &self.state.collection_ops {
+            match op {
+                Some(c) => {
+                    next.collections.insert(cid.clone(), c.clone());
+                }
+                None => {
+                    next.collections.remove(cid);
+                    // A stopped folder share releases its members' listing
+                    // bit everywhere, including shares no device has in its
+                    // local registry anymore (dead ones).
+                    for s in next.shares.values_mut() {
+                        if s.cid.as_deref() == Some(cid) {
+                            s.cid = None;
+                        }
+                    }
+                }
+            }
+            op_cols.push(cid.clone());
+        }
+        (op_files, op_cols)
+    }
+
     /// After a won CAS: make local state mirror what we just published.
     fn commit_staged(&mut self, staged: &Staged, next: &Manifest, etag: String) {
         for push in &staged.pushes {
@@ -1365,6 +1660,22 @@ impl<R: Remote> Engine<R> {
                         self.confirm_deletes();
                         if !self.paused { let _ = self.cycle().await; }
                     }
+                    Some(EngineCmd::SetShares { files, collections }) => {
+                        for (k, v) in files { self.state.share_ops.insert(k, v); }
+                        for (k, v) in collections { self.state.collection_ops.insert(k, v); }
+                        // Persist before anything can go wrong: a share made
+                        // offline must survive a restart, or the frontend's
+                        // mirror would read its own entry as remotely removed.
+                        self.persist_state();
+                        if !self.paused {
+                            let _ = self.cycle().await;
+                            next_poll = Instant::now() + POLL_INTERVAL;
+                        } else {
+                            // Paused: no cycle, but the status mirror must
+                            // still see the op in the effective view.
+                            self.set_status("paused", None);
+                        }
+                    }
                 },
                 ev = fs_events.recv() => {
                     if ev.is_none() { return; } // watcher died with the manager
@@ -1396,6 +1707,10 @@ pub(crate) enum EngineCmd {
     SetActivity(Option<String>),
     Pause(bool),
     ConfirmDeletes,
+    SetShares {
+        files: BTreeMap<String, Option<ShareRef>>,
+        collections: BTreeMap<String, Option<CollectionRef>>,
+    },
     Shutdown,
 }
 
@@ -2060,8 +2375,7 @@ pub(crate) async fn sync_enable(
         version: 1,
         name: name.clone(),
         seq: 1,
-        files: BTreeMap::new(),
-        tombstones: BTreeMap::new(),
+        ..Default::default()
     };
     let mut states: BTreeMap<String, FileState> = BTreeMap::new();
     let mut uploads: Vec<(String, String, Vec<u8>, ScanEntry)> = Vec::new(); // (fid, rel, bytes, entry)
@@ -2127,6 +2441,7 @@ pub(crate) async fn sync_enable(
         manifest_etag: Some(etag),
         manifest,
         files: states,
+        ..Default::default()
     };
     write_json(&state_dir.join("state.json"), &state).map_err(|e| format!("save state: {}", e))?;
 
@@ -2235,6 +2550,7 @@ pub(crate) async fn sync_connect(
         manifest_etag: Some(etag),
         manifest,
         files: states,
+        ..Default::default()
     };
     write_json(&state_dir.join("state.json"), &state).map_err(|e| format!("save state: {}", e))?;
 
@@ -2340,6 +2656,26 @@ pub(crate) fn sync_confirm_deletes(app: AppHandle, ws_id: String) -> Result<(), 
     with_inner(&app, |inner| {
         if let Some(h) = inner.engines.get(&ws_id) {
             let _ = h.tx.send(EngineCmd::ConfirmDeletes);
+        }
+        Ok(())
+    })
+}
+
+/// The frontend mirrors share-registry changes for documents under a synced
+/// root into the workspace manifest. `files` is keyed by workspace-relative
+/// path, `collections` by collection page id; Some = publish/update the
+/// record, None = forget it. Fire-and-forget: the engine queues the ops,
+/// persists them, and carries them on its next won CAS.
+#[tauri::command]
+pub(crate) fn sync_set_shares(
+    app: AppHandle,
+    ws_id: String,
+    files: BTreeMap<String, Option<ShareRef>>,
+    collections: BTreeMap<String, Option<CollectionRef>>,
+) -> Result<(), String> {
+    with_inner(&app, |inner| {
+        if let Some(h) = inner.engines.get(&ws_id) {
+            let _ = h.tx.send(EngineCmd::SetShares { files, collections });
         }
         Ok(())
     })
@@ -2970,5 +3306,222 @@ mod tests {
         assert_eq!(a_files, b_files, "device file sets must converge");
         let joined: String = a_files.iter().filter_map(|p| a.read(p)).collect();
         assert!(joined.contains("alice ideas") || joined.contains("bob ideas"));
+    }
+
+    /* ---------- Share registry riding the manifest ---------- */
+
+    impl Device {
+        fn queue_share(&mut self, path: &str, share: Option<ShareRef>) {
+            self.engine.state.share_ops.insert(path.to_string(), share);
+        }
+        fn queue_collection(&mut self, cid: &str, col: Option<CollectionRef>) {
+            self.engine.state.collection_ops.insert(cid.to_string(), col);
+        }
+        fn ws_shares(&self) -> Vec<WsShare> {
+            self.statuses
+                .lock()
+                .unwrap()
+                .get("ws-test")
+                .map(|s| s.shares.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    fn share(id: &str, title: &str) -> ShareRef {
+        ShareRef {
+            id: id.into(),
+            path: String::new(), // the engine stamps the real path on apply
+            cid: None,
+            title: title.into(),
+            by: "Alice".into(),
+            at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn share_op_publishes_and_mirrors_to_other_device() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        let mut b = device("Bob", &be);
+        a.write("doc.md", "# doc\n");
+        a.cycle().await;
+        b.cycle().await;
+
+        a.queue_share("doc.md", Some(share("page1", "Doc")));
+        a.cycle().await;
+        assert!(a.engine.state.share_ops.is_empty(), "carried op must clear");
+        {
+            let be2 = be.lock().unwrap();
+            assert_eq!(be2.manifest.shares.len(), 1);
+            let (fid, s) = be2.manifest.shares.iter().next().unwrap();
+            assert!(be2.manifest.files.contains_key(fid));
+            assert_eq!(s.path, "doc.md");
+            assert_eq!(s.id, "page1");
+        }
+
+        b.cycle().await;
+        let seen = b.ws_shares();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, "page1");
+        assert_eq!(seen[0].path, "doc.md");
+        assert!(seen[0].alive);
+    }
+
+    #[tokio::test]
+    async fn share_follows_rename_and_survives_lost_cas() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        let mut b = device("Bob", &be);
+        a.write("doc.md", "# doc\n");
+        a.write("other.md", "# other\n");
+        a.queue_share("doc.md", Some(share("page1", "Doc")));
+        a.cycle().await;
+        b.cycle().await;
+
+        // Bob renames the shared file — no ops anywhere, the share is
+        // fileId-keyed and only its recorded path re-points.
+        std::fs::create_dir_all(b.root.path().join("sub")).unwrap();
+        b.rename("doc.md", "sub/renamed.md");
+        b.cycle().await;
+        {
+            let be2 = be.lock().unwrap();
+            let s = be2.manifest.shares.values().next().unwrap();
+            assert_eq!(s.id, "page1");
+            assert_eq!(s.path, "sub/renamed.md");
+        }
+
+        // A share op queued behind a lost CAS lands on the retry, on top of
+        // whatever the winner wrote.
+        a.cycle().await; // catch up with the rename first
+        a.queue_share("other.md", Some(share("page2", "Other")));
+        {
+            let mut be2 = be.lock().unwrap();
+            let mut raced = be2.manifest.clone();
+            raced.seq += 1;
+            raced.name = "Raced".into();
+            be2.racer = Some(raced);
+        }
+        a.cycle().await;
+        let be2 = be.lock().unwrap();
+        assert_eq!(be2.manifest.name, "Raced", "the racer's write must survive");
+        assert_eq!(be2.manifest.shares.len(), 2);
+        assert!(be2.manifest.shares.values().any(|s| s.id == "page2" && s.path == "other.md"));
+    }
+
+    #[tokio::test]
+    async fn share_only_change_commits_once_then_stays_quiet() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        a.write("doc.md", "# doc\n");
+        a.cycle().await;
+
+        let before = be.lock().unwrap().put_manifest_calls;
+        a.queue_share("doc.md", Some(share("page1", "Doc")));
+        a.cycle().await;
+        let after_op = be.lock().unwrap().put_manifest_calls;
+        assert_eq!(after_op, before + 1, "a share toggle alone must still commit");
+
+        a.cycle().await;
+        assert_eq!(
+            be.lock().unwrap().put_manifest_calls,
+            after_op,
+            "a no-op cycle must not CAS"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_file_share_goes_dead_then_rebinds_on_recreate() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        a.write("doc.md", "# doc\n");
+        a.queue_share("doc.md", Some(share("page1", "Doc")));
+        a.cycle().await;
+        let old_fid = be.lock().unwrap().manifest.shares.keys().next().unwrap().clone();
+
+        // Delete: the file tombstones, the share stays (its page lives until
+        // stopped explicitly) — but flagged dead, so mirrors and TOCs drop it.
+        a.delete("doc.md");
+        a.cycle().await;
+        {
+            let be2 = be.lock().unwrap();
+            assert!(be2.manifest.files.is_empty());
+            assert_eq!(be2.manifest.shares.len(), 1);
+            assert_eq!(be2.manifest.shares[&old_fid].path, "doc.md");
+        }
+        let seen = a.ws_shares();
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].alive);
+
+        // Recreate at the same path: the share adopts the new fileId and the
+        // page keeps flowing.
+        a.write("doc.md", "# reborn\n");
+        a.cycle().await;
+        let be2 = be.lock().unwrap();
+        assert_eq!(be2.manifest.shares.len(), 1);
+        let (fid, s) = be2.manifest.shares.iter().next().unwrap();
+        assert_ne!(*fid, old_fid, "recreated file gets a fresh fileId");
+        assert!(be2.manifest.files.contains_key(fid));
+        assert_eq!(s.id, "page1");
+        drop(be2);
+        assert!(a.ws_shares()[0].alive);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_collection_releases_member_cids() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        a.write("notes/doc.md", "# doc\n");
+        let mut s = share("page1", "Doc");
+        s.cid = Some("toc1".into());
+        a.queue_share("notes/doc.md", Some(s));
+        a.queue_collection(
+            "toc1",
+            Some(CollectionRef {
+                path: "notes".into(),
+                title: "Notes".into(),
+                desc: Some("the notes".into()),
+                by: "Alice".into(),
+                at: 1,
+            }),
+        );
+        a.cycle().await;
+        {
+            let be2 = be.lock().unwrap();
+            assert_eq!(be2.manifest.collections["toc1"].title, "Notes");
+            assert_eq!(
+                be2.manifest.shares.values().next().unwrap().cid.as_deref(),
+                Some("toc1")
+            );
+        }
+
+        a.queue_collection("toc1", None);
+        a.cycle().await;
+        let be2 = be.lock().unwrap();
+        assert!(be2.manifest.collections.is_empty());
+        assert_eq!(be2.manifest.shares.values().next().unwrap().cid, None);
+    }
+
+    #[tokio::test]
+    async fn share_op_for_missing_file_waits_but_shows_in_effective_view() {
+        let be = backend();
+        let mut a = device("Alice", &be);
+        a.write("doc.md", "# doc\n");
+        a.cycle().await;
+
+        let before = be.lock().unwrap().put_manifest_calls;
+        a.queue_share("later.md", Some(share("page9", "Later")));
+        a.cycle().await;
+        // Nothing to bind to yet: no CAS wasted, op still queued — but the
+        // status mirror already reports it, so the frontend never un-mirrors
+        // the user's fresh share.
+        assert_eq!(be.lock().unwrap().put_manifest_calls, before);
+        assert_eq!(a.engine.state.share_ops.len(), 1);
+        assert!(a.ws_shares().iter().any(|s| s.path == "later.md" && s.id == "page9"));
+
+        a.write("later.md", "# here now\n");
+        a.cycle().await;
+        assert!(a.engine.state.share_ops.is_empty());
+        let be2 = be.lock().unwrap();
+        assert!(be2.manifest.shares.values().any(|s| s.path == "later.md" && s.id == "page9"));
     }
 }

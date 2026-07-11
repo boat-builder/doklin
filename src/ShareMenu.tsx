@@ -483,8 +483,9 @@ export default function ShareMenu({
               {entryConnection ? (
                 <>
                   <div className="share-note">
-                    Anyone with the link can view this page. It updates as you
-                    save.
+                    {entry.sharedBy
+                      ? `Shared by ${entry.sharedBy}. Anyone with the link can view this page; it updates as anyone in the workspace saves.`
+                      : "Anyone with the link can view this page. It updates as you save."}
                   </div>
                   <div className="share-url-row">
                     <span className="share-url" title={shareUrl(entryConnection, entry.id)}>

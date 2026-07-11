@@ -35,6 +35,54 @@ export type SyncWorkspaceStatus = {
   pendingDeletes: number;
   lastSyncMs: number | null;
   error: string | null;
+  // The workspace's share registry as the engine believes it: the last
+  // applied manifest overlaid with this device's not-yet-committed share
+  // ops. App.tsx mirrors these into the localStorage registry so every
+  // device (and every person on the backend) agrees on what's published.
+  shares: WsShareInfo[];
+  collections: WsCollectionInfo[];
+};
+
+// One published file in a synced workspace (engine's WsShare).
+export type WsShareInfo = {
+  path: string; // workspace-relative
+  id: string; // public page id
+  cid: string | null; // folder share (collection page id) listing it, if any
+  title: string;
+  by: string;
+  at: number;
+  // False = the file was deleted; its page lives on until stopped, but it
+  // should drop off TOCs and grow no new mirror entries.
+  alive: boolean;
+};
+
+// One folder share in a synced workspace (engine's WsCollection).
+export type WsCollectionInfo = {
+  id: string; // public TOC page id
+  path: string; // workspace-relative directory, "" = the workspace root
+  title: string;
+  desc: string | null;
+  by: string;
+  at: number;
+};
+
+// The wire shape of a share op's payload — mirrors the engine's ShareRef.
+// `path` is stamped engine-side from the op key, so callers leave it "".
+export type ShareRefInput = {
+  id: string;
+  path: string;
+  cid?: string | null;
+  title: string;
+  by: string;
+  at: number;
+};
+
+export type CollectionRefInput = {
+  path: string; // workspace-relative directory, "" = root
+  title: string;
+  desc?: string | null;
+  by: string;
+  at: number;
 };
 
 export type SyncDevice = { id: string; name: string };
@@ -85,6 +133,16 @@ export const syncPause = (wsId: string, paused: boolean) =>
 export const syncConfirmDeletes = (wsId: string) => invoke("sync_confirm_deletes", { wsId });
 export const syncDevice = () => invoke<SyncDevice>("sync_device");
 export const syncReloadConnections = () => invoke("sync_reload_connections");
+
+// Queue share-registry ops on a workspace's manifest: `files` keyed by
+// workspace-relative path, `collections` by collection page id; null = forget
+// the record. The engine persists the ops and carries them on its next won
+// CAS, so callers fire-and-forget.
+export const syncSetShares = (
+  wsId: string,
+  files: Record<string, ShareRefInput | null>,
+  collections: Record<string, CollectionRefInput | null> = {},
+) => invoke("sync_set_shares", { wsId, files, collections });
 
 // Fire-and-forget: tells the engines which document the user is actively
 // editing so presence heartbeats say something true. Called from autosave and

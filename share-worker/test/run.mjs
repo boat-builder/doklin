@@ -179,9 +179,10 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 4);
+  assert.equal(ok.json.version, 5);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
+  assert.ok(ok.json.features.includes("workspace-pages"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -540,6 +541,141 @@ await test("pages: members own what they publish, owner sees all", async () => {
   assert.equal(aliceEdit.status, 200);
 
   assert.equal((await call("/api/pages/alice-doc", { method: "DELETE", token: alice })).status, 200);
+});
+
+await test("pages: workspace-stamped pages are managed by the whole workspace", async () => {
+  // Carol is a member of a DIFFERENT workspace — she must stay locked out.
+  const other = await call("/api/sync/workspaces", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Elsewhere" },
+  });
+  const inv = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Carol", role: "member", workspaces: [other.json.id] },
+  });
+  const carol = (
+    await call("/api/auth/join", { method: "POST", ip: freshIp(), body: { invite: inv.json.code } })
+  ).json.token;
+
+  // Claiming a workspace you're not in is refused outright.
+  assert.equal(
+    (
+      await call("/api/pages/team-doc", {
+        method: "PUT",
+        token: carol,
+        body: { title: "Team doc", markdown: "# nope", ws },
+      })
+    ).status,
+    403,
+  );
+
+  // Alice publishes a page from the synced workspace: stamped with ws.
+  const made = await call("/api/pages/team-doc", {
+    method: "PUT",
+    token: alice,
+    body: { title: "Team doc", markdown: "# v1", ws },
+  });
+  assert.equal(made.status, 200);
+
+  // Bob shares the workspace, so he can keep the page fresh — even with a
+  // push that omits `ws` (the stamp is sticky) — and every member sees it
+  // in their listing.
+  const bobEdit = await call("/api/pages/team-doc", {
+    method: "PUT",
+    token: bob,
+    body: { title: "Team doc", markdown: "# bob's edit" },
+  });
+  assert.equal(bobEdit.status, 200);
+  const afterBob = await call("/api/pages/team-doc", {
+    method: "PUT",
+    token: alice,
+    body: { title: "Team doc", markdown: "# still shared", ws },
+  });
+  assert.equal(afterBob.status, 200, "an omitted ws must not strip the stamp");
+  const bobList = await call("/api/pages", { token: bob });
+  assert.ok(bobList.json.pages.some((p) => p.id === "team-doc"));
+
+  // Carol can't touch or even list it.
+  assert.equal(
+    (
+      await call("/api/pages/team-doc", {
+        method: "PUT",
+        token: carol,
+        body: { title: "Hijack", markdown: "# mine" },
+      })
+    ).status,
+    403,
+  );
+  const carolList = await call("/api/pages", { token: carol });
+  assert.ok(!carolList.json.pages.some((p) => p.id === "team-doc"));
+
+  // Collections stamp the same way, and a workspace member can stop a page
+  // they didn't create.
+  const toc = await call("/api/pages/team-toc", {
+    method: "PUT",
+    token: alice,
+    body: { title: "Team folder", kind: "collection", items: [], ws },
+  });
+  assert.equal(toc.status, 200);
+  assert.equal(
+    (await call("/api/pages/team-toc", { method: "DELETE", token: bob })).status,
+    200,
+  );
+  assert.equal((await call("/api/pages/team-doc", { method: "DELETE", token: bob })).status, 200);
+
+  // A malformed ws claim is a 400, not a silent unstamped page.
+  assert.equal(
+    (
+      await call("/api/pages/bad-ws", {
+        method: "PUT",
+        token: alice,
+        body: { title: "x", markdown: "# x", ws: "NOT VALID" },
+      })
+    ).status,
+    400,
+  );
+});
+
+await test("manifest: share metadata validates leniently, garbage rejected", async () => {
+  const head = await call(`/api/sync/${ws}/manifest`, { token: OWNER });
+  const etag = head.headers.get("x-manifest-etag");
+  const files = { "f-doc1": fileEntry("notes/hello.md", 9, "v9") };
+
+  const good = await call(`/api/sync/${ws}/manifest`, {
+    method: "PUT",
+    token: OWNER,
+    headers: { "x-base-etag": etag },
+    body: {
+      ...validManifest(9, files),
+      // A dead share (fileId not in files) is legal: the page outlives the file.
+      shares: {
+        "f-doc1": { id: "team-doc", path: "notes/hello.md", cid: "team-toc", title: "Team doc", by: "Alice", at: 1 },
+        "f-gone": { id: "old-page", path: "notes/old.md", title: "Old", by: "Bob", at: 1 },
+      },
+      collections: {
+        "team-toc": { path: "", title: "Team folder", desc: "the docs", by: "Alice", at: 1 },
+      },
+    },
+  });
+  assert.equal(good.status, 200);
+  const round = await call(`/api/sync/${ws}/manifest`, { token: OWNER });
+  const stored = JSON.parse(round.text);
+  assert.equal(stored.shares["f-doc1"].id, "team-doc");
+  assert.equal(stored.collections["team-toc"].title, "Team folder");
+
+  const etag2 = round.headers.get("x-manifest-etag");
+  const bad = await call(`/api/sync/${ws}/manifest`, {
+    method: "PUT",
+    token: OWNER,
+    headers: { "x-base-etag": etag2 },
+    body: {
+      ...validManifest(10, files),
+      shares: { "f-doc1": { id: "../etc", path: "notes/hello.md" } },
+    },
+  });
+  assert.equal(bad.status, 400);
 });
 
 await test("presence: heartbeats merge, stale entries pruned", async () => {

@@ -229,7 +229,7 @@ npx wrangler@4 secret put SHARE_TOKEN      # update the worker
 
 Old links keep working; only the app's write access is re-keyed.
 
-## Cloud sync (worker version 4)
+## Cloud sync (worker version 4; shared share-registry needs 5)
 
 The same worker doubles as a **private sync backend**: the app can sync whole
 workspaces (folders) to the bucket, bidirectionally, across machines and
@@ -247,6 +247,15 @@ people. Nothing under sync is public — the public routes above only ever serve
   a **member** can sync the workspaces named in their invite and publish
   pages — only their own — but can't touch the site config, tokens, invites,
   or workspace admin.
+- **Shares are workspace state too** (worker version 5): the manifest carries
+  the workspace's share registry (`shares` + `collections` sections), so every
+  device and every member sees the same "this document is published at that
+  page" truth — nobody double-publishes, and whoever edits a shared file keeps
+  its public page fresh from their own machine. Pages published from a synced
+  workspace are stamped with the workspace id (`ws` customMetadata) and are
+  managed **collectively**: any member of that workspace can update or stop
+  them, and sees them in `GET /api/pages` — the folder's files are everyone's
+  to edit, so their public faces are too.
 - **Invite links** look like `https://<host>/join#dk_i_…` — `GET /join` is a
   public landing page that walks the invitee through connecting the app. The
   code rides the URL fragment, which browsers never send to servers.
@@ -259,14 +268,19 @@ people. Nothing under sync is public — the public routes above only ever serve
 ```
 site.json         {ownerName?, ownerLink?, downloadUrl?, rootPageId?, updatedAt}  (app-managed site config)
 pages/<id>.json   {title, markdown?, html?, collection?, createdAt, updatedAt}  (+ customMetadata for listing,
-                  incl. owner: the token that published it)
+                  incl. owner: the token that published it, and ws: the synced workspace it
+                  was published from, when any — that stamp is what lets every member manage it)
                   or {kind: "collection", title, description?, items: [{id, title, path}], createdAt, updatedAt}
 pages/<id>.png    OG image
 auth/tokens/<sha256-of-token>.json    {id, name, role, workspaces, createdAt, lastSeenAt}
 auth/invites/<sha256-of-code>.json    {id, name, role, workspaces, createdAt, expiresAt, claimed?}
 sync/<ws>/ws.json                     {id, name, createdAt}
 sync/<ws>/manifest.json               {version, name, seq, files: {<fileId>: {path, rev, hash, size,
-                                      mtime, by, hist: [{r,h,s,t,b}]}}, tombstones: {<fileId>: {...}}}
+                                      mtime, by, hist: [{r,h,s,t,b}]}}, tombstones: {<fileId>: {...}},
+                                      shares: {<fileId>: {id, path, cid?, title, by, at}},
+                                      collections: {<pageId>: {path, title, desc?, by, at}}}
+                                      (shares/collections = the workspace's share registry; a share
+                                      may outlive its file — deleting a doc never unpublishes it)
 sync/<ws>/files/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
 sync/<ws>/history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
 sync/<ws>/presence.json               {devices: {<deviceId>: {name, fileId, path?, ts}}}
@@ -283,10 +297,13 @@ GET    /api/site             site config -> { site: {ownerName?, ownerLink?, dow
 PUT    /api/site             body = the same object, full record every time (missing field = unset)
 GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt }] }
 GET    /api/pages/<id>       existence/metadata check
-PUT    /api/pages/<id>       body {title, markdown?, html?, collection?} -> create/update a page
+PUT    /api/pages/<id>       body {title, markdown?, html?, collection?, ws?} -> create/update a page
                              (at least one of markdown/html; collection {id, title} marks
-                             folder-share membership and renders the back-home crumb)
-                             or body {title, kind: "collection", items, description?} ->
+                             folder-share membership and renders the back-home crumb;
+                             ws = the synced workspace the page belongs to — the writer must
+                             have access to it, the stamp is sticky once set, and it opens
+                             the page to management by every member of that workspace)
+                             or body {title, kind: "collection", items, description?, ws?} ->
                              create/update a folder share (items = [{id, title, path}], path
                              relative to the shared folder; drives the public table of
                              contents; description shows under the TOC's title)
