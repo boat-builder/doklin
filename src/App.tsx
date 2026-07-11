@@ -3034,6 +3034,11 @@ export default function App() {
      (adopt). Entries shared to a DIFFERENT backend than the workspace's are
      out of scope entirely and stay machine-local. */
   const mirrorBusyRef = useRef(false);
+  // Backfills already queued this session (wsId + "\n" + path). Ops are
+  // idempotent, but the fingerprint strip that rides along must fire once —
+  // a share sync can never carry (an over-cap file, say) would otherwise
+  // strip-and-republish on every status event.
+  const backfilledRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!isMainWindow || syncStatuses.length === 0) return;
     if (mirrorBusyRef.current) return; // the next status event re-runs us
@@ -3090,8 +3095,19 @@ export default function App() {
             if (cur.wsSynced && settled) {
               delete nextShares[e.path];
               sharesChanged = true;
-            } else if (!cur.wsSynced) {
+            } else if (!cur.wsSynced && !backfilledRef.current.has(`${ws.wsId}\n${e.path}`)) {
+              backfilledRef.current.add(`${ws.wsId}\n${e.path}`);
               backfillShares.push(e.path);
+              // A page published before this folder was synced carries no
+              // workspace stamp on the worker yet — only a push applies it.
+              // Strip the fingerprints so reconciliation re-establishes the
+              // page (one push, now stamped) from this device, the one that
+              // can already touch it.
+              if (cur.pushed) {
+                const { pushed: _establish, ...rest } = cur;
+                nextShares[e.path] = rest;
+                sharesChanged = true;
+              }
             }
             continue;
           }
@@ -3161,8 +3177,16 @@ export default function App() {
             if (cur.wsSynced && settled) {
               delete nextCols[c.path];
               colsChanged = true;
-            } else if (!cur.wsSynced) {
+            } else if (!cur.wsSynced && !backfilledRef.current.has(`${ws.wsId}\n${c.path}`)) {
+              backfilledRef.current.add(`${ws.wsId}\n${c.path}`);
               backfillCols.push(c.path);
+              // Same stamping story as file shares above; pushedTitle stays,
+              // so the establishing push skips the redundant OG render.
+              if (cur.pushedHash != null) {
+                const { pushedHash: _establish, ...rest } = cur;
+                nextCols[c.path] = rest;
+                colsChanged = true;
+              }
             }
             continue;
           }
