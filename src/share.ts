@@ -43,6 +43,16 @@ export type ShareEntry = {
   collectionId?: string;
   // Which connection (ShareConnection.id) this page was published to.
   connectionId: string;
+  // For a document in a cloud-synced workspace: who published it (their
+  // device/person name), set only on entries mirrored FROM the workspace
+  // manifest — your own shares don't carry it, so the UI can say
+  // "Shared by Alice" exactly when that's news.
+  sharedBy?: string;
+  // True once this share has been SEEN in its synced workspace's manifest
+  // (App.tsx's mirror sets it, nothing else). Meaningful only under a synced
+  // root: with it, "no longer in the manifest" reads as remotely unshared
+  // (drop the entry); without it, as never-synced (publish it there).
+  wsSynced?: boolean;
 };
 
 // A folder (or whole-workspace) share: one published "collection" page whose
@@ -68,6 +78,9 @@ export type CollectionEntry = {
   // Which connection this collection lives on. Members can only be pages on
   // the same connection.
   connectionId: string;
+  // Mirror bookkeeping for synced workspaces — see ShareEntry.
+  sharedBy?: string;
+  wsSynced?: boolean;
 };
 
 // One member reference inside a pushed manifest: the page's id, its display
@@ -406,13 +419,18 @@ export async function contentHash(text: string): Promise<string> {
 // record is sent every time (the worker doesn't merge), so a rendition that no
 // longer exists locally also disappears remotely — and so does the collection
 // back-reference (the public page's "back to the folder" crumb) when the page
-// is no longer included in a folder share.
+// is no longer included in a folder share. A page published from a synced
+// workspace sends that workspace's id (`ws`): the worker stamps it, and from
+// then on every member of the workspace can keep the page fresh or stop it —
+// not just whoever pushed first. The stamp is sticky worker-side, so pushes
+// that omit it never downgrade a page.
 export async function pushPage(
   config: ShareConfig,
   id: string,
   title: string,
   parts: ShareParts,
   collection?: { id: string; title: string } | null,
+  ws?: string | null,
 ): Promise<void> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
@@ -422,6 +440,7 @@ export async function pushPage(
       markdown: parts.markdown === null ? null : stripComments(parts.markdown),
       html: parts.html,
       ...(collection ? { collection } : {}),
+      ...(ws ? { ws } : {}),
     }),
   });
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
@@ -503,6 +522,7 @@ export async function pushCollection(
   title: string,
   items: CollectionItem[],
   description?: string | null,
+  ws?: string | null,
 ): Promise<void> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
@@ -512,6 +532,7 @@ export async function pushCollection(
       kind: "collection",
       items,
       ...(description ? { description } : {}),
+      ...(ws ? { ws } : {}),
     }),
   });
   // An up-to-date worker only 400s a collection push on malformed items (which

@@ -28,6 +28,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   flowing both ways. Concurrent edits merge; overlapping ones become a
   conflict copy; every revision stays restorable from per-file version
   history. No accounts — invites mint per-device tokens the owner can revoke.
+  Public shares sync too: everyone in the workspace sees what's published
+  (no accidental duplicate pages), and whoever edits a shared document keeps
+  its public page fresh — the original sharer doesn't have to be online.
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin path/to/file.md`. A second launch talks to the running app: a

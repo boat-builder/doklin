@@ -76,8 +76,9 @@ import { marked } from "../vendor/marked.esm.js";
 // Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
 // root page override, 3 = collection descriptions, 4 = cloud sync + member
-// tokens.
-const WORKER_VERSION = 4;
+// tokens, 5 = workspace-stamped pages (any member of the workspace can
+// update/stop them, not just their creator).
+const WORKER_VERSION = 5;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -86,6 +87,7 @@ const WORKER_FEATURES = [
   "collection-description",
   "sync",
   "auth",
+  "workspace-pages",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -342,6 +344,12 @@ async function handleApi(request, env, url, ctx) {
         if (!canTouchPage(auth, existing)) {
           return json({ error: "page belongs to another member" }, 403);
         }
+        const wsReq = requestedPageWs(body, auth);
+        if (wsReq.error) return wsReq.error;
+        // The stamp sticks once set: a push that omits `ws` (an older app, a
+        // device that hasn't learned of the share's workspace yet) must not
+        // strip the collectively-managed bit off the page.
+        const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
         const prior = existing ? await existing.json().catch(() => null) : null;
         const now = new Date().toISOString();
         const record = {
@@ -360,6 +368,7 @@ async function handleApi(request, env, url, ctx) {
             updatedAt: now,
             createdAt: record.createdAt,
             owner: pageOwner(auth, existing),
+            ...(wsStamp ? { ws: wsStamp } : {}),
           },
         });
         return json({
@@ -406,6 +415,10 @@ async function handleApi(request, env, url, ctx) {
       if (!canTouchPage(auth, existing)) {
         return json({ error: "page belongs to another member" }, 403);
       }
+      const wsReq = requestedPageWs(body, auth);
+      if (wsReq.error) return wsReq.error;
+      // Sticky, same as collections above.
+      const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
       const prior = existing ? await existing.json().catch(() => null) : null;
       const now = new Date().toISOString();
       const record = {
@@ -423,6 +436,7 @@ async function handleApi(request, env, url, ctx) {
           updatedAt: now,
           createdAt: record.createdAt,
           owner: pageOwner(auth, existing),
+          ...(wsStamp ? { ws: wsStamp } : {}),
         },
       });
       return json({ id, url: `${url.origin}/${id}`, createdAt: record.createdAt, updatedAt: now });
@@ -472,9 +486,16 @@ async function listPages(env, auth) {
     for (const obj of batch.objects) {
       const m = obj.key.match(/^pages\/([a-z0-9-]+)\.json$/);
       if (!m) continue;
-      // A member's view of the backend is their own pages; the full catalog
-      // (including the owner's and other members') is the owner's to see.
-      if (auth.role !== "owner" && obj.customMetadata?.owner !== auth.tokenId) continue;
+      // A member's view of the backend is their own pages plus every page
+      // stamped with a workspace they're in; the full catalog (including the
+      // owner's and other members') is the owner's to see.
+      if (
+        auth.role !== "owner" &&
+        obj.customMetadata?.owner !== auth.tokenId &&
+        !(pageWorkspaceOf(obj) !== null && canAccessWs(auth, pageWorkspaceOf(obj)))
+      ) {
+        continue;
+      }
       pages.push({
         id: m[1],
         title: obj.customMetadata?.title ?? "Untitled",
@@ -595,11 +616,37 @@ async function authenticate(request, env) {
 function canTouchPage(auth, existing) {
   if (auth.role === "owner") return true;
   if (!existing) return true;
-  return existing.customMetadata?.owner === auth.tokenId;
+  if (existing.customMetadata?.owner === auth.tokenId) return true;
+  // A page published from a synced workspace is stamped with that workspace's
+  // id and managed collectively: the folder's files are everyone's to edit,
+  // so keeping their public pages fresh (or stopping them) is too.
+  return pageWorkspaceOf(existing) !== null && canAccessWs(auth, pageWorkspaceOf(existing));
 }
 
 function pageOwner(auth, existing) {
   return existing?.customMetadata?.owner ?? auth.tokenId;
+}
+
+// The workspace stamp on a stored page, or null. Shape-checked here once so
+// every consumer (touch checks, listings) agrees on what counts as stamped.
+function pageWorkspaceOf(existing) {
+  const ws = existing?.customMetadata?.ws;
+  return typeof ws === "string" && SYNC_ID_RE.test(ws) ? ws : null;
+}
+
+// The `ws` field of a page PUT: absent is fine (not every page belongs to a
+// workspace), but a claimed workspace must be real-shaped and actually
+// granted to the writer — otherwise stamping would be an access-escalation
+// lever (stamp a page with someone else's workspace, its members can now
+// touch it… which is exactly what the writer wants to GRANT, so the check is
+// about the writer having the right to speak for that workspace).
+function requestedPageWs(body, auth) {
+  if (typeof body.ws !== "string" || body.ws.length === 0) return { ws: null };
+  if (!SYNC_ID_RE.test(body.ws)) return { error: json({ error: "invalid ws" }, 400) };
+  if (!canAccessWs(auth, body.ws)) {
+    return { error: json({ error: "no access to that workspace" }, 403) };
+  }
+  return { ws: body.ws };
 }
 
 // Best-effort "device was here" stamp, at most once per six hours per token —
@@ -981,6 +1028,55 @@ function validateManifest(data) {
       const t = data.tombstones[id];
       if (!t || typeof t !== "object" || !validSyncPath(t.path)) {
         return `invalid tombstone for ${id}`;
+      }
+    }
+  }
+  // Share metadata (app-managed; the worker never renders from it): which
+  // files are published as public pages, and the folder shares (collections)
+  // they roll up into. A share may reference a fileId that no longer exists
+  // in `files` — a deleted file's page stays live until explicitly stopped,
+  // so its registry entry outlives it. Validation is deliberately shallow:
+  // version-4 workers stored these sections without looking, so a newer
+  // worker must never be the stricter one about shape it doesn't consume.
+  if (data.shares !== undefined) {
+    if (typeof data.shares !== "object" || Array.isArray(data.shares)) {
+      return "shares must be an object";
+    }
+    const ids = Object.keys(data.shares);
+    if (ids.length > MAX_MANIFEST_FILES) return "too many shares";
+    for (const fid of ids) {
+      if (!SYNC_ID_RE.test(fid)) return `invalid share key: ${fid}`;
+      const s = data.shares[fid];
+      if (!s || typeof s !== "object") return `invalid share for ${fid}`;
+      if (typeof s.id !== "string" || !ID_RE.test(s.id)) return `invalid share id for ${fid}`;
+      if (!validSyncPath(s.path)) return `invalid share path for ${fid}`;
+      if (s.cid !== undefined && (typeof s.cid !== "string" || !ID_RE.test(s.cid))) {
+        return `invalid share cid for ${fid}`;
+      }
+      if (s.title !== undefined && (typeof s.title !== "string" || s.title.length > 300)) {
+        return `invalid share title for ${fid}`;
+      }
+    }
+  }
+  if (data.collections !== undefined) {
+    if (typeof data.collections !== "object" || Array.isArray(data.collections)) {
+      return "collections must be an object";
+    }
+    const ids = Object.keys(data.collections);
+    if (ids.length > 500) return "too many collections";
+    for (const cid of ids) {
+      if (!ID_RE.test(cid)) return `invalid collection key: ${cid}`;
+      const c = data.collections[cid];
+      if (!c || typeof c !== "object") return `invalid collection for ${cid}`;
+      // "" = the workspace root itself is the shared folder.
+      if (typeof c.path !== "string" || (c.path !== "" && !validSyncPath(c.path))) {
+        return `invalid collection path for ${cid}`;
+      }
+      if (typeof c.title !== "string" || c.title.length > 300) {
+        return `invalid collection title for ${cid}`;
+      }
+      if (c.desc !== undefined && (typeof c.desc !== "string" || c.desc.length > 600)) {
+        return `invalid collection desc for ${cid}`;
       }
     }
   }
