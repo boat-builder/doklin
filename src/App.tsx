@@ -3609,8 +3609,6 @@ export default function App() {
     void getCurrentWindow().setTitle(`${active && dirty ? "● " : ""}${name}`);
   }, [tabs, activeId, dirty]);
 
-  if (!ready) return null;
-
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const activeMissing = activeTab?.missing === true;
   const showSidebar = workspaceRoot != null && sidebarOpen;
@@ -3631,6 +3629,11 @@ export default function App() {
   useEffect(() => {
     reportSyncActivity(activeFilePath);
   }, [activeFilePath]);
+
+  // No hooks below this line: a hook after the early return crashes React
+  // ("rendered more hooks than during the previous render") the moment
+  // `ready` flips, unmounting the whole app.
+  if (!ready) return null;
 
   return (
     <div

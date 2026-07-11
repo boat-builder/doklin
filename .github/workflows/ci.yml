@@ -1,0 +1,37 @@
+name: ci
+
+# PR gate for what the release build can't catch until after merge:
+#   - eslint's react-hooks/rules-of-hooks (tsc is blind to hook-order bugs;
+#     one shipped in v0.1.24 and made the app unbootable for four releases)
+#   - the same tsc typecheck `pnpm build` runs, but before merge instead of
+#     failing the release job on main
+# Rust is deliberately not built here — it would dominate the runtime and the
+# release build covers it.
+
+on:
+  pull_request:
+
+jobs:
+  checks:
+    name: Lint + typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (react-hooks rules)
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
