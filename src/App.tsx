@@ -17,10 +17,12 @@ import ShareFolder from "./ShareFolder";
 import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
 import CloudSync from "./CloudSync";
 import ConnectBackend from "./ConnectBackend";
+import Backends from "./Backends";
 import HistoryPanel from "./HistoryPanel";
 import {
   reportSyncActivity,
   syncDevice,
+  syncDisable,
   syncReloadConnections,
   syncSetShares,
   syncStatus,
@@ -575,6 +577,7 @@ export default function App() {
   const [syncDeviceName, setSyncDeviceName] = useState("This Mac");
   const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
   const [connectBackendOpen, setConnectBackendOpen] = useState(false);
+  const [backendsOpen, setBackendsOpen] = useState(false);
   // Absolute path of the doc whose version history is open. null = closed.
   const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
@@ -864,6 +867,13 @@ export default function App() {
 
   const removeConnection = useCallback(
     async (id: string) => {
+      // Stop syncing the backend's workspaces on this Mac FIRST — an engine
+      // whose connection has vanished would otherwise respawn straight into a
+      // dead "connection not found" error state. Local folders stay; the
+      // backend keeps its copies.
+      for (const s of syncStatusesRef.current.filter((s) => s.connectionId === id)) {
+        await syncDisable(s.wsId).catch((e) => console.error("sync disable failed", e));
+      }
       await changeConnections((prev) => ({
         connections: prev.connections.filter((c) => c.id !== id),
         defaultId: prev.defaultId === id ? null : prev.defaultId,
@@ -3854,6 +3864,31 @@ export default function App() {
             setCloudSyncOpen(false);
             setConnectBackendOpen(true);
           }}
+          onOpenBackends={() => {
+            setCloudSyncOpen(false);
+            setBackendsOpen(true);
+          }}
+        />
+      )}
+      {backendsOpen && (
+        <Backends
+          connections={shareConns.connections}
+          defaultId={shareConns.defaultId}
+          statuses={syncStatuses}
+          shareCountFor={shareCountFor}
+          outdatedIds={outdatedWorkers.map((w) => w.conn.id)}
+          onClose={() => setBackendsOpen(false)}
+          onOpenExternal={openExternal}
+          onOpenSetup={() => setShareSetupOpen(true)}
+          onOpenConnectBackend={() => setConnectBackendOpen(true)}
+          onOpenWorkerUpdate={
+            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
+          }
+          onOpenCloudSync={() => setCloudSyncOpen(true)}
+          onOpenSharedPages={() => setSharedPagesOpen(true)}
+          onSaveConnection={saveConnection}
+          onMakeDefault={makeDefaultConnection}
+          onDisconnect={removeConnection}
         />
       )}
       {connectBackendOpen && (
@@ -4081,9 +4116,8 @@ export default function App() {
         canCopyWithComments={activeTab != null}
         onCopyWithComments={() => void copyWithComments()}
         onOpenSharedPages={() => setSharedPagesOpen(true)}
-        onOpenShareSetup={() => setShareSetupOpen(true)}
         onOpenCloudSync={() => setCloudSyncOpen(true)}
-        onOpenConnectBackend={() => setConnectBackendOpen(true)}
+        onOpenBackends={() => setBackendsOpen(true)}
         syncAttention={syncStatuses.some(
           (s) => s.phase === "pending-deletes" || s.phase === "revoked" || s.phase === "error",
         )}
@@ -4306,9 +4340,8 @@ function Settings({
   canCopyWithComments,
   onCopyWithComments,
   onOpenSharedPages,
-  onOpenShareSetup,
   onOpenCloudSync,
-  onOpenConnectBackend,
+  onOpenBackends,
   syncAttention,
   onOpenDictationSetup,
   update,
@@ -4328,9 +4361,10 @@ function Settings({
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
   onOpenSharedPages: () => void;
-  onOpenShareSetup: () => void;
   onOpenCloudSync: () => void;
-  onOpenConnectBackend: () => void;
+  // Opens the Backends dialog — the home for connecting, listing, and
+  // disconnecting backends (it routes to setup / invite flows itself).
+  onOpenBackends: () => void;
   // True when a synced workspace needs a decision (held deletions, revoked
   // access, an error) — dots the Cloud sync item.
   syncAttention: boolean;
@@ -4502,22 +4536,11 @@ function Settings({
             className="settings-option"
             onClick={() => {
               setOpen(false);
-              onOpenConnectBackend();
+              onOpenBackends();
             }}
           >
             <span className="settings-option-check" />
-            <span className="settings-option-label">Connect to a shared backend…</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenShareSetup();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Backend setup…</span>
+            <span className="settings-option-label">Backends…</span>
           </button>
           {workerUpdateCount > 0 && (
             <button

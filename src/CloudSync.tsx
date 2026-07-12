@@ -91,6 +91,7 @@ export default function CloudSync({
   onOpenShareSetup,
   onOpenWorkerUpdate,
   onOpenConnectBackend,
+  onOpenBackends,
 }: {
   workspaceRoot: string | null;
   workspaceName: string | null;
@@ -102,6 +103,9 @@ export default function CloudSync({
   onOpenShareSetup: () => void;
   onOpenWorkerUpdate: (() => void) | null;
   onOpenConnectBackend: () => void;
+  // Routes to the Backends dialog — connections themselves (edit, default,
+  // disconnect) are managed there, not here.
+  onOpenBackends: () => void;
 }) {
   const [connId, setConnId] = useState<string | null>(
     defaultConnectionId ?? connections[0]?.id ?? null,
@@ -643,6 +647,10 @@ export default function CloudSync({
                 from someone else?{" "}
                 <button className="share-all-link" onClick={onOpenConnectBackend}>
                   Connect to their backend
+                </button>
+                {" "}· Connections are managed in{" "}
+                <button className="share-all-link" onClick={onOpenBackends}>
+                  Backends
                 </button>
               </div>
             </>
