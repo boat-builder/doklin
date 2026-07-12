@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { TreeNode } from "./Sidebar";
+import AccessCodes from "./AccessCodes";
+import { LockGlyph } from "./ShareMenu";
 import {
   generateShareId,
   pageExists,
@@ -41,6 +43,8 @@ export default function ShareFolder({
   onStopSharing,
   onToggleMember,
   onUpdateMeta,
+  onProtectedChanged,
+  onOpenWorkerUpdate,
   onClose,
   onOpenExternal,
   onOpenSetup,
@@ -60,6 +64,10 @@ export default function ShareFolder({
   // Commit the public TOC's title + description (App pushes, debounced). An
   // empty title means "back to the folder name".
   onUpdateMeta: (title: string, description: string) => void;
+  // Keeps the registry's `protected` badge in sync with the codes editor.
+  onProtectedChanged: (isProtected: boolean) => void;
+  // Non-null when a guided worker update is available (pre-v7 backends).
+  onOpenWorkerUpdate: (() => void) | null;
   onClose: () => void;
   onOpenExternal: (url: string) => void;
   onOpenSetup: () => void;
@@ -76,6 +84,8 @@ export default function ShareFolder({
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
+  // The access-codes editor, folded out of its summary row.
+  const [accessOpen, setAccessOpen] = useState(false);
 
   const folderName = basename(dirPath);
 
@@ -418,10 +428,40 @@ export default function ShareFolder({
                 aria-label="Public page description"
               />
             </div>
+            {collectionConnection && (
+              <div className="folder-share-access">
+                <div className="share-access-summary">
+                  <span className="share-access-summary-text">
+                    <LockGlyph locked={!!collection.protected} />
+                    <span>
+                      {collection.protected
+                        ? "Access codes required — covers every page below"
+                        : "Anyone with the links"}
+                    </span>
+                  </span>
+                  <button
+                    className="share-btn"
+                    onClick={() => setAccessOpen((o) => !o)}
+                    aria-expanded={accessOpen}
+                  >
+                    {accessOpen ? "Close" : collection.protected ? "Manage" : "Restrict…"}
+                  </button>
+                </div>
+                {accessOpen && (
+                  <AccessCodes
+                    connection={collectionConnection}
+                    pageId={collection.id}
+                    scope="folder"
+                    onChanged={onProtectedChanged}
+                    onOpenWorkerUpdate={onOpenWorkerUpdate}
+                  />
+                )}
+              </div>
+            )}
             <div className="share-note">
-              Anyone with the link sees a table of contents of the pages you
-              include below — and only those. Each included page also has its
-              own link.
+              {collection.protected
+                ? "People with a code see a table of contents of the pages you include below — and only those. Each included page also has its own link, behind the same codes."
+                : "Anyone with the link sees a table of contents of the pages you include below — and only those. Each included page also has its own link."}
             </div>
             <div className="folder-share-list" role="group" aria-label="Included documents">
               {treeError && <div className="share-error">{treeError}</div>}

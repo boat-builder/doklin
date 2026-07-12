@@ -33,6 +33,10 @@ export type ShareEntry = {
   title: string;
   sharedAt: number;
   updatedAt: number;
+  // True when the public page is behind access codes. A local mirror of the
+  // worker's truth for badges/summaries — the codes editor corrects it
+  // whenever it talks to the backend.
+  protected?: boolean;
   // Fingerprints of the content last successfully pushed, per rendition
   // (null = that version didn't exist at push time). Absent on entries from
   // before reconciliation existed — the next pass re-pushes once to establish.
@@ -81,6 +85,8 @@ export type CollectionEntry = {
   // Mirror bookkeeping for synced workspaces — see ShareEntry.
   sharedBy?: string;
   wsSynced?: boolean;
+  // Folder codes cover the TOC and every member page — see ShareEntry.
+  protected?: boolean;
 };
 
 // One member reference inside a pushed manifest: the page's id, its display
@@ -606,6 +612,205 @@ export async function testShareConfig(config: ShareConfig): Promise<void> {
   if (!body || !Array.isArray(body.pages)) {
     throw new Error("That URL answers, but not like a Doklin share worker.");
   }
+}
+
+/* ---------- Visitor access codes ----------
+
+   A share can be protected with NAMED codes ("Acme team" / "sunset-marble-fig"),
+   each individually revocable. The worker stores only SHA-256 hashes; the
+   plaintext exists in exactly two places — the POST that creates it and this
+   Mac's local cache below, so the owner can re-copy a code later. On another
+   device the code shows as created-elsewhere: still revocable, never readable.
+   Folder-share codes cover the TOC and every member page (a member's own
+   codes, if set, take precedence — the worker resolves that). */
+
+export type PageAccessCode = { id: string; label: string; createdAt: string | null };
+export type PageAccess = { protected: boolean; codes: PageAccessCode[] };
+
+// 404 on the access routes is ambiguous: a pre-v7 worker (no such route) or a
+// page that's gone. The caller has a live entry in hand, so we disambiguate
+// with the version probe — "outdated" routes to the guided redeploy, like
+// folder shares and the site config do.
+async function accessErrorFrom(config: ShareConfig, res: Response): Promise<Error> {
+  if (res.status === 404) {
+    const version = await fetchWorkerVersion(config).catch(() => 0);
+    if (version > 0 && version < 7) return new ShareWorkerOutdatedError();
+    return new Error("That page isn't on the backend anymore.");
+  }
+  const body = (await res.json().catch(() => null)) as { error?: string } | null;
+  return new Error(body?.error ?? `access update failed (${res.status})`);
+}
+
+export async function fetchPageAccess(config: ShareConfig, id: string): Promise<PageAccess> {
+  const res = await apiFetch(config, `/api/pages/${id}/access`);
+  if (!res.ok) throw await accessErrorFrom(config, res);
+  const body = (await res.json().catch(() => null)) as {
+    protected?: boolean;
+    codes?: PageAccessCode[];
+  } | null;
+  return {
+    protected: body?.protected === true,
+    codes: Array.isArray(body?.codes) ? body.codes : [],
+  };
+}
+
+export async function addPageAccessCode(
+  config: ShareConfig,
+  id: string,
+  label: string,
+  code: string,
+): Promise<PageAccessCode> {
+  const res = await apiFetch(config, `/api/pages/${id}/access/codes`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label, code }),
+  });
+  if (!res.ok) throw await accessErrorFrom(config, res);
+  return (await res.json()) as PageAccessCode;
+}
+
+export async function removePageAccessCode(
+  config: ShareConfig,
+  id: string,
+  codeId: string,
+): Promise<void> {
+  const res = await apiFetch(config, `/api/pages/${id}/access/codes/${codeId}`, {
+    method: "DELETE",
+  });
+  // 404 = already gone (another device revoked it) — the outcome stands.
+  if (!res.ok && res.status !== 404) throw await accessErrorFrom(config, res);
+}
+
+export async function clearPageAccess(config: ShareConfig, id: string): Promise<void> {
+  const res = await apiFetch(config, `/api/pages/${id}/access`, { method: "DELETE" });
+  if (!res.ok) throw await accessErrorFrom(config, res);
+}
+
+// Mirrors the worker's normalization (trim/lowercase/NFKC) so what the owner
+// sees is byte-for-byte what a visitor's submission hashes to.
+export function normalizeAccessCode(raw: string): string {
+  return raw.trim().toLowerCase().normalize("NFKC");
+}
+
+// A share link that unlocks by itself: the code rides the URL #fragment
+// (never sent to servers or logged — the /join invite links work the same
+// way), and the gate page's script submits it on arrival.
+export function unlockShareUrl(config: ShareConfig | null, id: string, code: string): string {
+  return `${shareUrl(config, id)}#c=${encodeURIComponent(code)}`;
+}
+
+// Three words from a small curated list: easy to say over a call, easy to
+// type on a phone (all lowercase, no homoglyphs), 256³ ≈ 17M combinations
+// behind the worker's per-IP unlock rate limit. Owners can always type their
+// own instead.
+const ACCESS_WORDS = [
+  "acorn", "amber", "anchor", "apple", "arrow", "aspen", "atlas", "autumn",
+  "badge", "bamboo", "basil", "beacon", "berry", "birch", "bison", "blossom",
+  "bolt", "borealis", "breeze", "brick", "bridge", "brook", "bugle", "butter",
+  "cabin", "cactus", "candle", "canoe", "canyon", "carbon", "cedar", "chalk",
+  "cherry", "china", "cinder", "citrus", "clover", "cobalt", "cocoa", "comet",
+  "compass", "copper", "coral", "cotton", "cougar", "cricket", "crystal", "cypress",
+  "daisy", "dawn", "delta", "denim", "desert", "dune", "eagle", "echo",
+  "ember", "engine", "fable", "falcon", "feather", "fern", "fiddle", "field",
+  "fig", "finch", "fjord", "flint", "forest", "fossil", "fox", "frost",
+  "galaxy", "garden", "garnet", "gecko", "ginger", "glacier", "goose", "granite",
+  "grape", "grove", "guitar", "harbor", "harvest", "hazel", "heron", "hickory",
+  "hill", "honey", "horizon", "ibis", "indigo", "iris", "iron", "island",
+  "ivory", "jade", "jasper", "jungle", "juniper", "kayak", "kelp", "kite",
+  "lagoon", "lake", "lantern", "laurel", "lava", "leaf", "lemon", "lilac",
+  "lime", "linen", "lotus", "lunar", "lyric", "magnet", "mango", "maple",
+  "marble", "meadow", "melon", "mesa", "mint", "mirror", "mocha", "monsoon",
+  "moose", "moss", "mountain", "mulberry", "nectar", "nickel", "north", "nutmeg",
+  "oak", "oasis", "ocean", "olive", "onyx", "opal", "orbit", "orchid",
+  "osprey", "otter", "owl", "oxide", "palm", "panda", "paper", "peach",
+  "peak", "pearl", "pebble", "pecan", "penguin", "peony", "pepper", "petal",
+  "pine", "pistachio", "planet", "plum", "pocket", "polar", "pond", "poplar",
+  "poppy", "prairie", "prism", "pumpkin", "quail", "quartz", "quiet", "quill",
+  "rain", "raven", "reef", "ridge", "river", "robin", "rocket", "rose",
+  "rowan", "ruby", "rustic", "saddle", "saffron", "sage", "salmon", "sand",
+  "sapphire", "scarlet", "seal", "sequoia", "shadow", "shore", "sierra", "silver",
+  "sketch", "sky", "slate", "smoke", "snow", "solar", "sonnet", "sparrow",
+  "spice", "spring", "spruce", "stone", "storm", "story", "summit", "sunset",
+  "swan", "tango", "teal", "tempo", "thistle", "thunder", "tiger", "timber",
+  "topaz", "trail", "tulip", "tundra", "turtle", "umber", "valley", "vanilla",
+  "velvet", "verse", "violet", "walnut", "waterfall", "wave", "wheat", "willow",
+  "winter", "wolf", "wren", "yarrow", "yonder", "zephyr", "zebra", "zinnia",
+];
+
+export function generateAccessCode(): string {
+  const pick = () => {
+    // Rejection-sampled like generateShareId, so every word is equally likely.
+    const limit = 256 - (256 % ACCESS_WORDS.length);
+    const bytes = new Uint8Array(8);
+    for (;;) {
+      crypto.getRandomValues(bytes);
+      for (const b of bytes) {
+        if (b < limit) return ACCESS_WORDS[b % ACCESS_WORDS.length];
+      }
+    }
+  };
+  return `${pick()}-${pick()}-${pick()}`;
+}
+
+/* The local plaintext cache: `${connectionId}/${pageId}/${codeId}` -> code.
+   Owner-machine convenience only (re-copying a code later); the backend never
+   returns plaintext. Entries are dropped when their code is revoked, their
+   protection removed, or their share stopped. */
+
+const ACCESS_CODES_STORAGE_KEY = "doklin:access-codes";
+
+function readAccessCodeCache(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ACCESS_CODES_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAccessCodeCache(cache: Record<string, string>) {
+  try {
+    localStorage.setItem(ACCESS_CODES_STORAGE_KEY, JSON.stringify(cache));
+  } catch {
+    // ignore
+  }
+}
+
+const accessCacheKey = (connectionId: string, pageId: string, codeId: string) =>
+  `${connectionId}/${pageId}/${codeId}`;
+
+export function rememberAccessCode(
+  connectionId: string,
+  pageId: string,
+  codeId: string,
+  code: string,
+) {
+  const cache = readAccessCodeCache();
+  cache[accessCacheKey(connectionId, pageId, codeId)] = code;
+  writeAccessCodeCache(cache);
+}
+
+export function cachedAccessCode(
+  connectionId: string,
+  pageId: string,
+  codeId: string,
+): string | null {
+  return readAccessCodeCache()[accessCacheKey(connectionId, pageId, codeId)] ?? null;
+}
+
+// codeId omitted = forget every code cached for the page (protection removed
+// or share stopped).
+export function forgetAccessCodes(connectionId: string, pageId: string, codeId?: string) {
+  const cache = readAccessCodeCache();
+  const prefix = `${connectionId}/${pageId}/`;
+  let changed = false;
+  for (const key of Object.keys(cache)) {
+    if (codeId ? key === prefix + codeId : key.startsWith(prefix)) {
+      delete cache[key];
+      changed = true;
+    }
+  }
+  if (changed) writeAccessCodeCache(cache);
 }
 
 /* ---------- OG image ----------

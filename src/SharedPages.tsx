@@ -362,6 +362,7 @@ export default function SharedPages({
                             >
                               <span className="shared-row-title">
                                 {c.title}
+                                {c.protected && <LockBadge />}
                                 {isHome && <HomeBadge />}
                               </span>
                               <span
@@ -443,6 +444,7 @@ export default function SharedPages({
                           >
                             <span className="shared-row-title">
                               {s.title}
+                              {s.protected && <LockBadge />}
                               {isHome && <HomeBadge />}
                             </span>
                             <span
@@ -517,6 +519,30 @@ export default function SharedPages({
 // Small "this is the domain root" marker next to a row title.
 function HomeBadge() {
   return <span className="shared-home-badge">home</span>;
+}
+
+// "Behind access codes" marker — a tiny padlock, set the moment this Mac
+// protects a share (and corrected whenever the codes editor talks to the
+// backend, so a change made elsewhere catches up on the next visit).
+function LockBadge() {
+  return (
+    <span className="shared-lock-badge" title="Requires an access code" aria-label="Protected">
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <rect x="3" y="11" width="18" height="11" rx="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+      </svg>
+    </span>
+  );
 }
 
 function CloseIcon() {
