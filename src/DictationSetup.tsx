@@ -19,6 +19,7 @@ import {
   type DictationConfig,
 } from "./dictation";
 import { DEFAULT_POLISH_PROMPT, POLISH_REQUEST_TEMPLATE } from "./prompts";
+import Select from "./Select";
 
 type ModelOption = { value: string; label: string; detail: string };
 
@@ -173,22 +174,24 @@ export default function DictationSetup({
               <div className="dictation-row">
                 <label className="dictation-row-label" htmlFor="dictation-language">Spoken language</label>
                 <span className="dictation-select">
-                  <select id="dictation-language" value={language} onChange={(e) => setLanguage(e.target.value)}>
-                    {LANGUAGES.map((l) => (
-                      <option key={l.value} value={l.value}>{l.label}</option>
-                    ))}
-                  </select>
+                  <Select
+                    id="dictation-language"
+                    value={language}
+                    onChange={setLanguage}
+                    options={LANGUAGES}
+                  />
                 </span>
               </div>
 
               <div className="dictation-row">
                 <label className="dictation-row-label" htmlFor="dictation-stt">Speech model</label>
                 <span className="dictation-select">
-                  <select id="dictation-stt" value={sttModel} onChange={(e) => setSttModel(e.target.value)}>
-                    {sttOptions.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </select>
+                  <Select
+                    id="dictation-stt"
+                    value={sttModel}
+                    onChange={setSttModel}
+                    options={sttOptions}
+                  />
                 </span>
                 {sttDetail && <div className="dictation-row-caption">{sttDetail}</div>}
               </div>
@@ -196,11 +199,12 @@ export default function DictationSetup({
               <div className="dictation-row">
                 <label className="dictation-row-label" htmlFor="dictation-llm">Polish model</label>
                 <span className="dictation-select">
-                  <select id="dictation-llm" value={llmModel} onChange={(e) => setLlmModel(e.target.value)}>
-                    {llmOptions.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </select>
+                  <Select
+                    id="dictation-llm"
+                    value={llmModel}
+                    onChange={setLlmModel}
+                    options={llmOptions}
+                  />
                 </span>
                 {llmDetail && <div className="dictation-row-caption">{llmDetail}</div>}
               </div>

@@ -101,6 +101,67 @@ body,
   overflow: hidden;
 }
 
+/* ---------- Scrollbars ----------
+   Every pane owns its own overflow (see above), so scrollbars are themed
+   once, centrally, instead of falling back to OS chrome: transparent track,
+   pill thumb that only appears while the pointer is over the scroller —
+   macOS-overlay behavior, but in the app palette. Two exceptions below:
+   the editor canvas keeps an always-visible thumb (it's the one long-lived
+   scroll position and doubles as a place-in-document landmark), and modal
+   bodies hide the bar entirely. */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  /* The transparent border insets the pill from the pane edge; padding-box
+     clipping keeps the fill out of it. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--app-text) 22%, transparent);
+}
+
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--app-text) 38%, transparent);
+}
+
+/* The document canvas keeps its thumb visible without hover. */
+.editor-wrap::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--app-text) 16%, transparent);
+}
+
+.editor-wrap:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--app-text) 22%, transparent);
+}
+
+.editor-wrap::-webkit-scrollbar-thumb:hover,
+.editor-wrap::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--app-text) 38%, transparent);
+}
+
+/* Modal bodies scroll without showing a bar: their content is short and the
+   card already telegraphs its own bounds. */
+.shared-overlay * {
+  scrollbar-width: none;
+}
+
+.shared-overlay ::-webkit-scrollbar {
+  display: none;
+}
+
 /* ---------- App shell ----------
    When the sidebar is present we lay out with a column for it.
    The drag strip spans full width as the top row. */
@@ -160,11 +221,11 @@ body,
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .tab-strip::-webkit-scrollbar {
-  height: 0;
+  display: none;
 }
 
 .tab {
@@ -801,6 +862,210 @@ body,
 
 .settings-option.is-active .settings-option-label {
   font-weight: 600;
+}
+
+/* ---------- Custom select (Select.tsx) ----------
+   The native <select> trigger was easy to de-chrome, but its dropdown list is
+   OS chrome that ignores the theme palettes. Select.tsx renders the menu
+   itself; these styles keep it in the same visual language as
+   .settings-popover / .sidebar-menu. */
+
+.select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.select-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-trigger-chevron {
+  flex: none;
+  color: var(--app-text-muted);
+}
+
+/* Bordered field look — settings rows (dictation models, sync backend). */
+.select-trigger--field {
+  padding: 4px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-bg);
+  font-size: 12.5px;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.select-trigger--field:hover {
+  background: var(--app-hover);
+}
+
+.select-trigger--field:focus-visible {
+  border-color: var(--crepe-color-selected, var(--app-text-muted));
+}
+
+/* Text-like look — sits inside composed rows (the share-address bar). */
+.select-trigger--inline {
+  padding: 0;
+  gap: 3px;
+  font-size: 13px;
+  border-radius: 4px;
+}
+
+.select-trigger--inline:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 35%, transparent);
+}
+
+/* The menu is portaled to <body> with fixed coordinates (never clipped by a
+   modal, never adds a scrollbar to its host), so it must clear the modal
+   overlay's z-index: 30. */
+.select-menu {
+  position: fixed;
+  z-index: 40;
+  max-width: min(380px, calc(100vw - 16px));
+  max-height: min(320px, calc(100vh - 16px));
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 5px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+.select-menu::-webkit-scrollbar {
+  display: none;
+}
+
+[data-theme="dark"] .select-menu {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .select-menu,
+  [data-theme="system"] .select-menu {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 12px 32px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* Rows mirror .settings-option; "active" tracks pointer/arrow keys since
+   focus stays on the trigger (aria-activedescendant). */
+.select-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 10px 6px 7px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--app-text);
+  cursor: pointer;
+}
+
+.select-option.is-active {
+  background: var(--app-hover);
+}
+
+.select-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  flex: none;
+  margin-top: 3px;
+  color: var(--app-text);
+}
+
+.select-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.select-option[aria-selected="true"] .select-option-label {
+  font-weight: 600;
+}
+
+.select-option-detail {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--app-text-muted);
+}
+
+/* ---------- Custom checkbox ----------
+   Native checkboxes are OS chrome too; restyle them app-wide so every
+   checkbox matches the palette. The dictation toggle keeps its own look —
+   its input is already invisible under the switch track. */
+
+input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  display: inline-grid;
+  place-content: center;
+  border: 1px solid color-mix(in srgb, var(--app-text) 30%, transparent);
+  border-radius: 4px;
+  background: var(--app-surface);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  transform: scale(0);
+  transition: transform 0.1s ease;
+  background: #ffffff;
+  clip-path: polygon(13% 47%, 34% 68%, 87% 12%, 100% 25%, 34% 93%, 0 60%);
+}
+
+input[type="checkbox"]:hover:not(:checked):not(:indeterminate) {
+  border-color: color-mix(in srgb, var(--app-text) 45%, transparent);
+}
+
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+/* Tri-state folder rows (ShareFolder): a dash instead of the check. */
+input[type="checkbox"]:indeterminate::before {
+  transform: scale(1);
+  width: 8px;
+  height: 2px;
+  clip-path: none;
+  border-radius: 1px;
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--app-bg), 0 0 0 3.5px var(--app-accent);
 }
 
 /* ---------- Conflict banner ---------- */
@@ -2649,25 +2914,20 @@ body.tree-dragging.tree-drag-invalid * {
 
 /* ---------- Connections (multi-domain) ---------- */
 
-/* Domain picker inside the share-address row: styled like the static prefix
-   it replaces, native select chrome removed. */
+/* Domain picker inside the share-address row: an inline Select styled like
+   the static prefix it replaces. */
 .share-conn-select {
   flex-shrink: 0;
   max-width: 55%;
-  padding: 0 2px 0 0;
-  border: none;
-  outline: none;
-  background: transparent;
   color: var(--app-text-muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
 }
 
 .share-conn-select:hover {
   color: var(--app-text);
+}
+
+.share-conn-select .select-trigger-chevron {
+  color: inherit;
 }
 
 /* "Use this domain for this workspace" checkbox under the picker. */
@@ -2911,15 +3171,6 @@ body.tree-dragging.tree-drag-invalid * {
   gap: 8px;
   flex: 1;
   min-width: 0;
-  cursor: pointer;
-}
-
-.folder-share-check input[type="checkbox"] {
-  flex: none;
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--app-accent);
   cursor: pointer;
 }
 
@@ -3640,49 +3891,14 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-select {
-  position: relative;
   justify-self: end;
+  min-width: 0;
   max-width: 240px;
 }
 
-.dictation-select select {
-  -webkit-appearance: none;
-  appearance: none;
+.dictation-select .select-trigger {
   max-width: 100%;
-  padding: 4px 24px 4px 9px;
-  border: 1px solid var(--app-border);
-  border-radius: 6px;
-  background: var(--app-bg);
-  color: var(--app-text);
-  font: inherit;
   font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-  outline: none;
-  transition: border-color 0.12s, background 0.12s;
-}
-
-.dictation-select select:hover {
-  background: var(--app-hover);
-}
-
-.dictation-select select:focus-visible {
-  border-color: var(--crepe-color-selected, var(--app-text-muted));
-}
-
-.dictation-select::after {
-  content: "";
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid var(--app-text-muted);
-  border-bottom: 1.5px solid var(--app-text-muted);
-  transform: translateY(-70%) rotate(45deg);
-  pointer-events: none;
 }
 
 /* Inspector toggle switch. */
@@ -3694,10 +3910,16 @@ body.tree-dragging.tree-drag-invalid * {
   flex: none;
 }
 
+/* The input spans the whole track (the app-wide checkbox restyle sizes
+   checkboxes 14px; this one is invisible and only provides the hitbox). */
 .dictation-switch input {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   margin: 0;
+  border: none;
+  border-radius: 999px;
   opacity: 0;
   cursor: pointer;
 }
