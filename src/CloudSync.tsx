@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { ShareConnection } from "./share";
 import { shareHost } from "./share";
+import Select from "./Select";
 import {
   cancelInvite,
   createInvite,
@@ -373,17 +374,13 @@ export default function CloudSync({
               {showConnPicker && (
                 <div className="sync-conn-row">
                   <span className="shared-section-label">Backend</span>
-                  <select
-                    className="share-field-input sync-conn-select"
+                  <Select
+                    className="sync-conn-select"
                     value={connId ?? ""}
-                    onChange={(e) => setConnId(e.target.value)}
-                  >
-                    {connections.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {shareHost(c)}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setConnId}
+                    options={connections.map((c) => ({ value: c.id, label: shareHost(c) }))}
+                    ariaLabel="Backend"
+                  />
                 </div>
               )}
 

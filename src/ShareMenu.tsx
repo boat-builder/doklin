@@ -23,6 +23,7 @@ import {
   type ShareConnection,
   type ShareEntry,
 } from "./share";
+import Select from "./Select";
 
 export default function ShareMenu({
   docTitle,
@@ -589,21 +590,17 @@ export default function ShareMenu({
               </div>
               <div className="share-url-row">
                 {connections.length > 1 ? (
-                  <select
+                  <Select
+                    variant="inline"
                     className="share-conn-select"
                     value={selectedConn?.id ?? ""}
-                    onChange={(e) => {
-                      setSelectedConnId(e.target.value);
+                    onChange={(v) => {
+                      setSelectedConnId(v);
                       setRememberForWorkspace(false);
                     }}
-                    aria-label="Share domain"
-                  >
-                    {connections.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {shareHost(c)}/
-                      </option>
-                    ))}
-                  </select>
+                    options={connections.map((c) => ({ value: c.id, label: `${shareHost(c)}/` }))}
+                    ariaLabel="Share domain"
+                  />
                 ) : (
                   <span className="share-url-prefix">{shareHost(selectedConn)}/</span>
                 )}

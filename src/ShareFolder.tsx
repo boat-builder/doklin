@@ -20,6 +20,7 @@ import {
   type ShareConnection,
   type ShareEntry,
 } from "./share";
+import Select from "./Select";
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const stripDocExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
@@ -290,18 +291,14 @@ export default function ShareFolder({
             </div>
             <div className="share-url-row">
               {connections.length > 1 ? (
-                <select
+                <Select
+                  variant="inline"
                   className="share-conn-select"
                   value={selectedConn?.id ?? ""}
-                  onChange={(e) => setSelectedConnId(e.target.value)}
-                  aria-label="Share domain"
-                >
-                  {connections.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {shareHost(c)}/
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSelectedConnId}
+                  options={connections.map((c) => ({ value: c.id, label: `${shareHost(c)}/` }))}
+                  ariaLabel="Share domain"
+                />
               ) : (
                 <span className="share-url-prefix">{host}/</span>
               )}
