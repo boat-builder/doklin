@@ -8,6 +8,11 @@
 // Public surface (no auth):
 //   GET /              landing page (or the rootPageId page from site.json)
 //   GET /<id>          rendered read-only page for pages/<id>.json in R2.
+//                      A page (or the folder share it belongs to) can carry
+//                      named access codes; then these routes serve a code-entry
+//                      gate instead until the visitor unlocks (a signed,
+//                      HttpOnly cookie per share — see "Visitor access codes"
+//                      below).
 //                      A page can carry a markdown document, an html rendition,
 //                      or both; with both, the html rendition (the polished,
 //                      human-facing one) is what the link opens on, and a pill
@@ -19,6 +24,22 @@
 //   GET /<id>?v=md     the markdown document (when the page also has html)
 //   GET /<id>/raw      the raw html rendition document
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
+//   POST /<id>/unlock  the gate form target: exchanges a correct access code
+//                      for the share's cookie, then 303s back to the page
+//
+// Visitor access codes (version 7): a share can be protected with NAMED codes
+// ("Acme team" / "sunset-marble-fig"), each individually revocable. The codes
+// live INSIDE the page record ({access: {codes: [{id, label, hash}]}}) but are
+// server-managed state like `createdAt`: content pushes carry them forward
+// untouched and can never strip protection — only the /access API below
+// changes them. Codes are stored as SHA-256 hashes; a folder share's codes
+// cover its member pages via their existing `collection` back-reference (a
+// member's own codes, if any, take precedence). Unlocking sets a per-share
+// HttpOnly cookie signed with a random key the worker mints on first use
+// (auth/gate-key.json — no new wrangler secret to configure). Revoking a code
+// kills exactly the sessions minted from it, on their very next request. The
+// gate page itself is deliberately generic: no title, no description, no OG
+// image — nothing about the document leaks before the code.
 //
 // Write API (Authorization: Bearer $SHARE_TOKEN — the desktop app only):
 //   GET    /api/meta             worker version + feature list, so the app can
@@ -40,6 +61,13 @@
 //                                public TOC's title)
 //   PUT    /api/pages/<id>/og    body image/png — set the OG image
 //   DELETE /api/pages/<id>       stop sharing (removes page + OG image)
+//   GET    /api/pages/<id>/access            the share's codes (ids + labels,
+//                                            never hashes)
+//   POST   /api/pages/<id>/access/codes      body {label?, code} — add a named
+//                                            code (the worker stores its hash)
+//   DELETE /api/pages/<id>/access/codes/<cid>  revoke one code (and exactly
+//                                            the visitor sessions it minted)
+//   DELETE /api/pages/<id>/access            remove protection entirely
 //
 // Sync + auth (version 4): the same worker doubles as a private cloud-sync
 // backend. Private workspace files live under sync/<ws>/ and are reachable
@@ -85,8 +113,8 @@ import { marked } from "../vendor/marked.esm.js";
 // root page override, 3 = collection descriptions, 4 = cloud sync + member
 // tokens, 5 = workspace-stamped pages (any member of the workspace can
 // update/stop them, not just their creator), 6 = admin wipe (the app-driven
-// erase step of backend teardown).
-const WORKER_VERSION = 6;
+// erase step of backend teardown), 7 = visitor access codes (the public gate).
+const WORKER_VERSION = 7;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -97,6 +125,7 @@ const WORKER_FEATURES = [
   "auth",
   "workspace-pages",
   "wipe",
+  "page-access",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -116,6 +145,21 @@ const MAX_COLLECTION_DESCRIPTION = 500;
 const TOC_CARDS_MAX = 8;
 const MAX_SITE_TEXT = 120;
 const MAX_SITE_URL = 512;
+
+/* Visitor access codes. Codes are human-typed secrets, so the guardrails do
+   the heavy lifting: normalized before hashing (trim/lowercase/NFKC — phone
+   keyboards auto-capitalize), stored only as SHA-256, compared in constant
+   time, and the unlock endpoint is rate-limited like /api/auth/join. The
+   session cookie is HMAC-signed with a random key minted into the bucket on
+   first use, and bound to the specific code that opened it — revoking a code
+   revokes exactly its sessions. */
+const MAX_ACCESS_CODES = 20;
+const MIN_ACCESS_CODE_LEN = 4;
+const MAX_ACCESS_CODE_LEN = 128;
+const ACCESS_CODE_ID_RE = /^a-[a-f0-9]{8}$/;
+const GATE_KEY_KEY = "auth/gate-key.json";
+const GATE_COOKIE_TTL_S = 30 * 24 * 60 * 60; // unlock lasts 30 days per browser
+const UNLOCK_RATE_LIMIT = 10; // code attempts per IP per minute (per isolate)
 
 /* Sync + auth limits. File paths mirror the app's own workspace caps
    (MAX_TREE_DEPTH / MAX_TREE_ENTRIES in src-tauri), so the worker never
@@ -162,10 +206,16 @@ export default {
       return handleApi(request, env, url, ctx);
     }
 
+    // The gate form's POST target — the one non-GET public route.
+    const unlockMatch = path.match(/^\/([a-z0-9-]{1,64})\/unlock$/);
+    if (unlockMatch && validId(unlockMatch[1])) {
+      return handleUnlock(request, env, unlockMatch[1], url);
+    }
+
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed", { status: 405 });
     }
-    if (path === "/") return serveRoot(env, url);
+    if (path === "/") return serveRoot(request, env, url);
     if (path === "/join") return joinPage(env, url);
     if (path === "/robots.txt") {
       return new Response("User-agent: *\nAllow: /\n", {
@@ -175,14 +225,14 @@ export default {
     if (path === "/favicon.ico") return new Response(null, { status: 204 });
 
     const ogMatch = path.match(/^\/([a-z0-9-]{1,64})\/og\.png$/);
-    if (ogMatch && validId(ogMatch[1])) return serveOgImage(env, ogMatch[1]);
+    if (ogMatch && validId(ogMatch[1])) return serveOgImage(request, env, ogMatch[1]);
 
     const rawMatch = path.match(/^\/([a-z0-9-]{1,64})\/raw$/);
-    if (rawMatch && validId(rawMatch[1])) return serveRawHtml(env, rawMatch[1]);
+    if (rawMatch && validId(rawMatch[1])) return serveRawHtml(request, env, rawMatch[1]);
 
     const pageMatch = path.match(/^\/([a-z0-9-]{1,64})$/);
     if (pageMatch && validId(pageMatch[1])) {
-      return servePage(env, pageMatch[1], url);
+      return servePage(request, env, pageMatch[1], url);
     }
     return notFoundPage();
   },
@@ -324,6 +374,7 @@ async function handleApi(request, env, url, ctx) {
         title: data.title ?? "Untitled",
         createdAt: data.createdAt ?? null,
         updatedAt: data.updatedAt ?? null,
+        protected: sanitizeAccess(data.access) !== null,
       });
     }
     if (request.method === "PUT") {
@@ -375,12 +426,17 @@ async function handleApi(request, env, url, ctx) {
         // strip the collectively-managed bit off the page.
         const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
         const prior = existing ? await existing.json().catch(() => null) : null;
+        // Access codes are server-managed (only the /access API writes them);
+        // a content push — whatever its body claims — carries them forward, so
+        // an autosave can never strip protection off a share.
+        const access = sanitizeAccess(prior?.access);
         const now = new Date().toISOString();
         const record = {
           kind: "collection",
           title,
           ...(description ? { description } : {}),
           items,
+          ...(access ? { access } : {}),
           createdAt: prior?.createdAt ?? now,
           updatedAt: now,
         };
@@ -393,6 +449,7 @@ async function handleApi(request, env, url, ctx) {
             createdAt: record.createdAt,
             owner: pageOwner(auth, existing),
             ...(wsStamp ? { ws: wsStamp } : {}),
+            ...(access ? { protected: "1" } : {}),
           },
         });
         return json({
@@ -441,15 +498,17 @@ async function handleApi(request, env, url, ctx) {
       }
       const wsReq = requestedPageWs(body, auth);
       if (wsReq.error) return wsReq.error;
-      // Sticky, same as collections above.
+      // Sticky, same as collections above — the ws stamp and the access codes.
       const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
       const prior = existing ? await existing.json().catch(() => null) : null;
+      const access = sanitizeAccess(prior?.access);
       const now = new Date().toISOString();
       const record = {
         title,
         ...(markdown !== null ? { markdown } : {}),
         ...(html !== null ? { html } : {}),
         ...(collection ? { collection } : {}),
+        ...(access ? { access } : {}),
         createdAt: prior?.createdAt ?? now,
         updatedAt: now,
       };
@@ -461,6 +520,7 @@ async function handleApi(request, env, url, ctx) {
           createdAt: record.createdAt,
           owner: pageOwner(auth, existing),
           ...(wsStamp ? { ws: wsStamp } : {}),
+          ...(access ? { protected: "1" } : {}),
         },
       });
       return json({ id, url: `${url.origin}/${id}`, createdAt: record.createdAt, updatedAt: now });
@@ -495,7 +555,121 @@ async function handleApi(request, env, url, ctx) {
     return json({ id, og: true });
   }
 
+  if (parts[3] === "access") {
+    return handleAccessApi(request, env, parts, auth, id, pageKey);
+  }
+
   return json({ error: "not found" }, 404);
+}
+
+/* Manage a share's visitor access codes. Same permission rule as updating the
+   page itself (canTouchPage): whoever may keep a page fresh may also decide
+   who gets to read it. The plaintext code exists only in the POST body — the
+   record stores its hash, GET returns ids + labels. Writes are CAS-retried
+   against the page's etag so a concurrent autosave push can't be clobbered by
+   (or clobber) a code change. */
+async function handleAccessApi(request, env, parts, auth, id, pageKey) {
+  // ["api", "pages", id, "access"] (+ ["codes", cid?])
+  const sub = parts[4];
+  const wantsList = parts.length === 4;
+  const wantsAdd = parts.length === 5 && sub === "codes";
+  const wantsRevoke = parts.length === 6 && sub === "codes";
+  if (!wantsList && !wantsAdd && !wantsRevoke) return json({ error: "not found" }, 404);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await env.PAGES.get(pageKey);
+    if (!existing) return json({ error: "not found" }, 404);
+    if (!canTouchPage(auth, existing)) {
+      return json({ error: "page belongs to another member" }, 403);
+    }
+    const record = await existing.json().catch(() => null);
+    if (!record || typeof record !== "object") return json({ error: "not found" }, 404);
+    const access = sanitizeAccess(record.access);
+    const codes = access ? access.codes : [];
+
+    if (wantsList) {
+      if (request.method === "GET") return json(accessSummary(id, codes));
+      if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
+    }
+
+    let nextCodes;
+    let result;
+    if (wantsAdd) {
+      if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "invalid json body" }, 400);
+      }
+      const code = normalizeAccessCode(body.code);
+      if (code.length < MIN_ACCESS_CODE_LEN || code.length > MAX_ACCESS_CODE_LEN) {
+        return json(
+          { error: `code must be ${MIN_ACCESS_CODE_LEN}–${MAX_ACCESS_CODE_LEN} characters` },
+          400,
+        );
+      }
+      if (codes.length >= MAX_ACCESS_CODES) return json({ error: "too many codes" }, 409);
+      const hash = await sha256Hex(code);
+      // Two identical codes would make revocation misleading (removing one
+      // label still leaves the same string working under another).
+      if (codes.some((c) => c.hash === hash)) {
+        return json({ error: "that code is already set on this page" }, 409);
+      }
+      const entry = {
+        id: `a-${randomHex(4)}`,
+        label: validName(body.label, "Access code"),
+        hash,
+        createdAt: new Date().toISOString(),
+      };
+      nextCodes = [...codes, entry];
+      result = { id: entry.id, label: entry.label, createdAt: entry.createdAt };
+    } else if (wantsRevoke) {
+      if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
+      if (!ACCESS_CODE_ID_RE.test(parts[5]) || !codes.some((c) => c.id === parts[5])) {
+        return json({ error: "no such code" }, 404);
+      }
+      nextCodes = codes.filter((c) => c.id !== parts[5]);
+      result = { id: parts[5], deleted: true };
+    } else {
+      // wantsList + DELETE: drop protection entirely.
+      if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
+      nextCodes = [];
+      result = { id, deleted: true };
+    }
+
+    // Rewrite the record with only the access section changed. updatedAt stays
+    // put — a code change is not a content change, and the listing sorts by it.
+    const next = { ...record };
+    if (nextCodes.length > 0) {
+      next.access = { codes: nextCodes, updatedAt: new Date().toISOString() };
+    } else {
+      delete next.access;
+    }
+    const meta = { ...(existing.customMetadata ?? {}) };
+    delete meta.protected;
+    if (nextCodes.length > 0) meta.protected = "1";
+    const put = await env.PAGES.put(pageKey, JSON.stringify(next), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: meta,
+      onlyIf: { etagMatches: existing.etag },
+    });
+    if (put) return json(result);
+    // Lost a race with a content push — re-read and re-apply.
+  }
+  return json({ error: "conflict, retry" }, 409);
+}
+
+function accessSummary(id, codes) {
+  return {
+    id,
+    protected: codes.length > 0,
+    codes: codes.map((c) => ({
+      id: c.id,
+      label: c.label ?? "",
+      createdAt: c.createdAt ?? null,
+    })),
+  };
 }
 
 async function listPages(env, auth) {
@@ -525,6 +699,7 @@ async function listPages(env, auth) {
         title: obj.customMetadata?.title ?? "Untitled",
         createdAt: obj.customMetadata?.createdAt ?? null,
         updatedAt: obj.customMetadata?.updatedAt ?? obj.uploaded?.toISOString?.() ?? null,
+        protected: obj.customMetadata?.protected === "1",
       });
     }
     cursor = batch.truncated ? batch.cursor : undefined;
@@ -868,24 +1043,28 @@ async function findCredentialKeyById(env, prefix, id) {
   return null;
 }
 
-/* Joins are the only unauthenticated writes on the worker, so they get a
-   (per-isolate, best-effort) rate limit — belt and suspenders on top of the
-   256-bit code. */
+/* Joins and gate unlocks are the only unauthenticated writes on the worker,
+   so each gets a (per-isolate, best-effort) per-IP rate limit — belt and
+   suspenders on top of the 256-bit invite code, and the actual line of
+   defense behind human-sized access codes. */
 const joinAttempts = new Map(); // ip -> [timestamps]
+const unlockAttempts = new Map(); // ip -> [timestamps]
 
-function joinRateLimited(request) {
+function rateLimited(attempts, request, limit) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
   const now = Date.now();
-  const recent = (joinAttempts.get(ip) || []).filter((t) => now - t < 60_000);
+  const recent = (attempts.get(ip) || []).filter((t) => now - t < 60_000);
   recent.push(now);
-  joinAttempts.set(ip, recent);
-  if (joinAttempts.size > 10_000) joinAttempts.clear(); // unbounded-growth guard
-  return recent.length > JOIN_RATE_LIMIT;
+  attempts.set(ip, recent);
+  if (attempts.size > 10_000) attempts.clear(); // unbounded-growth guard
+  return recent.length > limit;
 }
 
 async function handleJoin(request, env, url) {
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
-  if (joinRateLimited(request)) return json({ error: "too many attempts, retry later" }, 429);
+  if (rateLimited(joinAttempts, request, JOIN_RATE_LIMIT)) {
+    return json({ error: "too many attempts, retry later" }, 429);
+  }
 
   let body;
   try {
@@ -1449,6 +1628,333 @@ async function deleteWorkspace(env, ws) {
   return json({ id: ws, deleted: true, purged: deleted, remaining: true });
 }
 
+/* ---------- Visitor access codes: the public gate ----------
+
+   A protected share's public routes serve a code-entry gate until the browser
+   holds that share's cookie. The cookie is a compact signed claim —
+   v1.<codeId>.<exp>.<hmac> — verified statelessly against a random signing
+   key minted into the bucket on first use, PLUS a liveness check that the
+   code it names still exists on the share. So sessions cost no storage, yet
+   revoking a code (deleting its entry) kills exactly the sessions it minted,
+   on their next request. Rotating nothing else: other codes' visitors stay
+   signed in.
+
+   The submitted code is normalized (trim, lowercase, NFKC) before hashing —
+   these are human-relayed secrets, and a phone keyboard's auto-capitalize
+   must not lock anyone out. The app normalizes identically when creating. */
+
+function normalizeAccessCode(raw) {
+  if (typeof raw !== "string") return "";
+  return raw.trim().toLowerCase().normalize("NFKC");
+}
+
+// The access section of a stored page record, shape-checked — or null when
+// absent/malformed/empty. Every consumer (gate checks, sticky merges, the
+// /access API) goes through this, so a corrupt section reads as "unprotected"
+// everywhere at once rather than crashing renders.
+function sanitizeAccess(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.codes)) return null;
+  const codes = [];
+  for (const c of raw.codes) {
+    if (!c || typeof c !== "object") continue;
+    if (typeof c.id !== "string" || !ACCESS_CODE_ID_RE.test(c.id)) continue;
+    if (typeof c.hash !== "string" || !/^[a-f0-9]{64}$/.test(c.hash)) continue;
+    if (codes.some((seen) => seen.id === c.id)) continue;
+    codes.push({
+      id: c.id,
+      label: typeof c.label === "string" ? c.label.slice(0, MAX_NAME_LEN) : "",
+      hash: c.hash,
+      ...(typeof c.createdAt === "string" ? { createdAt: c.createdAt } : {}),
+    });
+    if (codes.length >= MAX_ACCESS_CODES) break;
+  }
+  if (codes.length === 0) return null;
+  return {
+    codes,
+    ...(typeof raw.updatedAt === "string" ? { updatedAt: raw.updatedAt } : {}),
+  };
+}
+
+// The signing key for gate cookies: random, minted lazily into the bucket —
+// no wrangler secret to configure, dashboard-only deployments included. Two
+// isolates racing the first unlock both write, then read back the winner, so
+// they converge; the one visitor whose cookie was signed by the losing key
+// just re-enters the code once.
+async function gateSigningKey(env) {
+  let obj = await env.PAGES.get(GATE_KEY_KEY);
+  if (!obj) {
+    await env.PAGES.put(
+      GATE_KEY_KEY,
+      JSON.stringify({ key: randomHex(32), createdAt: new Date().toISOString() }),
+      { httpMetadata: { contentType: "application/json" } },
+    );
+    obj = await env.PAGES.get(GATE_KEY_KEY);
+  }
+  const rec = obj ? await obj.json().catch(() => null) : null;
+  return typeof rec?.key === "string" && rec.key.length >= 32 ? rec.key : null;
+}
+
+async function gateSig(key, gateId, codeId, exp) {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", k, enc.encode(`${gateId}.${codeId}.${exp}`));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const gateCookieName = (gateId) => `dk_a_${gateId}`;
+
+// Which access config guards this page, if any: its own codes win; otherwise
+// a folder-share member inherits the folder's codes through the `collection`
+// back-reference it already carries (so one unlock opens the whole folder —
+// the cookie is scoped to the collection id both sides agree on).
+async function accessGateFor(env, id, data) {
+  const own = sanitizeAccess(data.access);
+  if (own) return { gateId: id, access: own };
+  const cid =
+    data.collection && typeof data.collection.id === "string" && validId(data.collection.id)
+      ? data.collection.id
+      : null;
+  if (!cid) return null;
+  const colObj = await env.PAGES.get(`pages/${cid}.json`);
+  const col = colObj ? await colObj.json().catch(() => null) : null;
+  const colAccess = col ? sanitizeAccess(col.access) : null;
+  return colAccess ? { gateId: cid, access: colAccess } : null;
+}
+
+// Does the request carry a live cookie for this gate? Stateless HMAC check
+// plus "the code that minted it still exists" — revocation needs no session
+// registry.
+async function gateCookieValid(request, env, gate) {
+  const header = request.headers.get("cookie") || "";
+  const wanted = `${gateCookieName(gate.gateId)}=`;
+  let value = null;
+  for (const part of header.split(/;\s*/)) {
+    if (part.startsWith(wanted)) {
+      value = part.slice(wanted.length);
+      break;
+    }
+  }
+  if (!value) return false;
+  const m = value.match(/^v1\.(a-[a-f0-9]{8})\.(\d{1,12})\.([a-f0-9]{64})$/);
+  if (!m) return false;
+  const [, codeId, expRaw, sig] = m;
+  const exp = Number(expRaw);
+  if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return false;
+  if (!gate.access.codes.some((c) => c.id === codeId)) return false;
+  const key = await gateSigningKey(env);
+  if (!key) return false;
+  return timingEq(sig, await gateSig(key, gate.gateId, codeId, exp));
+}
+
+// Where the gate sends the visitor after a correct code. Site-relative page
+// paths only — this rides a hidden form field, so it must never become an
+// open redirect.
+function safeNext(raw, gateId) {
+  if (typeof raw === "string" && /^\/(?:[a-z0-9-]{1,64})?(?:\?v=md)?$/.test(raw)) return raw;
+  return `/${gateId}`;
+}
+
+// POST /<gateId>/unlock — the gate form's target. Verifies the code against
+// the share's stored hashes and answers with the cookie + a 303 back to
+// `next`. GETs redirect to the page (someone typed the URL); wrong codes
+// re-render the gate with an error, rate-limited per IP like /api/auth/join.
+async function handleUnlock(request, env, id, url) {
+  if (request.method === "GET" || request.method === "HEAD") {
+    return new Response(null, { status: 303, headers: { location: `/${id}` } });
+  }
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const obj = await env.PAGES.get(`pages/${id}.json`);
+  if (!obj) return notFoundPage();
+  const data = await obj.json().catch(() => null);
+  const access = data ? sanitizeAccess(data.access) : null;
+
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return gatePage(id, `/${id}`, url, { status: 400, error: "That didn't work — try again." });
+  }
+  const next = safeNext(form.get("next"), id);
+  // Not protected (anymore): nothing to unlock, just go where they were headed.
+  if (!access) {
+    return new Response(null, { status: 303, headers: { location: next } });
+  }
+
+  if (rateLimited(unlockAttempts, request, UNLOCK_RATE_LIMIT)) {
+    return gatePage(id, next, url, {
+      status: 429,
+      error: "Too many attempts — wait a minute, then try again.",
+    });
+  }
+
+  const submitted = normalizeAccessCode(form.get("code"));
+  if (!submitted) {
+    return gatePage(id, next, url, { status: 401, error: "Enter an access code." });
+  }
+  const hash = await sha256Hex(submitted);
+  let matched = null;
+  for (const c of access.codes) {
+    if (timingEq(hash, c.hash)) matched = c;
+  }
+  if (!matched) {
+    return gatePage(id, next, url, {
+      status: 401,
+      error: "That code didn't match. Codes aren't case-sensitive — check for typos and try again.",
+    });
+  }
+
+  const key = await gateSigningKey(env);
+  if (!key) {
+    return gatePage(id, next, url, { status: 500, error: "Something went wrong — try again." });
+  }
+  const exp = Math.floor(Date.now() / 1000) + GATE_COOKIE_TTL_S;
+  const sig = await gateSig(key, id, matched.id, exp);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: next,
+      "set-cookie": `${gateCookieName(id)}=v1.${matched.id}.${exp}.${sig}; Path=/; Max-Age=${GATE_COOKIE_TTL_S}; HttpOnly; Secure; SameSite=Lax`,
+    },
+  });
+}
+
+// The code-entry page. Deliberately generic — no document title, no derived
+// description, no OG image reference: nothing about the content leaks until
+// the code is right. Plain form, works without JS; with JS, a #c=<code>
+// fragment (the app's "copy link + code" format — fragments never reach
+// servers or logs, same trick as /join) fills and submits it automatically.
+function gatePage(gateId, next, url, { status = 401, error = null } = {}) {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Protected page</title>
+<meta name="description" content="This page requires an access code.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${escapeHtml(url.hostname)}">
+<meta property="og:title" content="Protected page">
+<meta property="og:description" content="This page requires an access code.">
+<meta name="twitter:card" content="summary">
+<style>${PAGE_CSS}${GATE_CSS}</style>
+</head>
+<body>
+<main class="doc gate">
+<div class="gate-card">
+<div class="gate-lock" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+<h1 class="gate-title">This page is protected</h1>
+<p class="gate-lead muted">Enter the access code you were given to view it.</p>
+<form class="gate-form" id="gate-form" method="post" action="/${gateId}/unlock">
+<input type="hidden" name="next" value="${escapeHtml(next)}">
+<input class="gate-input" id="gate-code" name="code" placeholder="access code"
+  autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+  autofocus required aria-label="Access code">
+<button class="gate-btn" type="submit">Unlock</button>
+</form>
+${error ? `<p class="gate-error" role="alert">${escapeHtml(error)}</p>` : ""}
+</div>
+</main>
+<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
+<script>
+(function () {
+  var m = location.hash.match(/^#c=(.+)$/);
+  if (!m) return;
+  var code = "";
+  try { code = decodeURIComponent(m[1]); } catch (e) { return; }
+  if (!code) return;
+  var input = document.getElementById("gate-code");
+  input.value = code;
+  // Scrub the fragment before submitting so the code doesn't linger in the
+  // address bar (or get carried across the redirect).
+  history.replaceState(null, "", location.pathname + location.search);
+  document.getElementById("gate-form").submit();
+})();
+</script>
+</body>
+</html>`;
+  return new Response(html, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+const GATE_CSS = `
+.gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gate-card {
+  width: 100%;
+  max-width: 22rem;
+  text-align: center;
+  padding-bottom: 8vh;
+}
+.gate-lock {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+}
+.gate-lock svg { width: 20px; height: 20px; }
+.gate-title { font-size: 20px; margin: 18px 0 0; }
+.gate-lead { font-size: 14px; margin: 6px 0 0; }
+.gate-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 22px;
+}
+.gate-input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.gate-input:focus { border-color: var(--link); }
+.gate-btn {
+  flex: none;
+  padding: 9px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gate-btn:hover { opacity: 0.85; }
+.gate-error {
+  margin: 14px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #d5484f;
+}
+`;
+
 /* ---------- Public pages ---------- */
 
 // Mirror of the app's clean-copy transform (criticMarkup.ts): drop CriticMarkup
@@ -1514,7 +2020,7 @@ async function readSiteConfig(env) {
 // custom home page — it can even be a collection's table of contents), the
 // landing page otherwise. A dangling rootPageId (page unshared since) falls
 // back to the landing page rather than 404ing the domain root.
-async function serveRoot(env, url) {
+async function serveRoot(request, env, url) {
   const site = await readSiteConfig(env);
   if (typeof site.rootPageId === "string" && validId(site.rootPageId)) {
     const obj = await env.PAGES.get(`pages/${site.rootPageId}.json`);
@@ -1522,7 +2028,7 @@ async function serveRoot(env, url) {
       try {
         // `await`, not a bare return: a rejection inside the render must land
         // in this catch so the domain root degrades instead of 500ing.
-        return await renderPage(env, site.rootPageId, await obj.json(), url);
+        return await renderPage(request, env, site.rootPageId, await obj.json(), url);
       } catch {
         // corrupt page object; fall through to the landing page
       }
@@ -1531,7 +2037,7 @@ async function serveRoot(env, url) {
   return landingPage(url, site);
 }
 
-async function servePage(env, id, url) {
+async function servePage(request, env, id, url) {
   const obj = await env.PAGES.get(`pages/${id}.json`);
   if (!obj) return notFoundPage();
   let data;
@@ -1540,11 +2046,22 @@ async function servePage(env, id, url) {
   } catch {
     return notFoundPage();
   }
-  return renderPage(env, id, data, url);
+  return renderPage(request, env, id, data, url);
 }
 
-async function renderPage(env, id, data, url) {
-  if (data.kind === "collection") return serveCollection(env, id, data, url);
+async function renderPage(request, env, id, data, url) {
+  // A protected share (or a member of a protected folder) shows the gate
+  // until this browser has unlocked it. The gate keeps the visitor's view
+  // (?v=md) through the unlock, and at the domain root sends them back to /.
+  const gate = await accessGateFor(env, id, data);
+  if (gate && !(await gateCookieValid(request, env, gate))) {
+    const next = `${url.pathname}${url.searchParams.get("v") === "md" ? "?v=md" : ""}`;
+    return gatePage(gate.gateId, safeNext(next, gate.gateId), url);
+  }
+  // Unlocked views of protected content stay out of shared caches.
+  const cacheControl = gate ? "no-store" : "no-cache";
+
+  if (data.kind === "collection") return serveCollection(env, id, data, url, cacheControl);
 
   const hasMd = typeof data.markdown === "string";
   const hasHtml = typeof data.html === "string" && data.html.length > 0;
@@ -1610,7 +2127,7 @@ ${pill("html")}
 </body>
 </html>`;
     return new Response(html, {
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": cacheControl },
     });
   }
 
@@ -1634,7 +2151,7 @@ ${body}
   return new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-cache",
+      "cache-control": cacheControl,
     },
   });
 }
@@ -1727,7 +2244,7 @@ function renderTocCards(items) {
 // The folder share's home page: title, an optional owner-written description,
 // page count, and the table of contents — cards for a handful of pages, the
 // collapsible tree for more (see TOC_CARDS_MAX).
-async function serveCollection(env, id, data, url) {
+async function serveCollection(env, id, data, url, cacheControl = "no-cache") {
   const title = data.title || "Untitled";
   const description = typeof data.description === "string" ? data.description.trim() : "";
   const items = Array.isArray(data.items)
@@ -1809,14 +2326,18 @@ ${toc}
   return new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-cache",
+      "cache-control": cacheControl,
     },
   });
 }
 
 // The html rendition, verbatim. Loaded by the ?v=html page's sandboxed iframe;
-// direct hits are fine too — the content is public either way.
-async function serveRawHtml(env, id) {
+// direct hits are fine too — the content is as public as the page. On a
+// protected share the gate answers instead, pointing at the framed page
+// (never at /raw itself: the sandbox blocks form posts, so a gate rendered
+// inside the iframe would be a dead end — the parent's cookie covers the
+// iframe's request anyway, both being same-site).
+async function serveRawHtml(request, env, id) {
   const obj = await env.PAGES.get(`pages/${id}.json`);
   if (!obj) return new Response("not found", { status: 404 });
   let data;
@@ -1825,19 +2346,36 @@ async function serveRawHtml(env, id) {
   } catch {
     return new Response("not found", { status: 404 });
   }
+  const gate = await accessGateFor(env, id, data);
+  if (gate && !(await gateCookieValid(request, env, gate))) {
+    return gatePage(gate.gateId, `/${id}`, new URL(request.url));
+  }
   if (typeof data.html !== "string" || data.html.length === 0) {
     return new Response("not found", { status: 404 });
   }
   return new Response(data.html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-cache",
+      "cache-control": gate ? "no-store" : "no-cache",
       "x-robots-tag": "noindex",
     },
   });
 }
 
-async function serveOgImage(env, id) {
+// The OG image is derived content (title + host), so it hides behind the same
+// gate — link-preview bots get nothing from a protected share. That costs a
+// page-record read before the image; unprotected pages pay it too, but R2
+// reads are the cheap half of the free tier and OG fetches are rare
+// (unfurl bots and first paints, not every view).
+async function serveOgImage(request, env, id) {
+  const pageObj = await env.PAGES.get(`pages/${id}.json`);
+  const data = pageObj ? await pageObj.json().catch(() => null) : null;
+  if (data) {
+    const gate = await accessGateFor(env, id, data);
+    if (gate && !(await gateCookieValid(request, env, gate))) {
+      return new Response("unauthorized", { status: 401, headers: { "cache-control": "no-store" } });
+    }
+  }
   const obj = await env.PAGES.get(`pages/${id}.png`);
   if (!obj) return new Response("not found", { status: 404 });
   return new Response(obj.body, {
