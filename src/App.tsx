@@ -24,6 +24,7 @@ import {
   syncReloadConnections,
   syncSetShares,
   syncStatus,
+  whoami,
   type SyncPresenceEvent,
   type SyncWorkspaceStatus,
 } from "./sync";
@@ -550,6 +551,16 @@ export default function App() {
   // credentials), so the dialog guides the redeploy instead. A failed probe
   // stays unknown: offline must not read as outdated.
   const [workerVersions, setWorkerVersions] = useState<Record<string, number>>({});
+  // This device's role on each backend (owner vs member), from /api/auth/whoami.
+  // Only an owner can redeploy — a member holds no Cloudflare credentials — so
+  // the update dialog shows redeploy steps to owners and a "nudge the owner"
+  // note to members. An unresolved probe (offline / revoked) leaves the entry
+  // absent, which the dialog reads as owner: better to show the steps to an
+  // actual owner than hide them.
+  const [workerRoles, setWorkerRoles] = useState<Record<string, "owner" | "member">>({});
+  // Connections whose role has been probed already (whether it resolved or is
+  // in flight), so the outdated-role effect fires whoami at most once each.
+  const roleProbedRef = useRef<Set<string>>(new Set());
   // The outdated list captured when the dialog opens, so a card can flip to
   // "Updated ✓" instead of vanishing the moment its recheck succeeds.
   const [workerUpdateList, setWorkerUpdateList] = useState<OutdatedWorker[] | null>(null);
@@ -599,12 +610,33 @@ export default function App() {
         ? shareConns.connections.flatMap((conn) => {
             const version = workerVersions[conn.id];
             return typeof version === "number" && version < BUNDLED_WORKER_VERSION
-              ? [{ conn, version }]
+              ? [{ conn, version, role: workerRoles[conn.id] }]
               : [];
           })
         : [],
-    [shareConns.connections, workerVersions],
+    [shareConns.connections, workerVersions, workerRoles],
   );
+
+  // Role (owner vs member) is only consumed by the update dialog, which only
+  // opens for an outdated worker — so resolve it lazily, per outdated backend,
+  // once each. In the steady state (every worker current) this makes no calls
+  // at all; whoami costs one worker request (plus one R2 read for a member,
+  // none for the owner), so even outdated it's negligible against the free
+  // tier. The ref dedupes so a re-render doesn't re-probe; a failed probe is
+  // dropped from it, letting a later outdated-set change retry.
+  useEffect(() => {
+    for (const { conn } of outdatedWorkers) {
+      if (roleProbedRef.current.has(conn.id)) continue;
+      roleProbedRef.current.add(conn.id);
+      void whoami(conn)
+        .then((me) =>
+          setWorkerRoles((prev) =>
+            prev[conn.id] === me.role ? prev : { ...prev, [conn.id]: me.role },
+          ),
+        )
+        .catch(() => roleProbedRef.current.delete(conn.id));
+    }
+  }, [outdatedWorkers]);
 
   // The ref is the writable source of truth and updates synchronously (a React
   // state updater only runs at render time — too late for code that reads the

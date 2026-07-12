@@ -2995,6 +2995,19 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-y: auto;
 }
 
+/* Dialog-level route tabs (browser / agent / terminal), like the setup guide's
+   rail but laid out horizontally to sit above the connection cards. */
+.worker-update-modes {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.worker-update-modes .setup-mode-btn {
+  flex: 1;
+  min-width: 0;
+}
+
 /* One card per outdated connection. */
 .worker-update-conn {
   margin-top: 10px;
