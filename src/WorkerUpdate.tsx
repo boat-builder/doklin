@@ -3,13 +3,18 @@
 // /api/meta on launch). The app can't push the update itself — by design it
 // holds only the worker's share token, never Cloudflare account credentials,
 // and two of the three setup paths leave no wrangler state on this Mac — so
-// this dialog makes the redeploy as close to one click as honesty allows: the
-// primary path is a single paste in the Cloudflare dashboard's code editor
-// (which preserves the bucket binding, the SHARE_TOKEN secret, and any custom
-// domain, swapping only the code), the fallback hands a self-contained prompt
-// to an AI agent — which just downloads the release's one-file worker bundle
-// and redeploys under the same name — and "Check again" verifies the live
-// version from in here.
+// this dialog makes the redeploy as close to one click as honesty allows. It
+// offers the same three routes as first-time setup, one per tab: paste the
+// code into the Cloudflare dashboard editor (fastest, preserves the bucket
+// binding, the SHARE_TOKEN secret, and any custom domain — code-only), hand a
+// self-contained prompt to an AI agent, or run the wrangler commands yourself.
+// None of them carry a secret: the SHARE_TOKEN survives a same-name redeploy
+// untouched. "Check again" verifies the live version from in here.
+//
+// Only the backend's OWNER can redeploy — a member joined via invite and holds
+// no Cloudflare credentials — so a member's card drops the instructions for a
+// note asking them to nudge whoever runs it; they can still "Check again" to
+// see when the owner has updated it.
 
 import { useEffect, useState } from "react";
 import workerCode from "virtual:share-worker-code";
@@ -17,7 +22,23 @@ import { shareHost, WORKER_BUNDLE_URL, type ShareConnection } from "./share";
 
 const CLOUDFLARE_WORKERS_URL = "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
 
-export type OutdatedWorker = { conn: ShareConnection; version: number };
+export type OutdatedWorker = {
+  conn: ShareConnection;
+  version: number;
+  // This device's role on the backend (from /api/auth/whoami). Only an owner
+  // can redeploy; a member sees the "nudge the owner" note instead. Undefined
+  // while the probe is in flight or after it failed — read as owner, so an
+  // actual owner is never denied the steps over a transient error.
+  role?: "owner" | "member";
+};
+
+type UpdateMode = "browser" | "agent" | "terminal";
+
+const MODES: { key: UpdateMode; name: string; sub: string }[] = [
+  { key: "browser", name: "In the browser", sub: "Paste in the dashboard — ~1 min" },
+  { key: "agent", name: "With an AI agent", sub: "Hand it to Claude Code" },
+  { key: "terminal", name: "In the terminal", sub: "Run wrangler yourself" },
+];
 
 // Recover the deployment's resource names from its endpoint. A workers.dev
 // endpoint literally carries the worker name (first hostname label); a custom
@@ -77,6 +98,35 @@ bucket_name = "${bucket}"
 Do not commit wrangler.toml anywhere, and do not create or modify any other Cloudflare resources.`;
 }
 
+// The terminal (wrangler) path: copy-paste commands that redeploy the same-name
+// worker with the latest code. Same non-secret property as the agent prompt —
+// SHARE_TOKEN, the bucket binding, and the domain all survive a same-name
+// redeploy — so nothing here needs the token. The wrangler.toml write mirrors
+// the deployment's names (see deploymentNames); the terminal note flags the
+// guess when the endpoint isn't a workers.dev address.
+function buildUpdateCommands(conn: ShareConnection): string[] {
+  const { worker, bucket, domain } = deploymentNames(conn);
+  const routesLines = domain
+    ? `workers_dev = false
+routes = [{ pattern = "${domain}", custom_domain = true }]`
+    : `workers_dev = true`;
+  return [
+    "mkdir doklin-worker-update && cd doklin-worker-update",
+    `curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-worker.js`,
+    "npx wrangler@4 whoami",
+    `cat > wrangler.toml << 'EOF'
+name = "${worker}"
+main = "doklin-worker.js"
+compatibility_date = "2025-05-05"
+${routesLines}
+[[r2_buckets]]
+binding = "PAGES"
+bucket_name = "${bucket}"
+EOF`,
+    "npx wrangler@4 deploy",
+  ];
+}
+
 // Per-connection check state: idle until pressed; "current" flips the card to
 // its done face (App has already cleared the badge by then).
 type CheckState =
@@ -103,6 +153,10 @@ export default function WorkerUpdate({
 }) {
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   const [copied, setCopied] = useState<string | null>(null);
+  // Dialog-level tab, mirroring the setup guide. Defaults to the dashboard
+  // paste — the fastest path that works for every deployment. Only shown when
+  // at least one card can act on it (an owner's).
+  const [mode, setMode] = useState<UpdateMode>("browser");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -139,6 +193,11 @@ export default function WorkerUpdate({
     }
   };
 
+  // A member (role explicitly "member") can't redeploy; anything else — owner,
+  // or an unresolved probe — gets the instructions. The tab strip only makes
+  // sense when at least one such card is present.
+  const hasOwnerCard = outdated.some((w) => w.role !== "member");
+
   return (
     <div
       className="shared-overlay"
@@ -163,13 +222,30 @@ export default function WorkerUpdate({
             This app ships a newer version of the backend worker than{" "}
             {outdated.length === 1 ? "your deployment runs" : "some of your deployments run"}.
             Everything keeps working meanwhile — the update unlocks what this app version
-            added (cloud sync needs worker v4). It swaps only the worker's code: your pages,
-            synced files, token, and domain stay put.
+            added (cloud sync needs worker v4). It swaps only the worker's code: pages,
+            synced files, tokens, and domains stay put.
           </div>
-          {outdated.map(({ conn, version }) => {
+          {hasOwnerCard && (
+            <div className="worker-update-modes" role="tablist" aria-label="Update method">
+              {MODES.map((m) => (
+                <button
+                  key={m.key}
+                  role="tab"
+                  aria-selected={mode === m.key}
+                  className={`setup-mode-btn ${mode === m.key ? "is-active" : ""}`}
+                  onClick={() => setMode(m.key)}
+                >
+                  <span className="setup-mode-name">{m.name}</span>
+                  <span className="setup-mode-sub">{m.sub}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {outdated.map(({ conn, version, role }) => {
             const host = shareHost(conn);
             const check = checks[conn.id] ?? { kind: "idle" };
             const done = check.kind === "current";
+            const isMember = role === "member";
             const { worker, certain } = deploymentNames(conn);
             return (
               <div key={conn.id} className="worker-update-conn">
@@ -196,45 +272,99 @@ export default function WorkerUpdate({
                 </div>
                 {!done && (
                   <>
-                    <div className="share-note">
-                      Fastest path — about a minute, works for every setup: in the Cloudflare
-                      dashboard open <strong>Workers &amp; Pages</strong> →{" "}
-                      <strong>{certain ? worker : `your worker (likely ${worker})`}</strong> →{" "}
-                      <strong>Edit code</strong>. Select everything in the editor, paste the
-                      code from the button below, hit <strong>Deploy</strong> — then come back
-                      and press “Check again”.
-                    </div>
-                    <div className="share-buttons">
-                      <button
-                        className="share-btn is-primary"
-                        onClick={() => void copy(`code-${conn.id}`, workerCode)}
-                      >
-                        {copied === `code-${conn.id}` ? "Copied ✓" : "Copy worker code"}
-                      </button>
-                      <button
-                        className="share-btn"
-                        onClick={() => onOpenExternal(CLOUDFLARE_WORKERS_URL)}
-                      >
-                        Open dashboard
-                      </button>
-                    </div>
-                    <details className="worker-update-agent">
-                      <summary>Prefer to hand it to an AI agent or the terminal?</summary>
+                    {isMember ? (
                       <div className="share-note">
-                        The complete job for an agent with shell access (Claude Code etc.) —
-                        it contains no secrets, and the steps double as a wrangler
-                        walkthrough if you'd rather run them yourself.
+                        This backend is run by someone else, and only its owner can update it
+                        — that takes Cloudflare access this app doesn't have. Ask whoever runs{" "}
+                        <strong>{host}</strong> to open Doklin and update the backend worker.
+                        Everything keeps working meanwhile; press “Check again” once they have.
                       </div>
-                      <pre className="setup-prompt">{buildUpdatePrompt(conn)}</pre>
-                      <div className="share-buttons">
-                        <button
-                          className="share-btn"
-                          onClick={() => void copy(`prompt-${conn.id}`, buildUpdatePrompt(conn))}
-                        >
-                          {copied === `prompt-${conn.id}` ? "Copied ✓" : "Copy prompt"}
-                        </button>
-                      </div>
-                    </details>
+                    ) : mode === "browser" ? (
+                      <>
+                        <div className="share-note">
+                          Fastest path — about a minute, works for every setup: in the
+                          Cloudflare dashboard open <strong>Workers &amp; Pages</strong> →{" "}
+                          <strong>{certain ? worker : `your worker (likely ${worker})`}</strong>{" "}
+                          → <strong>Edit code</strong>. Select everything in the editor, paste
+                          the code from the button below, hit <strong>Deploy</strong> — then
+                          come back and press “Check again”.
+                        </div>
+                        <div className="share-buttons">
+                          <button
+                            className="share-btn is-primary"
+                            onClick={() => void copy(`code-${conn.id}`, workerCode)}
+                          >
+                            {copied === `code-${conn.id}` ? "Copied ✓" : "Copy worker code"}
+                          </button>
+                          <button
+                            className="share-btn"
+                            onClick={() => onOpenExternal(CLOUDFLARE_WORKERS_URL)}
+                          >
+                            Open dashboard
+                          </button>
+                        </div>
+                      </>
+                    ) : mode === "agent" ? (
+                      <>
+                        <div className="share-note">
+                          The complete job for an agent with shell access (Claude Code etc.).
+                          It contains no secrets — the token survives a same-name redeploy — so
+                          it's safe to paste anywhere you trust with your machine.
+                        </div>
+                        <pre className="setup-prompt">{buildUpdatePrompt(conn)}</pre>
+                        <div className="share-buttons">
+                          <button
+                            className="share-btn"
+                            onClick={() => void copy(`prompt-${conn.id}`, buildUpdatePrompt(conn))}
+                          >
+                            {copied === `prompt-${conn.id}` ? "Copied ✓" : "Copy prompt"}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="share-note">
+                          Run these yourself — needs{" "}
+                          <button
+                            className="setup-link"
+                            onClick={() => onOpenExternal("https://nodejs.org")}
+                          >
+                            Node.js
+                          </button>
+                          ; wrangler signs into Cloudflare in a browser window. No token needed:
+                          your <code>SHARE_TOKEN</code>, the R2 binding, and any custom domain
+                          all survive a same-name redeploy, so nothing here is secret. If{" "}
+                          <code>whoami</code> says you're not signed in, run{" "}
+                          <code>npx wrangler@4 login</code> first (add{" "}
+                          <code>account_id</code> to the config if your login has more than one
+                          Cloudflare account).
+                        </div>
+                        {!certain && (
+                          <div className="share-note">
+                            Double-check the <code>name</code> below matches this deployment
+                            (dashboard → <strong>Workers &amp; Pages</strong>) — deploying under
+                            a different name creates a <strong>second</strong> worker instead of
+                            updating this one.
+                          </div>
+                        )}
+                        {buildUpdateCommands(conn).map((cmd, i) => {
+                          const key = `cmd-${conn.id}-${i}`;
+                          return (
+                            <div key={key} className="setup-cmd">
+                              <code>{cmd}</code>
+                              <button
+                                className="setup-copy"
+                                onClick={() => void copy(key, cmd)}
+                                title="Copy command"
+                                aria-label="Copy command"
+                              >
+                                {copied === key ? <CheckIcon /> : <CopyIcon />}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
                     {check.kind === "stale" && (
                       <div className="share-error">
                         Still on v{check.version} — the deploy hasn't landed. Give it a moment
@@ -289,6 +419,25 @@ function CheckIcon() {
       aria-hidden
     >
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </svg>
   );
 }
