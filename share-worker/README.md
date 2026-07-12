@@ -339,6 +339,14 @@ DELETE /api/sync/<ws>/files/<fid>/<hash> garbage-collect an unreferenced revisio
 GET    /api/sync/<ws>/history/<fileId>   -> { version, entries } deep revision archive
 PUT    /api/sync/<ws>/history/<fileId>   replace the archive (advisory, size-capped)
 PUT    /api/sync/<ws>/presence           body {deviceId, name?, fileId|null, path?}
+
+POST   /api/admin/wipe                   owner; body {"confirm":"wipe"} — erase every
+                                         object in the bucket (pages, workspaces,
+                                         credentials, site config); repeat until
+                                         remaining: false. The erase step of tearing a
+                                         backend down: R2 refuses to delete a non-empty
+                                         bucket, so the app empties it through this
+                                         before you delete the worker + bucket
 ```
 
 Smoke-test the whole contract without deploying: `node test/run.mjs` (plain

@@ -4185,3 +4185,111 @@ body.tree-dragging.tree-drag-invalid * {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ---------- Backends dialog ---------- */
+
+/* Links inside running prose flow with the sentence instead of dropping to
+   their own line (the block treatment is for standalone footer actions). */
+.sync-foot .share-all-link,
+.sync-hint .share-all-link,
+.backend-outdated .share-all-link {
+  display: inline;
+  margin-top: 0;
+}
+
+.backend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* One connection card: host + badges, an identity/usage line, then either
+   the action row or an expanded edit form / disconnect confirm. */
+.backend-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+}
+
+.backend-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Identity + usage can be long — wrap instead of ellipsizing. */
+.backend-row-meta {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.45;
+}
+
+/* "invited" pill: same shape as the default badge, tinted with the accent so
+   a backend that's shared WITH you reads differently from your own. */
+.backend-badge-member {
+  color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 45%, transparent);
+}
+
+.backend-outdated {
+  padding: 6px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+.backend-outdated .share-all-link { margin-left: 6px; }
+
+/* Disconnect confirmation: consequences first, then the commit button —
+   same danger treatment as the held-deletions block in Cloud sync. */
+.backend-confirm {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #e5534b 40%, transparent);
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.backend-confirm-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.backend-confirm-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--app-text-muted);
+}
+
+.backend-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+/* Teardown dialog: the removal-method switcher (agent / browser / terminal). */
+.teardown-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+/* The agent prompt block is sized for the wide setup modal; rein it in for
+   the narrower teardown dialog. */
+.sync-body .setup-prompt {
+  max-height: 220px;
+  overflow-y: auto;
+}

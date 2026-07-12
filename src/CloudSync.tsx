@@ -1,10 +1,12 @@
 // Cloud sync settings — the gear menu's "Cloud sync…" dialog.
 //
-// Three stories in one place, in the order people need them:
+// Four stories in one place, in the order people need them:
 //   1. this workspace: turn sync on (or see that it's on),
 //   2. synced workspaces: health, pause, sync-now, held deletions, stop,
-//   3. people: invites, members/devices, revocation — owner only; the
-//      backend decides who's the owner (whoami), not the UI.
+//   3. on this backend: the server's own workspace list — delete a
+//      workspace's data + history from the backend (owner only),
+//   4. people: invites, members/devices, staged revocation — owner only;
+//      the backend decides who's the owner (whoami), not the UI.
 //
 // The dialog is a *view* over App-owned live state (statuses arrive as
 // engine events) plus its own fetched people-state per connection.
@@ -16,6 +18,7 @@ import { shareHost } from "./share";
 import {
   cancelInvite,
   createInvite,
+  deleteRemoteWorkspace,
   listInvites,
   listRemoteWorkspaces,
   listTokens,
@@ -91,6 +94,7 @@ export default function CloudSync({
   onOpenShareSetup,
   onOpenWorkerUpdate,
   onOpenConnectBackend,
+  onOpenBackends,
 }: {
   workspaceRoot: string | null;
   workspaceName: string | null;
@@ -102,6 +106,9 @@ export default function CloudSync({
   onOpenShareSetup: () => void;
   onOpenWorkerUpdate: (() => void) | null;
   onOpenConnectBackend: () => void;
+  // Routes to the Backends dialog — connections themselves (edit, default,
+  // disconnect) are managed there, not here.
+  onOpenBackends: () => void;
 }) {
   const [connId, setConnId] = useState<string | null>(
     defaultConnectionId ?? connections[0]?.id ?? null,
@@ -216,6 +223,59 @@ export default function CloudSync({
   useEffect(() => {
     void loadPeople();
   }, [loadPeople]);
+
+  /* ----- backend workspace admin (owner): delete data from the backend ----- */
+
+  // Remote workspace id pending / running a delete-from-backend.
+  const [confirmDeleteWs, setConfirmDeleteWs] = useState<string | null>(null);
+  const [deletingWs, setDeletingWs] = useState<string | null>(null);
+  const [wsAdminError, setWsAdminError] = useState<string | null>(null);
+
+  const deleteFromBackend = useCallback(
+    async (wsId: string) => {
+      if (!conn || deletingWs) return;
+      setDeletingWs(wsId);
+      setWsAdminError(null);
+      try {
+        // If this Mac syncs it, stop that engine first — otherwise it would
+        // watch its workspace 404 out from under it.
+        const local = statuses.find(
+          (s) => s.wsId === wsId && s.connectionId === conn.id,
+        );
+        if (local) await syncDisable(local.wsId);
+        await deleteRemoteWorkspace(conn, wsId);
+        setConfirmDeleteWs(null);
+        void loadPeople();
+      } catch (e) {
+        setWsAdminError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDeletingWs(null);
+      }
+    },
+    [conn, deletingWs, statuses, loadPeople],
+  );
+
+  /* ----- revoke (owner): staged, so one click can't cut someone off ----- */
+
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState(false);
+
+  const revoke = useCallback(
+    async (tokenId: string) => {
+      if (!conn || revoking) return;
+      setRevoking(true);
+      try {
+        await revokeToken(conn, tokenId);
+        setConfirmRevoke(null);
+        void loadPeople();
+      } catch (e) {
+        console.error("revoke failed", e);
+      } finally {
+        setRevoking(false);
+      }
+    },
+    [conn, revoking, loadPeople],
+  );
 
   /* ----- invite form ----- */
 
@@ -448,6 +508,76 @@ export default function CloudSync({
                 </>
               )}
 
+              {/* --- On this backend (owner): the server truth, deletable --- */}
+              {people.me?.role === "owner" && people.workspaces.length > 0 && (
+                <>
+                  <div className="shared-section-label">On this backend</div>
+                  <p className="sync-hint">
+                    Every workspace stored on {conn ? shareHost(conn) : "this backend"}.
+                    Deleting one erases its files and version history from the backend for
+                    everyone — the copies on people's Macs stay where they are.
+                  </p>
+                  <ul className="shared-list">
+                    {people.workspaces.map((w) => {
+                      const local = statuses.some(
+                        (s) => s.wsId === w.id && s.connectionId === conn?.id,
+                      );
+                      return (
+                        <li key={w.id} className="shared-row sync-ws-row">
+                          <div className="shared-row-main">
+                            <span className="shared-row-title">{w.name}</span>
+                            <span className="sync-ws-meta">
+                              {local ? "synced on this Mac" : "not synced on this Mac"}
+                              {w.createdAt
+                                ? ` · created ${new Date(w.createdAt).toLocaleDateString()}`
+                                : ""}
+                            </span>
+                            {confirmDeleteWs === w.id && (
+                              <div className="sync-deletes">
+                                Erase “{w.name}” from the backend — every file and all
+                                version history? Everyone syncing it stops syncing
+                                {local ? " (this Mac too)" : ""}; the local copies on each
+                                machine stay. Pages published from it stay live — stop
+                                those from Shared pages.
+                                <div className="share-buttons">
+                                  <button
+                                    className="share-btn is-danger"
+                                    disabled={deletingWs === w.id}
+                                    onClick={() => void deleteFromBackend(w.id)}
+                                  >
+                                    {deletingWs === w.id ? "Deleting…" : "Delete from backend"}
+                                  </button>
+                                  <button
+                                    className="share-btn"
+                                    onClick={() => setConfirmDeleteWs(null)}
+                                  >
+                                    Keep
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {confirmDeleteWs !== w.id && (
+                            <div className="shared-row-actions">
+                              <button
+                                className="share-btn is-danger"
+                                onClick={() => {
+                                  setWsAdminError(null);
+                                  setConfirmDeleteWs(w.id);
+                                }}
+                              >
+                                Delete from backend…
+                              </button>
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {wsAdminError && <div className="sync-error">{wsAdminError}</div>}
+                </>
+              )}
+
               {/* --- People --- */}
               <div className="shared-section-label">People &amp; devices</div>
               {people.loading && <div className="sync-hint">Checking the backend…</div>}
@@ -487,19 +617,32 @@ export default function CloudSync({
                             </span>
                           </div>
                           <div className="shared-row-actions">
-                            <button
-                              className="share-btn is-danger"
-                              title="Cuts this token off immediately. Their local files stay; sync stops."
-                              onClick={() =>
-                                void (async () => {
-                                  if (!conn) return;
-                                  await revokeToken(conn, t.id).catch((e) => console.error(e));
-                                  void loadPeople();
-                                })()
-                              }
-                            >
-                              Revoke
-                            </button>
+                            {confirmRevoke === t.id ? (
+                              <>
+                                <button
+                                  className="share-btn is-danger"
+                                  disabled={revoking}
+                                  title="Their next sync or publish is refused. Files already on their machine stay there."
+                                  onClick={() => void revoke(t.id)}
+                                >
+                                  {revoking ? "Revoking…" : "Revoke access"}
+                                </button>
+                                <button
+                                  className="share-btn"
+                                  onClick={() => setConfirmRevoke(null)}
+                                >
+                                  Keep
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                className="share-btn is-danger"
+                                title="Cuts this key off immediately: sync and publishing stop on their next request. Their local files stay."
+                                onClick={() => setConfirmRevoke(t.id)}
+                              >
+                                Revoke…
+                              </button>
+                            )}
                           </div>
                         </li>
                       ))}
@@ -643,6 +786,10 @@ export default function CloudSync({
                 from someone else?{" "}
                 <button className="share-all-link" onClick={onOpenConnectBackend}>
                   Connect to their backend
+                </button>
+                {" "}· Connections are managed in{" "}
+                <button className="share-all-link" onClick={onOpenBackends}>
+                  Backends
                 </button>
               </div>
             </>

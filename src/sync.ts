@@ -212,6 +212,31 @@ export async function deleteRemoteWorkspace(config: ShareConfig, wsId: string): 
   throw new Error("workspace delete didn't finish — try again");
 }
 
+// Erase EVERYTHING the backend stores — pages, workspaces, credentials, site
+// config (owner only, worker v6+). The erase half of tearing a backend down:
+// R2 refuses to delete a non-empty bucket, so the app empties it through the
+// worker before the user deletes the worker + bucket in Cloudflare. Batched
+// server-side; loops until the worker reports nothing left. Returns the
+// object count purged; a worker predating it throws SyncWorkerOutdatedError.
+export async function wipeBackend(
+  config: ShareConfig,
+  onProgress?: (purged: number) => void,
+): Promise<number> {
+  let purged = 0;
+  for (let i = 0; i < 50; i += 1) {
+    const res = await api(config, "/api/admin/wipe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: "wipe" }),
+    });
+    const body = await readJson<{ purged?: number; remaining?: boolean }>(res, "erase");
+    purged += body.purged ?? 0;
+    onProgress?.(purged);
+    if (!body.remaining) return purged;
+  }
+  throw new Error("erase didn't finish — run it again");
+}
+
 export type InviteInfo = {
   id: string;
   name: string;
