@@ -179,10 +179,11 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 5);
+  assert.equal(ok.json.version, 6);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
+  assert.ok(ok.json.features.includes("wipe"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -758,6 +759,68 @@ await test("public surface: landing, /join page, private prefixes unreachable", 
   assert.equal((await call("/sync")).status, 404);
   assert.equal((await call("/auth")).status, 404);
   assert.equal((await call(`/${ws}`)).status, 404);
+});
+
+// Destroys all state — keep this last.
+await test("wipe: owner-only, confirmed, empties the bucket completely", async () => {
+  // Guardrails: a member can't wipe, and the confirm phrase is required.
+  const inv = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Mallory", role: "member", workspaces: [ws] },
+  });
+  const joined = await call("/api/auth/join", {
+    method: "POST",
+    ip: freshIp(),
+    body: { invite: inv.json.code, name: "Mallory's Mac" },
+  });
+  const mallory = joined.json.token;
+  assert.equal(
+    (await call("/api/admin/wipe", { method: "POST", token: mallory, body: { confirm: "wipe" } }))
+      .status,
+    403,
+  );
+  assert.equal(
+    (await call("/api/admin/wipe", { method: "POST", token: OWNER, body: {} })).status,
+    400,
+  );
+  assert.equal((await call("/api/admin/wipe", { token: OWNER })).status, 405);
+
+  // A linked-device owner wipes too: its own token object must go LAST so
+  // the wipe can't cut itself off half-done.
+  const devInv = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Studio iMac", role: "owner" },
+  });
+  const devJoin = await call("/api/auth/join", {
+    method: "POST",
+    ip: freshIp(),
+    body: { invite: devInv.json.code, name: "Studio iMac" },
+  });
+  const device = devJoin.json.token;
+
+  assert.ok(fake.store.size > 0, "there is data to wipe");
+  const res = await call("/api/admin/wipe", {
+    method: "POST",
+    token: device,
+    body: { confirm: "wipe" },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.remaining, false);
+  assert.ok(res.json.purged > 0);
+  assert.equal(fake.store.size, 0, "bucket is completely empty");
+
+  // Every minted credential died with the bucket; the master secret lives in
+  // the env, so the owner can still talk to the (now empty) worker.
+  assert.equal((await call("/api/auth/whoami", { token: mallory })).status, 401);
+  assert.equal((await call("/api/auth/whoami", { token: device })).status, 401);
+  const pages = await call("/api/pages", { token: OWNER });
+  assert.equal(pages.status, 200);
+  assert.deepEqual(pages.json.pages, []);
+  assert.equal((await call(`/api/sync/${ws}/manifest`, { token: OWNER })).status, 404);
+  const wss = await call("/api/sync/workspaces", { token: OWNER });
+  assert.deepEqual(wss.json.workspaces, []);
 });
 
 /* ---------- Summary ---------- */

@@ -47,6 +47,7 @@ export default function Backends({
   onSaveConnection,
   onMakeDefault,
   onDisconnect,
+  onTeardown,
 }: {
   connections: ShareConnection[];
   defaultId: string | null;
@@ -67,6 +68,9 @@ export default function Backends({
   // Disables sync for the backend's workspaces on this Mac, then removes the
   // connection (App owns both steps).
   onDisconnect: (id: string) => Promise<void>;
+  // Opens the guided teardown (erase data, remove worker + bucket) for a
+  // backend this user owns.
+  onTeardown: (conn: ShareConnection) => void;
 }) {
   const [identities, setIdentities] = useState<Record<string, Identity>>({});
   // Connection id pending the disconnect confirmation.
@@ -374,7 +378,8 @@ export default function Backends({
                             ) : (
                               <li>
                                 The backend itself keeps running on its Cloudflare account —
-                                connecting again just takes the endpoint and token.
+                                connecting again just takes the endpoint and token. To take
+                                it down for good, use <strong>Delete backend</strong> instead.
                               </li>
                             )}
                           </ul>
@@ -415,6 +420,17 @@ export default function Backends({
                           >
                             Disconnect…
                           </button>
+                          {/* Teardown is the owner's move; a pre-sync worker
+                              can't have members, so "outdated" is owner too. */}
+                          {(role === "owner" || idn?.kind === "outdated") && (
+                            <button
+                              className="share-btn is-danger"
+                              title="Erase its data and remove the worker + bucket from Cloudflare — the whole backend, not just this Mac's connection"
+                              onClick={() => onTeardown(c)}
+                            >
+                              Delete backend…
+                            </button>
+                          )}
                         </div>
                       )}
                     </li>

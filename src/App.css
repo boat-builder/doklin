@@ -4279,3 +4279,17 @@ body.tree-dragging.tree-drag-invalid * {
   gap: 8px;
   padding-top: 2px;
 }
+
+/* Teardown dialog: the removal-method switcher (agent / browser / terminal). */
+.teardown-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+/* The agent prompt block is sized for the wide setup modal; rein it in for
+   the narrower teardown dialog. */
+.sync-body .setup-prompt {
+  max-height: 220px;
+  overflow-y: auto;
+}

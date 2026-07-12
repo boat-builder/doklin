@@ -566,6 +566,18 @@ export async function deletePage(config: ShareConfig, id: string): Promise<void>
   if (!res.ok && res.status !== 404) throw new Error(`unshare failed (${res.status})`);
 }
 
+// Every page the backend holds — the whole deployment's list, not this Mac's
+// registry (other devices and members publish too). Used by teardown to show
+// what an erase would destroy.
+export type RemotePageInfo = { id: string; title: string; updatedAt: string | null };
+
+export async function listRemotePages(config: ShareConfig): Promise<RemotePageInfo[]> {
+  const res = await apiFetch(config, "/api/pages");
+  if (!res.ok) throw new Error(`page list failed (${res.status})`);
+  const body = (await res.json().catch(() => null)) as { pages?: RemotePageInfo[] } | null;
+  return Array.isArray(body?.pages) ? body.pages : [];
+}
+
 export async function pageExists(config: ShareConfig, id: string): Promise<boolean> {
   const res = await apiFetch(config, `/api/pages/${id}`);
   if (res.status === 404) return false;

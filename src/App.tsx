@@ -18,6 +18,7 @@ import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
 import CloudSync from "./CloudSync";
 import ConnectBackend from "./ConnectBackend";
 import Backends from "./Backends";
+import BackendTeardown from "./BackendTeardown";
 import HistoryPanel from "./HistoryPanel";
 import {
   reportSyncActivity,
@@ -578,6 +579,8 @@ export default function App() {
   const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
   const [connectBackendOpen, setConnectBackendOpen] = useState(false);
   const [backendsOpen, setBackendsOpen] = useState(false);
+  // The connection whose guided teardown (erase + delete worker) is open.
+  const [teardownConn, setTeardownConn] = useState<ShareConnection | null>(null);
   // Absolute path of the doc whose version history is open. null = closed.
   const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
@@ -865,15 +868,20 @@ export default function App() {
     [changeConnections],
   );
 
+  // Stop this Mac's sync engines for every workspace on a connection. Local
+  // folders stay; the backend keeps its copies. Used before removing a
+  // connection (an engine whose connection vanished would respawn straight
+  // into a dead "connection not found" error state) and before a teardown's
+  // erase (an engine mustn't watch its workspace 404 out from under it).
+  const disableSyncForConnection = useCallback(async (id: string) => {
+    for (const s of syncStatusesRef.current.filter((s) => s.connectionId === id)) {
+      await syncDisable(s.wsId).catch((e) => console.error("sync disable failed", e));
+    }
+  }, []);
+
   const removeConnection = useCallback(
     async (id: string) => {
-      // Stop syncing the backend's workspaces on this Mac FIRST — an engine
-      // whose connection has vanished would otherwise respawn straight into a
-      // dead "connection not found" error state. Local folders stay; the
-      // backend keeps its copies.
-      for (const s of syncStatusesRef.current.filter((s) => s.connectionId === id)) {
-        await syncDisable(s.wsId).catch((e) => console.error("sync disable failed", e));
-      }
+      await disableSyncForConnection(id);
       await changeConnections((prev) => ({
         connections: prev.connections.filter((c) => c.id !== id),
         defaultId: prev.defaultId === id ? null : prev.defaultId,
@@ -887,7 +895,7 @@ export default function App() {
       });
       void syncReloadConnections().catch(() => {});
     },
-    [changeConnections],
+    [changeConnections, disableSyncForConnection],
   );
 
   const makeDefaultConnection = useCallback(
@@ -3889,6 +3897,30 @@ export default function App() {
           onSaveConnection={saveConnection}
           onMakeDefault={makeDefaultConnection}
           onDisconnect={removeConnection}
+          onTeardown={(conn) => {
+            setBackendsOpen(false);
+            setTeardownConn(conn);
+          }}
+        />
+      )}
+      {teardownConn && (
+        <BackendTeardown
+          conn={teardownConn}
+          onDisableLocalSync={() => disableSyncForConnection(teardownConn.id)}
+          onOpenExternal={openExternal}
+          onOpenWorkerUpdate={
+            outdatedWorkers.some((w) => w.conn.id === teardownConn.id)
+              ? () => {
+                  setTeardownConn(null);
+                  setWorkerUpdateList(outdatedWorkers);
+                }
+              : null
+          }
+          onDisconnect={async () => {
+            await removeConnection(teardownConn.id);
+            setTeardownConn(null);
+          }}
+          onClose={() => setTeardownConn(null)}
         />
       )}
       {connectBackendOpen && (

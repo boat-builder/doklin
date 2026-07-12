@@ -55,6 +55,13 @@
 //   GET/DELETE /api/auth/invites[/<id>]   list / cancel invites (owner)
 //   GET/DELETE /api/auth/tokens[/<id>]    list / revoke tokens (owner)
 //   GET  /api/auth/whoami        the calling token's identity + scope
+//   POST /api/admin/wipe         body {confirm:"wipe"} — erase EVERYTHING in
+//                                the bucket (pages, workspaces, credentials,
+//                                site config), batched like workspace delete;
+//                                repeat while `remaining`. The teardown step
+//                                before deleting the worker + bucket, since
+//                                R2 refuses to delete a non-empty bucket
+//                                (owner)
 //   GET/POST /api/sync/workspaces         list / create workspaces
 //   DELETE /api/sync/workspaces/<ws>      delete a workspace + its objects
 //   GET  /api/sync/<ws>/poll     {manifestEtag, presence} — the cheap poll
@@ -77,8 +84,9 @@ import { marked } from "../vendor/marked.esm.js";
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
 // root page override, 3 = collection descriptions, 4 = cloud sync + member
 // tokens, 5 = workspace-stamped pages (any member of the workspace can
-// update/stop them, not just their creator).
-const WORKER_VERSION = 5;
+// update/stop them, not just their creator), 6 = admin wipe (the app-driven
+// erase step of backend teardown).
+const WORKER_VERSION = 6;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -88,6 +96,7 @@ const WORKER_FEATURES = [
   "sync",
   "auth",
   "workspace-pages",
+  "wipe",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -225,6 +234,21 @@ async function handleApi(request, env, url, ctx) {
 
   if (parts[1] === "auth") return handleAuthApi(request, env, url, parts, auth);
   if (parts[1] === "sync") return handleSyncApi(request, env, url, parts, auth, ctx);
+
+  if (parts[1] === "admin" && parts[2] === "wipe" && parts.length === 3) {
+    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (auth.role !== "owner") return json({ error: "owner only" }, 403);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "invalid json body" }, 400);
+    }
+    if (body?.confirm !== "wipe") {
+      return json({ error: 'body must be {"confirm":"wipe"}' }, 400);
+    }
+    return wipeBucket(env, auth);
+  }
 
   // Site config shapes the public landing page (and the root-page override) —
   // that's the owner's voice, not a member's.
@@ -1373,6 +1397,37 @@ async function createWorkspace(request, env) {
     httpMetadata: { contentType: "application/json" },
   });
   return json({ id, name, createdAt: now, manifestEtag: put.etag });
+}
+
+// The erase half of tearing a backend down: delete every object in the
+// bucket so `wrangler r2 bucket delete` (which refuses non-empty buckets)
+// can finish the job. Batched like deleteWorkspace — the client repeats the
+// call until `remaining` comes back false. The caller's own token object is
+// kept until everything else is gone and deleted in the final round, so a
+// linked-device owner doesn't cut itself off mid-wipe.
+async function wipeBucket(env, auth) {
+  let deleted = 0;
+  for (let round = 0; round < 20; round += 1) {
+    const batch = await env.PAGES.list({ limit: 1000 });
+    const keys = batch.objects.map((o) => o.key).filter((k) => k !== auth.key);
+    if (keys.length === 0) {
+      if (auth.key) {
+        await env.PAGES.delete(auth.key);
+        deleted += 1;
+      }
+      return json({ wiped: true, purged: deleted, remaining: false });
+    }
+    await env.PAGES.delete(keys);
+    deleted += keys.length;
+    if (!batch.truncated && batch.objects.length < 1000) {
+      if (auth.key) {
+        await env.PAGES.delete(auth.key);
+        deleted += 1;
+      }
+      return json({ wiped: true, purged: deleted, remaining: false });
+    }
+  }
+  return json({ wiped: true, purged: deleted, remaining: true });
 }
 
 // Purge as much as the per-request subrequest budget allows; the client
