@@ -179,11 +179,12 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 6);
+  assert.equal(ok.json.version, 7);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
   assert.ok(ok.json.features.includes("wipe"));
+  assert.ok(ok.json.features.includes("page-access"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -759,6 +760,336 @@ await test("public surface: landing, /join page, private prefixes unreachable", 
   assert.equal((await call("/sync")).status, 404);
   assert.equal((await call("/auth")).status, 404);
   assert.equal((await call(`/${ws}`)).status, 404);
+});
+
+/* ---------- Visitor access codes ---------- */
+
+// Pull the gate cookie out of a 303 unlock response, ready for a Cookie header.
+const cookieOf = (res) => {
+  const raw = res.headers.get("set-cookie");
+  assert.ok(raw, "unlock sets a cookie");
+  assert.match(raw, /HttpOnly/);
+  assert.match(raw, /SameSite=Lax/);
+  assert.match(raw, /Path=\//);
+  return raw.split(";")[0];
+};
+
+const unlock = (gateId, code, extra = {}) =>
+  call(`/${gateId}/unlock`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `code=${encodeURIComponent(code)}${extra.next ? `&next=${encodeURIComponent(extra.next)}` : ""}`,
+    ip: extra.ip ?? freshIp(),
+    ...(extra.cookie ? { headers: { "content-type": "application/x-www-form-urlencoded", cookie: extra.cookie } } : {}),
+  });
+
+await test("access: codes gate every public route, nothing leaks pre-code", async () => {
+  const secret = "The Launch Plan — DO NOT LEAK";
+  await call("/api/pages/locked-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: secret, markdown: `# ${secret}\n\nnumbers inside`, html: "<html><body>rendition-sentinel-b7</body></html>" },
+  });
+  await call("/api/pages/locked-doc/og", {
+    method: "PUT",
+    token: OWNER,
+    headers: { "content-type": "image/png" },
+    body: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+  });
+
+  // Before protection: publicly readable.
+  assert.equal((await call("/locked-doc")).status, 200);
+
+  const added = await call("/api/pages/locked-doc/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Acme team", code: "Sunset-Marble-Fig" },
+  });
+  assert.equal(added.status, 200);
+  assert.match(added.json.id, /^a-[a-f0-9]{8}$/);
+  assert.equal(added.json.label, "Acme team");
+
+  // The listing shows labels, never hashes or codes.
+  const listed = await call("/api/pages/locked-doc/access", { token: OWNER });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.json.protected, true);
+  assert.deepEqual(
+    listed.json.codes.map((c) => ({ id: c.id, label: c.label })),
+    [{ id: added.json.id, label: "Acme team" }],
+  );
+  assert.ok(!listed.text.includes("hash"));
+
+  // Page metadata + the pages list carry the protected flag.
+  assert.equal((await call("/api/pages/locked-doc", { token: OWNER })).json.protected, true);
+  const pageRow = (await call("/api/pages", { token: OWNER })).json.pages.find(
+    (p) => p.id === "locked-doc",
+  );
+  assert.equal(pageRow.protected, true);
+
+  // Every public route is a gate (or a 401) now — and the gate leaks nothing.
+  for (const path of ["/locked-doc", "/locked-doc?v=md", "/locked-doc/raw"]) {
+    const res = await call(path);
+    assert.equal(res.status, 401, path);
+    assert.ok(!res.text.includes("Launch Plan"), `${path} must not leak the title`);
+    assert.ok(!res.text.includes("numbers inside"), `${path} must not leak content`);
+    assert.ok(!res.text.includes("rendition-sentinel-b7"), `${path} must not leak the rendition`);
+    assert.ok(res.text.includes("gate-form"), `${path} serves the gate`);
+    assert.match(res.headers.get("cache-control"), /no-store/);
+  }
+  assert.equal((await call("/locked-doc/og.png")).status, 401);
+});
+
+await test("access: unlock — wrong code 401s, right code cookies the browser", async () => {
+  const wrong = await unlock("locked-doc", "not-the-code");
+  assert.equal(wrong.status, 401);
+  assert.ok(wrong.text.includes("didn't match"));
+  assert.equal(wrong.headers.get("set-cookie"), null);
+
+  // Codes are case/whitespace-insensitive (normalized on both ends).
+  const right = await unlock("locked-doc", "  sunset-marble-fig ", { next: "/locked-doc?v=md" });
+  assert.equal(right.status, 303);
+  assert.equal(right.headers.get("location"), "/locked-doc?v=md");
+  const cookie = cookieOf(right);
+
+  const page = await call("/locked-doc", { headers: { cookie } });
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes("Launch Plan"));
+  assert.match(page.headers.get("cache-control"), /no-store/);
+  assert.equal((await call("/locked-doc/raw", { headers: { cookie } })).status, 200);
+  assert.equal((await call("/locked-doc/og.png", { headers: { cookie } })).status, 200);
+
+  // A tampered cookie is just a missing cookie.
+  const forged = cookie.replace(/.$/, (c) => (c === "0" ? "1" : "0"));
+  assert.equal((await call("/locked-doc", { headers: { cookie: forged } })).status, 401);
+
+  // An open-redirect next is refused in favor of the page itself.
+  const evil = await unlock("locked-doc", "sunset-marble-fig", { next: "https://evil.test/x" });
+  assert.equal(evil.status, 303);
+  assert.equal(evil.headers.get("location"), "/locked-doc");
+
+  // GET /unlock (typed URL) just bounces to the page.
+  assert.equal((await call("/locked-doc/unlock")).status, 303);
+});
+
+await test("access: revoking one named code kills exactly its sessions", async () => {
+  const second = await call("/api/pages/locked-doc/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Priya", code: "quiet-harbor-lime" },
+  });
+  assert.equal(second.status, 200);
+
+  // Duplicate plaintext is refused (revocation would be misleading).
+  const dup = await call("/api/pages/locked-doc/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Copycat", code: "SUNSET-marble-fig" },
+  });
+  assert.equal(dup.status, 409);
+
+  const acmeCookie = cookieOf(await unlock("locked-doc", "sunset-marble-fig"));
+  const priyaCookie = cookieOf(await unlock("locked-doc", "quiet-harbor-lime"));
+
+  const acmeId = (await call("/api/pages/locked-doc/access", { token: OWNER })).json.codes.find(
+    (c) => c.label === "Acme team",
+  ).id;
+  const revoked = await call(`/api/pages/locked-doc/access/codes/${acmeId}`, {
+    method: "DELETE",
+    token: OWNER,
+  });
+  assert.equal(revoked.status, 200);
+
+  // Acme's session is dead on its next request; Priya's still works, and the
+  // revoked code no longer unlocks.
+  assert.equal((await call("/locked-doc", { headers: { cookie: acmeCookie } })).status, 401);
+  assert.equal((await call("/locked-doc", { headers: { cookie: priyaCookie } })).status, 200);
+  assert.equal((await unlock("locked-doc", "sunset-marble-fig")).status, 401);
+});
+
+await test("access: content pushes can't strip or inject protection", async () => {
+  // An autosave push (no access field) keeps the gate up…
+  const push = await call("/api/pages/locked-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Renamed", markdown: "# edited" },
+  });
+  assert.equal(push.status, 200);
+  assert.equal((await call("/locked-doc")).status, 401);
+
+  // …and a push that tries to smuggle its own access section is ignored.
+  const inject = await call("/api/pages/inject-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Inject",
+      markdown: "# x",
+      access: { codes: [{ id: "a-deadbeef", label: "evil", hash: "f".repeat(64) }] },
+    },
+  });
+  assert.equal(inject.status, 200);
+  assert.equal((await call("/inject-doc")).status, 200, "injected access must not gate");
+  assert.equal(
+    (await call("/api/pages/inject-doc/access", { token: OWNER })).json.protected,
+    false,
+  );
+  await call("/api/pages/inject-doc", { method: "DELETE", token: OWNER });
+});
+
+await test("access: folder codes cover member pages, own codes win", async () => {
+  await call("/api/pages/locked-folder", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Client folder",
+      kind: "collection",
+      items: [{ id: "member-doc", title: "Member", path: "docs/member.md" }],
+    },
+  });
+  await call("/api/pages/member-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Member",
+      markdown: "# member secret",
+      collection: { id: "locked-folder", title: "Client folder" },
+    },
+  });
+  await call("/api/pages/locked-folder/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Client", code: "goose-canyon-mint" },
+  });
+
+  // TOC and member both gate; the member's gate posts to the FOLDER's unlock,
+  // so one code entry opens everything.
+  const toc = await call("/locked-folder");
+  assert.equal(toc.status, 401);
+  const member = await call("/member-doc");
+  assert.equal(member.status, 401);
+  assert.ok(member.text.includes('action="/locked-folder/unlock"'));
+  assert.ok(!member.text.includes("member secret"));
+
+  const res = await unlock("locked-folder", "goose-canyon-mint", { next: "/member-doc" });
+  assert.equal(res.headers.get("location"), "/member-doc");
+  const cookie = cookieOf(res);
+  assert.equal((await call("/member-doc", { headers: { cookie } })).status, 200);
+  assert.equal((await call("/locked-folder", { headers: { cookie } })).status, 200);
+
+  // A member with its own codes locks tighter: the folder cookie stops working
+  // for it and its gate points at its own unlock.
+  await call("/api/pages/member-doc/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Inner circle", code: "velvet-otter-peak" },
+  });
+  const gated = await call("/member-doc", { headers: { cookie } });
+  assert.equal(gated.status, 401);
+  assert.ok(gated.text.includes('action="/member-doc/unlock"'));
+  const own = cookieOf(await unlock("member-doc", "velvet-otter-peak"));
+  assert.equal((await call("/member-doc", { headers: { cookie: own } })).status, 200);
+});
+
+await test("access: root-page override gates the domain root", async () => {
+  await call("/api/site", {
+    method: "PUT",
+    token: OWNER,
+    body: { rootPageId: "locked-doc" },
+  });
+  const root = await call("/");
+  assert.equal(root.status, 401);
+  assert.ok(root.text.includes("gate-form"));
+  const res = await unlock("locked-doc", "quiet-harbor-lime", { next: "/" });
+  assert.equal(res.headers.get("location"), "/");
+  assert.equal((await call("/", { headers: { cookie: cookieOf(res) } })).status, 200);
+  await call("/api/site", { method: "PUT", token: OWNER, body: {} });
+});
+
+await test("access: permissions mirror page management", async () => {
+  // Alice (member) protects her own page…
+  await call("/api/pages/alice-locked", {
+    method: "PUT",
+    token: alice,
+    body: { title: "Alice's", markdown: "# hers" },
+  });
+  const own = await call("/api/pages/alice-locked/access/codes", {
+    method: "POST",
+    token: alice,
+    body: { label: "Friends", code: "paper-lantern-sky" },
+  });
+  assert.equal(own.status, 200);
+
+  // …but can't read or manage codes on someone else's page.
+  const carolInv = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Dana", role: "member", workspaces: [ws] },
+  });
+  const dana = (
+    await call("/api/auth/join", {
+      method: "POST",
+      ip: freshIp(),
+      body: { invite: carolInv.json.code },
+    })
+  ).json.token;
+  assert.equal((await call("/api/pages/alice-locked/access", { token: dana })).status, 403);
+  assert.equal(
+    (
+      await call("/api/pages/alice-locked/access/codes", {
+        method: "POST",
+        token: dana,
+        body: { code: "gate-crash-attempt" },
+      })
+    ).status,
+    403,
+  );
+
+  // The owner can manage anyone's; removing protection reopens the page.
+  assert.equal((await call("/alice-locked")).status, 401);
+  const cleared = await call("/api/pages/alice-locked/access", {
+    method: "DELETE",
+    token: OWNER,
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal((await call("/alice-locked")).status, 200);
+  await call("/api/pages/alice-locked", { method: "DELETE", token: alice });
+});
+
+await test("access: unlock attempts are rate-limited per IP", async () => {
+  const stormIp = freshIp();
+  let last;
+  for (let i = 0; i < 11; i += 1) {
+    last = await unlock("locked-doc", `guess-${i}`, { ip: stormIp });
+  }
+  assert.equal(last.status, 429);
+  assert.ok(last.text.includes("Too many attempts"));
+
+  // Validation guardrails while we're here: short codes and overlong codes.
+  assert.equal(
+    (
+      await call("/api/pages/locked-doc/access/codes", {
+        method: "POST",
+        token: OWNER,
+        body: { code: "abc" },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await call("/api/pages/locked-doc/access/codes", {
+        method: "POST",
+        token: OWNER,
+        body: { code: "x".repeat(200) },
+      })
+    ).status,
+    400,
+  );
+  // Cleanup: unprotect + drop the shares this suite created.
+  await call("/api/pages/locked-doc/access", { method: "DELETE", token: OWNER });
+  assert.equal((await call("/locked-doc")).status, 200);
+  for (const id of ["locked-doc", "locked-folder", "member-doc"]) {
+    await call(`/api/pages/${id}`, { method: "DELETE", token: OWNER });
+  }
 });
 
 // Destroys all state — keep this last.

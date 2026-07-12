@@ -49,6 +49,7 @@ import {
   deletePage,
   deriveDocTitle,
   fetchWorkerVersion,
+  forgetAccessCodes,
   generateShareId,
   getConnections,
   pageExists,
@@ -1972,6 +1973,9 @@ export default function App() {
         window.clearTimeout(pending);
         timers.delete(target);
       }
+      // The page (and its access section) is gone remotely — the cached
+      // plaintext codes are dead weight now.
+      forgetAccessCodes(entry.connectionId, entry.id);
       updateShares((prev) => {
         const { [target]: _gone, ...rest } = prev;
         return rest;
@@ -2056,6 +2060,7 @@ export default function App() {
         window.clearTimeout(pending);
         timers.delete(dirPath);
       }
+      forgetAccessCodes(entry.connectionId, entry.id);
       const members = entry.members;
       updateCollections((prev) => {
         const { [dirPath]: _gone, ...rest } = prev;
@@ -3772,6 +3777,17 @@ export default function App() {
           onRememberWorkspaceConnection={
             workspaceRoot ? rememberWorkspaceConnection : null
           }
+          onProtectedChanged={(isProtected) => {
+            const path = activeTab.path;
+            updateShares((prev) =>
+              prev[path] && !!prev[path].protected !== isProtected
+                ? { ...prev, [path]: { ...prev[path], protected: isProtected } }
+                : prev,
+            );
+          }}
+          onOpenWorkerUpdate={
+            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
+          }
         />
       )}
       {sharedPagesOpen && (
@@ -3821,6 +3837,23 @@ export default function App() {
           }
           onUpdateMeta={(title, description) =>
             setCollectionMeta(shareFolderTarget, title, description)
+          }
+          onProtectedChanged={(isProtected) => {
+            updateCollections((prev) =>
+              prev[shareFolderTarget] &&
+              !!prev[shareFolderTarget].protected !== isProtected
+                ? {
+                    ...prev,
+                    [shareFolderTarget]: {
+                      ...prev[shareFolderTarget],
+                      protected: isProtected,
+                    },
+                  }
+                : prev,
+            );
+          }}
+          onOpenWorkerUpdate={
+            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
           }
           onClose={() => setShareFolderTarget(null)}
           onOpenExternal={openExternal}

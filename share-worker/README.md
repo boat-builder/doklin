@@ -41,6 +41,21 @@ choose. This README is the guide for standing up your own backend.
   (`vendor/marked.esm.js`, pinned) and CSS that mirrors the app's reading view,
   honoring light/dark via `prefers-color-scheme`. Shared pages carry
   `<meta name="robots" content="noindex">`.
+- **Access codes** (worker version 7): any share can be protected with *named*
+  codes — one per person or group ("Acme team" / `sunset-marble-fig`), each
+  individually revocable. Visitors hit a code-entry gate (generic on purpose:
+  no title, no description, no OG image — nothing leaks before the code) and
+  unlock once per browser for 30 days, via an HttpOnly cookie signed with a
+  random key the worker mints into the bucket on first use — no extra secret
+  to configure. Codes on a folder share cover its table of contents and every
+  member page; a member's own codes take precedence. The worker stores only
+  SHA-256 hashes (normalized trim/lowercase/NFKC, so phone keyboards can't
+  lock anyone out), compares in constant time, and rate-limits unlock attempts
+  per IP. Revoking a code kills exactly the sessions it minted, on their next
+  request. The app manages all of it from the Share popover ("Restrict…") and
+  the folder-share dialog, keeps the plaintext codes cached locally so you can
+  re-copy them, and offers a self-unlocking "link + code" format that carries
+  the code in the URL #fragment (never sent to servers or logs).
 
 ## Set up your own backend
 
@@ -267,13 +282,17 @@ people. Nothing under sync is public — the public routes above only ever serve
 
 ```
 site.json         {ownerName?, ownerLink?, downloadUrl?, rootPageId?, updatedAt}  (app-managed site config)
-pages/<id>.json   {title, markdown?, html?, collection?, createdAt, updatedAt}  (+ customMetadata for listing,
-                  incl. owner: the token that published it, and ws: the synced workspace it
-                  was published from, when any — that stamp is what lets every member manage it)
-                  or {kind: "collection", title, description?, items: [{id, title, path}], createdAt, updatedAt}
+pages/<id>.json   {title, markdown?, html?, collection?, access?, createdAt, updatedAt}  (+ customMetadata for
+                  listing, incl. owner: the token that published it, ws: the synced workspace it
+                  was published from, when any — that stamp is what lets every member manage it —
+                  and protected: "1" while access codes are set)
+                  or {kind: "collection", title, description?, items: [{id, title, path}], access?, createdAt, updatedAt}
+                  access = {codes: [{id, label, hash, createdAt}], updatedAt} — visitor access codes,
+                  hashes only; server-managed (content pushes carry it forward untouched)
 pages/<id>.png    OG image
 auth/tokens/<sha256-of-token>.json    {id, name, role, workspaces, createdAt, lastSeenAt}
 auth/invites/<sha256-of-code>.json    {id, name, role, workspaces, createdAt, expiresAt, claimed?}
+auth/gate-key.json                    {key, createdAt} — random HMAC key for gate cookies, minted on first unlock
 sync/<ws>/ws.json                     {id, name, createdAt}
 sync/<ws>/manifest.json               {version, name, seq, files: {<fileId>: {path, rev, hash, size,
                                       mtime, by, hist: [{r,h,s,t,b}]}}, tombstones: {<fileId>: {...}},
@@ -295,8 +314,8 @@ The write API the app depends on (all under the endpoint, requires
 GET    /api/meta             worker version + features -> { version, features: [...] }
 GET    /api/site             site config -> { site: {ownerName?, ownerLink?, downloadUrl?, rootPageId?} }
 PUT    /api/site             body = the same object, full record every time (missing field = unset)
-GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt }] }
-GET    /api/pages/<id>       existence/metadata check
+GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt, protected }] }
+GET    /api/pages/<id>       existence/metadata check (includes protected: bool)
 PUT    /api/pages/<id>       body {title, markdown?, html?, collection?, ws?} -> create/update a page
                              (at least one of markdown/html; collection {id, title} marks
                              folder-share membership and renders the back-home crumb;
@@ -309,6 +328,20 @@ PUT    /api/pages/<id>       body {title, markdown?, html?, collection?, ws?} ->
                              contents; description shows under the TOC's title)
 PUT    /api/pages/<id>/og    body image/png          -> set OG image
 DELETE /api/pages/<id>       stop sharing (remove page + OG image)
+```
+
+Visitor access codes (worker version 7; same auth — whoever can update a page
+can manage its codes):
+
+```
+GET    /api/pages/<id>/access             -> { protected, codes: [{id, label, createdAt}] }
+                                          (ids + labels only — the worker keeps hashes,
+                                          it can never echo a code back)
+POST   /api/pages/<id>/access/codes       body {label?, code} -> {id, label, createdAt}
+                                          (code is normalized trim/lowercase/NFKC, 4–128
+                                          chars; duplicate plaintext on one page -> 409)
+DELETE /api/pages/<id>/access/codes/<cid> revoke one code + exactly its visitor sessions
+DELETE /api/pages/<id>/access             remove protection entirely
 ```
 
 The sync + auth API (worker version 4; same bearer auth, roles apply):
@@ -360,7 +393,11 @@ worker".
 Plus the public reads a browser hits (no auth): `GET /<id>` (the html
 rendition when the page has one — framed — otherwise rendered markdown),
 `GET /<id>?v=md` (rendered markdown), `GET /<id>/raw` (the rendition
-verbatim), and `GET /<id>/og.png` (OG image).
+verbatim), and `GET /<id>/og.png` (OG image). On a protected share every one
+of those serves the code-entry gate (401) until the browser holds the share's
+cookie; `POST /<id>/unlock` (form body `code`, optional `next`) is the gate's
+target — correct code ⇒ Set-Cookie + 303 back. A `#c=<code>` fragment on a
+page link pre-fills and submits the gate automatically.
 
 ## Updating a deployed worker
 

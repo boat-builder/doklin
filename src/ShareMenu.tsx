@@ -9,6 +9,7 @@
 // and the actual push; this component owns the UX.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import AccessCodes from "./AccessCodes";
 import {
   generateShareId,
   newConnectionId,
@@ -44,6 +45,8 @@ export default function ShareMenu({
   onRemoveConnection,
   onMakeDefault,
   onRememberWorkspaceConnection,
+  onProtectedChanged,
+  onOpenWorkerUpdate,
 }: {
   docTitle: string;
   entry: ShareEntry | null;
@@ -83,9 +86,13 @@ export default function ShareMenu({
   onMakeDefault: (id: string) => Promise<void>;
   // null while no workspace folder is open (nothing to remember against).
   onRememberWorkspaceConnection: ((connectionId: string) => void) | null;
+  // Keeps the registry's `protected` badge in sync with the codes editor.
+  onProtectedChanged: (isProtected: boolean) => void;
+  // Non-null when a guided worker update is available (pre-v7 backends).
+  onOpenWorkerUpdate: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<"main" | "settings">("main");
+  const [view, setView] = useState<"main" | "settings" | "access">("main");
   // settings sub-state: which connection is being edited ("new" = adding one).
   const [editing, setEditing] = useState<ShareConnection | "new" | null>(null);
   // Connection id pending a remove confirmation.
@@ -281,6 +288,9 @@ export default function ShareMenu({
   // share form itself only ever renders with a working connection behind it.
   const showSetupPrompt = connections.length === 0 && view !== "settings";
   const showSettings = view === "settings";
+  // The codes editor only makes sense for a live share on a reachable backend.
+  const showAccess = view === "access" && !!entry && !!entryConnection;
+  const showMain = !showSetupPrompt && !showSettings && !showAccess;
 
   const openGuide = useCallback(() => {
     setOpen(false);
@@ -475,6 +485,24 @@ export default function ShareMenu({
                 </button>
               </div>
             </>
+          ) : showAccess && entry && entryConnection ? (
+            <>
+              <div className="share-heading" title={docTitle}>
+                Access codes
+              </div>
+              <AccessCodes
+                connection={entryConnection}
+                pageId={entry.id}
+                scope="page"
+                onChanged={onProtectedChanged}
+                onOpenWorkerUpdate={onOpenWorkerUpdate}
+              />
+              <div className="share-buttons">
+                <button className="share-btn" onClick={() => setView("main")}>
+                  Back
+                </button>
+              </div>
+            </>
           ) : entry ? (
             <>
               <div className="share-heading" title={docTitle}>
@@ -484,8 +512,16 @@ export default function ShareMenu({
                 <>
                   <div className="share-note">
                     {entry.sharedBy
-                      ? `Shared by ${entry.sharedBy}. Anyone with the link can view this page; it updates as anyone in the workspace saves.`
-                      : "Anyone with the link can view this page. It updates as you save."}
+                      ? `Shared by ${entry.sharedBy}. ${
+                          entry.protected
+                            ? "Only people with an access code can view this page"
+                            : "Anyone with the link can view this page"
+                        }; it updates as anyone in the workspace saves.`
+                      : `${
+                          entry.protected
+                            ? "Only people with an access code can view this page."
+                            : "Anyone with the link can view this page."
+                        } It updates as you save.`}
                   </div>
                   <div className="share-url-row">
                     <span className="share-url" title={shareUrl(entryConnection, entry.id)}>
@@ -508,6 +544,17 @@ export default function ShareMenu({
                       disabled={busy != null}
                     >
                       {busy === "stop" ? "Stopping…" : "Stop sharing"}
+                    </button>
+                  </div>
+                  <div className="share-access-summary">
+                    <span className="share-access-summary-text">
+                      <LockGlyph locked={!!entry.protected} />
+                      <span>
+                        {entry.protected ? "Access codes required" : "Anyone with the link"}
+                      </span>
+                    </span>
+                    <button className="share-btn" onClick={() => setView("access")}>
+                      {entry.protected ? "Manage" : "Restrict…"}
                     </button>
                   </div>
                 </>
@@ -609,7 +656,7 @@ export default function ShareMenu({
               {error && <div className="share-error">{error}</div>}
             </>
           )}
-          {!showSettings && !showSetupPrompt && collection && (
+          {showMain && collection && (
             <div className="share-collection">
               <div className="share-collection-text">
                 <button
@@ -646,7 +693,7 @@ export default function ShareMenu({
               </button>
             </div>
           )}
-          {!showSettings && !showSetupPrompt && (
+          {showMain && (
             <div className="share-footer-links">
               <button
                 className="share-all-link"
@@ -665,6 +712,26 @@ export default function ShareMenu({
         </div>
       )}
     </div>
+  );
+}
+
+// Open or closed padlock heading the access summary row.
+export function LockGlyph({ locked }: { locked: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      {locked ? <path d="M7 11V7a5 5 0 0 1 10 0v4" /> : <path d="M7 11V7a5 5 0 0 1 9.9-1" />}
+    </svg>
   );
 }
 

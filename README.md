@@ -20,7 +20,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 - **Autosave** — real files save back to the same `.md`; drafts save to app
   storage. Nothing is lost on tab switch or quit.
 - **Publish & share** — one click publishes a document as a public web page,
-  backed by a self-hostable backend.
+  backed by a self-hostable backend. Any page or shared folder can be put
+  behind named access codes — one code per person or group, individually
+  revocable; visitors enter it once per browser, no accounts involved.
 - **Cloud sync** — sync a workspace to that same backend (your own Cloudflare
   worker + R2 bucket): it backs up automatically, follows you to another Mac,
   and can be shared with people you invite — they install Doklin, paste a
