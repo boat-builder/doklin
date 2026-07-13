@@ -3694,7 +3694,24 @@ export default function App() {
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
     >
-      <div className="drag-strip" data-tauri-drag-region />
+      <div
+        className="drag-strip"
+        onMouseDown={(e) => {
+          // Drive the window drag ourselves rather than through the passive
+          // `data-tauri-drag-region` attribute: on macOS/WKWebView its injected
+          // mousedown handler intermittently fails to start the native drag, and
+          // a missed drag falls through to a normal content interaction — which
+          // is why dragging the strip would sometimes just select text instead
+          // of moving the window. Handling mousedown here (and preventing the
+          // default) starts the drag reliably and never selects text. A
+          // double-click zooms, matching a native title bar.
+          if (e.button !== 0) return;
+          e.preventDefault();
+          const win = getCurrentWindow();
+          if (e.detail === 2) void win.toggleMaximize();
+          else void win.startDragging();
+        }}
+      />
       <div className="title-actions">
         <button
           className="title-toggle"
