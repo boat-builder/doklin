@@ -4484,6 +4484,17 @@ body.tree-dragging.tree-drag-invalid * {
   margin-top: 10px;
 }
 
+/* The body is the one scroll region here (it has overflow-y + max-height), so
+   the lists inside must NOT be their own scroll containers. A .shared-list's
+   overflow-y:auto zeroes its flex auto-min-size, letting the flex column
+   squish it below one row's height — which clips the row and gives it a
+   private scrollbar (a single invite showing half its name + a cut-off
+   button). Keep them at natural height and let .sync-body do the scrolling. */
+.sync-body .shared-list {
+  overflow: visible;
+  flex-shrink: 0;
+}
+
 .sync-conn-row {
   display: flex;
   align-items: center;
