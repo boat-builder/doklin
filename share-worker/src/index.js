@@ -107,6 +107,7 @@
 //                                         <fileId>" (TTL'd, best-effort)
 
 import { marked } from "../vendor/marked.esm.js";
+import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
 
 // Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
@@ -130,6 +131,23 @@ const WORKER_FEATURES = [
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const RESERVED = new Set(["api", "join", "robots.txt", "favicon.ico"]);
+
+// Brand favicon: served from the worker (bytes embedded in favicons.js) and
+// linked from every page head. A multi-res .ico covers browser tabs/bookmarks
+// (and the automatic /favicon.ico request), plus an apple-touch-icon for iOS.
+const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
+const FAVICON_ICO_BYTES = Uint8Array.from(atob(FAVICON_ICO_B64), (c) => c.charCodeAt(0));
+const APPLE_TOUCH_BYTES = Uint8Array.from(atob(APPLE_TOUCH_PNG_B64), (c) => c.charCodeAt(0));
+
+function iconResponse(bytes, contentType) {
+  return new Response(bytes, {
+    headers: {
+      "content-type": contentType,
+      "cache-control": "public, max-age=604800, immutable",
+    },
+  });
+}
 // Landing branding + root page, app-managed. Lives outside the pages/ prefix
 // so listings never see it.
 const SITE_KEY = "site.json";
@@ -222,7 +240,8 @@ export default {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
-    if (path === "/favicon.ico") return new Response(null, { status: 204 });
+    if (path === "/favicon.ico") return iconResponse(FAVICON_ICO_BYTES, "image/x-icon");
+    if (path === "/apple-touch-icon.png") return iconResponse(APPLE_TOUCH_BYTES, "image/png");
 
     const ogMatch = path.match(/^\/([a-z0-9-]{1,64})\/og\.png$/);
     if (ogMatch && validId(ogMatch[1])) return serveOgImage(request, env, ogMatch[1]);
@@ -1837,6 +1856,7 @@ function gatePage(gateId, next, url, { status = 401, error = null } = {}) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Protected page</title>
@@ -2074,6 +2094,7 @@ async function renderPage(request, env, id, data, url) {
   const pageUrl = `${url.origin}/${id}`;
 
   const head = `<meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
@@ -2269,6 +2290,7 @@ async function serveCollection(env, id, data, url, cacheControl = "no-cache") {
       : null;
 
   const head = `<meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
@@ -2394,6 +2416,7 @@ function shellPage(title, message, status = 200) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
@@ -2533,6 +2556,7 @@ function landingPage(url, site = {}) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <meta name="description" content="${escapeHtml(desc)}">
@@ -2839,6 +2863,7 @@ function joinPage(env, url) {
 <html lang="en">
 <head>
 <meta charset="utf-8">
+${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Join a shared Doklin backend</title>
