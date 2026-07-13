@@ -750,6 +750,15 @@ await test("public surface: landing, /join page, private prefixes unreachable", 
   const root = await call("/");
   assert.equal(root.status, 200);
   assert.ok(root.text.includes("Doklin"));
+  assert.ok(root.text.includes('rel="icon"'), "pages link the favicon");
+
+  // Brand icons are served by the worker, not a 204 placeholder.
+  const favicon = await call("/favicon.ico");
+  assert.equal(favicon.status, 200);
+  assert.equal(favicon.headers.get("content-type"), "image/x-icon");
+  const apple = await call("/apple-touch-icon.png");
+  assert.equal(apple.status, 200);
+  assert.equal(apple.headers.get("content-type"), "image/png");
 
   const join = await call("/join");
   assert.equal(join.status, 200);
