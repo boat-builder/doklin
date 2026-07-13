@@ -209,6 +209,12 @@ body,
   padding: 0 8px;
   background: var(--app-bg);
   border-bottom: 1px solid var(--app-border);
+  /* The tab strip owns its horizontal overflow (scrolls internally, with the
+     overflow menu as escape hatch). Without this, the non-shrinking tabs give
+     the bar a large min-content width that pushes the 1fr track — and with it
+     the whole grid — wider than the window, spilling the sidebar off-screen
+     the moment there are enough tabs to fill the row. */
+  min-width: 0;
 }
 
 /* The tabs scroll inside the strip; the overflow chevron (if any) stays put
