@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "doklin"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "chrono",
  "diffy",
