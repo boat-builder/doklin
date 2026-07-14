@@ -17,18 +17,26 @@ import {
   type SearchInfo,
   type SearchMeta,
 } from "./searchPlugin";
-import { criticActivePlugin, criticCopyPlugin, setActiveComment } from "./criticPlugin";
+import {
+  criticActivePlugin,
+  criticActiveKey,
+  criticCopyPlugin,
+  setActiveThread,
+} from "./criticPlugin";
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import {
   criticCommentSchema,
   criticRemark,
-  collectComments,
-  applyComment,
+  collectThreads,
+  getThread,
+  createThread,
   updateCommentBody,
-  removeComment,
+  addReply,
+  deleteReply,
+  deleteThread,
 } from "./criticMark";
-import CommentsRail, { type RailComment } from "./CommentsRail";
+import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -81,12 +89,17 @@ type Props = {
   // Fires once the ProseMirror view exists with the full document rendered —
   // the earliest point DOM-level work (e.g. restoring scroll) can stick.
   onReady?: () => void;
+  // Comments: who new comments/replies are attributed to (the app's device
+  // identity — the same name sync history and presence use).
+  commentAuthor?: string;
+  // False hides the whole comment layer (rail, highlights, gutter) so the
+  // document reads clean; the marks stay in the doc untouched.
+  commentsVisible?: boolean;
+  // Reports the doc's thread count (drives the tab-bar toggle).
+  onCommentsCount?: (count: number) => void;
+  // Asks the host to flip comments visible (creating a comment while hidden).
+  onRequestShowComments?: () => void;
 };
-
-// Estimated card height + gap used by the rail's overlap-avoidance stacking pass
-// (cards have a min-height; very tightly packed comments may still touch).
-const CARD_MIN_HEIGHT = 52;
-const CARD_GAP = 10;
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
   view.dispatch(view.state.tr.setMeta(searchKey, meta));
@@ -177,7 +190,17 @@ function dictationContextAt(doc: import("@milkdown/kit/prose/model").Node, ancho
 }
 
 const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
-  { initialMarkdown, onChange, onSearchState, onFocusChange, onReady },
+  {
+    initialMarkdown,
+    onChange,
+    onSearchState,
+    onFocusChange,
+    onReady,
+    commentAuthor = "",
+    commentsVisible = true,
+    onCommentsCount,
+    onRequestShowComments,
+  },
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
@@ -200,62 +223,88 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
-  // Right-side comment rail state. `comments` is derived from the doc's marks on
-  // every update; activeId/editingId are transient UI state keyed by a comment's
-  // anchor `from` position.
-  const [comments, setComments] = useState<RailComment[]>([]);
-  const [activeId, setActiveId] = useState<number | null>(null);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const rafRef = useRef<number | null>(null);
+  // Right-side comment rail state. `threads` is derived from the doc's marks
+  // on every update; activeId/editing are transient UI state keyed by a
+  // thread's stable id, so they survive edits elsewhere in the document.
+  const [threads, setThreads] = useState<RailThread[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<EditTarget>(null);
+  // The pending recompute tick: rAF while the window paints, a timeout when
+  // it's hidden (rAF never fires in hidden windows, and the rail must not
+  // stall until the next paint).
+  const rafRef = useRef<{ kind: "raf" | "timeout"; id: number } | null>(null);
+  const contentObserverRef = useRef<ResizeObserver | null>(null);
+  // Latest comment props for the run-once editor closures.
+  const authorRef = useRef(commentAuthor);
+  authorRef.current = commentAuthor;
+  const visibleRef = useRef(commentsVisible);
+  const onCommentsCountRef = useRef(onCommentsCount);
+  onCommentsCountRef.current = onCommentsCount;
+  const onRequestShowCommentsRef = useRef(onRequestShowComments);
+  onRequestShowCommentsRef.current = onRequestShowComments;
 
   const report = () => {
     const view = viewRef.current;
     if (view) onSearchStateRef.current?.(infoOf(view));
   };
 
-  // Rebuild the rail from the document: scan the comment marks, position each
-  // card at its anchor's vertical offset (in the scroll container's content
-  // space, so cards translate with scroll), and stack to avoid overlaps.
-  // rAF-debounced because it runs on every editor update.
+  // Rebuild the rail from the document: scan the comment marks, group them
+  // into threads, and position each card at its first anchor's vertical
+  // offset (in the scroll container's content space, so cards translate with
+  // scroll). Overlap stacking happens in the rail, with measured heights.
+  // Also the janitor for transient state: active/editing ids whose thread
+  // vanished (deleted, cut, undone) are dropped here. rAF-debounced because
+  // it runs on every editor update.
   const recompute = useCallback(() => {
     if (rafRef.current != null) return;
-    rafRef.current = requestAnimationFrame(() => {
+    const run = () => {
       rafRef.current = null;
       const view = viewRef.current;
       const wrap = view?.dom.closest(".editor-wrap") as HTMLElement | null;
       if (!view || !wrap) {
-        setComments([]);
+        setThreads([]);
+        onCommentsCountRef.current?.(0);
         return;
       }
       const wrapRect = wrap.getBoundingClientRect();
-      const items: RailComment[] = [];
-      let cursor = 0;
-      for (const c of collectComments(view.state.doc)) {
+      const items: RailThread[] = [];
+      for (const t of collectThreads(view.state.doc)) {
         let top: number;
         try {
-          const coords = view.coordsAtPos(c.from);
+          const coords = view.coordsAtPos(t.ranges[0].from);
           top = coords.top - wrapRect.top + wrap.scrollTop;
         } catch {
-          top = cursor;
+          // position momentarily unmappable mid-edit; keep doc order
+          top = items.length > 0 ? items[items.length - 1].anchorTop + 1 : 0;
         }
-        top = Math.max(top, cursor);
-        items.push({ id: c.from, from: c.from, to: c.to, body: c.body, top });
-        cursor = top + CARD_MIN_HEIGHT + CARD_GAP;
+        items.push({ id: t.id, comments: t.comments, anchorTop: top });
       }
-      wrap.classList.toggle("has-comments", items.length > 0);
-      setComments(items);
-    });
+      wrap.classList.toggle("has-comments", items.length > 0 && visibleRef.current);
+      setThreads(items);
+      onCommentsCountRef.current?.(items.length);
+      setActiveId((a) => (a != null && !items.some((t) => t.id === a) ? null : a));
+      setEditing((e) => {
+        if (!e) return e;
+        const t = items.find((x) => x.id === e.id);
+        return t && e.index < t.comments.length ? e : null;
+      });
+    };
+    rafRef.current = document.hidden
+      ? { kind: "timeout", id: window.setTimeout(run, 32) }
+      : { kind: "raf", id: requestAnimationFrame(run) };
   }, []);
 
-  // Create a comment from the current selection and open its (empty) card.
-  // Routed through a ref so the run-once toolbar handler calls the latest copy.
+  // Create a comment thread from the current selection and open its (empty)
+  // card for typing. Routed through a ref so the run-once toolbar handler
+  // calls the latest copy.
   const createCommentRef = useRef<(view: EditorView) => void>(() => {});
   createCommentRef.current = (view: EditorView) => {
-    const range = applyComment(view, "");
-    if (!range) return;
-    setActiveComment(view, { from: range.from, to: range.to });
-    setActiveId(range.from);
-    setEditingId(range.from);
+    onRequestShowCommentsRef.current?.();
+    const id = createThread(view, authorRef.current);
+    if (!id) return;
+    setActiveThread(view, id);
+    setActiveId(id);
+    setEditing({ id, index: 0 });
     recompute();
   };
 
@@ -311,20 +360,32 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
           dispatchMeta(view, { kind: "set", ...pending });
           scrollToCurrent(view);
         }
-        // Clicking a highlighted anchor activates its comment in the rail.
+        // Clicking a highlighted anchor activates its thread in the rail;
+        // clicking anywhere else in the document deselects.
         view.dom.addEventListener("click", (e) => {
           const v = viewRef.current;
-          if (!v) return;
+          if (!v || !visibleRef.current) return;
           const at = v.posAtCoords({ left: e.clientX, top: e.clientY });
           if (!at) return;
-          const hit = collectComments(v.state.doc).find(
-            (c) => at.pos >= c.from && at.pos < c.to,
+          const hit = collectThreads(v.state.doc).find((t) =>
+            t.ranges.some((r) => at.pos >= r.from && at.pos < r.to),
           );
           if (hit) {
-            setActiveComment(v, { from: hit.from, to: hit.to });
-            setActiveId(hit.from);
+            setActiveThread(v, hit.id);
+            setActiveId(hit.id);
+          } else if (criticActiveKey.getState(v.state)?.id) {
+            setActiveThread(v, null);
+            setActiveId(null);
           }
         });
+        // Content height changes without an edit transaction (image loads,
+        // fonts) move the anchors — keep the rail aligned.
+        const observer = new ResizeObserver(() => recompute());
+        observer.observe(view.dom);
+        contentObserverRef.current = observer;
+        view.dom
+          .closest(".editor-wrap")
+          ?.classList.toggle("comments-off", !visibleRef.current);
         report();
         recompute();
         onReadyRef.current?.();
@@ -345,61 +406,107 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     return () => window.removeEventListener("resize", onResize);
   }, [recompute]);
 
+  // Show/hide the comment layer. Hiding clears the selection (no invisible
+  // active highlight) and drops the gutter; the marks themselves are
+  // untouched — the doc just reads clean.
+  useEffect(() => {
+    visibleRef.current = commentsVisible;
+    const view = viewRef.current;
+    const wrap = view?.dom.closest(".editor-wrap") as HTMLElement | null;
+    wrap?.classList.toggle("comments-off", !commentsVisible);
+    if (!commentsVisible) {
+      if (view) setActiveThread(view, null);
+      setActiveId(null);
+      setEditing(null);
+    }
+    recompute();
+  }, [commentsVisible, recompute]);
+
   // Drop the reserved gutter when this editor unmounts (e.g. closing the last
   // tab) so the welcome screen isn't left with a phantom right margin.
   useEffect(() => {
     return () => {
-      document.querySelector(".editor-wrap")?.classList.remove("has-comments");
+      const wrap = document.querySelector(".editor-wrap");
+      wrap?.classList.remove("has-comments", "comments-off");
+      contentObserverRef.current?.disconnect();
+      const pending = rafRef.current;
+      if (pending) {
+        if (pending.kind === "raf") cancelAnimationFrame(pending.id);
+        else clearTimeout(pending.id);
+      }
     };
   }, []);
 
-  const findComment = (id: number) => comments.find((c) => c.id === id);
+  // Rail callbacks. All of them resolve the thread from the CURRENT doc by
+  // its stable id at dispatch time, so stale rail state can never touch the
+  // wrong text.
+  const onActivate = useCallback((id: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const t = getThread(view.state, id);
+    if (!t) return;
+    setActiveThread(view, id);
+    setActiveId(id);
+    scrollPosIntoView(view, t.ranges[0].from);
+  }, []);
 
-  const onActivate = useCallback(
-    (id: number) => {
-      const view = viewRef.current;
-      const c = comments.find((x) => x.id === id);
-      if (!view || !c) return;
-      setActiveComment(view, { from: c.from, to: c.to });
-      setActiveId(id);
-      scrollPosIntoView(view, c.from);
-    },
-    [comments],
-  );
+  const onStartEdit = useCallback((id: string, index: number) => {
+    const view = viewRef.current;
+    if (view) setActiveThread(view, id);
+    setActiveId(id);
+    setEditing({ id, index });
+  }, []);
 
-  const onStartEdit = useCallback((id: number) => setEditingId(id), []);
-
-  const onCommitBody = useCallback(
-    (id: number, body: string) => {
-      const view = viewRef.current;
-      const c = findComment(id);
-      setEditingId(null);
-      if (!view || !c) return;
-      if (body.trim() === "") {
-        // An empty / never-filled comment is discarded on blur.
-        removeComment(view, c.from, c.to);
+  const onCommitEdit = useCallback((id: string, index: number, body: string) => {
+    setEditing(null);
+    const view = viewRef.current;
+    if (!view) return;
+    const entry = getThread(view.state, id)?.comments[index];
+    if (!entry) return;
+    if (body.trim() === "") {
+      if (index === 0 && entry.body === "") {
+        // An abandoned draft (opened, never written) is discarded on blur.
+        deleteThread(view, id);
+        setActiveThread(view, null);
         setActiveId((a) => (a === id ? null : a));
-      } else if (body !== c.body) {
-        updateCommentBody(view, c.from, c.to, body);
       }
-    },
-    // findComment closes over `comments`
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [comments],
-  );
+      // Emptying an existing entry reverts it; deleting is an explicit act.
+    } else if (body !== entry.body) {
+      updateCommentBody(view, id, index, body);
+    }
+  }, []);
 
-  const onDelete = useCallback(
-    (id: number) => {
-      const view = viewRef.current;
-      const c = findComment(id);
-      setEditingId((e) => (e === id ? null : e));
+  const onCancelEdit = useCallback((id: string, index: number) => {
+    setEditing(null);
+    const view = viewRef.current;
+    if (!view || index !== 0) return;
+    if (getThread(view.state, id)?.comments[0]?.body === "") {
+      deleteThread(view, id);
+      setActiveThread(view, null);
       setActiveId((a) => (a === id ? null : a));
-      if (view && c) removeComment(view, c.from, c.to);
-    },
-    // findComment closes over `comments`
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [comments],
-  );
+    }
+  }, []);
+
+  const onReply = useCallback((id: string, body: string) => {
+    const view = viewRef.current;
+    if (view) addReply(view, id, authorRef.current, body);
+  }, []);
+
+  const onDeleteThread = useCallback((id: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    setEditing((e) => (e?.id === id ? null : e));
+    setActiveId((a) => (a === id ? null : a));
+    deleteThread(view, id);
+    setActiveThread(view, null);
+  }, []);
+
+  const onDeleteReply = useCallback((id: string, index: number) => {
+    const view = viewRef.current;
+    if (!view) return;
+    setEditing((e) => (e && e.id === id && e.index === index ? null : e));
+    deleteReply(view, id, index);
+  }, []);
 
   useImperativeHandle(
     ref,
@@ -521,15 +628,20 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   return (
     <>
       <Milkdown />
-      <CommentsRail
-        comments={comments}
-        activeId={activeId}
-        editingId={editingId}
-        onActivate={onActivate}
-        onStartEdit={onStartEdit}
-        onCommitBody={onCommitBody}
-        onDelete={onDelete}
-      />
+      {commentsVisible && (
+        <CommentsRail
+          threads={threads}
+          activeId={activeId}
+          editing={editing}
+          onActivate={onActivate}
+          onStartEdit={onStartEdit}
+          onCommitEdit={onCommitEdit}
+          onCancelEdit={onCancelEdit}
+          onReply={onReply}
+          onDeleteThread={onDeleteThread}
+          onDeleteReply={onDeleteReply}
+        />
+      )}
     </>
   );
 });

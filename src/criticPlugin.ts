@@ -1,11 +1,15 @@
 // CriticMarkup editorial comments — Milkdown (ProseMirror) $prose plugins.
 //
-// The persistent highlight + comment body live in the `critic_comment` mark
-// (see criticMark.ts). These two plugins cover the *ephemeral* / view concerns:
+// The persistent highlight + thread data live in the `critic_comment` mark
+// (see criticMark.ts). These two plugins cover the *ephemeral* / view
+// concerns:
 //
-//   criticActivePlugin — paints the "active" comment (the one whose card is
-//     selected in the rail) with an extra decoration. Active state is transient
-//     UI, not document data, so it lives here rather than on the mark.
+//   criticActivePlugin — paints the "active" thread (the one whose card is
+//     selected in the rail) with an extra decoration on every one of its
+//     anchor runs. Active state is transient UI, not document data, so it
+//     lives here rather than on the mark. It is keyed by thread id, so it
+//     survives edits elsewhere and vanishes by itself the moment the thread's
+//     marks are gone (delete, cut, undo) — no stale highlight can linger.
 //
 //   criticCopyPlugin — intercepts copy/cut so the clipboard gets the *clean*
 //     markdown (markers stripped). The verbatim "with comments" copy is a
@@ -18,50 +22,60 @@ import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node as ProseNode, Schema } from "@milkdown/kit/prose/model";
 import { stripComments } from "./criticMarkup";
+import { collectThreads } from "./criticMark";
 
-// --- Active comment highlight ---
+/* ---------- Active thread highlight ---------- */
 
-export type ActiveRange = { from: number; to: number } | null;
+type ActiveState = { id: string | null; decos: DecorationSet };
 
-export const criticActiveKey = new PluginKey<ActiveRange>("doklin-critic-active");
+export const criticActiveKey = new PluginKey<ActiveState>("doklin-critic-active");
+
+function buildDecos(doc: ProseNode, id: string | null): DecorationSet {
+  if (!id) return DecorationSet.empty;
+  const thread = collectThreads(doc).find((t) => t.id === id);
+  if (!thread) return DecorationSet.empty;
+  return DecorationSet.create(
+    doc,
+    thread.ranges.map((r) =>
+      Decoration.inline(r.from, r.to, { class: "critic-anchor-active" }),
+    ),
+  );
+}
 
 export const criticActivePlugin = $prose(
   () =>
-    new Plugin<ActiveRange>({
+    new Plugin<ActiveState>({
       key: criticActiveKey,
       state: {
-        init: () => null,
+        init: () => ({ id: null, decos: DecorationSet.empty }),
         apply(tr, value) {
           // A set/clear request wins outright (meta is `null` to clear).
-          const meta = tr.getMeta(criticActiveKey) as ActiveRange | undefined;
-          if (meta !== undefined) return meta;
-          // Otherwise keep the range glued to its text across edits.
-          if (value && tr.docChanged) {
-            const from = tr.mapping.map(value.from);
-            const to = tr.mapping.map(value.to);
-            return to > from ? { from, to } : null;
+          const meta = tr.getMeta(criticActiveKey) as string | null | undefined;
+          const id = meta !== undefined ? meta : value.id;
+          if (!id) return { id: null, decos: DecorationSet.empty };
+          // Rebuild from the marks themselves whenever the doc (or the
+          // selection of active thread) changes: the decoration always
+          // mirrors where the thread's runs ARE, and disappears with them.
+          if (meta !== undefined || tr.docChanged) {
+            return { id, decos: buildDecos(tr.doc, id) };
           }
           return value;
         },
       },
       props: {
         decorations(state) {
-          const r = criticActiveKey.getState(state);
-          if (!r) return null;
-          return DecorationSet.create(state.doc, [
-            Decoration.inline(r.from, r.to, { class: "critic-anchor-active" }),
-          ]);
+          return criticActiveKey.getState(state)?.decos ?? null;
         },
       },
     }),
 );
 
-// Set (or clear, with null) which comment is visually active.
-export function setActiveComment(view: EditorView, range: ActiveRange): void {
-  view.dispatch(view.state.tr.setMeta(criticActiveKey, range));
+// Set (or clear, with null) which thread is visually active.
+export function setActiveThread(view: EditorView, id: string | null): void {
+  view.dispatch(view.state.tr.setMeta(criticActiveKey, id));
 }
 
-// --- Clean copy / cut ---
+/* ---------- Clean copy / cut ---------- */
 
 // Serialize the current selection to markdown exactly the way Milkdown's own
 // clipboard plugin does (@milkdown/plugin-clipboard). With the comment mark in
