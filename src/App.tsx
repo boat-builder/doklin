@@ -149,6 +149,7 @@ function suggestDraftFileName(md: string, fallback: string): string {
 type Theme = "system" | "light" | "sepia" | "dark";
 const THEMES: Theme[] = ["system", "light", "sepia", "dark"];
 const THEME_STORAGE_KEY = "doklin:theme";
+const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const RECENTS_STORAGE_KEY = "doklin:recents";
 const RECENTS_MAX = 8;
@@ -468,6 +469,17 @@ export default function App() {
   // asked for. null = closed.
   const [savePrompt, setSavePrompt] = useState<{ dir: string; suggested: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => readStoredSidebarOpen());
+  // The comment layer: visible by default, hideable app-wide (persisted) so a
+  // marked-up document can be read clean. The count comes from the editor and
+  // drives the tab-bar toggle (which only shows when there's something to hide).
+  const [commentsVisible, setCommentsVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COMMENTS_VISIBLE_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [commentCount, setCommentCount] = useState(0);
   const [draftsOpen, setDraftsOpen] = useState<boolean>(() => readDraftsOpen());
   const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
   const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
@@ -1337,6 +1349,21 @@ export default function App() {
   useEffect(() => {
     writeStoredSidebarOpen(sidebarOpen);
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COMMENTS_VISIBLE_STORAGE_KEY, commentsVisible ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [commentsVisible]);
+
+  // The count belongs to the mounted document; zero it on each editor remount
+  // so a tab with no editor (HTML doc, welcome screen) can't keep showing the
+  // previous doc's toggle.
+  useEffect(() => {
+    setCommentCount(0);
+  }, [loadKey]);
 
   useEffect(() => {
     writeDraftsOpen(draftsOpen);
@@ -4021,12 +4048,21 @@ export default function App() {
         onReorder={reorderTabs}
         trailing={
           activeTab && !activeMissing ? (
-            <ViewToggle
-              view={docView}
-              hasMd={!activeIsHtmlDoc}
-              hasHtml={hasHtml}
-              onSelect={(v) => void selectDocView(v)}
-            />
+            <>
+              {docView === "md" && commentCount > 0 && (
+                <CommentsToggle
+                  count={commentCount}
+                  visible={commentsVisible}
+                  onToggle={() => setCommentsVisible((v) => !v)}
+                />
+              )}
+              <ViewToggle
+                view={docView}
+                hasMd={!activeIsHtmlDoc}
+                hasHtml={hasHtml}
+                onSelect={(v) => void selectDocView(v)}
+              />
+            </>
           ) : null
         }
       />
@@ -4129,6 +4165,10 @@ export default function App() {
             onChange={onMarkdownChange}
             onSearchState={setFindInfo}
             onReady={restoreActiveScroll}
+            commentAuthor={syncDeviceName}
+            commentsVisible={commentsVisible}
+            onCommentsCount={setCommentCount}
+            onRequestShowComments={() => setCommentsVisible(true)}
           />
         )}
         {activeTab && showHtmlView && htmlContent != null && (
@@ -4252,6 +4292,43 @@ function ViewToggle({
         HTML
       </button>
     </div>
+  );
+}
+
+// Tab-bar control that shows the open document's comment count and toggles
+// the whole comment layer (rail, highlights, gutter) on and off. Only
+// rendered when the document actually has comments.
+function CommentsToggle({
+  count,
+  visible,
+  onToggle,
+}: {
+  count: number;
+  visible: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      className={`comments-toggle ${visible ? "" : "is-off"}`}
+      aria-pressed={visible}
+      title={visible ? "Hide comments" : `Show comments (${count})`}
+      onClick={onToggle}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      </svg>
+      <span className="comments-toggle-count">{count}</span>
+    </button>
   );
 }
 
