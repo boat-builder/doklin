@@ -3001,6 +3001,30 @@ export default function App() {
     };
   }, [flushPendingAutosave]);
 
+  // Mirror recent workspaces into the native File → "Open Recent Workspace"
+  // menu (macOS). Fires on mount (restoring from localStorage) and on every
+  // change. Folders only — files aren't workspaces. The backend menu is
+  // app-global, so the last window to push wins, which is the freshest list.
+  useEffect(() => {
+    const folders = recents
+      .filter((r) => r.kind === "folder")
+      .map((r) => r.path);
+    void invoke("set_recent_workspaces", { folders }).catch(() => {});
+  }, [recents]);
+
+  // "Clear Menu" in that native submenu emits this; wipe the shared recents (the
+  // push effect above then blanks the menu). Broadcast to every window, each
+  // clearing its own copy of the shared list.
+  useEffect(() => {
+    const un = listen("menu-clear-recent-workspaces", () => {
+      setRecents([]);
+      writeStoredRecents([]);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
   // Cloud sync wiring: seed the engine statuses once, then track events.
   useEffect(() => {
     void syncStatus()
@@ -3585,16 +3609,26 @@ export default function App() {
         if (activeIdRef.current) void closeTab(activeIdRef.current);
         else void getCurrentWindow().close();
       } else if (k === "backspace") {
-        // ⌘⌫ moves the active file to the Trash — but only when focus is outside
-        // the editor, so it stays Milkdown's delete-to-line-start while typing.
-        // (A sidebar-row handler can't be relied on: WebKit doesn't focus
-        // buttons on click, so the row never holds focus to receive the key.)
+        // ⌘⌫ moves the selected entry to the Trash — but only when focus is
+        // outside the editor, so it stays Milkdown's delete-to-line-start while
+        // typing. (A sidebar-row handler can't be relied on: WebKit doesn't
+        // focus buttons on click, so the row never holds focus to receive the
+        // key.)
         const t = e.target as HTMLElement | null;
         if (t?.isContentEditable || t?.closest(".editor-wrap")) return;
-        const active = tabsRef.current.find((tb) => tb.id === activeIdRef.current);
-        if (active?.kind === "file") {
+        const sel = sidebarSelectionRef.current;
+        if (sel?.kind === "dir" && workspaceRoot != null && sidebarOpen) {
+          // A folder is only ever the sidebar selection (it's never an open
+          // tab), so ⌘⌫ can target it only while its highlight is visible in the
+          // tree. Otherwise fall through to the active file tab.
           e.preventDefault();
-          void deleteEntry(active.path, "file");
+          void deleteEntry(sel.path, "dir");
+        } else {
+          const active = tabsRef.current.find((tb) => tb.id === activeIdRef.current);
+          if (active?.kind === "file") {
+            e.preventDefault();
+            void deleteEntry(active.path, "file");
+          }
         }
       } else if (e.code === "KeyO") {
         // Use e.code, not e.key: on macOS holding ⌥ remaps e.key (⌥O → "ø").
@@ -3653,6 +3687,7 @@ export default function App() {
     openFolderInNewWindow,
     cycleTab,
     workspaceRoot,
+    sidebarOpen,
     undoDelete,
     openWorkspaceSearch,
     selectDocView,

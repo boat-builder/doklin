@@ -18,7 +18,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 /// Folder waiting to be adopted by the main window on cold start. Files never
@@ -107,6 +107,18 @@ const QUIT_MENU_ID: &str = "doklin-quit-flush";
 /// so ⌘W is free for the renderer's close-tab handler (macOS-only). See
 /// `build_app_menu`.
 const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
+/// Menu id of the "Open Recent Workspace" submenu anchored under File
+/// (macOS-only). Its children are (re)built from the renderer's recents list via
+/// the `set_recent_workspaces` command.
+const RECENT_SUBMENU_ID: &str = "doklin-recent-submenu";
+/// Id prefix for each recent-workspace item; the folder path is the remainder
+/// (`doklin-recent::<path>`), so a menu click resolves straight to its folder
+/// without a side table.
+const RECENT_ITEM_PREFIX: &str = "doklin-recent::";
+/// Menu id of the disabled placeholder shown when there are no recents.
+const RECENT_EMPTY_ID: &str = "doklin-recent-empty";
+/// Menu id of the "Clear Menu" item at the foot of the recent submenu.
+const RECENT_CLEAR_ID: &str = "doklin-recent-clear";
 /// How long a quit waits for window acks before exiting anyway — the escape
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
@@ -1150,7 +1162,102 @@ fn build_app_menu<R: tauri::Runtime>(handle: &AppHandle<R>) -> tauri::Result<Men
         }
     }
 
+    // Anchor an "Open Recent Workspace" submenu at the top of the File menu. The
+    // renderer owns the recents list (localStorage), so it fills this in via
+    // `set_recent_workspaces`; here we just create it with a disabled
+    // placeholder so File shows the entry from the first launch. The File menu
+    // is matched by title, like the "Close Window" swap above.
+    for kind in menu.items()? {
+        let Some(submenu) = kind.as_submenu() else { continue };
+        if submenu.text().ok().as_deref() != Some("File") {
+            continue;
+        }
+        let recent = Submenu::with_id(handle, RECENT_SUBMENU_ID, "Open Recent Workspace", true)?;
+        recent.append(&MenuItem::with_id(
+            handle,
+            RECENT_EMPTY_ID,
+            "No Recent Workspaces",
+            false,
+            None::<&str>,
+        )?)?;
+        submenu.prepend(&recent)?;
+        break;
+    }
+
     Ok(menu)
+}
+
+/// macOS-only: rebuild the File → "Open Recent Workspace" submenu to mirror
+/// `folders` (most-recent first). Each item's id is `doklin-recent::<path>`, so
+/// a click resolves straight to its folder in the menu-event handler without a
+/// side table. `Menu::get` isn't recursive, so the submenu (nested under File)
+/// is located by probing each top-level submenu.
+#[cfg(target_os = "macos")]
+fn rebuild_recent_menu(app: &AppHandle, folders: &[String]) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else { return Ok(()) };
+    let mut recent = None;
+    for kind in menu.items()? {
+        if let Some(submenu) = kind.as_submenu() {
+            if let Some(found) = submenu.get(RECENT_SUBMENU_ID) {
+                recent = found.as_submenu().cloned();
+                break;
+            }
+        }
+    }
+    let Some(recent) = recent else { return Ok(()) };
+
+    // Drop every existing item, then refill. remove_at keeps us off the
+    // IsMenuItem-for-MenuItemKind path.
+    for _ in 0..recent.items()?.len() {
+        recent.remove_at(0)?;
+    }
+
+    if folders.is_empty() {
+        recent.append(&MenuItem::with_id(
+            app,
+            RECENT_EMPTY_ID,
+            "No Recent Workspaces",
+            false,
+            None::<&str>,
+        )?)?;
+        return Ok(());
+    }
+
+    for path in folders {
+        let name = Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        recent.append(&MenuItem::with_id(
+            app,
+            format!("{RECENT_ITEM_PREFIX}{path}"),
+            name,
+            true,
+            None::<&str>,
+        )?)?;
+    }
+    recent.append(&PredefinedMenuItem::separator(app)?)?;
+    recent.append(&MenuItem::with_id(
+        app,
+        RECENT_CLEAR_ID,
+        "Clear Menu",
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(())
+}
+
+/// The renderer pushes its recents (folders only, most-recent first) here on
+/// startup and whenever the list changes, so the native File → "Open Recent
+/// Workspace" menu stays in sync. A no-op off macOS (no custom app menu there).
+#[tauri::command]
+fn set_recent_workspaces(app: AppHandle, folders: Vec<String>) {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = rebuild_recent_menu(&app, &folders) {
+        eprintln!("failed to update recent-workspaces menu: {e}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (&app, &folders);
 }
 
 /// Quit, but let every window persist first: broadcast `quit-flush-requested`,
@@ -1504,6 +1611,14 @@ pub fn run() {
                 {
                     let _ = win.close();
                 }
+            } else if event.id() == RECENT_CLEAR_ID {
+                // The renderer owns the recents list; ask it to clear, then it
+                // re-pushes an empty list which blanks this submenu.
+                let _ = app.emit("menu-clear-recent-workspaces", ());
+            } else if let Some(path) = event.id().0.strip_prefix(RECENT_ITEM_PREFIX) {
+                // Focus a window already showing this workspace, else spawn one.
+                // Menu events run on the main thread, so route directly.
+                route_open(app, Some(path.to_string()), None);
             }
         });
     }
@@ -1552,6 +1667,7 @@ pub fn run() {
             register_window_content,
             take_window_init,
             open_in_window,
+            set_recent_workspaces,
             focus_next_window,
             create_draft,
             list_drafts,
