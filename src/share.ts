@@ -545,6 +545,11 @@ export type PageComment = {
   id: string;
   body: string;
   quote?: string;
+  // Present when the comment was left on an ELEMENT of the html rendition
+  // (worker v9): the same {path, tag, text} anchor shape the app's own
+  // sidecar threads use (htmlComments.ts). The moderation view shows the
+  // human-readable `quote`; the anchor is the machine half.
+  anchor?: { path: string; tag: string; text: string };
   name?: string;
   label: string;
   codeId: string;

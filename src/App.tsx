@@ -78,6 +78,13 @@ import {
   type ShareParts,
 } from "./share";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
+import HtmlView from "./HtmlView";
+import {
+  commentsSidecarOf,
+  parseHtmlComments,
+  serializeHtmlComments,
+  type HtmlThread,
+} from "./htmlComments";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -130,6 +137,17 @@ const HTML_EXT_RE = /\.html$/i;
 const isHtmlPath = (p: string) => HTML_EXT_RE.test(p);
 const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html";
 const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
+
+// The companion files the document watcher rides along with a tab: the html
+// rendition (when the tab is its markdown side) and the rendition's comments
+// sidecar. watch_file skips paths that don't exist, so the sidecar is always
+// offered.
+const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] =>
+  htmlPath === null
+    ? []
+    : htmlPath === tabPath
+      ? [commentsSidecarOf(htmlPath)]
+      : [htmlPath, commentsSidecarOf(htmlPath)];
 
 type DocView = "md" | "html";
 
@@ -535,6 +553,16 @@ export default function App() {
   const [hasHtml, setHasHtml] = useState(false);
   const [htmlContent, setHtmlContent] = useState<string | null>(null);
   const htmlPathRef = useRef<string | null>(null);
+  // Comment threads on the ACTIVE document's html rendition, mirrored from
+  // its sidecar file (see htmlComments.ts). The ref mirrors state for async
+  // readers (watcher events, debounced writes) — same pattern as pathRef.
+  // `htmlSidecarExistsRef` remembers whether the sidecar is on disk: an empty
+  // thread list never CREATES a file, and the first write re-arms the watcher
+  // (a file that didn't exist at watch time couldn't be watched).
+  const [htmlThreads, setHtmlThreads] = useState<HtmlThread[]>([]);
+  const htmlThreadsRef = useRef<HtmlThread[]>([]);
+  const htmlSidecarExistsRef = useRef(false);
+  const sidecarWriteTimerRef = useRef<number | null>(null);
   // Remembered view per document path (session-scoped): a tab you left on HTML
   // comes back on HTML; an html file opened explicitly starts on HTML.
   const viewPrefsRef = useRef<Map<string, DocView>>(new Map());
@@ -1594,6 +1622,107 @@ export default function App() {
     return writeToDisk(target, snapshot);
   }, [writeToDisk]);
 
+  /* ---------- HTML rendition comments: sidecar load/save ----------
+     The rendition's threads live in a sidecar file next to the html (see
+     htmlComments.ts) and follow the autosave pattern: HtmlView hands the app
+     a new thread list, the app debounces a write. Writes are unconditional
+     (last write wins) — the sidecar is append-mostly and low-stakes, and the
+     watcher covers concurrent external edits by reloading whenever the file
+     changes under us with no local write pending. */
+
+  const applyHtmlThreads = useCallback((threads: HtmlThread[]) => {
+    htmlThreadsRef.current = threads;
+    setHtmlThreads(threads);
+  }, []);
+
+  // Read the active rendition's sidecar (missing file = no comments yet).
+  const loadSidecar = useCallback(
+    async (htmlPath: string | null) => {
+      if (!htmlPath) {
+        htmlSidecarExistsRef.current = false;
+        applyHtmlThreads([]);
+        return;
+      }
+      try {
+        const r = await invoke<ReadFileResult>("read_file", {
+          path: commentsSidecarOf(htmlPath),
+        });
+        htmlSidecarExistsRef.current = true;
+        applyHtmlThreads(parseHtmlComments(r.contents));
+      } catch {
+        htmlSidecarExistsRef.current = false;
+        applyHtmlThreads([]);
+      }
+    },
+    [applyHtmlThreads],
+  );
+
+  // Re-watch the active document with its current companions. Needed once
+  // after the FIRST sidecar write: a file that didn't exist when watch_file
+  // ran isn't being watched, so external edits to it would go unseen.
+  const rearmDocWatcher = useCallback(async () => {
+    const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (active?.kind !== "file") return;
+    try {
+      await invoke("watch_file", {
+        path: active.path,
+        extras: watchExtrasOf(active.path, htmlPathRef.current),
+      });
+    } catch (e) {
+      console.error("watch_file failed", e);
+    }
+  }, []);
+
+  const writeSidecarNow = useCallback(async () => {
+    const htmlPath = htmlPathRef.current;
+    if (!htmlPath) return;
+    const threads = htmlThreadsRef.current;
+    // Deleting the last thread empties the file rather than deleting it (the
+    // only remover the app has is the Trash — too loud for a sidecar); a doc
+    // that never had comments never gets one.
+    if (threads.length === 0 && !htmlSidecarExistsRef.current) return;
+    try {
+      await invoke<FileSnapshot>("write_file", {
+        path: commentsSidecarOf(htmlPath),
+        contents: serializeHtmlComments(threads),
+        expected: null,
+      });
+      const isNew = !htmlSidecarExistsRef.current;
+      htmlSidecarExistsRef.current = true;
+      if (isNew) await rearmDocWatcher();
+    } catch (e) {
+      console.error("comment save failed", e);
+    }
+  }, [rearmDocWatcher]);
+
+  const scheduleSidecarWrite = useCallback(() => {
+    if (sidecarWriteTimerRef.current != null) {
+      window.clearTimeout(sidecarWriteTimerRef.current);
+    }
+    sidecarWriteTimerRef.current = window.setTimeout(() => {
+      sidecarWriteTimerRef.current = null;
+      void writeSidecarNow();
+    }, 400);
+  }, [writeSidecarNow]);
+
+  // Land a pending sidecar write before anything that retargets
+  // htmlPathRef (tab switch, close, quit) — mirrors flushPendingAutosave.
+  const flushSidecarWrite = useCallback((): Promise<void> => {
+    if (sidecarWriteTimerRef.current == null) return Promise.resolve();
+    window.clearTimeout(sidecarWriteTimerRef.current);
+    sidecarWriteTimerRef.current = null;
+    return writeSidecarNow();
+  }, [writeSidecarNow]);
+
+  // HtmlView reports every thread mutation here; disk follows.
+  const onHtmlThreadsChange = useCallback(
+    (next: HtmlThread[]) => {
+      applyHtmlThreads(next);
+      scheduleSidecarWrite();
+    },
+    [applyHtmlThreads, scheduleSidecarWrite],
+  );
+
   const addRecent = useCallback((p: string, kind: "file" | "folder") => {
     setRecents((prev) => {
       const next = [{ path: p, kind }, ...prev.filter((r) => r.path !== p)].slice(
@@ -1651,6 +1780,9 @@ export default function App() {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
+    // A pending comment write still targets the PREVIOUS document's sidecar
+    // (htmlPathRef switches below) — land it first.
+    await flushSidecarWrite();
     // An html-only document: rendered read-only, never loaded into the
     // markdown editor and never an autosave target (pathRef stays null).
     const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
@@ -1681,6 +1813,7 @@ export default function App() {
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
+      await loadSidecar(null);
       applyDocView("md");
       try {
         await invoke("unwatch_file");
@@ -1714,6 +1847,7 @@ export default function App() {
     }
     htmlPathRef.current = htmlPath;
     setHasHtml(htmlPath != null);
+    await loadSidecar(htmlPath);
     const view: DocView =
       htmlOnly || (htmlPath != null && viewPrefsRef.current.get(tab.path) === "html")
         ? "html"
@@ -1739,12 +1873,12 @@ export default function App() {
 
     if (tab.kind === "file") {
       try {
-        // Watch the document pair: the markdown for the edit/conflict flow,
+        // Watch the document set: the markdown for the edit/conflict flow,
         // the rendition so external regeneration re-renders (and re-pushes a
-        // share) live.
+        // share) live, the comments sidecar so sync-delivered threads pop in.
         await invoke("watch_file", {
           path: tab.path,
-          extra: htmlOnly ? null : htmlPath,
+          extras: watchExtrasOf(tab.path, htmlPath),
         });
       } catch (e) {
         console.error("watch_file failed", e);
@@ -1756,7 +1890,7 @@ export default function App() {
         // ignore
       }
     }
-  }, [setTabMissing, applyDocView]);
+  }, [setTabMissing, applyDocView, flushSidecarWrite, loadSidecar]);
 
   // Re-materialize stored tab descriptors against disk: a readable tab keeps its
   // identity (a draft regains its Untitled-N title; a stale `missing` flag
@@ -1787,6 +1921,7 @@ export default function App() {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
+    await flushSidecarWrite();
     try {
       await invoke("unwatch_file");
     } catch {
@@ -1803,8 +1938,10 @@ export default function App() {
     htmlPathRef.current = null;
     setHtmlContent(null);
     setHasHtml(false);
+    htmlSidecarExistsRef.current = false;
+    applyHtmlThreads([]);
     applyDocView("md");
-  }, [applyDocView]);
+  }, [applyDocView, flushSidecarWrite, applyHtmlThreads]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -2607,6 +2744,10 @@ export default function App() {
           console.error("read failed", htmlPath, e);
           return; // rendition vanished from disk; stay on markdown
         }
+        // Freshen the comment threads along with the rendition (same doc, so
+        // land any pending write first — the reload round-trips it).
+        await flushSidecarWrite();
+        await loadSidecar(htmlPath);
         setHtmlContent(contents);
         applyDocView("html");
         viewPrefsRef.current.set(tab.path, "html");
@@ -2617,7 +2758,14 @@ export default function App() {
         restoreActiveScroll(); // the wrap regained height; put the reader back
       }
     },
-    [captureActiveScroll, flushPendingAutosave, applyDocView, restoreActiveScroll],
+    [
+      captureActiveScroll,
+      flushPendingAutosave,
+      applyDocView,
+      restoreActiveScroll,
+      flushSidecarWrite,
+      loadSidecar,
+    ],
   );
 
   // Close a tab. Empty drafts are auto-discarded (nothing to recover); drafts
@@ -2732,24 +2880,28 @@ export default function App() {
         return;
       }
       const files = [{ path: target, trashPath }];
-      // A markdown file's html rendition is trashed with it — they are one
-      // document. Best-effort: the markdown is already in the Trash.
+      // A document's companions are trashed with it — the html rendition (for
+      // a markdown file) and the rendition's comments sidecar are one
+      // document with it. Best-effort: the primary is already in the Trash.
+      const trashCompanion = async (path: string, label: string) => {
+        const exists = await invoke<boolean>("path_exists", { path }).catch(() => false);
+        if (!exists) return;
+        try {
+          files.push({
+            path,
+            trashPath: await invoke<string>("trash_file", { path }),
+          });
+        } catch (e) {
+          console.error("trash failed", e);
+          alert(`Deleted ${basename(target)} but not its ${label}.\n${e}`);
+        }
+      };
       if (kind === "file" && MD_EXT_RE.test(target)) {
         const sibling = htmlSiblingOf(target);
-        const exists = await invoke<boolean>("path_exists", { path: sibling }).catch(
-          () => false,
-        );
-        if (exists) {
-          try {
-            files.push({
-              path: sibling,
-              trashPath: await invoke<string>("trash_file", { path: sibling }),
-            });
-          } catch (e) {
-            console.error("trash failed", e);
-            alert(`Deleted ${basename(target)} but not its HTML version.\n${e}`);
-          }
-        }
+        await trashCompanion(sibling, "HTML version");
+        await trashCompanion(commentsSidecarOf(sibling), "comments");
+      } else if (kind === "file" && HTML_EXT_RE.test(target)) {
+        await trashCompanion(commentsSidecarOf(target), "comments");
       }
       // A deleted member drops off its folder share's TOC (the published page
       // itself stays live — delete ≠ unshare, same as standalone shares). A
@@ -2844,28 +2996,40 @@ export default function App() {
       ) {
         await flushPendingAutosave();
       }
+      // Same for a pending comment write: land it before its sidecar (or the
+      // rendition it belongs to) moves out from under it.
+      await flushSidecarWrite();
       try {
         await invoke("move_path", { from, to });
       } catch (e) {
         return String(e);
       }
-      // A markdown file's html rendition moves/renames with it — the pair is
-      // one document, and leaving the html behind would silently split it in
-      // two. Best-effort: the markdown has already moved.
-      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
-        const fromHtml = htmlSiblingOf(from);
-        const exists = await invoke<boolean>("path_exists", { path: fromHtml }).catch(
+      // A document's companions move/rename with it — the markdown, its html
+      // rendition, and the rendition's comments sidecar are one document, and
+      // leaving one behind would silently split it. Best-effort: the primary
+      // file has already moved.
+      const moveCompanion = async (cFrom: string, cTo: string, label: string) => {
+        const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
           () => false,
         );
-        if (exists) {
-          try {
-            await invoke("move_path", { from: fromHtml, to: htmlSiblingOf(to) });
-          } catch (e) {
-            window.alert(
-              `Moved "${basename(from)}" but not its HTML version.\n${e}`,
-            );
-          }
+        if (!exists) return;
+        try {
+          await invoke("move_path", { from: cFrom, to: cTo });
+        } catch (e) {
+          window.alert(`Moved "${basename(from)}" but not its ${label}.\n${e}`);
         }
+      };
+      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
+        const fromHtml = htmlSiblingOf(from);
+        const toHtml = htmlSiblingOf(to);
+        await moveCompanion(fromHtml, toHtml, "HTML version");
+        await moveCompanion(
+          commentsSidecarOf(fromHtml),
+          commentsSidecarOf(toHtml),
+          "comments",
+        );
+      } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
+        await moveCompanion(commentsSidecarOf(from), commentsSidecarOf(to), "comments");
       }
       const remap = (p: string) =>
         p === from
@@ -2899,7 +3063,10 @@ export default function App() {
           const active = nextTabs.find((t) => t.id === activeIdRef.current);
           if (active?.kind === "file") {
             try {
-              await invoke("watch_file", { path: np, extra: htmlPathRef.current });
+              await invoke("watch_file", {
+                path: np,
+                extras: watchExtrasOf(np, htmlPathRef.current),
+              });
             } catch (e) {
               console.error("watch_file failed", e);
             }
@@ -2911,7 +3078,7 @@ export default function App() {
         if (np !== htmlPathRef.current) {
           htmlPathRef.current = np;
           try {
-            await invoke("watch_file", { path: np });
+            await invoke("watch_file", { path: np, extras: watchExtrasOf(np, np) });
           } catch (e) {
             console.error("watch_file failed", e);
           }
@@ -3017,6 +3184,7 @@ export default function App() {
     },
     [
       flushPendingAutosave,
+      flushSidecarWrite,
       updateShares,
       updateCollections,
       scheduleSharePush,
@@ -3168,6 +3336,26 @@ export default function App() {
 
   useEffect(() => {
     const un = listen<ExternalChangePayload>("file-externally-changed", (e) => {
+      // The active rendition's comments sidecar changed (cloud sync delivered
+      // a teammate's thread, or another window wrote): reload it — unless a
+      // local write is pending, which would clobber a comment mid-typing;
+      // that write lands in a moment and last-write-wins.
+      const sidecar = htmlPathRef.current
+        ? commentsSidecarOf(htmlPathRef.current)
+        : null;
+      if (sidecar !== null && e.payload.path === sidecar) {
+        if (sidecarWriteTimerRef.current != null) return;
+        void (async () => {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: sidecar });
+            htmlSidecarExistsRef.current = true;
+            applyHtmlThreads(parseHtmlComments(r.contents));
+          } catch {
+            // mid-rewrite; the next event covers it
+          }
+        })();
+        return;
+      }
       // The active document's html rendition changed (e.g. regenerated by an
       // AI tool): re-render it and mirror a live share. The markdown editor —
       // and its dirty/conflict flow — is untouched.
@@ -3194,7 +3382,7 @@ export default function App() {
     return () => {
       void un.then((f) => f());
     };
-  }, [reloadFromDisk, scheduleSharePush]);
+  }, [reloadFromDisk, scheduleSharePush, applyHtmlThreads]);
 
   // Reconcile shares with edits made outside the app at the moments staleness
   // becomes observable: once after launch/restore, then whenever the window
@@ -3221,7 +3409,7 @@ export default function App() {
       closingRef.current = true;
       event.preventDefault();
       try {
-        await flushPendingAutosave();
+        await Promise.all([flushPendingAutosave(), flushSidecarWrite()]);
       } finally {
         void win.destroy();
       }
@@ -3229,7 +3417,7 @@ export default function App() {
     return () => {
       void un.then((f) => f());
     };
-  }, [flushPendingAutosave]);
+  }, [flushPendingAutosave, flushSidecarWrite]);
 
   // The close-requested flush above never fires on ⌘Q: the app menu's Quit
   // would invoke NSApp terminate:, which kills the process without any window
@@ -3240,7 +3428,7 @@ export default function App() {
   useEffect(() => {
     const un = listen("quit-flush-requested", async () => {
       try {
-        await flushPendingAutosave();
+        await Promise.all([flushPendingAutosave(), flushSidecarWrite()]);
       } finally {
         void invoke("quit_flush_ack");
       }
@@ -3248,7 +3436,7 @@ export default function App() {
     return () => {
       void un.then((f) => f());
     };
-  }, [flushPendingAutosave]);
+  }, [flushPendingAutosave, flushSidecarWrite]);
 
   // Mirror recent workspaces into the native File → "Open Recent Workspace"
   // menu (macOS). Fires on mount (restoring from localStorage) and on every
@@ -3646,15 +3834,20 @@ export default function App() {
       queueShareOp(chosen);
     }
     // The promoted file may have landed next to an existing html rendition of
-    // the same stem — adopt it (enables the toggle, watches the pair).
+    // the same stem — adopt it (enables the toggle, watches the set, loads
+    // any comments the rendition already carries).
     const sibling = htmlSiblingOf(chosen);
     const siblingExists = await invoke<boolean>("path_exists", { path: sibling }).catch(
       () => false,
     );
     htmlPathRef.current = siblingExists ? sibling : null;
     setHasHtml(siblingExists);
+    await loadSidecar(htmlPathRef.current);
     try {
-      await invoke("watch_file", { path: chosen, extra: htmlPathRef.current });
+      await invoke("watch_file", {
+        path: chosen,
+        extras: watchExtrasOf(chosen, htmlPathRef.current),
+      });
     } catch (e) {
       console.error("watch_file failed", e);
     }
@@ -3669,7 +3862,7 @@ export default function App() {
     writeDraftsMeta(rest);
     addRecent(chosen, "file");
     setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
-  }, [writeToDisk, addRecent, updateShares, scheduleSharePush, queueShareOp]);
+  }, [writeToDisk, addRecent, updateShares, scheduleSharePush, queueShareOp, loadSidecar]);
 
   const handleSave = useCallback(async () => {
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
@@ -4307,9 +4500,9 @@ export default function App() {
         trailing={
           activeTab && !activeMissing ? (
             <>
-              {docView === "md" && commentCount > 0 && (
+              {(docView === "md" ? commentCount : htmlThreads.length) > 0 && (
                 <CommentsToggle
-                  count={commentCount}
+                  count={docView === "md" ? commentCount : htmlThreads.length}
                   visible={commentsVisible}
                   onToggle={() => setCommentsVisible((v) => !v)}
                 />
@@ -4430,14 +4623,19 @@ export default function App() {
           />
         )}
         {activeTab && showHtmlView && htmlContent != null && (
-          // The rendition is arbitrary generated markup: render it isolated in
-          // a sandboxed frame (scripts run under an opaque origin — no access
-          // to the app, its storage, or Tauri IPC).
-          <iframe
-            className="html-preview"
-            title="HTML version"
-            sandbox="allow-scripts allow-popups"
-            srcDoc={htmlContent}
+          // The sandboxed rendition preview plus its comment layer (rail,
+          // element highlights, hover "add comment" bubble) — see HtmlView.
+          // Keyed on the tab so switching documents resets transient comment
+          // UI state, while an external regeneration of the SAME rendition
+          // just reloads the frame in place.
+          <HtmlView
+            key={activeTab.id}
+            htmlContent={htmlContent}
+            threads={htmlThreads}
+            onThreadsChange={onHtmlThreadsChange}
+            commentAuthor={syncDeviceName}
+            commentsVisible={commentsVisible}
+            onRequestShowComments={() => setCommentsVisible(true)}
           />
         )}
         {activeTab && activeMissing && (

@@ -636,9 +636,21 @@ body,
   overflow: hidden; /* the iframe scrolls internally */
 }
 
+/* Hide the hidden markdown editor and ITS rail (a direct child of the wrap);
+   the html view's own rail lives inside .html-view and stays. */
 .editor-wrap.is-html-view .milkdown,
-.editor-wrap.is-html-view .comments-rail {
+.editor-wrap.is-html-view > .comments-rail {
   display: none;
+}
+
+/* The html view: sandboxed preview iframe + its comment rail, overlaying the
+   same box so the bridge's iframe-viewport anchor positions are directly the
+   rail's coordinate space. Unlike the markdown rail (which scrolls with the
+   canvas), this rail is repositioned by the bridge's layout messages as the
+   iframe scrolls internally. */
+.html-view {
+  position: absolute;
+  inset: 0;
 }
 
 .html-preview {
@@ -649,6 +661,22 @@ body,
   border: 0;
   /* Most generated documents assume a white canvas; let them own the look. */
   background: #ffffff;
+}
+
+/* Reserve the right-hand gutter for comment cards by narrowing the iframe —
+   the rendition reflows into the remaining width, nothing overlaps it. */
+.html-view.has-comments .html-preview {
+  width: auto;
+  right: 312px;
+}
+
+/* A thread whose anchor no longer exists in the regenerated rendition. */
+.comment-orphan-note {
+  margin-bottom: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-style: italic;
+  color: var(--app-text-muted);
 }
 
 .editor-wrap .milkdown .ProseMirror h1,

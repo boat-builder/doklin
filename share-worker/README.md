@@ -69,6 +69,19 @@ choose. This README is the guide for standing up your own backend.
     code's comments. Comments live in their own object next to the page, so
     the app's content pushes never touch them; the owner reads and moderates
     them from the app's Share popover ("Comments from the web") or the API.
+    On a page with an **html rendition** (worker version 9) the section
+    renders on the html view too — both views of a pair share one comment
+    pool — and comments there can point at an *element* of the rendition:
+    with JS on, hovering a block offers a small bubble; picking it quotes the
+    block above the composer ("Commenting on …") and stores an anchor
+    (`{path, tag, text}` — the same shape the app's own rendition comments
+    use). Anchored comments highlight their element in the framed rendition,
+    "Show in document" scrolls to it, and clicking a highlighted element
+    flashes its comment in the list — none of which ever hijacks the
+    rendition's own links or buttons, and all of which degrades to the plain
+    list + quote without JS. The anchoring bridge is injected into `/<id>/raw`
+    only for comment-capable sessions; everyone else gets the rendition
+    byte-for-byte as pushed.
   - *Edit*: everything comment gets, plus an **Edit** button that opens a
     plain markdown editor at `/<id>/edit`. Saves are revision-guarded — a
     concurrent save re-renders the editor with a warning and the visitor's
@@ -317,9 +330,10 @@ pages/<id>.json   {title, markdown?, html?, htmlStale?, collection?, access?, re
                   role = "comment" | "edit" (absent = view). rev counts content writes (app pushes +
                   web edits); webEdit = {by, at} while the latest write came from the web editor;
                   htmlStale marks a rendition outdated by a web edit
-pages/<id>.comments.json  {comments: [{id, body, quote?, name?, label, codeId, createdAt}]} — visitor
-                  comments (codes with the comment/edit role); its own object so content pushes and
-                  comment posts never race. Deleted with the page
+pages/<id>.comments.json  {comments: [{id, body, quote?, anchor?, name?, label, codeId, createdAt}]} —
+                  visitor comments (codes with the comment/edit role); its own object so content pushes
+                  and comment posts never race. Deleted with the page. `anchor` ({path, tag, text})
+                  points at an element of the html rendition (worker version 9)
 pages/<id>.png    OG image
 auth/tokens/<sha256-of-token>.json    {id, name, role, workspaces, createdAt, lastSeenAt}
 auth/invites/<sha256-of-code>.json    {id, name, role, workspaces, createdAt, expiresAt, claimed?}
