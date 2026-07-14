@@ -22,7 +22,11 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 - **Publish & share** — one click publishes a document as a public web page,
   backed by a self-hostable backend. Any page or shared folder can be put
   behind named access codes — one code per person or group, individually
-  revocable; visitors enter it once per browser, no accounts involved.
+  revocable; visitors enter it once per browser, no accounts involved. Each
+  code also carries a role: view only (the default — every public page stays
+  read-only unless you say otherwise), comment (a comments section right on
+  the page), or edit (a web markdown editor). Web edits flow back into the
+  local file; if both sides changed, the app asks before either version wins.
 - **Cloud sync** — sync a workspace to that same backend (your own Cloudflare
   worker + R2 bucket): it backs up automatically, follows you to another Mac,
   and can be shared with people you invite — they install Doklin, paste a

@@ -48,10 +48,12 @@ import {
   contentHash,
   deletePage,
   deriveDocTitle,
+  fetchPageContent,
   fetchWorkerVersion,
   forgetAccessCodes,
   generateShareId,
   getConnections,
+  listRemotePages,
   pageExists,
   parseWorkerVersion,
   pushCollection,
@@ -62,6 +64,7 @@ import {
   readWorkspaceConnectionMap,
   resolveConnection,
   saveConnections,
+  SharePushConflictError,
   shareUrl,
   writeCollections,
   writeShares,
@@ -1063,8 +1066,13 @@ export default function App() {
   // renditions travel together (see readShareParts), and so does the folder-
   // share back-reference (the public page's "back to the folder" crumb). A
   // title change (rename / draft promoted) also refreshes the OG image.
+  //
+  // Pushes claim the last revision this Mac pushed or pulled (baseRev), so a
+  // web edit the app hasn't folded in yet becomes a visible conflict on the
+  // entry instead of being silently overwritten. `force` drops that claim —
+  // the explicit "keep mine" resolution.
   const pushSharedNow = useCallback(
-    async (target: string) => {
+    async (target: string, opts?: { force?: boolean }) => {
       const entry = sharesRef.current[target];
       if (!entry) return;
       const config = await connectionForEntry(entry);
@@ -1081,25 +1089,48 @@ export default function App() {
         deriveDocTitle(parts) ??
         (tab ? docShareTitle(tab) : entry.kind === "file" ? pathShareTitle(target) : entry.title);
       try {
-        await pushPage(
+        const { rev } = await pushPage(
           config,
           entry.id,
           title,
           parts,
           collection ? { id: collection.id, title: collection.title } : null,
           wsStampFor(target, entry.connectionId),
+          opts?.force ? null : entry.pushedRev,
         );
         if (title !== entry.title) await pushOgImage(config, entry.id, title);
         const pushed = await fingerprintParts(parts);
         updateShares((prev) =>
           prev[target]
-            ? { ...prev, [target]: { ...prev[target], title, updatedAt: Date.now(), pushed } }
+            ? {
+                ...prev,
+                [target]: {
+                  ...prev[target],
+                  title,
+                  updatedAt: Date.now(),
+                  pushed,
+                  ...(rev != null ? { pushedRev: rev } : {}),
+                  webConflict: undefined,
+                },
+              }
             : prev,
         );
         // The folder TOC names this page by its share title — retitling the
         // document renames its row there too.
         if (title !== entry.title && collection) scheduleCollectionPush(collection.path);
       } catch (e) {
+        if (e instanceof SharePushConflictError) {
+          // Someone edited the page on the web AND this document changed
+          // locally — surface it in the share popover; pushes stay paused
+          // (each retry lands here) until the owner picks a side.
+          const conflict = { rev: e.rev, by: e.webEdit?.by ?? "", at: e.webEdit?.at ?? null };
+          updateShares((prev) =>
+            prev[target]
+              ? { ...prev, [target]: { ...prev[target], webConflict: conflict } }
+              : prev,
+          );
+          return;
+        }
         // Offline or the worker hiccuped; the next save retries.
         console.error("share push failed", target, e);
       }
@@ -1158,6 +1189,104 @@ export default function App() {
     return changed(htmlSiblingOf(entry.path), fp.html);
   }, []);
 
+  // Fold a web edit (a restricted visitor with an "edit" code saved through
+  // the page's web editor) back into this Mac. Fast-forward when the local
+  // markdown is untouched since the last push: the remote markdown lands in
+  // the file (the active document's watcher picks it up like any external
+  // edit). Anything less clear-cut — local changes too, a draft, an html-only
+  // share — parks a webConflict on the entry for the share popover to resolve.
+  const pullWebEdit = useCallback(
+    async (target: string) => {
+      const entry = sharesRef.current[target];
+      if (!entry) return;
+      const config = await connectionForEntry(entry);
+      if (!config) return;
+      const content = await fetchPageContent(config, entry.id);
+      if (!content.webEdit || content.markdown === null) return; // raced an app push
+      if (entry.pushedRev != null && content.rev <= entry.pushedRev) return; // already folded in
+      const markConflict = () =>
+        updateShares((prev) => {
+          const cur = prev[target];
+          if (!cur) return prev;
+          if (cur.webConflict?.rev === content.rev) return prev; // already surfaced
+          return {
+            ...prev,
+            [target]: {
+              ...cur,
+              webConflict: {
+                rev: content.rev,
+                by: content.webEdit?.by ?? "",
+                at: content.webEdit?.at ?? null,
+              },
+            },
+          };
+        });
+
+      // Drafts have no file watcher — an open draft tab would silently
+      // clobber the pulled content on its next autosave. Same for html-only
+      // shares (there's no local markdown to write). Both go through the
+      // explicit resolution in the popover.
+      const fp = entry.pushed?.md ?? null;
+      if (entry.kind !== "file" || isHtmlPath(entry.path) || !fp) {
+        markConflict();
+        return;
+      }
+      let snap = await invoke<FileSnapshot>("stat_file", { path: target }).catch(() => null);
+      let unchanged = false;
+      if (snap) {
+        if (fp.snap && fp.snap.mtime_ms === snap.mtime_ms && fp.snap.size === snap.size) {
+          unchanged = true;
+        } else {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: target });
+            unchanged = (await contentHash(r.contents)) === fp.hash;
+            snap = r.snapshot;
+          } catch {
+            unchanged = false;
+          }
+        }
+      }
+      if (!unchanged || !snap) {
+        markConflict();
+        return;
+      }
+      // Local copy is exactly what we last pushed — the web edit fast-forwards
+      // it. The conditional write keeps a keystroke that lands mid-pull safe
+      // (it fails; the next reconcile pass sees a diverged file instead).
+      let newSnap: FileSnapshot;
+      try {
+        newSnap = await invoke<FileSnapshot>("write_file", {
+          path: target,
+          contents: content.markdown,
+          expected: snap,
+        });
+      } catch {
+        markConflict();
+        return;
+      }
+      const hash = await contentHash(content.markdown);
+      updateShares((prev) =>
+        prev[target]
+          ? {
+              ...prev,
+              [target]: {
+                ...prev[target],
+                title: content.title || prev[target].title,
+                updatedAt: Date.now(),
+                pushed: {
+                  md: { snap: newSnap, hash },
+                  html: prev[target].pushed?.html ?? null,
+                },
+                pushedRev: content.rev,
+                webConflict: undefined,
+              },
+            }
+          : prev,
+      );
+    },
+    [connectionForEntry, updateShares],
+  );
+
   // Catch up every share with edits made outside the app — a sync cycle
   // landing another device's changes is the common case now, an html
   // rendition regenerated by an AI tool or an externally rewritten markdown
@@ -1187,12 +1316,44 @@ export default function App() {
       return;
     }
     lastReconcileRef.current = now;
-    if ((await getConnections()).connections.length === 0) return;
+    const st = await getConnections();
+    if (st.connections.length === 0) return;
     for (const entry of entries) {
       try {
         if (await shareNeedsPush(entry)) scheduleSharePush(entry.path);
       } catch (e) {
         console.error("share reconcile failed", entry.path, e);
+      }
+    }
+    // Web edits flow the other way: one listing per backend says which pages
+    // the web edited (v8 workers; older ones just don't send the stamp), and
+    // each stamped page is pulled — into the file when it fast-forwards, into
+    // a popover conflict when it doesn't.
+    const byConn = new Map<string, ShareEntry[]>();
+    for (const entry of entries) {
+      const list = byConn.get(entry.connectionId);
+      if (list) list.push(entry);
+      else byConn.set(entry.connectionId, [entry]);
+    }
+    for (const [connId, connEntries] of byConn) {
+      const config = st.connections.find((c) => c.id === connId);
+      if (!config) continue;
+      let remote;
+      try {
+        remote = await listRemotePages(config);
+      } catch {
+        continue; // offline; the next pass retries
+      }
+      const rows = new Map(remote.map((p) => [p.id, p]));
+      for (const entry of connEntries) {
+        const row = rows.get(entry.id);
+        if (!row?.webEdit) continue;
+        if (row.rev != null && entry.pushedRev != null && row.rev <= entry.pushedRev) continue;
+        try {
+          await pullWebEdit(entry.path);
+        } catch (e) {
+          console.error("web edit pull failed", entry.path, e);
+        }
       }
     }
     // A folder share's manifest is derived state (member ids, names, relative
@@ -1208,7 +1369,7 @@ export default function App() {
         console.error("collection reconcile failed", c.path, e);
       }
     }
-  }, [shareNeedsPush, scheduleSharePush, collectionItemsFor, scheduleCollectionPush]);
+  }, [shareNeedsPush, scheduleSharePush, pullWebEdit, collectionItemsFor, scheduleCollectionPush]);
 
   // In-file find (⌘F): a bar over the editor that drives the ProseMirror search
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
@@ -1952,7 +2113,14 @@ export default function App() {
       if (!parts) throw new Error("Could not read the document.");
       // Lead H1 (html-only: <title>) over file name — same rule as re-pushes.
       const title = deriveDocTitle(parts) ?? docShareTitle(active);
-      await pushPage(config, id, title, parts, null, wsStampFor(active.path, config.id));
+      const { rev } = await pushPage(
+        config,
+        id,
+        title,
+        parts,
+        null,
+        wsStampFor(active.path, config.id),
+      );
       try {
         await pushOgImage(config, id, title);
       } catch (e) {
@@ -1971,6 +2139,7 @@ export default function App() {
           sharedAt: now,
           updatedAt: now,
           pushed,
+          ...(rev != null ? { pushedRev: rev } : {}),
           connectionId: config.id,
         },
       }));
@@ -2193,7 +2362,7 @@ export default function App() {
           let id = generateShareId();
           if (await pageExists(config, id).catch(() => false)) id = generateShareId();
           const title = deriveDocTitle(parts) ?? pathShareTitle(filePath);
-          await pushPage(
+          const { rev } = await pushPage(
             config,
             id,
             title,
@@ -2216,6 +2385,7 @@ export default function App() {
             sharedAt: now,
             updatedAt: now,
             pushed,
+            ...(rev != null ? { pushedRev: rev } : {}),
             collectionId: collection.id,
             connectionId: config.id,
           };
@@ -2357,6 +2527,58 @@ export default function App() {
       scheduleAutosave();
     }
   }, [scheduleAutosave]);
+
+  // Settle a web-edit conflict from the share popover. "pull" replaces the
+  // local document with the web version (and reloads the open editor if this
+  // is the active document); "keepMine" republishes the local copy over the
+  // web edit. Either way the entry leaves its conflict state — the next push
+  // claims the fresh revision.
+  const resolveWebConflict = useCallback(
+    async (target: string, mode: "pull" | "keepMine") => {
+      const entry = sharesRef.current[target];
+      if (!entry) return;
+      if (mode === "keepMine") {
+        await pushSharedNow(target, { force: true });
+        if (sharesRef.current[target]?.webConflict) {
+          throw new Error("Could not republish — check the connection and try again.");
+        }
+        return;
+      }
+      const config = await connectionForEntry(entry);
+      if (!config) throw new Error("Sharing is not configured.");
+      const content = await fetchPageContent(config, entry.id);
+      if (content.markdown === null) throw new Error("The web version has no markdown.");
+      // The user chose the web side explicitly — last write wins on disk.
+      const newSnap = await invoke<FileSnapshot>("write_file", {
+        path: target,
+        contents: content.markdown,
+        expected: null,
+      });
+      const hash = await contentHash(content.markdown);
+      updateShares((prev) =>
+        prev[target]
+          ? {
+              ...prev,
+              [target]: {
+                ...prev[target],
+                title: content.title || prev[target].title,
+                updatedAt: Date.now(),
+                pushed: {
+                  md: { snap: newSnap, hash },
+                  html: prev[target].pushed?.html ?? null,
+                },
+                pushedRev: content.rev,
+                webConflict: undefined,
+              },
+            }
+          : prev,
+      );
+      // The open editor adopts the web version right away (files would get
+      // this from the watcher; drafts aren't watched, so do it for both).
+      if (pathRef.current === target) await reloadFromDisk();
+    },
+    [pushSharedNow, connectionForEntry, updateShares, reloadFromDisk],
+  );
 
   // The MD/HTML view toggle for the active document. Switching to HTML
   // re-reads the rendition (freshest copy) and hides — not unmounts — the
@@ -3867,6 +4089,7 @@ export default function App() {
           onOpenWorkerUpdate={
             outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
           }
+          onResolveWebConflict={(mode) => resolveWebConflict(activeTab.path, mode)}
         />
       )}
       {sharedPagesOpen && (

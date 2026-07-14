@@ -56,6 +56,30 @@ choose. This README is the guide for standing up your own backend.
   the folder-share dialog, keeps the plaintext codes cached locally so you can
   re-copy them, and offers a self-unlocking "link + code" format that carries
   the code in the URL #fragment (never sent to servers or logs).
+- **Code roles — commenting & editing on the web** (worker version 8): every
+  access code carries a role — **view** (the default; exactly what codes
+  always were), **comment**, or **edit** — picked in the app when the code is
+  created and changeable any time after. Unprotected shares stay read-only:
+  only a restricted share has named identities to grant anything to. The
+  unlock cookie names the code; the code's *current* entry supplies the role
+  on every request, so a downgrade (or revocation) bites on the visitor's
+  next click. Folder-share codes carry their role onto every member page.
+  - *Comment*: the public page grows a server-rendered comments section
+    (works without JS, like the gate) — post, read, and delete your own
+    code's comments. Comments live in their own object next to the page, so
+    the app's content pushes never touch them; the owner reads and moderates
+    them from the app's Share popover ("Comments from the web") or the API.
+  - *Edit*: everything comment gets, plus an **Edit** button that opens a
+    plain markdown editor at `/<id>/edit`. Saves are revision-guarded — a
+    concurrent save re-renders the editor with a warning and the visitor's
+    text intact, never a silent clobber — and re-title the page when its
+    lead H1 changes. A web edit marks any html rendition *stale* (the edited
+    markdown becomes the default view until the app pushes a fresh
+    rendition). The app pulls web edits back into the local file on its
+    reconcile pass (launch / window focus): untouched files fast-forward
+    silently; a file with local changes of its own surfaces a conflict in
+    the Share popover — "Use web version" or "Keep mine" — and never
+    overwrites either side without being asked.
 
 ## Set up your own backend
 
@@ -282,13 +306,20 @@ people. Nothing under sync is public — the public routes above only ever serve
 
 ```
 site.json         {ownerName?, ownerLink?, downloadUrl?, rootPageId?, updatedAt}  (app-managed site config)
-pages/<id>.json   {title, markdown?, html?, collection?, access?, createdAt, updatedAt}  (+ customMetadata for
-                  listing, incl. owner: the token that published it, ws: the synced workspace it
-                  was published from, when any — that stamp is what lets every member manage it —
-                  and protected: "1" while access codes are set)
+pages/<id>.json   {title, markdown?, html?, htmlStale?, collection?, access?, rev, webEdit?, createdAt, updatedAt}
+                  (+ customMetadata for listing, incl. owner: the token that published it, ws: the
+                  synced workspace it was published from, when any — that stamp is what lets every
+                  member manage it — protected: "1" while access codes are set, rev, and
+                  webEdit/webEditBy/webEditAt while the latest write came from the web editor)
                   or {kind: "collection", title, description?, items: [{id, title, path}], access?, createdAt, updatedAt}
-                  access = {codes: [{id, label, hash, createdAt}], updatedAt} — visitor access codes,
-                  hashes only; server-managed (content pushes carry it forward untouched)
+                  access = {codes: [{id, label, hash, role?, createdAt}], updatedAt} — visitor access
+                  codes, hashes only; server-managed (content pushes carry it forward untouched).
+                  role = "comment" | "edit" (absent = view). rev counts content writes (app pushes +
+                  web edits); webEdit = {by, at} while the latest write came from the web editor;
+                  htmlStale marks a rendition outdated by a web edit
+pages/<id>.comments.json  {comments: [{id, body, quote?, name?, label, codeId, createdAt}]} — visitor
+                  comments (codes with the comment/edit role); its own object so content pushes and
+                  comment posts never race. Deleted with the page
 pages/<id>.png    OG image
 auth/tokens/<sha256-of-token>.json    {id, name, role, workspaces, createdAt, lastSeenAt}
 auth/invites/<sha256-of-code>.json    {id, name, role, workspaces, createdAt, expiresAt, claimed?}
@@ -314,34 +345,60 @@ The write API the app depends on (all under the endpoint, requires
 GET    /api/meta             worker version + features -> { version, features: [...] }
 GET    /api/site             site config -> { site: {ownerName?, ownerLink?, downloadUrl?, rootPageId?} }
 PUT    /api/site             body = the same object, full record every time (missing field = unset)
-GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt, protected }] }
-GET    /api/pages/<id>       existence/metadata check (includes protected: bool)
-PUT    /api/pages/<id>       body {title, markdown?, html?, collection?, ws?} -> create/update a page
+GET    /api/pages            list shared pages -> { pages: [{ id, title, createdAt, updatedAt,
+                             protected, rev, webEdit }] } (rev/webEdit: see below — one listing
+                             tells the app every page the web edited)
+GET    /api/pages/<id>       existence/metadata check (includes protected, rev,
+                             webEdit: {by, at} | null, htmlStale)
+PUT    /api/pages/<id>       body {title, markdown?, html?, collection?, ws?, baseRev?} -> create/update
+                             a page -> {..., rev}
                              (at least one of markdown/html; collection {id, title} marks
                              folder-share membership and renders the back-home crumb;
                              ws = the synced workspace the page belongs to — the writer must
                              have access to it, the stamp is sticky once set, and it opens
-                             the page to management by every member of that workspace)
+                             the page to management by every member of that workspace;
+                             baseRev = the rev this client last pushed or pulled — when the
+                             page meanwhile took a WEB edit, a mismatch answers 409
+                             {rev, webEdit} instead of clobbering it. Mismatches without a
+                             pending web edit — ordinary device-to-device churn — keep
+                             last-writer-wins, as do pushes that omit baseRev)
                              or body {title, kind: "collection", items, description?, ws?} ->
                              create/update a folder share (items = [{id, title, path}], path
                              relative to the shared folder; drives the public table of
                              contents; description shows under the TOC's title)
+GET    /api/pages/<id>/content  the stored document -> { title, markdown, hasHtml, htmlStale,
+                             rev, webEdit, protected } — how the app pulls a web edit back
+                             into the local file
 PUT    /api/pages/<id>/og    body image/png          -> set OG image
-DELETE /api/pages/<id>       stop sharing (remove page + OG image)
+DELETE /api/pages/<id>       stop sharing (remove page + OG image + comments)
 ```
 
-Visitor access codes (worker version 7; same auth — whoever can update a page
-can manage its codes):
+Visitor access codes (worker version 7; roles + PATCH need version 8; same
+auth — whoever can update a page can manage its codes):
 
 ```
-GET    /api/pages/<id>/access             -> { protected, codes: [{id, label, createdAt}] }
-                                          (ids + labels only — the worker keeps hashes,
+GET    /api/pages/<id>/access             -> { protected, codes: [{id, label, role, createdAt}] }
+                                          (ids + labels + roles only — the worker keeps hashes,
                                           it can never echo a code back)
-POST   /api/pages/<id>/access/codes       body {label?, code} -> {id, label, createdAt}
+POST   /api/pages/<id>/access/codes       body {label?, code, role?} -> {id, label, role, createdAt}
                                           (code is normalized trim/lowercase/NFKC, 4–128
-                                          chars; duplicate plaintext on one page -> 409)
+                                          chars; duplicate plaintext on one page -> 409;
+                                          role = "view" (default) | "comment" | "edit")
+PATCH  /api/pages/<id>/access/codes/<cid> body {label?, role?} — rename a code or change what
+                                          it may do (applies to live sessions on their next
+                                          request)
 DELETE /api/pages/<id>/access/codes/<cid> revoke one code + exactly its visitor sessions
 DELETE /api/pages/<id>/access             remove protection entirely
+```
+
+Visitor comments, owner side (worker version 8; same auth):
+
+```
+GET    /api/pages/<id>/comments           -> { comments: [{id, body, quote?, name?, label,
+                                          codeId, createdAt}] } — label names the code that
+                                          posted, name is whatever the visitor typed
+DELETE /api/pages/<id>/comments/<cid>     moderate one comment away
+DELETE /api/pages/<id>/comments           clear the page's comments entirely
 ```
 
 The sync + auth API (worker version 4; same bearer auth, roles apply):
@@ -391,13 +448,25 @@ a 400 and 404s the site/meta routes, which the app surfaces as "redeploy your
 worker".
 
 Plus the public reads a browser hits (no auth): `GET /<id>` (the html
-rendition when the page has one — framed — otherwise rendered markdown),
-`GET /<id>?v=md` (rendered markdown), `GET /<id>/raw` (the rendition
-verbatim), and `GET /<id>/og.png` (OG image). On a protected share every one
-of those serves the code-entry gate (401) until the browser holds the share's
-cookie; `POST /<id>/unlock` (form body `code`, optional `next`) is the gate's
+rendition when the page has one — framed — otherwise rendered markdown; a
+web-edited page whose rendition went stale leads with the markdown instead,
+with `?v=html` reaching the old rendition explicitly), `GET /<id>?v=md`
+(rendered markdown), `GET /<id>/raw` (the rendition verbatim), and
+`GET /<id>/og.png` (OG image). On a protected share every one of those serves
+the code-entry gate (401) until the browser holds the share's cookie;
+`POST /<id>/unlock` (form body `code`, optional `next`) is the gate's
 target — correct code ⇒ Set-Cookie + 303 back. A `#c=<code>` fragment on a
 page link pre-fills and submits the gate automatically.
+
+Behind the gate, the session's code role unlocks the write surface (worker
+version 8; all plain form posts, no JS needed): `POST /<id>/comments` (form
+body `body`, optional `name` + `quote`; comment/edit roles),
+`POST /<id>/comments/<cid>/delete` (own code's comments only),
+`GET /<id>/edit` (the web editor; edit role, markdown-bearing pages), and
+`POST /<id>/edit` (form body `markdown` + `baseRev`; a stale `baseRev`
+re-renders the editor with the visitor's text intact instead of clobbering
+the newer save). Comment and edit posts are rate-limited per IP like the
+gate.
 
 ## Updating a deployed worker
 

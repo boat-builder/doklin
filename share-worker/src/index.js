@@ -26,6 +26,12 @@
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //   POST /<id>/unlock  the gate form target: exchanges a correct access code
 //                      for the share's cookie, then 303s back to the page
+//   GET  /<id>/edit    the web editor (unlocked sessions whose code can edit)
+//   POST /<id>/edit    save a web edit (form body markdown + baseRev; a stale
+//                      baseRev re-renders the editor instead of clobbering)
+//   POST /<id>/comments                 add a comment (codes that can comment)
+//   POST /<id>/comments/<cid>/delete    remove a comment posted by this
+//                                       session's own code
 //
 // Visitor access codes (version 7): a share can be protected with NAMED codes
 // ("Acme team" / "sunset-marble-fig"), each individually revocable. The codes
@@ -41,6 +47,31 @@
 // gate page itself is deliberately generic: no title, no description, no OG
 // image — nothing about the document leaks before the code.
 //
+// Code roles (version 8): every access code carries a role — "view" (the
+// default, exactly what codes always were), "comment", or "edit" — so a
+// restricted share can hand each named person/group its own level of access.
+// The unlock cookie names the code; the code's CURRENT entry supplies the
+// role on every request, so changing a role (or revoking the code) applies
+// on the visitor's next request with no session registry. Unprotected shares
+// stay read-only: there is no named identity to grant anything to.
+//
+//   comment  the public page grows a comments section (server-rendered,
+//            works without JS): post, read, and delete your own code's
+//            comments. Comments live in their own object
+//            (pages/<id>.comments.json) so content pushes never touch them.
+//   edit     everything "comment" gets, plus /<id>/edit — a markdown editor
+//            for the page. Saves are CAS-guarded by the page's `rev` (a
+//            counter bumped on every content write): a concurrent save gets
+//            the editor back with a warning, never a silent clobber. A web
+//            edit stamps the record {webEdit: {by, at}} and, when the page
+//            also carries an html rendition, marks it stale (the markdown
+//            becomes the default view until the app pushes a fresh
+//            rendition). The desktop app pulls web edits back into the local
+//            file (GET /api/pages/<id>/content) and its pushes can send
+//            baseRev to detect web edits it hasn't seen (409 on mismatch,
+//            only while a web edit is unseen — device-to-device pushes keep
+//            their last-writer-wins behavior).
+//
 // Write API (Authorization: Bearer $SHARE_TOKEN — the desktop app only):
 //   GET    /api/meta             worker version + feature list, so the app can
 //                                tell an outdated deployment from a broken one
@@ -49,7 +80,12 @@
 //                                rootPageId?} — full record every time, like
 //                                page pushes (a missing field means unset)
 //   GET    /api/pages            list shared pages (id, title, updatedAt)
-//   GET    /api/pages/<id>       page metadata (existence check)
+//   GET    /api/pages/<id>       page metadata (existence check; includes rev
+//                                + webEdit so the app can spot web edits)
+//   GET    /api/pages/<id>/content   the stored markdown + rev/webEdit — how
+//                                the app pulls a web edit into the local file
+//   GET    /api/pages/<id>/comments  every visitor comment on the page
+//   DELETE /api/pages/<id>/comments[/<cid>]  moderate: drop one (or all)
 //   PUT    /api/pages/<id>       body {title, markdown?, html?, collection?}
 //                                — create/update a page (at least one of
 //                                markdown/html required; collection {id,title}
@@ -61,10 +97,13 @@
 //                                public TOC's title)
 //   PUT    /api/pages/<id>/og    body image/png — set the OG image
 //   DELETE /api/pages/<id>       stop sharing (removes page + OG image)
-//   GET    /api/pages/<id>/access            the share's codes (ids + labels,
-//                                            never hashes)
-//   POST   /api/pages/<id>/access/codes      body {label?, code} — add a named
-//                                            code (the worker stores its hash)
+//   GET    /api/pages/<id>/access            the share's codes (ids + labels
+//                                            + roles, never hashes)
+//   POST   /api/pages/<id>/access/codes      body {label?, code, role?} — add
+//                                            a named code (the worker stores
+//                                            its hash; role defaults to view)
+//   PATCH  /api/pages/<id>/access/codes/<cid>  body {label?, role?} — rename
+//                                            a code or change what it may do
 //   DELETE /api/pages/<id>/access/codes/<cid>  revoke one code (and exactly
 //                                            the visitor sessions it minted)
 //   DELETE /api/pages/<id>/access            remove protection entirely
@@ -114,8 +153,9 @@ import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
 // root page override, 3 = collection descriptions, 4 = cloud sync + member
 // tokens, 5 = workspace-stamped pages (any member of the workspace can
 // update/stop them, not just their creator), 6 = admin wipe (the app-driven
-// erase step of backend teardown), 7 = visitor access codes (the public gate).
-const WORKER_VERSION = 7;
+// erase step of backend teardown), 7 = visitor access codes (the public gate),
+// 8 = code roles (view/comment/edit) + web comments + the web editor.
+const WORKER_VERSION = 8;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -127,6 +167,9 @@ const WORKER_FEATURES = [
   "workspace-pages",
   "wipe",
   "page-access",
+  "access-roles",
+  "web-comments",
+  "web-edit",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -179,6 +222,18 @@ const GATE_KEY_KEY = "auth/gate-key.json";
 const GATE_COOKIE_TTL_S = 30 * 24 * 60 * 60; // unlock lasts 30 days per browser
 const UNLOCK_RATE_LIMIT = 10; // code attempts per IP per minute (per isolate)
 
+/* Web comments + edits (version 8). Comments live in pages/<id>.comments.json
+   — their own object, so content pushes and comment posts never race each
+   other. Both surfaces exist only behind the gate (a session names the code
+   that unlocked it, the code's role says what it may do), and both are plain
+   form posts, so they work without JS like the gate does. */
+const COMMENT_ID_RE = /^m-[a-f0-9]{8}$/;
+const MAX_COMMENT_BODY = 4000;
+const MAX_COMMENT_QUOTE = 300;
+const MAX_COMMENTS = 500;
+const COMMENT_RATE_LIMIT = 10; // posts per IP per minute (per isolate)
+const EDIT_RATE_LIMIT = 20; // saves per IP per minute (per isolate)
+
 /* Sync + auth limits. File paths mirror the app's own workspace caps
    (MAX_TREE_DEPTH / MAX_TREE_ENTRIES in src-tauri), so the worker never
    accepts a workspace the app couldn't hold. */
@@ -209,7 +264,7 @@ const INVITES_PREFIX = "auth/invites/";
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,PUT,POST,DELETE,OPTIONS",
+  "access-control-allow-methods": "GET,PUT,POST,PATCH,DELETE,OPTIONS",
   "access-control-allow-headers": "authorization,content-type,x-base-etag",
   "access-control-expose-headers": "x-manifest-etag",
   "access-control-max-age": "86400",
@@ -224,10 +279,28 @@ export default {
       return handleApi(request, env, url, ctx);
     }
 
-    // The gate form's POST target — the one non-GET public route.
+    // The gate form's POST target.
     const unlockMatch = path.match(/^\/([a-z0-9-]{1,64})\/unlock$/);
     if (unlockMatch && validId(unlockMatch[1])) {
       return handleUnlock(request, env, unlockMatch[1], url);
+    }
+
+    // Comment forms (unlocked sessions whose code can comment) — POSTs, like
+    // the gate.
+    const commentAddMatch = path.match(/^\/([a-z0-9-]{1,64})\/comments$/);
+    if (commentAddMatch && validId(commentAddMatch[1])) {
+      return handleCommentAdd(request, env, commentAddMatch[1], url);
+    }
+    const commentDelMatch = path.match(/^\/([a-z0-9-]{1,64})\/comments\/(m-[a-f0-9]{8})\/delete$/);
+    if (commentDelMatch && validId(commentDelMatch[1])) {
+      return handleCommentDelete(request, env, commentDelMatch[1], commentDelMatch[2], url);
+    }
+
+    // The web editor (unlocked sessions whose code can edit): GET renders it,
+    // POST saves.
+    const editMatch = path.match(/^\/([a-z0-9-]{1,64})\/edit$/);
+    if (editMatch && validId(editMatch[1])) {
+      return handleEdit(request, env, editMatch[1], url);
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -394,6 +467,9 @@ async function handleApi(request, env, url, ctx) {
         createdAt: data.createdAt ?? null,
         updatedAt: data.updatedAt ?? null,
         protected: sanitizeAccess(data.access) !== null,
+        rev: pageRev(data),
+        webEdit: publicWebEdit(data),
+        htmlStale: data.htmlStale === true,
       });
     }
     if (request.method === "PUT") {
@@ -511,38 +587,71 @@ async function handleApi(request, env, url, ctx) {
         };
       }
 
-      const existing = await env.PAGES.get(pageKey);
-      if (!canTouchPage(auth, existing)) {
-        return json({ error: "page belongs to another member" }, 403);
-      }
-      const wsReq = requestedPageWs(body, auth);
-      if (wsReq.error) return wsReq.error;
-      // Sticky, same as collections above — the ws stamp and the access codes.
-      const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
-      const prior = existing ? await existing.json().catch(() => null) : null;
-      const access = sanitizeAccess(prior?.access);
-      const now = new Date().toISOString();
-      const record = {
-        title,
-        ...(markdown !== null ? { markdown } : {}),
-        ...(html !== null ? { html } : {}),
-        ...(collection ? { collection } : {}),
-        ...(access ? { access } : {}),
-        createdAt: prior?.createdAt ?? now,
-        updatedAt: now,
-      };
-      await env.PAGES.put(pageKey, JSON.stringify(record), {
-        httpMetadata: { contentType: "application/json" },
-        customMetadata: {
-          title: title.slice(0, 256),
+      // CAS-retried like the /access API: a web edit landing between this
+      // read and the put must not be silently overwritten — the etag condition
+      // makes the race re-run the baseRev check against the fresh record.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const existing = await env.PAGES.get(pageKey);
+        if (!canTouchPage(auth, existing)) {
+          return json({ error: "page belongs to another member" }, 403);
+        }
+        const wsReq = requestedPageWs(body, auth);
+        if (wsReq.error) return wsReq.error;
+        // Sticky, same as collections above — the ws stamp and the access codes.
+        const wsStamp = wsReq.ws ?? pageWorkspaceOf(existing);
+        const prior = existing ? await existing.json().catch(() => null) : null;
+        const access = sanitizeAccess(prior?.access);
+        // The app can send the rev its copy is based on; a mismatch is only a
+        // conflict while the newer rev came from the WEB (a web edit the app
+        // hasn't pulled). Device-to-device pushes keep last-writer-wins — the
+        // synced file is their shared truth, the page just mirrors it.
+        const priorRev = prior ? pageRev(prior) : 0;
+        const webEdit = prior ? publicWebEdit(prior) : null;
+        if (typeof body.baseRev === "number" && webEdit && body.baseRev !== priorRev) {
+          return json({ error: "page was edited on the web", rev: priorRev, webEdit }, 409);
+        }
+        const now = new Date().toISOString();
+        // An app push clears the webEdit stamp (the app has seen or chosen to
+        // override it). The html-stale flag survives until the html itself is
+        // replaced: re-pushing the same pre-edit rendition must not promote it
+        // back to the default view over the newer markdown.
+        const htmlStale = html !== null && prior?.htmlStale === true && prior?.html === html;
+        const record = {
+          title,
+          ...(markdown !== null ? { markdown } : {}),
+          ...(html !== null ? { html } : {}),
+          ...(htmlStale ? { htmlStale: true } : {}),
+          ...(collection ? { collection } : {}),
+          ...(access ? { access } : {}),
+          rev: priorRev + 1,
+          createdAt: prior?.createdAt ?? now,
           updatedAt: now,
-          createdAt: record.createdAt,
-          owner: pageOwner(auth, existing),
-          ...(wsStamp ? { ws: wsStamp } : {}),
-          ...(access ? { protected: "1" } : {}),
-        },
-      });
-      return json({ id, url: `${url.origin}/${id}`, createdAt: record.createdAt, updatedAt: now });
+        };
+        const put = await env.PAGES.put(pageKey, JSON.stringify(record), {
+          httpMetadata: { contentType: "application/json" },
+          customMetadata: {
+            title: title.slice(0, 256),
+            updatedAt: now,
+            createdAt: record.createdAt,
+            owner: pageOwner(auth, existing),
+            rev: String(record.rev),
+            ...(wsStamp ? { ws: wsStamp } : {}),
+            ...(access ? { protected: "1" } : {}),
+          },
+          ...(existing ? { onlyIf: { etagMatches: existing.etag } } : {}),
+        });
+        if (put) {
+          return json({
+            id,
+            url: `${url.origin}/${id}`,
+            createdAt: record.createdAt,
+            updatedAt: now,
+            rev: record.rev,
+          });
+        }
+        // Lost a race (web edit / code change) — re-read and re-apply.
+      }
+      return json({ error: "conflict, retry" }, 409);
     }
     if (request.method === "DELETE") {
       if (auth.role !== "owner") {
@@ -551,7 +660,7 @@ async function handleApi(request, env, url, ctx) {
           return json({ error: "page belongs to another member" }, 403);
         }
       }
-      await env.PAGES.delete([pageKey, ogKey]);
+      await env.PAGES.delete([pageKey, ogKey, commentsKey(id)]);
       return json({ id, deleted: true });
     }
     return json({ error: "method not allowed" }, 405);
@@ -574,6 +683,56 @@ async function handleApi(request, env, url, ctx) {
     return json({ id, og: true });
   }
 
+  // The stored document + rev bookkeeping — how the app pulls a web edit back
+  // into the local file. Same permission rule as pushing (canTouchPage).
+  if (parts.length === 4 && parts[3] === "content") {
+    if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
+    const existing = await env.PAGES.get(pageKey);
+    if (!existing) return json({ error: "not found" }, 404);
+    if (!canTouchPage(auth, existing)) {
+      return json({ error: "page belongs to another member" }, 403);
+    }
+    const data = await existing.json().catch(() => null);
+    if (!data || typeof data !== "object") return json({ error: "not found" }, 404);
+    return json({
+      id,
+      title: data.title ?? "Untitled",
+      markdown: typeof data.markdown === "string" ? data.markdown : null,
+      hasHtml: typeof data.html === "string" && data.html.length > 0,
+      htmlStale: data.htmlStale === true,
+      rev: pageRev(data),
+      webEdit: publicWebEdit(data),
+      protected: sanitizeAccess(data.access) !== null,
+    });
+  }
+
+  // Visitor comments, owner side: read them all, moderate one, or clear the
+  // page's slate. Writes CAS the comments object like every shared record.
+  if (parts[3] === "comments" && (parts.length === 4 || parts.length === 5)) {
+    const existing = await env.PAGES.get(pageKey);
+    if (!existing) return json({ error: "not found" }, 404);
+    if (!canTouchPage(auth, existing)) {
+      return json({ error: "page belongs to another member" }, 403);
+    }
+    if (parts.length === 4) {
+      if (request.method === "GET") {
+        return json({ id, comments: await readComments(env, id) });
+      }
+      if (request.method === "DELETE") {
+        await env.PAGES.delete(commentsKey(id));
+        return json({ id, deleted: true });
+      }
+      return json({ error: "method not allowed" }, 405);
+    }
+    if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
+    const cid = parts[4];
+    if (!COMMENT_ID_RE.test(cid)) return json({ error: "no such comment" }, 404);
+    const removed = await removeComment(env, id, cid, null);
+    if (removed === "missing") return json({ error: "no such comment" }, 404);
+    if (removed === "conflict") return json({ error: "conflict, retry" }, 409);
+    return json({ id: cid, deleted: true });
+  }
+
   if (parts[3] === "access") {
     return handleAccessApi(request, env, parts, auth, id, pageKey);
   }
@@ -592,8 +751,8 @@ async function handleAccessApi(request, env, parts, auth, id, pageKey) {
   const sub = parts[4];
   const wantsList = parts.length === 4;
   const wantsAdd = parts.length === 5 && sub === "codes";
-  const wantsRevoke = parts.length === 6 && sub === "codes";
-  if (!wantsList && !wantsAdd && !wantsRevoke) return json({ error: "not found" }, 404);
+  const wantsCode = parts.length === 6 && sub === "codes"; // revoke or update one
+  if (!wantsList && !wantsAdd && !wantsCode) return json({ error: "not found" }, 404);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const existing = await env.PAGES.get(pageKey);
@@ -628,6 +787,8 @@ async function handleAccessApi(request, env, parts, auth, id, pageKey) {
           400,
         );
       }
+      const role = parseAccessRole(body.role);
+      if (!role) return json({ error: "role must be view, comment, or edit" }, 400);
       if (codes.length >= MAX_ACCESS_CODES) return json({ error: "too many codes" }, 409);
       const hash = await sha256Hex(code);
       // Two identical codes would make revocation misleading (removing one
@@ -639,11 +800,33 @@ async function handleAccessApi(request, env, parts, auth, id, pageKey) {
         id: `a-${randomHex(4)}`,
         label: validName(body.label, "Access code"),
         hash,
+        ...(role !== "view" ? { role } : {}),
         createdAt: new Date().toISOString(),
       };
       nextCodes = [...codes, entry];
-      result = { id: entry.id, label: entry.label, createdAt: entry.createdAt };
-    } else if (wantsRevoke) {
+      result = { id: entry.id, label: entry.label, role, createdAt: entry.createdAt };
+    } else if (wantsCode && request.method === "PATCH") {
+      // Rename a code or change its role. The role reads live on every public
+      // request, so a downgrade bites the visitor's very next click.
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "invalid json body" }, 400);
+      }
+      const target = codes.find((c) => c.id === parts[5]);
+      if (!ACCESS_CODE_ID_RE.test(parts[5]) || !target) {
+        return json({ error: "no such code" }, 404);
+      }
+      const role = body.role === undefined ? accessCodeRole(target) : parseAccessRole(body.role);
+      if (!role) return json({ error: "role must be view, comment, or edit" }, 400);
+      const label = body.label === undefined ? target.label : validName(body.label, "Access code");
+      const updated = { ...target, label };
+      delete updated.role;
+      if (role !== "view") updated.role = role;
+      nextCodes = codes.map((c) => (c.id === target.id ? updated : c));
+      result = { id: target.id, label, role, createdAt: target.createdAt ?? null };
+    } else if (wantsCode) {
       if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
       if (!ACCESS_CODE_ID_RE.test(parts[5]) || !codes.some((c) => c.id === parts[5])) {
         return json({ error: "no such code" }, 404);
@@ -686,6 +869,7 @@ function accessSummary(id, codes) {
     codes: codes.map((c) => ({
       id: c.id,
       label: c.label ?? "",
+      role: accessCodeRole(c),
       createdAt: c.createdAt ?? null,
     })),
   };
@@ -713,12 +897,23 @@ async function listPages(env, auth) {
       ) {
         continue;
       }
+      const revMeta = Number(obj.customMetadata?.rev);
       pages.push({
         id: m[1],
         title: obj.customMetadata?.title ?? "Untitled",
         createdAt: obj.customMetadata?.createdAt ?? null,
         updatedAt: obj.customMetadata?.updatedAt ?? obj.uploaded?.toISOString?.() ?? null,
         protected: obj.customMetadata?.protected === "1",
+        // Rev + web-edit stamp ride the listing so the app can spot pages
+        // edited on the web with ONE request per backend, not one per page.
+        rev: Number.isInteger(revMeta) && revMeta > 0 ? revMeta : null,
+        webEdit:
+          obj.customMetadata?.webEdit === "1"
+            ? {
+                by: obj.customMetadata?.webEditBy ?? "",
+                at: obj.customMetadata?.webEditAt ?? null,
+              }
+            : null,
       });
     }
     cursor = batch.truncated ? batch.cursor : undefined;
@@ -1683,6 +1878,9 @@ function sanitizeAccess(raw) {
       id: c.id,
       label: typeof c.label === "string" ? c.label.slice(0, MAX_NAME_LEN) : "",
       hash: c.hash,
+      // "view" is the absent default — only the two grants are stored, so
+      // records written by older workers mean exactly what they always did.
+      ...(c.role === "comment" || c.role === "edit" ? { role: c.role } : {}),
       ...(typeof c.createdAt === "string" ? { createdAt: c.createdAt } : {}),
     });
     if (codes.length >= MAX_ACCESS_CODES) break;
@@ -1692,6 +1890,32 @@ function sanitizeAccess(raw) {
     codes,
     ...(typeof raw.updatedAt === "string" ? { updatedAt: raw.updatedAt } : {}),
   };
+}
+
+// What a stored code may do on the public page. Absent/unknown = "view".
+function accessCodeRole(c) {
+  return c?.role === "comment" || c?.role === "edit" ? c.role : "view";
+}
+
+// A role as claimed by an API body: absent/"view" normalizes to "view", the
+// two grants pass through, anything else is a caller error (null).
+function parseAccessRole(raw) {
+  if (raw === undefined || raw === null || raw === "" || raw === "view") return "view";
+  return raw === "comment" || raw === "edit" ? raw : null;
+}
+
+// The page's content revision: bumped on every content write (app push or web
+// edit). Records from before version 8 read as rev 1.
+function pageRev(record) {
+  return Number.isInteger(record?.rev) && record.rev > 0 ? record.rev : 1;
+}
+
+// The web-edit stamp, shape-checked for API responses: set when the LAST
+// content write came from the web editor, cleared by the next app push.
+function publicWebEdit(record) {
+  const w = record?.webEdit;
+  if (!w || typeof w !== "object" || typeof w.by !== "string") return null;
+  return { by: w.by.slice(0, MAX_NAME_LEN), at: typeof w.at === "string" ? w.at : null };
 }
 
 // The signing key for gate cookies: random, minted lazily into the bucket —
@@ -1746,10 +1970,11 @@ async function accessGateFor(env, id, data) {
   return colAccess ? { gateId: cid, access: colAccess } : null;
 }
 
-// Does the request carry a live cookie for this gate? Stateless HMAC check
-// plus "the code that minted it still exists" — revocation needs no session
-// registry.
-async function gateCookieValid(request, env, gate) {
+// The live session behind a request, or null. Stateless HMAC check plus "the
+// code that minted it still exists" — revocation needs no session registry.
+// The returned role/label come from the code's CURRENT entry (never from the
+// cookie), so a role change also applies on the very next request.
+async function gateSession(request, env, gate) {
   const header = request.headers.get("cookie") || "";
   const wanted = `${gateCookieName(gate.gateId)}=`;
   let value = null;
@@ -1759,23 +1984,34 @@ async function gateCookieValid(request, env, gate) {
       break;
     }
   }
-  if (!value) return false;
+  if (!value) return null;
   const m = value.match(/^v1\.(a-[a-f0-9]{8})\.(\d{1,12})\.([a-f0-9]{64})$/);
-  if (!m) return false;
+  if (!m) return null;
   const [, codeId, expRaw, sig] = m;
   const exp = Number(expRaw);
-  if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return false;
-  if (!gate.access.codes.some((c) => c.id === codeId)) return false;
+  if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return null;
+  const code = gate.access.codes.find((c) => c.id === codeId);
+  if (!code) return null;
   const key = await gateSigningKey(env);
-  if (!key) return false;
-  return timingEq(sig, await gateSig(key, gate.gateId, codeId, exp));
+  if (!key) return null;
+  if (!timingEq(sig, await gateSig(key, gate.gateId, codeId, exp))) return null;
+  return { codeId: code.id, role: accessCodeRole(code), label: code.label || "Access code" };
+}
+
+async function gateCookieValid(request, env, gate) {
+  return (await gateSession(request, env, gate)) !== null;
 }
 
 // Where the gate sends the visitor after a correct code. Site-relative page
-// paths only — this rides a hidden form field, so it must never become an
-// open redirect.
+// paths (or a page's /edit) only — this rides a hidden form field, so it must
+// never become an open redirect.
 function safeNext(raw, gateId) {
-  if (typeof raw === "string" && /^\/(?:[a-z0-9-]{1,64})?(?:\?v=md)?$/.test(raw)) return raw;
+  if (
+    typeof raw === "string" &&
+    /^\/(?:[a-z0-9-]{1,64}(?:\/edit)?)?(?:\?v=md)?$/.test(raw)
+  ) {
+    return raw;
+  }
   return `/${gateId}`;
 }
 
@@ -1975,6 +2211,557 @@ const GATE_CSS = `
 }
 `;
 
+/* ---------- Web comments + edits (behind the gate) ----------
+
+   Both surfaces exist only on protected shares: the unlock cookie names the
+   code that opened the door, the code's role says what its holder may do.
+   Everything is a plain form post + 303 (like the gate), so it works without
+   JS. Comments live in pages/<id>.comments.json — their own object, so the
+   app's content pushes and visitor comments never race each other. */
+
+const commentsKey = (id) => `pages/${id}.comments.json`;
+
+const commentAttempts = new Map(); // ip -> [timestamps]
+const editAttempts = new Map(); // ip -> [timestamps]
+
+// The stored comment list, shape-checked — same contract as sanitizeAccess:
+// a corrupt object reads as empty everywhere at once instead of crashing.
+function sanitizeComments(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.comments)) return [];
+  const out = [];
+  for (const c of raw.comments) {
+    if (!c || typeof c !== "object") continue;
+    if (typeof c.id !== "string" || !COMMENT_ID_RE.test(c.id)) continue;
+    if (typeof c.body !== "string" || c.body.length === 0) continue;
+    if (out.some((seen) => seen.id === c.id)) continue;
+    out.push({
+      id: c.id,
+      body: c.body.slice(0, MAX_COMMENT_BODY),
+      ...(typeof c.quote === "string" && c.quote
+        ? { quote: c.quote.slice(0, MAX_COMMENT_QUOTE) }
+        : {}),
+      ...(typeof c.name === "string" && c.name ? { name: c.name.slice(0, MAX_NAME_LEN) } : {}),
+      label: typeof c.label === "string" ? c.label.slice(0, MAX_NAME_LEN) : "",
+      codeId: typeof c.codeId === "string" ? c.codeId : "",
+      ...(typeof c.createdAt === "string" ? { createdAt: c.createdAt } : {}),
+    });
+    if (out.length >= MAX_COMMENTS) break;
+  }
+  return out;
+}
+
+async function readComments(env, id) {
+  const obj = await env.PAGES.get(commentsKey(id));
+  if (!obj) return [];
+  return sanitizeComments(await obj.json().catch(() => null));
+}
+
+// Remove one comment, CAS-retried. `codeId` scopes the delete to comments
+// that code posted (the public path); null removes regardless (the owner's
+// moderation path). Returns "ok" | "missing" | "forbidden" | "conflict".
+async function removeComment(env, id, cid, codeId) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await env.PAGES.get(commentsKey(id));
+    const current = existing ? sanitizeComments(await existing.json().catch(() => null)) : [];
+    const target = current.find((c) => c.id === cid);
+    if (!target) return "missing";
+    if (codeId !== null && target.codeId !== codeId) return "forbidden";
+    const next = current.filter((c) => c.id !== cid);
+    const put = await env.PAGES.put(commentsKey(id), JSON.stringify({ comments: next }), {
+      httpMetadata: { contentType: "application/json" },
+      onlyIf: { etagMatches: existing.etag },
+    });
+    if (put) return "ok";
+  }
+  return "conflict";
+}
+
+// Resolve the {data, gate, session} triple behind a public write — answering
+// with the right page (404 / gate / a plain-language 403) when a layer says
+// no. `need` is the role floor: "comment" (comment or edit) or "edit".
+async function publicWriteContext(request, env, id, url, need, nextPath) {
+  const obj = await env.PAGES.get(`pages/${id}.json`);
+  if (!obj) return { error: notFoundPage() };
+  const data = await obj.json().catch(() => null);
+  if (!data || typeof data !== "object" || data.kind === "collection") {
+    return { error: notFoundPage() };
+  }
+  const gate = await accessGateFor(env, id, data);
+  if (!gate) {
+    // No codes, no named identities: a public share stays read-only.
+    return {
+      error: shellPage("Read-only page", "This page doesn't take changes from the web.", 403),
+    };
+  }
+  const session = await gateSession(request, env, gate);
+  if (!session) return { error: gatePage(gate.gateId, safeNext(nextPath, gate.gateId), url) };
+  const allowed = need === "edit" ? session.role === "edit" : session.role !== "view";
+  if (!allowed) {
+    return {
+      error: shellPage(
+        "Not allowed",
+        need === "edit"
+          ? "Your access code can read this page, not edit it."
+          : "Your access code can read this page, not comment on it.",
+        403,
+      ),
+    };
+  }
+  return { data, gate, session };
+}
+
+// Where a comment form returns to: the view that renders the comments section.
+function commentsReturnPath(data, id) {
+  const both =
+    typeof data.markdown === "string" && typeof data.html === "string" && data.html.length > 0;
+  return both ? `/${id}?v=md#comments` : `/${id}#comments`;
+}
+
+// POST /<id>/comments — add a comment (codes with the comment or edit role).
+async function handleCommentAdd(request, env, id, url) {
+  if (request.method !== "POST") {
+    return new Response(null, { status: 303, headers: { location: `/${id}` } });
+  }
+  const ctx = await publicWriteContext(request, env, id, url, "comment", `/${id}`);
+  if (ctx.error) return ctx.error;
+  if (rateLimited(commentAttempts, request, COMMENT_RATE_LIMIT)) {
+    return shellPage("Slow down", "Too many comments at once — wait a minute, then try again.", 429);
+  }
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return shellPage("That didn't work", "The comment didn't come through — go back and try again.", 400);
+  }
+  const body = String(form.get("body") ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!body) return shellPage("Empty comment", "Write something first, then post.", 400);
+  if (body.length > MAX_COMMENT_BODY) {
+    return shellPage("Too long", `Comments are capped at ${MAX_COMMENT_BODY} characters.`, 413);
+  }
+  const name = String(form.get("name") ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NAME_LEN);
+  const quote = String(form.get("quote") ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_COMMENT_QUOTE);
+
+  const entry = {
+    id: `m-${randomHex(4)}`,
+    body,
+    ...(quote ? { quote } : {}),
+    ...(name ? { name } : {}),
+    label: ctx.session.label,
+    codeId: ctx.session.codeId,
+    createdAt: new Date().toISOString(),
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await env.PAGES.get(commentsKey(id));
+    const current = existing ? sanitizeComments(await existing.json().catch(() => null)) : [];
+    if (current.length >= MAX_COMMENTS) {
+      return shellPage("Comments are full", "This page has reached its comment limit.", 409);
+    }
+    const put = await env.PAGES.put(
+      commentsKey(id),
+      JSON.stringify({ comments: [...current, entry] }),
+      {
+        httpMetadata: { contentType: "application/json" },
+        ...(existing ? { onlyIf: { etagMatches: existing.etag } } : {}),
+      },
+    );
+    if (put) {
+      return new Response(null, {
+        status: 303,
+        headers: { location: commentsReturnPath(ctx.data, id) },
+      });
+    }
+    // Lost a race with another comment — re-read and re-append.
+  }
+  return shellPage("Try again", "Two comments landed at once — go back and post again.", 409);
+}
+
+// POST /<id>/comments/<cid>/delete — a session may remove its own code's
+// comments; everything else is the owner's moderation API.
+async function handleCommentDelete(request, env, id, cid, url) {
+  if (request.method !== "POST") {
+    return new Response(null, { status: 303, headers: { location: `/${id}` } });
+  }
+  const ctx = await publicWriteContext(request, env, id, url, "comment", `/${id}`);
+  if (ctx.error) return ctx.error;
+  const removed = await removeComment(env, id, cid, ctx.session.codeId);
+  if (removed === "forbidden") {
+    return shellPage("Not yours", "Only the code that posted a comment can remove it here.", 403);
+  }
+  if (removed === "conflict") {
+    return shellPage("Try again", "Something raced that delete — go back and retry.", 409);
+  }
+  // "missing" = already gone (double-click); the outcome stands either way.
+  return new Response(null, {
+    status: 303,
+    headers: { location: commentsReturnPath(ctx.data, id) },
+  });
+}
+
+// A document that opens with an H1 names itself — mirror of the app's
+// markdownLeadTitle (share.ts), so a web edit retitles the page exactly like
+// a local edit would. Null = keep the stored title.
+function markdownLeadTitle(md) {
+  const lines = md.split("\n");
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === "") i += 1;
+  const m = lines[i]?.match(/^#[ \t]+(.+?)[ \t]*#*[ \t]*$/);
+  if (!m) return null;
+  const text = m[1]
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+  return text ? text.slice(0, 256) : null;
+}
+
+// GET /<id>/edit renders the web editor; POST saves. Saves are CAS-guarded
+// twice over: baseRev (the revision the editor loaded) must still be current,
+// and the put itself is conditional on the record's etag — a lost race
+// re-renders the editor with the visitor's text intact, never a clobber.
+async function handleEdit(request, env, id, url) {
+  if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
+  const ctx = await publicWriteContext(request, env, id, url, "edit", `/${id}/edit`);
+  if (ctx.error) return ctx.error;
+  const { data, session } = ctx;
+  if (typeof data.markdown !== "string") {
+    // An html-only rendition page: nothing editable here.
+    return new Response(null, { status: 303, headers: { location: `/${id}` } });
+  }
+  const hasHtml = typeof data.html === "string" && data.html.length > 0;
+
+  if (request.method !== "POST") {
+    return editorPage(id, data.title || "Untitled", data.markdown, pageRev(data), { hasHtml });
+  }
+
+  if (rateLimited(editAttempts, request, EDIT_RATE_LIMIT)) {
+    return shellPage("Slow down", "Too many saves at once — wait a minute, then try again.", 429);
+  }
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return shellPage("That didn't work", "The save didn't come through — go back and try again.", 400);
+  }
+  // Strip CriticMarkup like the app does before publishing — the public copy
+  // never carries editorial braces, whoever wrote them.
+  const markdown = stripComments(String(form.get("markdown") ?? "").replace(/\r\n?/g, "\n"));
+  const baseRev = Number(form.get("baseRev"));
+  if (!Number.isInteger(baseRev) || baseRev < 1) {
+    return shellPage("That didn't work", "The save didn't come through — go back and try again.", 400);
+  }
+  if (markdown.trim().length === 0) {
+    return editorPage(id, data.title || "Untitled", markdown, baseRev, {
+      hasHtml,
+      status: 400,
+      error: "There's nothing to save — the document can't be emptied from here.",
+    });
+  }
+  if (markdown.length > MAX_MARKDOWN_BYTES) {
+    return shellPage("Too large", "That document is beyond the size limit.", 413);
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await env.PAGES.get(`pages/${id}.json`);
+    if (!existing) return notFoundPage();
+    const record = await existing.json().catch(() => null);
+    if (!record || typeof record !== "object" || typeof record.markdown !== "string") {
+      return notFoundPage();
+    }
+    const currentRev = pageRev(record);
+    const recordHasHtml = typeof record.html === "string" && record.html.length > 0;
+    if (currentRev !== baseRev) {
+      const by = publicWebEdit(record)?.by;
+      return editorPage(id, record.title || "Untitled", markdown, currentRev, {
+        hasHtml: recordHasHtml,
+        status: 409,
+        error: `This page changed while you were editing${by ? ` (last saved by ${by})` : ""}. Your text is kept below — saving now overwrites the newer version, so open the live page in another tab first if you need to merge.`,
+      });
+    }
+    const now = new Date().toISOString();
+    const title = markdownLeadTitle(markdown) ?? record.title ?? "Untitled";
+    const next = {
+      ...record,
+      title,
+      markdown,
+      // The rendition (if any) no longer matches the document; the markdown
+      // takes the default view until the app pushes a fresh one.
+      ...(recordHasHtml ? { htmlStale: true } : {}),
+      rev: currentRev + 1,
+      webEdit: { by: session.label, at: now },
+      updatedAt: now,
+    };
+    const meta = { ...(existing.customMetadata ?? {}) };
+    meta.title = title.slice(0, 256);
+    meta.updatedAt = now;
+    meta.rev = String(next.rev);
+    meta.webEdit = "1";
+    meta.webEditBy = session.label.slice(0, MAX_NAME_LEN);
+    meta.webEditAt = now;
+    const put = await env.PAGES.put(`pages/${id}.json`, JSON.stringify(next), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: meta,
+      onlyIf: { etagMatches: existing.etag },
+    });
+    if (put) {
+      return new Response(null, {
+        status: 303,
+        headers: { location: recordHasHtml ? `/${id}?v=md` : `/${id}` },
+      });
+    }
+    // Lost a race (concurrent save / app push) — re-read; the rev check above
+    // turns a real content change into the 409 editor.
+  }
+  return shellPage("Try again", "Something raced that save — go back and retry.", 409);
+}
+
+// The web editor: one full-height form, no JS required. The document rides a
+// <textarea>; baseRev pins the revision it was loaded from.
+function editorPage(id, title, markdown, rev, { status = 200, error = null, hasHtml = false } = {}) {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+${FAVICON_LINKS}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Edit · ${escapeHtml(title)}</title>
+<style>${PAGE_CSS}${EDITOR_CSS}</style>
+</head>
+<body class="editor-page">
+<form class="editor" method="post" action="/${id}/edit">
+<header class="editor-bar">
+<div class="editor-name">Editing <strong>${escapeHtml(title)}</strong></div>
+<div class="editor-actions">
+<a class="editor-cancel" href="/${id}">Cancel</a>
+<button class="editor-save" type="submit">Save</button>
+</div>
+</header>
+${error ? `<div class="editor-warn" role="alert">${escapeHtml(error)}</div>` : ""}
+${
+  hasHtml && !error
+    ? `<div class="editor-note muted">This page also carries a polished HTML rendition. Saving marks it out of date — readers see your markdown until the owner regenerates it.</div>`
+    : ""
+}
+<textarea class="editor-text" name="markdown" spellcheck="false" autocapitalize="off" autocorrect="off" aria-label="Markdown document">${escapeHtml(markdown)}</textarea>
+<input type="hidden" name="baseRev" value="${rev}">
+</form>
+</body>
+</html>`;
+  return new Response(html, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+const EDIT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>`;
+const COMMENT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+
+function commentDateLabel(iso) {
+  const d = iso ? new Date(iso) : null;
+  return d && !Number.isNaN(d.getTime())
+    ? d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
+    : "";
+}
+
+// The comments section under a page (rendered only for sessions that may
+// comment — the panel and its contents stay invisible to view-only codes).
+// Deleting is offered on the session's own code's comments; the tiny script
+// only remembers the visitor's name between posts.
+function renderCommentsSection(id, comments, session) {
+  const items = comments
+    .map((c) => {
+      const name = c.name || c.label || "Someone";
+      const via =
+        c.name && c.label && c.label !== c.name
+          ? `<span class="comment-via">· ${escapeHtml(c.label)}</span>`
+          : "";
+      const when = commentDateLabel(c.createdAt);
+      const del =
+        c.codeId === session.codeId
+          ? `<form class="comment-delete-form" method="post" action="/${id}/comments/${c.id}/delete"><button class="comment-delete" type="submit" title="Delete this comment">Delete</button></form>`
+          : "";
+      return `<li class="comment">
+<div class="comment-head"><span class="comment-author">${escapeHtml(name)}</span>${via}${when ? `<span class="comment-date">${escapeHtml(when)}</span>` : ""}${del}</div>
+${c.quote ? `<blockquote class="comment-quote">${escapeHtml(c.quote)}</blockquote>` : ""}
+<p class="comment-body">${escapeHtml(c.body)}</p>
+</li>`;
+    })
+    .join("\n");
+  return `<section class="comments" id="comments" aria-label="Comments">
+<div class="comments-inner">
+<h2 class="comments-title">Comments${comments.length > 0 ? ` <span class="comments-count">${comments.length}</span>` : ""}</h2>
+${comments.length > 0 ? `<ol class="comment-list">\n${items}\n</ol>` : `<p class="comments-empty muted">No comments yet.</p>`}
+<form class="comment-form" method="post" action="/${id}/comments">
+<textarea class="comment-text" name="body" required maxlength="${MAX_COMMENT_BODY}" rows="3" placeholder="Write a comment…" aria-label="Comment"></textarea>
+<div class="comment-form-foot">
+<input class="comment-name" id="comment-name" name="name" maxlength="${MAX_NAME_LEN}" placeholder="Your name (optional)" autocomplete="name" aria-label="Your name">
+<button class="comment-post" type="submit">Post comment</button>
+</div>
+</form>
+</div>
+</section>
+<script>
+(function () {
+  var f = document.getElementById("comment-name");
+  if (!f) return;
+  try { var v = localStorage.getItem("dk-comment-name"); if (v && !f.value) f.value = v; } catch (e) {}
+  var form = f.closest("form");
+  if (form) form.addEventListener("submit", function () {
+    try { localStorage.setItem("dk-comment-name", f.value.trim()); } catch (e) {}
+  });
+})();
+</script>`;
+}
+
+const COMMENTS_CSS = `
+.comments { width: 100%; border-top: 1px solid var(--border); margin-top: 24px; }
+.comments-inner { width: 100%; max-width: 1080px; margin: 0 auto; padding: 32px 64px 16px; }
+@media (max-width: 720px) { .comments-inner { padding: 28px 24px 12px; } }
+.comments-title { font-size: 16px; font-weight: 700; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+.comments-count {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: center;
+}
+.comments-empty { font-size: 13.5px; margin: 0 0 16px; }
+.comment-list { list-style: none; margin: 0 0 20px; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.comment { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.comment-head { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.comment-author { font-weight: 600; color: var(--text); }
+.comment-via { color: var(--muted); }
+.comment-date { color: var(--muted); }
+.comment-delete-form { margin-left: auto; }
+.comment-delete { border: none; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; }
+.comment-delete:hover { color: #d5484f; }
+.comment-quote { margin: 8px 0 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.comment-body { margin: 6px 0 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment-form { display: flex; flex-direction: column; gap: 8px; }
+.comment-text {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+}
+.comment-text:focus { border-color: var(--link); }
+.comment-form-foot { display: flex; gap: 8px; align-items: center; }
+.comment-name {
+  flex: 1;
+  min-width: 0;
+  max-width: 240px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.comment-name:focus { border-color: var(--link); }
+.comment-post {
+  margin-left: auto;
+  flex: none;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.comment-post:hover { opacity: 0.85; }
+`;
+
+const EDITOR_CSS = `
+body.editor-page { height: 100dvh; overflow: hidden; }
+.editor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.editor-name { font-size: 13.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-name strong { color: var(--text); font-weight: 600; }
+.editor-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.editor-cancel { font-size: 13px; color: var(--muted); text-decoration: none; }
+.editor-cancel:hover { color: var(--text); }
+.editor-save {
+  flex: none;
+  padding: 7px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.editor-save:hover { opacity: 0.85; }
+.editor-warn {
+  padding: 10px 16px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  background: rgba(213, 72, 79, 0.1);
+  color: #d5484f;
+  border-bottom: 1px solid var(--border);
+}
+.editor-note { padding: 8px 16px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
+.editor-text {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: 20px 24px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+`;
+
+/* The html-only frame variant used when comments render below the rendition:
+   the iframe takes one viewport-height block in the normal flow (the page
+   scrolls past it), instead of owning the whole viewport. */
+const FRAME_FLOW_CSS = `
+.raw-frame-flow {
+  display: block;
+  width: 100%;
+  height: 100dvh;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+}
+`;
+
 /* ---------- Public pages ---------- */
 
 // Mirror of the app's clean-copy transform (criticMarkup.ts): drop CriticMarkup
@@ -2074,7 +2861,8 @@ async function renderPage(request, env, id, data, url) {
   // until this browser has unlocked it. The gate keeps the visitor's view
   // (?v=md) through the unlock, and at the domain root sends them back to /.
   const gate = await accessGateFor(env, id, data);
-  if (gate && !(await gateCookieValid(request, env, gate))) {
+  const session = gate ? await gateSession(request, env, gate) : null;
+  if (gate && !session) {
     const next = `${url.pathname}${url.searchParams.get("v") === "md" ? "?v=md" : ""}`;
     return gatePage(gate.gateId, safeNext(next, gate.gateId), url);
   }
@@ -2086,6 +2874,15 @@ async function renderPage(request, env, id, data, url) {
   const hasMd = typeof data.markdown === "string";
   const hasHtml = typeof data.html === "string" && data.html.length > 0;
   if (!hasMd && !hasHtml) return notFoundPage();
+
+  // What this session's code may do here (nothing extra on public shares —
+  // there's no named identity to grant anything to).
+  const canComment = session !== null && session.role !== "view";
+  const canEdit = session !== null && session.role === "edit" && hasMd;
+  const comments = canComment ? await readComments(env, id) : null;
+  // A web edit outdates the html rendition: the markdown (the edited truth)
+  // becomes the default view until the app pushes a fresh rendition.
+  const htmlStale = data.htmlStale === true && hasMd;
 
   const title = data.title || "Untitled";
   const clean = hasMd ? stripComments(data.markdown) : "";
@@ -2121,30 +2918,51 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
   // With both versions present, the reader picks: a fixed pill toggles between
   // the html rendition (/<id> — the polished, human-facing default, opposite
   // of the editor which leads with the markdown source) and the markdown page
-  // (/<id>?v=md).
+  // (/<id>?v=md). While the rendition is stale (a web edit outdated it), the
+  // markdown takes the default spot and the HTML side is reachable only
+  // explicitly (?v=html).
   const pill = (active) =>
     hasMd && hasHtml
       ? `<nav class="view-pill" aria-label="Document version">
 <a class="view-seg ${active === "md" ? "is-active" : ""}" href="${pageUrl}?v=md">MD</a>
-<a class="view-seg ${active === "html" ? "is-active" : ""}" href="${pageUrl}">HTML</a>
+<a class="view-seg ${active === "html" ? "is-active" : ""}${htmlStale ? " is-stale" : ""}" href="${pageUrl}${htmlStale ? "?v=html" : ""}"${htmlStale ? ' title="Rendition from before the latest web edit"' : ""}>HTML</a>
 </nav>`
       : "";
 
+  // The fixed top-right cluster: session actions (edit / comments) + the pill.
+  const editBtn = canEdit
+    ? `<a class="top-action" href="${pageUrl}/edit">${EDIT_ICON}<span>Edit</span></a>`
+    : "";
+  const topBar = (...segs) => {
+    const inner = segs.filter(Boolean).join("");
+    return inner ? `<div class="page-top">${inner}</div>` : "";
+  };
+
   const wantMd = url.searchParams.get("v") === "md";
-  if (hasHtml && !(hasMd && wantMd)) {
+  const wantHtml = url.searchParams.get("v") === "html";
+  if (hasHtml && !(hasMd && wantMd) && (wantHtml || !htmlStale)) {
     // The rendition is an arbitrary standalone document; framing it (instead of
     // serving it at /<id> directly) keeps our meta tags, the toggle, and the
-    // sandbox — its scripts run under an opaque origin.
+    // sandbox — its scripts run under an opaque origin. Comments live on the
+    // markdown view; from here they're one pill away — except on an html-only
+    // page, where the frame flows in the document so they fit below it.
+    const flow = !hasMd && canComment;
+    const commentsBtn =
+      hasMd && canComment
+        ? `<a class="top-action" href="${pageUrl}?v=md#comments">${COMMENT_ICON}<span>Comments${comments.length > 0 ? ` · ${comments.length}` : ""}</span></a>`
+        : "";
     const html = `<!doctype html>
 <html lang="en">
 <head>
 ${head}
-<style>${PAGE_CSS}${FRAME_CSS}</style>
+<style>${PAGE_CSS}${flow ? FRAME_FLOW_CSS + COMMENTS_CSS : FRAME_CSS}</style>
 </head>
 <body>
 ${crumb}
-${pill("html")}
-<iframe class="raw-frame" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
+${topBar(commentsBtn, editBtn, pill("html"))}
+<iframe class="${flow ? "raw-frame-flow" : "raw-frame"}" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
+${flow ? renderCommentsSection(id, comments, session) : ""}
+${flow ? `<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>` : ""}
 </body>
 </html>`;
     return new Response(html, {
@@ -2157,14 +2975,15 @@ ${pill("html")}
 <html lang="en">
 <head>
 ${head}
-<style>${PAGE_CSS}</style>
+<style>${PAGE_CSS}${canComment ? COMMENTS_CSS : ""}</style>
 </head>
 <body>
 ${crumb}
-${pill("md")}
+${topBar(editBtn, pill("md"))}
 <main class="doc">
 ${body}
 </main>
+${canComment ? renderCommentsSection(id, comments, session) : ""}
 <footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
 </body>
 </html>`;
@@ -3114,6 +3933,36 @@ main.doc {
   color: var(--text);
   box-shadow: 0 0 0 1px var(--border);
 }
+.view-seg.is-stale { opacity: 0.55; }
+/* Fixed top-right cluster: session actions (Edit / Comments) + the view pill.
+   The pill keeps its own look but gives up its fixed position in here. */
+.page-top {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.page-top .view-pill { position: static; }
+.top-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+.top-action:hover { color: var(--text); }
+.top-action svg { width: 13px; height: 13px; flex: none; }
 footer {
   width: 100%;
   max-width: 1080px;
