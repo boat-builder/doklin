@@ -8,12 +8,17 @@ import {
 import type { CommentEntry } from "./criticMark";
 
 // One thread as the rail renders it. `anchorTop` is the anchor's vertical
-// offset in the scroll container's content space (cards translate with the
-// document as it scrolls).
+// offset in the host's coordinate space — the scroll container's content
+// space for the markdown editor (cards translate with the document), the
+// viewport for the html view (the host re-sends tops as the iframe scrolls).
+// `orphaned` marks a thread whose anchor no longer exists in the document
+// (an html rendition regenerated out from under its comments); the card
+// stays, labeled, instead of vanishing.
 export type RailThread = {
   id: string;
   comments: CommentEntry[];
   anchorTop: number;
+  orphaned?: boolean;
 };
 
 // Which entry is being edited: the thread + its index (0 = the opener).
@@ -202,6 +207,9 @@ function ThreadCard({
         if (!active) onActivate(id);
       }}
     >
+      {thread.orphaned && (
+        <div className="comment-orphan-note">Commented spot no longer in the document</div>
+      )}
       <EntryRow
         entry={opener}
         editing={editing === 0}

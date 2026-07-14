@@ -717,7 +717,7 @@ fn write_file(
 #[tauri::command]
 fn watch_file(
     path: String,
-    extra: Option<String>,
+    extras: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, WatcherStore>,
 ) -> Result<FileSnapshot, String> {
@@ -754,9 +754,10 @@ fn watch_file(
 
     let mut files = vec![(path_buf, snapshot.clone())];
 
-    // The companion rendition (a document's html next to its markdown) rides
-    // along best-effort: it may vanish between the caller's probe and here.
-    if let Some(extra) = extra {
+    // Companion files (a document's html rendition next to its markdown, and
+    // the rendition's comments sidecar) ride along best-effort: any of them
+    // may vanish between the caller's probe and here.
+    for extra in extras.unwrap_or_default() {
         let extra_buf = PathBuf::from(&extra);
         if let Ok(extra_snapshot) = stat_snapshot(&extra_buf) {
             if debouncer

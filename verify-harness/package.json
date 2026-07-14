@@ -1,0 +1,8 @@
+{
+  "name": "doklin-verify-harness",
+  "private": true,
+  "description": "Playwright driver deps for verify-harness/drive.mjs (browser itself is preinstalled on the runner)",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
