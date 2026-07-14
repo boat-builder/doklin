@@ -446,6 +446,7 @@ export default function SharedPages({
                               {s.title}
                               {s.protected && <LockBadge />}
                               {isHome && <HomeBadge />}
+                              {s.webConflict && <WebEditBadge by={s.webConflict.by} />}
                             </span>
                             <span
                               className="shared-row-url"
@@ -519,6 +520,19 @@ export default function SharedPages({
 // Small "this is the domain root" marker next to a row title.
 function HomeBadge() {
   return <span className="shared-home-badge">home</span>;
+}
+
+// A web edit collided with local changes — opening the document surfaces the
+// resolution in its share popover.
+function WebEditBadge({ by }: { by: string }) {
+  return (
+    <span
+      className="shared-webedit-badge"
+      title={`Edited on the web${by ? ` by ${by}` : ""} — open the document to resolve`}
+    >
+      web edit
+    </span>
+  );
 }
 
 // "Behind access codes" marker — a tiny padlock, set the moment this Mac

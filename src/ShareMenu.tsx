@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AccessCodes from "./AccessCodes";
 import {
+  deletePageComment,
+  fetchPageComments,
   generateShareId,
   newConnectionId,
   normalizeEndpoint,
@@ -19,7 +21,9 @@ import {
   shareUrl,
   testShareConfig,
   SHARE_ID_RE,
+  ShareWorkerOutdatedError,
   type CollectionEntry,
+  type PageComment,
   type ShareConnection,
   type ShareEntry,
 } from "./share";
@@ -48,6 +52,7 @@ export default function ShareMenu({
   onRememberWorkspaceConnection,
   onProtectedChanged,
   onOpenWorkerUpdate,
+  onResolveWebConflict,
 }: {
   docTitle: string;
   entry: ShareEntry | null;
@@ -91,9 +96,12 @@ export default function ShareMenu({
   onProtectedChanged: (isProtected: boolean) => void;
   // Non-null when a guided worker update is available (pre-v7 backends).
   onOpenWorkerUpdate: (() => void) | null;
+  // Settle entry.webConflict: "pull" replaces the local document with the web
+  // version, "keepMine" republishes the local copy over the web edit.
+  onResolveWebConflict: (mode: "pull" | "keepMine") => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<"main" | "settings" | "access">("main");
+  const [view, setView] = useState<"main" | "settings" | "access" | "comments">("main");
   // settings sub-state: which connection is being edited ("new" = adding one).
   const [editing, setEditing] = useState<ShareConnection | "new" | null>(null);
   // Connection id pending a remove confirmation.
@@ -103,7 +111,7 @@ export default function ShareMenu({
   const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
   const [rememberForWorkspace, setRememberForWorkspace] = useState(false);
   const [busy, setBusy] = useState<
-    "share" | "stop" | "save" | "remove" | "collection" | null
+    "share" | "stop" | "save" | "remove" | "collection" | "pull" | "keepMine" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -285,13 +293,30 @@ export default function ShareMenu({
     }
   }, [collection, busy, onToggleCollection]);
 
+  const resolveConflict = useCallback(
+    async (mode: "pull" | "keepMine") => {
+      if (busy) return;
+      setBusy(mode);
+      setError(null);
+      try {
+        await onResolveWebConflict(mode);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, onResolveWebConflict],
+  );
+
   // Unconfigured + not explicitly editing settings → the setup prompt. The
   // share form itself only ever renders with a working connection behind it.
   const showSetupPrompt = connections.length === 0 && view !== "settings";
   const showSettings = view === "settings";
   // The codes editor only makes sense for a live share on a reachable backend.
   const showAccess = view === "access" && !!entry && !!entryConnection;
-  const showMain = !showSetupPrompt && !showSettings && !showAccess;
+  const showComments = view === "comments" && !!entry && !!entryConnection;
+  const showMain = !showSetupPrompt && !showSettings && !showAccess && !showComments;
 
   const openGuide = useCallback(() => {
     setOpen(false);
@@ -504,6 +529,22 @@ export default function ShareMenu({
                 </button>
               </div>
             </>
+          ) : showComments && entry && entryConnection ? (
+            <>
+              <div className="share-heading" title={docTitle}>
+                Web comments
+              </div>
+              <WebComments
+                connection={entryConnection}
+                pageId={entry.id}
+                onOpenWorkerUpdate={onOpenWorkerUpdate}
+              />
+              <div className="share-buttons">
+                <button className="share-btn" onClick={() => setView("main")}>
+                  Back
+                </button>
+              </div>
+            </>
           ) : entry ? (
             <>
               <div className="share-heading" title={docTitle}>
@@ -524,6 +565,33 @@ export default function ShareMenu({
                             : "Anyone with the link can view this page."
                         } It updates as you save.`}
                   </div>
+                  {entry.webConflict && (
+                    <div className="share-web-conflict">
+                      <div className="share-web-conflict-text">
+                        Edited on the web
+                        {entry.webConflict.by ? ` by ${entry.webConflict.by}` : ""} — and this
+                        document has local changes too, so nothing was overwritten.
+                      </div>
+                      <div className="share-buttons">
+                        <button
+                          className="share-btn"
+                          onClick={() => void resolveConflict("pull")}
+                          disabled={busy != null}
+                          title="Replace this document's local content with the web version"
+                        >
+                          {busy === "pull" ? "Replacing…" : "Use web version"}
+                        </button>
+                        <button
+                          className="share-btn"
+                          onClick={() => void resolveConflict("keepMine")}
+                          disabled={busy != null}
+                          title="Republish your local copy over the web edit"
+                        >
+                          {busy === "keepMine" ? "Publishing…" : "Keep mine"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div className="share-url-row">
                     <span className="share-url" title={shareUrl(entryConnection, entry.id)}>
                       {shareHost(entryConnection)}/{entry.id}
@@ -558,6 +626,17 @@ export default function ShareMenu({
                       {entry.protected ? "Manage" : "Restrict…"}
                     </button>
                   </div>
+                  {entry.protected && (
+                    <div className="share-access-summary">
+                      <span className="share-access-summary-text">
+                        <CommentGlyph />
+                        <span>Comments from the web</span>
+                      </span>
+                      <button className="share-btn" onClick={() => setView("comments")}>
+                        View
+                      </button>
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
@@ -709,6 +788,173 @@ export default function ShareMenu({
         </div>
       )}
     </div>
+  );
+}
+
+/* Comments visitors left on the public page (codes with the comment/edit
+   role). The backend is the source of truth — fetched on open, each row
+   deletable (moderation). Read-only here: replying happens where the
+   conversation lives, on the page itself. */
+function WebComments({
+  connection,
+  pageId,
+  onOpenWorkerUpdate,
+}: {
+  connection: ShareConnection;
+  pageId: string;
+  onOpenWorkerUpdate: (() => void) | null;
+}) {
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "ready"; comments: PageComment[] }
+    | { kind: "outdated" }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+  const [busy, setBusy] = useState<string | null>(null); // comment id being deleted
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const comments = await fetchPageComments(connection, pageId);
+        if (!cancelled) setState({ kind: "ready", comments });
+      } catch (e) {
+        if (cancelled) return;
+        if (e instanceof ShareWorkerOutdatedError) setState({ kind: "outdated" });
+        else setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connection, pageId]);
+
+  const remove = useCallback(
+    async (commentId: string) => {
+      if (busy || state.kind !== "ready") return;
+      setBusy(commentId);
+      setError(null);
+      try {
+        await deletePageComment(connection, pageId, commentId);
+        setState({ kind: "ready", comments: state.comments.filter((c) => c.id !== commentId) });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, state, connection, pageId],
+  );
+
+  if (state.kind === "loading") {
+    return <div className="share-access-status">Loading comments…</div>;
+  }
+  if (state.kind === "outdated") {
+    return (
+      <div className="share-access-status">
+        <p className="share-note">
+          Web comments need a newer backend worker — a quick redeploy unlocks
+          them, and your pages keep working meanwhile.
+        </p>
+        {onOpenWorkerUpdate && (
+          <button className="share-btn is-primary" onClick={onOpenWorkerUpdate}>
+            Update backend…
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="share-access-status">
+        <div className="share-error">{state.message}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="share-web-comments">
+      {state.comments.length === 0 ? (
+        <div className="share-note">
+          No comments yet. Visitors whose access code can comment (or edit)
+          leave them right on the public page.
+        </div>
+      ) : (
+        <ul className="share-comment-list">
+          {state.comments.map((c) => (
+            <li key={c.id} className="share-comment">
+              <div className="share-comment-head">
+                <span className="share-comment-author" title={c.label}>
+                  {c.name || c.label}
+                  {c.name && c.label && c.label !== c.name && (
+                    <span className="share-comment-via"> · {c.label}</span>
+                  )}
+                </span>
+                {c.createdAt && (
+                  <span className="share-comment-date">{commentDateLabel(c.createdAt)}</span>
+                )}
+                <button
+                  className="share-access-remove"
+                  onClick={() => void remove(c.id)}
+                  disabled={busy != null}
+                  title="Delete this comment"
+                  aria-label="Delete this comment"
+                >
+                  <XIcon />
+                </button>
+              </div>
+              {c.quote && <div className="share-comment-quote">{c.quote}</div>}
+              <div className="share-comment-body">{c.body}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <div className="share-error">{error}</div>}
+    </div>
+  );
+}
+
+function commentDateLabel(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function XIcon() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function CommentGlyph() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
   );
 }
 

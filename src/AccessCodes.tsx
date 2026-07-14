@@ -12,10 +12,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ACCESS_ROLE_LABELS,
   addPageAccessCode,
   cachedAccessCode,
   clearPageAccess,
   fetchPageAccess,
+  fetchWorkerVersion,
   forgetAccessCodes,
   generateAccessCode,
   normalizeAccessCode,
@@ -23,15 +25,25 @@ import {
   removePageAccessCode,
   ShareWorkerOutdatedError,
   unlockShareUrl,
+  updatePageAccessCode,
+  type AccessRole,
   type PageAccessCode,
   type ShareConnection,
 } from "./share";
+import Select from "./Select";
 
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; codes: PageAccessCode[] }
   | { kind: "outdated" }
   | { kind: "error"; message: string };
+
+// What each role means on the public page — the picker's second line.
+const ROLE_OPTIONS: { value: AccessRole; label: string; detail: string }[] = [
+  { value: "view", label: ACCESS_ROLE_LABELS.view, detail: "Read the page, nothing else" },
+  { value: "comment", label: ACCESS_ROLE_LABELS.comment, detail: "Read and comment on the page" },
+  { value: "edit", label: ACCESS_ROLE_LABELS.edit, detail: "Read, comment, and edit the page" },
+];
 
 export default function AccessCodes({
   connection,
@@ -54,7 +66,11 @@ export default function AccessCodes({
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [labelInput, setLabelInput] = useState("");
   const [codeInput, setCodeInput] = useState(() => generateAccessCode());
-  const [busy, setBusy] = useState<"add" | "clear" | string | null>(null); // string = code id being revoked
+  const [roleInput, setRoleInput] = useState<AccessRole>("view");
+  // Roles (comment/edit on the web) need a v8 worker; on older backends the
+  // pickers hide and codes behave as pure view codes, exactly as before.
+  const [rolesSupported, setRolesSupported] = useState(false);
+  const [busy, setBusy] = useState<"add" | "clear" | string | null>(null); // string = code id being revoked / re-roled
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [copied, setCopied] = useState<string | null>(null); // "<codeId>:code" | "<codeId>:link"
@@ -73,8 +89,12 @@ export default function AccessCodes({
     let cancelled = false;
     void (async () => {
       try {
-        const access = await fetchPageAccess(connection, pageId);
+        const [access, version] = await Promise.all([
+          fetchPageAccess(connection, pageId),
+          fetchWorkerVersion(connection).catch(() => 0),
+        ]);
         if (cancelled) return;
+        setRolesSupported(version >= 8);
         setState({ kind: "ready", codes: access.codes });
         onChanged(access.protected);
       } catch (e) {
@@ -101,18 +121,46 @@ export default function AccessCodes({
     setError(null);
     try {
       const label = labelInput.trim() || `Code ${state.codes.length + 1}`;
-      const added = await addPageAccessCode(connection, pageId, label, code);
+      const added = await addPageAccessCode(
+        connection,
+        pageId,
+        label,
+        code,
+        rolesSupported ? roleInput : "view",
+      );
       rememberAccessCode(connection.id, pageId, added.id, code);
       setCodes([...state.codes, added]);
       setLabelInput("");
       setCodeInput(generateAccessCode());
+      setRoleInput("view");
       labelRef.current?.focus();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [busy, state, codeInput, labelInput, connection, pageId, setCodes]);
+  }, [busy, state, codeInput, labelInput, roleInput, rolesSupported, connection, pageId, setCodes]);
+
+  // Change what an existing code may do. The worker applies it to live
+  // sessions on their next request — nothing to re-send to the visitor.
+  const changeRole = useCallback(
+    async (codeId: string, role: AccessRole) => {
+      if (busy || state.kind !== "ready") return;
+      const current = state.codes.find((c) => c.id === codeId);
+      if (!current || current.role === role) return;
+      setBusy(codeId);
+      setError(null);
+      try {
+        const updated = await updatePageAccessCode(connection, pageId, codeId, { role });
+        setCodes(state.codes.map((c) => (c.id === codeId ? { ...c, role: updated.role } : c)));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, state, connection, pageId, setCodes],
+  );
 
   const revoke = useCallback(
     async (codeId: string) => {
@@ -196,12 +244,20 @@ export default function AccessCodes({
             Anyone with the link can open {target}. Add an access code to put
             it behind a door — one code per person or group, so you can revoke
             one without resetting the rest.
+            {rolesSupported && (
+              <> Each code also sets what its holder can do: view only, or
+              comment and even edit right on the web page.</>
+            )}
           </>
         ) : (
           <>
             Visitors unlock {target} with any code below — once per browser,
             good for 30 days. Revoking a code locks out exactly the people
             using it.
+            {rolesSupported && (
+              <> A code's role says what its holders can do on the page;
+              changing it applies on their next visit.</>
+            )}
           </>
         )}
       </div>
@@ -216,6 +272,17 @@ export default function AccessCodes({
                   <span className="share-access-label" title={c.label}>
                     {c.label || "Access code"}
                   </span>
+                  {rolesSupported && confirmRevoke !== c.id && (
+                    <Select
+                      variant="inline"
+                      className="share-access-role"
+                      value={c.role}
+                      onChange={(v) => void changeRole(c.id, v as AccessRole)}
+                      options={ROLE_OPTIONS}
+                      disabled={busy != null}
+                      ariaLabel={`What “${c.label}” can do`}
+                    />
+                  )}
                   {confirmRevoke === c.id ? (
                     <span className="share-access-actions">
                       <span className="share-access-hint">Locks out its users.</span>
@@ -279,16 +346,28 @@ export default function AccessCodes({
       )}
 
       <div className="share-access-add">
-        <input
-          ref={labelRef}
-          className="share-field-input"
-          value={labelInput}
-          onChange={(e) => setLabelInput(e.target.value)}
-          placeholder={codes.length === 0 ? "Label — who's it for?" : "Label for another code"}
-          maxLength={80}
-          spellCheck={false}
-          aria-label="Code label"
-        />
+        <div className="share-access-add-label">
+          <input
+            ref={labelRef}
+            className="share-field-input"
+            value={labelInput}
+            onChange={(e) => setLabelInput(e.target.value)}
+            placeholder={codes.length === 0 ? "Label — who's it for?" : "Label for another code"}
+            maxLength={80}
+            spellCheck={false}
+            aria-label="Code label"
+          />
+          {rolesSupported && (
+            <Select
+              variant="inline"
+              className="share-access-role"
+              value={roleInput}
+              onChange={(v) => setRoleInput(v as AccessRole)}
+              options={ROLE_OPTIONS}
+              ariaLabel="What this code can do"
+            />
+          )}
+        </div>
         <div className="share-access-add-code">
           <input
             className="share-field-input share-access-code-input"
@@ -341,6 +420,20 @@ export default function AccessCodes({
           ) : (
             <button className="share-all-link" onClick={() => setConfirmClear(true)}>
               Remove protection…
+            </button>
+          )}
+        </div>
+      )}
+
+      {!rolesSupported && (
+        <div className="share-access-roles-hint">
+          <span>
+            Letting named codes comment or edit on the web needs a newer
+            backend worker.
+          </span>
+          {onOpenWorkerUpdate && (
+            <button className="share-all-link" onClick={onOpenWorkerUpdate}>
+              Update backend…
             </button>
           )}
         </div>

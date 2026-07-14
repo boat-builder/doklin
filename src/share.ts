@@ -45,6 +45,14 @@ export type ShareEntry = {
   // Membership is always explicit — sharing a folder shares no files by
   // itself, and sharing a file inside a shared folder doesn't enroll it.
   collectionId?: string;
+  // The revision counter this Mac last pushed to (or pulled from) the
+  // backend — the `baseRev` its next push claims, so the worker can tell an
+  // unseen web edit from ordinary device-to-device churn. Absent on entries
+  // that haven't pushed to a v8 worker yet.
+  pushedRev?: number;
+  // A web edit that diverged from local changes and is waiting on the owner's
+  // call (shown in the share popover until resolved one way or the other).
+  webConflict?: { rev: number; by: string; at: string | null };
   // Which connection (ShareConnection.id) this page was published to.
   connectionId: string;
   // For a document in a cloud-synced workspace: who published it (their
@@ -420,6 +428,24 @@ export async function contentHash(text: string): Promise<string> {
   );
 }
 
+// A push refused because the page carries a web edit the app hasn't seen
+// (worker v8; the app sent `baseRev` and the worker's revision moved past it
+// via /<id>/edit). Carries what the caller needs to pull or surface it.
+export class SharePushConflictError extends Error {
+  rev: number;
+  webEdit: PageWebEdit | null;
+  constructor(rev: number, webEdit: PageWebEdit | null) {
+    super(
+      webEdit?.by
+        ? `This page was edited on the web by ${webEdit.by}.`
+        : "This page was edited on the web.",
+    );
+    this.name = "SharePushConflictError";
+    this.rev = rev;
+    this.webEdit = webEdit;
+  }
+}
+
 // Publish (or update) a page. Comments are stripped before upload so editorial
 // notes never reach the public copy — same transform as plain ⌘C. The full
 // record is sent every time (the worker doesn't merge), so a rendition that no
@@ -430,6 +456,12 @@ export async function contentHash(text: string): Promise<string> {
 // then on every member of the workspace can keep the page fresh or stop it —
 // not just whoever pushed first. The stamp is sticky worker-side, so pushes
 // that omit it never downgrade a page.
+//
+// `baseRev` (v8 workers) is the revision this Mac last pushed or pulled: when
+// sent, a page that meanwhile took a WEB edit answers 409 (thrown here as
+// SharePushConflictError) instead of silently clobbering it. Omitting baseRev
+// keeps the old clobbering behavior — that's the explicit "keep mine" path.
+// Returns the revision the worker stored (null from pre-v8 workers).
 export async function pushPage(
   config: ShareConfig,
   id: string,
@@ -437,7 +469,8 @@ export async function pushPage(
   parts: ShareParts,
   collection?: { id: string; title: string } | null,
   ws?: string | null,
-): Promise<void> {
+  baseRev?: number | null,
+): Promise<{ rev: number | null }> {
   const res = await apiFetch(config, `/api/pages/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
@@ -447,9 +480,94 @@ export async function pushPage(
       html: parts.html,
       ...(collection ? { collection } : {}),
       ...(ws ? { ws } : {}),
+      ...(typeof baseRev === "number" ? { baseRev } : {}),
     }),
   });
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => null)) as {
+      rev?: unknown;
+      webEdit?: PageWebEdit | null;
+    } | null;
+    if (typeof body?.rev === "number") {
+      throw new SharePushConflictError(body.rev, body.webEdit ?? null);
+    }
+  }
   if (!res.ok) throw new Error(`upload failed (${res.status})`);
+  const body = (await res.json().catch(() => null)) as { rev?: unknown } | null;
+  return { rev: typeof body?.rev === "number" ? body.rev : null };
+}
+
+/* ---------- Web edits: pulling them back ----------
+
+   A v8 worker lets restricted visitors with an "edit" code rewrite the page's
+   markdown on the web. The page record counts revisions (`rev`) and stamps
+   {webEdit: {by, at}} while the latest write came from the web; the app pulls
+   the markdown through /content and folds it into the local file (App.tsx's
+   reconcile pass), clearing the stamp with its next push. */
+
+export type PageWebEdit = { by: string; at: string | null };
+
+export type PageContent = {
+  title: string;
+  markdown: string | null;
+  hasHtml: boolean;
+  htmlStale: boolean;
+  rev: number;
+  webEdit: PageWebEdit | null;
+};
+
+export async function fetchPageContent(config: ShareConfig, id: string): Promise<PageContent> {
+  const res = await apiFetch(config, `/api/pages/${id}/content`);
+  if (!res.ok) throw await accessErrorFrom(config, res, 8);
+  const body = (await res.json().catch(() => null)) as Partial<PageContent> | null;
+  if (!body || typeof body !== "object") throw new Error("content read failed");
+  return {
+    title: typeof body.title === "string" ? body.title : "Untitled",
+    markdown: typeof body.markdown === "string" ? body.markdown : null,
+    hasHtml: body.hasHtml === true,
+    htmlStale: body.htmlStale === true,
+    rev: typeof body.rev === "number" ? body.rev : 1,
+    webEdit:
+      body.webEdit && typeof body.webEdit.by === "string"
+        ? { by: body.webEdit.by, at: body.webEdit.at ?? null }
+        : null,
+  };
+}
+
+/* ---------- Web comments ----------
+
+   Comments posted by restricted visitors whose code carries the comment (or
+   edit) role. They live beside the page in their own object; the owner reads
+   and moderates them here. `label` names the code that posted, `name` is
+   whatever the visitor typed (optional). */
+
+export type PageComment = {
+  id: string;
+  body: string;
+  quote?: string;
+  name?: string;
+  label: string;
+  codeId: string;
+  createdAt: string | null;
+};
+
+export async function fetchPageComments(config: ShareConfig, id: string): Promise<PageComment[]> {
+  const res = await apiFetch(config, `/api/pages/${id}/comments`);
+  if (!res.ok) throw await accessErrorFrom(config, res, 8);
+  const body = (await res.json().catch(() => null)) as { comments?: PageComment[] } | null;
+  return Array.isArray(body?.comments) ? body.comments : [];
+}
+
+export async function deletePageComment(
+  config: ShareConfig,
+  id: string,
+  commentId: string,
+): Promise<void> {
+  const res = await apiFetch(config, `/api/pages/${id}/comments/${commentId}`, {
+    method: "DELETE",
+  });
+  // 404 = already gone; the outcome stands.
+  if (!res.ok && res.status !== 404) throw await accessErrorFrom(config, res, 8);
 }
 
 // Thrown when the deployed worker predates a feature the app just used —
@@ -574,8 +692,15 @@ export async function deletePage(config: ShareConfig, id: string): Promise<void>
 
 // Every page the backend holds — the whole deployment's list, not this Mac's
 // registry (other devices and members publish too). Used by teardown to show
-// what an erase would destroy.
-export type RemotePageInfo = { id: string; title: string; updatedAt: string | null };
+// what an erase would destroy, and by the reconcile pass to spot web edits
+// with one request per backend (rev/webEdit ride along on v8 workers).
+export type RemotePageInfo = {
+  id: string;
+  title: string;
+  updatedAt: string | null;
+  rev?: number | null;
+  webEdit?: PageWebEdit | null;
+};
 
 export async function listRemotePages(config: ShareConfig): Promise<RemotePageInfo[]> {
   const res = await apiFetch(config, "/api/pages");
@@ -624,17 +749,43 @@ export async function testShareConfig(config: ShareConfig): Promise<void> {
    Folder-share codes cover the TOC and every member page (a member's own
    codes, if set, take precedence — the worker resolves that). */
 
-export type PageAccessCode = { id: string; label: string; createdAt: string | null };
+/* Each code carries a role (worker v8): what its holder may do on the public
+   page. "view" is exactly what codes always were; "comment" opens the page's
+   comments section; "edit" additionally opens the web markdown editor. Codes
+   from older workers read as "view". */
+export type AccessRole = "view" | "comment" | "edit";
+
+export const ACCESS_ROLE_LABELS: Record<AccessRole, string> = {
+  view: "Can view",
+  comment: "Can comment",
+  edit: "Can edit",
+};
+
+function normalizeRole(raw: unknown): AccessRole {
+  return raw === "comment" || raw === "edit" ? raw : "view";
+}
+
+export type PageAccessCode = {
+  id: string;
+  label: string;
+  role: AccessRole;
+  createdAt: string | null;
+};
 export type PageAccess = { protected: boolean; codes: PageAccessCode[] };
 
-// 404 on the access routes is ambiguous: a pre-v7 worker (no such route) or a
-// page that's gone. The caller has a live entry in hand, so we disambiguate
-// with the version probe — "outdated" routes to the guided redeploy, like
-// folder shares and the site config do.
-async function accessErrorFrom(config: ShareConfig, res: Response): Promise<Error> {
+// 404 on the access/content/comments routes is ambiguous: a worker predating
+// the route, or a page that's gone. The caller has a live entry in hand, so we
+// disambiguate with the version probe — "outdated" routes to the guided
+// redeploy, like folder shares and the site config do. `minVersion` is the
+// worker version the route arrived in.
+async function accessErrorFrom(
+  config: ShareConfig,
+  res: Response,
+  minVersion = 7,
+): Promise<Error> {
   if (res.status === 404) {
     const version = await fetchWorkerVersion(config).catch(() => 0);
-    if (version > 0 && version < 7) return new ShareWorkerOutdatedError();
+    if (version > 0 && version < minVersion) return new ShareWorkerOutdatedError();
     return new Error("That page isn't on the backend anymore.");
   }
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -646,11 +797,13 @@ export async function fetchPageAccess(config: ShareConfig, id: string): Promise<
   if (!res.ok) throw await accessErrorFrom(config, res);
   const body = (await res.json().catch(() => null)) as {
     protected?: boolean;
-    codes?: PageAccessCode[];
+    codes?: (Omit<PageAccessCode, "role"> & { role?: unknown })[];
   } | null;
   return {
     protected: body?.protected === true,
-    codes: Array.isArray(body?.codes) ? body.codes : [],
+    codes: Array.isArray(body?.codes)
+      ? body.codes.map((c) => ({ ...c, role: normalizeRole(c.role) }))
+      : [],
   };
 }
 
@@ -659,14 +812,38 @@ export async function addPageAccessCode(
   id: string,
   label: string,
   code: string,
+  role: AccessRole = "view",
 ): Promise<PageAccessCode> {
   const res = await apiFetch(config, `/api/pages/${id}/access/codes`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ label, code }),
+    // role rides along only when it grants something: a pre-v8 worker ignores
+    // unknown fields, and "view" is exactly its behavior anyway — so this
+    // never silently downgrades a grant on an old backend (the UI hides the
+    // role picker there; see AccessCodes).
+    body: JSON.stringify({ label, code, ...(role !== "view" ? { role } : {}) }),
   });
   if (!res.ok) throw await accessErrorFrom(config, res);
-  return (await res.json()) as PageAccessCode;
+  const body = (await res.json()) as Omit<PageAccessCode, "role"> & { role?: unknown };
+  return { ...body, role: normalizeRole(body.role) };
+}
+
+// Rename a code or change its role (worker v8). The change reaches visitors
+// on their next request — sessions aren't re-minted.
+export async function updatePageAccessCode(
+  config: ShareConfig,
+  id: string,
+  codeId: string,
+  patch: { label?: string; role?: AccessRole },
+): Promise<PageAccessCode> {
+  const res = await apiFetch(config, `/api/pages/${id}/access/codes/${codeId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw await accessErrorFrom(config, res, 8);
+  const body = (await res.json()) as Omit<PageAccessCode, "role"> & { role?: unknown };
+  return { ...body, role: normalizeRole(body.role) };
 }
 
 export async function removePageAccessCode(
