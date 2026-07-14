@@ -179,7 +179,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 8);
+  assert.equal(ok.json.version, 9);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -188,6 +188,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.ok(ok.json.features.includes("access-roles"));
   assert.ok(ok.json.features.includes("web-comments"));
   assert.ok(ok.json.features.includes("web-edit"));
+  assert.ok(ok.json.features.includes("html-comments"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -1326,6 +1327,148 @@ await test("comments: post, read, delete-own; owner moderates over the API", asy
   });
   assert.equal((await postForm("/open-page/comments", { body: "nope" })).status, 403);
   await call("/api/pages/open-page", { method: "DELETE", token: OWNER });
+});
+
+/* ---------- Comments on html renditions (version 9) ---------- */
+
+await test("html comments: the html view grows the section; anchored posts round-trip", async () => {
+  await call("/api/pages/brief", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Brief",
+      markdown: "# Brief\n\nAlpha paragraph.",
+      html: "<html><body><main><p>Alpha paragraph.</p></main></body></html>",
+    },
+  });
+  await call("/api/pages/brief/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Vera", code: "brief-view-code", role: "view" },
+  });
+  await call("/api/pages/brief/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Cody", code: "brief-comment-code", role: "comment" },
+  });
+  const vCookie = cookieOf(await unlock("brief", "brief-view-code"));
+  const cCookie = cookieOf(await unlock("brief", "brief-comment-code"));
+
+  // View role: the page as it always was — fixed frame, no comments section,
+  // and the raw rendition byte-for-byte (no bridge).
+  const viewPage = await call("/brief", { headers: { cookie: vCookie } });
+  assert.ok(viewPage.text.includes('class="raw-frame"'));
+  assert.ok(!viewPage.text.includes('id="comments"'));
+  const viewRaw = await call("/brief/raw", { headers: { cookie: vCookie } });
+  assert.ok(!viewRaw.text.includes("dkw-bubble"), "view session raw is untouched");
+  assert.ok(viewRaw.text.includes("Alpha paragraph."));
+
+  // Comment role: flowing frame with the section below, the anchor plumbing
+  // in the form, and the bridge injected into the raw rendition.
+  const commentPage = await call("/brief", { headers: { cookie: cCookie } });
+  assert.ok(commentPage.text.includes('class="raw-frame-flow"'));
+  assert.ok(commentPage.text.includes('id="comments"'));
+  assert.ok(commentPage.text.includes('id="dkw-data"'));
+  assert.ok(commentPage.text.includes('name="anchor_path"'));
+  const commentRaw = await call("/brief/raw", { headers: { cookie: cCookie } });
+  assert.ok(commentRaw.text.includes("dkw-bubble"), "comment session raw carries the bridge");
+
+  // An anchored post from the html view returns to the html view.
+  const posted = await postForm(
+    "/brief/comments",
+    {
+      body: "Tighten this.",
+      view: "html",
+      anchor_path: "body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)",
+      anchor_tag: "P",
+      anchor_text: "Alpha paragraph.",
+      quote: "Alpha paragraph.",
+    },
+    { cookie: cCookie },
+  );
+  assert.equal(posted.status, 303);
+  assert.equal(posted.headers.get("location"), "/brief#comments");
+
+  // A plain post (md view, no view field) still returns to the md view.
+  const mdPosted = await postForm("/brief/comments", { body: "General note." }, { cookie: cCookie });
+  assert.equal(mdPosted.headers.get("location"), "/brief?v=md#comments");
+
+  // Both views list both comments (one pool per page); the anchored one
+  // carries its reveal button and rides the anchor-data JSON.
+  const htmlView = await call("/brief", { headers: { cookie: cCookie } });
+  assert.ok(htmlView.text.includes("Tighten this."));
+  assert.ok(htmlView.text.includes("General note."));
+  assert.ok(htmlView.text.includes("Show in document"));
+  assert.ok(htmlView.text.includes("anchor"), "anchor data rendered for the shell script");
+  const mdView = await call("/brief?v=md", { headers: { cookie: cCookie } });
+  assert.ok(mdView.text.includes("Tighten this."));
+  assert.ok(!mdView.text.includes('id="dkw-data"'), "md view carries no anchoring layer");
+
+  // The owner sees the anchor (normalized) over the moderation API.
+  const list = await call("/api/pages/brief/comments", { token: OWNER });
+  const anchored = list.json.comments.find((c) => c.body === "Tighten this.");
+  assert.deepEqual(anchored.anchor, {
+    path: "body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)",
+    tag: "p",
+    text: "Alpha paragraph.",
+  });
+  assert.equal(anchored.quote, "Alpha paragraph.");
+  assert.equal(list.json.comments.find((c) => c.body === "General note.").anchor, undefined);
+
+  // A malformed anchor never sinks the comment — it posts unanchored.
+  await postForm(
+    "/brief/comments",
+    { body: "bad anchor", view: "html", anchor_path: "main > p", anchor_tag: "not a tag" },
+    { cookie: cCookie },
+  );
+  const list2 = await call("/api/pages/brief/comments", { token: OWNER });
+  assert.equal(list2.json.comments.find((c) => c.body === "bad anchor").anchor, undefined);
+
+  // Deleting from the html view returns there too.
+  const mine = list2.json.comments.find((c) => c.body === "General note.");
+  const del = await postForm(`/brief/comments/${mine.id}/delete`, { view: "html" }, { cookie: cCookie });
+  assert.equal(del.status, 303);
+  assert.equal(del.headers.get("location"), "/brief#comments");
+
+  await call("/api/pages/brief", { method: "DELETE", token: OWNER });
+});
+
+await test("html comments: html-only pages flow the section and return to themselves", async () => {
+  await call("/api/pages/deck", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Deck", html: "<html><body><section><h2>Slide one</h2></section></body></html>" },
+  });
+  await call("/api/pages/deck/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Cody", code: "deck-comment-code", role: "comment" },
+  });
+  const cookie = cookieOf(await unlock("deck", "deck-comment-code"));
+
+  const page = await call("/deck", { headers: { cookie } });
+  assert.ok(page.text.includes('class="raw-frame-flow"'));
+  assert.ok(page.text.includes('id="comments"'));
+  assert.ok(page.text.includes('id="dkw-data"'));
+
+  const posted = await postForm(
+    "/deck/comments",
+    {
+      body: "Bigger title?",
+      view: "html",
+      anchor_path: "body:nth-of-type(1) > section:nth-of-type(1) > h2:nth-of-type(1)",
+      anchor_tag: "h2",
+      anchor_text: "Slide one",
+      quote: "Slide one",
+    },
+    { cookie },
+  );
+  assert.equal(posted.headers.get("location"), "/deck#comments");
+  const after = await call("/deck", { headers: { cookie } });
+  assert.ok(after.text.includes("Bigger title?"));
+  assert.ok(after.text.includes("Show in document"));
+
+  await call("/api/pages/deck", { method: "DELETE", token: OWNER });
 });
 
 await test("web edit: save bumps rev, retitles, stamps webEdit; stale baseRev 409s", async () => {

@@ -37,6 +37,20 @@ Gotchas learned the hard way:
 - The harness runs under StrictMode: wire harness buttons with `onclick=`
   assignment, not `addEventListener` (double-mount would double-toggle).
 
+## Public web pages (worker served locally)
+
+`verify-harness/serve-worker.mjs` runs the real share worker over node http
+with an in-memory R2 fake (state resets on restart), so a browser can walk
+the actual public flows — gate unlock, comments, the html anchoring layer:
+
+```sh
+node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
+node verify-harness/drive-web.mjs        # gate → comment → anchor round-trip + no-JS parity
+```
+
+Also: `node share-worker/test/run.mjs` is the pure-node e2e suite for every
+worker route (no browser needed) — run it for any worker change.
+
 ## Rust side
 
 `cd src-tauri && cargo check` works on Linux after

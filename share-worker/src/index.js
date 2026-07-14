@@ -147,6 +147,7 @@
 
 import { marked } from "../vendor/marked.esm.js";
 import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
+import { injectCommentBridge, SHELL_COMMENTS_SCRIPT } from "./webComments.js";
 
 // Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
@@ -154,8 +155,10 @@ import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
 // tokens, 5 = workspace-stamped pages (any member of the workspace can
 // update/stop them, not just their creator), 6 = admin wipe (the app-driven
 // erase step of backend teardown), 7 = visitor access codes (the public gate),
-// 8 = code roles (view/comment/edit) + web comments + the web editor.
-const WORKER_VERSION = 8;
+// 8 = code roles (view/comment/edit) + web comments + the web editor,
+// 9 = comments on html renditions (the html view of a pair grows the same
+// comments section, and comments can anchor to an element of the rendition).
+const WORKER_VERSION = 9;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -170,6 +173,7 @@ const WORKER_FEATURES = [
   "access-roles",
   "web-comments",
   "web-edit",
+  "html-comments",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -231,6 +235,25 @@ const COMMENT_ID_RE = /^m-[a-f0-9]{8}$/;
 const MAX_COMMENT_BODY = 4000;
 const MAX_COMMENT_QUOTE = 300;
 const MAX_COMMENTS = 500;
+// An anchored comment points at an element of the html rendition: a
+// structural selector plus the element's tag and leading text (the
+// re-anchoring fallback). Byte-compatible with the app's sidecar anchors
+// (src/htmlComments.ts), so the same comment resolves in both places.
+const MAX_ANCHOR_PATH = 600;
+const MAX_ANCHOR_TAG = 32;
+const MAX_ANCHOR_TEXT = 200;
+
+// The anchor carried by a comment (form fields or a stored entry), or null.
+// Requires the structural pieces; text may be empty (bare structural anchor).
+function sanitizeAnchor(path, tag, text) {
+  if (typeof path !== "string" || typeof tag !== "string") return null;
+  const cleanPath = path.trim().slice(0, MAX_ANCHOR_PATH);
+  const cleanTag = tag.trim().toLowerCase().slice(0, MAX_ANCHOR_TAG);
+  if (!cleanPath || !/^[a-z][a-z0-9-]*$/.test(cleanTag)) return null;
+  const cleanText =
+    typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, MAX_ANCHOR_TEXT) : "";
+  return { path: cleanPath, tag: cleanTag, text: cleanText };
+}
 const COMMENT_RATE_LIMIT = 10; // posts per IP per minute (per isolate)
 const EDIT_RATE_LIMIT = 20; // saves per IP per minute (per isolate)
 
@@ -2234,12 +2257,14 @@ function sanitizeComments(raw) {
     if (typeof c.id !== "string" || !COMMENT_ID_RE.test(c.id)) continue;
     if (typeof c.body !== "string" || c.body.length === 0) continue;
     if (out.some((seen) => seen.id === c.id)) continue;
+    const anchor = c.anchor ? sanitizeAnchor(c.anchor.path, c.anchor.tag, c.anchor.text) : null;
     out.push({
       id: c.id,
       body: c.body.slice(0, MAX_COMMENT_BODY),
       ...(typeof c.quote === "string" && c.quote
         ? { quote: c.quote.slice(0, MAX_COMMENT_QUOTE) }
         : {}),
+      ...(anchor ? { anchor } : {}),
       ...(typeof c.name === "string" && c.name ? { name: c.name.slice(0, MAX_NAME_LEN) } : {}),
       label: typeof c.label === "string" ? c.label.slice(0, MAX_NAME_LEN) : "",
       codeId: typeof c.codeId === "string" ? c.codeId : "",
@@ -2310,11 +2335,14 @@ async function publicWriteContext(request, env, id, url, need, nextPath) {
   return { data, gate, session };
 }
 
-// Where a comment form returns to: the view that renders the comments section.
-function commentsReturnPath(data, id) {
+// Where a comment form returns to: the view the visitor posted from. Both
+// views of a pair render the comments section now; the hidden `view` field
+// says which one the form was on ("html" → the default rendition view,
+// anything else → the markdown view when the page has both).
+function commentsReturnPath(data, id, fromView) {
   const both =
     typeof data.markdown === "string" && typeof data.html === "string" && data.html.length > 0;
-  return both ? `/${id}?v=md#comments` : `/${id}#comments`;
+  return both && fromView !== "html" ? `/${id}?v=md#comments` : `/${id}#comments`;
 }
 
 // POST /<id>/comments — add a comment (codes with the comment or edit role).
@@ -2343,11 +2371,20 @@ async function handleCommentAdd(request, env, id, url) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_COMMENT_QUOTE);
+  // An element anchor, when the html view's picker filled the fields. A
+  // malformed anchor never sinks the comment — it just posts unanchored.
+  const anchor = sanitizeAnchor(
+    String(form.get("anchor_path") ?? ""),
+    String(form.get("anchor_tag") ?? ""),
+    String(form.get("anchor_text") ?? ""),
+  );
+  const fromView = String(form.get("view") ?? "") === "html" ? "html" : "md";
 
   const entry = {
     id: `m-${randomHex(4)}`,
     body,
     ...(quote ? { quote } : {}),
+    ...(anchor ? { anchor } : {}),
     ...(name ? { name } : {}),
     label: ctx.session.label,
     codeId: ctx.session.codeId,
@@ -2370,7 +2407,7 @@ async function handleCommentAdd(request, env, id, url) {
     if (put) {
       return new Response(null, {
         status: 303,
-        headers: { location: commentsReturnPath(ctx.data, id) },
+        headers: { location: commentsReturnPath(ctx.data, id, fromView) },
       });
     }
     // Lost a race with another comment — re-read and re-append.
@@ -2386,6 +2423,8 @@ async function handleCommentDelete(request, env, id, cid, url) {
   }
   const ctx = await publicWriteContext(request, env, id, url, "comment", `/${id}`);
   if (ctx.error) return ctx.error;
+  const form = await request.formData().catch(() => null);
+  const fromView = String(form?.get("view") ?? "") === "html" ? "html" : "md";
   const removed = await removeComment(env, id, cid, ctx.session.codeId);
   if (removed === "forbidden") {
     return shellPage("Not yours", "Only the code that posted a comment can remove it here.", 403);
@@ -2396,7 +2435,7 @@ async function handleCommentDelete(request, env, id, cid, url) {
   // "missing" = already gone (double-click); the outcome stands either way.
   return new Response(null, {
     status: 303,
-    headers: { location: commentsReturnPath(ctx.data, id) },
+    headers: { location: commentsReturnPath(ctx.data, id, fromView) },
   });
 }
 
@@ -2572,7 +2611,14 @@ function commentDateLabel(iso) {
 // comment — the panel and its contents stay invisible to view-only codes).
 // Deleting is offered on the session's own code's comments; the tiny script
 // only remembers the visitor's name between posts.
-function renderCommentsSection(id, comments, session) {
+// `view` says which page view hosts the section ("md" | "html"): it rides the
+// forms as a hidden field (the post returns to the view it came from), and on
+// the html view the section also carries what the anchoring layer needs —
+// per-item ids + "Show in document" buttons (inert without JS), the hidden
+// anchor/quote fields with the "Commenting on" chip, the anchor list JSON,
+// and the shell script that wires it all to the frame bridge.
+function renderCommentsSection(id, comments, session, view = "md") {
+  const isHtmlView = view === "html";
   const items = comments
     .map((c) => {
       const name = c.name || c.label || "Someone";
@@ -2583,26 +2629,47 @@ function renderCommentsSection(id, comments, session) {
       const when = commentDateLabel(c.createdAt);
       const del =
         c.codeId === session.codeId
-          ? `<form class="comment-delete-form" method="post" action="/${id}/comments/${c.id}/delete"><button class="comment-delete" type="submit" title="Delete this comment">Delete</button></form>`
+          ? `<form class="comment-delete-form" method="post" action="/${id}/comments/${c.id}/delete"><input type="hidden" name="view" value="${view}"><button class="comment-delete" type="submit" title="Delete this comment">Delete</button></form>`
           : "";
-      return `<li class="comment">
+      const reveal =
+        isHtmlView && c.anchor
+          ? `<button class="comment-reveal" type="button" data-comment-id="${c.id}">Show in document</button>`
+          : "";
+      return `<li class="comment" id="c-${c.id}">
 <div class="comment-head"><span class="comment-author">${escapeHtml(name)}</span>${via}${when ? `<span class="comment-date">${escapeHtml(when)}</span>` : ""}${del}</div>
 ${c.quote ? `<blockquote class="comment-quote">${escapeHtml(c.quote)}</blockquote>` : ""}
 <p class="comment-body">${escapeHtml(c.body)}</p>
+${reveal}
 </li>`;
     })
     .join("\n");
+  // The anchor list the shell script feeds the frame bridge. `<` is escaped
+  // so page content can never close this script block.
+  const anchorData = isHtmlView
+    ? `<script type="application/json" id="dkw-data">${JSON.stringify(
+        comments.filter((c) => c.anchor).map((c) => ({ id: c.id, anchor: c.anchor })),
+      ).replace(/</g, "\\u003c")}</script>`
+    : "";
+  const chip = isHtmlView
+    ? `<div class="comment-anchor-chip" id="dkw-chip" hidden>Commenting on <q id="dkw-chip-quote"></q><button type="button" class="comment-chip-clear" id="dkw-chip-clear" title="Comment on the whole page instead" aria-label="Remove the anchor">×</button></div>`
+    : "";
+  const anchorFields = isHtmlView
+    ? `<input type="hidden" name="anchor_path" value=""><input type="hidden" name="anchor_tag" value=""><input type="hidden" name="anchor_text" value=""><input type="hidden" name="quote" value="">`
+    : "";
   return `<section class="comments" id="comments" aria-label="Comments">
 <div class="comments-inner">
 <h2 class="comments-title">Comments${comments.length > 0 ? ` <span class="comments-count">${comments.length}</span>` : ""}</h2>
 ${comments.length > 0 ? `<ol class="comment-list">\n${items}\n</ol>` : `<p class="comments-empty muted">No comments yet.</p>`}
 <form class="comment-form" method="post" action="/${id}/comments">
+<input type="hidden" name="view" value="${view}">
+${anchorFields}${chip}
 <textarea class="comment-text" name="body" required maxlength="${MAX_COMMENT_BODY}" rows="3" placeholder="Write a comment…" aria-label="Comment"></textarea>
 <div class="comment-form-foot">
 <input class="comment-name" id="comment-name" name="name" maxlength="${MAX_NAME_LEN}" placeholder="Your name (optional)" autocomplete="name" aria-label="Your name">
 <button class="comment-post" type="submit">Post comment</button>
 </div>
 </form>
+${anchorData}
 </div>
 </section>
 <script>
@@ -2691,6 +2758,32 @@ const COMMENTS_CSS = `
   cursor: pointer;
 }
 .comment-post:hover { opacity: 0.85; }
+
+/* Anchored comments (the html view). "Show in document" is server-rendered
+   but inert until the shell script marks it live; the chip appears when the
+   frame's bubble picked an element for the next comment. */
+.comment-reveal { display: none; margin-top: 6px; border: none; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent, #2f6fdd); cursor: pointer; }
+.comment-reveal.is-live { display: inline-block; }
+.comment-reveal:hover { text-decoration: underline; }
+.comment-anchor-chip[hidden] { display: none; }
+.comment-anchor-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #2f6fdd;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.comment-anchor-chip q { font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.comment-chip-clear { margin-left: auto; flex: none; border: none; background: none; padding: 0 2px; font-size: 15px; line-height: 1; color: var(--muted); cursor: pointer; }
+.comment-chip-clear:hover { color: var(--text); }
+@keyframes dkw-li-flash { 0% { background-color: rgba(47, 111, 221, 0.14); } 100% { background-color: transparent; } }
+.comment.is-flash { animation: dkw-li-flash 1.1s ease-out; border-radius: 8px; }
 `;
 
 const EDITOR_CSS = `
@@ -2943,14 +3036,14 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
   if (hasHtml && !(hasMd && wantMd) && (wantHtml || !htmlStale)) {
     // The rendition is an arbitrary standalone document; framing it (instead of
     // serving it at /<id> directly) keeps our meta tags, the toggle, and the
-    // sandbox — its scripts run under an opaque origin. Comments live on the
-    // markdown view; from here they're one pill away — except on an html-only
-    // page, where the frame flows in the document so they fit below it.
-    const flow = !hasMd && canComment;
-    const commentsBtn =
-      hasMd && canComment
-        ? `<a class="top-action" href="${pageUrl}?v=md#comments">${COMMENT_ICON}<span>Comments${comments.length > 0 ? ` · ${comments.length}` : ""}</span></a>`
-        : "";
+    // sandbox — its scripts run under an opaque origin. A commenting session
+    // gets the frame flowing in the document with the comments section below
+    // it (and the anchoring layer wiring the two together — see
+    // webComments.js); everyone else gets the plain fixed frame.
+    const flow = canComment;
+    const commentsBtn = flow
+      ? `<a class="top-action" href="#comments">${COMMENT_ICON}<span>Comments${comments.length > 0 ? ` · ${comments.length}` : ""}</span></a>`
+      : "";
     const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -2961,7 +3054,8 @@ ${head}
 ${crumb}
 ${topBar(commentsBtn, editBtn, pill("html"))}
 <iframe class="${flow ? "raw-frame-flow" : "raw-frame"}" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
-${flow ? renderCommentsSection(id, comments, session) : ""}
+${flow ? renderCommentsSection(id, comments, session, "html") : ""}
+${flow ? `<script>${SHELL_COMMENTS_SCRIPT}</script>` : ""}
 ${flow ? `<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>` : ""}
 </body>
 </html>`;
@@ -3188,13 +3282,18 @@ async function serveRawHtml(request, env, id) {
     return new Response("not found", { status: 404 });
   }
   const gate = await accessGateFor(env, id, data);
-  if (gate && !(await gateCookieValid(request, env, gate))) {
+  const session = gate ? await gateSession(request, env, gate) : null;
+  if (gate && !session) {
     return gatePage(gate.gateId, `/${id}`, new URL(request.url));
   }
   if (typeof data.html !== "string" || data.html.length === 0) {
     return new Response("not found", { status: 404 });
   }
-  return new Response(data.html, {
+  // A commenting session's frame carries the anchoring bridge (highlights,
+  // the hover bubble — see webComments.js); every other visitor gets the
+  // rendition byte-for-byte as pushed.
+  const canComment = session !== null && session.role !== "view";
+  return new Response(canComment ? injectCommentBridge(data.html) : data.html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": gate ? "no-store" : "no-cache",
