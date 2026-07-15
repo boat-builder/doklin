@@ -17,7 +17,9 @@ pnpm install
 pnpm exec vite --port 1420 --strictPort    # dev server, repo root, keep running
 (cd verify-harness && npm install)         # driver lib only (own package.json — npm can't
                                            # write into the pnpm node_modules); browser is preinstalled
-node verify-harness/drive.mjs              # 17 scripted steps + screenshots into verify-harness/shots/
+node verify-harness/drive.mjs              # 23 scripted steps + screenshots into verify-harness/shots/
+                                           # (comment mode: button, scrim spotlight, hover bubble,
+                                           # pins, floating cards, orphans)
 node verify-harness/drive-mermaid.mjs      # 14 steps: gallery render, diagram⇄source switch,
                                            # live edit, error card, theme flip, /diagram slash
                                            # item, picker, read-only
@@ -31,15 +33,20 @@ as root; `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` is already set).
 
 Gotchas learned the hard way:
 
+- The html view's comment layer only exists in comment mode — click
+  `.html-comment-btn` first; outside the mode there is no hover bubble, no
+  scrim, no pins.
 - The add-comment bubble follows the pointer on rAF — hover, then wait for
   the bubble to settle next to the target before clicking (`clickBubbleFor`
   in the driver), or the click lands on the page.
 - After a bubble click (focus goes into the iframe), poll until
-  `document.activeElement` is the rail textarea before typing.
-- With a card active, cards above it clamp toward the rail top and may
-  overlap — that's the designed "cram" behavior (same as the md rail).
-  Deselect (click a non-commented spot) before clicking buttons on other
-  cards.
+  `document.activeElement` is the card textarea before typing.
+- Frame locators report boxes in PAGE coordinates; the bridge's scrim canvas
+  and anchor rects live in iframe-viewport space — subtract the iframe's own
+  box before comparing.
+- In the MD rail, with a card active, cards above it clamp toward the rail
+  top and may overlap — that's the designed "cram" behavior. Deselect (click
+  a non-commented spot) before clicking buttons on other cards.
 - The harness runs under StrictMode: wire harness buttons with `onclick=`
   assignment, not `addEventListener` (double-mount would double-toggle).
 
@@ -55,10 +62,10 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 18 steps: gate → html rail comment → reply →
-                                         # read-only md + selection comment (CriticMarkup
-                                         # save) → view-role stripping → edit-role autosave
-                                         # → desktop-pushed thread visibility
+node verify-harness/drive-web.mjs        # 18 steps: gate → comment-mode html comment →
+                                         # reply → read-only md + selection comment
+                                         # (CriticMarkup save) → view-role stripping →
+                                         # edit-role autosave → desktop-pushed thread pins
 node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
                                            # dark), broken-source fallback, shell renders via
                                            # the worker-served /__web mermaid module

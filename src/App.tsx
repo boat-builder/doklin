@@ -4827,9 +4827,11 @@ export default function App() {
         trailing={
           activeTab && !activeMissing ? (
             <>
-              {(docView === "md" ? commentCount : htmlThreads.length) > 0 && (
+              {/* Markdown only: the html view carries its own floating
+                  "Comment" button (comment mode lives inside HtmlView). */}
+              {docView === "md" && commentCount > 0 && (
                 <CommentsToggle
-                  count={docView === "md" ? commentCount : htmlThreads.length}
+                  count={commentCount}
                   visible={commentsVisible}
                   onToggle={() => setCommentsVisible((v) => !v)}
                 />
@@ -4950,19 +4952,18 @@ export default function App() {
           />
         )}
         {activeTab && showHtmlView && htmlContent != null && (
-          // The sandboxed rendition preview plus its comment layer (rail,
-          // element highlights, hover "add comment" bubble) — see HtmlView.
-          // Keyed on the tab so switching documents resets transient comment
-          // UI state, while an external regeneration of the SAME rendition
-          // just reloads the frame in place.
+          // The sandboxed rendition preview plus its comment layer (the
+          // floating "Comment" button, anchored pins/cards, bridge-side
+          // scrim + hover bubble) — see HtmlView. Keyed on the tab so
+          // switching documents resets transient comment UI state (comment
+          // mode is per-visit, default off), while an external regeneration
+          // of the SAME rendition just reloads the frame in place.
           <HtmlView
             key={activeTab.id}
             htmlContent={htmlContent}
             threads={htmlThreads}
             onThreadsChange={onHtmlThreadsChange}
             commentAuthor={syncDeviceName}
-            commentsVisible={commentsVisible}
-            onRequestShowComments={() => setCommentsVisible(true)}
           />
         )}
         {activeTab && activeMissing && (

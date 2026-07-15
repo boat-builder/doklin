@@ -10,9 +10,10 @@
 //     text, comment, reply, resolve — because markdown comments ARE the
 //     document (CriticMarkup), a comment is a save whose stripped content is
 //     unchanged, which is exactly what the worker enforces for them.
-//   - html view: the real HtmlView (sandboxed rendition + floating rail),
-//     threads synced with the worker's per-page pool, which the desktop app
-//     pushes its sidecar into and pulls web additions back from.
+//   - html view: the real HtmlView (sandboxed rendition + comment mode with
+//     anchored pins/cards), threads synced with the worker's per-page pool,
+//     which the desktop app pushes its sidecar into and pulls web additions
+//     back from.
 //
 // View-role sessions never see this shell — they get the classic read-only
 // pages with every comment stripped.
@@ -434,10 +435,6 @@ export default function WebApp({ boot }: { boot: Boot }) {
     };
   }, [view, boot.id]);
 
-  useEffect(() => {
-    if (view === "html") setCommentCount(threads.length);
-  }, [view, threads]);
-
   /* ---------- chrome ---------- */
 
   const readOnly = boot.role !== "edit";
@@ -496,7 +493,9 @@ export default function WebApp({ boot }: { boot: Boot }) {
             onChange={(e) => saveName(e.target.value)}
           />
         </label>
-        {commentCount > 0 && (
+        {/* Markdown only: the html view carries its own floating "Comment"
+            button (comment mode lives inside HtmlView). */}
+        {view === "md" && commentCount > 0 && (
           <CommentsToggle
             count={commentCount}
             visible={commentsVisible}
@@ -569,8 +568,6 @@ export default function WebApp({ boot }: { boot: Boot }) {
               threads={threads}
               onThreadsChange={onThreadsChange}
               commentAuthor={author}
-              commentsVisible={commentsVisible}
-              onRequestShowComments={() => setCommentsVisible(true)}
               onOpenExternal={(url) => window.open(url, "_blank", "noopener")}
             />
           </div>

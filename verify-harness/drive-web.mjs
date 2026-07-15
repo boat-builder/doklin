@@ -7,7 +7,7 @@
 //   node verify-harness/serve-worker.mjs &
 //   node verify-harness/drive-web.mjs
 import { chromium } from "playwright";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 
 const BASE = "http://localhost:8787";
 const OWNER = "owner-secret";
@@ -71,10 +71,11 @@ for (const [label, code, role] of [
   await api("/api/pages/brief-web/access/codes", { label, code, role }, "POST");
 }
 
-const browser = await chromium.launch({
-  executablePath: "/opt/pw-browsers/chromium",
-  args: ["--no-sandbox"],
-});
+const browser = await chromium.launch(
+  existsSync("/opt/pw-browsers/chromium")
+    ? { executablePath: "/opt/pw-browsers/chromium", args: ["--no-sandbox"] }
+    : {},
+);
 
 async function unlockedPage(code, viewport = { width: 1360, height: 900 }) {
   const page = await (await browser.newContext({ viewport })).newPage();
@@ -117,7 +118,10 @@ await poll(async () => (await frame.locator("#dk-bubble").count()) === 1);
 step("rendition carries the desktop's own comment bridge", true);
 await rev.screenshot({ path: `${SHOTS}/01-html-view.png` });
 
-// 3. Hover → bubble → click → a rail card opens focused; type + Enter.
+// 3. Enter comment mode (the floating button), hover → bubble → click → a
+//    floating card opens at the element, focused; type + Enter.
+await rev.locator(".html-comment-btn").click();
+await poll(async () => frame.locator("#dk-scrim.dk-on").isVisible());
 const opening = frame.locator("#opening");
 await opening.hover();
 await poll(async () => {
@@ -126,12 +130,12 @@ await poll(async () => {
   return !!t && !!b && Math.abs(b.y - t.y - 4) < 8;
 });
 await frame.locator("#dk-bubble").click();
-await poll(async () => (await rev.locator(".comment-card").count()) === 1);
+await poll(async () => (await rev.locator(".html-comment-pop .comment-card").count()) === 1);
 await typeIntoFocusedCard(rev, "Open with the metric instead.");
 await poll(async () =>
   (await rev.locator(".comment-card").textContent()).includes("Open with the metric instead."),
 );
-step("bubble pick opens a floating rail card; the entry commits", true);
+step("comment mode + bubble pick opens a floating card at the element", true);
 await rev.screenshot({ path: `${SHOTS}/02-html-comment.png` });
 
 // 4. The thread lands in the worker's pool (debounced push), stamped with
@@ -149,11 +153,15 @@ step(
   JSON.stringify(pooledEntry),
 );
 
-// 5. The commented element is highlighted; clicking it activates the card.
+// 5. The commented element is highlighted; deselecting collapses the card
+//    to a pin, clicking the element reopens it.
 await poll(async () => (await frame.locator("#opening[data-dk-t]").count()) === 1);
+await frame.locator("h1").click(); // a non-commented spot: card closes
+await poll(async () => (await rev.locator(".html-comment-pop").count()) === 0);
+await poll(async () => (await rev.locator(".html-comment-pin").count()) === 1);
 await frame.locator("#opening").click();
-await poll(async () => (await rev.locator(".comment-card.is-active").count()) === 1);
-step("element highlight and click-to-activate work like the desktop", true);
+await poll(async () => (await rev.locator(".html-comment-pop .comment-card").count()) === 1);
+step("element highlight, pin collapse, and click-to-activate work", true);
 
 // 6. Reply on the card (threads, not a flat list).
 await rev.locator(".comment-reply-composer .comment-input").first().click();
@@ -169,20 +177,27 @@ step(
   replied.threads[0].comments[1].body === "Agreed — swap it in.",
 );
 
-// 7. The rendition's own interactivity is untouched.
+// 7. The rendition's own interactivity is untouched (and clicking it, a
+//    non-commented spot, closes the open card back to a pin — no new
+//    thread).
 await frame.locator("#cta").click();
+await poll(async () => (await rev.locator(".html-comment-pop").count()) === 0);
 step(
   "page's own button still works; its click creates no comment",
   (await frame.locator("#cta").textContent()) === "pressed" &&
-    (await rev.locator(".comment-card").count()) === 1,
+    (await rev.locator(".html-comment-pin").count()) === 1,
 );
 
-// 8. The comments toggle hides the whole layer (desktop parity).
-await rev.locator(".comments-toggle").click();
-const hidden = await poll(async () => (await rev.locator(".comment-card").count()) === 0);
-await rev.locator(".comments-toggle").click();
-await poll(async () => (await rev.locator(".comment-card").count()) === 1);
-step("comments toggle hides/shows the rail", hidden === true);
+// 8. "Done" restores the pristine page; the button re-enters with the pin.
+await rev.locator(".html-comment-btn").click();
+const hidden = await poll(
+  async () =>
+    (await rev.locator(".html-comment-pin").count()) === 0 &&
+    !(await frame.locator("#dk-scrim.dk-on").isVisible()),
+);
+await rev.locator(".html-comment-btn").click();
+await poll(async () => (await rev.locator(".html-comment-pin").count()) === 1);
+step("Comment button hides/shows the whole layer", hidden === true);
 
 // 9. MD view: the real Milkdown editor, read-only for the comment role.
 await rev.locator(".view-toggle-seg", { hasText: "MD" }).click();
@@ -290,17 +305,23 @@ await api("/api/pages/brief-web/comments", {
 // (?v=html explicitly: the edit above staled the rendition, so the plain
 // URL now leads with the markdown — same rule as v8.)
 await rev.goto(`${BASE}/brief-web?v=html`);
-await poll(async () => (await rev.locator(".comment-card").count()) === 2);
-step(
-  "a desktop-pushed thread appears in the web rail",
-  (await rev.locator(".comments-rail").textContent()).includes("Desktop says hi."),
+const frame2 = rev.frameLocator("iframe.html-preview");
+await poll(async () => rev.locator(".html-comment-btn").isVisible());
+await rev.locator(".html-comment-btn").click(); // back into comment mode
+await poll(async () => (await rev.locator(".html-comment-pin").count()) === 2);
+await frame2.locator("#closing").click(); // the desktop thread's element
+await poll(async () =>
+  (await rev.locator(".html-comment-pop .comment-card").textContent()).includes(
+    "Desktop says hi.",
+  ),
 );
+step("a desktop-pushed thread appears pinned at its element on the web", true);
 await rev.screenshot({ path: `${SHOTS}/05-desktop-thread.png` });
 
 // 15. Someone else's comment is not click-editable: the reviewer clicking
 //     the desktop author's body gets the reply composer (no entry editor,
 //     no Edit pencil on a foreign entry).
-const deskCard = rev.locator(".comment-card", { hasText: "Desktop says hi." });
+const deskCard = rev.locator(".html-comment-pop .comment-card");
 await deskCard.locator(".comment-entry-body").first().click();
 await poll(
   async () => (await deskCard.locator(".comment-reply-composer .comment-input").count()) === 1,
@@ -318,8 +339,11 @@ step(
 
 // 16. The reviewer's own entry still edits — through the explicit pencil —
 //     and the change syncs to the pool.
-const ownCard = rev.locator(".comment-card", { hasText: "Open with the metric instead." });
-await ownCard.locator(".comment-entry-body").first().click(); // activate own card
+await frame2.locator("#opening").click(); // switch the card to the reviewer's own thread
+const ownCard = rev.locator(".html-comment-pop .comment-card");
+await poll(async () =>
+  (await ownCard.textContent()).includes("Open with the metric instead."),
+);
 await poll(async () => (await ownCard.locator(".comment-entry-edit").count()) > 0);
 await ownCard.locator(".comment-entry-edit").first().click();
 await poll(async () => (await ownCard.locator(".comment-entry .comment-input").count()) === 1);
