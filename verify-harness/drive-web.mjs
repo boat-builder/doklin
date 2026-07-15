@@ -1,7 +1,9 @@
-// Drives the PUBLIC web comment flow on an html page — gate unlock, the
-// anchored comment layer, role gating, and the no-JS fallback — against the
-// real worker served by serve-worker.mjs. Run:
+// Drives the PUBLIC web experience end to end — the app shell that comment/
+// edit sessions get (the desktop's own editor + comment rail, in a browser),
+// role gating, and the desktop⇄web comment flow — against the real worker
+// served by serve-worker.mjs. Run:
 //
+//   node scripts/build-web.mjs               # once, or after editor changes
 //   node verify-harness/serve-worker.mjs &
 //   node verify-harness/drive-web.mjs
 import { chromium } from "playwright";
@@ -18,7 +20,7 @@ const step = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
 };
 
-async function poll(fn, timeout = 5000, every = 100) {
+async function poll(fn, timeout = 8000, every = 120) {
   const t0 = Date.now();
   let last;
   while (Date.now() - t0 < timeout) {
@@ -33,21 +35,24 @@ async function poll(fn, timeout = 5000, every = 100) {
   throw new Error("poll timeout: " + last);
 }
 
-/* ----- seed a gated pair page through the owner API ----- */
-
-const api = (path, body, method = "PUT") =>
-  fetch(`${BASE}${path}`, {
+const api = async (path, body, method = body === undefined ? "GET" : "PUT") => {
+  const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { authorization: `Bearer ${OWNER}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
+  return { status: res.status, json: await res.json().catch(() => null) };
+};
 
-// Comments live in their own object and survive page re-pushes (by design),
-// so clear the slate for a repeatable run.
-await api("/api/pages/brief-web/comments", undefined, "DELETE");
+/* ----- seed a gated pair page through the owner API ----- */
+
+// The pool and the page survive re-runs by design (and htmlStale is sticky
+// while the rendition bytes don't change) — drop the page entirely for a
+// truly repeatable drive.
+await api("/api/pages/brief-web", undefined, "DELETE");
 await api("/api/pages/brief-web", {
   title: "Web Brief",
-  markdown: "# Web Brief\n\nThe opening line of the brief.",
+  markdown: "# Web Brief\n\nThe opening line of the brief.\n\nThe closing line.",
   html: `<!doctype html><html><head><style>
     body { font-family: Georgia, serif; margin: 0; background: #fff; }
     main { max-width: 620px; margin: 0 auto; padding: 32px 24px; }
@@ -58,144 +63,240 @@ await api("/api/pages/brief-web", {
   <p id="closing">The closing line.</p>
   </main></body></html>`,
 });
-await api(
-  "/api/pages/brief-web/access/codes",
-  { label: "Reviewer", code: "web-comment-code", role: "comment" },
-  "POST",
-);
-await api(
-  "/api/pages/brief-web/access/codes",
-  { label: "Reader", code: "web-view-code", role: "view" },
-  "POST",
-);
-
-/* ----- the reviewer's journey ----- */
+for (const [label, code, role] of [
+  ["Reviewer", "web-comment-code", "comment"],
+  ["Editor", "web-edit-code", "edit"],
+  ["Reader", "web-view-code", "view"],
+]) {
+  await api("/api/pages/brief-web/access/codes", { label, code, role }, "POST");
+}
 
 const browser = await chromium.launch({
   executablePath: "/opt/pw-browsers/chromium",
   args: ["--no-sandbox"],
 });
-const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
-page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
-// 1. Gate, then unlock with the comment-role code.
-await page.goto(`${BASE}/brief-web`);
-await poll(async () => page.locator("#gate-code").isVisible());
-await page.screenshot({ path: `${SHOTS}/01-gate.png` });
-await page.fill("#gate-code", "web-comment-code");
-await page.press("#gate-code", "Enter");
-await poll(async () => page.locator("#comments").isVisible());
-step("unlock lands on the html view with the comments section below", true);
-step("the anchor chip starts hidden", await page.locator("#dkw-chip").isHidden());
+async function unlockedPage(code, viewport = { width: 1360, height: 900 }) {
+  const page = await (await browser.newContext({ viewport })).newPage();
+  page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await page.goto(`${BASE}/brief-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", code);
+  await page.press("#gate-code", "Enter");
+  return page;
+}
 
-const frame = page.frameLocator("iframe.raw-frame-flow");
+// Wait for the rail's focused textarea (focus lands asynchronously after the
+// card mounts), then type + commit.
+async function typeIntoFocusedCard(page, text) {
+  await poll(async () =>
+    page.evaluate(() => document.activeElement?.classList.contains("comment-input")),
+  );
+  await page.keyboard.type(text);
+  await page.keyboard.press("Enter");
+}
+
+/* ================= Reviewer (comment role) ================= */
+
+const rev = await unlockedPage("web-comment-code");
+
+// 1. Unlock lands on the app shell's HTML view (pair pages lead with the
+//    rendition), with the desktop chrome: topbar, MD/HTML toggle, rail host.
+await poll(async () => (await rev.locator(".web-topbar").count()) === 1);
+await poll(async () => (await rev.locator(".editor-wrap.is-html-view").count()) === 1);
+step(
+  "comment role gets the app shell html view (topbar + MD/HTML toggle)",
+  (await rev.locator(".view-toggle-seg").count()) === 2,
+);
+
+// 2. The rendition renders in the sandboxed frame with the DESKTOP bridge
+//    (dk-bubble — the same instrumentHtml the app injects).
+const frame = rev.frameLocator("iframe.html-preview");
 await poll(async () => (await frame.locator("#opening").count()) === 1);
-await poll(async () => (await frame.locator("#dkw-bubble").count()) === 1);
-step("rendition renders in the flowing frame with the bridge installed", true);
+await poll(async () => (await frame.locator("#dk-bubble").count()) === 1);
+step("rendition carries the desktop's own comment bridge", true);
+await rev.screenshot({ path: `${SHOTS}/01-html-view.png` });
 
-// 2. Hover a paragraph, click the settled bubble → chip + focused composer.
-const target = frame.locator("#opening");
-await target.hover();
+// 3. Hover → bubble → click → a rail card opens focused; type + Enter.
+const opening = frame.locator("#opening");
+await opening.hover();
 await poll(async () => {
-  const t = await target.boundingBox();
-  const b = await frame.locator("#dkw-bubble.dkw-on").boundingBox();
+  const t = await opening.boundingBox();
+  const b = await frame.locator("#dk-bubble.dk-on").boundingBox();
   return !!t && !!b && Math.abs(b.y - t.y - 4) < 8;
 });
-await frame.locator("#dkw-bubble").click();
-await poll(async () => page.locator("#dkw-chip:not([hidden])").isVisible());
-const chipText = await page.locator("#dkw-chip").textContent();
-const pathVal = await page.locator('input[name="anchor_path"]').inputValue();
-step(
-  "bubble pick fills the chip + hidden anchor fields",
-  chipText.includes("The opening line") && pathVal.includes("p:nth-of-type"),
-  pathVal,
+await frame.locator("#dk-bubble").click();
+await poll(async () => (await rev.locator(".comment-card").count()) === 1);
+await typeIntoFocusedCard(rev, "Open with the metric instead.");
+await poll(async () =>
+  (await rev.locator(".comment-card").textContent()).includes("Open with the metric instead."),
 );
-const focused = await page.evaluate(() => document.activeElement?.className || "");
-step("composer textarea is focused after the pick", focused.includes("comment-text"));
-await page.screenshot({ path: `${SHOTS}/02-picked.png` });
+step("bubble pick opens a floating rail card; the entry commits", true);
+await rev.screenshot({ path: `${SHOTS}/02-html-comment.png` });
 
-// 3. Post → lands back on the html view; comment listed + element highlighted.
-await page.keyboard.type("Open with the metric instead.");
-await page.click(".comment-post");
-await poll(async () => page.url().endsWith("#comments"));
-await poll(async () => page.locator(".comment-list").isVisible());
-const listed = await page.locator(".comment-list").textContent();
+// 4. The thread lands in the worker's pool (debounced push), stamped with
+//    the session's code.
+const pooled = await poll(async () => {
+  const { json } = await api("/api/pages/brief-web/comments");
+  return json?.threads?.length === 1 ? json : null;
+});
+const pooledEntry = pooled.threads[0].comments[0];
 step(
-  "post returns to the html view and the comment is listed with its quote",
-  page.url().includes("/brief-web#comments") &&
-    listed.includes("Open with the metric instead.") &&
-    listed.includes("The opening line"),
+  "thread reaches the worker pool with provenance",
+  pooledEntry.body === "Open with the metric instead." &&
+    pooledEntry.label === "Reviewer" &&
+    /^e-/.test(pooledEntry.eid ?? ""),
+  JSON.stringify(pooledEntry),
 );
-const frame2 = page.frameLocator("iframe.raw-frame-flow");
-await poll(async () => (await frame2.locator("#opening[data-dkw-c]").count()) === 1);
-step("the commented element is highlighted in the rendition", true);
-await page.screenshot({ path: `${SHOTS}/03-posted.png` });
 
-// 4. Element → list: clicking the highlighted paragraph flashes its comment.
-await frame2.locator("#opening").click();
-await poll(async () => (await page.locator(".comment.is-flash").count()) === 1);
-step("clicking the highlighted element flashes its comment in the list", true);
+// 5. The commented element is highlighted; clicking it activates the card.
+await poll(async () => (await frame.locator("#opening[data-dk-t]").count()) === 1);
+await frame.locator("#opening").click();
+await poll(async () => (await rev.locator(".comment-card.is-active").count()) === 1);
+step("element highlight and click-to-activate work like the desktop", true);
 
-// 5. List → element: "Show in document" flashes the paragraph.
-await page.locator(".comment-reveal").first().click();
-await poll(async () => (await frame2.locator("#opening[data-dkw-flash]").count()) === 1);
-step("'Show in document' scrolls/flashes the element in the frame", true);
+// 6. Reply on the card (threads, not a flat list).
+await rev.locator(".comment-reply-composer .comment-input").first().click();
+await rev.keyboard.type("Agreed — swap it in.");
+await rev.keyboard.press("Enter");
+await poll(async () => (await rev.locator(".comment-entry.is-reply").count()) === 1);
+const replied = await poll(async () => {
+  const { json } = await api("/api/pages/brief-web/comments");
+  return json?.threads?.[0]?.comments?.length === 2 ? json : null;
+});
+step(
+  "replies thread under the opener and sync to the pool",
+  replied.threads[0].comments[1].body === "Agreed — swap it in.",
+);
 
-// 6. The rendition's own interactivity is untouched by the layer.
-await frame2.locator("#cta").click();
-const ctaText = await frame2.locator("#cta").textContent();
-const commentCount = await page.locator(".comment").count();
+// 7. The rendition's own interactivity is untouched.
+await frame.locator("#cta").click();
 step(
   "page's own button still works; its click creates no comment",
-  ctaText === "pressed" && commentCount === 1,
+  (await frame.locator("#cta").textContent()) === "pressed" &&
+    (await rev.locator(".comment-card").count()) === 1,
 );
 
-// 7. Chip clear: pick then × posts the next comment unanchored.
-const closing = frame2.locator("#closing");
-await closing.hover();
-await poll(async () => {
-  const t = await closing.boundingBox();
-  const b = await frame2.locator("#dkw-bubble.dkw-on").boundingBox();
-  return !!t && !!b && Math.abs(b.y - t.y - 4) < 8;
+// 8. The comments toggle hides the whole layer (desktop parity).
+await rev.locator(".comments-toggle").click();
+const hidden = await poll(async () => (await rev.locator(".comment-card").count()) === 0);
+await rev.locator(".comments-toggle").click();
+await poll(async () => (await rev.locator(".comment-card").count()) === 1);
+step("comments toggle hides/shows the rail", hidden === true);
+
+// 9. MD view: the real Milkdown editor, read-only for the comment role.
+await rev.locator(".view-toggle-seg", { hasText: "MD" }).click();
+await poll(
+  async () => (await rev.locator('.ProseMirror[contenteditable="false"]').count()) === 1,
+);
+step("MD view renders the real editor, read-only for the comment role", true);
+
+// 10. Select text → floating Comment bubble → a Notion-style TEXT thread.
+await poll(async () => (await rev.locator(".ProseMirror p").count()) >= 1);
+await rev.evaluate(() => {
+  const p = [...document.querySelectorAll(".ProseMirror p")].find((el) =>
+    el.textContent?.includes("closing line"),
+  );
+  const range = document.createRange();
+  range.selectNodeContents(p);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
 });
-await frame2.locator("#dkw-bubble").click();
-await poll(async () => page.locator("#dkw-chip:not([hidden])").isVisible());
-await page.click("#dkw-chip-clear");
-const clearedPath = await page.locator('input[name="anchor_path"]').inputValue();
-step("chip × clears the pending anchor", clearedPath === "");
+await poll(async () => rev.locator(".web-selection-bubble").isVisible());
+await rev.locator(".web-selection-bubble").click();
+await poll(async () => (await rev.locator(".comment-card").count()) === 1);
+await typeIntoFocusedCard(rev, "End on the call to action?");
+await poll(async () => (await rev.locator(".critic-anchor").count()) >= 1);
+await poll(async () =>
+  (await rev.locator(".comment-card").textContent()).includes("End on the call to action?"),
+);
+step("selection bubble creates a Notion-style text comment in the rail", true);
+await rev.screenshot({ path: `${SHOTS}/03-md-comment.png` });
 
-/* ----- role gating: a view code sees no comment machinery ----- */
-
-const viewerPage = await (await browser.newContext()).newPage();
-await viewerPage.goto(`${BASE}/brief-web`);
-await viewerPage.fill("#gate-code", "web-view-code");
-await viewerPage.press("#gate-code", "Enter");
-await poll(async () => (await viewerPage.locator("iframe.raw-frame").count()) === 1);
-const viewerHasComments = await viewerPage.locator("#comments").count();
-const viewerBubble = await viewerPage
-  .frameLocator("iframe.raw-frame")
-  .locator("#dkw-bubble")
-  .count();
+// 11. The comment IS the document: the save carries CriticMarkup and the
+//     revision bumps, without changing the readable content.
+const savedMd = await poll(async () => {
+  const { json } = await api("/api/pages/brief-web/content");
+  return json?.markdown?.includes("End on the call to action?") ? json : null;
+});
 step(
-  "view-role session gets the plain fixed frame — no section, no bubble",
-  viewerHasComments === 0 && viewerBubble === 0,
+  "comment-role save lands as CriticMarkup in the stored markdown",
+  savedMd.markdown.includes("{==") && savedMd.markdown.includes("{>>#"),
 );
 
-/* ----- no-JS parity: the flat section still reads and posts ----- */
+/* ================= Reader (view role) ================= */
 
-const nojs = await (await browser.newContext({ javaScriptEnabled: false })).newPage();
-await nojs.goto(`${BASE}/brief-web`);
-await nojs.fill("#gate-code", "web-comment-code");
-await Promise.all([nojs.waitForNavigation(), nojs.press("#gate-code", "Enter")]);
-const nojsHtml = await nojs.content();
+const reader = await unlockedPage("web-view-code");
+await poll(async () => (await reader.locator("main.doc, iframe.raw-frame").count()) === 1);
+const readerHtml = await reader.content();
 step(
-  "without JS: comments render, the form posts, the layer stays out of the way",
-  nojsHtml.includes("Open with the metric instead.") && nojsHtml.includes("comment-form"),
+  "view role keeps the classic read-only page — no shell, no comment text",
+  !readerHtml.includes("dk-boot") &&
+    !readerHtml.includes("End on the call to action?") &&
+    !readerHtml.includes("Open with the metric instead."),
 );
-await nojs.fill(".comment-text", "Posted without JS.");
-await Promise.all([nojs.waitForNavigation(), nojs.click(".comment-post")]);
-const nojsAfter = await nojs.content();
-step("no-JS post lands", nojsAfter.includes("Posted without JS."));
+await reader.context().close();
+
+/* ================= Editor (edit role) ================= */
+
+const ed = await unlockedPage("web-edit-code");
+await ed.locator(".view-toggle-seg", { hasText: "MD" }).click();
+await poll(async () => (await ed.locator('.ProseMirror[contenteditable="true"]').count()) === 1);
+step("edit role gets the editable Milkdown editor", true);
+
+// 12. The web editor shows the reviewer's thread — one shared truth.
+await poll(async () => (await ed.locator(".critic-anchor").count()) >= 1);
+await poll(async () => (await ed.locator(".comment-card").count()) >= 1);
+step(
+  "the reviewer's markdown thread is live in the edit session's rail",
+  (await ed.locator(".comments-rail").textContent()).includes("End on the call to action?"),
+);
+
+// 13. Typing autosaves through the rev-guarded endpoint; comments survive.
+await ed.locator(".ProseMirror p").first().click();
+await ed.keyboard.press("End");
+await ed.keyboard.type(" Now edited on the web.");
+const afterEdit = await poll(async () => {
+  const { json } = await api("/api/pages/brief-web/content");
+  return json?.markdown?.includes("Now edited on the web.") ? json : null;
+});
+step(
+  "edit-role typing autosaves; the comment thread rides the edit",
+  afterEdit.markdown.includes("End on the call to action?") &&
+    afterEdit.webEdit?.by === "Editor",
+);
+await ed.screenshot({ path: `${SHOTS}/04-md-edit.png` });
+await ed.context().close();
+
+// 14. A desktop-side thread pushed into the pool (what the app's sidecar
+//     sync does) shows up in the reviewer's rail on reload.
+const poolNow = await api("/api/pages/brief-web/comments");
+await api("/api/pages/brief-web/comments", {
+  baseRev: poolNow.json.rev,
+  threads: [
+    ...poolNow.json.threads,
+    {
+      id: "t9desk",
+      anchor: {
+        path: "main:nth-of-type(1) > p:nth-of-type(2)",
+        tag: "p",
+        text: "The closing line.",
+      },
+      comments: [{ author: "Sherin's Mac", at: Date.now(), body: "Desktop says hi." }],
+    },
+  ],
+});
+// (?v=html explicitly: the edit above staled the rendition, so the plain
+// URL now leads with the markdown — same rule as v8.)
+await rev.goto(`${BASE}/brief-web?v=html`);
+await poll(async () => (await rev.locator(".comment-card").count()) === 2);
+step(
+  "a desktop-pushed thread appears in the web rail",
+  (await rev.locator(".comments-rail").textContent()).includes("Desktop says hi."),
+);
+await rev.screenshot({ path: `${SHOTS}/05-desktop-thread.png` });
+await rev.context().close();
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);
 await browser.close();

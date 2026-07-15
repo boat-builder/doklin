@@ -51,10 +51,13 @@ class FakeR2 {
   }
 
   async put(key, value, opts = {}) {
-    if (opts.onlyIf?.etagMatches !== undefined) {
+    const cond = opts.onlyIf;
+    if (cond?.etagMatches !== undefined) {
       const existing = this.store.get(key);
-      if (!existing || existing.etag !== opts.onlyIf.etagMatches) return null;
+      if (!existing || existing.etag !== cond.etagMatches) return null;
     }
+    // If-None-Match: "*" — create only when the object is absent.
+    if (cond?.etagDoesNotMatch === "*" && this.store.has(key)) return null;
     const rec = this.#record(key, value, opts);
     this.store.set(key, rec);
     return this.#object(key, rec);
@@ -179,7 +182,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 9);
+  assert.equal(ok.json.version, 10);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -189,6 +192,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.ok(ok.json.features.includes("web-comments"));
   assert.ok(ok.json.features.includes("web-edit"));
   assert.ok(ok.json.features.includes("html-comments"));
+  assert.ok(ok.json.features.includes("web-app"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -1220,316 +1224,207 @@ await test("roles: codes carry view/comment/edit, PATCH changes them", async () 
   editCookie = cookieOf(await unlock("team-page", "edit-code-one"));
 });
 
-await test("roles: what each session sees and may do", async () => {
-  // View: the page as it always was — no comments section, no edit button.
+const bootOf = (text) => {
+  const m = text.match(/<script type="application\/json" id="dk-boot">([\s\S]*?)<\/script>/);
+  assert.ok(m, "page carries an app-shell boot record");
+  return JSON.parse(m[1]);
+};
+
+await test("roles: view keeps the classic page; comment/edit get the app shell", async () => {
+  // View: the page as it always was — no shell, no comment machinery.
   const viewPage = await call("/team-page", { headers: { cookie: viewCookie } });
   assert.equal(viewPage.status, 200);
-  assert.ok(!viewPage.text.includes('id="comments"'), "view sees no comments section");
-  assert.ok(!viewPage.text.includes("/team-page/edit"), "view sees no edit button");
+  assert.ok(viewPage.text.includes('<main class="doc">'));
+  assert.ok(!viewPage.text.includes("dk-boot"), "view gets no app shell");
 
-  // Comment: comments section, no edit button.
+  // Comment/edit: the app shell, booted with the session's role and the
+  // document (comments included — that's the point).
   const commentPage = await call("/team-page", { headers: { cookie: commentCookie } });
-  assert.ok(commentPage.text.includes('id="comments"'));
-  assert.ok(!commentPage.text.includes("/team-page/edit"));
+  assert.equal(commentPage.status, 200);
+  assert.ok(commentPage.text.includes('id="dk-root"'));
+  const commentBoot = bootOf(commentPage.text);
+  assert.equal(commentBoot.role, "comment");
+  assert.equal(commentBoot.view, "md");
+  assert.equal(commentBoot.label, "Priya");
+  assert.ok(commentBoot.markdown.includes("shared body"));
 
-  // Edit: both.
-  const editPage = await call("/team-page", { headers: { cookie: editCookie } });
-  assert.ok(editPage.text.includes('id="comments"'));
-  assert.ok(editPage.text.includes('href="https://docs.test/team-page/edit"'));
+  const editBoot = bootOf((await call("/team-page", { headers: { cookie: editCookie } })).text);
+  assert.equal(editBoot.role, "edit");
 
-  // The write endpoints enforce the same floors.
+  // The shell references version-stamped assets; without an injected bundle
+  // (this test build) the asset route says exactly that.
+  assert.ok(commentPage.text.includes("/__web/10/app.js"));
+  assert.equal((await call("/__web/10/app.js")).status, 503);
+
+  // Write-endpoint floors: view can't save or comment; no cookie is a 401.
+  const viewSave = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: viewCookie },
+    body: { markdown: "# nope", baseRev: 1 },
+  });
+  assert.equal(viewSave.status, 403);
   assert.equal(
-    (await postForm("/team-page/comments", { body: "hi" }, { cookie: viewCookie })).status,
+    (await call("/team-page/html-comments", { headers: { cookie: viewCookie } })).status,
     403,
   );
-  assert.equal(
-    (await call("/team-page/edit", { headers: { cookie: viewCookie } })).status,
-    403,
-  );
-  assert.equal(
-    (await call("/team-page/edit", { headers: { cookie: commentCookie } })).status,
-    403,
-  );
-  // No cookie at all → the gate, not a 403.
-  const anon = await call("/team-page/edit");
-  assert.equal(anon.status, 401);
-  assert.ok(anon.text.includes("gate-form"));
-  assert.ok(anon.text.includes('value="/team-page/edit"'), "gate returns to the editor");
-});
+  assert.equal((await call("/team-page/html-comments")).status, 401);
 
-await test("comments: post, read, delete-own; owner moderates over the API", async () => {
-  const posted = await postForm(
-    "/team-page/comments",
-    { body: "First!\n\nWith a second line.", name: "Priya P" },
-    { cookie: commentCookie },
-  );
-  assert.equal(posted.status, 303);
-  assert.equal(posted.headers.get("location"), "/team-page#comments");
-
-  await postForm("/team-page/comments", { body: "Editor here." }, { cookie: editCookie });
-
-  const page = await call("/team-page", { headers: { cookie: commentCookie } });
-  assert.ok(page.text.includes("First!"));
-  assert.ok(page.text.includes("Priya P"));
-  assert.ok(page.text.includes("Editor here."));
-  assert.ok(page.text.includes("Sam"), "a nameless comment is attributed to its code label");
-
-  // Blank comments are refused.
-  assert.equal(
-    (await postForm("/team-page/comments", { body: "   " }, { cookie: commentCookie })).status,
-    400,
-  );
-
-  // The owner reads everything (with code attribution) over the API.
-  const ownerList = await call("/api/pages/team-page/comments", { token: OWNER });
-  assert.equal(ownerList.status, 200);
-  assert.equal(ownerList.json.comments.length, 2);
-  assert.equal(ownerList.json.comments[0].name, "Priya P");
-  assert.equal(ownerList.json.comments[0].codeId, commenterId);
-  const first = ownerList.json.comments[0];
-  const second = ownerList.json.comments[1];
-
-  // A session deletes its own code's comments, not another code's.
-  const denied = await postForm(
-    `/team-page/comments/${second.id}/delete`,
-    {},
-    { cookie: commentCookie },
-  );
-  assert.equal(denied.status, 403);
-  const okDelete = await postForm(
-    `/team-page/comments/${first.id}/delete`,
-    {},
-    { cookie: commentCookie },
-  );
-  assert.equal(okDelete.status, 303);
-
-  // Owner moderation: delete one by id, then the rest wholesale.
-  assert.equal(
-    (await call(`/api/pages/team-page/comments/${second.id}`, { method: "DELETE", token: OWNER }))
-      .status,
-    200,
-  );
-  await postForm("/team-page/comments", { body: "again" }, { cookie: commentCookie });
-  assert.equal(
-    (await call("/api/pages/team-page/comments", { method: "DELETE", token: OWNER })).status,
-    200,
-  );
-  assert.deepEqual(
-    (await call("/api/pages/team-page/comments", { token: OWNER })).json.comments,
-    [],
-  );
-
-  // Unprotected pages take no comments — there's no one named to take them from.
-  await call("/api/pages/open-page", {
-    method: "PUT",
-    token: OWNER,
-    body: { title: "Open", markdown: "# open" },
-  });
-  assert.equal((await postForm("/open-page/comments", { body: "nope" })).status, 403);
-  await call("/api/pages/open-page", { method: "DELETE", token: OWNER });
-});
-
-/* ---------- Comments on html renditions (version 9) ---------- */
-
-await test("html comments: the html view grows the section; anchored posts round-trip", async () => {
-  await call("/api/pages/brief", {
-    method: "PUT",
-    token: OWNER,
-    body: {
-      title: "Brief",
-      markdown: "# Brief\n\nAlpha paragraph.",
-      html: "<html><body><main><p>Alpha paragraph.</p></main></body></html>",
-    },
-  });
-  await call("/api/pages/brief/access/codes", {
+  // JSON-only writes: a form-encoded body is refused (the CSRF line), and a
+  // cross-origin sender is refused even with the right cookie.
+  const formish = await call("/team-page/save", {
     method: "POST",
-    token: OWNER,
-    body: { label: "Vera", code: "brief-view-code", role: "view" },
+    headers: { cookie: editCookie, "content-type": "application/x-www-form-urlencoded" },
+    body: "markdown=x&baseRev=1",
   });
-  await call("/api/pages/brief/access/codes", {
+  assert.equal(formish.status, 415);
+  const crossOrigin = await call("/team-page/save", {
     method: "POST",
-    token: OWNER,
-    body: { label: "Cody", code: "brief-comment-code", role: "comment" },
+    headers: { cookie: editCookie, origin: "https://evil.test" },
+    body: { markdown: "# x", baseRev: 1 },
   });
-  const vCookie = cookieOf(await unlock("brief", "brief-view-code"));
-  const cCookie = cookieOf(await unlock("brief", "brief-comment-code"));
+  assert.equal(crossOrigin.status, 403);
 
-  // View role: the page as it always was — fixed frame, no comments section,
-  // and the raw rendition byte-for-byte (no bridge).
-  const viewPage = await call("/brief", { headers: { cookie: vCookie } });
-  assert.ok(viewPage.text.includes('class="raw-frame"'));
-  assert.ok(!viewPage.text.includes('id="comments"'));
-  const viewRaw = await call("/brief/raw", { headers: { cookie: vCookie } });
-  assert.ok(!viewRaw.text.includes("dkw-bubble"), "view session raw is untouched");
-  assert.ok(viewRaw.text.includes("Alpha paragraph."));
-
-  // Comment role: flowing frame with the section below, the anchor plumbing
-  // in the form, and the bridge injected into the raw rendition.
-  const commentPage = await call("/brief", { headers: { cookie: cCookie } });
-  assert.ok(commentPage.text.includes('class="raw-frame-flow"'));
-  assert.ok(commentPage.text.includes('id="comments"'));
-  assert.ok(commentPage.text.includes('id="dkw-data"'));
-  assert.ok(commentPage.text.includes('name="anchor_path"'));
-  const commentRaw = await call("/brief/raw", { headers: { cookie: cCookie } });
-  assert.ok(commentRaw.text.includes("dkw-bubble"), "comment session raw carries the bridge");
-
-  // An anchored post from the html view returns to the html view.
-  const posted = await postForm(
-    "/brief/comments",
-    {
-      body: "Tighten this.",
-      view: "html",
-      anchor_path: "body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)",
-      anchor_tag: "P",
-      anchor_text: "Alpha paragraph.",
-      quote: "Alpha paragraph.",
-    },
-    { cookie: cCookie },
-  );
-  assert.equal(posted.status, 303);
-  assert.equal(posted.headers.get("location"), "/brief#comments");
-
-  // A plain post (md view, no view field) still returns to the md view.
-  const mdPosted = await postForm("/brief/comments", { body: "General note." }, { cookie: cCookie });
-  assert.equal(mdPosted.headers.get("location"), "/brief?v=md#comments");
-
-  // Both views list both comments (one pool per page); the anchored one
-  // carries its reveal button and rides the anchor-data JSON.
-  const htmlView = await call("/brief", { headers: { cookie: cCookie } });
-  assert.ok(htmlView.text.includes("Tighten this."));
-  assert.ok(htmlView.text.includes("General note."));
-  assert.ok(htmlView.text.includes("Show in document"));
-  assert.ok(htmlView.text.includes("anchor"), "anchor data rendered for the shell script");
-  const mdView = await call("/brief?v=md", { headers: { cookie: cCookie } });
-  assert.ok(mdView.text.includes("Tighten this."));
-  assert.ok(!mdView.text.includes('id="dkw-data"'), "md view carries no anchoring layer");
-
-  // The owner sees the anchor (normalized) over the moderation API.
-  const list = await call("/api/pages/brief/comments", { token: OWNER });
-  const anchored = list.json.comments.find((c) => c.body === "Tighten this.");
-  assert.deepEqual(anchored.anchor, {
-    path: "body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)",
-    tag: "p",
-    text: "Alpha paragraph.",
-  });
-  assert.equal(anchored.quote, "Alpha paragraph.");
-  assert.equal(list.json.comments.find((c) => c.body === "General note.").anchor, undefined);
-
-  // A malformed anchor never sinks the comment — it posts unanchored.
-  await postForm(
-    "/brief/comments",
-    { body: "bad anchor", view: "html", anchor_path: "main > p", anchor_tag: "not a tag" },
-    { cookie: cCookie },
-  );
-  const list2 = await call("/api/pages/brief/comments", { token: OWNER });
-  assert.equal(list2.json.comments.find((c) => c.body === "bad anchor").anchor, undefined);
-
-  // Deleting from the html view returns there too.
-  const mine = list2.json.comments.find((c) => c.body === "General note.");
-  const del = await postForm(`/brief/comments/${mine.id}/delete`, { view: "html" }, { cookie: cCookie });
-  assert.equal(del.status, 303);
-  assert.equal(del.headers.get("location"), "/brief#comments");
-
-  await call("/api/pages/brief", { method: "DELETE", token: OWNER });
+  // The old v8/v9 routes send stale tabs back to the page.
+  const legacyEdit = await call("/team-page/edit", { headers: { cookie: editCookie } });
+  assert.equal(legacyEdit.status, 303);
+  assert.equal(legacyEdit.headers.get("location"), "/team-page");
+  assert.equal((await call("/team-page/comments", { method: "POST" })).status, 303);
 });
 
-await test("html comments: html-only pages flow the section and return to themselves", async () => {
-  await call("/api/pages/deck", {
-    method: "PUT",
-    token: OWNER,
-    body: { title: "Deck", html: "<html><body><section><h2>Slide one</h2></section></body></html>" },
-  });
-  await call("/api/pages/deck/access/codes", {
-    method: "POST",
-    token: OWNER,
-    body: { label: "Cody", code: "deck-comment-code", role: "comment" },
-  });
-  const cookie = cookieOf(await unlock("deck", "deck-comment-code"));
+await test("markdown comments: a comment-role save must leave the document unchanged", async () => {
+  const content = await call("/api/pages/team-page/content", { token: OWNER });
+  const rev = content.json.rev;
+  const md = content.json.markdown;
 
-  const page = await call("/deck", { headers: { cookie } });
-  assert.ok(page.text.includes('class="raw-frame-flow"'));
-  assert.ok(page.text.includes('id="comments"'));
-  assert.ok(page.text.includes('id="dkw-data"'));
-
-  const posted = await postForm(
-    "/deck/comments",
-    {
-      body: "Bigger title?",
-      view: "html",
-      anchor_path: "body:nth-of-type(1) > section:nth-of-type(1) > h2:nth-of-type(1)",
-      anchor_tag: "h2",
-      anchor_text: "Slide one",
-      quote: "Slide one",
-    },
-    { cookie },
+  // A comment IS a save: the same document, one CriticMarkup thread added.
+  const commented = md.replace(
+    "shared body",
+    "{==shared body==}{>>#w1a2b3 Priya P · 2026-07-15T10:00:00Z: bolder?<<}",
   );
-  assert.equal(posted.headers.get("location"), "/deck#comments");
-  const after = await call("/deck", { headers: { cookie } });
-  assert.ok(after.text.includes("Bigger title?"));
-  assert.ok(after.text.includes("Show in document"));
+  const saved = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: commented, baseRev: rev },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.rev, rev + 1);
 
-  await call("/api/pages/deck", { method: "DELETE", token: OWNER });
+  // Comment/edit sessions see the thread; view sessions never do.
+  const shell = await call("/team-page", { headers: { cookie: commentCookie } });
+  assert.ok(bootOf(shell.text).markdown.includes("bolder?"));
+  const viewPage = await call("/team-page", { headers: { cookie: viewCookie } });
+  assert.ok(!viewPage.text.includes("bolder?"), "comments are stripped for view sessions");
+  assert.ok(viewPage.text.includes("shared body"), "the anchor text stays");
+
+  // The pull-back stamp is set — the app folds web comments in like edits —
+  // but a comment-only save never retitles.
+  const meta = await call("/api/pages/team-page", { token: OWNER });
+  assert.equal(meta.json.webEdit.by, "Priya");
+  assert.equal(meta.json.title, "Team page");
+
+  // Content changes are the edit role's alone.
+  const sneaky = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: commented.replace("shared body==}", "REWRITTEN==}"), baseRev: rev + 1 },
+  });
+  assert.equal(sneaky.status, 403);
+
+  // Normalized-but-equivalent markdown still counts as unchanged — the
+  // shell's editor re-serializes documents in its own style (here: an extra
+  // blank line, which renders and describes identically).
+  const normalized = commented.replace("\n\n", "\n\n\n");
+  const okNorm = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: normalized, baseRev: rev + 1 },
+  });
+  assert.equal(okNorm.status, 200);
+
+  // But content that renders invisibly yet would surface to a VIEW reader — a
+  // link reference definition lands verbatim in the page description — is NOT
+  // a comment: rejected exactly like a body change.
+  const smuggle = "[Wire funds to acct 9982]: https://evil.test\n\n" + commented;
+  const rejected = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: smuggle, baseRev: okNorm.json.rev },
+  });
+  assert.equal(rejected.status, 403);
+
+  // A stale baseRev answers 409 with the current rev, never a clobber.
+  const stale = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: commented, baseRev: rev },
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.json.rev, rev + 2);
 });
 
-await test("web edit: save bumps rev, retitles, stamps webEdit; stale baseRev 409s", async () => {
-  const editor = await call("/team-page/edit", { headers: { cookie: editCookie } });
-  assert.equal(editor.status, 200);
-  assert.ok(editor.text.includes('name="markdown"'));
-  const revMatch = editor.text.match(/name="baseRev" value="(\d+)"/);
-  assert.ok(revMatch, "editor carries the loaded revision");
-  const baseRev = Number(revMatch[1]);
-
-  const saved = await postForm(
-    "/team-page/edit",
-    { markdown: "# Renamed by the web\n\nnew body {>>smuggled comment<<}", baseRev: String(baseRev) },
-    { cookie: editCookie },
-  );
-  assert.equal(saved.status, 303);
-  assert.equal(saved.headers.get("location"), "/team-page");
-
-  const page = await call("/team-page", { headers: { cookie: viewCookie } });
-  assert.ok(page.text.includes("Renamed by the web"));
-  assert.ok(page.text.includes("new body"));
-  assert.ok(!page.text.includes("smuggled"), "CriticMarkup is stripped on web saves");
+await test("web edit: rev bumps, retitles, stamps webEdit; comments ride along", async () => {
+  const rev = (await call("/api/pages/team-page/content", { token: OWNER })).json.rev;
+  const newMd =
+    "# Renamed by the web\n\nnew body {==here==}{>>#a1b2c3 Sam · 2026-07-15T11:00:00Z: kept<<}";
+  const saved = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: editCookie },
+    body: { markdown: newMd, baseRev: rev },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.rev, rev + 1);
 
   const meta = await call("/api/pages/team-page", { token: OWNER });
   assert.equal(meta.json.title, "Renamed by the web", "lead H1 retitles the page");
-  assert.equal(meta.json.rev, baseRev + 1);
+  assert.equal(meta.json.rev, rev + 1);
   assert.equal(meta.json.webEdit.by, "Sam");
+
+  // The comment the editor left rides the document: stored in full, pulled
+  // back by the app, stripped for view sessions.
+  const viewPage = await call("/team-page", { headers: { cookie: viewCookie } });
+  assert.ok(viewPage.text.includes("new body"));
+  assert.ok(!viewPage.text.includes("kept"), "view sessions never see comment text");
+  const content = await call("/api/pages/team-page/content", { token: OWNER });
+  assert.ok(content.json.markdown.includes("{>>#a1b2c3"), "the app pulls comments with the doc");
 
   const listRow = (await call("/api/pages", { token: OWNER })).json.pages.find(
     (p) => p.id === "team-page",
   );
-  assert.equal(listRow.rev, baseRev + 1);
+  assert.equal(listRow.rev, rev + 1);
   assert.equal(listRow.webEdit.by, "Sam");
 
-  // The app pulls the edited markdown back.
-  const content = await call("/api/pages/team-page/content", { token: OWNER });
-  assert.equal(content.status, 200);
-  assert.ok(content.json.markdown.startsWith("# Renamed by the web"));
-  assert.equal(content.json.rev, baseRev + 1);
-  assert.equal(content.json.webEdit.by, "Sam");
-
-  // A save from the revision that just got overwritten: 409, editor again,
-  // the visitor's text preserved, the fresh rev in the form.
-  const stale = await postForm(
-    "/team-page/edit",
-    { markdown: "# My stale attempt", baseRev: String(baseRev) },
-    { cookie: editCookie },
-  );
+  // A save from the revision that just got overwritten: 409 with the fresh
+  // rev; force (the shell's explicit "keep mine") pushes through.
+  const stale = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: editCookie },
+    body: { markdown: "# My stale attempt", baseRev: rev },
+  });
   assert.equal(stale.status, 409);
-  assert.ok(stale.text.includes("My stale attempt"));
-  assert.ok(stale.text.includes(`name="baseRev" value="${baseRev + 1}"`));
-  assert.ok(stale.text.includes("changed while you were editing"));
+  assert.equal(stale.json.rev, rev + 1);
+  const forced = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: editCookie },
+    body: { markdown: "# Renamed by the web\n\nforced body", baseRev: rev, force: true },
+  });
+  assert.equal(forced.status, 200);
+
+  // force is the edit role's alone.
+  const commentForce = await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: commentCookie },
+    body: { markdown: "# Renamed by the web\n\nsneaky body", baseRev: rev, force: true },
+  });
+  assert.ok(commentForce.status === 403 || commentForce.status === 409);
 
   // Emptying the document from the web is refused.
   assert.equal(
     (
-      await postForm(
-        "/team-page/edit",
-        { markdown: "  \n ", baseRev: String(baseRev + 1) },
-        { cookie: editCookie },
-      )
+      await call("/team-page/save", {
+        method: "POST",
+        headers: { cookie: editCookie },
+        body: { markdown: "  \n ", baseRev: forced.json.rev },
+      })
     ).status,
     400,
   );
@@ -1571,13 +1466,12 @@ await test("web edit: app pushes see the conflict once, devices keep last-writer
   assert.equal(devicePush.status, 200);
 
   // Legacy pushes (no baseRev) clobber a web edit silently, as before v8.
-  const editorNow = await call("/team-page/edit", { headers: { cookie: editCookie } });
-  const nowRev = Number(editorNow.text.match(/name="baseRev" value="(\d+)"/)[1]);
-  await postForm(
-    "/team-page/edit",
-    { markdown: "# web again", baseRev: String(nowRev) },
-    { cookie: editCookie },
-  );
+  const nowRev = (await call("/api/pages/team-page", { token: OWNER })).json.rev;
+  await call("/team-page/save", {
+    method: "POST",
+    headers: { cookie: editCookie },
+    body: { markdown: "# web again", baseRev: nowRev },
+  });
   const legacy = await call("/api/pages/team-page", {
     method: "PUT",
     token: OWNER,
@@ -1587,7 +1481,7 @@ await test("web edit: app pushes see the conflict once, devices keep last-writer
   assert.equal((await call("/api/pages/team-page", { token: OWNER })).json.webEdit, null);
 });
 
-await test("web edit: outdates the html rendition until the app replaces it", async () => {
+await test("web edit: only content changes outdate the rendition", async () => {
   await call("/api/pages/dual-page", {
     method: "PUT",
     token: OWNER,
@@ -1604,29 +1498,47 @@ await test("web edit: outdates the html rendition until the app replaces it", as
   });
   const cookie = cookieOf(await unlock("dual-page", "dual-edit-code"));
 
-  // With both renditions the link opens on the html frame.
-  const before = await call("/dual-page", { headers: { cookie } });
-  assert.ok(before.text.includes("/dual-page/raw"));
+  // With both renditions the shell opens on the html view.
+  const before = bootOf((await call("/dual-page", { headers: { cookie } })).text);
+  assert.equal(before.view, "html");
+  assert.equal(before.hasMd, true);
+  assert.equal(before.markdown, null, "the html view's shell doesn't carry the markdown");
 
-  const editor = await call("/dual-page/edit", { headers: { cookie } });
-  assert.ok(editor.text.includes("polished HTML rendition"), "editor warns about the rendition");
-  const rev = Number(editor.text.match(/name="baseRev" value="(\d+)"/)[1]);
-  const saved = await postForm(
-    "/dual-page/edit",
-    { markdown: "# Dual\n\nedited on the web", baseRev: String(rev) },
-    { cookie },
+  // A comment-only save (strip-equivalent) leaves the rendition current.
+  const rev1 = (await call("/api/pages/dual-page", { token: OWNER })).json.rev;
+  const commentOnly = await call("/dual-page/save", {
+    method: "POST",
+    headers: { cookie },
+    body: {
+      markdown:
+        "# Dual\n\n{==md body==}{>>#q1w2e3 Editor · 2026-07-15T12:00:00Z: note<<}",
+      baseRev: rev1,
+    },
+  });
+  assert.equal(commentOnly.status, 200);
+  assert.equal((await call("/api/pages/dual-page", { token: OWNER })).json.htmlStale, false);
+  assert.equal(
+    bootOf((await call("/dual-page", { headers: { cookie } })).text).view,
+    "html",
+    "the rendition still leads after comment traffic",
   );
-  assert.equal(saved.headers.get("location"), "/dual-page?v=md");
 
-  // The markdown (the edited truth) is now the default view; the stale
-  // rendition stays reachable explicitly.
-  const after = await call("/dual-page", { headers: { cookie } });
-  assert.ok(after.text.includes("edited on the web"), "default view is the markdown");
-  assert.ok(!after.text.includes('src="https://docs.test/dual-page/raw"'));
-  assert.ok(after.text.includes("is-stale"), "the pill marks the rendition stale");
-  const explicitHtml = await call("/dual-page?v=html", { headers: { cookie } });
-  assert.ok(explicitHtml.text.includes("/dual-page/raw"), "?v=html still frames the rendition");
+  // A real edit stales it: the markdown becomes the default view.
+  const edited = await call("/dual-page/save", {
+    method: "POST",
+    headers: { cookie },
+    body: { markdown: "# Dual\n\nedited on the web", baseRev: commentOnly.json.rev },
+  });
+  assert.equal(edited.status, 200);
   assert.equal((await call("/api/pages/dual-page", { token: OWNER })).json.htmlStale, true);
+  const after = bootOf((await call("/dual-page", { headers: { cookie } })).text);
+  assert.equal(after.view, "md");
+  assert.equal(after.htmlStale, true);
+  assert.equal(
+    bootOf((await call("/dual-page?v=html", { headers: { cookie } })).text).view,
+    "html",
+    "?v=html still reaches the stale rendition",
+  );
 
   // The app re-pushing the SAME rendition (it hasn't regenerated) keeps the
   // markdown in front…
@@ -1652,10 +1564,284 @@ await test("web edit: outdates the html rendition until the app replaces it", as
     },
   });
   assert.equal((await call("/api/pages/dual-page", { token: OWNER })).json.htmlStale, false);
-  const restored = await call("/dual-page", { headers: { cookie } });
-  assert.ok(restored.text.includes("/dual-page/raw"), "fresh rendition leads again");
+  assert.equal(bootOf((await call("/dual-page", { headers: { cookie } })).text).view, "html");
 
   await call("/api/pages/dual-page", { method: "DELETE", token: OWNER });
+});
+
+/* ---------- Comment threads on html renditions (version 10) ---------- */
+
+await test("html threads: session pool round-trip with provenance stamping", async () => {
+  const RENDITION =
+    "<html><body><main><h1>Brief</h1><p>opening line</p></main></body></html>";
+  await call("/api/pages/brief", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Brief", markdown: "# Brief\n\nopening", html: RENDITION },
+  });
+  await call("/api/pages/brief/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Reviewer", code: "brief-comment-code", role: "comment" },
+  });
+  const cookie = cookieOf(await unlock("brief", "brief-comment-code"));
+
+  // Empty pool; the shell's html view boots lean (no markdown payload).
+  assert.deepEqual((await call("/brief/html-comments", { headers: { cookie } })).json, {
+    rev: 0,
+    threads: [],
+  });
+  const boot = bootOf((await call("/brief", { headers: { cookie } })).text);
+  assert.equal(boot.view, "html");
+  assert.equal(boot.markdown, null);
+
+  // The rendition is served byte-for-byte — the shell instruments it
+  // client-side, exactly like the desktop preview.
+  const raw = await call("/brief/raw", { headers: { cookie } });
+  assert.equal(raw.text, RENDITION);
+
+  // A new thread: the client pushes the whole list against the rev it read.
+  const post = await call("/brief/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: {
+      baseRev: 0,
+      threads: [
+        {
+          id: "t1abcd",
+          anchor: { path: "main:nth-of-type(1) > p:nth-of-type(1)", tag: "p", text: "opening line" },
+          comments: [{ author: "Priya P", at: 1752570000000, body: "Bolder opening?" }],
+        },
+      ],
+    },
+  });
+  assert.equal(post.status, 200);
+  assert.equal(post.json.rev, 1);
+  const entry = post.json.threads[0].comments[0];
+  assert.ok(/^e-[a-f0-9]{8}$/.test(entry.eid), "new entries get a server eid");
+  assert.equal(entry.label, "Reviewer");
+  assert.ok(entry.codeId.startsWith("a-"), "entries carry the code that wrote them");
+
+  // A concurrent writer with a stale base gets the current state to rebase on.
+  const conflicted = await call("/brief/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: { baseRev: 0, threads: [] },
+  });
+  assert.equal(conflicted.status, 409);
+  assert.equal(conflicted.json.rev, 1);
+  assert.equal(conflicted.json.threads.length, 1);
+
+  // Owner GET carries a flat `comments` back-compat view (one row per thread)
+  // so a pre-v10 desktop app still reads the moderation list.
+  const ownerCompat = await call("/api/pages/brief/comments", { token: OWNER });
+  assert.equal(ownerCompat.json.comments.length, 1);
+  assert.equal(ownerCompat.json.comments[0].id, "t1abcd");
+  assert.equal(ownerCompat.json.comments[0].body, "Bolder opening?");
+  assert.equal(ownerCompat.json.comments[0].quote, "opening line");
+
+  // Replies join the thread — and the stored identity of existing entries is
+  // pinned: a swap can't reattribute someone else's words.
+  const tampered = post.json.threads.map((t) => ({
+    ...t,
+    comments: [
+      { ...t.comments[0], author: "Mallory", label: "Mallory" },
+      { author: "Sam", at: 1752570100000, body: "Agreed." },
+    ],
+  }));
+  const replied = await call("/brief/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: { baseRev: 1, threads: tampered },
+  });
+  assert.equal(replied.status, 200);
+  const [opener, reply] = replied.json.threads[0].comments;
+  assert.equal(opener.author, "Priya P", "stored authorship survives a hostile swap");
+  assert.equal(opener.label, "Reviewer");
+  assert.equal(reply.label, "Reviewer", "new entries are stamped with the session's code");
+
+  // Body edits DO follow the incoming copy (desktop-parity edit-anywhere),
+  // under the same stable identity.
+  const editedThreads = replied.json.threads.map((t) => ({
+    ...t,
+    comments: t.comments.map((e, i) => (i === 0 ? { ...e, body: "Bolder opening!!" } : e)),
+  }));
+  const body2 = await call("/brief/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: { baseRev: replied.json.rev, threads: editedThreads },
+  });
+  assert.equal(body2.json.threads[0].comments[0].body, "Bolder opening!!");
+  assert.equal(body2.json.threads[0].comments[0].eid, entry.eid, "identity survives edits");
+
+  // Owner side: the same pool through the API, and the pool's revision rides
+  // the page listing (one request tells the app what to pull).
+  const ownerRead = await call("/api/pages/brief/comments", { token: OWNER });
+  assert.equal(ownerRead.json.rev, body2.json.rev);
+  assert.equal(ownerRead.json.threads.length, 1);
+  const row = (await call("/api/pages", { token: OWNER })).json.pages.find(
+    (p) => p.id === "brief",
+  );
+  assert.equal(row.commentsRev, body2.json.rev);
+
+  // The app pushes its sidecar in (a desktop thread joins), rev-guarded like
+  // every other writer.
+  const appPush = await call("/api/pages/brief/comments", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      baseRev: body2.json.rev,
+      threads: [
+        ...body2.json.threads,
+        {
+          id: "t2wxyz",
+          anchor: { path: "main:nth-of-type(1) > h1:nth-of-type(1)", tag: "h1", text: "Brief" },
+          comments: [{ author: "Sherin's Mac", at: 1752570200000, body: "Desktop note" }],
+        },
+      ],
+    },
+  });
+  assert.equal(appPush.status, 200);
+  assert.equal(appPush.json.threads.length, 2);
+  const desktopEntry = appPush.json.threads[1].comments[0];
+  assert.ok(desktopEntry.eid, "desktop entries get eids at ingestion");
+  assert.equal(desktopEntry.codeId, undefined, "owner pushes carry no code provenance");
+  assert.equal(
+    (
+      await call("/api/pages/brief/comments", {
+        method: "PUT",
+        token: OWNER,
+        body: { baseRev: 0, threads: [] },
+      })
+    ).status,
+    409,
+  );
+
+  // Comment sessions see the merged pool — the desktop's thread included.
+  assert.equal(
+    (await call("/brief/html-comments", { headers: { cookie } })).json.threads.length,
+    2,
+  );
+
+  // Owner moderation: one thread away, then the slate.
+  assert.equal(
+    (await call("/api/pages/brief/comments/t1abcd", { method: "DELETE", token: OWNER })).status,
+    200,
+  );
+  assert.equal(
+    (await call("/brief/html-comments", { headers: { cookie } })).json.threads.length,
+    1,
+  );
+  await call("/api/pages/brief/comments", { method: "DELETE", token: OWNER });
+  assert.deepEqual(
+    (await call("/brief/html-comments", { headers: { cookie } })).json,
+    { rev: 0, threads: [] },
+  );
+
+  await call("/api/pages/brief", { method: "DELETE", token: OWNER });
+});
+
+await test("html threads: two first-writers race a fresh pool — exactly one wins", async () => {
+  await call("/api/pages/race", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Race", html: "<html><body><p>x</p></body></html>" },
+  });
+  await call("/api/pages/race/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "One", code: "race-code", role: "comment" },
+  });
+  const cookie = cookieOf(await unlock("race", "race-code"));
+
+  const mk = (tid, who) => ({
+    method: "POST",
+    headers: { cookie },
+    body: {
+      baseRev: 0,
+      threads: [
+        { id: tid, anchor: { path: "", tag: "", text: "" }, comments: [{ author: who, at: 1, body: who }] },
+      ],
+    },
+  });
+  // Both read rev 0 (no pool object yet) and both try to CREATE. The
+  // If-None-Match create guard must let only one through; the loser re-reads
+  // and gets the 409 conflict — never a silent overwrite that loses a comment.
+  const [a, b] = await Promise.all([
+    call("/race/html-comments", mk("aaa111", "Ana")),
+    call("/race/html-comments", mk("bbb222", "Ben")),
+  ]);
+  const oks = [a, b].filter((r) => r.status === 200);
+  const conflicts = [a, b].filter((r) => r.status === 409);
+  assert.equal(oks.length, 1, "exactly one create wins");
+  assert.equal(conflicts.length, 1, "the other is told to rebase, not silently dropped");
+  assert.equal(oks[0].json.rev, 1);
+  assert.equal(conflicts[0].json.rev, 1);
+  assert.equal(conflicts[0].json.threads.length, 1, "the loser sees the winner's comment to merge");
+
+  await call("/api/pages/race", { method: "DELETE", token: OWNER });
+});
+
+await test("html threads: a v9 flat pool reads as threads (nothing lost)", async () => {
+  await call("/api/pages/legacy", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Legacy", markdown: "# Legacy\n\nopening", html: "<html><body><p>opening</p></body></html>" },
+  });
+  await call("/api/pages/legacy/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Reviewer", code: "legacy-comment-code", role: "comment" },
+  });
+  const cookie = cookieOf(await unlock("legacy", "legacy-comment-code"));
+
+  // Seed the exact shape a v9 worker stored.
+  await fake.put(
+    "pages/legacy.comments.json",
+    JSON.stringify({
+      comments: [
+        {
+          id: "m-11223344",
+          body: "Anchored one",
+          quote: "opening",
+          anchor: { path: "body:nth-of-type(1) > p:nth-of-type(1)", tag: "p", text: "opening" },
+          name: "Priya P",
+          label: "Reviewer",
+          codeId: "a-12345678",
+          createdAt: "2026-07-01T10:00:00Z",
+        },
+        {
+          id: "m-55667788",
+          body: "Whole-page note",
+          label: "Reviewer",
+          codeId: "a-12345678",
+          createdAt: "2026-07-02T10:00:00Z",
+        },
+      ],
+    }),
+  );
+
+  const read = await call("/legacy/html-comments", { headers: { cookie } });
+  assert.equal(read.json.rev, 1);
+  assert.equal(read.json.threads.length, 2);
+  const [anchored, whole] = read.json.threads;
+  assert.equal(anchored.id, "m-11223344");
+  assert.equal(anchored.anchor.tag, "p");
+  assert.equal(anchored.comments[0].author, "Priya P");
+  assert.equal(anchored.comments[0].eid, "m-11223344");
+  assert.equal(whole.anchor.path, "", "an unanchored comment becomes an orphan thread");
+  assert.equal(whole.comments[0].body, "Whole-page note");
+
+  // The first write upgrades the object in place.
+  const upgraded = await call("/legacy/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: { baseRev: 1, threads: read.json.threads },
+  });
+  assert.equal(upgraded.status, 200);
+  assert.equal(upgraded.json.rev, 2);
+
+  await call("/api/pages/legacy", { method: "DELETE", token: OWNER });
 });
 
 await test("roles: folder codes carry their role onto member pages", async () => {
@@ -1686,15 +1872,35 @@ await test("roles: folder codes carry their role onto member pages", async () =>
   const cookie = cookieOf(await unlock("role-folder", "folder-edit-code"));
   const member = await call("/role-member", { headers: { cookie } });
   assert.equal(member.status, 200);
-  assert.ok(member.text.includes('id="comments"'), "folder role grants comments on members");
-  assert.ok(member.text.includes("/role-member/edit"), "folder role grants editing members");
-  const editor = await call("/role-member/edit", { headers: { cookie } });
-  assert.equal(editor.status, 200);
+  const boot = bootOf(member.text);
+  assert.equal(boot.role, "edit", "folder role reaches member pages");
+  assert.equal(boot.crumb.id, "role-folder", "the shell keeps the back-home crumb");
 
-  // Deleting a page also drops its comments object.
-  await postForm("/role-member/comments", { body: "folder session comment" }, { cookie });
+  const rev = (await call("/api/pages/role-member", { token: OWNER })).json.rev;
+  const saved = await call("/role-member/save", {
+    method: "POST",
+    headers: { cookie },
+    body: { markdown: "# member\n\nedited via folder code", baseRev: rev },
+  });
+  assert.equal(saved.status, 200);
+
+  // Deleting a page also drops its thread pool.
+  await call("/role-member/html-comments", {
+    method: "POST",
+    headers: { cookie },
+    body: {
+      baseRev: 0,
+      threads: [
+        {
+          id: "t3folk",
+          anchor: { path: "", tag: "", text: "" },
+          comments: [{ author: "Team", at: 1752570300000, body: "folder session comment" }],
+        },
+      ],
+    },
+  });
   assert.equal(
-    (await call("/api/pages/role-member/comments", { token: OWNER })).json.comments.length,
+    (await call("/api/pages/role-member/comments", { token: OWNER })).json.threads.length,
     1,
   );
   await call("/api/pages/role-member", { method: "DELETE", token: OWNER });
@@ -1703,8 +1909,11 @@ await test("roles: folder codes carry their role onto member pages", async () =>
     token: OWNER,
     body: { title: "Member", markdown: "# fresh", collection: { id: "role-folder", title: "Folder" } },
   });
-  const fresh = await call("/api/pages/role-member/comments", { token: OWNER });
-  assert.deepEqual(fresh.json.comments, [], "comments died with the page");
+  assert.deepEqual(
+    (await call("/api/pages/role-member/comments", { token: OWNER })).json.threads,
+    [],
+    "the pool died with the page",
+  );
 
   for (const id of ["role-member", "role-folder", "team-page"]) {
     await call(`/api/pages/${id}`, { method: "DELETE", token: OWNER });

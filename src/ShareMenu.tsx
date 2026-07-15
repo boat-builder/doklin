@@ -11,8 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AccessCodes from "./AccessCodes";
 import {
-  deletePageComment,
-  fetchPageComments,
+  deletePageThread,
+  fetchPageThreads,
   generateShareId,
   newConnectionId,
   normalizeEndpoint,
@@ -23,10 +23,10 @@ import {
   SHARE_ID_RE,
   ShareWorkerOutdatedError,
   type CollectionEntry,
-  type PageComment,
   type ShareConnection,
   type ShareEntry,
 } from "./share";
+import type { HtmlThread } from "./htmlComments";
 import Select from "./Select";
 
 export default function ShareMenu({
@@ -791,10 +791,11 @@ export default function ShareMenu({
   );
 }
 
-/* Comments visitors left on the public page (codes with the comment/edit
-   role). The backend is the source of truth — fetched on open, each row
-   deletable (moderation). Read-only here: replying happens where the
-   conversation lives, on the page itself. */
+/* The page's rendition comment threads — the pool web sessions and the
+   desktop rail both write into. The backend is the source of truth — fetched
+   on open, each thread deletable (moderation). Read-only here: replying
+   happens where the conversation lives, in the document's own comment rail
+   (or on the public page). */
 function WebComments({
   connection,
   pageId,
@@ -806,19 +807,19 @@ function WebComments({
 }) {
   const [state, setState] = useState<
     | { kind: "loading" }
-    | { kind: "ready"; comments: PageComment[] }
+    | { kind: "ready"; threads: HtmlThread[] }
     | { kind: "outdated" }
     | { kind: "error"; message: string }
   >({ kind: "loading" });
-  const [busy, setBusy] = useState<string | null>(null); // comment id being deleted
+  const [busy, setBusy] = useState<string | null>(null); // thread id being deleted
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const comments = await fetchPageComments(connection, pageId);
-        if (!cancelled) setState({ kind: "ready", comments });
+        const snap = await fetchPageThreads(connection, pageId);
+        if (!cancelled) setState({ kind: "ready", threads: snap.threads });
       } catch (e) {
         if (cancelled) return;
         if (e instanceof ShareWorkerOutdatedError) setState({ kind: "outdated" });
@@ -831,13 +832,13 @@ function WebComments({
   }, [connection, pageId]);
 
   const remove = useCallback(
-    async (commentId: string) => {
+    async (threadId: string) => {
       if (busy || state.kind !== "ready") return;
-      setBusy(commentId);
+      setBusy(threadId);
       setError(null);
       try {
-        await deletePageComment(connection, pageId, commentId);
-        setState({ kind: "ready", comments: state.comments.filter((c) => c.id !== commentId) });
+        await deletePageThread(connection, pageId, threadId);
+        setState({ kind: "ready", threads: state.threads.filter((t) => t.id !== threadId) });
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -875,39 +876,51 @@ function WebComments({
 
   return (
     <div className="share-web-comments">
-      {state.comments.length === 0 ? (
+      {state.threads.length === 0 ? (
         <div className="share-note">
           No comments yet. Visitors whose access code can comment (or edit)
-          leave them right on the public page.
+          leave them right on the public page; your own show up here once the
+          page syncs.
         </div>
       ) : (
         <ul className="share-comment-list">
-          {state.comments.map((c) => (
-            <li key={c.id} className="share-comment">
-              <div className="share-comment-head">
-                <span className="share-comment-author" title={c.label}>
-                  {c.name || c.label}
-                  {c.name && c.label && c.label !== c.name && (
-                    <span className="share-comment-via"> · {c.label}</span>
+          {state.threads.map((t) => {
+            const opener = t.comments[0];
+            const replies = t.comments.slice(1);
+            return (
+              <li key={t.id} className="share-comment">
+                <div className="share-comment-head">
+                  <span className="share-comment-author" title={opener?.label ?? ""}>
+                    {opener?.author || opener?.label || "Someone"}
+                    {opener?.label && opener.label !== opener.author && (
+                      <span className="share-comment-via"> · {opener.label}</span>
+                    )}
+                  </span>
+                  {opener != null && opener.at > 0 && (
+                    <span className="share-comment-date">{commentDateLabel(opener.at)}</span>
                   )}
-                </span>
-                {c.createdAt && (
-                  <span className="share-comment-date">{commentDateLabel(c.createdAt)}</span>
-                )}
-                <button
-                  className="share-access-remove"
-                  onClick={() => void remove(c.id)}
-                  disabled={busy != null}
-                  title="Delete this comment"
-                  aria-label="Delete this comment"
-                >
-                  <XIcon />
-                </button>
-              </div>
-              {c.quote && <div className="share-comment-quote">{c.quote}</div>}
-              <div className="share-comment-body">{c.body}</div>
-            </li>
-          ))}
+                  <button
+                    className="share-access-remove"
+                    onClick={() => void remove(t.id)}
+                    disabled={busy != null}
+                    title="Delete this thread"
+                    aria-label="Delete this thread"
+                  >
+                    <XIcon />
+                  </button>
+                </div>
+                {t.anchor.text && <div className="share-comment-quote">{t.anchor.text}</div>}
+                <div className="share-comment-body">{opener?.body ?? ""}</div>
+                {replies.map((r, i) => (
+                  <div key={r.eid ?? i} className="share-comment-reply">
+                    <span className="share-comment-author">{r.author || r.label || "Someone"}</span>
+                    {" — "}
+                    {r.body}
+                  </div>
+                ))}
+              </li>
+            );
+          })}
         </ul>
       )}
       {error && <div className="share-error">{error}</div>}
@@ -915,8 +928,8 @@ function WebComments({
   );
 }
 
-function commentDateLabel(iso: string): string {
-  const d = new Date(iso);
+function commentDateLabel(at: number): string {
+  const d = new Date(at);
   return Number.isNaN(d.getTime())
     ? ""
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });

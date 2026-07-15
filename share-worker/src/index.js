@@ -26,12 +26,23 @@
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //   POST /<id>/unlock  the gate form target: exchanges a correct access code
 //                      for the share's cookie, then 303s back to the page
-//   GET  /<id>/edit    the web editor (unlocked sessions whose code can edit)
-//   POST /<id>/edit    save a web edit (form body markdown + baseRev; a stale
-//                      baseRev re-renders the editor instead of clobbering)
-//   POST /<id>/comments                 add a comment (codes that can comment)
-//   POST /<id>/comments/<cid>/delete    remove a comment posted by this
-//                                       session's own code
+//   GET /__web/<v>/app.js|css   the app shell's compiled frontend (public,
+//                      immutable — embedded in this worker at bundle time)
+//   POST /<id>/save    the app shell's autosave (JSON {markdown, baseRev});
+//                      edit-role sessions save like the desktop does, and
+//                      comment-role sessions use the same endpoint for their
+//                      comment work under a content-equivalence guard —
+//                      markdown comments ARE the markdown (CriticMarkup)
+//   GET/POST /<id>/html-comments   the rendition's comment-thread pool for
+//                      unlocked comment/edit sessions ({rev, threads},
+//                      rev-guarded whole-list swaps)
+//
+// Sessions whose code carries the comment or edit role don't get the static
+// page at /<id> at all: they get the app shell — the desktop app's own
+// editor and comment rail, compiled for the browser — so a shared document
+// looks and behaves exactly like it does on the owner's machine. View-role
+// sessions and unprotected shares get the classic read-only pages with every
+// editorial comment stripped.
 //
 // Visitor access codes (version 7): a share can be protected with NAMED codes
 // ("Acme team" / "sunset-marble-fig"), each individually revocable. The codes
@@ -147,7 +158,7 @@
 
 import { marked } from "../vendor/marked.esm.js";
 import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
-import { injectCommentBridge, SHELL_COMMENTS_SCRIPT } from "./webComments.js";
+import { WEB_APP } from "./webAssets.js";
 
 // Bumped when the API grows; GET /api/meta reports it. 1 = pages+collections
 // (never had /api/meta, so the app infers it from a 404), 2 = site config +
@@ -158,7 +169,7 @@ import { injectCommentBridge, SHELL_COMMENTS_SCRIPT } from "./webComments.js";
 // 8 = code roles (view/comment/edit) + web comments + the web editor,
 // 9 = comments on html renditions (the html view of a pair grows the same
 // comments section, and comments can anchor to an element of the rendition).
-const WORKER_VERSION = 9;
+const WORKER_VERSION = 10;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -174,6 +185,11 @@ const WORKER_FEATURES = [
   "web-comments",
   "web-edit",
   "html-comments",
+  // Version 10: comment/edit sessions get the app shell — the desktop's own
+  // editor + comment rail compiled for the browser — instead of the old
+  // bottom-of-page comment list and raw-markdown textarea. Comment threads
+  // are shared between the desktop and the web in both directions.
+  "web-app",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -233,8 +249,8 @@ const UNLOCK_RATE_LIMIT = 10; // code attempts per IP per minute (per isolate)
    form posts, so they work without JS like the gate does. */
 const COMMENT_ID_RE = /^m-[a-f0-9]{8}$/;
 const MAX_COMMENT_BODY = 4000;
-const MAX_COMMENT_QUOTE = 300;
 const MAX_COMMENTS = 500;
+const MAX_THREAD_ENTRIES = 100;
 // An anchored comment points at an element of the html rendition: a
 // structural selector plus the element's tag and leading text (the
 // re-anchoring fallback). Byte-compatible with the app's sidecar anchors
@@ -308,22 +324,29 @@ export default {
       return handleUnlock(request, env, unlockMatch[1], url);
     }
 
-    // Comment forms (unlocked sessions whose code can comment) — POSTs, like
-    // the gate.
-    const commentAddMatch = path.match(/^\/([a-z0-9-]{1,64})\/comments$/);
-    if (commentAddMatch && validId(commentAddMatch[1])) {
-      return handleCommentAdd(request, env, commentAddMatch[1], url);
-    }
-    const commentDelMatch = path.match(/^\/([a-z0-9-]{1,64})\/comments\/(m-[a-f0-9]{8})\/delete$/);
-    if (commentDelMatch && validId(commentDelMatch[1])) {
-      return handleCommentDelete(request, env, commentDelMatch[1], commentDelMatch[2], url);
+    // The app shell's compiled assets (content-tagged so they cache forever;
+    // no page data inside — just the frontend the shell pages load).
+    const assetMatch = path.match(/^\/__web\/([a-z0-9]+)\/app\.(js|css)$/);
+    if (assetMatch) {
+      return serveWebAsset(assetMatch[1], assetMatch[2]);
     }
 
-    // The web editor (unlocked sessions whose code can edit): GET renders it,
-    // POST saves.
-    const editMatch = path.match(/^\/([a-z0-9-]{1,64})\/edit$/);
-    if (editMatch && validId(editMatch[1])) {
-      return handleEdit(request, env, editMatch[1], url);
+    // The app shell's save + comment endpoints (unlocked sessions whose code
+    // can comment or edit) — JSON, same-origin.
+    const saveMatch = path.match(/^\/([a-z0-9-]{1,64})\/save$/);
+    if (saveMatch && validId(saveMatch[1])) {
+      return handleSave(request, env, saveMatch[1], url);
+    }
+    const threadsMatch = path.match(/^\/([a-z0-9-]{1,64})\/html-comments$/);
+    if (threadsMatch && validId(threadsMatch[1])) {
+      return handleHtmlComments(request, env, threadsMatch[1], url);
+    }
+
+    // The old web-editor and comment-form routes (versions 8–9). The shell is
+    // the editor now; send stale links and open tabs back to the page.
+    const legacyMatch = path.match(/^\/([a-z0-9-]{1,64})\/(edit|comments(?:\/.*)?)$/);
+    if (legacyMatch && validId(legacyMatch[1])) {
+      return new Response(null, { status: 303, headers: { location: `/${legacyMatch[1]}` } });
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -729,8 +752,10 @@ async function handleApi(request, env, url, ctx) {
     });
   }
 
-  // Visitor comments, owner side: read them all, moderate one, or clear the
-  // page's slate. Writes CAS the comments object like every shared record.
+  // The page's html-rendition comment threads, owner side — the same pool
+  // browser sessions read and write through /<id>/html-comments. The app
+  // pushes its local sidecar in (PUT, rev-guarded) and pulls web additions
+  // back out (GET); DELETE moderates a thread away or clears the slate.
   if (parts[3] === "comments" && (parts.length === 4 || parts.length === 5)) {
     const existing = await env.PAGES.get(pageKey);
     if (!existing) return json({ error: "not found" }, 404);
@@ -739,7 +764,44 @@ async function handleApi(request, env, url, ctx) {
     }
     if (parts.length === 4) {
       if (request.method === "GET") {
-        return json({ id, comments: await readComments(env, id) });
+        const state = await readThreadState(env, id);
+        // `comments` is a flat back-compat view (one row per thread opener):
+        // a desktop app from before version 10 reads that field and shows the
+        // moderation list, even though it can't render the thread structure.
+        const comments = state.threads.map((t) => {
+          const opener = t.comments[0] ?? { body: "", author: "", at: 0 };
+          return {
+            id: t.id,
+            body: opener.body,
+            ...(t.anchor?.text ? { quote: t.anchor.text } : {}),
+            ...(t.anchor?.path ? { anchor: t.anchor } : {}),
+            ...(opener.author ? { name: opener.author } : {}),
+            label: opener.label ?? "",
+            codeId: opener.codeId ?? "",
+            createdAt: opener.at ? new Date(opener.at).toISOString() : null,
+          };
+        });
+        return json({ id, rev: state.rev, threads: state.threads, comments });
+      }
+      if (request.method === "PUT") {
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ error: "invalid json body" }, 400);
+        }
+        const threads = sanitizeThreads(body?.threads);
+        if (threads === null) return json({ error: "threads must be an array" }, 400);
+        const baseRev = Number(body?.baseRev);
+        if (!Number.isInteger(baseRev) || baseRev < 0) {
+          return json({ error: "baseRev must be a non-negative integer" }, 400);
+        }
+        const result = await swapThreadState(env, id, baseRev, threads, null);
+        if (result.kind === "conflict") {
+          return json({ error: "comments changed", rev: result.rev, threads: result.threads }, 409);
+        }
+        if (result.kind === "retry") return json({ error: "conflict, retry" }, 409);
+        return json({ id, rev: result.rev, threads: result.threads });
       }
       if (request.method === "DELETE") {
         await env.PAGES.delete(commentsKey(id));
@@ -748,12 +810,11 @@ async function handleApi(request, env, url, ctx) {
       return json({ error: "method not allowed" }, 405);
     }
     if (request.method !== "DELETE") return json({ error: "method not allowed" }, 405);
-    const cid = parts[4];
-    if (!COMMENT_ID_RE.test(cid)) return json({ error: "no such comment" }, 404);
-    const removed = await removeComment(env, id, cid, null);
-    if (removed === "missing") return json({ error: "no such comment" }, 404);
+    const tid = parts[4];
+    const removed = await removeThread(env, id, tid);
+    if (removed === "missing") return json({ error: "no such thread" }, 404);
     if (removed === "conflict") return json({ error: "conflict, retry" }, 409);
-    return json({ id: cid, deleted: true });
+    return json({ id: tid, deleted: true });
   }
 
   if (parts[3] === "access") {
@@ -900,6 +961,11 @@ function accessSummary(id, codes) {
 
 async function listPages(env, auth) {
   const pages = [];
+  // The comment pools live under the same prefix (pages/<id>.comments.json),
+  // so one pass also yields each page's comment revision — the app's
+  // reconcile uses it to spot pools with web additions to pull, without a
+  // request per page. 0 = "pool exists, revision unknown" (a pre-v10 object).
+  const commentRevs = new Map();
   let cursor;
   do {
     const batch = await env.PAGES.list({
@@ -908,6 +974,15 @@ async function listPages(env, auth) {
       include: ["customMetadata"],
     });
     for (const obj of batch.objects) {
+      const c = obj.key.match(/^pages\/([a-z0-9-]+)\.comments\.json$/);
+      if (c) {
+        // A v2 pool always stamps its rev; an object without one is a pre-v10
+        // flat pool, which readThreadState surfaces as rev 1 — report the
+        // same, so a migrated page doesn't look perpetually out of sync.
+        const rev = Number(obj.customMetadata?.rev);
+        commentRevs.set(c[1], Number.isInteger(rev) && rev > 0 ? rev : 1);
+        continue;
+      }
       const m = obj.key.match(/^pages\/([a-z0-9-]+)\.json$/);
       if (!m) continue;
       // A member's view of the backend is their own pages plus every page
@@ -941,6 +1016,11 @@ async function listPages(env, auth) {
     }
     cursor = batch.truncated ? batch.cursor : undefined;
   } while (cursor);
+  // R2 lists keys in order, so a pool's entry may arrive after its page —
+  // attach the revisions once the walk is complete.
+  for (const p of pages) {
+    p.commentsRev = commentRevs.has(p.id) ? commentRevs.get(p.id) : null;
+  }
   return json({ pages });
 }
 
@@ -2238,96 +2318,255 @@ const GATE_CSS = `
 
    Both surfaces exist only on protected shares: the unlock cookie names the
    code that opened the door, the code's role says what its holder may do.
-   Everything is a plain form post + 303 (like the gate), so it works without
-   JS. Comments live in pages/<id>.comments.json — their own object, so the
-   app's content pushes and visitor comments never race each other. */
+
+   Version 10 reshaped both around the app shell (the desktop's own editor
+   compiled for the browser — see appShellPage):
+
+   - Markdown comments need no store of their own: they ARE the markdown
+     (CriticMarkup), so they ride /<id>/save like any edit. What separates a
+     comment-role session from an edit-role one is the content-equivalence
+     guard in handleSave — its saves must leave the stripped document
+     unchanged.
+   - Html-rendition comments live in pages/<id>.comments.json as THREADS —
+     the exact shape of the app's local sidecar ({id, anchor, comments}),
+     plus per-entry provenance this worker stamps (eid + which access code
+     wrote it). The object is a small rev-guarded document of its own:
+     readers get {rev, threads}, writers swap the whole list against the rev
+     they read (CAS on the R2 etag underneath), and a lost race hands back
+     the current state to rebase onto. The desktop app pushes its sidecar in
+     and merges web additions back out through the owner API's mirror of the
+     same contract. */
 
 const commentsKey = (id) => `pages/${id}.comments.json`;
 
 const commentAttempts = new Map(); // ip -> [timestamps]
 const editAttempts = new Map(); // ip -> [timestamps]
 
-// The stored comment list, shape-checked — same contract as sanitizeAccess:
-// a corrupt object reads as empty everywhere at once instead of crashing.
-function sanitizeComments(raw) {
-  if (!raw || typeof raw !== "object" || !Array.isArray(raw.comments)) return [];
+const THREAD_ID_RE = /^[a-z0-9][a-z0-9_-]{2,24}$/;
+const ENTRY_ID_RE = /^[em]-[a-f0-9]{4,16}$/;
+
+// One thread list, shape-checked — same contract as sanitizeAccess: a corrupt
+// object reads as empty everywhere at once instead of crashing. Null means
+// "not even an array" (a caller's 400), [] means "nothing valid".
+function sanitizeThreads(raw) {
+  if (!Array.isArray(raw)) return null;
   const out = [];
-  for (const c of raw.comments) {
-    if (!c || typeof c !== "object") continue;
-    if (typeof c.id !== "string" || !COMMENT_ID_RE.test(c.id)) continue;
-    if (typeof c.body !== "string" || c.body.length === 0) continue;
-    if (out.some((seen) => seen.id === c.id)) continue;
-    const anchor = c.anchor ? sanitizeAnchor(c.anchor.path, c.anchor.tag, c.anchor.text) : null;
-    out.push({
-      id: c.id,
-      body: c.body.slice(0, MAX_COMMENT_BODY),
-      ...(typeof c.quote === "string" && c.quote
-        ? { quote: c.quote.slice(0, MAX_COMMENT_QUOTE) }
-        : {}),
-      ...(anchor ? { anchor } : {}),
-      ...(typeof c.name === "string" && c.name ? { name: c.name.slice(0, MAX_NAME_LEN) } : {}),
-      label: typeof c.label === "string" ? c.label.slice(0, MAX_NAME_LEN) : "",
-      codeId: typeof c.codeId === "string" ? c.codeId : "",
-      ...(typeof c.createdAt === "string" ? { createdAt: c.createdAt } : {}),
-    });
+  const seen = new Set();
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    if (typeof t.id !== "string" || !THREAD_ID_RE.test(t.id) || seen.has(t.id)) continue;
+    if (!Array.isArray(t.comments) || t.comments.length === 0) continue;
+    const anchor = t.anchor
+      ? sanitizeAnchor(t.anchor.path, t.anchor.tag, t.anchor.text)
+      : null;
+    const comments = [];
+    for (const e of t.comments) {
+      if (!e || typeof e !== "object") continue;
+      if (typeof e.body !== "string") continue;
+      const at = Number(e.at);
+      comments.push({
+        author: typeof e.author === "string" ? e.author.slice(0, MAX_NAME_LEN) : "",
+        at: Number.isFinite(at) && at > 0 ? Math.round(at) : 0,
+        // Empty bodies stay: a just-opened draft is pushed before it's typed
+        // into (the desktop sidecar holds drafts the same way).
+        body: e.body.slice(0, MAX_COMMENT_BODY),
+        ...(typeof e.eid === "string" && ENTRY_ID_RE.test(e.eid) ? { eid: e.eid } : {}),
+        ...(typeof e.codeId === "string" && e.codeId
+          ? { codeId: e.codeId.slice(0, 32) }
+          : {}),
+        ...(typeof e.label === "string" && e.label
+          ? { label: e.label.slice(0, MAX_NAME_LEN) }
+          : {}),
+      });
+      if (comments.length >= MAX_THREAD_ENTRIES) break;
+    }
+    if (comments.length === 0) continue;
+    seen.add(t.id);
+    // A thread that lost its anchor (or a migrated whole-page comment) keeps
+    // an empty one — the rail shows it as orphaned instead of dropping it.
+    out.push({ id: t.id, anchor: anchor ?? { path: "", tag: "", text: "" }, comments });
     if (out.length >= MAX_COMMENTS) break;
   }
   return out;
 }
 
-async function readComments(env, id) {
-  const obj = await env.PAGES.get(commentsKey(id));
-  if (!obj) return [];
-  return sanitizeComments(await obj.json().catch(() => null));
+// Pre-v10 pools stored a flat list ({comments: [{id, body, quote?, anchor?,
+// name?, label, codeId, createdAt}]}). Read them as one thread per comment so
+// nothing a visitor wrote disappears in the upgrade; unanchored ones surface
+// as orphans (empty anchor), quotes become the anchor text.
+function migrateFlatComments(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.comments)) return [];
+  const threads = [];
+  for (const c of raw.comments) {
+    if (!c || typeof c !== "object") continue;
+    if (typeof c.id !== "string" || !COMMENT_ID_RE.test(c.id)) continue;
+    if (typeof c.body !== "string" || c.body.length === 0) continue;
+    if (threads.some((t) => t.id === c.id)) continue;
+    const anchor = c.anchor ? sanitizeAnchor(c.anchor.path, c.anchor.tag, c.anchor.text) : null;
+    const at = typeof c.createdAt === "string" ? Date.parse(c.createdAt) : NaN;
+    threads.push({
+      id: c.id,
+      anchor:
+        anchor ??
+        {
+          path: "",
+          tag: "",
+          text: typeof c.quote === "string" ? c.quote.slice(0, MAX_ANCHOR_TEXT) : "",
+        },
+      comments: [
+        {
+          author:
+            (typeof c.name === "string" && c.name) ||
+            (typeof c.label === "string" && c.label) ||
+            "",
+          at: Number.isFinite(at) ? at : 0,
+          body: c.body.slice(0, MAX_COMMENT_BODY),
+          eid: c.id,
+          ...(typeof c.codeId === "string" && c.codeId ? { codeId: c.codeId } : {}),
+          ...(typeof c.label === "string" && c.label ? { label: c.label } : {}),
+        },
+      ],
+    });
+    if (threads.length >= MAX_COMMENTS) break;
+  }
+  return threads;
 }
 
-// Remove one comment, CAS-retried. `codeId` scopes the delete to comments
-// that code posted (the public path); null removes regardless (the owner's
-// moderation path). Returns "ok" | "missing" | "forbidden" | "conflict".
-async function removeComment(env, id, cid, codeId) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const existing = await env.PAGES.get(commentsKey(id));
-    const current = existing ? sanitizeComments(await existing.json().catch(() => null)) : [];
-    const target = current.find((c) => c.id === cid);
-    if (!target) return "missing";
-    if (codeId !== null && target.codeId !== codeId) return "forbidden";
-    const next = current.filter((c) => c.id !== cid);
-    const put = await env.PAGES.put(commentsKey(id), JSON.stringify({ comments: next }), {
-      httpMetadata: { contentType: "application/json" },
-      onlyIf: { etagMatches: existing.etag },
-    });
-    if (put) return "ok";
+// {rev, threads, etag} for a page's pool. rev 0 = no pool yet; a legacy flat
+// pool reads as rev 1 (any number a client can hand back — the swap below
+// checks equality, not history).
+async function readThreadState(env, id) {
+  const obj = await env.PAGES.get(commentsKey(id));
+  if (!obj) return { rev: 0, threads: [], etag: null };
+  const data = await obj.json().catch(() => null);
+  if (data && typeof data === "object" && data.v === 2) {
+    const rev = Number(data.rev);
+    return {
+      rev: Number.isInteger(rev) && rev > 0 ? rev : 1,
+      threads: sanitizeThreads(data.threads) ?? [],
+      etag: obj.etag,
+    };
+  }
+  return { rev: 1, threads: migrateFlatComments(data), etag: obj.etag };
+}
+
+// An entry's identity for cross-copy matching: the worker-stamped eid when it
+// has one, else author + creation time (stable across body edits — editing
+// keeps `at`). The web client and the desktop app key entries the same way.
+const entryKeyOf = (e) => e.eid ?? `${e.author}|${e.at}`;
+
+// What survives a whole-list swap: an entry that already exists keeps its
+// stored identity (author, time, provenance — a pushed copy can't reassign
+// someone else's words), and only its body follows the incoming copy. A NEW
+// entry gets an eid and — when the write comes from a browser session — that
+// session's code stamped on it. Owner pushes (session null) keep whatever
+// provenance the entries carried, since they're round-tripping a pull.
+function stampThreads(currentThreads, incomingThreads, session) {
+  const byThread = new Map(
+    currentThreads.map((t) => [t.id, new Map(t.comments.map((e) => [entryKeyOf(e), e]))]),
+  );
+  return incomingThreads.map((t) => ({
+    ...t,
+    comments: t.comments.map((e) => {
+      const stored = byThread.get(t.id)?.get(entryKeyOf(e));
+      if (stored) return { ...stored, body: e.body };
+      return {
+        ...e,
+        eid: e.eid ?? `e-${randomHex(4)}`,
+        ...(session ? { codeId: session.codeId, label: session.label } : {}),
+      };
+    }),
+  }));
+}
+
+// The R2 pre-condition for a pool write: match the etag we read, or — when
+// the object didn't exist yet — require that it STILL doesn't (If-None-Match:
+// *), so two writers racing to create the first pool can't both win (one
+// would silently overwrite the other's comments). Both branches make a lost
+// race re-read against a now-existing object.
+const poolPutCondition = (etag) =>
+  etag ? { etagMatches: etag } : { etagDoesNotMatch: "*" };
+
+async function writePool(env, id, rev, threads, etag) {
+  return env.PAGES.put(commentsKey(id), JSON.stringify({ v: 2, rev, threads }), {
+    httpMetadata: { contentType: "application/json" },
+    customMetadata: { rev: String(rev) },
+    onlyIf: poolPutCondition(etag),
+  });
+}
+
+// Swap the pool wholesale, rev-guarded: baseRev must equal the stored rev,
+// and the put is conditional on the object's etag underneath (or its absence).
+// A mismatch answers with the current state so the writer can rebase and retry.
+async function swapThreadState(env, id, baseRev, incomingThreads, session) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const state = await readThreadState(env, id);
+    if (state.rev !== baseRev) {
+      return { kind: "conflict", rev: state.rev, threads: state.threads };
+    }
+    const threads = stampThreads(state.threads, incomingThreads, session);
+    const rev = state.rev + 1;
+    if (await writePool(env, id, rev, threads, state.etag)) return { kind: "ok", rev, threads };
+    // Lost the create/etag race — re-read; the rev check above turns the
+    // winner's write into the conflict answer.
+  }
+  return { kind: "retry" };
+}
+
+// Remove one thread (the owner's moderation path), CAS-retried.
+async function removeThread(env, id, tid) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const state = await readThreadState(env, id);
+    if (!state.threads.some((t) => t.id === tid)) return "missing";
+    const threads = state.threads.filter((t) => t.id !== tid);
+    if (await writePool(env, id, state.rev + 1, threads, state.etag)) return "ok";
   }
   return "conflict";
 }
 
-// Resolve the {data, gate, session} triple behind a public write — answering
-// with the right page (404 / gate / a plain-language 403) when a layer says
-// no. `need` is the role floor: "comment" (comment or edit) or "edit".
-async function publicWriteContext(request, env, id, url, need, nextPath) {
+// Resolve the {data, gate, session} triple behind a public write — the
+// page/gate/role resolution for the app shell's fetch calls, answered in the
+// caller's own language (status + {error}), not HTML pages. Also the CSRF
+// line: these
+// endpoints change state on the strength of a cookie, so the body must be
+// declared JSON (cross-site senders can't do that without a preflight this
+// worker never grants) and any Origin header must be our own.
+async function publicJsonContext(request, env, id, url, need) {
+  if (request.method !== "POST" && request.method !== "GET") {
+    return { error: json({ error: "method not allowed" }, 405) };
+  }
+  if (request.method === "POST") {
+    const ct = request.headers.get("content-type") || "";
+    if (!ct.toLowerCase().includes("application/json")) {
+      return { error: json({ error: "body must be application/json" }, 415) };
+    }
+    const origin = request.headers.get("origin");
+    if (origin && origin !== url.origin) {
+      return { error: json({ error: "cross-origin writes are not allowed" }, 403) };
+    }
+  }
   const obj = await env.PAGES.get(`pages/${id}.json`);
-  if (!obj) return { error: notFoundPage() };
+  if (!obj) return { error: json({ error: "not found" }, 404) };
   const data = await obj.json().catch(() => null);
   if (!data || typeof data !== "object" || data.kind === "collection") {
-    return { error: notFoundPage() };
+    return { error: json({ error: "not found" }, 404) };
   }
   const gate = await accessGateFor(env, id, data);
   if (!gate) {
-    // No codes, no named identities: a public share stays read-only.
-    return {
-      error: shellPage("Read-only page", "This page doesn't take changes from the web.", 403),
-    };
+    return { error: json({ error: "this page doesn't take changes from the web" }, 403) };
   }
   const session = await gateSession(request, env, gate);
-  if (!session) return { error: gatePage(gate.gateId, safeNext(nextPath, gate.gateId), url) };
+  if (!session) return { error: json({ error: "locked — reload the page to unlock" }, 401) };
   const allowed = need === "edit" ? session.role === "edit" : session.role !== "view";
   if (!allowed) {
     return {
-      error: shellPage(
-        "Not allowed",
-        need === "edit"
-          ? "Your access code can read this page, not edit it."
-          : "Your access code can read this page, not comment on it.",
+      error: json(
+        {
+          error:
+            need === "edit"
+              ? "your access code can read this page, not edit it"
+              : "your access code can read this page, not comment on it",
+        },
         403,
       ),
     };
@@ -2335,107 +2574,192 @@ async function publicWriteContext(request, env, id, url, need, nextPath) {
   return { data, gate, session };
 }
 
-// Where a comment form returns to: the view the visitor posted from. Both
-// views of a pair render the comments section now; the hidden `view` field
-// says which one the form was on ("html" → the default rendition view,
-// anything else → the markdown view when the page has both).
-function commentsReturnPath(data, id, fromView) {
-  const both =
-    typeof data.markdown === "string" && typeof data.html === "string" && data.html.length > 0;
-  return both && fromView !== "html" ? `/${id}?v=md#comments` : `/${id}#comments`;
+// Everything a view-role or public reader can observe about a page's markdown:
+// the rendered reading view AND the derived description (which feeds the
+// <meta> / og:description and thus link previews). A comment-only save must
+// leave ALL of this untouched — comparing the rendered body alone would miss
+// markup that renders invisibly yet still surfaces in the description (a link
+// *reference* definition, say: `[text]: url` renders to nothing but its text
+// lands in deriveDescription), which a comment-role session could use to plant
+// content on the public page.
+function publicProjection(md) {
+  const clean = stripComments(md);
+  return `${deriveDescription(clean)} ${marked.parse(clean, {
+    gfm: true,
+    breaks: false,
+    async: false,
+  })}`;
 }
 
-// POST /<id>/comments — add a comment (codes with the comment or edit role).
-async function handleCommentAdd(request, env, id, url) {
-  if (request.method !== "POST") {
-    return new Response(null, { status: 303, headers: { location: `/${id}` } });
-  }
-  const ctx = await publicWriteContext(request, env, id, url, "comment", `/${id}`);
-  if (ctx.error) return ctx.error;
-  if (rateLimited(commentAttempts, request, COMMENT_RATE_LIMIT)) {
-    return shellPage("Slow down", "Too many comments at once — wait a minute, then try again.", 429);
-  }
-  let form;
+// Are two markdown documents the same DOCUMENT once editorial comments are
+// stripped? Exact string equality first (the common case); failing that,
+// equal public projections — the app shell's editor re-serializes markdown in
+// its own normalized style (list markers, spacing), so a comment-role session
+// must not be locked out by cosmetic differences a reader can't see, but it
+// also must not be able to smuggle anything a reader CAN see.
+function contentEquivalent(a, b) {
+  const trim = (s) => stripComments(s).replace(/[ \t]+$/gm, "").trim();
+  if (trim(a) === trim(b)) return true;
   try {
-    form = await request.formData();
+    return publicProjection(a) === publicProjection(b);
   } catch {
-    return shellPage("That didn't work", "The comment didn't come through — go back and try again.", 400);
+    return false;
   }
-  const body = String(form.get("body") ?? "").replace(/\r\n?/g, "\n").trim();
-  if (!body) return shellPage("Empty comment", "Write something first, then post.", 400);
-  if (body.length > MAX_COMMENT_BODY) {
-    return shellPage("Too long", `Comments are capped at ${MAX_COMMENT_BODY} characters.`, 413);
-  }
-  const name = String(form.get("name") ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NAME_LEN);
-  const quote = String(form.get("quote") ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_COMMENT_QUOTE);
-  // An element anchor, when the html view's picker filled the fields. A
-  // malformed anchor never sinks the comment — it just posts unanchored.
-  const anchor = sanitizeAnchor(
-    String(form.get("anchor_path") ?? ""),
-    String(form.get("anchor_tag") ?? ""),
-    String(form.get("anchor_text") ?? ""),
-  );
-  const fromView = String(form.get("view") ?? "") === "html" ? "html" : "md";
-
-  const entry = {
-    id: `m-${randomHex(4)}`,
-    body,
-    ...(quote ? { quote } : {}),
-    ...(anchor ? { anchor } : {}),
-    ...(name ? { name } : {}),
-    label: ctx.session.label,
-    codeId: ctx.session.codeId,
-    createdAt: new Date().toISOString(),
-  };
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const existing = await env.PAGES.get(commentsKey(id));
-    const current = existing ? sanitizeComments(await existing.json().catch(() => null)) : [];
-    if (current.length >= MAX_COMMENTS) {
-      return shellPage("Comments are full", "This page has reached its comment limit.", 409);
-    }
-    const put = await env.PAGES.put(
-      commentsKey(id),
-      JSON.stringify({ comments: [...current, entry] }),
-      {
-        httpMetadata: { contentType: "application/json" },
-        ...(existing ? { onlyIf: { etagMatches: existing.etag } } : {}),
-      },
-    );
-    if (put) {
-      return new Response(null, {
-        status: 303,
-        headers: { location: commentsReturnPath(ctx.data, id, fromView) },
-      });
-    }
-    // Lost a race with another comment — re-read and re-append.
-  }
-  return shellPage("Try again", "Two comments landed at once — go back and post again.", 409);
 }
 
-// POST /<id>/comments/<cid>/delete — a session may remove its own code's
-// comments; everything else is the owner's moderation API.
-async function handleCommentDelete(request, env, id, cid, url) {
-  if (request.method !== "POST") {
-    return new Response(null, { status: 303, headers: { location: `/${id}` } });
-  }
-  const ctx = await publicWriteContext(request, env, id, url, "comment", `/${id}`);
+// POST /<id>/save — the app shell's autosave. Edit-role sessions save the
+// document like the desktop does (rev-guarded, retitles on a new lead H1,
+// stales the rendition); comment-role sessions use the SAME endpoint for
+// their comment work — markdown comments are CriticMarkup in the document —
+// under the guard that their save leaves the stripped content unchanged.
+async function handleSave(request, env, id, url) {
+  const ctx = await publicJsonContext(request, env, id, url, "comment");
   if (ctx.error) return ctx.error;
-  const form = await request.formData().catch(() => null);
-  const fromView = String(form?.get("view") ?? "") === "html" ? "html" : "md";
-  const removed = await removeComment(env, id, cid, ctx.session.codeId);
-  if (removed === "forbidden") {
-    return shellPage("Not yours", "Only the code that posted a comment can remove it here.", 403);
+  if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+  const { session } = ctx;
+  if (rateLimited(editAttempts, request, EDIT_RATE_LIMIT)) {
+    return json({ error: "too many saves at once — wait a minute" }, 429);
   }
-  if (removed === "conflict") {
-    return shellPage("Try again", "Something raced that delete — go back and retry.", 409);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid json body" }, 400);
   }
-  // "missing" = already gone (double-click); the outcome stands either way.
-  return new Response(null, {
-    status: 303,
-    headers: { location: commentsReturnPath(ctx.data, id, fromView) },
+  const markdown =
+    typeof body?.markdown === "string" ? body.markdown.replace(/\r\n?/g, "\n") : null;
+  const baseRev = Number(body?.baseRev);
+  const force = body?.force === true && session.role === "edit";
+  if (markdown === null) return json({ error: "markdown must be a string" }, 400);
+  if (markdown.length > MAX_MARKDOWN_BYTES) return json({ error: "markdown too large" }, 413);
+  if (!Number.isInteger(baseRev) || baseRev < 1) {
+    return json({ error: "baseRev must be a positive integer" }, 400);
+  }
+  if (stripComments(markdown).trim().length === 0) {
+    return json({ error: "the document can't be emptied from here" }, 400);
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await env.PAGES.get(`pages/${id}.json`);
+    if (!existing) return json({ error: "not found" }, 404);
+    const record = await existing.json().catch(() => null);
+    if (!record || typeof record !== "object" || typeof record.markdown !== "string") {
+      return json({ error: "this page has no markdown document" }, 404);
+    }
+    const currentRev = pageRev(record);
+    if (currentRev !== baseRev && !force) {
+      const by = publicWebEdit(record)?.by ?? "";
+      return json({ error: "the page changed", rev: currentRev, by }, 409);
+    }
+    const contentChanged = !contentEquivalent(markdown, record.markdown);
+    if (contentChanged && session.role !== "edit") {
+      return json(
+        { error: "your access code can comment on this page, not change its text" },
+        403,
+      );
+    }
+    const recordHasHtml = typeof record.html === "string" && record.html.length > 0;
+    const now = new Date().toISOString();
+    const title = contentChanged
+      ? (markdownLeadTitle(stripComments(markdown)) ?? record.title ?? "Untitled")
+      : (record.title ?? "Untitled");
+    const next = {
+      ...record,
+      title,
+      markdown,
+      rev: currentRev + 1,
+      // The stamp is what the app's reconcile watches — comments need the
+      // pull-back exactly like edits do.
+      webEdit: { by: session.label, at: now },
+      updatedAt: now,
+    };
+    // Only a real content change outdates the rendition; comment traffic
+    // leaves the default view alone.
+    if (recordHasHtml && contentChanged) next.htmlStale = true;
+    const meta = { ...(existing.customMetadata ?? {}) };
+    meta.title = title.slice(0, 256);
+    meta.updatedAt = now;
+    meta.rev = String(next.rev);
+    meta.webEdit = "1";
+    meta.webEditBy = session.label.slice(0, MAX_NAME_LEN);
+    meta.webEditAt = now;
+    const put = await env.PAGES.put(`pages/${id}.json`, JSON.stringify(next), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: meta,
+      onlyIf: { etagMatches: existing.etag },
+    });
+    if (put) return json({ rev: next.rev });
+    // Lost a race (concurrent save / app push) — re-read; the rev check
+    // above turns a real change into the 409 answer.
+  }
+  return json({ error: "conflict, retry" }, 409);
+}
+
+// GET/POST /<id>/html-comments — the rendition's thread pool for unlocked
+// comment/edit sessions: GET hands back {rev, threads}, POST swaps the list
+// against the rev it was built on (see swapThreadState). Full parity with
+// the desktop rail: sessions may open threads, reply anywhere, edit bodies,
+// and delete — the worker pins each entry's author/time/provenance so a swap
+// can never reattribute someone else's words, and the owner moderates
+// through the API/app.
+async function handleHtmlComments(request, env, id, url) {
+  const ctx = await publicJsonContext(request, env, id, url, "comment");
+  if (ctx.error) return ctx.error;
+  if (request.method === "GET") {
+    const state = await readThreadState(env, id);
+    return json({ rev: state.rev, threads: state.threads });
+  }
+  if (rateLimited(commentAttempts, request, COMMENT_RATE_LIMIT)) {
+    return json({ error: "too many comment updates at once — wait a minute" }, 429);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid json body" }, 400);
+  }
+  const threads = sanitizeThreads(body?.threads);
+  if (threads === null) return json({ error: "threads must be an array" }, 400);
+  const baseRev = Number(body?.baseRev);
+  if (!Number.isInteger(baseRev) || baseRev < 0) {
+    return json({ error: "baseRev must be a non-negative integer" }, 400);
+  }
+  const result = await swapThreadState(env, id, baseRev, threads, ctx.session);
+  if (result.kind === "conflict") {
+    return json({ error: "comments changed", rev: result.rev, threads: result.threads }, 409);
+  }
+  if (result.kind === "retry") return json({ error: "conflict, retry" }, 409);
+  return json({ rev: result.rev, threads: result.threads });
+}
+
+// The cache key in the shell's asset URLs: a short content hash of the
+// embedded bundle, stamped in at bundle time (WEB_APP.tag). It changes with
+// the bytes, so a redeploy that alters the shell WITHOUT bumping
+// WORKER_VERSION still busts the immutable cache. Falls back to the worker
+// version when no bundle is embedded (dev / the plain-node stub).
+const WEB_ASSET_TAG = (WEB_APP && WEB_APP.tag) || String(WORKER_VERSION);
+
+// GET /__web/<tag>/app.js|css — the app shell's compiled frontend, embedded
+// in this worker at bundle time. Public and immutable; the tag is a content
+// cache key (shell pages always reference the running worker's own build),
+// and the content is code, not page data.
+function serveWebAsset(_tag, ext) {
+  if (!WEB_APP) {
+    return new Response(
+      "web assets not bundled — build with scripts/bundle-worker.mjs (or serve share-worker/dist/web in dev)",
+      { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } },
+    );
+  }
+  // Any tag serves the CURRENT build (the immutable cache is content-keyed by
+  // the tag the shell requested; a mismatched tag only means an older tab,
+  // which still gets working code and re-tags on its next load).
+  return new Response(ext === "js" ? WEB_APP.js : WEB_APP.css, {
+    headers: {
+      "content-type":
+        ext === "js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8",
+      "cache-control": "public, max-age=31536000, immutable",
+      "x-robots-tag": "noindex",
+    },
   });
 }
 
@@ -2456,111 +2780,41 @@ function markdownLeadTitle(md) {
   return text ? text.slice(0, 256) : null;
 }
 
-// GET /<id>/edit renders the web editor; POST saves. Saves are CAS-guarded
-// twice over: baseRev (the revision the editor loaded) must still be current,
-// and the put itself is conditional on the record's etag — a lost race
-// re-renders the editor with the visitor's text intact, never a clobber.
-async function handleEdit(request, env, id, url) {
-  if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "POST") {
-    return new Response("method not allowed", { status: 405 });
-  }
-  const ctx = await publicWriteContext(request, env, id, url, "edit", `/${id}/edit`);
-  if (ctx.error) return ctx.error;
-  const { data, session } = ctx;
-  if (typeof data.markdown !== "string") {
-    // An html-only rendition page: nothing editable here.
-    return new Response(null, { status: 303, headers: { location: `/${id}` } });
-  }
+// The app shell — what a comment/edit session gets at /<id> instead of the
+// static reading view: a minimal page that mounts the SAME editor + comment
+// surface the desktop app renders (web/main.tsx, embedded in this worker at
+// bundle time). The boot record carries everything the shell needs; the
+// markdown travels WITH its CriticMarkup comments — for these sessions the
+// comments are the point.
+function appShellPage(id, data, session, url, cacheControl) {
+  const hasMd = typeof data.markdown === "string";
   const hasHtml = typeof data.html === "string" && data.html.length > 0;
-
-  if (request.method !== "POST") {
-    return editorPage(id, data.title || "Untitled", data.markdown, pageRev(data), { hasHtml });
-  }
-
-  if (rateLimited(editAttempts, request, EDIT_RATE_LIMIT)) {
-    return shellPage("Slow down", "Too many saves at once — wait a minute, then try again.", 429);
-  }
-  let form;
-  try {
-    form = await request.formData();
-  } catch {
-    return shellPage("That didn't work", "The save didn't come through — go back and try again.", 400);
-  }
-  // Strip CriticMarkup like the app does before publishing — the public copy
-  // never carries editorial braces, whoever wrote them.
-  const markdown = stripComments(String(form.get("markdown") ?? "").replace(/\r\n?/g, "\n"));
-  const baseRev = Number(form.get("baseRev"));
-  if (!Number.isInteger(baseRev) || baseRev < 1) {
-    return shellPage("That didn't work", "The save didn't come through — go back and try again.", 400);
-  }
-  if (markdown.trim().length === 0) {
-    return editorPage(id, data.title || "Untitled", markdown, baseRev, {
-      hasHtml,
-      status: 400,
-      error: "There's nothing to save — the document can't be emptied from here.",
-    });
-  }
-  if (markdown.length > MAX_MARKDOWN_BYTES) {
-    return shellPage("Too large", "That document is beyond the size limit.", 413);
-  }
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const existing = await env.PAGES.get(`pages/${id}.json`);
-    if (!existing) return notFoundPage();
-    const record = await existing.json().catch(() => null);
-    if (!record || typeof record !== "object" || typeof record.markdown !== "string") {
-      return notFoundPage();
-    }
-    const currentRev = pageRev(record);
-    const recordHasHtml = typeof record.html === "string" && record.html.length > 0;
-    if (currentRev !== baseRev) {
-      const by = publicWebEdit(record)?.by;
-      return editorPage(id, record.title || "Untitled", markdown, currentRev, {
-        hasHtml: recordHasHtml,
-        status: 409,
-        error: `This page changed while you were editing${by ? ` (last saved by ${by})` : ""}. Your text is kept below — saving now overwrites the newer version, so open the live page in another tab first if you need to merge.`,
-      });
-    }
-    const now = new Date().toISOString();
-    const title = markdownLeadTitle(markdown) ?? record.title ?? "Untitled";
-    const next = {
-      ...record,
-      title,
-      markdown,
-      // The rendition (if any) no longer matches the document; the markdown
-      // takes the default view until the app pushes a fresh one.
-      ...(recordHasHtml ? { htmlStale: true } : {}),
-      rev: currentRev + 1,
-      webEdit: { by: session.label, at: now },
-      updatedAt: now,
-    };
-    const meta = { ...(existing.customMetadata ?? {}) };
-    meta.title = title.slice(0, 256);
-    meta.updatedAt = now;
-    meta.rev = String(next.rev);
-    meta.webEdit = "1";
-    meta.webEditBy = session.label.slice(0, MAX_NAME_LEN);
-    meta.webEditAt = now;
-    const put = await env.PAGES.put(`pages/${id}.json`, JSON.stringify(next), {
-      httpMetadata: { contentType: "application/json" },
-      customMetadata: meta,
-      onlyIf: { etagMatches: existing.etag },
-    });
-    if (put) {
-      return new Response(null, {
-        status: 303,
-        headers: { location: recordHasHtml ? `/${id}?v=md` : `/${id}` },
-      });
-    }
-    // Lost a race (concurrent save / app push) — re-read; the rev check above
-    // turns a real content change into the 409 editor.
-  }
-  return shellPage("Try again", "Something raced that save — go back and retry.", 409);
-}
-
-// The web editor: one full-height form, no JS required. The document rides a
-// <textarea>; baseRev pins the revision it was loaded from.
-function editorPage(id, title, markdown, rev, { status = 200, error = null, hasHtml = false } = {}) {
+  const htmlStale = data.htmlStale === true && hasMd;
+  const wantMd = url.searchParams.get("v") === "md";
+  const wantHtml = url.searchParams.get("v") === "html";
+  const view = hasHtml && !(hasMd && wantMd) && (wantHtml || !htmlStale) ? "html" : "md";
+  const title = data.title || "Untitled";
+  const crumb =
+    data.collection && typeof data.collection.id === "string" && validId(data.collection.id)
+      ? { id: data.collection.id, title: data.collection.title || "Home" }
+      : null;
+  const boot = {
+    id,
+    title,
+    role: session.role === "edit" ? "edit" : "comment",
+    label: session.label,
+    view,
+    hasMd,
+    hasHtml,
+    htmlStale,
+    rev: pageRev(data),
+    // The html view fetches /<id>/raw itself (renditions can be megabytes);
+    // the markdown rides the shell for an immediate first paint.
+    markdown: view === "md" && hasMd ? data.markdown : null,
+    crumb,
+    host: url.hostname,
+  };
+  const assets = `/__web/${WEB_ASSET_TAG}`;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -2568,298 +2822,28 @@ function editorPage(id, title, markdown, rev, { status = 200, error = null, hasH
 ${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Edit · ${escapeHtml(title)}</title>
-<style>${PAGE_CSS}${EDITOR_CSS}</style>
+<title>${escapeHtml(title)}</title>
+<link rel="stylesheet" href="${assets}/app.css">
 </head>
-<body class="editor-page">
-<form class="editor" method="post" action="/${id}/edit">
-<header class="editor-bar">
-<div class="editor-name">Editing <strong>${escapeHtml(title)}</strong></div>
-<div class="editor-actions">
-<a class="editor-cancel" href="/${id}">Cancel</a>
-<button class="editor-save" type="submit">Save</button>
-</div>
-</header>
-${error ? `<div class="editor-warn" role="alert">${escapeHtml(error)}</div>` : ""}
-${
-  hasHtml && !error
-    ? `<div class="editor-note muted">This page also carries a polished HTML rendition. Saving marks it out of date — readers see your markdown until the owner regenerates it.</div>`
-    : ""
-}
-<textarea class="editor-text" name="markdown" spellcheck="false" autocapitalize="off" autocorrect="off" aria-label="Markdown document">${escapeHtml(markdown)}</textarea>
-<input type="hidden" name="baseRev" value="${rev}">
-</form>
+<body>
+<noscript>Commenting and editing need JavaScript — enable it and reload, or ask for a view-only code.</noscript>
+<div id="dk-root"></div>
+<script type="application/json" id="dk-boot">${JSON.stringify(boot).replace(/</g, "\\u003c")}</script>
+<script type="module" src="${assets}/app.js"></script>
 </body>
 </html>`;
   return new Response(html, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": cacheControl },
   });
 }
-
-const EDIT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>`;
-const COMMENT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
-
-function commentDateLabel(iso) {
-  const d = iso ? new Date(iso) : null;
-  return d && !Number.isNaN(d.getTime())
-    ? d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
-    : "";
-}
-
-// The comments section under a page (rendered only for sessions that may
-// comment — the panel and its contents stay invisible to view-only codes).
-// Deleting is offered on the session's own code's comments; the tiny script
-// only remembers the visitor's name between posts.
-// `view` says which page view hosts the section ("md" | "html"): it rides the
-// forms as a hidden field (the post returns to the view it came from), and on
-// the html view the section also carries what the anchoring layer needs —
-// per-item ids + "Show in document" buttons (inert without JS), the hidden
-// anchor/quote fields with the "Commenting on" chip, the anchor list JSON,
-// and the shell script that wires it all to the frame bridge.
-function renderCommentsSection(id, comments, session, view = "md") {
-  const isHtmlView = view === "html";
-  const items = comments
-    .map((c) => {
-      const name = c.name || c.label || "Someone";
-      const via =
-        c.name && c.label && c.label !== c.name
-          ? `<span class="comment-via">· ${escapeHtml(c.label)}</span>`
-          : "";
-      const when = commentDateLabel(c.createdAt);
-      const del =
-        c.codeId === session.codeId
-          ? `<form class="comment-delete-form" method="post" action="/${id}/comments/${c.id}/delete"><input type="hidden" name="view" value="${view}"><button class="comment-delete" type="submit" title="Delete this comment">Delete</button></form>`
-          : "";
-      const reveal =
-        isHtmlView && c.anchor
-          ? `<button class="comment-reveal" type="button" data-comment-id="${c.id}">Show in document</button>`
-          : "";
-      return `<li class="comment" id="c-${c.id}">
-<div class="comment-head"><span class="comment-author">${escapeHtml(name)}</span>${via}${when ? `<span class="comment-date">${escapeHtml(when)}</span>` : ""}${del}</div>
-${c.quote ? `<blockquote class="comment-quote">${escapeHtml(c.quote)}</blockquote>` : ""}
-<p class="comment-body">${escapeHtml(c.body)}</p>
-${reveal}
-</li>`;
-    })
-    .join("\n");
-  // The anchor list the shell script feeds the frame bridge. `<` is escaped
-  // so page content can never close this script block.
-  const anchorData = isHtmlView
-    ? `<script type="application/json" id="dkw-data">${JSON.stringify(
-        comments.filter((c) => c.anchor).map((c) => ({ id: c.id, anchor: c.anchor })),
-      ).replace(/</g, "\\u003c")}</script>`
-    : "";
-  const chip = isHtmlView
-    ? `<div class="comment-anchor-chip" id="dkw-chip" hidden>Commenting on <q id="dkw-chip-quote"></q><button type="button" class="comment-chip-clear" id="dkw-chip-clear" title="Comment on the whole page instead" aria-label="Remove the anchor">×</button></div>`
-    : "";
-  const anchorFields = isHtmlView
-    ? `<input type="hidden" name="anchor_path" value=""><input type="hidden" name="anchor_tag" value=""><input type="hidden" name="anchor_text" value=""><input type="hidden" name="quote" value="">`
-    : "";
-  return `<section class="comments" id="comments" aria-label="Comments">
-<div class="comments-inner">
-<h2 class="comments-title">Comments${comments.length > 0 ? ` <span class="comments-count">${comments.length}</span>` : ""}</h2>
-${comments.length > 0 ? `<ol class="comment-list">\n${items}\n</ol>` : `<p class="comments-empty muted">No comments yet.</p>`}
-<form class="comment-form" method="post" action="/${id}/comments">
-<input type="hidden" name="view" value="${view}">
-${anchorFields}${chip}
-<textarea class="comment-text" name="body" required maxlength="${MAX_COMMENT_BODY}" rows="3" placeholder="Write a comment…" aria-label="Comment"></textarea>
-<div class="comment-form-foot">
-<input class="comment-name" id="comment-name" name="name" maxlength="${MAX_NAME_LEN}" placeholder="Your name (optional)" autocomplete="name" aria-label="Your name">
-<button class="comment-post" type="submit">Post comment</button>
-</div>
-</form>
-${anchorData}
-</div>
-</section>
-<script>
-(function () {
-  var f = document.getElementById("comment-name");
-  if (!f) return;
-  try { var v = localStorage.getItem("dk-comment-name"); if (v && !f.value) f.value = v; } catch (e) {}
-  var form = f.closest("form");
-  if (form) form.addEventListener("submit", function () {
-    try { localStorage.setItem("dk-comment-name", f.value.trim()); } catch (e) {}
-  });
-})();
-</script>`;
-}
-
-const COMMENTS_CSS = `
-.comments { width: 100%; border-top: 1px solid var(--border); margin-top: 24px; }
-.comments-inner { width: 100%; max-width: 1080px; margin: 0 auto; padding: 32px 64px 16px; }
-@media (max-width: 720px) { .comments-inner { padding: 28px 24px 12px; } }
-.comments-title { font-size: 16px; font-weight: 700; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
-.comments-count {
-  min-width: 20px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--muted);
-  text-align: center;
-}
-.comments-empty { font-size: 13.5px; margin: 0 0 16px; }
-.comment-list { list-style: none; margin: 0 0 20px; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.comment { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.comment-head { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
-.comment-author { font-weight: 600; color: var(--text); }
-.comment-via { color: var(--muted); }
-.comment-date { color: var(--muted); }
-.comment-delete-form { margin-left: auto; }
-.comment-delete { border: none; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; }
-.comment-delete:hover { color: #d5484f; }
-.comment-quote { margin: 8px 0 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--border); font-size: 12.5px; color: var(--muted); }
-.comment-body { margin: 6px 0 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-.comment-form { display: flex; flex-direction: column; gap: 8px; }
-.comment-text {
-  width: 100%;
-  min-height: 72px;
-  resize: vertical;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  line-height: 1.5;
-  outline: none;
-}
-.comment-text:focus { border-color: var(--link); }
-.comment-form-foot { display: flex; gap: 8px; align-items: center; }
-.comment-name {
-  flex: 1;
-  min-width: 0;
-  max-width: 240px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  outline: none;
-}
-.comment-name:focus { border-color: var(--link); }
-.comment-post {
-  margin-left: auto;
-  flex: none;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 8px;
-  background: var(--text);
-  color: var(--bg);
-  font: inherit;
-  font-size: 13.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.comment-post:hover { opacity: 0.85; }
-
-/* Anchored comments (the html view). "Show in document" is server-rendered
-   but inert until the shell script marks it live; the chip appears when the
-   frame's bubble picked an element for the next comment. */
-.comment-reveal { display: none; margin-top: 6px; border: none; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent, #2f6fdd); cursor: pointer; }
-.comment-reveal.is-live { display: inline-block; }
-.comment-reveal:hover { text-decoration: underline; }
-.comment-anchor-chip[hidden] { display: none; }
-.comment-anchor-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-left: 3px solid #2f6fdd;
-  border-radius: 8px;
-  background: var(--surface);
-  font-size: 12.5px;
-  color: var(--muted);
-}
-.comment-anchor-chip q { font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.comment-chip-clear { margin-left: auto; flex: none; border: none; background: none; padding: 0 2px; font-size: 15px; line-height: 1; color: var(--muted); cursor: pointer; }
-.comment-chip-clear:hover { color: var(--text); }
-@keyframes dkw-li-flash { 0% { background-color: rgba(47, 111, 221, 0.14); } 100% { background-color: transparent; } }
-.comment.is-flash { animation: dkw-li-flash 1.1s ease-out; border-radius: 8px; }
-`;
-
-const EDITOR_CSS = `
-body.editor-page { height: 100dvh; overflow: hidden; }
-.editor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.editor-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-.editor-name { font-size: 13.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-name strong { color: var(--text); font-weight: 600; }
-.editor-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.editor-cancel { font-size: 13px; color: var(--muted); text-decoration: none; }
-.editor-cancel:hover { color: var(--text); }
-.editor-save {
-  flex: none;
-  padding: 7px 16px;
-  border: none;
-  border-radius: 8px;
-  background: var(--text);
-  color: var(--bg);
-  font: inherit;
-  font-size: 13.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.editor-save:hover { opacity: 0.85; }
-.editor-warn {
-  padding: 10px 16px;
-  font-size: 13.5px;
-  line-height: 1.5;
-  background: rgba(213, 72, 79, 0.1);
-  color: #d5484f;
-  border-bottom: 1px solid var(--border);
-}
-.editor-note { padding: 8px 16px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
-.editor-text {
-  flex: 1;
-  width: 100%;
-  min-height: 0;
-  resize: none;
-  border: none;
-  outline: none;
-  padding: 20px 24px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13.5px;
-  line-height: 1.6;
-  tab-size: 2;
-}
-`;
-
-/* The html-only frame variant used when comments render below the rendition:
-   the iframe takes one viewport-height block in the normal flow (the page
-   scrolls past it), instead of owning the whole viewport. */
-const FRAME_FLOW_CSS = `
-.raw-frame-flow {
-  display: block;
-  width: 100%;
-  height: 100dvh;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: #ffffff;
-}
-`;
 
 /* ---------- Public pages ---------- */
 
 // Mirror of the app's clean-copy transform (criticMarkup.ts): drop CriticMarkup
-// comments, unwrap highlights. The app already strips before pushing; this is
-// defense in depth so editorial notes can never leak to a public page.
+// comments, unwrap highlights. Since version 10 the stored markdown KEEPS its
+// comments (comment/edit sessions share them with the desktop) — this strip
+// is what keeps them out of everything view-role and public sessions see:
+// the reading view, descriptions, titles, OG derivations.
 function stripComments(md) {
   return md
     .replace(/\{>>[\s\S]*?<<\}/g, "")
@@ -2968,11 +2952,13 @@ async function renderPage(request, env, id, data, url) {
   const hasHtml = typeof data.html === "string" && data.html.length > 0;
   if (!hasMd && !hasHtml) return notFoundPage();
 
-  // What this session's code may do here (nothing extra on public shares —
-  // there's no named identity to grant anything to).
-  const canComment = session !== null && session.role !== "view";
-  const canEdit = session !== null && session.role === "edit" && hasMd;
-  const comments = canComment ? await readComments(env, id) : null;
+  // A comment- or edit-role session doesn't get the static page at all: it
+  // gets the app shell — the desktop's own editor and comment rail, over
+  // this same document (comments included). Everyone else reads on.
+  if (session !== null && session.role !== "view") {
+    return appShellPage(id, data, session, url, cacheControl);
+  }
+
   // A web edit outdates the html rendition: the markdown (the edited truth)
   // becomes the default view until the app pushes a fresh rendition.
   const htmlStale = data.htmlStale === true && hasMd;
@@ -3022,41 +3008,22 @@ ${ogImage ? `<meta property="og:image" content="${pageUrl}/og.png">
 </nav>`
       : "";
 
-  // The fixed top-right cluster: session actions (edit / comments) + the pill.
-  const editBtn = canEdit
-    ? `<a class="top-action" href="${pageUrl}/edit">${EDIT_ICON}<span>Edit</span></a>`
-    : "";
-  const topBar = (...segs) => {
-    const inner = segs.filter(Boolean).join("");
-    return inner ? `<div class="page-top">${inner}</div>` : "";
-  };
-
   const wantMd = url.searchParams.get("v") === "md";
   const wantHtml = url.searchParams.get("v") === "html";
   if (hasHtml && !(hasMd && wantMd) && (wantHtml || !htmlStale)) {
     // The rendition is an arbitrary standalone document; framing it (instead of
     // serving it at /<id> directly) keeps our meta tags, the toggle, and the
-    // sandbox — its scripts run under an opaque origin. A commenting session
-    // gets the frame flowing in the document with the comments section below
-    // it (and the anchoring layer wiring the two together — see
-    // webComments.js); everyone else gets the plain fixed frame.
-    const flow = canComment;
-    const commentsBtn = flow
-      ? `<a class="top-action" href="#comments">${COMMENT_ICON}<span>Comments${comments.length > 0 ? ` · ${comments.length}` : ""}</span></a>`
-      : "";
+    // sandbox — its scripts run under an opaque origin.
     const html = `<!doctype html>
 <html lang="en">
 <head>
 ${head}
-<style>${PAGE_CSS}${flow ? FRAME_FLOW_CSS + COMMENTS_CSS : FRAME_CSS}</style>
+<style>${PAGE_CSS}${FRAME_CSS}</style>
 </head>
 <body>
 ${crumb}
-${topBar(commentsBtn, editBtn, pill("html"))}
-<iframe class="${flow ? "raw-frame-flow" : "raw-frame"}" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
-${flow ? renderCommentsSection(id, comments, session, "html") : ""}
-${flow ? `<script>${SHELL_COMMENTS_SCRIPT}</script>` : ""}
-${flow ? `<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>` : ""}
+${pill("html") ? `<div class="page-top">${pill("html")}</div>` : ""}
+<iframe class="raw-frame" src="${pageUrl}/raw" sandbox="allow-scripts allow-popups" title="${escapeHtml(title)}"></iframe>
 </body>
 </html>`;
     return new Response(html, {
@@ -3069,15 +3036,14 @@ ${flow ? `<footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer
 <html lang="en">
 <head>
 ${head}
-<style>${PAGE_CSS}${canComment ? COMMENTS_CSS : ""}</style>
+<style>${PAGE_CSS}</style>
 </head>
 <body>
 ${crumb}
-${topBar(editBtn, pill("md"))}
+${pill("md") ? `<div class="page-top">${pill("md")}</div>` : ""}
 <main class="doc">
 ${body}
 </main>
-${canComment ? renderCommentsSection(id, comments, session) : ""}
 <footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
 </body>
 </html>`;
@@ -3289,11 +3255,11 @@ async function serveRawHtml(request, env, id) {
   if (typeof data.html !== "string" || data.html.length === 0) {
     return new Response("not found", { status: 404 });
   }
-  // A commenting session's frame carries the anchoring bridge (highlights,
-  // the hover bubble — see webComments.js); every other visitor gets the
-  // rendition byte-for-byte as pushed.
-  const canComment = session !== null && session.role !== "view";
-  return new Response(canComment ? injectCommentBridge(data.html) : data.html, {
+  // Byte-for-byte as pushed, for every session. The app shell (comment/edit
+  // sessions) fetches this and instruments it client-side — the same
+  // instrumentHtml the desktop applies to its preview — so the stored
+  // rendition itself never changes shape.
+  return new Response(data.html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": gate ? "no-store" : "no-cache",

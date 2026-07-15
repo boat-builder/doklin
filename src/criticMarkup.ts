@@ -21,6 +21,14 @@ export type CommentEntry = {
   author: string; // display name; "" = unknown (legacy / hand-written)
   at: number; // epoch ms; 0 = unknown
   body: string;
+  // Web-share provenance, stamped by the share worker when an entry arrives
+  // from a browser session: a stable entry id plus the access code that wrote
+  // it. Absent on desktop-authored entries. Only html-rendition threads carry
+  // these (they travel as JSON); the CriticMarkup serialization below doesn't
+  // encode them — markdown entries never have them.
+  eid?: string;
+  codeId?: string;
+  label?: string;
 };
 
 // {==anchor==} directly followed by one or more {>>…<<} spans. `[\s\S]` (not

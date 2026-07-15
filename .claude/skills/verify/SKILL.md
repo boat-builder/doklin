@@ -41,15 +41,34 @@ Gotchas learned the hard way:
 
 `verify-harness/serve-worker.mjs` runs the real share worker over node http
 with an in-memory R2 fake (state resets on restart), so a browser can walk
-the actual public flows — gate unlock, comments, the html anchoring layer:
+the actual public flows. Since worker v10, comment/edit sessions get the APP
+SHELL (the desktop's own editor + comment rail compiled for the browser), so
+the drive exercises the real Milkdown editor and the real rail end to end:
 
 ```sh
+node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
+                                         # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # gate → comment → anchor round-trip + no-JS parity
+node verify-harness/drive-web.mjs        # 16 steps: gate → html rail comment → reply →
+                                         # read-only md + selection comment (CriticMarkup
+                                         # save) → view-role stripping → edit-role autosave
+                                         # → desktop-pushed thread visibility
 ```
+
+serve-worker serves `/__web/*` from `share-worker/dist/web` (the plain-node
+import leaves the embedded-assets stub empty — that's expected; deployable
+bundles embed them via scripts/bundle-worker.mjs).
 
 Also: `node share-worker/test/run.mjs` is the pure-node e2e suite for every
 worker route (no browser needed) — run it for any worker change.
+
+The desktop⇄web comment-thread three-way merge (the correctness core of pool
+sync) has its own fast unit test — run it for any change to
+`src/htmlComments.ts` merge logic or the sync flow:
+
+```sh
+node verify-harness/merge.test.mjs   # deletions stick, eid dedupe, concurrent replies
+```
 
 ## Rust side
 
