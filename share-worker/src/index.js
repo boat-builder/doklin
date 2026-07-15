@@ -344,6 +344,9 @@ export default {
 
     // The old web-editor and comment-form routes (versions 8–9). The shell is
     // the editor now; send stale links and open tabs back to the page.
+    // TODO(legacy-cleanup): these redirects only exist to catch bookmarks and
+    // open tabs from the v8/v9 form-based editor/comments. Safe to delete once
+    // enough time has passed that no such stale URLs are still in circulation.
     const legacyMatch = path.match(/^\/([a-z0-9-]{1,64})\/(edit|comments(?:\/.*)?)$/);
     if (legacyMatch && validId(legacyMatch[1])) {
       return new Response(null, { status: 303, headers: { location: `/${legacyMatch[1]}` } });
@@ -768,6 +771,9 @@ async function handleApi(request, env, url, ctx) {
         // `comments` is a flat back-compat view (one row per thread opener):
         // a desktop app from before version 10 reads that field and shows the
         // moderation list, even though it can't render the thread structure.
+        // TODO(legacy-cleanup): once no pre-v10 desktop app talks to this
+        // backend, stop building/returning `comments` and answer with
+        // {rev, threads} alone.
         const comments = state.threads.map((t) => {
           const opener = t.comments[0] ?? { body: "", author: "", at: 0 };
           return {
@@ -979,6 +985,8 @@ async function listPages(env, auth) {
         // A v2 pool always stamps its rev; an object without one is a pre-v10
         // flat pool, which readThreadState surfaces as rev 1 — report the
         // same, so a migrated page doesn't look perpetually out of sync.
+        // TODO(legacy-cleanup): the `: 1` fallback is only for flat pools;
+        // once none remain, an object without a rev stamp is corrupt, not "1".
         const rev = Number(obj.customMetadata?.rev);
         commentRevs.set(c[1], Number.isInteger(rev) && rev > 0 ? rev : 1);
         continue;
@@ -2394,6 +2402,13 @@ function sanitizeThreads(raw) {
 // name?, label, codeId, createdAt}]}). Read them as one thread per comment so
 // nothing a visitor wrote disappears in the upgrade; unanchored ones surface
 // as orphans (empty anchor), quotes become the anchor text.
+//
+// TODO(legacy-cleanup): this whole flat→v2 migration is transitional. A pool
+// is rewritten to the v2 shape on its first write after the v10 deploy, so
+// once every backend has run v10 long enough that no flat `{comments}` object
+// remains in any bucket, delete migrateFlatComments and let readThreadState
+// treat a non-v2 object as an empty/corrupt pool. (Search the tag to find the
+// call site and the related flat-pool rev handling in listPages.)
 function migrateFlatComments(raw) {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.comments)) return [];
   const threads = [];
@@ -2447,6 +2462,7 @@ async function readThreadState(env, id) {
       etag: obj.etag,
     };
   }
+  // TODO(legacy-cleanup): the flat-pool fallback — drop with migrateFlatComments.
   return { rev: 1, threads: migrateFlatComments(data), etag: obj.etag };
 }
 

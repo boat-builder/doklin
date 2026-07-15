@@ -596,6 +596,9 @@ export async function fetchPageThreads(
   // missing `threads` array. Treating it as outdated (rather than as "no
   // comments") keeps thread sync from silently no-opping against a backend
   // that can't hold threads, and routes the owner to redeploy.
+  // TODO(legacy-cleanup): drop the flat-{comments} detection once v8/v9
+  // workers are no longer in the wild — then a missing `threads` is simply an
+  // empty pool.
   if (!Array.isArray(body?.threads)) {
     if (Array.isArray(body?.comments)) throw new ShareWorkerOutdatedError();
     return { rev: typeof body?.rev === "number" ? body.rev : 0, threads: [] };
@@ -774,9 +777,10 @@ export type RemotePageInfo = {
   updatedAt: string | null;
   rev?: number | null;
   webEdit?: PageWebEdit | null;
-  // The comment pool's revision (v10 workers): null = no pool, 0 = a pre-v10
-  // pool of unknown revision, otherwise the rev of the last swap. Reconcile
-  // compares it against the entry's synced rev to spot web comments to pull.
+  // The comment pool's revision (v10 workers): null = no pool, otherwise the
+  // rev of the last swap (a migrated pre-v10 flat pool reports 1). Absent from
+  // pre-v10 workers' listings entirely. Reconcile compares it against the
+  // entry's synced rev to spot web comments to pull.
   commentsRev?: number | null;
 };
 

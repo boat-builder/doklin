@@ -1782,6 +1782,8 @@ await test("html threads: two first-writers race a fresh pool — exactly one wi
   await call("/api/pages/race", { method: "DELETE", token: OWNER });
 });
 
+// TODO(legacy-cleanup): retire this suite together with migrateFlatComments
+// (share-worker/src/index.js) once no pre-v10 flat pools remain.
 await test("html threads: a v9 flat pool reads as threads (nothing lost)", async () => {
   await call("/api/pages/legacy", {
     method: "PUT",
