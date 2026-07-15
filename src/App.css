@@ -4005,6 +4005,45 @@ body.tree-dragging.tree-drag-invalid * {
   min-width: 0;
 }
 
+/* Dashboard route: the workers to paste the (identical) code into. */
+.worker-update-targets {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.worker-update-targets li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.worker-update-targets code {
+  flex: none;
+  font-size: 12px;
+}
+
+.worker-update-guess {
+  flex: none;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.worker-update-target-host {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+
 /* One card per outdated connection. */
 .worker-update-conn {
   margin-top: 10px;
@@ -4045,11 +4084,13 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-accent, var(--app-text));
 }
 
-.worker-update-agent {
+/* Terminal route: the generated script, folded away behind a disclosure. The
+   run command is the thing to act on; the body is here to be read, not copied. */
+.worker-update-script {
   margin-top: 10px;
 }
 
-.worker-update-agent > summary {
+.worker-update-script > summary {
   cursor: pointer;
   font-size: 12px;
   color: var(--app-text-muted);
@@ -4057,7 +4098,7 @@ body.tree-dragging.tree-drag-invalid * {
   -webkit-user-select: none;
 }
 
-.worker-update-agent > summary:hover {
+.worker-update-script > summary:hover {
   color: var(--app-text);
 }
 
