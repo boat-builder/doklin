@@ -9,6 +9,7 @@ import {
 import { Crepe } from "@milkdown/crepe";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import { editorViewCtx } from "@milkdown/kit/core";
+import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import {
   searchKey,
@@ -79,6 +80,11 @@ export type EditorHandle = {
   dictationClearRevert: () => void;
   dictationEnd: () => void;
   dictationContext: () => DictationContext | null;
+  // Create a comment thread on the current selection (the same act as the
+  // toolbar's Comment button). Read-only hosts use this: Crepe suppresses its
+  // selection toolbar there, so they provide their own affordance and route
+  // it here. Returns false when there's nothing usable selected.
+  commentSelection: () => boolean;
 };
 
 type Props = {
@@ -99,6 +105,12 @@ type Props = {
   onCommentsCount?: (count: number) => void;
   // Asks the host to flip comments visible (creating a comment while hidden).
   onRequestShowComments?: () => void;
+  // True renders the document read-only: typing, slash menu, and toolbar are
+  // off, but selection and the whole comment layer still work (a web
+  // comment-role session comments on a document it can't edit). Comment
+  // mutations still dispatch — they go through the rail and commentSelection,
+  // not through DOM editing.
+  readOnly?: boolean;
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -200,10 +212,12 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     commentsVisible = true,
     onCommentsCount,
     onRequestShowComments,
+    readOnly = false,
   },
   ref,
 ) {
   const viewRef = useRef<EditorView | null>(null);
+  const crepeRef = useRef<Crepe | null>(null);
   // True while dictation owns the editor — from the talk-key press until the
   // chunk pipeline drains. The editable prop (installed at mount) reads this,
   // so typing is suspended exactly while spoken text is in flight. Flips take
@@ -238,6 +252,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const authorRef = useRef(commentAuthor);
   authorRef.current = commentAuthor;
   const visibleRef = useRef(commentsVisible);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const onCommentsCountRef = useRef(onCommentsCount);
   onCommentsCountRef.current = onCommentsCount;
   const onRequestShowCommentsRef = useRef(onRequestShowComments);
@@ -338,6 +354,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(criticCopyPlugin);
     crepe.editor.use(ghostPlugin);
     crepe.editor.use(polishRevertPlugin);
+    crepeRef.current = crepe;
+    // Crepe's readonly flag silences its own chrome (toolbar, slash menu,
+    // block handle); the editable prop installed at mount keeps ProseMirror
+    // itself from accepting input.
+    if (readOnlyRef.current) crepe.setReadonly(true);
     crepe.on((api) => {
       api.markdownUpdated((_ctx, markdown) => {
         onChangeRef.current(markdown);
@@ -345,7 +366,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       api.mounted((ctx) => {
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
-        view.setProps({ editable: () => !dictatingRef.current });
+        view.setProps({ editable: () => !dictatingRef.current && !readOnlyRef.current });
         // Emit the mounted doc's serialization as the baseline. markdownUpdated
         // only fires on edit transactions — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
@@ -405,6 +426,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [recompute]);
+
+  // Apply readOnly flips after mount (the ref keeps the editable prop
+  // current; setProps forces ProseMirror to re-consult it).
+  useEffect(() => {
+    crepeRef.current?.setReadonly(readOnly);
+    viewRef.current?.setProps({});
+  }, [readOnly]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are
@@ -620,6 +648,34 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         if (!view) return null;
         const anchor = getGhostState(view.state)?.anchor ?? view.state.selection.head;
         return dictationContextAt(view.state.doc, anchor);
+      },
+      commentSelection() {
+        const view = viewRef.current;
+        if (!view) return false;
+        if (view.state.selection.empty) {
+          // A read-only editor may not have folded the DOM selection into its
+          // state (that tracking rides focus) — map it in explicitly.
+          const sel = window.getSelection();
+          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+          const range = sel.getRangeAt(0);
+          if (!view.dom.contains(range.commonAncestorContainer)) return false;
+          let from: number;
+          let to: number;
+          try {
+            const a = view.posAtDOM(range.startContainer, range.startOffset);
+            const b = view.posAtDOM(range.endContainer, range.endOffset);
+            from = Math.min(a, b);
+            to = Math.max(a, b);
+          } catch {
+            return false;
+          }
+          if (from === to) return false;
+          view.dispatch(
+            view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)),
+          );
+        }
+        createCommentRef.current(view);
+        return true;
       },
     }),
     [],

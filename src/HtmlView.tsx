@@ -39,6 +39,9 @@ type Props = {
   commentAuthor: string;
   commentsVisible: boolean;
   onRequestShowComments: () => void;
+  // How external links leave the rendition. The desktop default routes them
+  // to the system browser via Tauri; a web host passes window.open instead.
+  onOpenExternal?: (url: string) => void;
 };
 
 export default function HtmlView({
@@ -48,6 +51,7 @@ export default function HtmlView({
   commentAuthor,
   commentsVisible,
   onRequestShowComments,
+  onOpenExternal,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -71,6 +75,8 @@ export default function HtmlView({
   onThreadsChangeRef.current = onThreadsChange;
   const onRequestShowCommentsRef = useRef(onRequestShowComments);
   onRequestShowCommentsRef.current = onRequestShowComments;
+  const onOpenExternalRef = useRef(onOpenExternal);
+  onOpenExternalRef.current = onOpenExternal;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
 
@@ -123,11 +129,15 @@ export default function HtmlView({
         setActiveId(msg.id);
         if (msg.id === null) setEditing(null);
       } else if (msg.type === "open") {
-        // External links open in the system browser; navigating the iframe
-        // would replace the rendition (and this whole layer) with the site.
-        void invoke("open_external", { url: msg.url }).catch((err) =>
-          console.error("open_external failed", err),
-        );
+        // External links open outside the rendition; navigating the iframe
+        // would replace it (and this whole layer) with the site.
+        if (onOpenExternalRef.current) {
+          onOpenExternalRef.current(msg.url);
+        } else {
+          void invoke("open_external", { url: msg.url }).catch((err) =>
+            console.error("open_external failed", err),
+          );
+        }
       }
     };
     window.addEventListener("message", onMessage);

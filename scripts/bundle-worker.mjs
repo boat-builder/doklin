@@ -17,6 +17,7 @@ import { build } from "vite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
+import { buildWebAssets, webAssetsInjector } from "./build-web.mjs";
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = path.join(repoRoot, "share-worker", "src", "index.js");
@@ -24,12 +25,19 @@ const dest = path.resolve(
   process.argv[2] ?? path.join(repoRoot, "share-worker", "dist", "doklin-worker.js"),
 );
 
+// The worker carries its own frontend (the app shell comment/edit sessions
+// load — see share-worker/src/webAssets.js): build it first, splice it in.
+const web = await buildWebAssets();
+
 const out = await build({
   configFile: false,
   logLevel: "warn",
+  plugins: [webAssetsInjector(web)],
   build: {
     write: false,
     minify: false, // stay readable — people are asked to trust-deploy this
+    // (the embedded frontend is minified: it's the same app build the
+    // desktop ships, injected as data)
     target: "es2022",
     lib: { entry, formats: ["es"], fileName: "doklin-worker" },
   },

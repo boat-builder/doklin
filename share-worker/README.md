@@ -15,8 +15,11 @@ choose. This README is the guide for standing up your own backend.
   `{title, markdown?, html?}` to `/api/pages/<id>` and a canvas-rendered
   1200×630 OG png to `/api/pages/<id>/og`. A document can be a markdown file,
   a generated html rendition (same stem, `.html` next to the `.md`), or both —
-  whatever exists locally is pushed together. CriticMarkup comments are
-  stripped before upload (and again in the worker, as defense in depth).
+  whatever exists locally is pushed together. The markdown travels WITH its
+  CriticMarkup comments (worker version 10): the worker strips them at render
+  time from everything view-role and public visitors see (pages, titles,
+  descriptions, OG derivations), and serves them — the same threads the
+  desktop shows — to comment/edit-role sessions.
 - Every autosave of a shared document re-pushes it (debounced), so the public
   page tracks the local file. Regenerating the html rendition while the
   document is open re-pushes too.
@@ -64,35 +67,45 @@ choose. This README is the guide for standing up your own backend.
   unlock cookie names the code; the code's *current* entry supplies the role
   on every request, so a downgrade (or revocation) bites on the visitor's
   next click. Folder-share codes carry their role onto every member page.
-  - *Comment*: the public page grows a server-rendered comments section
-    (works without JS, like the gate) — post, read, and delete your own
-    code's comments. Comments live in their own object next to the page, so
-    the app's content pushes never touch them; the owner reads and moderates
-    them from the app's Share popover ("Comments from the web") or the API.
-    On a page with an **html rendition** (worker version 9) the section
-    renders on the html view too — both views of a pair share one comment
-    pool — and comments there can point at an *element* of the rendition:
-    with JS on, hovering a block offers a small bubble; picking it quotes the
-    block above the composer ("Commenting on …") and stores an anchor
-    (`{path, tag, text}` — the same shape the app's own rendition comments
-    use). Anchored comments highlight their element in the framed rendition,
-    "Show in document" scrolls to it, and clicking a highlighted element
-    flashes its comment in the list — none of which ever hijacks the
-    rendition's own links or buttons, and all of which degrades to the plain
-    list + quote without JS. The anchoring bridge is injected into `/<id>/raw`
-    only for comment-capable sessions; everyone else gets the rendition
-    byte-for-byte as pushed.
-  - *Edit*: everything comment gets, plus an **Edit** button that opens a
-    plain markdown editor at `/<id>/edit`. Saves are revision-guarded — a
-    concurrent save re-renders the editor with a warning and the visitor's
-    text intact, never a silent clobber — and re-title the page when its
-    lead H1 changes. A web edit marks any html rendition *stale* (the edited
-    markdown becomes the default view until the app pushes a fresh
-    rendition). The app pulls web edits back into the local file on its
-    reconcile pass (launch / window focus): untouched files fast-forward
-    silently; a file with local changes of its own surfaces a conflict in
-    the Share popover — "Use web version" or "Keep mine" — and never
-    overwrites either side without being asked.
+  - **The app shell (worker version 10):** a comment- or edit-role session
+    doesn't get the static page at `/<id>` at all — it gets the desktop
+    app's own editor and comment surface, compiled for the browser and
+    embedded in this worker (built from `web/main.tsx` by
+    `scripts/build-web.mjs`; the same components, the same stylesheet). A
+    shared document looks and behaves exactly like it does on the owner's
+    machine: the real Milkdown editor for markdown, the sandboxed rendition
+    with the hover bubble for html, and the floating comment rail beside
+    both. Commenting and editing on the web need JavaScript (view-role
+    pages and the code gate still work without it).
+  - *Comment*: the full desktop commenting experience, on both views.
+    Markdown: select text → a floating Comment bubble opens a thread card in
+    the rail (the document itself is read-only for this role). Html: hover a
+    block → the bubble opens an element-anchored card. Threads take replies,
+    edits, and deletions like the desktop rail, and they're the SAME threads
+    the owner sees in the app:
+    - markdown threads are CriticMarkup in the document — a web comment is a
+      save whose stripped content is unchanged (the worker enforces exactly
+      that for comment-role saves via `POST /<id>/save`), and it flows back
+      to the owner's file through the ordinary web-edit pull.
+    - html threads live in `pages/<id>.comments.json` in the app's own
+      sidecar shape (`{id, anchor: {path, tag, text}, comments}`), a small
+      rev-guarded document of its own (`GET/POST /<id>/html-comments`). The
+      worker stamps every web-originated entry with a stable id and the
+      access code that wrote it; the app pushes its local sidecar threads in
+      and merges web additions back out on its reconcile pass, so the
+      desktop rail and the web rail show one conversation. The owner also
+      reads/moderates the pool from the Share popover or the API.
+  - *Edit*: the same shell with the document editable — typing autosaves
+    through revision-guarded saves (a concurrent save surfaces a
+    reload/keep-mine choice instead of clobbering), a new lead H1 retitles
+    the page, and a *content* change marks any html rendition stale (the
+    edited markdown becomes the default view until the app pushes a fresh
+    rendition — comment-only saves never trip this). The app pulls web
+    edits back into the local file on its reconcile pass (launch / window
+    focus): untouched files fast-forward silently; a file with local
+    changes of its own surfaces a conflict in the Share popover — "Use web
+    version" or "Keep mine" — and never overwrites either side without
+    being asked.
 
 ## Set up your own backend
 
@@ -119,9 +132,13 @@ https://github.com/boat-builder/doklin/releases/latest/download/doklin-worker.js
 ```
 
 (generated by `scripts/bundle-worker.mjs` in CI; it's this folder's source
-with the vendored `marked` inlined). Deploying from a checkout works exactly
-the same — use `main = "src/index.js"` instead and wrangler bundles the import
-itself. From scratch:
+with the vendored `marked` — and, since version 10, the compiled app shell
+that comment/edit sessions load — inlined). Deploying from a checkout: run
+`node scripts/bundle-worker.mjs` first and deploy the file it writes
+(`share-worker/dist/doklin-worker.js`) — pointing wrangler straight at
+`src/index.js` also runs, but with an empty `webAssets.js` stub, so
+comment/edit sessions would get a "web assets not bundled" shell. From
+scratch:
 
 ```sh
 mkdir doklin-backend && cd doklin-backend
@@ -330,10 +347,15 @@ pages/<id>.json   {title, markdown?, html?, htmlStale?, collection?, access?, re
                   role = "comment" | "edit" (absent = view). rev counts content writes (app pushes +
                   web edits); webEdit = {by, at} while the latest write came from the web editor;
                   htmlStale marks a rendition outdated by a web edit
-pages/<id>.comments.json  {comments: [{id, body, quote?, anchor?, name?, label, codeId, createdAt}]} —
-                  visitor comments (codes with the comment/edit role); its own object so content pushes
-                  and comment posts never race. Deleted with the page. `anchor` ({path, tag, text})
-                  points at an element of the html rendition (worker version 9)
+pages/<id>.comments.json  {v: 2, rev, threads: [{id, anchor: {path, tag, text}, comments:
+                  [{author, at, body, eid?, codeId?, label?}]}]} — the page's html-rendition comment
+                  threads (worker version 10): the app's own sidecar shape plus per-entry provenance
+                  the worker stamps on web-originated entries (eid + which access code wrote it).
+                  A small rev-guarded document of its own so content pushes and comment writes never
+                  race; deleted with the page. Pre-v10 flat pools ({comments: [...]}) read as one
+                  thread per comment — nothing a visitor wrote is lost in the upgrade.
+                  Markdown comment threads have no object here: they live IN the stored markdown
+                  as CriticMarkup.
 pages/<id>.png    OG image
 auth/tokens/<sha256-of-token>.json    {id, name, role, workspaces, createdAt, lastSeenAt}
 auth/invites/<sha256-of-code>.json    {id, name, role, workspaces, createdAt, expiresAt, claimed?}
@@ -405,15 +427,23 @@ DELETE /api/pages/<id>/access/codes/<cid> revoke one code + exactly its visitor 
 DELETE /api/pages/<id>/access             remove protection entirely
 ```
 
-Visitor comments, owner side (worker version 8; same auth):
+Html-rendition comment threads, owner side (worker version 10; same auth —
+the same pool browser sessions read/write through `/<id>/html-comments`):
 
 ```
-GET    /api/pages/<id>/comments           -> { comments: [{id, body, quote?, name?, label,
-                                          codeId, createdAt}] } — label names the code that
-                                          posted, name is whatever the visitor typed
-DELETE /api/pages/<id>/comments/<cid>     moderate one comment away
-DELETE /api/pages/<id>/comments           clear the page's comments entirely
+GET    /api/pages/<id>/comments           -> { rev, threads } — the pool in the app's sidecar
+                                          shape; how the app pulls web comments back into the
+                                          local sidecar (three-way merge, deletions stick)
+PUT    /api/pages/<id>/comments           body {baseRev, threads} -> {rev, threads} — swap the
+                                          whole list against the rev it was built on; a lost
+                                          race answers 409 {rev, threads} to merge against.
+                                          How the app pushes its local sidecar threads in
+DELETE /api/pages/<id>/comments/<tid>     moderate one thread away
+DELETE /api/pages/<id>/comments           clear the page's threads entirely
 ```
+
+(`GET /api/pages` rows carry `commentsRev` — the pool's revision — so one
+listing tells the app which pages have web comments to pull.)
 
 The sync + auth API (worker version 4; same bearer auth, roles apply):
 
@@ -472,15 +502,16 @@ the code-entry gate (401) until the browser holds the share's cookie;
 target — correct code ⇒ Set-Cookie + 303 back. A `#c=<code>` fragment on a
 page link pre-fills and submits the gate automatically.
 
-Behind the gate, the session's code role unlocks the write surface (worker
-version 8; all plain form posts, no JS needed): `POST /<id>/comments` (form
-body `body`, optional `name` + `quote`; comment/edit roles),
-`POST /<id>/comments/<cid>/delete` (own code's comments only),
-`GET /<id>/edit` (the web editor; edit role, markdown-bearing pages), and
-`POST /<id>/edit` (form body `markdown` + `baseRev`; a stale `baseRev`
-re-renders the editor with the visitor's text intact instead of clobbering
-the newer save). Comment and edit posts are rate-limited per IP like the
-gate.
+Behind the gate, a comment/edit-role session's `/<id>` serves the app shell
+instead of the static page, and the shell talks to the write surface (worker
+version 10; JSON, same-origin): `POST /<id>/save` (body `{markdown, baseRev,
+force?}` — edit role saves the document; comment-role saves must leave the
+stripped content unchanged, which is how markdown comments post),
+`GET/POST /<id>/html-comments` (the rendition's thread pool: `{rev,
+threads}`, rev-guarded whole-list swaps), and `GET /__web/<v>/app.js|css`
+(the shell's compiled frontend, public + immutable). Saves and comment
+writes are rate-limited per IP like the gate. The v8/v9 form routes
+(`/<id>/edit`, `/<id>/comments…`) now 303 back to the page.
 
 ## Updating a deployed worker
 

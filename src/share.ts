@@ -16,6 +16,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { stripComments } from "./criticMarkup";
+import type { HtmlThread } from "./htmlComments";
 
 export type FileSnapshot = { mtime_ms: number; size: number };
 
@@ -53,6 +54,18 @@ export type ShareEntry = {
   // A web edit that diverged from local changes and is waiting on the owner's
   // call (shown in the share popover until resolved one way or the other).
   webConflict?: { rev: number; by: string; at: string | null };
+  // Html-rendition comment threads, synced with the worker's per-page pool
+  // (v10): the pool revision this Mac last agreed with, and the thread state
+  // both sides held at that moment — the BASE of the three-way merge
+  // (htmlComments.ts mergeHtmlThreads) that folds web comments into the
+  // local sidecar and local ones into the pool, with deletions sticking on
+  // both sides. Absent until the first sync. `commentsDirty` marks a local
+  // sidecar change that hasn't reached the pool yet (a comment made offline,
+  // or a push that failed): it survives restarts so the reconcile pass keeps
+  // retrying until the pool catches up, cleared on a successful sync.
+  commentsRev?: number;
+  commentsBase?: HtmlThread[];
+  commentsDirty?: boolean;
   // Which connection (ShareConnection.id) this page was published to.
   connectionId: string;
   // For a document in a cloud-synced workspace: who published it (their
@@ -149,7 +162,22 @@ export function writeShares(shares: Record<string, ShareEntry>) {
   try {
     localStorage.setItem(SHARES_STORAGE_KEY, JSON.stringify(shares));
   } catch {
-    // ignore
+    // Quota: the comment-thread bases (full thread contents, for the 3-way
+    // merge) are the heavy, purely-derived part of an entry — drop them and
+    // retry so the actual share registry always persists. A dropped base only
+    // costs a first-sync's precision (deletions could resurrect once), which
+    // the next sync re-establishes; losing the whole registry would unshare
+    // everything.
+    try {
+      const trimmed: Record<string, ShareEntry> = {};
+      for (const [path, e] of Object.entries(shares)) {
+        const { commentsBase: _drop, ...rest } = e;
+        trimmed[path] = rest;
+      }
+      localStorage.setItem(SHARES_STORAGE_KEY, JSON.stringify(trimmed));
+    } catch {
+      // still over quota — nothing more we can safely shed here
+    }
   }
 }
 
@@ -446,16 +474,18 @@ export class SharePushConflictError extends Error {
   }
 }
 
-// Publish (or update) a page. Comments are stripped before upload so editorial
-// notes never reach the public copy — same transform as plain ⌘C. The full
-// record is sent every time (the worker doesn't merge), so a rendition that no
-// longer exists locally also disappears remotely — and so does the collection
-// back-reference (the public page's "back to the folder" crumb) when the page
-// is no longer included in a folder share. A page published from a synced
-// workspace sends that workspace's id (`ws`): the worker stamps it, and from
-// then on every member of the workspace can keep the page fresh or stop it —
-// not just whoever pushed first. The stamp is sticky worker-side, so pushes
-// that omit it never downgrade a page.
+// Publish (or update) a page. The markdown travels WITH its CriticMarkup
+// comments (v10 workers): the worker strips them at render time for
+// view-role and public visitors, and serves them — the same threads the
+// desktop shows — to comment/edit-role sessions. The full record is sent
+// every time (the worker doesn't merge), so a rendition that no longer
+// exists locally also disappears remotely — and so does the collection
+// back-reference (the public page's "back to the folder" crumb) when the
+// page is no longer included in a folder share. A page published from a
+// synced workspace sends that workspace's id (`ws`): the worker stamps it,
+// and from then on every member of the workspace can keep the page fresh or
+// stop it — not just whoever pushed first. The stamp is sticky worker-side,
+// so pushes that omit it never downgrade a page.
 //
 // `baseRev` (v8 workers) is the revision this Mac last pushed or pulled: when
 // sent, a page that meanwhile took a WEB edit answers 409 (thrown here as
@@ -476,7 +506,7 @@ export async function pushPage(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       title,
-      markdown: parts.markdown === null ? null : stripComments(parts.markdown),
+      markdown: parts.markdown,
       html: parts.html,
       ...(collection ? { collection } : {}),
       ...(ws ? { ws } : {}),
@@ -541,38 +571,80 @@ export async function fetchPageContent(config: ShareConfig, id: string): Promise
    and moderates them here. `label` names the code that posted, `name` is
    whatever the visitor typed (optional). */
 
-export type PageComment = {
-  id: string;
-  body: string;
-  quote?: string;
-  // Present when the comment was left on an ELEMENT of the html rendition
-  // (worker v9): the same {path, tag, text} anchor shape the app's own
-  // sidecar threads use (htmlComments.ts). The moderation view shows the
-  // human-readable `quote`; the anchor is the machine half.
-  anchor?: { path: string; tag: string; text: string };
-  name?: string;
-  label: string;
-  codeId: string;
-  createdAt: string | null;
-};
+// The pool holds THREADS in the app's own sidecar shape (htmlComments.ts's
+// HtmlThread — anchor + entries), plus per-entry provenance the worker
+// stamps on web-originated entries (eid + which access code wrote it). It is
+// a small rev-guarded document: readers get {rev, threads}; a push swaps the
+// whole list against the rev it was built on, and a lost race answers 409
+// with the current state to merge against.
 
-export async function fetchPageComments(config: ShareConfig, id: string): Promise<PageComment[]> {
-  const res = await apiFetch(config, `/api/pages/${id}/comments`);
-  if (!res.ok) throw await accessErrorFrom(config, res, 8);
-  const body = (await res.json().catch(() => null)) as { comments?: PageComment[] } | null;
-  return Array.isArray(body?.comments) ? body.comments : [];
-}
+export type PageThreadsSnapshot = { rev: number; threads: HtmlThread[] };
 
-export async function deletePageComment(
+export async function fetchPageThreads(
   config: ShareConfig,
   id: string,
-  commentId: string,
+): Promise<PageThreadsSnapshot> {
+  const res = await apiFetch(config, `/api/pages/${id}/comments`);
+  if (!res.ok) throw await accessErrorFrom(config, res, 10);
+  const body = (await res.json().catch(() => null)) as {
+    rev?: unknown;
+    threads?: HtmlThread[];
+    comments?: unknown;
+  } | null;
+  // A pre-v10 worker answers this route 200 with the old flat {comments}
+  // shape and no thread pool — distinguishable from an empty v10 pool by the
+  // missing `threads` array. Treating it as outdated (rather than as "no
+  // comments") keeps thread sync from silently no-opping against a backend
+  // that can't hold threads, and routes the owner to redeploy.
+  // TODO(legacy-cleanup): drop the flat-{comments} detection once v8/v9
+  // workers are no longer in the wild — then a missing `threads` is simply an
+  // empty pool.
+  if (!Array.isArray(body?.threads)) {
+    if (Array.isArray(body?.comments)) throw new ShareWorkerOutdatedError();
+    return { rev: typeof body?.rev === "number" ? body.rev : 0, threads: [] };
+  }
+  return { rev: typeof body?.rev === "number" ? body.rev : 0, threads: body.threads };
+}
+
+export type PageThreadsPush =
+  | { kind: "ok"; rev: number; threads: HtmlThread[] }
+  | { kind: "conflict"; rev: number; threads: HtmlThread[] };
+
+export async function pushPageThreads(
+  config: ShareConfig,
+  id: string,
+  baseRev: number,
+  threads: HtmlThread[],
+): Promise<PageThreadsPush> {
+  const res = await apiFetch(config, `/api/pages/${id}/comments`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ baseRev, threads }),
+  });
+  if (res.ok || res.status === 409) {
+    const body = (await res.json().catch(() => null)) as {
+      rev?: unknown;
+      threads?: HtmlThread[];
+    } | null;
+    return {
+      kind: res.ok ? "ok" : "conflict",
+      rev: typeof body?.rev === "number" ? body.rev : baseRev,
+      threads: Array.isArray(body?.threads) ? body.threads : threads,
+    };
+  }
+  throw await accessErrorFrom(config, res, 10);
+}
+
+export async function deletePageThread(
+  config: ShareConfig,
+  id: string,
+  threadId: string,
 ): Promise<void> {
-  const res = await apiFetch(config, `/api/pages/${id}/comments/${commentId}`, {
+  const res = await apiFetch(config, `/api/pages/${id}/comments/${threadId}`, {
     method: "DELETE",
   });
   // 404 = already gone; the outcome stands.
-  if (!res.ok && res.status !== 404) throw await accessErrorFrom(config, res, 8);
+  if (!res.ok && res.status !== 404) throw await accessErrorFrom(config, res, 10);
 }
 
 // Thrown when the deployed worker predates a feature the app just used —
@@ -705,6 +777,11 @@ export type RemotePageInfo = {
   updatedAt: string | null;
   rev?: number | null;
   webEdit?: PageWebEdit | null;
+  // The comment pool's revision (v10 workers): null = no pool, otherwise the
+  // rev of the last swap (a migrated pre-v10 flat pool reports 1). Absent from
+  // pre-v10 workers' listings entirely. Reconcile compares it against the
+  // entry's synced rev to spot web comments to pull.
+  commentsRev?: number | null;
 };
 
 export async function listRemotePages(config: ShareConfig): Promise<RemotePageInfo[]> {
