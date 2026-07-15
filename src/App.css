@@ -723,6 +723,24 @@ body,
   font-style: normal;
 }
 
+/* Table column drag-resize (tableResize.ts). prosemirror-tables' stock css
+   (imported by the Crepe theme) provides the handle box and col-resize
+   cursor; this restyles its hardcoded #adf to the app accent. Widths are
+   session-only — markdown can't store them. */
+.editor-wrap .milkdown .ProseMirror .column-resize-handle {
+  background: var(--app-accent);
+  width: 3px;
+  right: -2px;
+}
+
+/* A table dragged wider than the editor scrolls within itself (the canvas
+   never scrolls sideways — see .editor-wrap). The wrapper stays position:
+   static, so crepe's absolutely-positioned drag handles/preview (anchored to
+   a positioned ancestor further up) are not clipped by this. */
+.editor-wrap .milkdown .milkdown-table-block .table-wrapper {
+  overflow-x: auto;
+}
+
 /* ---------- Crepe editor variables per theme ----------
    .milkdown reads --crepe-color-* tokens for its block/menu/toolbar styling.
    We override them per theme so the slash menu, drag handles, toolbar, etc.

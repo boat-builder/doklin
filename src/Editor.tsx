@@ -26,6 +26,7 @@ import {
 } from "./criticPlugin";
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
+import { resizableTableView, enableColumnResizing } from "./tableResize";
 import {
   criticCommentSchema,
   criticRemark,
@@ -354,6 +355,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(criticCopyPlugin);
     crepe.editor.use(ghostPlugin);
     crepe.editor.use(polishRevertPlugin);
+    // Column drag-resize; must come after the Crepe features so its table
+    // node view overrides the table block's (see tableResize.ts).
+    crepe.editor.config(enableColumnResizing);
+    crepe.editor.use(resizableTableView);
     crepeRef.current = crepe;
     // Crepe's readonly flag silences its own chrome (toolbar, slash menu,
     // block handle); the editable prop installed at mount keeps ProseMirror
