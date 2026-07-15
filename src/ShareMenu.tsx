@@ -53,6 +53,9 @@ export default function ShareMenu({
   onProtectedChanged,
   onOpenWorkerUpdate,
   onResolveWebConflict,
+  webActivityBy,
+  onWebActivitySeen,
+  onCheckForWebChanges,
 }: {
   docTitle: string;
   entry: ShareEntry | null;
@@ -99,6 +102,15 @@ export default function ShareMenu({
   // Settle entry.webConflict: "pull" replaces the local document with the web
   // version, "keepMine" republishes the local copy over the web edit.
   onResolveWebConflict: (mode: "pull" | "keepMine") => Promise<void>;
+  // Who last changed this page from the web while it wasn't looked at — drives
+  // the ambient dot on the pill. Null when there's nothing unseen.
+  webActivityBy: string | null;
+  // Clear that unseen marker — called once when the popover opens (the owner
+  // is now looking, so the notice has served its purpose).
+  onWebActivitySeen: () => void;
+  // Manual "Check for web changes": pull this page's web edit + comments now.
+  // Resolves to whether anything actually landed.
+  onCheckForWebChanges: () => Promise<{ updated: boolean }>;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"main" | "settings" | "access" | "comments">("main");
@@ -117,7 +129,22 @@ export default function ShareMenu({
   const [copied, setCopied] = useState(false);
   const [endpointInput, setEndpointInput] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<"updated" | "current" | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Opening the popover means the owner is now looking — clear the ambient
+  // "unseen web activity" marker once per open (a ref guards against the
+  // effect re-firing when the callback prop's identity changes each render).
+  const seenRef = useRef(false);
+  useEffect(() => {
+    if (open && !seenRef.current) {
+      seenRef.current = true;
+      onWebActivitySeen();
+    } else if (!open) {
+      seenRef.current = false;
+    }
+  }, [open, onWebActivitySeen]);
 
   useEffect(() => {
     if (!open) return;
@@ -149,6 +176,8 @@ export default function ShareMenu({
         setConfirmRemove(null);
         setSelectedConnId(null);
         setRememberForWorkspace(false);
+        setChecking(false);
+        setCheckResult(null);
       }
       return next;
     });
@@ -309,6 +338,32 @@ export default function ShareMenu({
     [busy, onResolveWebConflict],
   );
 
+  const runCheck = useCallback(async () => {
+    if (checking) return;
+    setChecking(true);
+    setCheckResult(null);
+    setError(null);
+    try {
+      const { updated } = await onCheckForWebChanges();
+      setCheckResult(updated ? "updated" : "current");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChecking(false);
+    }
+  }, [checking, onCheckForWebChanges]);
+
+  // The pill wears a dot when something on the web needs the owner's eye: a
+  // divergence to resolve (conflict) outranks a silent-but-applied change
+  // (activity). Hidden while the popover is open — the detail is right there.
+  const dotKind: "conflict" | "activity" | null = open
+    ? null
+    : entry?.webConflict
+      ? "conflict"
+      : webActivityBy
+        ? "activity"
+        : null;
+
   // Unconfigured + not explicitly editing settings → the setup prompt. The
   // share form itself only ever renders with a working connection behind it.
   const showSetupPrompt = connections.length === 0 && view !== "settings";
@@ -326,11 +381,21 @@ export default function ShareMenu({
   return (
     <div ref={wrapRef} className="share-wrap">
       <button
-        className={`share-button ${entry ? "is-shared" : ""}`}
+        className={`share-button ${entry ? "is-shared" : ""} ${
+          dotKind ? `has-${dotKind}` : ""
+        }`}
         onClick={toggle}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title={entry ? "Shared — manage link" : "Share this note"}
+        title={
+          dotKind === "conflict"
+            ? "Web changes need your attention"
+            : dotKind === "activity"
+              ? `Changed on the web${webActivityBy ? ` by ${webActivityBy}` : ""}`
+              : entry
+                ? "Shared — manage link"
+                : "Share this note"
+        }
       >
         <ShareIcon />
         <span>{entry ? "Shared" : "Share"}</span>
@@ -614,6 +679,22 @@ export default function ShareMenu({
                     >
                       {busy === "stop" ? "Stopping…" : "Stop sharing"}
                     </button>
+                  </div>
+                  <div className="share-check-row">
+                    <button
+                      className="share-check-btn"
+                      onClick={() => void runCheck()}
+                      disabled={checking}
+                      title="Pull the latest web comments and edits for this page now"
+                    >
+                      <RefreshIcon />
+                      <span>{checking ? "Checking…" : "Check for web changes"}</span>
+                    </button>
+                    {checkResult && !checking && !entry.webConflict && (
+                      <span className="share-check-result">
+                        {checkResult === "updated" ? "Pulled in new changes" : "Up to date"}
+                      </span>
+                    )}
                   </div>
                   <div className="share-access-summary">
                     <span className="share-access-summary-text">

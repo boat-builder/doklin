@@ -2636,6 +2636,17 @@ body.tree-dragging.tree-drag-invalid * {
   background: #3fb950;
 }
 
+/* The same "shared" dot, recolored when the web wants the owner's eye: blue
+   for a change that already applied (ambient notice), amber with a soft ring
+   for a divergence waiting to be resolved. */
+.share-button.is-shared.has-activity::after {
+  background: var(--app-accent);
+}
+.share-button.is-shared.has-conflict::after {
+  background: #d29922;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #d29922 28%, transparent);
+}
+
 .share-popover {
   position: absolute;
   top: 30px;
@@ -3115,6 +3126,44 @@ body.tree-dragging.tree-drag-invalid * {
 .share-access-summary-text span {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Manual "Check for web changes" — a quiet text button under the link actions
+   with an inline result note ("Up to date" / "Pulled in new changes"). */
+.share-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.share-check-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.share-check-btn:hover:not(:disabled) {
+  color: var(--app-text);
+}
+.share-check-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.share-check-btn svg {
+  flex-shrink: 0;
+}
+
+.share-check-result {
+  font-size: 11.5px;
+  color: var(--app-text-muted);
   white-space: nowrap;
 }
 
