@@ -174,7 +174,9 @@ export default function CommentsRail({
   );
 }
 
-function ThreadCard({
+// Exported for the html view, which renders the same card floating at the
+// commented element (inside .html-comment-pop) instead of in a rail.
+export function ThreadCard({
   setRef,
   thread,
   top,
@@ -470,7 +472,7 @@ function autoGrow(el: HTMLTextAreaElement) {
 
 /* ---------- Presentation helpers ---------- */
 
-function Avatar({ name }: { name: string }) {
+export function Avatar({ name }: { name: string }) {
   const known = name.trim().length > 0;
   const style = known ? { background: `hsl(${hueOf(name)} 40% 52%)` } : undefined;
   return (

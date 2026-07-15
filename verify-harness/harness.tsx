@@ -1,6 +1,7 @@
-// Verification harness: mounts the REAL HtmlView (bridge, rail, sidecar
-// model — no reimplementation) the way App.tsx does, with in-memory state in
-// place of the sidecar file. Driven by Playwright; not part of the app.
+// Verification harness: mounts the REAL HtmlView (bridge, comment-mode
+// overlay, sidecar model — no reimplementation) the way App.tsx does, with
+// in-memory state in place of the sidecar file. Driven by Playwright; not
+// part of the app.
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import HtmlView from "../src/HtmlView";
@@ -54,7 +55,6 @@ declare global {
 function Harness() {
   const [threads, setThreads] = useState<HtmlThread[]>([]);
   const [html, setHtml] = useState(PAGE_V1);
-  const [visible, setVisible] = useState(true);
 
   useEffect(() => {
     window.__setHtml = (v) => setHtml(v === "v2" ? PAGE_V2 : PAGE_V1);
@@ -66,8 +66,6 @@ function Harness() {
   useEffect(() => {
     // onclick assignment (not addEventListener): StrictMode double-mounts
     // this harness and duplicate listeners would double-toggle.
-    (document.getElementById("toggle-visible") as HTMLButtonElement).onclick = () =>
-      setVisible((v) => !v);
     (document.getElementById("regen-keep") as HTMLButtonElement).onclick = () =>
       setHtml(PAGE_V2);
   }, []);
@@ -78,8 +76,6 @@ function Harness() {
       threads={threads}
       onThreadsChange={setThreads}
       commentAuthor="Sherin's Mac"
-      commentsVisible={visible}
-      onRequestShowComments={() => setVisible(true)}
     />
   );
 }

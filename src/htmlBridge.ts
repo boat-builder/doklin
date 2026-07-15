@@ -12,28 +12,31 @@
 // UX ground rules, decided deliberately (the rendition is arbitrary,
 // possibly interactive HTML — tabs, accordions, links, its own JS):
 //
-//   1. A plain click is NEVER a "create comment" click. Creation goes through
+//   1. The whole comment layer lives behind an explicit COMMENT MODE (the
+//      app's floating "Comment" button; `visible` on the sync message). Mode
+//      off — the default — is the pristine rendition: no highlights, no
+//      hover affordance, no scrim. Readers who never comment never see the
+//      machinery.
+//   2. In comment mode the bridge dims the page with a scrim and cuts
+//      spotlight holes over the hovered block and every commented element,
+//      so the comment layer reads clearly against arbitrary markup.
+//   3. A plain click is NEVER a "create comment" click. Creation goes through
 //      a dedicated hover affordance: a small bubble button that appears at
 //      the top-right of the block under the pointer. The page's own clicks
 //      (links, buttons, onclick handlers) are never repurposed, so nothing
 //      the rendition does collides with commenting.
-//   2. Clicking a commented (highlighted) element ACTIVATES its thread in the
-//      rail, but never preventDefault()s — the page's own handler still runs.
-//      Both happen; neither blocks the other. For fully interactive anchors
-//      the rail card is the always-reliable path to the thread (clicking the
-//      card scrolls to and flashes the element).
-//   3. External links are the one place the bridge overrides the page:
+//   4. Clicking a commented (highlighted) element ACTIVATES its thread — the
+//      app opens the floating card at the element — but never
+//      preventDefault()s; the page's own handler still runs. Both happen;
+//      neither blocks the other.
+//   5. External links are the one place the bridge overrides the page:
 //      following a link inside the iframe would replace the rendition (and
 //      the comment layer) with the linked site, so http(s)/mailto links open
 //      in the system browser via the app instead. Same-page #hash links keep
 //      their in-page behavior.
-//   4. Hiding comments hides highlights and rail, but the hover bubble stays
-//      available — creating while hidden asks the app to flip comments back
-//      on (exact parity with the markdown editor's always-available toolbar
-//      button + onRequestShowComments).
-//   5. The bridge listens in the capture phase, so renditions that
+//   6. The bridge listens in the capture phase, so renditions that
 //      stopPropagation() in their own handlers can't starve activation — and
-//      since activation never blocks (rule 2), the reverse holds too.
+//      since activation never blocks (rule 4), the reverse holds too.
 //
 // Known limits, accepted: a rendition carrying a strict CSP <meta> that
 // forbids inline scripts disables the comment layer (the preview still
@@ -55,21 +58,22 @@ export type BridgeSyncMsg = {
 };
 export type BridgeScrollToMsg = { dk: "doklin-comments"; type: "scroll-to"; id: string };
 
-// What the bridge sends the app. Tops are iframe-viewport-relative, which is
-// exactly the rail's coordinate space (the iframe and the rail overlay the
-// same box), so no scroll arithmetic crosses the boundary.
+// What the bridge sends the app. Rects are iframe-viewport-relative, which
+// is exactly the overlay layer's coordinate space (the iframe and the
+// overlay share the same box), so no scroll arithmetic crosses the boundary.
+export type AnchorRect = { top: number; left: number; width: number; height: number };
 export type BridgeReadyMsg = { dk: "doklin-comments"; type: "ready" };
 export type BridgeLayoutMsg = {
   dk: "doklin-comments";
   type: "layout";
-  tops: { id: string; top: number }[];
+  rects: ({ id: string } & AnchorRect)[];
   orphans: string[];
 };
 export type BridgePickMsg = {
   dk: "doklin-comments";
   type: "pick";
   anchor: HtmlAnchor;
-  top: number;
+  rect: AnchorRect;
 };
 export type BridgeActivateMsg = {
   dk: "doklin-comments";
@@ -127,6 +131,22 @@ const BRIDGE_STYLE = `
 [data-dk-flash] {
   animation: dk-flash 0.9s ease-out;
 }
+/* Comment-mode scrim: dims the page, with spotlight holes cleared over the
+   hovered block and every commented element (drawn on the canvas — clearRect
+   handles overlapping holes, unlike an evenodd clip path). Sits under the
+   bubble, over everything else. */
+#dk-scrim {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: none;
+  pointer-events: none;
+  z-index: 2147483646;
+}
+#dk-scrim.dk-on {
+  display: block;
+}
 #dk-bubble {
   position: fixed;
   z-index: 2147483647;
@@ -162,7 +182,7 @@ const BRIDGE_SCRIPT = `
   if (!parentWin || parentWin === window) return;
 
   var threads = []; // [{id, anchor}] as last synced
-  var visible = true;
+  var visible = false; // comment mode is opt-in; stay dark until the app says otherwise
   var activeId = null;
   var resolved = {}; // id -> Element (may go stale; layout() re-resolves)
   var hoverEl = null;
@@ -244,13 +264,18 @@ const BRIDGE_SCRIPT = `
     });
   }
 
+  function rectOf(el) {
+    var r = el.getBoundingClientRect();
+    return { top: r.top, left: r.left, width: r.width, height: r.height };
+  }
+
   function layout() {
     var old = document.querySelectorAll("[data-dk-t]");
     for (var i = 0; i < old.length; i++) {
       old[i].removeAttribute("data-dk-t");
       old[i].removeAttribute("data-dk-active");
     }
-    var tops = [];
+    var rects = [];
     var orphans = [];
     for (var j = 0; j < threads.length; j++) {
       var t = threads[j];
@@ -266,13 +291,55 @@ const BRIDGE_SCRIPT = `
       }
       el.setAttribute("data-dk-t", "1");
       if (t.id === activeId) el.setAttribute("data-dk-active", "1");
-      tops.push({ id: t.id, top: el.getBoundingClientRect().top });
+      var r = rectOf(el);
+      r.id = t.id;
+      rects.push(r);
     }
     document.documentElement.toggleAttribute("data-dk-hidden", !visible);
-    post({ type: "layout", tops: tops, orphans: orphans });
+    drawScrim();
+    post({ type: "layout", rects: rects, orphans: orphans });
   }
 
-  /* ----- hover bubble (the only "create" affordance) ----- */
+  /* ----- the comment-mode scrim ----- */
+
+  var scrim = document.createElement("canvas");
+  scrim.id = "dk-scrim";
+
+  function drawScrim() {
+    if (!visible) {
+      scrim.classList.remove("dk-on");
+      return;
+    }
+    scrim.classList.add("dk-on");
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var dpr = window.devicePixelRatio || 1;
+    if (scrim.width !== Math.round(w * dpr) || scrim.height !== Math.round(h * dpr)) {
+      scrim.width = Math.round(w * dpr);
+      scrim.height = Math.round(h * dpr);
+    }
+    var ctx = scrim.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(15, 21, 32, 0.32)";
+    ctx.fillRect(0, 0, w, h);
+    // Spotlight holes: every commented element, plus the hovered block. The
+    // inflation keeps the elements' outlines (offset 2px) inside the light.
+    for (var i = 0; i < threads.length; i++) {
+      var el = resolved[threads[i].id];
+      if (el && el.isConnected) {
+        var r = el.getBoundingClientRect();
+        ctx.clearRect(r.left - 6, r.top - 6, r.width + 12, r.height + 12);
+      }
+    }
+    if (hoverEl && hoverEl.isConnected) {
+      var hr = hoverEl.getBoundingClientRect();
+      ctx.clearRect(hr.left - 6, hr.top - 6, hr.width + 12, hr.height + 12);
+    }
+  }
+
+  /* ----- hover bubble (the only "create" affordance; comment mode only) ----- */
 
   var bubble = document.createElement("button");
   bubble.id = "dk-bubble";
@@ -311,6 +378,7 @@ const BRIDGE_SCRIPT = `
     hoverEl = el;
     if (!el) {
       bubble.classList.remove("dk-on");
+      drawScrim();
       return;
     }
     el.setAttribute("data-dk-hover", "1");
@@ -318,6 +386,7 @@ const BRIDGE_SCRIPT = `
     bubble.style.top = Math.max(4, Math.min(r.top + 4, window.innerHeight - 32)) + "px";
     bubble.style.left = Math.max(4, Math.min(r.right - 30, window.innerWidth - 34)) + "px";
     bubble.classList.add("dk-on");
+    drawScrim();
   }
 
   var hoverQueued = false;
@@ -330,6 +399,7 @@ const BRIDGE_SCRIPT = `
       hoverQueued = true;
       requestAnimationFrame(function () {
         hoverQueued = false;
+        if (!visible) return; // outside comment mode there is no affordance
         if (!lastPointer) return;
         var target = lastPointer.target;
         if (target === bubble || bubble.contains(target)) return; // keep current hover
@@ -355,7 +425,7 @@ const BRIDGE_SCRIPT = `
     post({
       type: "pick",
       anchor: anchorOf(hoverEl),
-      top: hoverEl.getBoundingClientRect().top
+      rect: rectOf(hoverEl)
     });
   });
 
@@ -420,6 +490,7 @@ const BRIDGE_SCRIPT = `
       threads = Array.isArray(msg.threads) ? msg.threads : [];
       activeId = typeof msg.activeId === "string" ? msg.activeId : null;
       visible = msg.visible !== false;
+      if (!visible) setHover(null);
       scheduleLayout();
     } else if (msg.type === "scroll-to") {
       var el = resolved[msg.id];
@@ -443,6 +514,7 @@ const BRIDGE_SCRIPT = `
   });
 
   function start() {
+    document.body.appendChild(scrim);
     document.body.appendChild(bubble);
     mutations.observe(document.body, {
       childList: true,

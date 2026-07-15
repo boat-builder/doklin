@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
+import { Avatar, ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
   addHtmlReply,
   createHtmlThread,
@@ -13,74 +13,96 @@ import {
   bridgeThreads,
   instrumentHtml,
   isBridgeMsg,
-  type BridgeScrollToMsg,
+  type AnchorRect,
   type BridgeSyncMsg,
 } from "./htmlBridge";
 
 // The HTML rendition view: the sandboxed preview iframe plus its comment
-// layer (the same right-hand rail the markdown editor uses). The iframe DOM
-// is out of reach behind the sandbox's opaque origin, so all element work
-// happens bridge-side (see htmlBridge.ts) and this component only exchanges
-// messages: it sends the thread list, visibility, and the active id down;
-// it gets anchor positions (iframe-viewport space — the rail overlays the
-// same box, so they're used as card tops directly), picks, and activations
-// back.
+// layer. The layer lives behind an explicit COMMENT MODE — a floating
+// "Comment" button over the rendition. Mode off (the default) shows the
+// pristine page; mode on dims the page (bridge-side scrim), arms the hover
+// "add comment" bubble, and overlays existing threads AT their elements:
+// a small avatar pin on each commented element, expanding into a floating
+// card when clicked. No side rail — comments live where they were made.
+//
+// The iframe DOM is out of reach behind the sandbox's opaque origin, so all
+// element work happens bridge-side (see htmlBridge.ts) and this component
+// only exchanges messages: it sends the thread list, comment mode, and the
+// active id down; it gets anchor rects (iframe-viewport space — the overlay
+// shares the same box, so they position pins/cards directly), picks, and
+// activations back.
 //
 // Thread DATA lives with the host (App owns the sidecar file and its
 // persistence, like it owns the markdown autosave); this component owns the
-// transient UI state — active card, which entry is being edited — mirroring
-// Editor.tsx's split exactly, including the draft semantics: a new thread
-// opens as an empty card, and an abandoned draft (committed or cancelled
-// empty) is discarded rather than saved.
+// transient UI state — comment mode, active card, which entry is being
+// edited — mirroring Editor.tsx's split, including the draft semantics: a
+// new thread opens as an empty card, and an abandoned draft (committed or
+// cancelled empty, or left behind when mode exits) is discarded, not saved.
 type Props = {
   htmlContent: string;
   threads: HtmlThread[];
   onThreadsChange: (next: HtmlThread[]) => void;
   commentAuthor: string;
-  commentsVisible: boolean;
-  onRequestShowComments: () => void;
   // How external links leave the rendition. The desktop default routes them
   // to the system browser via Tauri; a web host passes window.open instead.
   onOpenExternal?: (url: string) => void;
 };
+
+const CARD_W = 300;
+const PIN = 26; // pin hit target, square
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
 
 export default function HtmlView({
   htmlContent,
   threads,
   onThreadsChange,
   commentAuthor,
-  commentsVisible,
-  onRequestShowComments,
   onOpenExternal,
 }: Props) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [mode, setMode] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditTarget>(null);
-  // Latest anchor layout from the bridge: card tops (viewport space) and
-  // which threads failed to re-anchor. Orphans surface at the top of the
-  // rail instead of vanishing.
-  const [tops, setTops] = useState<Map<string, number>>(new Map());
+  // Latest anchor layout from the bridge: element rects (viewport space) and
+  // which threads failed to re-anchor. Orphans surface in a stack under the
+  // Comment button instead of vanishing.
+  const [rects, setRects] = useState<Map<string, AnchorRect>>(new Map());
   const [orphans, setOrphans] = useState<Set<string>>(new Set());
+  // The overlay's own box — pins and cards clamp inside it.
+  const [size, setSize] = useState({ w: 0, h: 0 });
 
   // Refs for the message handler (installed once).
   const threadsRef = useRef(threads);
   threadsRef.current = threads;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
-  const visibleRef = useRef(commentsVisible);
-  visibleRef.current = commentsVisible;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const authorRef = useRef(commentAuthor);
   authorRef.current = commentAuthor;
   const onThreadsChangeRef = useRef(onThreadsChange);
   onThreadsChangeRef.current = onThreadsChange;
-  const onRequestShowCommentsRef = useRef(onRequestShowComments);
-  onRequestShowCommentsRef.current = onRequestShowComments;
   const onOpenExternalRef = useRef(onOpenExternal);
   onOpenExternalRef.current = onOpenExternal;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
 
-  const postToBridge = useCallback((msg: BridgeSyncMsg | BridgeScrollToMsg) => {
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() =>
+      setSize({ w: el.clientWidth, h: el.clientHeight }),
+    );
+    ro.observe(el);
+    setSize({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  const postToBridge = useCallback((msg: BridgeSyncMsg) => {
     iframeRef.current?.contentWindow?.postMessage(msg, "*");
   }, []);
 
@@ -90,7 +112,7 @@ export default function HtmlView({
       type: "sync",
       threads: bridgeThreads(threadsRef.current),
       activeId: activeIdRef.current,
-      visible: visibleRef.current,
+      visible: modeRef.current,
     });
   }, [postToBridge]);
 
@@ -99,7 +121,7 @@ export default function HtmlView({
   // fresh bridge says "ready" and gets the same sync.)
   useEffect(() => {
     syncBridge();
-  }, [threads, activeId, commentsVisible, syncBridge]);
+  }, [threads, activeId, mode, syncBridge]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -109,20 +131,18 @@ export default function HtmlView({
       if (msg.type === "ready") {
         syncBridge();
       } else if (msg.type === "layout") {
-        setTops(new Map(msg.tops.map((t) => [t.id, t.top])));
+        setRects(new Map(msg.rects.map((r) => [r.id, r])));
         setOrphans(new Set(msg.orphans));
       } else if (msg.type === "pick") {
-        // The hover bubble: create a draft thread on the picked element and
-        // open its card for typing. Works while comments are hidden too —
-        // the app flips them visible first (markdown-toolbar parity).
-        if (!visibleRef.current) onRequestShowCommentsRef.current?.();
+        // The hover bubble (comment mode only): create a draft thread on the
+        // picked element and open its card for typing.
         const { next, id } = createHtmlThread(
           threadsRef.current,
           msg.anchor,
           authorRef.current,
         );
         onThreadsChangeRef.current(next);
-        setTops((prev) => new Map(prev).set(id, msg.top)); // place the card before the next layout arrives
+        setRects((prev) => new Map(prev).set(id, msg.rect)); // place the card before the next layout arrives
         setActiveId(id);
         setEditing({ id, index: 0 });
       } else if (msg.type === "activate") {
@@ -156,43 +176,30 @@ export default function HtmlView({
     });
   }, [threads]);
 
-  // Hiding comments clears the selection — no invisible active highlight.
-  useEffect(() => {
-    if (!commentsVisible) {
+  // Entering/leaving comment mode. Leaving discards an unwritten draft (its
+  // textarea's blur usually got there first — this is the belt to that
+  // suspender) and clears the selection: nothing invisible stays active.
+  const toggleMode = useCallback(() => {
+    const next = !modeRef.current;
+    if (!next) {
+      const e = editingRef.current;
+      if (e && e.index === 0) {
+        const t = threadsRef.current.find((x) => x.id === e.id);
+        if (t && t.comments.length === 1 && t.comments[0].body === "") {
+          onThreadsChangeRef.current(deleteHtmlThread(threadsRef.current, e.id));
+        }
+      }
       setActiveId(null);
       setEditing(null);
     }
-  }, [commentsVisible]);
+    setMode(next);
+  }, []);
 
-  // Rail order: orphans pinned at the top (they have no position of their
-  // own), then anchored threads by their on-screen position. layoutCards
-  // stacks from there with real measured heights.
-  const railThreads: RailThread[] = useMemo(() => {
-    const orphaned = threads.filter((t) => orphans.has(t.id));
-    const anchored = threads
-      .filter((t) => !orphans.has(t.id))
-      .map((t) => ({ t, top: tops.get(t.id) ?? 0 }))
-      .sort((a, b) => a.top - b.top);
-    return [
-      ...orphaned.map((t) => ({
-        id: t.id,
-        comments: t.comments,
-        anchorTop: 8,
-        orphaned: true,
-      })),
-      ...anchored.map(({ t, top }) => ({ id: t.id, comments: t.comments, anchorTop: top })),
-    ];
-  }, [threads, tops, orphans]);
+  /* ----- card callbacks: same contracts as Editor.tsx, over the sidecar ----- */
 
-  /* ----- rail callbacks: same contracts as Editor.tsx, over the sidecar ----- */
-
-  const onActivate = useCallback(
-    (id: string) => {
-      setActiveId(id);
-      postToBridge({ dk: "doklin-comments", type: "scroll-to", id });
-    },
-    [postToBridge],
-  );
+  const onActivate = useCallback((id: string) => {
+    setActiveId(id);
+  }, []);
 
   const onStartEdit = useCallback((id: string, index: number) => {
     setActiveId(id);
@@ -241,9 +248,75 @@ export default function HtmlView({
     onThreadsChangeRef.current(deleteHtmlReply(threadsRef.current, id, index));
   }, []);
 
-  const showRail = commentsVisible && railThreads.length > 0;
+  const noopRef = useCallback(() => {}, []);
+  const cardProps = {
+    selfAuthor: commentAuthor,
+    onActivate,
+    onStartEdit,
+    onCommitEdit,
+    onCancelEdit,
+    onReply,
+    onDeleteThread,
+    onDeleteReply,
+  };
+
+  const asRailThread = (t: HtmlThread, orphaned = false): RailThread => ({
+    id: t.id,
+    comments: t.comments,
+    anchorTop: 0,
+    orphaned,
+  });
+
+  // Pins: one per anchored, on-screen thread (the active one shows its card
+  // instead). Nested or twice-commented elements would stack pins on the
+  // same corner — nudge collisions apart so both stay clickable.
+  const pins = useMemo(() => {
+    if (!mode) return [];
+    const placed: { id: string; top: number; left: number; count: number }[] = [];
+    for (const t of threads) {
+      if (t.id === activeId || orphans.has(t.id)) continue;
+      const r = rects.get(t.id);
+      if (!r) continue;
+      if (r.top + r.height < 0 || r.top > size.h) continue; // off-screen anchor
+      let left = clamp(r.left + r.width - PIN + 4, 8, size.w - PIN - 8);
+      const top = clamp(r.top - 10, 8, size.h - PIN - 8);
+      for (let nudges = 0; nudges <= placed.length; nudges += 1) {
+        const clash = placed.find(
+          (p) => Math.abs(p.top - top) < PIN && Math.abs(p.left - left) < PIN,
+        );
+        if (!clash) break;
+        left = clash.left - PIN - 4;
+      }
+      placed.push({ id: t.id, top, left: Math.max(4, left), count: t.comments.length });
+    }
+    return placed;
+  }, [mode, threads, rects, orphans, activeId, size]);
+
+  const activeThread = activeId ? threads.find((t) => t.id === activeId) ?? null : null;
+  const activeRect = activeThread && !orphans.has(activeThread.id)
+    ? rects.get(activeThread.id) ?? null
+    : null;
+
+  // The floating card sits beside its element when the gutter is wide
+  // enough, otherwise tucked over the element's right edge — always inside
+  // the view, capped to the space below so long threads scroll internally.
+  const cardPos = activeRect
+    ? (() => {
+        const beside = activeRect.left + activeRect.width + 10;
+        const left =
+          beside + CARD_W + 8 <= size.w
+            ? beside
+            : clamp(activeRect.left + activeRect.width - CARD_W, 8, size.w - CARD_W - 8);
+        const top = clamp(activeRect.top, 8, Math.max(8, size.h - 180));
+        return { left, top, maxHeight: size.h - top - 12 };
+      })()
+    : null;
+
+  const orphaned = mode ? threads.filter((t) => orphans.has(t.id)) : [];
+  const pinFaces = new Map(threads.map((t) => [t.id, t.comments[0]?.author ?? ""]));
+
   return (
-    <div className={`html-view ${showRail ? "has-comments" : ""}`}>
+    <div className="html-view" ref={rootRef}>
       {/* The rendition is arbitrary generated markup: render it isolated in a
           sandboxed frame (scripts run under an opaque origin — no access to
           the app, its storage, or Tauri IPC). The bridge script injected by
@@ -255,21 +328,79 @@ export default function HtmlView({
         sandbox="allow-scripts allow-popups"
         srcDoc={srcDoc}
       />
-      {showRail && (
-        <CommentsRail
-          threads={railThreads}
-          activeId={activeId}
-          editing={editing}
-          selfAuthor={commentAuthor}
-          onActivate={onActivate}
-          onStartEdit={onStartEdit}
-          onCommitEdit={onCommitEdit}
-          onCancelEdit={onCancelEdit}
-          onReply={onReply}
-          onDeleteThread={onDeleteThread}
-          onDeleteReply={onDeleteReply}
-        />
-      )}
+      <div className="html-comment-layer">
+        <button
+          type="button"
+          className={`html-comment-btn ${mode ? "is-on" : ""}`}
+          aria-pressed={mode}
+          title={mode ? "Hide comments" : "Review and comment"}
+          onClick={toggleMode}
+        >
+          <BubbleIcon />
+          {mode ? "Done" : "Comment"}
+          {!mode && threads.length > 0 && (
+            <span className="html-comment-btn-count">{threads.length}</span>
+          )}
+        </button>
+        {pins.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className="html-comment-pin"
+            style={{ top: p.top, left: p.left }}
+            title="Open comment"
+            onClick={() => setActiveId(p.id)}
+          >
+            <Avatar name={pinFaces.get(p.id) ?? ""} />
+            {p.count > 1 && <span className="html-comment-pin-count">{p.count}</span>}
+          </button>
+        ))}
+        {activeThread && cardPos && (
+          <div className="html-comment-pop" style={cardPos}>
+            <ThreadCard
+              setRef={noopRef}
+              thread={asRailThread(activeThread)}
+              top={0}
+              active
+              editing={editing && editing.id === activeThread.id ? editing.index : null}
+              {...cardProps}
+            />
+          </div>
+        )}
+        {orphaned.length > 0 && (
+          <div className="html-comment-orphans">
+            {orphaned.map((t) => (
+              <ThreadCard
+                key={t.id}
+                setRef={noopRef}
+                thread={asRailThread(t, true)}
+                top={0}
+                active={t.id === activeId}
+                editing={editing && editing.id === t.id ? editing.index : null}
+                {...cardProps}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+function BubbleIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
   );
 }
