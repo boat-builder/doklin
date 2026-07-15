@@ -296,6 +296,43 @@ step(
   (await rev.locator(".comments-rail").textContent()).includes("Desktop says hi."),
 );
 await rev.screenshot({ path: `${SHOTS}/05-desktop-thread.png` });
+
+// 15. Someone else's comment is not click-editable: the reviewer clicking
+//     the desktop author's body gets the reply composer (no entry editor,
+//     no Edit pencil on a foreign entry).
+const deskCard = rev.locator(".comment-card", { hasText: "Desktop says hi." });
+await deskCard.locator(".comment-entry-body").first().click();
+await poll(
+  async () => (await deskCard.locator(".comment-reply-composer .comment-input").count()) === 1,
+);
+const foreignState = await rev.evaluate(() => ({
+  entryEditors: document.querySelectorAll(".comment-entry .comment-input").length,
+  inComposer: document.activeElement?.closest(".comment-reply-composer") != null,
+}));
+step(
+  "a foreign comment isn't click-editable — the click lands in the reply box",
+  foreignState.entryEditors === 0 &&
+    foreignState.inComposer &&
+    (await deskCard.locator(".comment-entry-edit").count()) === 0,
+);
+
+// 16. The reviewer's own entry still edits — through the explicit pencil —
+//     and the change syncs to the pool.
+const ownCard = rev.locator(".comment-card", { hasText: "Open with the metric instead." });
+await ownCard.locator(".comment-entry-body").first().click(); // activate own card
+await poll(async () => (await ownCard.locator(".comment-entry-edit").count()) > 0);
+await ownCard.locator(".comment-entry-edit").first().click();
+await poll(async () => (await ownCard.locator(".comment-entry .comment-input").count()) === 1);
+await rev.keyboard.type(" (edited)");
+await rev.keyboard.press("Enter");
+const editedPool = await poll(async () => {
+  const { json } = await api("/api/pages/brief-web/comments");
+  const t = json?.threads?.find((x) =>
+    x.comments[0]?.body?.startsWith("Open with the metric"),
+  );
+  return t?.comments[0]?.body?.endsWith("(edited)") ? json : null;
+});
+step("own entries edit via the explicit pencil and sync to the pool", !!editedPool);
 await rev.context().close();
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);

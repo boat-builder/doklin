@@ -534,6 +534,13 @@ export default function App() {
   const autosaveTimerRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const conflictRef = useRef<Conflict | null>(null);
+  // Reload-from-disk lives far below (it needs the autosave/scroll machinery),
+  // but the web-edit pull up here has to call it to refresh the open editor
+  // when a fast-forward lands. This ref bridges the ordering (same pattern as
+  // syncShareThreadsRef) and always points at the latest closure.
+  const reloadFromDiskRef = useRef<(opts?: { push?: boolean }) => Promise<void>>(
+    () => Promise.resolve(),
+  );
   // Imperative mirrors of the tab list + active id, so async operations read the
   // latest value without stale closures (same pattern as pathRef/dirtyRef).
   const tabsRef = useRef<Tab[]>([]);
@@ -585,6 +592,16 @@ export default function App() {
   // a debounced push of the same content to the remote page.
   const [shares, setShares] = useState<Record<string, ShareEntry>>(() => readShares());
   const sharesRef = useRef<Record<string, ShareEntry>>(shares);
+  // Ambient "someone touched this on the web" marker, keyed by document path.
+  // A fast-forward pull (a web comment/edit that landed silently) sets it; the
+  // share pill shows a dot until the popover is opened, which clears it. Purely
+  // a notice — the content itself already reloaded into the editor/rail.
+  const [webActivity, setWebActivity] = useState<Record<string, { by: string; at: number }>>(
+    {},
+  );
+  const markWebActivity = useCallback((target: string, by: string) => {
+    setWebActivity((prev) => ({ ...prev, [target]: { by, at: Date.now() } }));
+  }, []);
   // The configured share backends. State mirrors share.ts's session cache for
   // rendering; callbacks read the cache directly (`await getConnections()`).
   const [shareConns, setShareConns] = useState<ShareConnectionsState>({
@@ -1282,6 +1299,14 @@ export default function App() {
         markConflict();
         return;
       }
+      // The disk matches the last push, but the OPEN editor may hold unsaved
+      // keystrokes the autosave hasn't flushed yet (disk lags the rail). That
+      // is a genuine two-sided edit — treat it as a conflict rather than
+      // fast-forwarding over the in-flight typing.
+      if (pathRef.current === target && dirtyRef.current) {
+        markConflict();
+        return;
+      }
       // Local copy is exactly what we last pushed — the web edit fast-forwards
       // it. The conditional write keeps a keystroke that lands mid-pull safe
       // (it fails; the next reconcile pass sees a diverged file instead).
@@ -1315,8 +1340,17 @@ export default function App() {
             }
           : prev,
       );
+      // The change is on disk now; make it visible. If this is the open
+      // document, reload the editor so the web comment/edit appears live (like
+      // a collaborator's edit would) — the write suppressed the file watcher,
+      // so nothing else would. Skip the push-back: disk already equals the web
+      // version. A quiet marker lights the share pill either way.
+      markWebActivity(target, content.webEdit?.by ?? "");
+      if (pathRef.current === target && !dirtyRef.current) {
+        await reloadFromDiskRef.current({ push: false });
+      }
     },
-    [connectionForEntry, updateShares],
+    [connectionForEntry, updateShares, markWebActivity],
   );
 
   // Html-rendition comment threads sync bidirectionally with the worker's
@@ -2873,7 +2907,7 @@ export default function App() {
     [connectionForEntry],
   );
 
-  const reloadFromDisk = useCallback(async () => {
+  const reloadFromDisk = useCallback(async (opts?: { push?: boolean }) => {
     const target = pathRef.current;
     if (!target) return;
     if (autosaveTimerRef.current != null) {
@@ -2895,12 +2929,14 @@ export default function App() {
       setLoadKey((k) => k + 1);
       // The document just adopted outside edits; a live share follows them
       // (covers both the watcher's auto-reload and the conflict banner's
-      // "Reload from disk").
-      if (sharesRef.current[target]) scheduleSharePush(target);
+      // "Reload from disk"). A web-edit pull skips this: the content on disk
+      // IS the web version, so pushing it straight back only churns the rev.
+      if (opts?.push !== false && sharesRef.current[target]) scheduleSharePush(target);
     } catch (e) {
       console.error("reload failed", e);
     }
   }, [captureActiveScroll, scheduleSharePush]);
+  reloadFromDiskRef.current = reloadFromDisk;
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
@@ -2957,10 +2993,39 @@ export default function App() {
           : prev,
       );
       // The open editor adopts the web version right away (files would get
-      // this from the watcher; drafts aren't watched, so do it for both).
-      if (pathRef.current === target) await reloadFromDisk();
+      // this from the watcher; drafts aren't watched, so do it for both). No
+      // push-back: disk already equals the web copy we just pulled.
+      if (pathRef.current === target) await reloadFromDisk({ push: false });
     },
     [pushSharedNow, connectionForEntry, updateShares, reloadFromDisk],
+  );
+
+  // The share popover's manual "Check for web changes": pull this one page's
+  // web edit and comment threads right now instead of waiting for the next
+  // window-focus reconcile. Reuses the same pull paths, so a fast-forward
+  // reloads the open editor and a divergence parks a conflict — this only
+  // changes WHEN, not HOW. Reports whether anything actually landed so the
+  // popover can say "up to date" vs "pulled in new changes".
+  const checkForWebChanges = useCallback(
+    async (target: string): Promise<{ updated: boolean }> => {
+      const before = sharesRef.current[target];
+      if (!before) return { updated: false };
+      const sig = (e: ShareEntry | undefined) =>
+        e ? `${e.pushedRev ?? ""}|${e.commentsRev ?? ""}|${e.webConflict?.rev ?? ""}` : "";
+      const beforeSig = sig(before);
+      try {
+        await pullWebEdit(target);
+      } catch (e) {
+        console.error("web edit check failed", target, e);
+      }
+      try {
+        await syncShareThreadsRef.current(target);
+      } catch (e) {
+        console.error("web comments check failed", target, e);
+      }
+      return { updated: sig(sharesRef.current[target]) !== beforeSig };
+    },
+    [pullWebEdit],
   );
 
   // The MD/HTML view toggle for the active document. Switching to HTML
@@ -4535,6 +4600,16 @@ export default function App() {
             outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
           }
           onResolveWebConflict={(mode) => resolveWebConflict(activeTab.path, mode)}
+          webActivityBy={webActivity[activeTab.path]?.by ?? null}
+          onWebActivitySeen={() =>
+            setWebActivity((prev) => {
+              if (!(activeTab.path in prev)) return prev;
+              const next = { ...prev };
+              delete next[activeTab.path];
+              return next;
+            })
+          }
+          onCheckForWebChanges={() => checkForWebChanges(activeTab.path)}
         />
       )}
       {sharedPagesOpen && (

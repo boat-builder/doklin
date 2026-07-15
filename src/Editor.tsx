@@ -694,6 +694,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
           threads={threads}
           activeId={activeId}
           editing={editing}
+          selfAuthor={commentAuthor}
           onActivate={onActivate}
           onStartEdit={onStartEdit}
           onCommitEdit={onCommitEdit}

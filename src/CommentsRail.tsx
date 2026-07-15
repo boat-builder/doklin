@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import type { CommentEntry } from "./criticMark";
 
@@ -28,6 +29,14 @@ type Props = {
   threads: RailThread[];
   activeId: string | null;
   editing: EditTarget;
+  // Who is looking at the rail — the same identity new entries are stamped
+  // with (device name on desktop, visitor name / code label on the web).
+  // Only entries whose author matches get an Edit affordance: rewording
+  // someone else's comment by casually clicking on it was terrible UX in a
+  // rail that web reviewers and other synced Macs share. Display-name
+  // matching, not security — the document format has no identity stronger
+  // than a name, and that's fine here.
+  selfAuthor: string;
   onActivate: (id: string) => void;
   onStartEdit: (id: string, index: number) => void;
   onCommitEdit: (id: string, index: number, body: string) => void;
@@ -90,6 +99,7 @@ export default function CommentsRail({
   threads,
   activeId,
   editing,
+  selfAuthor,
   onActivate,
   onStartEdit,
   onCommitEdit,
@@ -150,6 +160,7 @@ export default function CommentsRail({
           top={tops.get(t.id) ?? t.anchorTop}
           active={t.id === activeId}
           editing={editing && editing.id === t.id ? editing.index : null}
+          selfAuthor={selfAuthor}
           onActivate={onActivate}
           onStartEdit={onStartEdit}
           onCommitEdit={onCommitEdit}
@@ -169,6 +180,7 @@ function ThreadCard({
   top,
   active,
   editing,
+  selfAuthor,
   onActivate,
   onStartEdit,
   onCommitEdit,
@@ -182,6 +194,7 @@ function ThreadCard({
   top: number;
   active: boolean;
   editing: number | null; // index of the entry being edited, if in this card
+  selfAuthor: string;
   onActivate: (id: string) => void;
   onStartEdit: (id: string, index: number) => void;
   onCommitEdit: (id: string, index: number, body: string) => void;
@@ -193,6 +206,20 @@ function ThreadCard({
   const { id, comments } = thread;
   const opener = comments[0];
   const replies = comments.slice(1);
+  const mine = (entry: CommentEntry) =>
+    selfAuthor.trim() !== "" && entry.author === selfAuthor;
+
+  // Clicking a card means "I want to respond": once the card is active the
+  // caret goes to the reply composer. For an activating click the composer
+  // doesn't exist yet — the flag hands the focus to the render that mounts
+  // it (consumed-or-dropped there, so it can't fire later out of context).
+  const replyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const wantReplyFocusRef = useRef(false);
+  useEffect(() => {
+    if (!wantReplyFocusRef.current) return;
+    wantReplyFocusRef.current = false;
+    if (active && editing == null) replyInputRef.current?.focus({ preventScroll: true });
+  });
 
   return (
     <div
@@ -204,7 +231,12 @@ function ThreadCard({
         // (or an editing textarea elsewhere).
         const t = e.target as HTMLElement;
         if (t.tagName !== "TEXTAREA") e.preventDefault();
-        if (!active) onActivate(id);
+        if (!active) {
+          onActivate(id);
+          wantReplyFocusRef.current = true;
+        } else if (editing == null && t.tagName !== "TEXTAREA") {
+          replyInputRef.current?.focus({ preventScroll: true });
+        }
       }}
     >
       {thread.orphaned && (
@@ -213,6 +245,7 @@ function ThreadCard({
       <EntryRow
         entry={opener}
         editing={editing === 0}
+        canEdit={mine(opener)}
         placeholder="Comment…"
         onStartEdit={() => onStartEdit(id, 0)}
         onCommit={(body) => onCommitEdit(id, 0, body)}
@@ -227,6 +260,7 @@ function ThreadCard({
               entry={r}
               isReply
               editing={editing === i + 1}
+              canEdit={mine(r)}
               placeholder="Reply…"
               onStartEdit={() => onStartEdit(id, i + 1)}
               onCommit={(body) => onCommitEdit(id, i + 1, body)}
@@ -241,7 +275,7 @@ function ThreadCard({
             </div>
           )}
       {active && editing == null && (
-        <ReplyComposer onSubmit={(body) => onReply(id, body)} />
+        <ReplyComposer inputRef={replyInputRef} onSubmit={(body) => onReply(id, body)} />
       )}
     </div>
   );
@@ -251,6 +285,7 @@ function EntryRow({
   entry,
   isReply = false,
   editing,
+  canEdit,
   placeholder,
   onStartEdit,
   onCommit,
@@ -261,6 +296,7 @@ function EntryRow({
   entry: CommentEntry;
   isReply?: boolean;
   editing: boolean;
+  canEdit: boolean;
   placeholder: string;
   onStartEdit: () => void;
   onCommit: (body: string) => void;
@@ -274,18 +310,34 @@ function EntryRow({
         <Avatar name={entry.author} />
         <span className="comment-entry-author">{entry.author || "Unknown"}</span>
         <span className="comment-entry-when">{formatWhen(entry.at)}</span>
-        <button
-          className="comment-entry-delete"
-          title={deleteTitle}
-          aria-label={deleteTitle}
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            onDelete();
-          }}
-        >
-          <TrashIcon />
-        </button>
+        <div className="comment-entry-actions">
+          {canEdit && !editing && (
+            <button
+              className="comment-entry-edit"
+              title="Edit"
+              aria-label="Edit"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                onStartEdit();
+              }}
+            >
+              <PencilIcon />
+            </button>
+          )}
+          <button
+            className="comment-entry-delete"
+            title={deleteTitle}
+            aria-label={deleteTitle}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onDelete();
+            }}
+          >
+            <TrashIcon />
+          </button>
+        </div>
       </div>
       {editing ? (
         <EntryEditor
@@ -295,14 +347,10 @@ function EntryRow({
           onCancel={onCancel}
         />
       ) : (
-        <div
-          className="comment-entry-body"
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            onStartEdit();
-          }}
-        >
+        // Deliberately inert: the body is what someone SAID — clicking it
+        // activates the thread (bubbles to the card) rather than opening it
+        // for rewriting. Editing your own words is the pencil above.
+        <div className="comment-entry-body">
           {entry.body || <span className="comment-entry-empty">Empty comment</span>}
         </div>
       )}
@@ -366,9 +414,16 @@ function EntryEditor({
   );
 }
 
-function ReplyComposer({ onSubmit }: { onSubmit: (body: string) => void }) {
+function ReplyComposer({
+  inputRef,
+  onSubmit,
+}: {
+  // Owned by the card so a click anywhere on it can focus the composer.
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  onSubmit: (body: string) => void;
+}) {
   const [draft, setDraft] = useState("");
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const ref = inputRef;
 
   const post = () => {
     if (!draft.trim()) return;
@@ -451,6 +506,24 @@ function formatWhen(at: number): string {
   const opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
   if (date.getFullYear() !== new Date(now).getFullYear()) opts.year = "numeric";
   return date.toLocaleDateString(undefined, opts);
+}
+
+function PencilIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+    </svg>
+  );
 }
 
 function TrashIcon() {
