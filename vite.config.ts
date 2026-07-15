@@ -6,12 +6,13 @@ import path from "node:path";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
-// Bundles the share worker (share-worker/src + its vendored marked) into a
+// Bundles the share worker (share-worker/src + its vendored marked + the
+// compiled app shell the worker serves to comment/edit sessions) into a
 // single ES-module string the app imports as `virtual:share-worker-code`.
 // This is what makes the setup guide's "Copy worker code" button possible:
 // installed-app users paste it into the Cloudflare dashboard editor and never
-// touch the repo. Bundled with vite's own programmatic build (a nested,
-// in-memory lib build) so no extra dependency is needed.
+// touch the repo. Bundled with vite's own programmatic builds (nested,
+// in-memory) so no extra dependency is needed.
 function shareWorkerCode(): Plugin {
   const virtualId = "virtual:share-worker-code";
   const resolvedId = `\0${virtualId}`;
@@ -26,9 +27,18 @@ function shareWorkerCode(): Plugin {
     },
     async load(id) {
       if (id !== resolvedId) return undefined;
+      // Plain node module (shared with scripts/bundle-worker.mjs) — no types.
+      const { buildWebAssets, webAssetsInjector } = (await import(
+        "./scripts/build-web.mjs"
+      )) as {
+        buildWebAssets: () => Promise<{ js: string; css: string }>;
+        webAssetsInjector: (web: { js: string; css: string }) => Plugin;
+      };
+      const web = await buildWebAssets();
       const out = await viteBuild({
         configFile: false,
         logLevel: "warn",
+        plugins: [webAssetsInjector(web)],
         build: {
           write: false,
           minify: false, // stay readable — users are asked to trust-paste this

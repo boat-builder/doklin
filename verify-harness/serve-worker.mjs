@@ -5,6 +5,7 @@
 //   node verify-harness/serve-worker.mjs   # http://localhost:8787, owner token "owner-secret"
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import worker from "../share-worker/src/index.js";
 
 class FakeR2 {
@@ -43,10 +44,13 @@ class FakeR2 {
     };
   }
   async put(key, value, opts = {}) {
-    if (opts.onlyIf?.etagMatches !== undefined) {
+    const cond = opts.onlyIf;
+    if (cond?.etagMatches !== undefined) {
       const existing = this.store.get(key);
-      if (!existing || existing.etag !== opts.onlyIf.etagMatches) return null;
+      if (!existing || existing.etag !== cond.etagMatches) return null;
     }
+    // If-None-Match: "*" — create only when the object is absent.
+    if (cond?.etagDoesNotMatch === "*" && this.store.has(key)) return null;
     const rec = this.#record(key, value, opts);
     this.store.set(key, rec);
     return this.#object(key, rec);
@@ -96,7 +100,30 @@ class FakeR2 {
 const env = { SHARE_TOKEN: "owner-secret", PAGES: new FakeR2() };
 const PORT = Number(process.env.PORT || 8787);
 
+// The app shell's compiled frontend. In a deployed worker it's embedded at
+// bundle time (share-worker/src/webAssets.js); here the plain-node import
+// leaves that stub empty, so serve the dist files scripts/build-web.mjs
+// writes — run `node scripts/build-web.mjs` once before driving the shell.
+const WEB_DIST = new URL("../share-worker/dist/web/", import.meta.url);
+function serveWebDist(url, res) {
+  const m = url.match(/^\/__web\/\d+\/app\.(js|css)$/);
+  if (!m) return false;
+  try {
+    const body = readFileSync(new URL(`app.${m[1]}`, WEB_DIST));
+    res.writeHead(200, {
+      "content-type": m[1] === "js" ? "text/javascript" : "text/css",
+      "cache-control": "no-cache", // dev: rebuilt files must win
+    });
+    res.end(body);
+  } catch {
+    res.writeHead(503, { "content-type": "text/plain" });
+    res.end("web assets not built — run: node scripts/build-web.mjs");
+  }
+  return true;
+}
+
 createServer(async (req, res) => {
+  if (serveWebDist(req.url, res)) return;
   const chunks = [];
   for await (const c of req) chunks.push(c);
   const body = Buffer.concat(chunks);
