@@ -26,8 +26,11 @@
 //   GET /<id>/og.png   the page's OG image (pages/<id>.png in R2)
 //   POST /<id>/unlock  the gate form target: exchanges a correct access code
 //                      for the share's cookie, then 303s back to the page
-//   GET /__web/<v>/app.js|css   the app shell's compiled frontend (public,
-//                      immutable — embedded in this worker at bundle time)
+//   GET /__web/<v>/app.js|app.css|mermaid.js   the app shell's compiled
+//                      frontend plus the standalone mermaid module (public,
+//                      immutable — embedded in this worker at bundle time);
+//                      mermaid is its own file so only documents that carry
+//                      diagrams ever load it (shell and static pages both)
 //   POST /<id>/save    the app shell's autosave (JSON {markdown, baseRev});
 //                      edit-role sessions save like the desktop does, and
 //                      comment-role sessions use the same endpoint for their
@@ -171,8 +174,11 @@ import { WEB_APP } from "./webAssets.js";
 // comments section, and comments can anchor to an element of the rendition),
 // 11 = column drag-resize in the app shell's table editor (shell-only: no
 // API change — the bump exists to roll the new shell out to deployed
-// backends through the update dialog).
-const WORKER_VERSION = 11;
+// backends through the update dialog),
+// 12 = mermaid diagrams: the embedded mermaid module (/__web/<v>/mermaid.js),
+// diagram rendering in the app shell's editor, and ```mermaid hydration on
+// static reading pages.
+const WORKER_VERSION = 12;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -329,7 +335,7 @@ export default {
 
     // The app shell's compiled assets (content-tagged so they cache forever;
     // no page data inside — just the frontend the shell pages load).
-    const assetMatch = path.match(/^\/__web\/([a-z0-9]+)\/app\.(js|css)$/);
+    const assetMatch = path.match(/^\/__web\/([a-z0-9]+)\/(app\.js|app\.css|mermaid\.js)$/);
     if (assetMatch) {
       return serveWebAsset(assetMatch[1], assetMatch[2]);
     }
@@ -2758,11 +2764,12 @@ async function handleHtmlComments(request, env, id, url) {
 // version when no bundle is embedded (dev / the plain-node stub).
 const WEB_ASSET_TAG = (WEB_APP && WEB_APP.tag) || String(WORKER_VERSION);
 
-// GET /__web/<tag>/app.js|css — the app shell's compiled frontend, embedded
-// in this worker at bundle time. Public and immutable; the tag is a content
-// cache key (shell pages always reference the running worker's own build),
-// and the content is code, not page data.
-function serveWebAsset(_tag, ext) {
+// GET /__web/<tag>/app.js|app.css|mermaid.js — the app shell's compiled
+// frontend and the standalone mermaid module, embedded in this worker at
+// bundle time. Public and immutable; the tag is a content cache key (shell
+// pages always reference the running worker's own build), and the content is
+// code, not page data.
+function serveWebAsset(_tag, file) {
   if (!WEB_APP) {
     return new Response(
       "web assets not bundled — build with scripts/bundle-worker.mjs (or serve share-worker/dist/web in dev)",
@@ -2772,14 +2779,64 @@ function serveWebAsset(_tag, ext) {
   // Any tag serves the CURRENT build (the immutable cache is content-keyed by
   // the tag the shell requested; a mismatched tag only means an older tab,
   // which still gets working code and re-tags on its next load).
-  return new Response(ext === "js" ? WEB_APP.js : WEB_APP.css, {
+  const body =
+    file === "app.js" ? WEB_APP.js : file === "app.css" ? WEB_APP.css : WEB_APP.mermaid;
+  return new Response(body, {
     headers: {
-      "content-type":
-        ext === "js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8",
+      "content-type": file.endsWith(".css")
+        ? "text/css; charset=utf-8"
+        : "text/javascript; charset=utf-8",
       "cache-control": "public, max-age=31536000, immutable",
       "x-robots-tag": "noindex",
     },
   });
+}
+
+// The static reading view's diagram renderer, injected only into pages whose
+// rendered markdown carries a ```mermaid block. It imports the same embedded
+// mermaid module the app shell uses (mermaidThemeVariables rides along in it,
+// so diagrams take the page palette — light and dark) and swaps each code
+// block for its rendered SVG. A source that doesn't parse keeps its plain
+// code block, and without JavaScript the page still shows every source.
+function mermaidHydrator() {
+  const moduleUrl = `/__web/${WEB_ASSET_TAG}/mermaid.js`;
+  return `<script type="module">
+(async () => {
+  const codes = [...document.querySelectorAll("pre > code.language-mermaid")];
+  if (codes.length === 0) return;
+  let mod;
+  try { mod = await import(${JSON.stringify(moduleUrl)}); } catch { return; }
+  const mermaid = mod.default;
+  const spots = codes.map((code) => ({
+    source: code.textContent,
+    pre: code.parentElement,
+    holder: Object.assign(document.createElement("div"), { className: "dk-mermaid" }),
+  }));
+  let seq = 0;
+  const renderAll = async () => {
+    // Re-initialized per pass: the palette derives from the page's current
+    // colors, and the prefers-color-scheme listener below re-renders on flips.
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: "base",
+      themeVariables: mod.mermaidThemeVariables(),
+    });
+    for (const spot of spots) {
+      try {
+        const { svg } = await mermaid.render("dk-mermaid-" + ++seq, spot.source);
+        spot.holder.innerHTML = svg;
+        if (!spot.holder.isConnected) spot.pre.replaceWith(spot.holder);
+      } catch {
+        if (spot.holder.isConnected) spot.holder.replaceWith(spot.pre);
+      }
+    }
+  };
+  await renderAll();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
+})();
+</script>`;
 }
 
 // A document that opens with an H1 names itself — mirror of the app's
@@ -2848,6 +2905,7 @@ ${FAVICON_LINKS}
 <noscript>Commenting and editing need JavaScript — enable it and reload, or ask for a view-only code.</noscript>
 <div id="dk-root"></div>
 <script type="application/json" id="dk-boot">${JSON.stringify(boot).replace(/</g, "\\u003c")}</script>
+<script>window.__DK_MERMAID_URL = "${assets}/mermaid.js";</script>
 <script type="module" src="${assets}/app.js"></script>
 </body>
 </html>`;
@@ -3064,6 +3122,7 @@ ${pill("md") ? `<div class="page-top">${pill("md")}</div>` : ""}
 ${body}
 </main>
 <footer>shared via <a href="/">${escapeHtml(url.hostname)}</a></footer>
+${body.includes('class="language-mermaid"') ? mermaidHydrator() : ""}
 </body>
 </html>`;
 
@@ -3979,6 +4038,21 @@ main.doc {
   line-height: 1.55;
 }
 .doc img { max-width: 100%; border-radius: 4px; }
+/* Rendered mermaid diagrams (the hydrator swaps them in for their fenced
+   code blocks). Colors live inside the SVG, derived from this page's palette
+   — this is layout only: a centered figure, wide charts scroll within it. */
+.doc .dk-mermaid {
+  display: flex;
+  justify-content: safe center;
+  margin: 8px 0;
+  padding: 12px 0;
+  overflow-x: auto;
+}
+.doc .dk-mermaid svg { max-width: 100%; flex: none; }
+/* The page's paragraph styling (.doc p) must not restyle the HTML labels
+   inside a diagram — mermaid measures them outside .doc, and a mismatch
+   clips the label boxes. */
+.doc .dk-mermaid p { font-size: inherit; line-height: inherit; padding: 0; }
 .doc hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .doc table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
 .doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }

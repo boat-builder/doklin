@@ -9,7 +9,8 @@ surface, driven in real Chromium.
 `verify-harness/` mounts real components from `src/` in a plain browser page
 (Tauri IPC stubbed via `window.__TAURI_INTERNALS__` in `index.html`). It
 currently covers the HTML-rendition comment layer (`HtmlView` + the injected
-iframe bridge + `CommentsRail` + the sidecar model).
+iframe bridge + `CommentsRail` + the sidecar model) and the mermaid diagram
+pipeline (`src/mermaid.ts` + the Editor wiring).
 
 ```sh
 pnpm install
@@ -17,6 +18,10 @@ pnpm exec vite --port 1420 --strictPort    # dev server, repo root, keep running
 (cd verify-harness && npm install)         # driver lib only (own package.json — npm can't
                                            # write into the pnpm node_modules); browser is preinstalled
 node verify-harness/drive.mjs              # 17 scripted steps + screenshots into verify-harness/shots/
+node verify-harness/drive-mermaid.mjs      # 13 steps: gallery render, live edit, error card,
+                                           # theme flip, /diagram slash item, picker, read-only
+node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the diagram gallery
+                                           # in light/sepia/dark for an eyeball pass
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -53,6 +58,9 @@ node verify-harness/drive-web.mjs        # 18 steps: gate → html rail comment 
                                          # read-only md + selection comment (CriticMarkup
                                          # save) → view-role stripping → edit-role autosave
                                          # → desktop-pushed thread visibility
+node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
+                                           # dark), broken-source fallback, shell renders via
+                                           # the worker-served /__web mermaid module
 ```
 
 serve-worker serves `/__web/*` from `share-worker/dist/web` (the plain-node

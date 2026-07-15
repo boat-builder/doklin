@@ -746,6 +746,70 @@ body,
   overflow-x: auto;
 }
 
+/* ---------- Mermaid diagrams (```mermaid code blocks) ----------
+   The SVG itself is colored from the app tokens at render time
+   (src/mermaid.ts) — this is layout and framing only. The diagram sits on
+   its own paper canvas (--app-bg) inside the code block's tinted card, like
+   a mounted figure; wide charts scroll sideways within it. */
+
+.milkdown .milkdown-code-block .preview .dk-mermaid {
+  display: flex;
+  justify-content: safe center;
+  background: var(--app-bg);
+  border-radius: 8px;
+  padding: 20px 16px;
+  overflow-x: auto;
+}
+
+.milkdown .milkdown-code-block .preview .dk-mermaid svg {
+  max-width: 100%;
+  flex: none;
+}
+
+/* The editor's paragraph styling (.ProseMirror p above) must not restyle the
+   HTML labels inside a diagram: mermaid measures them outside the editor
+   cascade, so any extra font-size/padding here clips the label boxes. */
+.editor-wrap .milkdown .ProseMirror .dk-mermaid p {
+  font-size: inherit;
+  line-height: inherit;
+  padding: 0;
+  margin: 0;
+}
+
+.milkdown .milkdown-code-block .preview .dk-mermaid-loading {
+  justify-content: center;
+  font-size: 12.5px;
+  color: var(--app-text-muted);
+  padding: 14px 16px;
+}
+
+/* A source that doesn't parse (the normal state mid-typing): a quiet card,
+   not an alarm — heading in muted ink, mermaid's message in small mono. */
+.milkdown .milkdown-code-block .preview .dk-mermaid-error {
+  display: block;
+  text-align: left;
+  padding: 12px 14px;
+}
+
+.milkdown .milkdown-code-block .preview .dk-mermaid-error-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--app-text-muted);
+}
+
+.milkdown .milkdown-code-block .preview .dk-mermaid-error-msg {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--app-text-muted);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
 /* ---------- Crepe editor variables per theme ----------
    .milkdown reads --crepe-color-* tokens for its block/menu/toolbar styling.
    We override them per theme so the slash menu, drag handles, toolbar, etc.

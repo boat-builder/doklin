@@ -8,9 +8,21 @@ import {
 } from "react";
 import { Crepe } from "@milkdown/crepe";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
-import { editorViewCtx } from "@milkdown/kit/core";
+import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
+import {
+  addBlockTypeCommand,
+  clearTextInCurrentBlockCommand,
+  codeBlockSchema,
+} from "@milkdown/kit/preset/commonmark";
+import { codeBlockConfig } from "@milkdown/kit/component/code-block";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import {
+  isMermaidLanguage,
+  mermaidLanguage,
+  queueMermaidPreview,
+  MERMAID_PREVIEW_LOADING,
+} from "./mermaid";
 import {
   searchKey,
   searchPlugin,
@@ -123,6 +135,14 @@ function dispatchMeta(view: EditorView, meta: SearchMeta) {
 const commentIcon = `
   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+  </svg>
+`;
+
+// Material "account_tree" — the slash menu's Diagram item, drawn in the same
+// filled style as Crepe's built-in menu icons.
+const diagramIcon = `
+  <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor">
+    <path d="M600-120v-120H440v-400h-80v120H80v-320h280v120h240v-120h280v320H600v-120h-80v320h80v-120h280v320H600Zm-440-520h120v-160H160v160Zm520 400h120v-160H680v160Zm0-400h120v-160H680v160ZM160-640Zm520 240Zm0-240Z"/>
   </svg>
 `;
 
@@ -345,7 +365,45 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
             });
           },
         },
+        "block-edit": {
+          // "/diagram" → a mermaid code block; the preview panel below it
+          // renders the diagram live (see the codeBlockConfig update below).
+          buildMenu: (builder) => {
+            builder.getGroup("advanced").addItem("diagram", {
+              label: "Diagram",
+              icon: diagramIcon,
+              onRun: (ctx) => {
+                const commands = ctx.get(commandsCtx);
+                commands.call(clearTextInCurrentBlockCommand.key);
+                commands.call(addBlockTypeCommand.key, {
+                  nodeType: codeBlockSchema.type(ctx),
+                  attrs: { language: "mermaid" },
+                });
+              },
+            });
+          },
+        },
       },
+    });
+    // Mermaid diagrams: put "mermaid" in the code block's language picker and
+    // chain a diagram renderer in front of the stock preview handlers (LaTeX
+    // et al) — registered after the Crepe constructor, so `prev` already
+    // carries the feature-installed chain. Rendering itself (loading, theming,
+    // debouncing) lives in mermaid.ts.
+    crepe.editor.config((ctx) => {
+      ctx.update(codeBlockConfig.key, (prev) => ({
+        ...prev,
+        languages: [...prev.languages, mermaidLanguage],
+        previewLoading: MERMAID_PREVIEW_LOADING,
+        renderPreview: (language, content, applyPreview) => {
+          if (isMermaidLanguage(language)) {
+            if (!content.trim()) return null;
+            queueMermaidPreview(content, applyPreview);
+            return undefined; // async — the panel shows previewLoading meanwhile
+          }
+          return prev.renderPreview(language, content, applyPreview);
+        },
+      }));
     });
     // The comment mark + its remark round-trip must be registered together.
     // Spread each composable into its underlying MilkdownPlugins.
