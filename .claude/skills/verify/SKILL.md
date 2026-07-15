@@ -18,8 +18,9 @@ pnpm exec vite --port 1420 --strictPort    # dev server, repo root, keep running
 (cd verify-harness && npm install)         # driver lib only (own package.json — npm can't
                                            # write into the pnpm node_modules); browser is preinstalled
 node verify-harness/drive.mjs              # 17 scripted steps + screenshots into verify-harness/shots/
-node verify-harness/drive-mermaid.mjs      # 13 steps: gallery render, live edit, error card,
-                                           # theme flip, /diagram slash item, picker, read-only
+node verify-harness/drive-mermaid.mjs      # 14 steps: gallery render, diagram⇄source switch,
+                                           # live edit, error card, theme flip, /diagram slash
+                                           # item, picker, read-only
 node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the diagram gallery
                                            # in light/sepia/dark for an eyeball pass
 ```

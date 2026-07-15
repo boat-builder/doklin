@@ -750,15 +750,84 @@ body,
    The SVG itself is colored from the app tokens at render time
    (src/mermaid.ts) — this is layout and framing only. The diagram sits on
    its own paper canvas (--app-bg) inside the code block's tinted card, like
-   a mounted figure; wide charts scroll sideways within it. */
+   a mounted figure; wide charts scroll sideways within it.
+
+   A diagram block is two-state, never both at once: reading (nothing in the
+   block focused) shows the diagram alone; the Source button — or arrowing
+   the caret in — shows the source alone, and leaving the block flips back.
+   The .dk-mermaid-editing class (managed in src/mermaid.ts) bridges the gap
+   where :focus-within can't reach: a display:none editor can't take focus. */
+
+.milkdown .milkdown-code-block:has(.preview .dk-mermaid):not(:focus-within):not(.dk-mermaid-editing)
+  .codemirror-host {
+  display: none;
+}
+
+.milkdown
+  .milkdown-code-block:has(.preview .dk-mermaid):is(:focus-within, .dk-mermaid-editing)
+  .preview-panel {
+  display: none;
+}
+
+/* Read-only sessions mount preview-only (the component marks the editor
+   .hidden, !important) — the Source button must still win there. */
+.milkdown
+  .milkdown-code-block:has(.preview .dk-mermaid):is(:focus-within, .dk-mermaid-editing)
+  .codemirror-host.hidden {
+  display: block !important;
+}
+
+/* The stock preview toggle ("Hide"/"Edit") would fight the two-state model —
+   drop it for diagram blocks only (LaTeX previews keep it). Same for the
+   "PREVIEW" divider + label: they exist to separate a preview from the
+   source above it, and a diagram never shows beside its source. */
+.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-toggle-button,
+.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-divider,
+.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-label {
+  display: none;
+}
 
 .milkdown .milkdown-code-block .preview .dk-mermaid {
+  position: relative;
   display: flex;
   justify-content: safe center;
   background: var(--app-bg);
   border-radius: 8px;
   padding: 20px 16px;
   overflow-x: auto;
+}
+
+/* The switch into source view: a quiet chip riding the diagram's top-right
+   corner (inside the error card too), visible while the pointer is over the
+   block — the same reveal the block's language/copy tools use. */
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--app-text-muted);
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.milkdown .milkdown-code-block:hover .preview .dk-mermaid .dk-mermaid-edit,
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:focus-visible {
+  opacity: 1;
+}
+
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
 }
 
 .milkdown .milkdown-code-block .preview .dk-mermaid svg {

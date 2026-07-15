@@ -24,17 +24,17 @@ for (const theme of ["light", "sepia", "dark"]) {
   // Diagrams are debounced + lazily loaded; wait for at least 5 SVGs.
   try {
     await page.waitForFunction(
-      () => document.querySelectorAll(".dk-mermaid svg").length >= 5,
+      () => document.querySelectorAll(".dk-mermaid > svg").length >= 5,
       { timeout: 20000 },
     );
   } catch {
     console.log(`[${theme}] TIMEOUT waiting for diagrams — svg count:`,
-      await page.evaluate(() => document.querySelectorAll(".dk-mermaid svg").length));
+      await page.evaluate(() => document.querySelectorAll(".dk-mermaid > svg").length));
   }
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}mermaid-${theme}.png`, fullPage: true });
   console.log(`[${theme}] shot written; svgs:`,
-    await page.evaluate(() => document.querySelectorAll(".dk-mermaid svg").length),
+    await page.evaluate(() => document.querySelectorAll(".dk-mermaid > svg").length),
     "errors:",
     await page.evaluate(() => document.querySelectorAll(".dk-mermaid-error").length));
   await page.close();
