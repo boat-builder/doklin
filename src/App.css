@@ -2246,9 +2246,23 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
-.comment-entry-delete {
+/* Hover-revealed entry actions: Edit (only on the looker's own entries) and
+   Delete. Explicit buttons — the body text itself is not an edit target. */
+.comment-entry-actions {
   flex: none;
   margin-left: auto;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.comment-entry:hover .comment-entry-actions,
+.comment-entry-actions:focus-within {
+  opacity: 1;
+}
+.comment-entry-edit,
+.comment-entry-delete {
+  flex: none;
   width: 20px;
   height: 20px;
   padding: 0;
@@ -2260,12 +2274,9 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
   color: var(--app-text-muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.comment-entry:hover .comment-entry-delete {
-  opacity: 1;
-}
+.comment-entry-edit:hover,
 .comment-entry-delete:hover {
   background: var(--app-hover);
   color: var(--app-text);

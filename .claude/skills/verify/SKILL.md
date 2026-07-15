@@ -16,7 +16,7 @@ pnpm install
 pnpm exec vite --port 1420 --strictPort    # dev server, repo root, keep running
 (cd verify-harness && npm install)         # driver lib only (own package.json — npm can't
                                            # write into the pnpm node_modules); browser is preinstalled
-node verify-harness/drive.mjs              # 15 scripted steps + screenshots into verify-harness/shots/
+node verify-harness/drive.mjs              # 17 scripted steps + screenshots into verify-harness/shots/
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -49,7 +49,7 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 16 steps: gate → html rail comment → reply →
+node verify-harness/drive-web.mjs        # 18 steps: gate → html rail comment → reply →
                                          # read-only md + selection comment (CriticMarkup
                                          # save) → view-role stripping → edit-role autosave
                                          # → desktop-pushed thread visibility

@@ -260,6 +260,7 @@ export default function HtmlView({
           threads={railThreads}
           activeId={activeId}
           editing={editing}
+          selfAuthor={commentAuthor}
           onActivate={onActivate}
           onStartEdit={onStartEdit}
           onCommitEdit={onCommitEdit}

@@ -107,6 +107,31 @@ const oneLine = (await page.locator("#sidecar-dump").textContent())
 step("reply lands in the same thread (one JSONL line, two entries)", oneLine);
 await page.screenshot({ path: `${SHOTS}/04-reply.png` });
 
+// 4b. The body text is not an edit target: clicking it drops the caret in
+//     the reply composer instead of opening the entry for rewriting.
+await page.locator(".comment-card .comment-entry-body").first().click();
+const bodyClickState = await page.evaluate(() => ({
+  entryEditors: document.querySelectorAll(".comment-entry .comment-input").length,
+  inComposer: document.activeElement?.closest(".comment-reply-composer") != null,
+}));
+step(
+  "clicking a comment body replies instead of editing it",
+  bodyClickState.entryEditors === 0 && bodyClickState.inComposer,
+);
+
+// 4c. Editing your own words goes through the explicit pencil (the harness
+//     author owns every entry here, so the affordance is present).
+await page.locator(".comment-card .comment-entry-edit").first().click();
+await poll(async () => page.locator(".comment-entry .comment-input").isVisible());
+await page.keyboard.type(" — reworded");
+await page.keyboard.press("Enter");
+await poll(async () =>
+  (await page.locator("#sidecar-dump").textContent()).includes(
+    "This intro reads odd — reworded",
+  ),
+);
+step("own entries edit via the explicit pencil (sidecar updated)", true);
+
 // 5. Click pass-through: the rendition's own button still works and no
 //    comment is created by clicking it.
 await frame.locator("#counter").click();
