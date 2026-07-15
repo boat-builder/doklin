@@ -182,7 +182,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 10);
+  assert.equal(ok.json.version, 11);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -1253,8 +1253,8 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
 
   // The shell references version-stamped assets; without an injected bundle
   // (this test build) the asset route says exactly that.
-  assert.ok(commentPage.text.includes("/__web/10/app.js"));
-  assert.equal((await call("/__web/10/app.js")).status, 503);
+  assert.ok(commentPage.text.includes("/__web/11/app.js"));
+  assert.equal((await call("/__web/11/app.js")).status, 503);
 
   // Write-endpoint floors: view can't save or comment; no cookie is a 401.
   const viewSave = await call("/team-page/save", {
