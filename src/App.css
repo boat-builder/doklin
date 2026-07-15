@@ -733,6 +733,11 @@ body,
   right: -2px;
 }
 
+/* Wins over web.css's read-only `cursor: text` — resize works there too. */
+.editor-wrap .milkdown .ProseMirror.resize-cursor {
+  cursor: col-resize;
+}
+
 /* A table dragged wider than the editor scrolls within itself (the canvas
    never scrolls sideways — see .editor-wrap). The wrapper stays position:
    static, so crepe's absolutely-positioned drag handles/preview (anchored to

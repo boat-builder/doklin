@@ -168,8 +168,11 @@ import { WEB_APP } from "./webAssets.js";
 // erase step of backend teardown), 7 = visitor access codes (the public gate),
 // 8 = code roles (view/comment/edit) + web comments + the web editor,
 // 9 = comments on html renditions (the html view of a pair grows the same
-// comments section, and comments can anchor to an element of the rendition).
-const WORKER_VERSION = 10;
+// comments section, and comments can anchor to an element of the rendition),
+// 11 = column drag-resize in the app shell's table editor (shell-only: no
+// API change — the bump exists to roll the new shell out to deployed
+// backends through the update dialog).
+const WORKER_VERSION = 11;
 const WORKER_FEATURES = [
   "pages",
   "collections",
