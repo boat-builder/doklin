@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 // Build the shared-page app shell (web/main.tsx — the SAME editor components
-// the desktop renders) into exactly two strings: one ES-module JS file and
-// one CSS file with every asset (KaTeX fonts, icons) inlined as data: URIs.
+// the desktop renders) into exactly three strings: one ES-module JS file, one
+// CSS file with every asset (KaTeX fonts, icons) inlined as data: URIs, and a
+// standalone mermaid module (web/mermaid-entry.ts). Mermaid rides its own
+// file — served at /__web/<tag>/mermaid.js — because it's ~1 MB gz that only
+// documents with diagrams should ever pay for: the shell imports it lazily
+// (the app build compiles its npm-import branch away via the DK_WEB define —
+// see src/mermaid.ts), and the worker's static pages use the same module to
+// render ```mermaid blocks.
 //
 // Two consumers:
 //   - `node scripts/build-web.mjs` writes them to share-worker/dist/web/
-//     (app.js + app.css) for local serving — verify-harness/serve-worker.mjs
-//     picks them up so a real browser can drive the real thing.
+//     (app.js + app.css + mermaid.js) for local serving —
+//     verify-harness/serve-worker.mjs picks them up so a real browser can
+//     drive the real thing.
 //   - the worker bundlers (scripts/bundle-worker.mjs and vite.config.ts's
 //     virtual:share-worker-code plugin) call buildWebAssets() and inject the
 //     strings into share-worker/src/webAssets.js, so the deployable worker
@@ -27,9 +34,15 @@ export async function buildWebAssets() {
     configFile: false,
     logLevel: "warn",
     plugins: [react()],
-    // Lib builds don't substitute this the way app builds do, and React's
-    // dev/prod split reads it at runtime.
-    define: { "process.env.NODE_ENV": JSON.stringify("production") },
+    define: {
+      // Lib builds don't substitute this the way app builds do, and React's
+      // dev/prod split reads it at runtime.
+      "process.env.NODE_ENV": JSON.stringify("production"),
+      // Web build marker: src/mermaid.ts drops its import("mermaid") branch,
+      // keeping the npm package out of this bundle — the shell loads the
+      // standalone module below through window.__DK_MERMAID_URL instead.
+      "import.meta.env.DK_WEB": "true",
+    },
     build: {
       write: false,
       target: "es2022",
@@ -77,7 +90,36 @@ export async function buildWebAssets() {
       `web build emitted un-inlined assets: ${strays.map((s) => s.fileName).join(", ")}`,
     );
   }
-  return { js: chunk.code, css };
+  return { js: chunk.code, css, mermaid: await buildMermaidAsset() };
+}
+
+// The standalone mermaid module (see the header): the npm package plus the
+// app's palette derivation (src/mermaidTheme.ts), flattened to one ES file —
+// mermaid's internal lazy diagram chunks must ride along, there is no second
+// asset route to load them from.
+async function buildMermaidAsset() {
+  const out = await build({
+    configFile: false,
+    logLevel: "warn",
+    define: { "process.env.NODE_ENV": JSON.stringify("production") },
+    build: {
+      write: false,
+      target: "es2022",
+      lib: {
+        entry: path.join(repoRoot, "web", "mermaid-entry.ts"),
+        formats: ["es"],
+        fileName: "mermaid",
+      },
+      rollupOptions: {
+        output: { inlineDynamicImports: true },
+      },
+    },
+  });
+  const result = Array.isArray(out) ? out[0] : out;
+  if (!("output" in result)) throw new Error("unexpected watcher from mermaid build");
+  const chunk = result.output.find((o) => o.type === "chunk");
+  if (!chunk) throw new Error("mermaid build produced no chunk");
+  return chunk.code;
 }
 
 // A rollup/vite plugin that splices built web assets into the worker's
@@ -90,6 +132,7 @@ export function webAssetsInjector(web) {
   const tag = createHash("sha256")
     .update(web.js)
     .update(web.css)
+    .update(web.mermaid)
     .digest("hex")
     .slice(0, 12);
   return {
@@ -98,7 +141,7 @@ export function webAssetsInjector(web) {
       if (!id.replace(/\\/g, "/").endsWith("share-worker/src/webAssets.js")) return undefined;
       return `export const WEB_APP = { tag: ${JSON.stringify(tag)}, js: ${JSON.stringify(
         web.js,
-      )}, css: ${JSON.stringify(web.css)} };\n`;
+      )}, css: ${JSON.stringify(web.css)}, mermaid: ${JSON.stringify(web.mermaid)} };\n`;
     },
   };
 }
@@ -106,14 +149,16 @@ export function webAssetsInjector(web) {
 const isMain =
   process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const { js, css } = await buildWebAssets();
+  const { js, css, mermaid } = await buildWebAssets();
   const dest = path.join(repoRoot, "share-worker", "dist", "web");
   fs.mkdirSync(dest, { recursive: true });
   fs.writeFileSync(path.join(dest, "app.js"), js);
   fs.writeFileSync(path.join(dest, "app.css"), css);
+  fs.writeFileSync(path.join(dest, "mermaid.js"), mermaid);
   const gz = (s) => (zlib.gzipSync(Buffer.from(s)).length / 1024).toFixed(0);
   console.log(
-    `wrote ${dest}/app.js (${(js.length / 1024).toFixed(0)} KB, ${gz(js)} KB gz) ` +
-      `and app.css (${(css.length / 1024).toFixed(0)} KB, ${gz(css)} KB gz)`,
+    `wrote ${dest}/app.js (${(js.length / 1024).toFixed(0)} KB, ${gz(js)} KB gz), ` +
+      `app.css (${(css.length / 1024).toFixed(0)} KB, ${gz(css)} KB gz), ` +
+      `and mermaid.js (${(mermaid.length / 1024).toFixed(0)} KB, ${gz(mermaid)} KB gz)`,
   );
 }

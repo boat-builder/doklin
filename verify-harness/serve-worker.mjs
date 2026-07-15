@@ -106,12 +106,12 @@ const PORT = Number(process.env.PORT || 8787);
 // writes — run `node scripts/build-web.mjs` once before driving the shell.
 const WEB_DIST = new URL("../share-worker/dist/web/", import.meta.url);
 function serveWebDist(url, res) {
-  const m = url.match(/^\/__web\/\d+\/app\.(js|css)$/);
+  const m = url.match(/^\/__web\/[a-z0-9]+\/(app\.js|app\.css|mermaid\.js)$/);
   if (!m) return false;
   try {
-    const body = readFileSync(new URL(`app.${m[1]}`, WEB_DIST));
+    const body = readFileSync(new URL(m[1], WEB_DIST));
     res.writeHead(200, {
-      "content-type": m[1] === "js" ? "text/javascript" : "text/css",
+      "content-type": m[1].endsWith(".css") ? "text/css" : "text/javascript",
       "cache-control": "no-cache", // dev: rebuilt files must win
     });
     res.end(body);

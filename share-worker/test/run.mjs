@@ -182,7 +182,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 11);
+  assert.equal(ok.json.version, 12);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -1253,8 +1253,8 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
 
   // The shell references version-stamped assets; without an injected bundle
   // (this test build) the asset route says exactly that.
-  assert.ok(commentPage.text.includes("/__web/11/app.js"));
-  assert.equal((await call("/__web/11/app.js")).status, 503);
+  assert.ok(commentPage.text.includes("/__web/12/app.js"));
+  assert.equal((await call("/__web/12/app.js")).status, 503);
 
   // Write-endpoint floors: view can't save or comment; no cookie is a 401.
   const viewSave = await call("/team-page/save", {
@@ -1289,6 +1289,41 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
   assert.equal(legacyEdit.status, 303);
   assert.equal(legacyEdit.headers.get("location"), "/team-page");
   assert.equal((await call("/team-page/comments", { method: "POST" })).status, 303);
+});
+
+await test("mermaid: static pages hydrate diagram blocks, shell knows the module URL", async () => {
+  // A page WITH a ```mermaid block: the reading view keeps the code block in
+  // the markup (no-JS fallback) and gains the hydrator, which imports the
+  // version-stamped module.
+  await call("/api/pages/diagram-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "With a diagram",
+      markdown: "# Flow\n\n```mermaid\nflowchart LR\n  A --> B\n```\n",
+    },
+  });
+  const withDiagram = await call("/diagram-doc");
+  assert.equal(withDiagram.status, 200);
+  assert.ok(withDiagram.text.includes('class="language-mermaid"'));
+  assert.ok(withDiagram.text.includes("/__web/12/mermaid.js"));
+
+  // A page without one doesn't pay for the script.
+  await call("/api/pages/plain-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "No diagram", markdown: "# Plain\n\n```js\n1\n```\n" },
+  });
+  assert.ok(!(await call("/plain-doc")).text.includes("mermaid.js"));
+
+  // The shell hands the module URL to the editor (window.__DK_MERMAID_URL);
+  // the asset route answers like app.js does (503 in this bundle-less build).
+  const shell = await call("/team-page", { headers: { cookie: commentCookie } });
+  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/12/mermaid.js"`));
+  assert.equal((await call("/__web/12/mermaid.js")).status, 503);
+
+  await call("/api/pages/diagram-doc", { method: "DELETE", token: OWNER });
+  await call("/api/pages/plain-doc", { method: "DELETE", token: OWNER });
 });
 
 await test("markdown comments: a comment-role save must leave the document unchanged", async () => {
