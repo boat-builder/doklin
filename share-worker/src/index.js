@@ -178,7 +178,12 @@ import { WEB_APP } from "./webAssets.js";
 // 12 = mermaid diagrams: the embedded mermaid module (/__web/<v>/mermaid.js),
 // diagram rendering in the app shell's editor, and ```mermaid hydration on
 // static reading pages.
-const WORKER_VERSION = 12;
+// 13 = comment mode on html renditions in the app shell: the floating
+// "Comment" button, scrim spotlight, and threads pinned at their elements
+// replace the always-on hover bubble and the right-hand rail (shell-only:
+// no API change — the bump rolls the new shell out to deployed backends
+// through the update dialog).
+const WORKER_VERSION = 13;
 const WORKER_FEATURES = [
   "pages",
   "collections",
