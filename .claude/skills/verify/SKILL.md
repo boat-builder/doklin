@@ -9,8 +9,9 @@ surface, driven in real Chromium.
 `verify-harness/` mounts real components from `src/` in a plain browser page
 (Tauri IPC stubbed via `window.__TAURI_INTERNALS__` in `index.html`). It
 currently covers the HTML-rendition comment layer (`HtmlView` + the injected
-iframe bridge + `CommentsRail` + the sidecar model) and the mermaid diagram
-pipeline (`src/mermaid.ts` + the Editor wiring).
+iframe bridge + `CommentsRail` + the sidecar model), the mermaid diagram
+pipeline (`src/mermaid.ts` + the Editor wiring), and the inline-code newline
+normalization (`src/inlineCodeNewlines.ts`).
 
 ```sh
 pnpm install
@@ -25,6 +26,9 @@ node verify-harness/drive-mermaid.mjs      # 14 steps: gallery render, diagramâ‡
                                            # item, picker, read-only
 node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the diagram gallery
                                            # in light/sepia/dark for an eyeball pass
+node verify-harness/drive-inline-code.mjs  # 7 steps: hard-wrapped inline code spans parse to a
+                                           # single-space value, render one-line, and serialize
+                                           # back on one line
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
