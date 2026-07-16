@@ -183,7 +183,11 @@ import { WEB_APP } from "./webAssets.js";
 // replace the always-on hover bubble and the right-hand rail (shell-only:
 // no API change — the bump rolls the new shell out to deployed backends
 // through the update dialog).
-const WORKER_VERSION = 13;
+// 14 = inline code spans hard-wrapped across markdown source lines render
+// on one line in the app shell's editor instead of a stacked two-line pill
+// (shell-only: no API change — the bump rolls the fix out through the
+// update dialog).
+const WORKER_VERSION = 14;
 const WORKER_FEATURES = [
   "pages",
   "collections",

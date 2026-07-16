@@ -39,6 +39,7 @@ import {
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
+import { inlineCodeNewlines } from "./inlineCodeNewlines";
 import {
   criticCommentSchema,
   criticRemark,
@@ -408,6 +409,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // The comment mark + its remark round-trip must be registered together.
     // Spread each composable into its underlying MilkdownPlugins.
     crepe.editor.use([...criticCommentSchema, ...criticRemark]);
+    // Hard-wrapped inline code spans: collapse the source newline to a space
+    // at parse time so the code pill doesn't render as a stacked two-line box
+    // (see inlineCodeNewlines.ts).
+    crepe.editor.use([...inlineCodeNewlines]);
     crepe.editor.use(searchPlugin);
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
