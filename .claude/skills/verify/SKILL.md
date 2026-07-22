@@ -29,6 +29,14 @@ node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the di
 node verify-harness/drive-inline-code.mjs  # 7 steps: hard-wrapped inline code spans parse to a
                                            # single-space value, render one-line, and serialize
                                            # back on one line
+node verify-harness/drive-split.mjs        # 16 steps: boots the REAL <App/> (split.html stubs
+                                           # enough IPC: in-memory fs, window init, sync probes)
+                                           # and walks the split view — same-doc md|rendition
+                                           # split, two-doc split, promote by click / iframe
+                                           # gesture, read-only companion, promote→edit→autosave,
+                                           # sync-scroll on/off (md↔html and md↔md), divider
+                                           # resize, pane close, ⌘⇧\, tab drag-out drop zones,
+                                           # session-restore round trip
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -53,6 +61,13 @@ Gotchas learned the hard way:
   a non-commented spot) before clicking buttons on other cards.
 - The harness runs under StrictMode: wire harness buttons with `onclick=`
   assignment, not `addEventListener` (double-mount would double-toggle).
+- split.html seeds localStorage ONCE per browser context (guarded by
+  `doklin:harness-seeded`) — a reload must keep what the app persisted, or
+  the session/split restore steps can't be tested. Its IPC stub must answer
+  `sync_status` with `[]` and `sync_device` with `{name}` (App `.then`s the
+  shapes straight into state), and stub
+  `__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener` or StrictMode's
+  unmount pass throws on every `listen()` cleanup.
 
 ## Public web pages (worker served locally)
 

@@ -187,7 +187,7 @@ import { WEB_APP } from "./webAssets.js";
 // on one line in the app shell's editor instead of a stacked two-line pill
 // (shell-only: no API change — the bump rolls the fix out through the
 // update dialog).
-const WORKER_VERSION = 14;
+const WORKER_VERSION = 15;
 const WORKER_FEATURES = [
   "pages",
   "collections",

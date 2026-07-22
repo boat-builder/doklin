@@ -18,6 +18,14 @@ type Props = {
   onClose: (id: string) => void;
   onNewDraft: () => void;
   onReorder: (tabs: Tab[]) => void;
+  // Dragging a tab DOWN out of the bar hands the gesture to the host (the
+  // split-view drop zones): `onDragOut` streams pointer positions while the
+  // tab is below the bar, `onDragOutEnd` commits the drop, `onDragOutCancel`
+  // fires when the pointer comes back up into the bar (or the drag dies).
+  // Reordering pauses while the tab is out.
+  onDragOut?: (tabId: string, x: number, y: number) => void;
+  onDragOutEnd?: (tabId: string, x: number, y: number) => void;
+  onDragOutCancel?: () => void;
   // Rendered at the bar's right edge, after the tab strip (the app puts the
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
@@ -35,6 +43,9 @@ export default function TabBar({
   onClose,
   onNewDraft,
   onReorder,
+  onDragOut,
+  onDragOutEnd,
+  onDragOutCancel,
   trailing,
 }: Props) {
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -49,13 +60,31 @@ export default function TabBar({
   // high-frequency); reorders are applied live via onReorder, and the new
   // order flows back in through the `tabs` prop. The click that fires after a
   // completed drag must not switch tabs — see suppressClickRef.
-  const dragRef = useRef<{ id: string; startX: number; moved: boolean } | null>(null);
+  //
+  // Dragging DOWN out of the bar flips the gesture into "tear-out" mode
+  // (`out`): reordering pauses and the pointer stream goes to the host's
+  // split-view drop zones instead; coming back up resumes reordering.
+  const dragRef = useRef<{
+    id: string;
+    startX: number;
+    moved: boolean;
+    out: boolean;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
   const suppressClickRef = useRef(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const onTabPointerDown = (e: React.PointerEvent<HTMLButtonElement>, id: string) => {
     if (e.button !== 0) return; // middle-click stays close, right-click stays menu
-    dragRef.current = { id, startX: e.clientX, moved: false };
+    dragRef.current = {
+      id,
+      startX: e.clientX,
+      moved: false,
+      out: false,
+      lastX: e.clientX,
+      lastY: e.clientY,
+    };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
@@ -67,8 +96,22 @@ export default function TabBar({
       drag.moved = true;
       setDraggingId(drag.id);
     }
+    drag.lastX = e.clientX;
+    drag.lastY = e.clientY;
     const strip = stripRef.current;
     if (!strip) return;
+    // Below the bar = torn out toward the editor area (the drop zones take
+    // over); back inside resumes reordering. Only when a host listens.
+    const barRect = (strip.closest(".tab-bar") ?? strip).getBoundingClientRect();
+    const isOut = onDragOut != null && e.clientY > barRect.bottom + 6;
+    if (isOut !== drag.out) {
+      drag.out = isOut;
+      if (!isOut) onDragOutCancel?.();
+    }
+    if (isOut) {
+      onDragOut?.(drag.id, e.clientX, e.clientY);
+      return;
+    }
     const from = tabs.findIndex((t) => t.id === drag.id);
     if (from < 0) return;
     // Target slot = how many of the OTHER tabs' midpoints lie left of the
@@ -95,6 +138,10 @@ export default function TabBar({
     dragRef.current = null;
     if (drag?.moved) {
       setDraggingId(null);
+      if (drag.out) {
+        if (cancelled) onDragOutCancel?.();
+        else onDragOutEnd?.(drag.id, drag.lastX, drag.lastY);
+      }
       if (!cancelled) {
         suppressClickRef.current = true;
         // The trailing click (if any) fires before the next task; don't let a

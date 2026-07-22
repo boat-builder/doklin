@@ -516,9 +516,35 @@ body,
 
 /* ---------- Editor canvas ---------- */
 
-.editor-wrap {
+/* The editor grid cell. Holds one pane, or two side by side (split view)
+   with a draggable divider; the drop overlay (dragging a tab out of the bar)
+   floats over the whole area. */
+.editor-area {
   grid-area: main;
   position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  background: var(--app-surface);
+}
+
+/* One pane: an optional slim header (split mode) over the scrolling canvas. */
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-width: 180px;
+  min-height: 0;
+}
+
+.editor-pane.is-split[data-side="left"] {
+  flex: 0 0 auto; /* flex-basis carries the split ratio (inline style) */
+}
+
+.editor-wrap {
+  position: relative;
+  flex: 1 1 auto;
   overflow-y: auto;
   /* The document flows vertically; the content area never scrolls sideways.
      Wide inner blocks (code, tables) scroll within themselves — nothing pushes
@@ -526,6 +552,169 @@ body,
   overflow-x: hidden;
   background: var(--app-surface);
   min-width: 0;
+  min-height: 0;
+}
+
+/* ---------- Split view chrome ---------- */
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px 3px 12px;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-bg);
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.pane-header-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.pane-header.is-focused .pane-header-title {
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.pane-header-title.is-missing {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.pane-header .view-toggle {
+  margin-left: 0;
+}
+
+.pane-header-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.pane-header-close:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+/* The unfocused pane reads slightly recessed; its header carries the cue. */
+.editor-pane.is-split:not(.is-focused) > .pane-header {
+  background: color-mix(in srgb, var(--app-bg) 92%, var(--app-border));
+}
+
+.editor-pane.is-split.is-focused > .pane-header {
+  box-shadow: inset 0 2px 0 var(--app-accent);
+}
+
+.split-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: var(--app-border);
+  background-clip: padding-box;
+  border-left: 2px solid transparent;
+  border-right: 2px solid transparent;
+  transition: background-color 0.12s;
+  z-index: 6;
+}
+
+.split-divider:hover {
+  background-color: var(--app-accent);
+}
+
+/* Drop zones while a tab is dragged over the editor area. */
+.split-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.split-drop-half {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  transition: background-color 0.1s, border-color 0.1s;
+}
+
+.split-drop-half.is-left {
+  left: 0;
+}
+
+.split-drop-half.is-right {
+  right: 0;
+}
+
+.split-drop-half.is-active {
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+}
+
+/* Tab-bar controls: the split button and the sync-scroll chain. */
+.split-toggle,
+.sync-scroll-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-bg);
+  color: var(--app-text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.split-toggle:hover:not(:disabled),
+.sync-scroll-toggle:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.split-toggle.is-active,
+.sync-scroll-toggle.is-on {
+  color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--app-accent) 8%, transparent);
+}
+
+.split-toggle.is-active:hover,
+.sync-scroll-toggle.is-on:hover {
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+}
+
+.split-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* With a pane header above, the canvas is ~30px shorter than the full grid
+   row — trim the document's min-height so short docs don't grow a phantom
+   scroll range. */
+.editor-pane.is-split .editor-wrap .milkdown .ProseMirror {
+  min-height: calc(100vh - 104px);
 }
 
 .editor-wrap .milkdown {

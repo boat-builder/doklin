@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Avatar, ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
@@ -46,6 +54,23 @@ type Props = {
   // How external links leave the rendition. The desktop default routes them
   // to the system browser via Tauri; a web host passes window.open instead.
   onOpenExternal?: (url: string) => void;
+  // False hides the whole comment layer (button, pins, cards). The split
+  // view's unfocused pane uses this: comments there activate only after the
+  // pane is promoted to the focused document.
+  commentsEnabled?: boolean;
+  // Split-view scroll sync: a USER scroll of the rendition's document, as a
+  // 0..1 proportion of its scrollable range (programmatic sync moves are
+  // filtered bridge-side).
+  onScrollRatio?: (ratio: number) => void;
+  // Any pointerdown inside the sandboxed frame (which the app can't observe
+  // directly) — the split view uses it to move pane focus here.
+  onGesture?: () => void;
+};
+
+// Imperative surface for the split view's scroll sync: drive this rendition
+// to a proportional scroll offset.
+export type HtmlViewHandle = {
+  scrollToRatio: (ratio: number) => void;
 };
 
 const CARD_W = 300;
@@ -53,13 +78,19 @@ const PIN = 26; // pin hit target, square
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
 
-export default function HtmlView({
-  htmlContent,
-  threads,
-  onThreadsChange,
-  commentAuthor,
-  onOpenExternal,
-}: Props) {
+const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
+  {
+    htmlContent,
+    threads,
+    onThreadsChange,
+    commentAuthor,
+    onOpenExternal,
+    commentsEnabled = true,
+    onScrollRatio,
+    onGesture,
+  }: Props,
+  ref,
+) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [mode, setMode] = useState(false);
@@ -88,8 +119,25 @@ export default function HtmlView({
   onThreadsChangeRef.current = onThreadsChange;
   const onOpenExternalRef = useRef(onOpenExternal);
   onOpenExternalRef.current = onOpenExternal;
+  const onScrollRatioRef = useRef(onScrollRatio);
+  onScrollRatioRef.current = onScrollRatio;
+  const onGestureRef = useRef(onGesture);
+  onGestureRef.current = onGesture;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollToRatio(ratio: number) {
+        iframeRef.current?.contentWindow?.postMessage(
+          { dk: "doklin-comments", type: "scroll-sync", ratio },
+          "*",
+        );
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     const el = rootRef.current;
@@ -158,11 +206,24 @@ export default function HtmlView({
             console.error("open_external failed", err),
           );
         }
+      } else if (msg.type === "scroll") {
+        onScrollRatioRef.current?.(msg.ratio);
+      } else if (msg.type === "gesture") {
+        onGestureRef.current?.();
       }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [syncBridge]);
+
+  // The unfocused split pane disables the layer; dropping out of enabled
+  // mid-session (a demote) must not leave an invisible mode/card armed.
+  useEffect(() => {
+    if (commentsEnabled) return;
+    setMode(false);
+    setActiveId(null);
+    setEditing(null);
+  }, [commentsEnabled]);
 
   // Janitor (Editor.tsx recompute parity): transient state whose thread
   // vanished — deleted here, or removed by an external sidecar reload — is
@@ -328,6 +389,7 @@ export default function HtmlView({
         sandbox="allow-scripts allow-popups"
         srcDoc={srcDoc}
       />
+      {commentsEnabled && (
       <div className="html-comment-layer">
         <button
           type="button"
@@ -383,9 +445,12 @@ export default function HtmlView({
           </div>
         )}
       </div>
+      )}
     </div>
   );
-}
+});
+
+export default HtmlView;
 
 function BubbleIcon() {
   return (

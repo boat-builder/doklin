@@ -1,0 +1,140 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Split-view verification harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Tauri IPC stub broad enough to boot the REAL <App/>: an in-memory
+      // file system behind read/write/stat/watch, window-init answers for a
+      // bare no-workspace launch, and sane shapes for the sync probes. The
+      // updater plugin rejects (its caller catches into the "error" phase).
+      // Everything else resolves null — every remaining caller either
+      // ignores the result or catches.
+      const para = (seed, n) =>
+        Array.from(
+          { length: n },
+          (_, i) =>
+            `Paragraph ${i + 1} of ${seed}. The quick brown fox jumps over the lazy dog, ` +
+            `again and again, so the document grows tall enough to scroll.`,
+        ).join("\n\n");
+      const htmlDoc = (title, n) =>
+        `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>` +
+        `<main><h1>${title}</h1>` +
+        Array.from(
+          { length: n },
+          (_, i) => `<p id="p${i + 1}">Rendition block ${i + 1} for ${title}.</p>`,
+        ).join("") +
+        `</main></body></html>`;
+
+      window.__fs = new Map([
+        ["/docs/notes.md", `# Notes\n\n${para("notes", 40)}\n`],
+        ["/docs/notes.html", htmlDoc("Notes rendition", 80)],
+        ["/docs/other.md", `# Other\n\n${para("other", 40)}\n`],
+      ]);
+      window.__mtime = 1000;
+      window.__writes = [];
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          switch (cmd) {
+            case "take_window_init":
+              return Promise.resolve({
+                isMain: true,
+                folder: null,
+                file: null,
+                files: [],
+                activeFile: null,
+                restored: false,
+              });
+            case "take_pending_folder":
+            case "migrate_scratch":
+              return Promise.resolve(null);
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject(`no such file: ${args.path}`)
+                : Promise.resolve({ contents: c, snapshot: snap(c) });
+            }
+            case "write_file": {
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.contents));
+            }
+            case "path_exists":
+              return Promise.resolve(window.__fs.has(args.path));
+            case "stat_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject("missing")
+                : Promise.resolve(snap(c));
+            }
+            case "watch_file": {
+              const c = window.__fs.get(args.path) ?? "";
+              window.__watched = [args.path, ...(args.extras ?? [])];
+              return Promise.resolve(snap(c));
+            }
+            case "unwatch_file":
+              window.__watched = [];
+              return Promise.resolve(null);
+            case "sync_status":
+              return Promise.resolve([]);
+            case "sync_device":
+              return Promise.resolve({ name: "Test Mac" });
+            case "list_drafts":
+              return Promise.resolve([]);
+            case "open_external":
+              (window.__opened ??= []).push(args.url);
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:event|listen":
+              return Promise.resolve(1);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+
+      // The API's unlisten path dereferences this global; a no-op keeps
+      // StrictMode's mount→unmount→remount cycle quiet.
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+
+      // A restorable bare (no-workspace) session: two file tabs, notes
+      // active. Seeded ONCE per browser context — a reload must keep what
+      // the app itself persisted (the drive's restore round-trip).
+      if (!localStorage.getItem("doklin:harness-seeded")) {
+        localStorage.clear();
+        localStorage.setItem("doklin:harness-seeded", "1");
+        localStorage.setItem(
+          "doklin:session",
+          JSON.stringify({
+            version: 2,
+            lastRoot: null,
+            sessions: {
+              "<no-workspace>": {
+                tabs: [
+                  { id: "t-notes", kind: "file", path: "/docs/notes.md" },
+                  { id: "t-other", kind: "file", path: "/docs/other.md" },
+                ],
+                activeId: "t-notes",
+              },
+            },
+          }),
+        );
+      }
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./split.tsx"></script>
+  </body>
+</html>

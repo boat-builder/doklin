@@ -240,6 +240,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
 ) {
   const viewRef = useRef<EditorView | null>(null);
   const crepeRef = useRef<Crepe | null>(null);
+  // The scroll container this editor lives in, captured while mounted. The
+  // unmount cleanup must address exactly this wrap — by unmount time the
+  // editor DOM is detached (closest() finds nothing), and with split panes a
+  // global .editor-wrap query could hit the OTHER pane.
+  const wrapRef = useRef<HTMLElement | null>(null);
   // True while dictation owns the editor — from the talk-key press until the
   // chunk pipeline drains. The editable prop (installed at mount) reads this,
   // so typing is suspended exactly while spoken text is in flight. Flips take
@@ -472,9 +477,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         const observer = new ResizeObserver(() => recompute());
         observer.observe(view.dom);
         contentObserverRef.current = observer;
-        view.dom
-          .closest(".editor-wrap")
-          ?.classList.toggle("comments-off", !visibleRef.current);
+        wrapRef.current = view.dom.closest(".editor-wrap") as HTMLElement | null;
+        wrapRef.current?.classList.toggle("comments-off", !visibleRef.current);
         report();
         recompute();
         onReadyRef.current?.();
@@ -496,11 +500,15 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   }, [recompute]);
 
   // Apply readOnly flips after mount (the ref keeps the editable prop
-  // current; setProps forces ProseMirror to re-consult it).
+  // current; setProps forces ProseMirror to re-consult it). A flip also
+  // re-reports the rail: the split view promotes/demotes a pane by flipping
+  // readOnly, and the incoming host callbacks (comment count) need a fresh
+  // report even though no transaction happened.
   useEffect(() => {
     crepeRef.current?.setReadonly(readOnly);
     viewRef.current?.setProps({});
-  }, [readOnly]);
+    recompute();
+  }, [readOnly, recompute]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are
@@ -519,10 +527,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   }, [commentsVisible, recompute]);
 
   // Drop the reserved gutter when this editor unmounts (e.g. closing the last
-  // tab) so the welcome screen isn't left with a phantom right margin.
+  // tab) so the welcome screen isn't left with a phantom right margin. Scoped
+  // to OUR wrap (resolved from the mounted view) — with split panes there can
+  // be two .editor-wrap elements, and a global query would strip the other
+  // pane's gutter.
   useEffect(() => {
     return () => {
-      const wrap = document.querySelector(".editor-wrap");
+      const wrap = wrapRef.current ?? document.querySelector(".editor-wrap");
       wrap?.classList.remove("has-comments", "comments-off");
       contentObserverRef.current?.disconnect();
       const pending = rafRef.current;
