@@ -187,7 +187,15 @@ import { WEB_APP } from "./webAssets.js";
 // on one line in the app shell's editor instead of a stacked two-line pill
 // (shell-only: no API change — the bump rolls the fix out through the
 // update dialog).
-const WORKER_VERSION = 15;
+// 15 = split panes with synced scrolling: the sandboxed-HTML pane bridge
+// gains scroll / scroll-sync / gesture messages (shell-only: no API change —
+// the bump rolls the new shell out to deployed backends through the update
+// dialog).
+// 16 = code block placeholders sized to match the mounted CodeMirror editor,
+// so the lazy mount/teardown swap no longer shifts the document mid-scroll
+// (shell-only: no API change — the bump rolls the fix out through the
+// update dialog).
+const WORKER_VERSION = 16;
 const WORKER_FEATURES = [
   "pages",
   "collections",
