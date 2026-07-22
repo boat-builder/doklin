@@ -57,6 +57,14 @@ export type BridgeSyncMsg = {
   visible: boolean;
 };
 export type BridgeScrollToMsg = { dk: "doklin-comments"; type: "scroll-to"; id: string };
+// Split-view scroll sync: the app drives the iframe's document scroll to a
+// proportional offset (0..1 of the scrollable range). The bridge suppresses
+// its own scroll REPORT for the programmatic move, so sync never echoes.
+export type BridgeScrollSyncMsg = {
+  dk: "doklin-comments";
+  type: "scroll-sync";
+  ratio: number;
+};
 
 // What the bridge sends the app. Rects are iframe-viewport-relative, which
 // is exactly the overlay layer's coordinate space (the iframe and the
@@ -81,12 +89,21 @@ export type BridgeActivateMsg = {
   id: string | null;
 };
 export type BridgeOpenMsg = { dk: "doklin-comments"; type: "open"; url: string };
+// A USER scroll of the iframe's document (programmatic scroll-sync moves are
+// suppressed bridge-side): the document's proportional offset, for driving
+// the opposite split pane.
+export type BridgeScrollMsg = { dk: "doklin-comments"; type: "scroll"; ratio: number };
+// Any pointerdown inside the rendition. The iframe swallows clicks (separate
+// browsing context), so this is how the app knows to move pane focus there.
+export type BridgeGestureMsg = { dk: "doklin-comments"; type: "gesture" };
 export type BridgeOutMsg =
   | BridgeReadyMsg
   | BridgeLayoutMsg
   | BridgePickMsg
   | BridgeActivateMsg
-  | BridgeOpenMsg;
+  | BridgeOpenMsg
+  | BridgeScrollMsg
+  | BridgeGestureMsg;
 
 export function isBridgeMsg(data: unknown): data is BridgeOutMsg {
   const d = data as { dk?: string; type?: string };
@@ -500,8 +517,47 @@ const BRIDGE_SCRIPT = `
         void el.offsetWidth; // restart the animation
         el.setAttribute("data-dk-flash", "1");
       }
+    } else if (msg.type === "scroll-sync") {
+      // Split-view sync drives our document scroll. Suppress the resulting
+      // scroll REPORT (not the layout pass) so the two panes never echo.
+      var doc = document.scrollingElement || document.documentElement;
+      var range = doc.scrollHeight - doc.clientHeight;
+      if (range > 0 && typeof msg.ratio === "number") {
+        scrollSyncMuteUntil = Date.now() + 250;
+        doc.scrollTop = Math.max(0, Math.min(1, msg.ratio)) * range;
+      }
     }
   });
+
+  /* ----- split-view scroll sync: report user scrolls of the document ----- */
+
+  var scrollSyncMuteUntil = 0;
+  var scrollReportQueued = false;
+  window.addEventListener(
+    "scroll",
+    function () {
+      if (scrollReportQueued) return;
+      scrollReportQueued = true;
+      requestAnimationFrame(function () {
+        scrollReportQueued = false;
+        if (Date.now() < scrollSyncMuteUntil) return; // our own scroll-sync move
+        var doc = document.scrollingElement || document.documentElement;
+        var range = doc.scrollHeight - doc.clientHeight;
+        post({ type: "scroll", ratio: range > 0 ? doc.scrollTop / range : 0 });
+      });
+    },
+    { passive: true }
+  );
+
+  // The app can't see pointer events inside the sandboxed frame; report them
+  // so a click into this pane can move split focus here.
+  document.addEventListener(
+    "pointerdown",
+    function () {
+      post({ type: "gesture" });
+    },
+    true
+  );
 
   /* ----- keep layout fresh ----- */
 
