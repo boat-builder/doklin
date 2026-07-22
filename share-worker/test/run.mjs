@@ -182,7 +182,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 15);
+  assert.equal(ok.json.version, 16);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -1253,8 +1253,8 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
 
   // The shell references version-stamped assets; without an injected bundle
   // (this test build) the asset route says exactly that.
-  assert.ok(commentPage.text.includes("/__web/15/app.js"));
-  assert.equal((await call("/__web/15/app.js")).status, 503);
+  assert.ok(commentPage.text.includes("/__web/16/app.js"));
+  assert.equal((await call("/__web/16/app.js")).status, 503);
 
   // Write-endpoint floors: view can't save or comment; no cookie is a 401.
   const viewSave = await call("/team-page/save", {
@@ -1306,7 +1306,7 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   const withDiagram = await call("/diagram-doc");
   assert.equal(withDiagram.status, 200);
   assert.ok(withDiagram.text.includes('class="language-mermaid"'));
-  assert.ok(withDiagram.text.includes("/__web/15/mermaid.js"));
+  assert.ok(withDiagram.text.includes("/__web/16/mermaid.js"));
 
   // A page without one doesn't pay for the script.
   await call("/api/pages/plain-doc", {
@@ -1319,8 +1319,8 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   // The shell hands the module URL to the editor (window.__DK_MERMAID_URL);
   // the asset route answers like app.js does (503 in this bundle-less build).
   const shell = await call("/team-page", { headers: { cookie: commentCookie } });
-  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/15/mermaid.js"`));
-  assert.equal((await call("/__web/15/mermaid.js")).status, 503);
+  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/16/mermaid.js"`));
+  assert.equal((await call("/__web/16/mermaid.js")).status, 503);
 
   await call("/api/pages/diagram-doc", { method: "DELETE", token: OWNER });
   await call("/api/pages/plain-doc", { method: "DELETE", token: OWNER });

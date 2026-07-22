@@ -1046,6 +1046,37 @@ body,
   overflow-x: auto;
 }
 
+/* ---------- Code block placeholder parity ----------
+   Off-screen code blocks are static <pre> placeholders; the component swaps
+   in the live CodeMirror when scrolled within 200px and tears it back down
+   after 5s off-screen. The swap happens mid-scroll, so the placeholder must
+   occupy EXACTLY the height of the mounted editor or the document shifts
+   under the reader (blink + scroll jump). Mounted geometry (crepe 7.21.1 +
+   CM6 base theme): 30px .tools row, then .cm-content at inherited font-size,
+   monospace, line-height 1.4, 4px vertical padding, no wrapping; each
+   .cm-line is padded 0 2px 0 6px. The `pre` type selector outranks the crepe
+   theme rule regardless of stylesheet order. Mermaid blocks keep their own
+   height dance (diagram ≠ source, inherently). Re-measure if crepe updates. */
+.milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
+  margin: 0;
+  padding: 34px 0 4px; /* 30px tools row + 4px cm-content top; 4px bottom */
+  font-family: monospace;
+  font-size: inherit;
+  line-height: 1.4;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: hidden;
+}
+
+.milkdown .milkdown-code-block pre.milkdown-code-block-placeholder > code {
+  display: block;
+  padding: 0 2px 0 6px;
+  /* The inline-code pill rule (.ProseMirror code, 87.5%/1.4286) reaches this
+     code element too — reclaim the pre's metrics or lines land at 20px
+     instead of CM's 22.4px. */
+  font: inherit;
+}
+
 /* ---------- Mermaid diagrams (```mermaid code blocks) ----------
    The SVG itself is colored from the app tokens at render time
    (src/mermaid.ts) — this is layout and framing only. The diagram sits on
