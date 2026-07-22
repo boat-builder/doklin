@@ -165,10 +165,14 @@ type DocView = "md" | "html";
    dictation, find) stays bound to ONE document — the FOCUSED pane's — and
    `SplitPane` describes the other pane:
 
-   - Same-document split (`doc === null`): the active document's markdown in
-     the focused pane and its html rendition in the other. Everything is the
-     active document's own state, so BOTH panes are fully live (the rendition
-     keeps its comment layer). The focused pane is always the markdown side.
+   - Same-document split (`doc === null`): the active document open in both
+     panes, each with its own MD/HTML pick (VS Code-style "same file
+     twice"). Everything is the active document's own state, so html panes
+     stay fully live (comment layer included). When exactly one pane shows
+     markdown, THAT pane is the live editor (the machinery normalizes sides
+     to keep it focused); when both show markdown, the non-focused pane is a
+     read-only MIRROR that refreshes from each autosave — two Milkdown
+     instances of one document must never both accept edits.
    - Two-document split (`doc` loaded): the other pane shows a second
      document read-only, kept fresh by the shared file watcher. Interacting
      with it (click, comment) promotes it to the focused document — a pure
@@ -178,6 +182,12 @@ type DocView = "md" | "html";
    `split.side`; there is no separate focus state to drift. */
 type PaneSide = "left" | "right";
 const otherSide = (s: PaneSide): PaneSide => (s === "left" ? "right" : "left");
+
+// Where a split pane's scroll offset lives. Two-document companions share
+// the per-tab key — the doc restores at the same place when it later opens
+// focused. A same-document MIRROR pane gets its own key: the live pane's
+// offset for that tab must not be clobbered by the mirror's.
+const companionScrollKey = (s: SplitPane) => (s.doc ? s.tabId : `mirror:${s.tabId}`);
 
 // The demoted document's full state, stashed so promoting it back is instant
 // and lossless. `contents` is the markdown as this pane's editor last knew it
@@ -207,12 +217,28 @@ type SplitPane = {
 const SYNC_SCROLL_STORAGE_KEY = "doklin:split-sync-scroll";
 const SPLIT_RATIO_STORAGE_KEY = "doklin:split-ratio";
 
+// Sync scroll is opt-in: independent panes (each scrolls on its own, under
+// the pointer) are what most people expect from a split.
 function readStoredSyncScroll(): boolean {
   try {
-    return localStorage.getItem(SYNC_SCROLL_STORAGE_KEY) !== "0";
+    return localStorage.getItem(SYNC_SCROLL_STORAGE_KEY) === "1";
   } catch {
-    return true;
+    return false;
   }
+}
+
+const SIDEBAR_WIDTH_STORAGE_KEY = "doklin:sidebar-width";
+const SIDEBAR_MIN_W = 180;
+const SIDEBAR_MAX_W = 440;
+
+function readStoredSidebarWidth(): number {
+  try {
+    const v = parseInt(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) || "", 10);
+    if (Number.isFinite(v)) return Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, v));
+  } catch {
+    // ignore
+  }
+  return 240;
 }
 
 function readStoredSplitRatio(): number {
@@ -679,6 +705,16 @@ export default function App() {
   const syncScrollRef = useRef(syncScroll);
   syncScrollRef.current = syncScroll;
   const [splitRatio, setSplitRatio] = useState<number>(() => readStoredSplitRatio());
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => readStoredSidebarWidth());
+  // The same-document split's read-only markdown MIRROR (both panes on md):
+  // content snapshots of the live editor, re-seeded on every autosave
+  // commit/reload. Keyed remounts (`mirror:tabId:seq`) keep it cheap.
+  const [mirror, setMirror] = useState<{ content: string; seq: number }>({
+    content: "",
+    seq: 0,
+  });
+  const mirrorRef = useRef(mirror);
+  mirrorRef.current = mirror;
   // The companion pane's markdown editor handle + its serialized-content
   // tracking: `md` is the editor's latest serialization, `baseline` the
   // serialization matching what's saved on disk, `baselined` whether the
@@ -731,18 +767,40 @@ export default function App() {
     writeStoredSession(tabsRef.current, activeIdRef.current);
   }, []);
 
+  // Re-seed the same-doc mirror pane from `content` (autosave commits,
+  // reloads, view flips): capture where the reader was, remount at the new
+  // content, land back at the same offset via the editor's onReady. Lives up
+  // here (state-block dependencies only) so writeToDisk can depend on it.
+  const refreshMirror = useCallback((content: string) => {
+    if (mirrorRef.current.content === content) return;
+    const s = splitRef.current;
+    if (s && !s.doc && s.view === "md") {
+      const wrap = wrapElsRef.current[s.side];
+      if (wrap) scrollPositionsRef.current.set(companionScrollKey(s), wrap.scrollTop);
+    }
+    setMirror((m) => ({ content, seq: m.seq + 1 }));
+  }, []);
+
   // The split operations live below (they need the whole document
   // machinery); earlier callers (switchTab, openWorkspace) reach them
   // through these refs — the reloadFromDiskRef pattern.
   const swapFocusRef = useRef<(toFocusSide?: PaneSide) => Promise<void>>(
     () => Promise.resolve(),
   );
-  const splitActiveDocRef = useRef<(htmlSide?: PaneSide) => Promise<void>>(
+  const splitSameDocRef = useRef<(side?: PaneSide, view?: DocView) => Promise<void>>(
     () => Promise.resolve(),
   );
   const openInPaneRef = useRef<(tabId: string, side: PaneSide, view?: DocView) => Promise<void>>(
     () => Promise.resolve(),
   );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+    } catch {
+      // ignore
+    }
+  }, [sidebarWidth]);
 
   useEffect(() => {
     try {
@@ -1855,6 +1913,14 @@ export default function App() {
       snapshotRef.current = newSnapshot;
       lastSavedRef.current = contents;
       if (currentMarkdownRef.current === contents) setDirty(false);
+      // A same-document mirror pane tracks the live editor through its
+      // autosaves — the cheapest safe point to sync two Milkdown instances.
+      {
+        const s = splitRef.current;
+        if (s && !s.doc && s.tabId === activeIdRef.current && s.view === "md") {
+          refreshMirror(contents);
+        }
+      }
     } catch (e) {
       if ((pathRef.current) !== target) {
         const s = splitRef.current;
@@ -1872,7 +1938,7 @@ export default function App() {
         console.error("autosave failed", e);
       }
     }
-  }, [scheduleSharePush, setSplitState]);
+  }, [scheduleSharePush, setSplitState, refreshMirror]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -2271,13 +2337,13 @@ export default function App() {
   }, []);
 
   // Same pair for the companion pane (its editor remounts on external
-  // reloads and md/html view flips; the shared per-tab offset map is keyed by
-  // tab id, and a tab lives in at most one markdown pane at a time).
+  // reloads, view flips, and mirror refreshes); offsets live under
+  // companionScrollKey.
   const captureCompanionScroll = useCallback(() => {
     const s = splitRef.current;
-    if (!s || !s.doc || s.view !== "md") return;
+    if (!s || s.view !== "md") return;
     const wrap = wrapElsRef.current[s.side];
-    if (wrap) scrollPositionsRef.current.set(s.tabId, wrap.scrollTop);
+    if (wrap) scrollPositionsRef.current.set(companionScrollKey(s), wrap.scrollTop);
   }, []);
 
   const restoreCompanionScroll = useCallback(() => {
@@ -2285,12 +2351,29 @@ export default function App() {
     if (!s) return;
     const wrap = wrapElsRef.current[s.side];
     if (!wrap) return;
-    const saved = scrollPositionsRef.current.get(s.tabId) ?? 0;
+    const saved = scrollPositionsRef.current.get(companionScrollKey(s)) ?? 0;
     wrap.scrollTop = saved;
     requestAnimationFrame(() => {
       wrap.scrollTop = saved;
     });
   }, []);
+
+  // Remount the FOCUSED pane's editor from the live machinery content.
+  // Required with any layout change that moves the focused editor to the
+  // other pane (React remounts it there): mounting from the stale
+  // `initialMarkdown` state would resurrect the last LOADED content — and
+  // the mount-time serialization would then autosave that stale text over
+  // real edits. Callers MUST flushPendingAutosave() first: the remount
+  // re-baselines on its mount serialization, so unflushed edits would
+  // otherwise silently drop out of the save flow.
+  const remountFocusedEditor = useCallback(() => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    setInitialMarkdown(currentMarkdownRef.current);
+    baselineCapturedRef.current = false;
+    bumpEditorSeq(id);
+    setLoadKey((k) => k + 1); // re-applies find highlights, zeroes the comment count
+  }, [bumpEditorSeq]);
 
   // Flip a tab's `missing` flag (in place) and persist the session.
   const setTabMissing = useCallback((id: string, missing: boolean) => {
@@ -2416,6 +2499,26 @@ export default function App() {
     },
     [],
   );
+
+  // A same-document split whose focused side is moving to ANOTHER tab: the
+  // remaining pane keeps showing the outgoing document, so it needs its own
+  // record from here on (a two-document companion). A markdown pane keeps
+  // its place: its offset moves onto the tab key the companion editor
+  // restores from.
+  const materializeSameDocSplit = useCallback(() => {
+    const s = splitRef.current;
+    if (!s || s.doc || s.tabId !== activeIdRef.current) return;
+    if (s.view === "md") {
+      const wrap = wrapElsRef.current[s.side];
+      if (wrap) scrollPositionsRef.current.set(s.tabId, wrap.scrollTop);
+    }
+    setSplitState({ ...s, doc: stashActiveDoc() });
+    companionMdRef.current = {
+      md: currentMarkdownRef.current,
+      baseline: lastSavedRef.current,
+      baselined: true,
+    };
+  }, [setSplitState, stashActiveDoc]);
 
   // Make `tab` the active document in the (single) editor: read its content from
   // disk, reset the per-doc refs, and remount the editor. Watch only real files.
@@ -2582,23 +2685,16 @@ export default function App() {
       if (!target) return;
       captureActiveScroll(); // remember where the outgoing doc was scrolled
       flushPendingAutosave(); // persist the outgoing doc before switching
-      // A same-document split whose focused (markdown) side is moving on:
-      // the rendition pane stays behind showing the outgoing document, so it
-      // needs its own record from here on.
-      if (s && s.tabId === activeIdRef.current && !s.doc) {
-        setSplitState({ ...s, doc: stashActiveDoc() });
-        companionMdRef.current = {
-          md: currentMarkdownRef.current,
-          baseline: lastSavedRef.current,
-          baselined: true,
-        };
-      }
+      // A same-document split whose focused side is moving on: the other
+      // pane stays behind showing the outgoing document — give it its own
+      // record.
+      materializeSameDocSplit();
       activeIdRef.current = id;
       setActiveId(id);
       writeStoredSession(tabsRef.current, id);
       await loadActiveContent(target);
     },
-    [captureActiveScroll, flushPendingAutosave, loadActiveContent, setSplitState, stashActiveDoc],
+    [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
   // Ctrl+Tab / Ctrl+Shift+Tab: cycle to the next/previous tab in this window,
@@ -2628,17 +2724,9 @@ export default function App() {
     async (tab: Tab) => {
       captureActiveScroll(); // remember where the outgoing doc was scrolled
       flushPendingAutosave(); // persist the outgoing doc before switching
-      const s = splitRef.current;
-      // Same-document split: the rendition pane keeps the outgoing document
-      // — give it its own record (see switchTab).
-      if (s && s.tabId === activeIdRef.current && !s.doc) {
-        setSplitState({ ...s, doc: stashActiveDoc() });
-        companionMdRef.current = {
-          md: currentMarkdownRef.current,
-          baseline: lastSavedRef.current,
-          baselined: true,
-        };
-      }
+      // Same-document split: the other pane keeps the outgoing document —
+      // give it its own record (see switchTab).
+      materializeSameDocSplit();
       const nextTabs = [...tabsRef.current, tab];
       tabsRef.current = nextTabs;
       activeIdRef.current = tab.id;
@@ -2647,7 +2735,7 @@ export default function App() {
       writeStoredSession(nextTabs, tab.id);
       await loadActiveContent(tab);
     },
-    [captureActiveScroll, flushPendingAutosave, loadActiveContent, setSplitState, stashActiveDoc],
+    [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
   // Open a path in a tab (dedupe by path). Used for files (picker/recents/sidebar/
@@ -2798,7 +2886,7 @@ export default function App() {
       const sp = session.split ?? null;
       if (sp && restored.some((t) => t.id === sp.tabId)) {
         if (sp.tabId === activeId) {
-          if (htmlPathRef.current) await splitActiveDocRef.current(sp.side);
+          await splitSameDocRef.current(sp.side, sp.view);
         } else {
           await openInPaneRef.current(sp.tabId, sp.side, sp.view);
         }
@@ -3326,6 +3414,13 @@ export default function App() {
       setConflict(null);
       if (activeIdRef.current) bumpEditorSeq(activeIdRef.current);
       setLoadKey((k) => k + 1);
+      // A same-document mirror shows the same file — follow the reload.
+      {
+        const s = splitRef.current;
+        if (s && !s.doc && s.tabId === activeIdRef.current && s.view === "md") {
+          refreshMirror(result.contents);
+        }
+      }
       // The document just adopted outside edits; a live share follows them
       // (covers both the watcher's auto-reload and the conflict banner's
       // "Reload from disk"). A web-edit pull skips this: the content on disk
@@ -3334,7 +3429,7 @@ export default function App() {
     } catch (e) {
       console.error("reload failed", e);
     }
-  }, [captureActiveScroll, scheduleSharePush, bumpEditorSeq]);
+  }, [captureActiveScroll, scheduleSharePush, bumpEditorSeq, refreshMirror]);
   reloadFromDiskRef.current = reloadFromDisk;
 
   const keepMyVersion = useCallback(() => {
@@ -3434,10 +3529,48 @@ export default function App() {
   const selectDocView = useCallback(
     async (v: DocView) => {
       if (v === docViewRef.current) return;
-      // In a same-document split both views are already on screen (md
-      // focused, html in the other pane) — the toggles pin.
+      // Same-document split, focused pane switching to html while the OTHER
+      // pane shows markdown: the live editor must stay with the markdown
+      // view (two editable Milkdown instances of one doc can't coexist), so
+      // the panes swap ROLES instead — the markdown pane becomes the
+      // focused/live side, this pane becomes the html split pane. Visually
+      // each pane keeps showing exactly what the user chose.
       const sp = splitRef.current;
-      if (sp && !sp.doc && sp.tabId === activeIdRef.current) return;
+      if (sp && !sp.doc && sp.tabId === activeIdRef.current && v === "html") {
+        if (sp.view === "md") {
+          const htmlPath = htmlPathRef.current;
+          if (!htmlPath) return;
+          await dictationRef.current?.stop();
+          flushPendingAutosave();
+          let contents: string;
+          try {
+            contents = (await invoke<ReadFileResult>("read_file", { path: htmlPath }))
+              .contents;
+          } catch (e) {
+            console.error("read failed", htmlPath, e);
+            return;
+          }
+          await flushSidecarWrite();
+          await loadSidecar(htmlPath);
+          setHtmlContent(contents);
+          // The surviving markdown pane keeps ITS reading position: the live
+          // editor remounts over there and restores from the tab key.
+          const mirrorWrap = wrapElsRef.current[sp.side];
+          if (mirrorWrap) {
+            scrollPositionsRef.current.set(sp.tabId, mirrorWrap.scrollTop);
+          }
+          remountFocusedEditor();
+          setSplitState({
+            side: otherSide(sp.side),
+            tabId: sp.tabId,
+            view: "html",
+            doc: null,
+          });
+          return;
+        }
+        // Other pane already shows html → fall through to the normal html
+        // switch (both panes on html renders two live previews).
+      }
       const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
       if (!tab) return;
       if (v === "html") {
@@ -3479,6 +3612,8 @@ export default function App() {
       restoreActiveScroll,
       flushSidecarWrite,
       loadSidecar,
+      remountFocusedEditor,
+      setSplitState,
     ],
   );
 
@@ -3563,37 +3698,50 @@ export default function App() {
   );
   swapFocusRef.current = swapFocus;
 
-  // Split the active document into markdown + rendition, side by side — the
-  // marquee split. Requires a rendition on disk. The markdown (machinery)
-  // pane takes the side opposite `htmlSide`.
-  const splitActiveDoc = useCallback(
-    async (htmlSide: PaneSide = "right") => {
+  // Open the ACTIVE document in the other pane too (VS Code's "split
+  // editor"): the new pane duplicates the current view by default — the
+  // user then picks MD/HTML per pane from the headers. A duplicated
+  // markdown view makes the new pane a read-only mirror; a rendition view
+  // makes it a second live preview. `view` overrides for session restore.
+  const splitSameDoc = useCallback(
+    async (side: PaneSide = "right", view?: DocView) => {
       const id = activeIdRef.current;
-      const htmlPath = htmlPathRef.current;
-      if (!id || !htmlPath) return;
+      if (!id) return;
       const tab = tabsRef.current.find((t) => t.id === id);
-      if (!tab || tab.missing || (tab.kind === "file" && isHtmlPath(tab.path))) return;
-      if (docViewRef.current === "html") {
-        // The hidden markdown editor becomes the focused pane; the rendition
-        // moves to the other side.
-        applyDocView("md");
-        restoreActiveScroll();
-      }
-      if (htmlContentRef.current == null) {
+      if (!tab || tab.missing) return;
+      const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
+      let v: DocView = view ?? docViewRef.current;
+      if (htmlOnly) v = "html";
+      if (v === "html" && !htmlPathRef.current) v = "md"; // no rendition on disk
+      if (v === "html" && htmlContentRef.current == null) {
+        // Restoring an md|html arrangement: the rendition isn't loaded yet.
+        const htmlPath = htmlPathRef.current!;
         try {
           const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
           setHtmlContent(r.contents);
           htmlContentRef.current = r.contents;
         } catch (e) {
           console.error("read failed", htmlPath, e);
-          return; // rendition vanished; nothing to split with
+          v = "md"; // rendition vanished; fall back to a markdown mirror
         }
       }
-      setSplitState({ side: htmlSide, tabId: id, view: "html", doc: null });
+      if (v === "md") {
+        if (docViewRef.current === "html") {
+          // Normalize: a markdown pane is always the live side. Bring the
+          // hidden editor forward here; the new pane shows the rendition.
+          applyDocView("md");
+          restoreActiveScroll();
+          v = "html";
+          if (htmlContentRef.current == null) return; // nothing loaded to show
+        } else {
+          setMirror((m) => ({ content: currentMarkdownRef.current, seq: m.seq + 1 }));
+        }
+      }
+      setSplitState({ side, tabId: id, view: v, doc: null });
     },
     [applyDocView, restoreActiveScroll, setSplitState],
   );
-  splitActiveDocRef.current = splitActiveDoc;
+  splitSameDocRef.current = splitSameDoc;
 
   // Open a tab in the split pane (two-document split), or re-side an
   // existing one. Opening the ACTIVE tab routes to the same-document split.
@@ -3605,7 +3753,7 @@ export default function App() {
           if (s.side !== side) setSplitState({ ...s, side });
           return;
         }
-        await splitActiveDoc(side);
+        await splitSameDoc(side, view);
         return;
       }
       if (s && s.tabId === tabId && s.doc) {
@@ -3620,7 +3768,7 @@ export default function App() {
       setSplitState({ side, tabId, view: resolvedView, doc });
       await refreshWatchSet();
     },
-    [splitActiveDoc, loadCompanionDoc, setSplitState, refreshWatchSet, bumpEditorSeq],
+    [splitSameDoc, loadCompanionDoc, setSplitState, refreshWatchSet, bumpEditorSeq],
   );
   openInPaneRef.current = openInPane;
 
@@ -3639,8 +3787,10 @@ export default function App() {
   }, [loadCompanionDoc, bumpEditorSeq, setSplitState, refreshWatchSet]);
 
   // The unfocused pane's HtmlView gets an inert threads sink (its comment
-  // layer is disabled; mutations only flow once promoted).
+  // layer is disabled; mutations only flow once promoted), and the mirror
+  // editor an inert markdown sink (read-only snapshot; nothing to track).
   const noopThreadsChange = useCallback(() => {}, []);
+  const noopMarkdownChange = useCallback((_md: string) => {}, []);
 
   // Close the split (the focused document takes the whole area again; the
   // other pane's tab stays open in the strip).
@@ -3653,7 +3803,7 @@ export default function App() {
 
   // A pane header's ✕. Closing the FOCUSED pane of a two-document split
   // promotes the other document first (VS Code group semantics); closing the
-  // markdown pane of a same-document split keeps the rendition view.
+  // focused pane of a same-document split keeps the surviving pane's view.
   const closePane = useCallback(
     async (side: PaneSide) => {
       const s = splitRef.current;
@@ -3668,18 +3818,63 @@ export default function App() {
         await closeSplit();
       } else {
         setSplitState(null);
-        await selectDocView("html"); // keep showing what the user kept
+        if (s.view === "html" && docViewRef.current !== "html") {
+          await selectDocView("html"); // keep showing what the user kept
+        }
+        // Both-markdown: the mirror pane closes into the live editor —
+        // nothing to switch.
       }
     },
     [closeSplit, swapFocus, setSplitState, selectDocView],
   );
 
-  // The split pane's MD/HTML toggle (two-document splits; the same-document
-  // split pins its views).
+  // The split pane's MD/HTML toggle.
   const setCompanionView = useCallback(
     async (v: DocView) => {
       const s = splitRef.current;
-      if (!s || !s.doc || v === s.view) return;
+      if (!s || v === s.view) return;
+      if (!s.doc) {
+        // Same-document split pane.
+        const tab = tabsRef.current.find((t) => t.id === s.tabId);
+        if (!tab) return;
+        if (v === "html") {
+          // Mirror → rendition (the classic md | html arrangement).
+          const htmlPath = htmlPathRef.current;
+          if (!htmlPath) return;
+          if (htmlContentRef.current == null) {
+            try {
+              const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
+              setHtmlContent(r.contents);
+              htmlContentRef.current = r.contents;
+            } catch (e) {
+              console.error("read failed", htmlPath, e);
+              return;
+            }
+          }
+          captureCompanionScroll(); // the mirror is about to unmount
+          setSplitState({ ...s, view: "html" });
+        } else if (!(tab.kind === "file" && isHtmlPath(tab.path))) {
+          if (docViewRef.current === "md") {
+            // Both panes on markdown: this one becomes the read-only mirror.
+            setMirror((m) => ({ content: currentMarkdownRef.current, seq: m.seq + 1 }));
+            setSplitState({ ...s, view: "md" });
+          } else {
+            // Focused pane shows html; the user wants markdown HERE. The
+            // live editor follows the markdown view: this pane becomes the
+            // focused side, the html preview keeps the other pane.
+            flushPendingAutosave();
+            remountFocusedEditor();
+            applyDocView("md");
+            setSplitState({
+              side: otherSide(s.side),
+              tabId: s.tabId,
+              view: "html",
+              doc: null,
+            });
+          }
+        }
+        return;
+      }
       if (v === "html") {
         if (!s.doc.htmlPath) return;
         let contents = s.doc.htmlContent;
@@ -3703,7 +3898,13 @@ export default function App() {
         setSplitState({ ...s, view: "md" });
       }
     },
-    [captureCompanionScroll, setSplitState],
+    [
+      captureCompanionScroll,
+      setSplitState,
+      flushPendingAutosave,
+      remountFocusedEditor,
+      applyDocView,
+    ],
   );
 
   // The split pane's markdown editor reports every serialization here. It is
@@ -3787,80 +3988,143 @@ export default function App() {
 
   const handleTabDragOut = useCallback(
     (tabId: string, x: number, y: number) => {
-      const side = dropSideForPointer(x, y);
-      // Splitting needs a second view to show: the active tab can only tear
-      // out when it has a rendition (or a split already exists to rearrange).
-      const active = tabId === activeIdRef.current;
-      const canDrop = !active || splitRef.current != null || htmlPathRef.current != null;
-      setTabDrop({ tabId, side: canDrop ? side : null });
+      setTabDrop({ tabId, side: dropSideForPointer(x, y) });
     },
     [dropSideForPointer],
   );
 
   const handleTabDragCancel = useCallback(() => setTabDrop(null), []);
 
+  // Land a tab on a pane half. Shared by the tab-bar drag and (through the
+  // path resolver below) the sidebar's file drag.
+  const commitTabDrop = useCallback(
+    async (tabId: string, side: PaneSide) => {
+      const s = splitRef.current;
+      const focusedSide = focusedSideOf(s);
+      if (tabId === activeIdRef.current) {
+        if (s) {
+          // Dropping the active tab moves the FOCUSED pane to that half
+          // (the other pane takes the opposite side). React remounts the
+          // focused editor in its new parent — refresh it from live content
+          // first, or the remount would resurrect (and then autosave) the
+          // last-loaded text over real edits.
+          if (focusedSide !== side) {
+            flushPendingAutosave();
+            captureActiveScroll();
+            captureCompanionScroll(); // the other pane's editor re-parents too
+            if (docViewRef.current === "md") remountFocusedEditor();
+            setSplitState({ ...s, side: otherSide(side) });
+          }
+        } else {
+          // No split yet: duplicate the active doc; the new pane lands on
+          // the half it was dropped on.
+          await splitSameDoc(side);
+        }
+        return;
+      }
+      if (s && s.tabId === tabId && s.doc) {
+        if (side === focusedSide) {
+          await swapFocus(side); // promote INTO the half it was dropped on
+        } else if (s.side !== side) {
+          setSplitState({ ...s, side });
+        }
+        return;
+      }
+      if (side === focusedSide && s) {
+        await switchTab(tabId); // replace the focused pane's document
+      } else {
+        await openInPane(tabId, side);
+      }
+    },
+    [
+      setSplitState,
+      splitSameDoc,
+      swapFocus,
+      openInPane,
+      switchTab,
+      flushPendingAutosave,
+      remountFocusedEditor,
+      captureActiveScroll,
+      captureCompanionScroll,
+    ],
+  );
+
   const handleTabDragEnd = useCallback(
     (tabId: string, x: number, y: number) => {
       setTabDrop(null);
       const side = dropSideForPointer(x, y);
       if (!side) return;
-      const s = splitRef.current;
-      const focusedSide = focusedSideOf(s);
-      void (async () => {
-        if (tabId === activeIdRef.current) {
-          if (s && !s.doc) {
-            // Same-document split: dropping the active (markdown) tab picks
-            // its side; the rendition goes opposite.
-            if (s.side === side) setSplitState({ ...s, side: otherSide(side) });
-          } else if (s && s.doc) {
-            // Move the focused document to `side` (panes swap positions).
-            if (focusedSide !== side) setSplitState({ ...s, side: otherSide(side) });
-          } else if (htmlPathRef.current) {
-            // No split yet: the dragged (active) doc lands on `side`, its
-            // rendition on the other.
-            await splitActiveDoc(otherSide(side));
-          }
-          return;
-        }
-        if (s && s.tabId === tabId && s.doc) {
-          if (side === focusedSide) {
-            await swapFocus(side); // promote INTO the half it was dropped on
-          } else if (s.side !== side) {
-            setSplitState({ ...s, side });
-          }
-          return;
-        }
-        if (side === focusedSide && s) {
-          await switchTab(tabId); // replace the focused pane's document
-        } else {
-          await openInPane(tabId, side);
-        }
-      })();
+      void commitTabDrop(tabId, side);
     },
-    [dropSideForPointer, setSplitState, splitActiveDoc, swapFocus, openInPane, switchTab],
+    [dropSideForPointer, commitTabDrop],
   );
 
-  // The tab-bar split button / ⌘⇧\: split the active document with its
-  // rendition when it has one, else with the neighboring tab; toggle off
-  // when already split.
+  /* ---------- Sidebar file drag → panes ---------- */
+
+  // The sidebar streams file-row drags that leave the tree; the same drop
+  // overlay lights up and dropping opens the file in that pane — as a new
+  // tab when it isn't open yet.
+  const handleTreeDragToEditor = useCallback(
+    (_path: string, x: number, y: number) => {
+      setTabDrop({ tabId: "", side: dropSideForPointer(x, y) });
+    },
+    [dropSideForPointer],
+  );
+
+  const handleTreeDragCancel = useCallback(() => setTabDrop(null), []);
+
+  const handleTreeDropToEditor = useCallback(
+    (path: string, x: number, y: number) => {
+      setTabDrop(null);
+      const side = dropSideForPointer(x, y);
+      if (!side) return;
+      void (async () => {
+        // An html file whose markdown sibling exists opens as that document
+        // (same pairing rule as openTab).
+        let target = path;
+        if (isHtmlPath(target)) {
+          const md = mdSiblingOf(target);
+          const paired = await invoke<boolean>("path_exists", { path: md }).catch(
+            () => false,
+          );
+          if (paired) {
+            viewPrefsRef.current.set(md, "html");
+            target = md;
+          }
+        }
+        const existing = tabsRef.current.find((t) => t.path === target);
+        if (existing) {
+          await commitTabDrop(existing.id, side);
+          return;
+        }
+        addRecent(target, "file");
+        const tab: Tab = { id: uuid(), kind: "file", path: target };
+        if (side === focusedSideOf(splitRef.current)) {
+          // Focused half (or no split yet, left half): a normal open.
+          await appendAndActivate(tab);
+          return;
+        }
+        // The other half: add the tab WITHOUT activating, open it there.
+        const nextTabs = [...tabsRef.current, tab];
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+        writeStoredSession(nextTabs, activeIdRef.current);
+        await openInPane(tab.id, side);
+      })();
+    },
+    [dropSideForPointer, commitTabDrop, addRecent, appendAndActivate, openInPane],
+  );
+
+  // The tab-bar split button / ⌘⇧\: open the active document in a second
+  // pane (VS Code's split-editor semantics — pick per-pane views from the
+  // headers afterwards); toggle off when already split.
   const toggleSplit = useCallback(async () => {
     if (splitRef.current) {
       await closeSplit();
       return;
     }
-    const id = activeIdRef.current;
-    if (!id) return;
-    const tab = tabsRef.current.find((t) => t.id === id);
-    if (!tab || tab.missing) return;
-    if (htmlPathRef.current && !(tab.kind === "file" && isHtmlPath(tab.path))) {
-      await splitActiveDoc("right");
-      return;
-    }
-    const list = tabsRef.current;
-    const idx = list.findIndex((t) => t.id === id);
-    const neighbor = list[idx + 1] ?? list[idx - 1];
-    if (neighbor) await openInPane(neighbor.id, "right");
-  }, [closeSplit, splitActiveDoc, openInPane]);
+    await splitSameDoc("right");
+  }, [closeSplit, splitSameDoc]);
 
   const closeTab = useCallback(
     async (id: string, opts?: { discard?: boolean }) => {
@@ -4421,7 +4685,7 @@ export default function App() {
         const sp = session.split ?? null;
         if (sp && restored.some((t) => t.id === sp.tabId)) {
           if (sp.tabId === activeId) {
-            if (htmlPathRef.current) await splitActiveDocRef.current(sp.side);
+            await splitSameDocRef.current(sp.side, sp.view);
           } else {
             await openInPaneRef.current(sp.tabId, sp.side, sp.view);
           }
@@ -5410,6 +5674,10 @@ export default function App() {
     [promotePane],
   );
 
+  const resizeSidebar = useCallback((w: number) => {
+    setSidebarWidth(Math.min(SIDEBAR_MAX_W, Math.max(SIDEBAR_MIN_W, Math.round(w))));
+  }, []);
+
   // Divider drag: live ratio while the pointer moves, clamped so neither
   // pane collapses.
   const onDividerPointerDown = useCallback((e: React.PointerEvent) => {
@@ -5443,10 +5711,7 @@ export default function App() {
   const splitTab = split ? tabs.find((t) => t.id === split.tabId) ?? null : null;
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
-  const canSplit =
-    activeTab != null &&
-    !activeMissing &&
-    ((hasHtml && !activeIsHtmlDoc) || tabs.length > 1);
+  const canSplit = activeTab != null && !activeMissing;
   // The folder share the active document's include/remove toggle binds to
   // (drafts have no directory, so never a collection).
   const activeShareCollection = activeFilePath
@@ -5477,15 +5742,22 @@ export default function App() {
     const paneView: DocView = focused ? docView : s!.view;
     const paneMissing = focused ? activeMissing : doc ? doc.missing : activeMissing;
 
+    // A same-document split pane on markdown is a read-only MIRROR of the
+    // live editor (see the SplitPane comment).
+    const isMirror = !focused && s != null && !s.doc && s.view === "md";
     const showEditorHere = focused
       ? activeTab != null && !activeMissing && !activeIsHtmlDoc
-      : doc != null &&
-        s!.view === "md" &&
-        !doc.missing &&
-        !(doc.kind === "file" && isHtmlPath(doc.path));
+      : isMirror
+        ? !activeMissing
+        : doc != null &&
+          s!.view === "md" &&
+          !doc.missing &&
+          !(doc.kind === "file" && isHtmlPath(doc.path));
     const editorKey = focused
       ? `${activeTab?.id}:${editorSeqRef.current.get(activeTab?.id ?? "") ?? 0}`
-      : `${s!.tabId}:${editorSeqRef.current.get(s!.tabId) ?? 0}`;
+      : isMirror
+        ? `mirror:${s!.tabId}:${mirror.seq}`
+        : `${s!.tabId}:${editorSeqRef.current.get(s!.tabId) ?? 0}`;
 
     const paneHtmlContent = focused
       ? showHtmlView
@@ -5499,14 +5771,11 @@ export default function App() {
     const showHtmlHere =
       paneTab != null && !paneMissing && paneView === "html" && paneHtmlContent != null;
 
-    // Header facts (split mode only): which toggle sides exist / are pinned.
+    // Header facts (split mode only): which toggle sides exist.
     const paneIsHtmlOnlyDoc = focused
       ? activeIsHtmlDoc
-      : doc != null && doc.kind === "file" && isHtmlPath(doc.path);
-    const paneHasHtml = focused ? hasHtml : doc ? doc.hasHtml : true;
-    const pinnedHint = "Shown in the other pane";
-    const mdPinned = s != null && !s.doc && !focused; // same-doc: html pane pins MD
-    const htmlPinned = s != null && !s.doc && focused; // same-doc: md pane pins HTML
+      : doc != null ? doc.kind === "file" && isHtmlPath(doc.path) : activeIsHtmlDoc;
+    const paneHasHtml = focused ? hasHtml : doc ? doc.hasHtml : hasHtml;
 
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
@@ -5544,10 +5813,8 @@ export default function App() {
             focused={focused}
             missing={paneMissing}
             view={paneView}
-            hasMd={!paneIsHtmlOnlyDoc && !mdPinned}
-            hasHtml={paneHasHtml && !htmlPinned}
-            mdHint={mdPinned ? pinnedHint : undefined}
-            htmlHint={htmlPinned ? pinnedHint : undefined}
+            hasMd={!paneIsHtmlOnlyDoc}
+            hasHtml={paneHasHtml}
             onSelectView={(v) =>
               focused ? void selectDocView(v) : void setCompanionView(v)
             }
@@ -5574,15 +5841,28 @@ export default function App() {
             />
           )}
           {showEditorHere && (
+            // Three wirings, one slot: the live machinery editor (focused),
+            // a two-document companion (read-only, promotes on edit), or a
+            // same-document mirror (read-only snapshot of the live editor;
+            // comment layer off — its rail would accept edits that the next
+            // refresh silently discards).
             <Editor
               key={editorKey}
-              ref={focused ? editorRef : companionEditorRef}
-              initialMarkdown={focused ? initialMarkdown : doc!.contents}
-              onChange={focused ? onMarkdownChange : onCompanionMarkdownChange}
+              ref={focused ? editorRef : isMirror ? undefined : companionEditorRef}
+              initialMarkdown={
+                focused ? initialMarkdown : isMirror ? mirror.content : doc!.contents
+              }
+              onChange={
+                focused
+                  ? onMarkdownChange
+                  : isMirror
+                    ? noopMarkdownChange
+                    : onCompanionMarkdownChange
+              }
               onSearchState={focused ? setFindInfo : undefined}
               onReady={focused ? restoreActiveScroll : restoreCompanionScroll}
               commentAuthor={syncDeviceName}
-              commentsVisible={commentsVisible}
+              commentsVisible={commentsVisible && !isMirror}
               onCommentsCount={focused ? setCommentCount : undefined}
               onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
               readOnly={!focused}
@@ -5618,7 +5898,7 @@ export default function App() {
             <MissingFileState
               path={paneTab.path}
               onRetry={
-                focused
+                focused || !doc
                   ? () => void loadActiveContent(paneTab)
                   : () => void retryCompanion()
               }
@@ -5653,6 +5933,7 @@ export default function App() {
   return (
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
+      style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
       <div
         className="drag-strip"
@@ -6024,7 +6305,6 @@ export default function App() {
               <SplitToggle
                 active={effectiveSplit != null}
                 disabled={!effectiveSplit && !canSplit}
-                sameDocPossible={hasHtml && !activeIsHtmlDoc}
                 onToggle={() => void toggleSplit()}
               />
             </>
@@ -6077,6 +6357,10 @@ export default function App() {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);
           }}
+          onDragFileToEditor={handleTreeDragToEditor}
+          onDropFileToEditor={handleTreeDropToEditor}
+          onDragFileCancel={handleTreeDragCancel}
+          onResizeWidth={resizeSidebar}
           presence={presenceByPath}
           syncPhase={syncedWorkspace?.phase ?? null}
           onFileHistory={syncedWorkspace ? (p) => setHistoryTarget(p) : null}
@@ -6289,18 +6573,16 @@ function PaneHeader({
   );
 }
 
-// Tab-bar button that opens/closes the split view. Splitting favors the
-// marquee layout — markdown beside its HTML rendition — and falls back to
-// the neighboring tab when the document has no rendition.
+// Tab-bar button that opens/closes the split view: the active document
+// opens in a second pane (each pane then picks its own MD/HTML view from
+// its header) — VS Code's split-editor semantics.
 function SplitToggle({
   active,
   disabled,
-  sameDocPossible,
   onToggle,
 }: {
   active: boolean;
   disabled: boolean;
-  sameDocPossible: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -6308,15 +6590,7 @@ function SplitToggle({
       className={`split-toggle ${active ? "is-active" : ""}`}
       aria-pressed={active}
       disabled={disabled}
-      title={
-        active
-          ? "Close split (⌘⇧\\)"
-          : disabled
-            ? "Nothing to split with — open another tab"
-            : sameDocPossible
-              ? "Split: markdown and HTML side by side (⌘⇧\\)"
-              : "Split with the neighboring tab (⌘⇧\\)"
-      }
+      title={active ? "Close split (⌘⇧\\)" : "Split editor right (⌘⇧\\)"}
       onClick={onToggle}
     >
       <svg

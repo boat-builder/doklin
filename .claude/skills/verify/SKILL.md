@@ -29,14 +29,16 @@ node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the di
 node verify-harness/drive-inline-code.mjs  # 7 steps: hard-wrapped inline code spans parse to a
                                            # single-space value, render one-line, and serialize
                                            # back on one line
-node verify-harness/drive-split.mjs        # 16 steps: boots the REAL <App/> (split.html stubs
-                                           # enough IPC: in-memory fs, window init, sync probes)
-                                           # and walks the split view — same-doc md|rendition
-                                           # split, two-doc split, promote by click / iframe
-                                           # gesture, read-only companion, promote→edit→autosave,
-                                           # sync-scroll on/off (md↔html and md↔md), divider
-                                           # resize, pane close, ⌘⇧\, tab drag-out drop zones,
-                                           # session-restore round trip
+node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
+                                           # enough IPC: in-memory fs, /docs workspace tree,
+                                           # window init, sync probes) and walks the split view —
+                                           # same-doc duplicate split (read-only mirror tracking
+                                           # autosaves), per-pane MD/HTML picks with live-editor
+                                           # normalization, two-doc split + promotion by click /
+                                           # iframe gesture, sync scroll off-by-default then
+                                           # chained (md↔html and md↔md), divider + sidebar
+                                           # resize, sidebar-file and tab drag-to-pane drop
+                                           # zones, session-restore round trip
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.

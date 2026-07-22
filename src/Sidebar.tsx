@@ -73,6 +73,16 @@ type Props = {
   // Include/remove a file in the folder share rooted at `dirPath`.
   onToggleMembership: (path: string, dirPath: string, include: boolean) => void;
   onSwitchToSearch: () => void;
+  // Dragging a FILE row past the tree and over the editor area (the app
+  // shows its split drop zones): stream pointer positions, commit the drop,
+  // or cancel when the pointer comes back / the drag dies. Folder rows never
+  // tear out — only files open in panes.
+  onDragFileToEditor?: (path: string, x: number, y: number) => void;
+  onDropFileToEditor?: (path: string, x: number, y: number) => void;
+  onDragFileCancel?: () => void;
+  // Drag-resize of the sidebar itself (right-edge handle); the app owns the
+  // width (a CSS variable on the grid) and persists it.
+  onResizeWidth?: (w: number) => void;
   // Cloud sync (all absent/null when the workspace isn't synced): other
   // people's presence keyed by absolute path ("Alice" is editing this doc),
   // the engine phase for the header indicator, and the version-history opener
@@ -120,6 +130,10 @@ export default function Sidebar({
   onCopyShareLink,
   onToggleMembership,
   onSwitchToSearch,
+  onDragFileToEditor,
+  onDropFileToEditor,
+  onDragFileCancel,
+  onResizeWidth,
   presence = {},
   syncPhase = null,
   onFileHistory = null,
@@ -180,7 +194,11 @@ export default function Sidebar({
     startY: number;
     moved: boolean;
     cancelled: boolean;
+    // True while the pointer is beyond the sidebar over the editor area —
+    // the drag belongs to the app's split drop zones, not the tree.
+    out: boolean;
   } | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
   const dropDirRef = useRef<string | null>(null);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const ghostRef = useRef<HTMLDivElement>(null);
@@ -335,6 +353,7 @@ export default function Sidebar({
         startY: e.clientY,
         moved: false,
         cancelled: false,
+        out: false,
       };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
@@ -356,9 +375,30 @@ export default function Sidebar({
       }
       lastPointRef.current = { x: e.clientX, y: e.clientY };
       positionGhost(e.clientX, e.clientY);
+      // A FILE dragged past the sidebar's right edge tears out toward the
+      // editor area — the app's split drop zones take over; coming back
+      // resumes the tree move.
+      const aside = asideRef.current;
+      const isOut =
+        drag.entry.kind === "file" &&
+        onDragFileToEditor != null &&
+        aside != null &&
+        e.clientX > aside.getBoundingClientRect().right;
+      if (isOut !== drag.out) {
+        drag.out = isOut;
+        if (!isOut) onDragFileCancel?.();
+        else {
+          setDropState(null); // no tree target while out
+          document.body.classList.remove("tree-drag-invalid");
+        }
+      }
+      if (isOut) {
+        onDragFileToEditor?.(drag.entry.path, e.clientX, e.clientY);
+        return;
+      }
       updateDropTarget(e.clientX, e.clientY);
     },
-    [startAutoScroll, positionGhost, updateDropTarget],
+    [startAutoScroll, positionGhost, updateDropTarget, onDragFileToEditor, onDragFileCancel, setDropState],
   );
 
   const onRowPointerUp = useCallback(() => {
@@ -372,15 +412,23 @@ export default function Sidebar({
     window.setTimeout(() => {
       suppressClickRef.current = false;
     }, 0);
+    if (drag.out) {
+      const pt = lastPointRef.current;
+      if (!drag.cancelled && pt) onDropFileToEditor?.(drag.entry.path, pt.x, pt.y);
+      else onDragFileCancel?.();
+      return;
+    }
     if (!drag.cancelled && canDrop(drag.entry, toDir)) {
       void performDrop(drag.entry, toDir!);
     }
-  }, [clearDragVisuals, canDrop, performDrop]);
+  }, [clearDragVisuals, canDrop, performDrop, onDropFileToEditor, onDragFileCancel]);
 
   const onRowPointerCancel = useCallback(() => {
+    const wasOut = dragRef.current?.out === true;
     dragRef.current = null;
     clearDragVisuals();
-  }, [clearDragVisuals]);
+    if (wasOut) onDragFileCancel?.();
+  }, [clearDragVisuals, onDragFileCancel]);
 
   const suppressRowClick = useCallback(() => {
     if (suppressClickRef.current) {
@@ -408,11 +456,12 @@ export default function Sidebar({
       if (e.key !== "Escape") return;
       const drag = dragRef.current;
       if (drag) drag.cancelled = true;
+      if (drag?.out) onDragFileCancel?.();
       clearDragVisuals();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [dragging, clearDragVisuals]);
+  }, [dragging, clearDragVisuals, onDragFileCancel]);
 
   // If the sidebar unmounts mid-drag (mode switch), don't leave the document
   // stuck with drag cursor classes.
@@ -656,8 +705,37 @@ export default function Sidebar({
     root,
   ]);
 
+  // Right-edge drag handle: the app owns the width (grid CSS variable);
+  // this just streams clamped pointer positions while the handle is held.
+  const onResizePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0 || !onResizeWidth) return;
+      e.preventDefault();
+      const aside = asideRef.current;
+      if (!aside) return;
+      const left = aside.getBoundingClientRect().left;
+      const onMove = (ev: PointerEvent) => onResizeWidth(ev.clientX - left);
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        document.body.classList.remove("sidebar-resizing");
+      };
+      document.body.classList.add("sidebar-resizing");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [onResizeWidth],
+  );
+
   return (
-    <aside className="sidebar" aria-label="File browser">
+    <aside className="sidebar" aria-label="File browser" ref={asideRef}>
+      {onResizeWidth && (
+        <div
+          className="sidebar-resize"
+          title="Drag to resize"
+          onPointerDown={onResizePointerDown}
+        />
+      )}
       <SidebarHeader
         name={rootName}
         menuOpen={menuOpen}

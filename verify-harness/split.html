@@ -35,6 +35,7 @@
         ["/docs/notes.md", `# Notes\n\n${para("notes", 40)}\n`],
         ["/docs/notes.html", htmlDoc("Notes rendition", 80)],
         ["/docs/other.md", `# Other\n\n${para("other", 40)}\n`],
+        ["/docs/third.md", `# Third\n\n${para("third", 40)}\n`],
       ]);
       window.__mtime = 1000;
       window.__writes = [];
@@ -72,7 +73,18 @@
               return Promise.resolve(snap(args.contents));
             }
             case "path_exists":
-              return Promise.resolve(window.__fs.has(args.path));
+              return Promise.resolve(args.path === "/docs" || window.__fs.has(args.path));
+            case "list_md_tree":
+              return Promise.resolve({
+                kind: "dir",
+                name: "docs",
+                path: "/docs",
+                children: [
+                  { kind: "file", name: "notes.md", path: "/docs/notes.md", paired: true },
+                  { kind: "file", name: "other.md", path: "/docs/other.md" },
+                  { kind: "file", name: "third.md", path: "/docs/third.md" },
+                ],
+              });
             case "stat_file": {
               const c = window.__fs.get(args.path);
               return c === undefined
@@ -110,7 +122,8 @@
       // StrictMode's mount→unmount→remount cycle quiet.
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
 
-      // A restorable bare (no-workspace) session: two file tabs, notes
+      // A restorable /docs workspace session (the sidebar renders — the
+      // drive walks tree-drag and sidebar-resize): two file tabs, notes
       // active. Seeded ONCE per browser context — a reload must keep what
       // the app itself persisted (the drive's restore round-trip).
       if (!localStorage.getItem("doklin:harness-seeded")) {
@@ -120,9 +133,9 @@
           "doklin:session",
           JSON.stringify({
             version: 2,
-            lastRoot: null,
+            lastRoot: "/docs",
             sessions: {
-              "<no-workspace>": {
+              "/docs": {
                 tabs: [
                   { id: "t-notes", kind: "file", path: "/docs/notes.md" },
                   { id: "t-other", kind: "file", path: "/docs/other.md" },
