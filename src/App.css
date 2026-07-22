@@ -186,11 +186,11 @@ body,
 }
 
 .app.with-sidebar {
-  grid-template-columns: 0 240px 1fr;
+  grid-template-columns: 0 var(--sidebar-w, 240px) 1fr;
 }
 
 .app.show-drafts.with-sidebar {
-  grid-template-columns: 240px 240px 1fr;
+  grid-template-columns: 240px var(--sidebar-w, 240px) 1fr;
 }
 
 .drag-strip {
@@ -2075,6 +2075,7 @@ input[type="checkbox"]:focus-visible {
 
 .sidebar {
   grid-area: side;
+  position: relative; /* anchors the right-edge resize handle */
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -2082,6 +2083,28 @@ input[type="checkbox"]:focus-visible {
   border-right: 1px solid var(--app-border);
   overflow: hidden;
   font-size: 13px;
+}
+
+/* Right-edge drag handle: an invisible grab strip over the border (same
+   affordance as the split divider — the width is adjustable, so this edge
+   should feel adjustable too). */
+.sidebar-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -2px;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 30;
+}
+
+.sidebar-resize:hover {
+  background: color-mix(in srgb, var(--app-accent) 45%, transparent);
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
