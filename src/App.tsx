@@ -21,6 +21,7 @@ import ShareFolder from "./ShareFolder";
 import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
 import CloudSync from "./CloudSync";
 import ConnectBackend from "./ConnectBackend";
+import MermaidModal from "./MermaidModal";
 import Backends from "./Backends";
 import BackendTeardown from "./BackendTeardown";
 import HistoryPanel from "./HistoryPanel";
@@ -918,10 +919,25 @@ export default function App() {
   const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
   const [connectBackendOpen, setConnectBackendOpen] = useState(false);
   const [backendsOpen, setBackendsOpen] = useState(false);
+  // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
+  // when closed. Set by the `dk-mermaid-expand` event a diagram's expand chip
+  // fires (src/mermaid.ts).
+  const [zoomDiagramSvg, setZoomDiagramSvg] = useState<string | null>(null);
   // The connection whose guided teardown (erase + delete worker) is open.
   const [teardownConn, setTeardownConn] = useState<ShareConnection | null>(null);
   // Absolute path of the doc whose version history is open. null = closed.
   const [historyTarget, setHistoryTarget] = useState<string | null>(null);
+
+  // A rendered mermaid diagram's expand chip (src/mermaid.ts) fires this with
+  // the diagram's SVG; open the zoom/pan canvas on it.
+  useEffect(() => {
+    const onExpand = (e: Event) => {
+      const detail = (e as CustomEvent<{ svg?: string }>).detail;
+      if (detail && typeof detail.svg === "string") setZoomDiagramSvg(detail.svg);
+    };
+    window.addEventListener("dk-mermaid-expand", onExpand);
+    return () => window.removeEventListener("dk-mermaid-expand", onExpand);
+  }, []);
 
   useEffect(() => {
     if (BUNDLED_WORKER_VERSION <= 0) return;
@@ -6425,6 +6441,9 @@ export default function App() {
           onOpenWorkspace={(root) => void openWorkspace(root)}
           onClose={() => setConnectBackendOpen(false)}
         />
+      )}
+      {zoomDiagramSvg && (
+        <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
       {historyTarget &&
         syncedWorkspace &&
