@@ -1131,7 +1131,8 @@ body,
 /* The switch into source view: a quiet chip riding the diagram's top-right
    corner (inside the error card too), visible while the pointer is over the
    block — the same reveal the block's language/copy tools use. */
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit {
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit,
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -1151,12 +1152,23 @@ body,
   transition: opacity 0.15s ease;
 }
 
+/* Expand rides the opposite corner from Source (top-left) and is icon-only. */
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand {
+  right: auto;
+  left: 8px;
+  gap: 0;
+  padding: 4px;
+}
+
 .milkdown .milkdown-code-block:hover .preview .dk-mermaid .dk-mermaid-edit,
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:focus-visible {
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:focus-visible,
+.milkdown .milkdown-code-block:hover .preview .dk-mermaid .dk-mermaid-expand,
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand:focus-visible {
   opacity: 1;
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:hover {
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:hover,
+.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand:hover {
   color: var(--app-text);
   background: var(--app-hover);
 }
@@ -1208,6 +1220,150 @@ body,
   color: var(--app-text-muted);
   white-space: pre-wrap;
   overflow-x: auto;
+}
+
+/* ---------- Mermaid zoom/pan canvas (MermaidModal.tsx) ----------
+   A full-screen surface for one rendered diagram: wheel to zoom (toward the
+   cursor), drag to pan, double-click to fit. The dot grid tracks the transform
+   (size follows zoom, position follows pan) so it reads as one movable plane. */
+
+@keyframes dk-zoom-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.dk-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  background: var(--app-bg);
+  animation: dk-zoom-fade 0.12s ease-out;
+}
+
+.dk-zoom-stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background-color: var(--app-bg);
+  background-image: radial-gradient(circle, var(--app-border) 1px, transparent 1.2px);
+}
+
+.dk-zoom-stage:active {
+  cursor: grabbing;
+}
+
+.dk-zoom-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.dk-zoom-content svg {
+  display: block;
+}
+
+.dk-zoom-toolbar {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="dark"] .dk-zoom-toolbar {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .dk-zoom-toolbar,
+  [data-theme="system"] .dk-zoom-toolbar {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.5),
+      0 8px 24px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.dk-zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 16px;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dk-zoom-btn:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.dk-zoom-pct {
+  min-width: 52px;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.dk-zoom-pct:hover {
+  background: var(--app-hover);
+}
+
+.dk-zoom-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--app-border);
+}
+
+.dk-zoom-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 20px;
+  pointer-events: none;
+  opacity: 0.9;
 }
 
 /* ---------- Crepe editor variables per theme ----------
