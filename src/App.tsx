@@ -5,7 +5,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
-import Sidebar, { type SidebarSelection } from "./Sidebar";
+import Sidebar, {
+  pruneNestedSelection,
+  type SidebarSelection,
+  type FileClipboardPayload,
+} from "./Sidebar";
 import TabBar from "./TabBar";
 import DraftsPanel from "./DraftsPanel";
 import FindBar from "./FindBar";
@@ -156,6 +160,33 @@ const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] =>
     : htmlPath === tabPath
       ? [commentsSidecarOf(htmlPath)]
       : [htmlPath, commentsSidecarOf(htmlPath)];
+
+// Pick a collision-free paste target inside `destDir`: "name.md", then
+// "name copy.md", then "name copy 2.md" (VS Code's convention). Document
+// files also keep their sibling stem free — pasting "notes.md" where only
+// "notes.html" exists would otherwise fold two unrelated documents into one
+// paired tree row.
+const uniquePastePath = async (
+  destDir: string,
+  name: string,
+  kind: "file" | "dir",
+): Promise<string> => {
+  const dot = kind === "file" ? name.lastIndexOf(".") : -1;
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  const isDoc = kind === "file" && (MD_EXT_RE.test(name) || HTML_EXT_RE.test(name));
+  const taken = async (p: string): Promise<boolean> => {
+    if (await invoke<boolean>("path_exists", { path: p })) return true;
+    if (!isDoc) return false;
+    const sibling = HTML_EXT_RE.test(p) ? mdSiblingOf(p) : htmlSiblingOf(p);
+    return invoke<boolean>("path_exists", { path: sibling });
+  };
+  for (let n = 0; ; n++) {
+    const candidate = n === 0 ? name : n === 1 ? `${stem} copy${ext}` : `${stem} copy ${n}${ext}`;
+    const full = `${destDir}/${candidate}`;
+    if (!(await taken(full))) return full;
+  }
+};
 
 type DocView = "md" | "html";
 
@@ -591,12 +622,14 @@ export default function App() {
   // watch/conflict) keys off `path` alone — keep it that way; never branch file
   // handling on whether a workspace is open.
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
-  // The sidebar's selected row (file or folder). Lives here — not in Sidebar —
-  // because it is the creation context: saving a new draft defaults the save
-  // dialog into the selected folder (or next to the selected file), falling
-  // back to the workspace root. Mirrored in a ref for async readers.
-  const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection | null>(null);
-  const sidebarSelectionRef = useRef<SidebarSelection | null>(null);
+  // The sidebar's selected rows (files or folders; ⌘/⇧-click multi-selects).
+  // Lives here — not in Sidebar — because the PRIMARY selection (the last
+  // entry, the row clicked most recently) is the creation context: saving a
+  // new draft defaults the save dialog into the selected folder (or next to
+  // the selected file), falling back to the workspace root. Mirrored in a ref
+  // for async readers.
+  const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection[]>([]);
+  const sidebarSelectionRef = useRef<SidebarSelection[]>([]);
   // The in-app Save As prompt (shown instead of the native save panel when a
   // workspace decides the destination): the folder is fixed, only the name is
   // asked for. null = closed.
@@ -2827,19 +2860,19 @@ export default function App() {
     );
   }, []);
 
-  const selectSidebarEntry = useCallback((sel: SidebarSelection | null) => {
-    sidebarSelectionRef.current = sel;
-    setSidebarSelection(sel);
+  const selectSidebarEntries = useCallback((sels: SidebarSelection[]) => {
+    sidebarSelectionRef.current = sels;
+    setSidebarSelection(sels);
   }, []);
 
   const setWorkspace = useCallback((root: string) => {
     sessionWorkspaceRoot = root;
     setWorkspaceRoot(root);
     setSidebarOpen(true);
-    selectSidebarEntry(null); // a selection from the previous workspace is meaningless
+    selectSidebarEntries([]); // a selection from the previous workspace is meaningless
     addRecent(root, "folder");
     writeStoredSession(tabsRef.current, activeIdRef.current); // the root is part of the session
-  }, [addRecent, selectSidebarEntry]);
+  }, [addRecent, selectSidebarEntries]);
 
   // Switch this window to a different workspace folder (File ▸ Open Folder, a
   // recent, the sidebar). Because tabs are keyed by folder, we persist the
@@ -4303,13 +4336,14 @@ export default function App() {
         openPaths: affected.map((t) => t.path),
         memberships,
       });
-      const sel = sidebarSelectionRef.current;
-      if (sel && (sel.path === target || sel.path.startsWith(target + "/"))) {
-        selectSidebarEntry(null);
-      }
+      const sels = sidebarSelectionRef.current;
+      const kept = sels.filter(
+        (s) => s.path !== target && !s.path.startsWith(target + "/"),
+      );
+      if (kept.length !== sels.length) selectSidebarEntries(kept);
       setTreeRefreshToken((t) => t + 1);
     },
-    [closeTab, selectSidebarEntry, updateCollections, scheduleCollectionPush],
+    [closeTab, selectSidebarEntries, updateCollections, scheduleCollectionPush],
   );
 
   // Undo the most recent trash (⌘Z outside the editor): move the entry (and
@@ -4556,11 +4590,12 @@ export default function App() {
         queueShareOp(p);
       }
 
-      const sel = sidebarSelectionRef.current;
-      if (sel) {
-        const np = remap(sel.path);
-        if (np !== sel.path) selectSidebarEntry({ ...sel, path: np });
-      }
+      const sels = sidebarSelectionRef.current;
+      const remapped = sels.map((s) => {
+        const np = remap(s.path);
+        return np === s.path ? s : { ...s, path: np };
+      });
+      if (remapped.some((s, i) => s !== sels[i])) selectSidebarEntries(remapped);
 
       setTreeRefreshToken((t) => t + 1);
       return null;
@@ -4572,12 +4607,134 @@ export default function App() {
       updateCollections,
       scheduleSharePush,
       scheduleCollectionPush,
-      selectSidebarEntry,
+      selectSidebarEntries,
       queueShareOp,
       queueCollectionOp,
       refreshWatchSet,
       setSplitState,
     ],
+  );
+
+  /* ---------- File clipboard (sidebar Cut/Copy/Paste) ---------- */
+
+  // Local mirror of the backend clipboard, for the UI only: enabling Paste
+  // and dimming rows a Cut is about to move. The backend copy is the truth —
+  // paste re-reads it — so a stale mirror can't misfile anything.
+  const [fileClipboard, setFileClipboard] = useState<FileClipboardPayload | null>(null);
+  useEffect(() => {
+    invoke<FileClipboardPayload | null>("clipboard_get_files")
+      .then((p) => setFileClipboard(p ?? null))
+      .catch(() => {});
+    const un = listen<FileClipboardPayload | null>("file-clipboard-changed", (e) => {
+      setFileClipboard(e.payload ?? null);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
+  // Cut/Copy: park the selection on the app-wide clipboard. The files aren't
+  // touched until paste (a cut that's never pasted moves nothing).
+  const copyEntries = useCallback(async (entries: SidebarSelection[], cut: boolean) => {
+    const items = pruneNestedSelection(entries);
+    if (items.length === 0) return;
+    try {
+      await invoke("clipboard_set_files", { items, cut });
+    } catch (e) {
+      console.error("file clipboard set failed", e);
+    }
+  }, []);
+
+  // Paste into `destDir`: copy → duplicate on disk (companions ride along,
+  // like delete/move); cut → a real move through movePath, which repoints
+  // tabs, watchers, and shares. Collisions get a fresh "name copy.md"-style
+  // target instead of a prompt, so paste never clobbers.
+  const pasteEntries = useCallback(
+    async (destDir: string) => {
+      let clip: FileClipboardPayload | null = null;
+      try {
+        clip = await invoke<FileClipboardPayload | null>("clipboard_get_files");
+      } catch {
+        return;
+      }
+      if (!clip || clip.items.length === 0) return;
+      const pasted: SidebarSelection[] = [];
+      let copiedAny = false;
+      for (const item of clip.items) {
+        const name = basename(item.path);
+        if (
+          item.kind === "dir" &&
+          (destDir === item.path || destDir.startsWith(item.path + "/"))
+        ) {
+          window.alert(
+            `Can't ${clip.cut ? "move" : "copy"} "${name}" into itself`,
+          );
+          continue;
+        }
+        if (clip.cut) {
+          if (dirname(item.path) === destDir) continue; // cut+paste in place: nothing to move
+          const to = await uniquePastePath(destDir, name, item.kind);
+          const err = await movePath(item.path, to, item.kind);
+          if (err) {
+            window.alert(`Could not move ${name}\n${err}`);
+            continue;
+          }
+          pasted.push({ path: to, kind: item.kind });
+        } else {
+          const to = await uniquePastePath(destDir, name, item.kind);
+          try {
+            await invoke("copy_path", { from: item.path, to });
+          } catch (e) {
+            window.alert(`Could not copy ${name}\n${e}`);
+            continue;
+          }
+          copiedAny = true;
+          // The document's companions ride along, mirroring delete/move: the
+          // html rendition and its comments sidecar are one document with it.
+          const copyCompanion = async (cFrom: string, cTo: string, label: string) => {
+            const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
+              () => false,
+            );
+            if (!exists) return;
+            try {
+              await invoke("copy_path", { from: cFrom, to: cTo });
+            } catch (e) {
+              window.alert(`Copied ${name} but not its ${label}.\n${e}`);
+            }
+          };
+          if (item.kind === "file" && MD_EXT_RE.test(item.path) && MD_EXT_RE.test(to)) {
+            const fromHtml = htmlSiblingOf(item.path);
+            const toHtml = htmlSiblingOf(to);
+            await copyCompanion(fromHtml, toHtml, "HTML version");
+            await copyCompanion(
+              commentsSidecarOf(fromHtml),
+              commentsSidecarOf(toHtml),
+              "comments",
+            );
+          } else if (item.kind === "file" && HTML_EXT_RE.test(item.path)) {
+            await copyCompanion(commentsSidecarOf(item.path), commentsSidecarOf(to), "comments");
+          }
+          pasted.push({ path: to, kind: item.kind });
+        }
+      }
+      if (clip.cut && pasted.length > 0) {
+        // A cut is consumed by its paste (VS Code): a second ⌘V must not try
+        // to move files that already left.
+        invoke("clipboard_clear_files").catch(() => {});
+      }
+      if (copiedAny) setTreeRefreshToken((t) => t + 1); // moves refresh on their own
+      if (pasted.length > 0) selectSidebarEntries(pasted);
+    },
+    [movePath, selectSidebarEntries],
+  );
+
+  // Trash a whole selection, outermost entries only — deleting a folder
+  // already takes its selected children with it.
+  const deleteEntries = useCallback(
+    async (entries: SidebarSelection[]) => {
+      for (const s of pruneNestedSelection(entries)) await deleteEntry(s.path, s.kind);
+    },
+    [deleteEntry],
   );
 
   useEffect(() => {
@@ -5348,7 +5505,8 @@ export default function App() {
     // no Finder navigation (VS Code-style): the destination is already decided
     // by context — the sidebar's selected folder, the selected file's folder,
     // or the workspace root — so the in-app prompt only asks for a name.
-    const sel = sidebarSelectionRef.current;
+    const sels = sidebarSelectionRef.current;
+    const sel = sels[sels.length - 1] ?? null; // primary selection
     const contextDir = sel
       ? sel.kind === "dir"
         ? sel.path
@@ -5525,26 +5683,58 @@ export default function App() {
         if (activeIdRef.current) void closeTab(activeIdRef.current);
         else void getCurrentWindow().close();
       } else if (k === "backspace") {
-        // ⌘⌫ moves the selected entry to the Trash — but only when focus is
+        // ⌘⌫ moves the selected entries to the Trash — but only when focus is
         // outside the editor, so it stays Milkdown's delete-to-line-start while
         // typing. (A sidebar-row handler can't be relied on: WebKit doesn't
         // focus buttons on click, so the row never holds focus to receive the
         // key.)
         const t = e.target as HTMLElement | null;
         if (t?.isContentEditable || t?.closest(".editor-wrap")) return;
-        const sel = sidebarSelectionRef.current;
-        if (sel?.kind === "dir" && workspaceRoot != null && sidebarOpen) {
-          // A folder is only ever the sidebar selection (it's never an open
-          // tab), so ⌘⌫ can target it only while its highlight is visible in the
-          // tree. Otherwise fall through to the active file tab.
+        const sels = sidebarSelectionRef.current;
+        if (
+          workspaceRoot != null &&
+          sidebarOpen &&
+          (sels.length > 1 || sels[0]?.kind === "dir")
+        ) {
+          // A multi-selection (or a folder — never an open tab) can only be
+          // targeted while its highlight is visible in the tree. A single
+          // selected FILE falls through to the active tab below: tree rows
+          // never hold focus (see above), so the tab is the safer read of
+          // what "the selected file" means.
           e.preventDefault();
-          void deleteEntry(sel.path, "dir");
+          void deleteEntries(sels);
         } else {
           const active = tabsRef.current.find((tb) => tb.id === activeIdRef.current);
           if (active?.kind === "file") {
             e.preventDefault();
             void deleteEntry(active.path, "file");
           }
+        }
+      } else if ((k === "c" || k === "x" || k === "v") && !e.shiftKey && !e.altKey) {
+        // ⌘C/⌘X/⌘V on sidebar entries (VS Code's explorer clipboard) — only
+        // when focus is outside the editor and any text field, and no text is
+        // selected anywhere, so the native text clipboard keeps working
+        // everywhere it does today.
+        const t = e.target as HTMLElement | null;
+        if (t?.isContentEditable || t?.closest(".editor-wrap")) return;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+        if (!(window.getSelection()?.isCollapsed ?? true)) return;
+        if (workspaceRoot == null || !sidebarOpen) return;
+        if (k === "v") {
+          const sels = sidebarSelectionRef.current;
+          const primary = sels[sels.length - 1];
+          const destDir = primary
+            ? primary.kind === "dir"
+              ? primary.path
+              : dirname(primary.path)
+            : workspaceRoot;
+          e.preventDefault();
+          void pasteEntries(destDir);
+        } else {
+          const sels = sidebarSelectionRef.current;
+          if (sels.length === 0) return;
+          e.preventDefault();
+          void copyEntries(sels, k === "x");
         }
       } else if (e.code === "KeyO") {
         // Use e.code, not e.key: on macOS holding ⌥ remaps e.key (⌥O → "ø").
@@ -5601,6 +5791,9 @@ export default function App() {
     newDraft,
     closeTab,
     deleteEntry,
+    deleteEntries,
+    copyEntries,
+    pasteEntries,
     openFolderPicker,
     openFilePicker,
     openFileInNewWindow,
@@ -6328,16 +6521,19 @@ export default function App() {
           root={workspaceRoot}
           currentPath={activeFilePath}
           selection={sidebarSelection}
+          clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
           shares={shares}
           collections={collections}
-          onSelect={selectSidebarEntry}
+          onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p, "file")}
           onOpenFolder={openFolderPicker}
           onOpenFilePicker={openFilePicker}
           onRevealInFinder={revealInFinder}
-          onDelete={(p, kind) => void deleteEntry(p, kind)}
+          onDelete={(entries) => void deleteEntries(entries)}
           onMovePath={movePath}
+          onCopyEntries={(entries, cut) => void copyEntries(entries, cut)}
+          onPasteEntries={(dir) => void pasteEntries(dir)}
           onShareFolder={(dir) => setShareFolderTarget(dir)}
           onShareFile={(p) => void shareFileFromTree(p)}
           onStopSharingFile={(p) =>
