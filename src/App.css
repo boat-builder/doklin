@@ -1259,16 +1259,20 @@ body,
   cursor: grabbing;
 }
 
+/* Zoom is the wrapper's layout size, not a scale() transform — WKWebView
+   rasterizes scaled layers and zooming would blur (see MermaidModal.tsx).
+   The transform only translates. */
 .dk-zoom-content {
   position: absolute;
   top: 0;
   left: 0;
-  transform-origin: 0 0;
   will-change: transform;
 }
 
 .dk-zoom-content svg {
   display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .dk-zoom-toolbar {

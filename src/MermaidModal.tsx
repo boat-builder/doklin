@@ -3,9 +3,18 @@
 // A rendered diagram in the doc is a self-contained <svg> (mermaid inlines its
 // own styles), so the "expand" chip on a diagram (src/mermaid.ts) hands us that
 // SVG's outerHTML through a `dk-mermaid-expand` CustomEvent; App mounts this
-// full-screen canvas with it. No pan/zoom library — the diagram is one node, so
-// a transform on its wrapper (wheel-zoom toward the cursor, drag to pan) is all
-// it takes.
+// full-screen canvas with it. No pan/zoom library — the diagram is one node,
+// so wheel-zoom toward the cursor and drag-to-pan are hand-rolled.
+//
+// HOW THE ZOOM WORKS (and why not transform: scale): zooming resizes the
+// wrapper's layout box (nat × scale) with the SVG filling it at 100%/100%, and
+// the CSS transform only ever *translates*. A scale() transform would be the
+// obvious move, but WKWebView rasterizes the composited layer once at its
+// current scale and stretches that bitmap — zoom in and the diagram is an
+// unreadable blur, and the on-screen size can drift from what the fit math
+// assumed. A layout resize re-renders the vectors (foreignObject labels
+// included) at the displayed size, so every zoom level is crisp; translation
+// reuses the raster as-is, so panning stays cheap.
 
 import {
   useCallback,
@@ -39,7 +48,10 @@ const CloseIcon = (
 export default function MermaidModal({ svg, onClose }: { svg: string; onClose: () => void }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
-  // The injected SVG's intrinsic size, so zoom math and re-fit are stable.
+  // The diagram's intrinsic size (viewBox units — CSS px at 100%). A ref read
+  // during render (for the wrapper's layout size), which is safe here: it only
+  // moves in the layout effect below, which always schedules the re-render
+  // that reads it (fit → setT).
   const nat = useRef({ w: 0, h: 0 });
   const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(null);
   const [t, setT] = useState<Transform>({ scale: 1, x: 0, y: 0 });
@@ -51,14 +63,15 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
     const rect = stage.getBoundingClientRect();
     const pad = 56;
     const raw = Math.min((rect.width - pad * 2) / w, (rect.height - pad * 2) / h);
-    // Shrink big diagrams to fit; don't blow small ones up past 2×.
-    const scale = clampScale(Math.min(raw, 2));
+    // Shrink big diagrams to fit the stage; open small ones at 100%, never
+    // blown up.
+    const scale = clampScale(Math.min(raw, 1));
     setT({ scale, x: (rect.width - w * scale) / 2, y: (rect.height - h * scale) / 2 });
   }, []);
 
-  // Pin the injected SVG to its intrinsic size so a CSS transform on the wrapper
-  // scales it predictably, record that size, then fit it to the stage. Runs
-  // before paint, so the diagram never flashes at the top-left corner first.
+  // Measure the diagram, make the SVG fill its wrapper (the wrapper's layout
+  // size is what zooms — see the header comment), then fit it to the stage.
+  // Runs before paint, so the diagram never flashes at the top-left first.
   useLayoutEffect(() => {
     const svgEl = contentRef.current?.querySelector<SVGSVGElement>("svg");
     if (!svgEl) return;
@@ -69,10 +82,15 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
       const r = svgEl.getBoundingClientRect();
       w = r.width;
       h = r.height;
+      // The wrapper-box zoom needs a viewBox to scale the drawing into.
+      if (w && h) svgEl.setAttribute("viewBox", `0 0 ${w} ${h}`);
     }
     nat.current = { w, h };
-    svgEl.style.width = `${w}px`;
-    svgEl.style.height = `${h}px`;
+    // Inline, so it beats mermaid's own inline max-width. The wrapper box and
+    // the viewBox share an aspect ratio by construction, so 100%/100% maps the
+    // drawing exactly — no letterboxing.
+    svgEl.style.width = "100%";
+    svgEl.style.height = "100%";
     svgEl.style.maxWidth = "none";
     fit();
   }, [svg, fit]);
@@ -105,7 +123,9 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
       setT((prev) => {
         const next = clampScale(prev.scale * Math.exp(-e.deltaY * 0.0015));
         const k = next / prev.scale;
-        // Keep the point under the cursor fixed while scaling.
+        // Keep the point under the cursor fixed while scaling. The wrapper
+        // grows from its top-left corner, so the same origin math as a
+        // transform-origin 0 0 scale applies.
         return { scale: next, x: cx - (cx - prev.x) * k, y: cy - (cy - prev.y) * k };
       });
     };
@@ -170,7 +190,11 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
         <div
           ref={contentRef}
           className="dk-zoom-content"
-          style={{ transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})` }}
+          style={{
+            width: `${nat.current.w * t.scale}px`,
+            height: `${nat.current.h * t.scale}px`,
+            transform: `translate(${t.x}px, ${t.y}px)`,
+          }}
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       </div>
