@@ -833,8 +833,9 @@ fn create_dir(path: String) -> Result<(), String> {
 /// Refuses to clobber an existing destination — except when `from` and `to`
 /// resolve to the same entry, which is a case-only rename on macOS's default
 /// case-insensitive APFS ("notes.md" → "Notes.md") and must be allowed.
-/// Backs both the sidebar's inline Rename and its drag-and-drop move; both
-/// stay within one workspace, so the cross-volume limits of `rename` don't bite.
+/// Backs the sidebar's inline Rename, its drag-and-drop move, and Cut/Paste.
+/// A cut pasted into another workspace can cross volumes, where `rename` fails
+/// with EXDEV — that one error falls back to copy + delete.
 #[tauri::command]
 fn move_path(from: String, to: String) -> Result<(), String> {
     let from_buf = PathBuf::from(&from);
@@ -853,7 +854,118 @@ fn move_path(from: String, to: String) -> Result<(), String> {
             .unwrap_or_else(|| to.clone());
         return Err(format!("A file or folder named \"{}\" already exists", name));
     }
-    std::fs::rename(&from_buf, &to_buf).map_err(|e| format!("move {}: {}", from, e))
+    std::fs::rename(&from_buf, &to_buf)
+        .or_else(|e| {
+            if e.kind() != std::io::ErrorKind::CrossesDevices {
+                return Err(e);
+            }
+            copy_recursive(&from_buf, &to_buf)?;
+            if from_buf.is_dir() {
+                std::fs::remove_dir_all(&from_buf)
+            } else {
+                std::fs::remove_file(&from_buf)
+            }
+        })
+        .map_err(|e| format!("move {}: {}", from, e))
+}
+
+/// Recursively copies `from` into `to`. `to` must not exist yet (the caller
+/// picked a free name); intermediate failures leave a partial copy behind,
+/// which the no-clobber contract surfaces on retry rather than silently merging.
+fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// Copies a file or folder (recursively) from `from` to `to` — the sidebar's
+/// Copy/Paste. Same no-clobber contract as `move_path`, plus a guard against
+/// copying a folder into its own subtree (which would recurse forever). Unlike
+/// `move_path` this is volume-agnostic, so paste works between any two
+/// workspaces.
+#[tauri::command]
+fn copy_path(from: String, to: String) -> Result<(), String> {
+    let from_buf = PathBuf::from(&from);
+    let to_buf = PathBuf::from(&to);
+    if !from_buf.exists() {
+        return Err(format!("\"{}\" no longer exists", from));
+    }
+    let name = |p: &PathBuf, s: &str| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| s.to_string())
+    };
+    if to_buf.exists() {
+        return Err(format!(
+            "A file or folder named \"{}\" already exists",
+            name(&to_buf, &to)
+        ));
+    }
+    if from_buf.is_dir() && (to == from || to.starts_with(&format!("{}/", from))) {
+        return Err(format!(
+            "Can't copy \"{}\" into itself",
+            name(&from_buf, &from)
+        ));
+    }
+    copy_recursive(&from_buf, &to_buf).map_err(|e| format!("copy {}: {}", from, e))
+}
+
+/// The app-wide file clipboard behind the sidebar's Cut/Copy/Paste. It lives
+/// in the Rust process so every workspace window shares it — copy in one
+/// window, paste in another. Deliberately not the system pasteboard: Finder
+/// never sees it, and text copy/paste is untouched.
+#[derive(Default)]
+struct FileClipboard(Mutex<Option<ClipboardPayload>>);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ClipboardItem {
+    path: String,
+    kind: String, // "file" | "dir"
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ClipboardPayload {
+    items: Vec<ClipboardItem>,
+    cut: bool,
+}
+
+/// Stores entries on the file clipboard (the sidebar's Cut/Copy) and notifies
+/// every window, so Paste enablement and cut-row dimming stay in sync across
+/// workspaces.
+#[tauri::command]
+fn clipboard_set_files(
+    app: AppHandle,
+    items: Vec<ClipboardItem>,
+    cut: bool,
+    state: State<'_, FileClipboard>,
+) {
+    let payload = ClipboardPayload { items, cut };
+    if let Ok(mut guard) = state.0.lock() {
+        *guard = Some(payload.clone());
+    }
+    let _ = app.emit("file-clipboard-changed", Some(payload));
+}
+
+#[tauri::command]
+fn clipboard_get_files(state: State<'_, FileClipboard>) -> Option<ClipboardPayload> {
+    state.0.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// Clears the file clipboard — a cut is consumed by its paste. Notifies all
+/// windows so cut-dimmed rows light back up.
+#[tauri::command]
+fn clipboard_clear_files(app: AppHandle, state: State<'_, FileClipboard>) {
+    if let Ok(mut guard) = state.0.lock() {
+        *guard = None;
+    }
+    let _ = app.emit("file-clipboard-changed", None::<ClipboardPayload>);
 }
 
 /// True if anything (file or folder) exists at `path`. The in-app Save As
@@ -1636,6 +1748,7 @@ pub fn run() {
         .manage(Quitting::default())
         .manage(dictation::Dictation::default())
         .manage(sync::SyncManager::default())
+        .manage(FileClipboard::default())
         .invoke_handler(tauri::generate_handler![
             dictation::dictation_init,
             dictation::dictation_cmd,
@@ -1662,6 +1775,10 @@ pub fn run() {
             create_file,
             create_dir,
             move_path,
+            copy_path,
+            clipboard_set_files,
+            clipboard_get_files,
+            clipboard_clear_files,
             path_exists,
             search_workspace,
             take_pending_folder,

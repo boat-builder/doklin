@@ -2214,6 +2214,13 @@ body.sidebar-resizing {
   background: var(--app-hover);
 }
 
+/* Visible but inert (e.g. Paste with an empty file clipboard). */
+.sidebar-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
 .sidebar-body {
   flex: 1;
   overflow-y: auto;
@@ -2374,6 +2381,11 @@ body.sidebar-resizing {
 /* The dragged row stays in place, dimmed; the ghost pill is the moving part. */
 .tree-row.is-drag-source {
   opacity: 0.4;
+}
+
+/* A row the file clipboard holds as a Cut: about to move away on paste. */
+.tree-row.is-cut {
+  opacity: 0.5;
 }
 
 /* Destination folder: a ring + tint on the folder row itself… */
