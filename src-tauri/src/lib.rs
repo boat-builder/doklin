@@ -497,6 +497,19 @@ fn is_markdown(path: &Path) -> bool {
     }
 }
 
+/// The entity meta file for a document path — same naming rule as the
+/// frontend's metaFile.ts: the stem (document extension stripped) plus
+/// ".meta.jsonl". Extensions are ASCII, so byte slicing is UTF-8 safe.
+fn meta_file_of(doc_path: &str) -> String {
+    let lower = doc_path.to_ascii_lowercase();
+    for ext in [".markdown", ".mdown", ".mkd", ".md", ".html"] {
+        if lower.ends_with(ext) {
+            return format!("{}.meta.jsonl", &doc_path[..doc_path.len() - ext.len()]);
+        }
+    }
+    format!("{}.meta.jsonl", doc_path)
+}
+
 fn is_html(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => ext.eq_ignore_ascii_case("html"),
@@ -1113,6 +1126,61 @@ fn search_workspace(
                 }
             }
         }
+        // Markdown comment-thread bodies live in the entity meta file, not in
+        // the markdown itself (the file keeps only `{>>#id<<}` markers — see
+        // the frontend's metaFile.ts). Search them too, attributing each hit
+        // to the thread's marker line so a result click lands on the anchor.
+        if matches.len() < MAX_MATCHES_PER_FILE && total < MAX_TOTAL_MATCHES {
+            let meta_path = meta_file_of(&file.to_string_lossy());
+            if let Ok(meta_raw) = std::fs::read_to_string(&meta_path) {
+                'meta: for mline in meta_raw.lines() {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(mline) else {
+                        continue;
+                    };
+                    if v.get("t").and_then(|t| t.as_str()) != Some("mthread") {
+                        continue;
+                    }
+                    let Some(id) = v.get("id").and_then(|i| i.as_str()) else {
+                        continue;
+                    };
+                    let Some(comments) = v.get("comments").and_then(|c| c.as_array()) else {
+                        continue;
+                    };
+                    for c in comments {
+                        let Some(body) = c.get("body").and_then(|b| b.as_str()) else {
+                            continue;
+                        };
+                        let hay = if case_sensitive {
+                            body.to_string()
+                        } else {
+                            body.to_lowercase()
+                        };
+                        if !hay.contains(&needle) {
+                            continue;
+                        }
+                        let marker = format!("{{>>#{}", id);
+                        let (line_no, column) = contents
+                            .lines()
+                            .enumerate()
+                            .find_map(|(i, l)| {
+                                l.find(&marker).map(|c| (i + 1, l[..c].chars().count()))
+                            })
+                            .unwrap_or((1, 0));
+                        let preview: String =
+                            body.trim().chars().take(SEARCH_PREVIEW_MAX).collect();
+                        matches.push(SearchMatchInfo {
+                            line: line_no,
+                            column,
+                            preview,
+                        });
+                        total += 1;
+                        if matches.len() >= MAX_MATCHES_PER_FILE || total >= MAX_TOTAL_MATCHES {
+                            break 'meta;
+                        }
+                    }
+                }
+            }
+        }
         if !matches.is_empty() {
             results.push(FileMatches {
                 path: file.to_string_lossy().to_string(),
@@ -1494,10 +1562,16 @@ fn list_drafts(app: AppHandle) -> Result<Vec<DraftInfo>, String> {
 
 /// Permanently deletes a draft file. Drafts are app-internal temp files, so a
 /// hard delete (no Trash) is appropriate — they're recoverable from the drafts
-/// view only while they exist.
+/// view only while they exist. The draft's entity meta (comment-thread
+/// bodies — see the frontend's metaFile.ts) dies with it.
 #[tauri::command]
 fn delete_draft(path: String) -> Result<(), String> {
-    std::fs::remove_file(&path).map_err(|e| format!("delete draft {}: {}", path, e))
+    std::fs::remove_file(&path).map_err(|e| format!("delete draft {}: {}", path, e))?;
+    let meta = meta_file_of(&path);
+    if Path::new(&meta).exists() {
+        let _ = std::fs::remove_file(&meta);
+    }
+    Ok(())
 }
 
 /// One-shot migration from the legacy single scratchpad to the drafts model. If

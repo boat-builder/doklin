@@ -1,0 +1,156 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Entity-meta verification harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Same IPC stub as split.html, seeded for the entity-meta drive: one
+      // OPEN document in the OLD layout (full CriticMarkup thread inline +
+      // a legacy html comments sidecar) to prove lazy migration and
+      // expansion, and one UNOPENED old-layout document to prove the
+      // workspace sweep. The in-memory fs round-trips through
+      // sessionStorage so a reload behaves like an app relaunch over the
+      // same disk.
+      const htmlDoc = (title, n) =>
+        `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>` +
+        `<main><h1>${title}</h1>` +
+        Array.from(
+          { length: n },
+          (_, i) => `<p id="p${i + 1}">Rendition block ${i + 1} for ${title}.</p>`,
+        ).join("") +
+        `</main></body></html>`;
+
+      const seeds = [
+        [
+          "/docs/notes.md",
+          `# Notes\n\nAn intro paragraph nobody commented on.\n\n` +
+            `The {==anchor text==}{>>#m1meta Old Mac · 2026-07-01T10:00:00Z: needs a stronger opening<<} sits here.\n\n` +
+            `A closing paragraph.\n`,
+        ],
+        ["/docs/notes.html", htmlDoc("Notes rendition", 6)],
+        [
+          "/docs/notes.html.comments.jsonl",
+          `{"doklin":"html-comments","v":1}\n` +
+            `{"id":"lh1meta","anchor":{"path":"body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)","tag":"p","text":"Rendition block 1 for Notes rendition."},"comments":[{"author":"Old Mac","at":5,"body":"legacy html note"}]}\n`,
+        ],
+        ["/docs/other.md", `# Other\n\nNothing to migrate here.\n`],
+        [
+          "/docs/third.md",
+          `# Third\n\nA {==sweepable==}{>>#m3meta Old Mac · 2026-07-01T11:00:00Z: sweep me<<} line.\n`,
+        ],
+      ];
+      const savedFs = sessionStorage.getItem("harness-fs");
+      window.__fs = savedFs ? new Map(JSON.parse(savedFs)) : new Map(seeds);
+      window.__mtime = 1000;
+      window.__writes = [];
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          switch (cmd) {
+            case "take_window_init":
+              return Promise.resolve({
+                isMain: true,
+                folder: null,
+                file: null,
+                files: [],
+                activeFile: null,
+                restored: false,
+              });
+            case "take_pending_folder":
+            case "migrate_scratch":
+              return Promise.resolve(null);
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject(`no such file: ${args.path}`)
+                : Promise.resolve({ contents: c, snapshot: snap(c) });
+            }
+            case "write_file": {
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.contents));
+            }
+            case "path_exists":
+              return Promise.resolve(args.path === "/docs" || window.__fs.has(args.path));
+            case "list_md_tree":
+              return Promise.resolve({
+                kind: "dir",
+                name: "docs",
+                path: "/docs",
+                children: [
+                  { kind: "file", name: "notes.md", path: "/docs/notes.md", paired: true },
+                  { kind: "file", name: "other.md", path: "/docs/other.md" },
+                  { kind: "file", name: "third.md", path: "/docs/third.md" },
+                ],
+              });
+            case "stat_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject("missing")
+                : Promise.resolve(snap(c));
+            }
+            case "watch_file": {
+              const c = window.__fs.get(args.path) ?? "";
+              window.__watched = [args.path, ...(args.extras ?? [])];
+              return Promise.resolve(snap(c));
+            }
+            case "unwatch_file":
+              window.__watched = [];
+              return Promise.resolve(null);
+            case "sync_status":
+              return Promise.resolve([]);
+            case "sync_device":
+              return Promise.resolve({ name: "Test Mac" });
+            case "list_drafts":
+              return Promise.resolve([]);
+            case "open_external":
+              (window.__opened ??= []).push(args.url);
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:event|listen":
+              return Promise.resolve(1);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+
+      if (!localStorage.getItem("doklin:meta-harness-seeded")) {
+        localStorage.clear();
+        localStorage.setItem("doklin:meta-harness-seeded", "1");
+        localStorage.setItem(
+          "doklin:session",
+          JSON.stringify({
+            version: 2,
+            lastRoot: "/docs",
+            sessions: {
+              "/docs": {
+                tabs: [
+                  { id: "t-notes", kind: "file", path: "/docs/notes.md" },
+                  { id: "t-other", kind: "file", path: "/docs/other.md" },
+                ],
+                activeId: "t-notes",
+              },
+            },
+          }),
+        );
+      }
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./meta.tsx"></script>
+  </body>
+</html>
