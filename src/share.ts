@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { stripComments } from "./criticMarkup";
 import type { HtmlThread } from "./htmlComments";
+import type { TableCols } from "./metaFile";
 
 export type FileSnapshot = { mtime_ms: number; size: number };
 
@@ -397,8 +398,16 @@ function apiFetch(config: ShareConfig, path: string, init?: RequestInit): Promis
 }
 
 // The two renditions a share can carry: the markdown document and/or a
-// standalone html version of it (see App.tsx's readShareParts).
-export type ShareParts = { markdown: string | null; html: string | null };
+// standalone html version of it (see App.tsx's readShareParts) — plus the
+// markdown's table column widths, read from the same entity meta file that
+// supplied the comment bodies. Widths can't live in markdown, so unlike the
+// comments (which the push re-inlines as CriticMarkup) they travel beside it
+// and are re-attached at render time on the other end.
+export type ShareParts = {
+  markdown: string | null;
+  html: string | null;
+  tcols: TableCols[];
+};
 
 /* ---------- Document titles ---------- */
 
@@ -477,7 +486,10 @@ export class SharePushConflictError extends Error {
 // Publish (or update) a page. The markdown travels WITH its CriticMarkup
 // comments (v10 workers): the worker strips them at render time for
 // view-role and public visitors, and serves them — the same threads the
-// desktop shows — to comment/edit-role sessions. The full record is sent
+// desktop shows — to comment/edit-role sessions. Table column widths ride
+// alongside it (v18 workers): the public reading view gets them as a
+// <colgroup>, shell sessions hand them to the same editor the desktop uses.
+// The full record is sent
 // every time (the worker doesn't merge), so a rendition that no longer
 // exists locally also disappears remotely — and so does the collection
 // back-reference (the public page's "back to the folder" crumb) when the
@@ -508,6 +520,9 @@ export async function pushPage(
       title,
       markdown: parts.markdown,
       html: parts.html,
+      // Sent every push like the renditions: an empty array means "this
+      // document has no stored column widths", not "keep the last ones".
+      tcols: parts.tcols,
       ...(collection ? { collection } : {}),
       ...(ws ? { ws } : {}),
       ...(typeof baseRev === "number" ? { baseRev } : {}),

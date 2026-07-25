@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type EditorHandle } from "../src/Editor";
+import type { TableCols } from "../src/tableWidths";
 import HtmlView from "../src/HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "../src/htmlComments";
 import {
@@ -41,6 +42,10 @@ export type Boot = {
   htmlStale: boolean;
   rev: number;
   markdown: string | null;
+  // The markdown's table column widths, as the desktop stored them in the
+  // entity meta file (worker v18; older workers send nothing, hence the
+  // fallback where it's read).
+  tcols?: TableCols[];
   crumb: { id: string; title: string } | null;
   host: string;
 };
@@ -550,6 +555,12 @@ export default function WebApp({ boot }: { boot: Boot }) {
             onCommentsCount={setCommentCount}
             onRequestShowComments={() => setCommentsVisible(true)}
             readOnly={readOnly}
+            // Column widths the desktop published with the page. No sink:
+            // the document's widths belong to the file, and this session has
+            // no channel to write them back — dragging a border here is a
+            // local adjustment for the length of the session, same as it is
+            // in a read-only pane on the desktop.
+            tableWidths={boot.tcols ?? []}
           />
           {showBubble && (
             <SelectionCommentBubble

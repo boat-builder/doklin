@@ -182,7 +182,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 17);
+  assert.equal(ok.json.version, 18);
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -1253,8 +1253,8 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
 
   // The shell references version-stamped assets; without an injected bundle
   // (this test build) the asset route says exactly that.
-  assert.ok(commentPage.text.includes("/__web/17/app.js"));
-  assert.equal((await call("/__web/17/app.js")).status, 503);
+  assert.ok(commentPage.text.includes("/__web/18/app.js"));
+  assert.equal((await call("/__web/18/app.js")).status, 503);
 
   // Write-endpoint floors: view can't save or comment; no cookie is a 401.
   const viewSave = await call("/team-page/save", {
@@ -1306,7 +1306,7 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   const withDiagram = await call("/diagram-doc");
   assert.equal(withDiagram.status, 200);
   assert.ok(withDiagram.text.includes('class="language-mermaid"'));
-  assert.ok(withDiagram.text.includes("/__web/17/mermaid.js"));
+  assert.ok(withDiagram.text.includes("/__web/18/mermaid.js"));
 
   // A page without one doesn't pay for the script.
   await call("/api/pages/plain-doc", {
@@ -1319,11 +1319,170 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   // The shell hands the module URL to the editor (window.__DK_MERMAID_URL);
   // the asset route answers like app.js does (503 in this bundle-less build).
   const shell = await call("/team-page", { headers: { cookie: commentCookie } });
-  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/17/mermaid.js"`));
-  assert.equal((await call("/__web/17/mermaid.js")).status, 503);
+  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/18/mermaid.js"`));
+  assert.equal((await call("/__web/18/mermaid.js")).status, 503);
 
   await call("/api/pages/diagram-doc", { method: "DELETE", token: OWNER });
   await call("/api/pages/plain-doc", { method: "DELETE", token: OWNER });
+});
+
+/* ---------- Table column widths (version 18) ----------
+
+   The ids below are NOT arbitrary: they are what src/tableWidths.ts's
+   tableSignature + metaFile.ts's deriveId produce for these exact tables,
+   pinned as literals in verify-harness/tablewidths.test.mjs too. The worker
+   re-derives them from marked's tokens, so if either implementation drifts
+   one of the two suites fails — which is the whole point of pinning them.
+
+     yh4epk11 = 3 cols, headers Name / Role / Location
+     10ekmx0x = 3 cols, headers Q3 / id / docs   (written **Q3** / `id` /
+                a link — header identity is PLAIN text on both sides)
+     1sv41y41 = 2 cols, headers Name / Role, first such table
+     c02mbb1j = …the second one
+     1c480k21 = 2 cols, headers R&D / Owner (written R&amp;D)              */
+
+const WIDE_TABLE = `# Sizes
+
+| Name | Role | Location |
+| --- | --- | --- |
+| Ada | Engineer | London |
+`;
+
+await test("table widths: the public page renders stored widths as a colgroup", async () => {
+  const made = await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Sizes",
+      markdown: WIDE_TABLE,
+      tcols: [{ id: "yh4epk11", cols: [260, 0, 140] }],
+    },
+  });
+  assert.equal(made.status, 200);
+
+  const page = await call("/widths-doc");
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes('<table class="dk-cols">'), "the table opts into fixed layout");
+  assert.ok(
+    page.text.includes('<colgroup><col style="width:260px"><col><col style="width:140px"></colgroup>'),
+    "each stored column width lands on its own col; 0 stays auto",
+  );
+  assert.ok(page.text.includes('class="dk-table-scroll"'), "and it scrolls inside a wrapper");
+  // The document itself is untouched — widths are presentation, not content.
+  assert.ok(page.text.includes("<th>Name</th>"));
+  assert.equal((await call("/api/pages/widths-doc/content", { token: OWNER })).json.markdown, WIDE_TABLE);
+});
+
+await test("table widths: identity survives styled headers, entities, and twins", async () => {
+  const md = `| **Q3** | \`id\` | [docs](https://x.test) |
+| --- | --- | --- |
+| a | b | c |
+
+| R&amp;D | Owner |
+| --- | --- |
+| x | y |
+
+| Name | Role |
+| --- | --- |
+| first | table |
+
+| Name | Role |
+| --- | --- |
+| second | table |
+`;
+  await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Sizes",
+      markdown: md,
+      tcols: [
+        { id: "10ekmx0x", cols: [111, 0, 0] },
+        { id: "1c480k21", cols: [222, 0] },
+        { id: "1sv41y41", cols: [333, 0] },
+        { id: "c02mbb1j", cols: [444, 0] },
+      ],
+    },
+  });
+  const page = await call("/widths-doc");
+  // Bold / code / link headers flatten to the same plain text the desktop
+  // hashed, so the record still finds its table.
+  assert.ok(page.text.includes('width:111px'), "styled headers still match");
+  assert.ok(page.text.includes('width:222px'), "a character entity still matches");
+  // Two tables with identical headers are told apart by occurrence order.
+  const first = page.text.indexOf("width:333px");
+  const second = page.text.indexOf("width:444px");
+  assert.ok(first > 0 && second > first, "twin tables keep their own widths, in order");
+});
+
+await test("table widths: absent, junk, and stale records all degrade quietly", async () => {
+  // No tcols on the push = no widths (and the exact pre-v18 markup).
+  await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Sizes", markdown: WIDE_TABLE },
+  });
+  const plain = await call("/widths-doc");
+  assert.ok(
+    !plain.text.includes('<table class="dk-cols">'),
+    "a page pushed without widths renders as before",
+  );
+  assert.ok(!plain.text.includes('class="dk-table-scroll"'));
+  assert.ok(plain.text.includes("<table>"));
+
+  // A record for a table that isn't in this document any more: ignored.
+  await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Sizes", markdown: WIDE_TABLE, tcols: [{ id: "zzzzzzzz", cols: [200, 200, 200] }] },
+  });
+  assert.ok(!(await call("/widths-doc")).text.includes('<table class="dk-cols">'));
+
+  // Junk inside the list is dropped record by record; the good one survives.
+  await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Sizes",
+      markdown: WIDE_TABLE,
+      tcols: [
+        null,
+        { id: "", cols: [10] },
+        { id: "BAD-ID", cols: [10] },
+        { id: "negative", cols: [-5] },
+        { id: "notnums", cols: ["10"] },
+        { id: "empty", cols: [] },
+        { id: "yh4epk11", cols: [260, 0, 140] },
+      ],
+    },
+  });
+  assert.ok((await call("/widths-doc")).text.includes('width:260px'), "the valid record still applies");
+
+  // Not an array at all is a client error, not a silent drop.
+  const bad = await call("/api/pages/widths-doc", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Sizes", markdown: WIDE_TABLE, tcols: "wide" },
+  });
+  assert.equal(bad.status, 400);
+
+  await call("/api/pages/widths-doc", { method: "DELETE", token: OWNER });
+});
+
+await test("table widths: shell sessions get the records in their boot payload", async () => {
+  await call("/api/pages/team-page", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Team page",
+      markdown: (await call("/api/pages/team-page/content", { token: OWNER })).json.markdown,
+      tcols: [{ id: "yh4epk11", cols: [260, 0, 140] }],
+    },
+  });
+  const boot = bootOf((await call("/team-page", { headers: { cookie: commentCookie } })).text);
+  assert.deepEqual(boot.tcols, [{ id: "yh4epk11", cols: [260, 0, 140] }]);
+  // The view-role page has no shell at all, and its widths ride the HTML.
+  assert.ok(!(await call("/team-page", { headers: { cookie: viewCookie } })).text.includes("dk-boot"));
 });
 
 await test("markdown comments: a comment-role save must leave the document unchanged", async () => {

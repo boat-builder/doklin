@@ -359,6 +359,82 @@ const editedPool = await poll(async () => {
 step("own entries edit via the explicit pencil and sync to the pool", !!editedPool);
 await rev.context().close();
 
+/* ================= Table column widths (worker v18) =================
+   The desktop's stored widths travel with the page and land on BOTH reading
+   paths: the server-rendered public page (a <colgroup>) and the app shell
+   (the real editor, matching records to tables with the same code that
+   recorded them). `yh4epk11` is what src/tableWidths.ts derives for a
+   3-column Name/Role/Location table — pinned in verify-harness/
+   tablewidths.test.mjs and share-worker/test/run.mjs. */
+
+const TABLE_MD = `# Sizes
+
+| Name | Role | Location |
+| --- | --- | --- |
+| Ada | Engineer | London |
+| Grace | Admiral | Washington |
+`;
+const STORED_COLS = [420, 0, 0];
+
+await api("/api/pages/widths-web", undefined, "DELETE");
+await api("/api/pages/widths-web", {
+  title: "Sizes",
+  markdown: TABLE_MD,
+  tcols: [{ id: "yh4epk11", cols: STORED_COLS }],
+});
+
+// Public reading page: no JS, no shell — the width has to be in the HTML.
+{
+  const page = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
+  await page.goto(`${BASE}/widths-web`);
+  const widths = await page.evaluate(() =>
+    [...document.querySelectorAll(".doc table col")].map((c) =>
+      Math.round(c.getBoundingClientRect().width),
+    ),
+  );
+  step(
+    "public reading page lays the table out at the desktop's widths",
+    widths.length === 3 && Math.abs(widths[0] - STORED_COLS[0]) <= 2,
+    widths.join("/"),
+  );
+  await page.context().close();
+}
+
+// Comment-role shell: the same records, applied by the real editor.
+await api("/api/pages/widths-web/access/codes", {
+  label: "Reviewer",
+  code: "widths-comment-code",
+  role: "comment",
+}, "POST");
+{
+  const page = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
+  page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await page.goto(`${BASE}/widths-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", "widths-comment-code");
+  await page.press("#gate-code", "Enter");
+  await poll(async () =>
+    (await page.evaluate(
+      () => document.querySelectorAll(".milkdown table.children tbody tr").length,
+    )) >= 3,
+  );
+  const widths = await page.evaluate(() =>
+    [...document.querySelectorAll(".milkdown table.children colgroup col")].map((c) =>
+      Math.round(c.getBoundingClientRect().width),
+    ),
+  );
+  step(
+    "the shell's editor opens the shared table at the desktop's widths",
+    widths.length === 3 && Math.abs(widths[0] - STORED_COLS[0]) <= 2,
+    widths.join("/"),
+  );
+  step(
+    "…without touching the document (widths are not content)",
+    (await api("/api/pages/widths-web/content")).json.markdown === TABLE_MD,
+  );
+  await page.context().close();
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);
 await browser.close();
 process.exit(results.some((r) => !r.ok) ? 1 : 0);

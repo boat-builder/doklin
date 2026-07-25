@@ -159,7 +159,7 @@
 //   PUT  /api/sync/<ws>/presence          heartbeat "this device is editing
 //                                         <fileId>" (TTL'd, best-effort)
 
-import { marked } from "../vendor/marked.esm.js";
+import { marked, Marked, Renderer } from "../vendor/marked.esm.js";
 import { FAVICON_ICO_B64, APPLE_TOUCH_PNG_B64 } from "./favicons.js";
 import { WEB_APP } from "./webAssets.js";
 
@@ -195,7 +195,14 @@ import { WEB_APP } from "./webAssets.js";
 // so the lazy mount/teardown swap no longer shifts the document mid-scroll
 // (shell-only: no API change — the bump rolls the fix out through the
 // update dialog).
-const WORKER_VERSION = 17;
+// 17 = the per-entity meta file (comment bodies out of the markdown, bare
+// markers left in it) — shell-only, the wire format was unchanged.
+// 18 = table column widths travel with a page: PUT /api/pages/<id> accepts
+// `tcols`, the public reading view renders them as a <colgroup>, and shell
+// sessions hand them to the same editor the desktop uses. An older app
+// pushes no `tcols`, which reads as "no stored widths" — the page simply
+// renders at auto width, exactly as it does today.
+const WORKER_VERSION = 18;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -216,6 +223,8 @@ const WORKER_FEATURES = [
   // bottom-of-page comment list and raw-markdown textarea. Comment threads
   // are shared between the desktop and the web in both directions.
   "web-app",
+  // Version 18: a page carries its markdown tables' column widths.
+  "table-widths",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -643,6 +652,11 @@ async function handleApi(request, env, url, ctx) {
       if (html !== null && html.length > MAX_HTML_BYTES) {
         return json({ error: "html too large" }, 413);
       }
+      // Markdown table column widths (v18). Sent on every push like the
+      // renditions, so an empty list means "no stored widths" — and an older
+      // app, which sends none at all, simply publishes pages without them.
+      const tcols = sanitizeTableCols(body.tcols);
+      if (tcols === null) return json({ error: "tcols must be an array" }, 400);
       // A member of a folder share carries a back-reference so its public page
       // can show a "back to the folder" crumb. Sent (or omitted) on every push,
       // like the renditions: absent means "not in a folder share".
@@ -695,6 +709,7 @@ async function handleApi(request, env, url, ctx) {
           title,
           ...(markdown !== null ? { markdown } : {}),
           ...(html !== null ? { html } : {}),
+          ...(tcols.length > 0 ? { tcols } : {}),
           ...(htmlStale ? { htmlStale: true } : {}),
           ...(collection ? { collection } : {}),
           ...(access ? { access } : {}),
@@ -2904,6 +2919,10 @@ function appShellPage(id, data, session, url, cacheControl) {
     // The html view fetches /<id>/raw itself (renditions can be megabytes);
     // the markdown rides the shell for an immediate first paint.
     markdown: view === "md" && hasMd ? data.markdown : null,
+    // Column widths belong to the markdown, so they ride with it. The shell
+    // hands them straight to the editor, which matches them to tables with
+    // the same code the desktop used to record them.
+    tcols: view === "md" && hasMd ? sanitizeTableCols(data.tcols) : [],
     crumb,
     host: url.hostname,
   };
@@ -2929,6 +2948,158 @@ ${FAVICON_LINKS}
   return new Response(html, {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": cacheControl },
   });
+}
+
+/* ---------- Table column widths (version 18) ----------
+
+   A page can carry its markdown tables' column widths: `tcols`, the same
+   records the desktop keeps in <stem>.meta.jsonl (src/tableWidths.ts). They
+   can't live in markdown, so unlike comments — which the app re-inlines as
+   CriticMarkup before pushing — they travel as their own field and are
+   re-attached at render time, on both paths a reader can arrive by:
+
+     • comment/edit sessions get them in the shell's boot payload and hand
+       them to the same editor the desktop runs, which matches them with the
+       very code that wrote them. Nothing here is involved.
+     • the public reading view is server-rendered by marked, so this file
+       has to find each table's record itself.
+
+   That second path is why the identity function has a second implementation.
+   A table is identified by its column count plus its header row's PLAIN
+   text — chosen so both sides can compute it: ProseMirror reads
+   `cell.textContent`, and here marked's own TextRenderer flattens the
+   header cell's inline tokens to the same string (`| **Q3** |` and `| Q3 |`
+   are one header on both sides). share-worker/test/run.mjs checks the two
+   implementations against each other, so a change to src/tableWidths.ts
+   fails a test instead of quietly dropping widths from published pages. */
+
+const MAX_TCOLS = 500; // per page; a document with more tables than this is pathological
+const MAX_COL_PX = 20000;
+
+// Shape-check a pushed record list — same contract as sanitizeThreads: junk
+// reads as "no widths" rather than crashing a render. Null means "not even
+// an array" (the caller's 400).
+function sanitizeTableCols(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    if (typeof t.id !== "string" || !/^[a-z0-9]{1,32}$/.test(t.id) || seen.has(t.id)) continue;
+    if (!Array.isArray(t.cols) || t.cols.length === 0 || t.cols.length > 64) continue;
+    const cols = [];
+    let ok = true;
+    for (const n of t.cols) {
+      if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > MAX_COL_PX) {
+        ok = false;
+        break;
+      }
+      cols.push(Math.round(n));
+    }
+    if (!ok) continue;
+    seen.add(t.id);
+    out.push({ id: t.id, cols });
+    if (out.length >= MAX_TCOLS) break;
+  }
+  return out;
+}
+
+// ---- The mirror of src/tableWidths.ts / metaFile.ts's deriveId ----
+// Keep byte-compatible with those; the worker test asserts it.
+
+function tcolsFnv1a(s, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function tcolsDeriveId(material, index) {
+  const src = `${index} ${material}`;
+  const id = (
+    tcolsFnv1a(src, 0x811c9dc5).toString(36) + tcolsFnv1a(src, 0x01234567).toString(36)
+  ).replace(/[^a-z0-9]/g, "");
+  return (id + "000000").slice(0, 8);
+}
+
+// remark (the app's parser) resolves character references while building the
+// document, so ProseMirror's textContent for `R&amp;D` is "R&D". marked
+// leaves them alone and escapes on output instead — decode here so a header
+// written with an entity still matches its record.
+function decodeEntities(s) {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
+const normalizeHeaderText = (s) => s.replace(/\s+/g, " ").trim();
+
+function tableSignature(colCount, headerTexts) {
+  return [String(colCount), ...headerTexts.map(normalizeHeaderText)].join("\n");
+}
+
+// A marked renderer override that attaches stored widths. Tables it
+// recognizes get a <colgroup> and a fixed layout inside a scroll box; every
+// other table keeps marked's own output untouched, so a page without widths
+// renders byte-for-byte as it did before version 18.
+//
+// Plain object, not a Renderer subclass: marked merges overrides with
+// `for (const prop in pack.renderer)`, and a class's methods are
+// non-enumerable — a subclass silently never runs. The stock output comes
+// from our own base Renderer, borrowing the live parser.
+function tableColsRenderer(records) {
+  const byId = new Map(records.map((r) => [r.id, r.cols]));
+  const seen = new Map();
+  const base = new Renderer();
+  return {
+    table(token) {
+      base.parser = this.parser;
+      base.options = this.options;
+      const html = base.table(token);
+      // TextRenderer flattens the cell's inline tokens to plain text — the
+      // same string ProseMirror's cell.textContent yields on the desktop.
+      const headerTexts = token.header.map((cell) =>
+        decodeEntities(this.parser.parseInline(cell.tokens, this.parser.textRenderer)),
+      );
+      const signature = tableSignature(token.header.length, headerTexts);
+      const nth = seen.get(signature) ?? 0;
+      seen.set(signature, nth + 1);
+      const cols = byId.get(tcolsDeriveId(signature, nth));
+      if (!cols || !cols.some((w) => w > 0)) return html;
+      const group = cols
+        .slice(0, token.header.length)
+        .map((w) => (w > 0 ? `<col style="width:${w}px">` : "<col>"))
+        .join("");
+      return `<div class="dk-table-scroll">${html.replace(
+        "<table>",
+        `<table class="dk-cols"><colgroup>${group}</colgroup>`,
+      )}</div>`;
+    },
+  };
+}
+
+// Render a document's markdown, with column widths applied when the page has
+// any. Without records this is exactly the pre-18 call.
+function renderPageMarkdown(md, records) {
+  if (!records || records.length === 0) {
+    return marked.parse(md, { gfm: true, breaks: false, async: false });
+  }
+  const instance = new Marked({
+    gfm: true,
+    breaks: false,
+    async: false,
+    renderer: tableColsRenderer(records),
+  });
+  return instance.parse(md);
 }
 
 /* ---------- Public pages ---------- */
@@ -3125,7 +3296,7 @@ ${pill("html") ? `<div class="page-top">${pill("html")}</div>` : ""}
     });
   }
 
-  const body = marked.parse(clean, { gfm: true, breaks: false, async: false });
+  const body = renderPageMarkdown(clean, sanitizeTableCols(data.tcols));
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -4072,6 +4243,11 @@ main.doc {
 .doc .dk-mermaid p { font-size: inherit; line-height: inherit; padding: 0; }
 .doc hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .doc table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+/* A table published WITH column widths (version 18): the widths come from a
+   colgroup, which only takes effect on a real table box — so the horizontal
+   scroll that display:block gives every other table moves out to a wrapper. */
+.doc .dk-table-scroll { overflow-x: auto; margin: 8px 0; }
+.doc table.dk-cols { display: table; table-layout: fixed; margin: 0; }
 .doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
 .doc th { background: var(--surface); font-weight: 600; }
 .doc input[type="checkbox"] { margin-right: 6px; }
