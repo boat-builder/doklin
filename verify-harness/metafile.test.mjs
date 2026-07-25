@@ -136,6 +136,11 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
     `{"t":"prop","id":"color","value":"blue"}`, // a future record type
     `{"t":"mthread","id":"m1","comments":[{"author":"B","at":2,"body":"dup"}]}`, // dup: first wins
     `{"t":"mthread","comments":[]}`, // no id: invalid
+    `{"t":"tcols","id":"t2","cols":[180,0]}`,
+    `{"t":"tcols","id":"t1","cols":[220.4,140]}`, // px are rounded on the way in
+    `{"t":"tcols","id":"bad","cols":[220,-3]}`, // a negative width: drop the record
+    `{"t":"tcols","id":"nan","cols":["220"]}`, // not numbers: drop the record
+    `{"t":"tcols","cols":[220]}`, // no id: invalid
   ].join("\n");
   const meta = parseEntityMeta(lines);
   assert.equal(meta.mthreads.length, 1);
@@ -143,13 +148,20 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   assert.equal(meta.hthreads.length, 1);
   assert.equal(meta.foreign.length, 1);
   assert.equal(meta.foreign[0].t, "prop");
+  assert.equal(meta.tcols.length, 2);
+  assert.deepEqual(meta.tcols.find((t) => t.id === "t1").cols, [220, 140]);
 
   const ser = serializeEntityMeta(meta);
   assert.ok(ser.includes(`{"t":"prop","id":"color","value":"blue"}`)); // verbatim
+  assert.ok(ser.includes(`{"t":"tcols","id":"t1","cols":[220,140]}`));
+  // Records sort by (type, id), so the two tcols lines are adjacent and in
+  // id order however they arrived.
+  assert.ok(ser.indexOf(`"id":"t1"`) < ser.indexOf(`"id":"t2"`));
   // Shuffled input state serializes to identical bytes.
   const shuffled = {
     mthreads: [...meta.mthreads].reverse(),
     hthreads: [...meta.hthreads].reverse(),
+    tcols: [...meta.tcols].reverse(),
     foreign: [...meta.foreign].reverse(),
   };
   assert.equal(serializeEntityMeta(shuffled), ser);
@@ -197,11 +209,26 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   // Orphaned meta bodies survive a migration pass untouched.
   const withOrphan = migrateEntity({
     diskMd: "plain\n",
-    meta: { mthreads: [{ id: "or1", comments: [entry("A", 1, "kept")] }], hthreads: [], foreign: [] },
+    meta: {
+      mthreads: [{ id: "or1", comments: [entry("A", 1, "kept")] }],
+      hthreads: [],
+      tcols: [],
+      foreign: [],
+    },
     legacyHtmlThreads: null,
   });
   assert.equal(withOrphan.mdChanged, false);
   assert.equal(withOrphan.meta.mthreads.length, 1);
+
+  // Table widths have no old format and no anchor in the prose: a migration
+  // pass carries them through untouched, and they alone are enough to make
+  // an entity worth a file on disk.
+  const widths = { ...emptyMeta(), tcols: [{ id: "tw1", cols: [220, 0] }] };
+  assert.equal(metaIsEmpty(widths), false);
+  const kept = migrateEntity({ diskMd: "just prose\n", meta: widths, legacyHtmlThreads: null });
+  assert.equal(kept.mdChanged, false);
+  assert.equal(kept.metaChanged, false);
+  assert.deepEqual(kept.meta.tcols, widths.tcols);
 
   // Html-only entity: markdown side untouched (null), sidecar folds in.
   const htmlOnly = migrateEntity({ diskMd: null, meta: emptyMeta(), legacyHtmlThreads: legacy });

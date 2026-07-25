@@ -1,9 +1,23 @@
 // Notion-style drag-to-resize for table columns.
 //
-// Markdown has no syntax for column widths, so widths are session-only by
-// design: a drag sets prosemirror-tables' `colwidth` attr on the cells (the
-// GFM preset never serializes it) and everything resets when the doc is
-// reopened.
+// A drag sets prosemirror-tables' `colwidth` attr on the cells. Markdown has
+// no syntax for column widths, so the GFM preset never serializes it and the
+// document text is untouched by a resize — which is exactly why widths need
+// somewhere else to live: they persist as `tcols` records in the entity meta
+// file (see tableWidths.ts for the identity model, metaFile.ts for the
+// record). This module owns the two seams to that store:
+//
+//   IN  — enableColumnResizing() maps the parsed doc through
+//         applyTableWidths BEFORE the editor state exists, so a reopened
+//         document renders at its stored widths on the first paint: no
+//         transaction, no undo entry, no re-serialization, no flash.
+//   OUT — a watcher plugin re-derives the record set after the document
+//         settles and hands it to the host, which writes the meta file.
+//         Push, not pull: the host never has to ask an editor that may have
+//         been unmounted since.
+//
+// Both are optional; a host that passes neither (the shared-page shell) gets
+// the session-only behavior this file started with.
 //
 // Two pieces make prosemirror-tables' columnResizing plugin work under Crepe:
 //
@@ -40,6 +54,12 @@ import {
   updateColumnsOnResize,
 } from "@milkdown/kit/prose/tables";
 import { TableNodeView } from "@milkdown/kit/component/table-block";
+import {
+  applyTableWidths,
+  readTableWidths,
+  tableWidthsKey,
+  type TableCols,
+} from "./tableWidths";
 
 // Must match columnResizing()'s defaultCellMinWidth so the widths this node
 // view renders agree with the plugin's live-drag feedback.
@@ -115,6 +135,10 @@ export const resizableTableView = $view(
 // plugin's state, handle decorations, and resize-cursor styling render the
 // interaction. On editable views it defers entirely to the stock plugin.
 // The helpers mirror prosemirror-tables' un-exported internals.
+//
+// A read-only view is by definition not the document's owner, so its host
+// withholds the sink and these resizes stay session-only — the same rule the
+// split view's mirror pane follows.
 
 const HANDLE_WIDTH = 5; // px within a border that activates the handle
 const CELL_MIN_WIDTH = 25; // px floor while dragging
@@ -295,16 +319,80 @@ function readOnlyColumnResizing(): Plugin {
   });
 }
 
+// ---------- Persistence ----------
+
+// How long the document must sit still before the width set is re-derived.
+// A resize drag is one commit and a header edit is a burst of keystrokes;
+// both coalesce into a single walk well inside the host's own save debounce.
+const EMIT_DEBOUNCE_MS = 200;
+
+// Reports the document's table widths whenever they change. Seeded from the
+// MOUNTED document, which already carries the stored widths (they are
+// applied to the parsed doc below) — so a document that is merely read, or
+// typed in away from its tables, never emits and never touches its meta
+// file. Header edits DO emit: they change a table's derived id, and
+// re-emitting the whole set is what lets the record follow the rename.
+//
+// The callback is read through a getter on every emit, not captured, so a
+// pane that gains or loses ownership of the document (a split-view focus
+// swap promotes a read-only companion in place, without remounting) starts
+// or stops persisting without a new editor.
+function tableWidthsWatcher(getSink: () => ((r: TableCols[]) => void) | null): Plugin {
+  return new Plugin({
+    view: (view) => {
+      let last = tableWidthsKey(readTableWidths(view.state.doc));
+      let timer: number | null = null;
+      const cancel = () => {
+        if (timer != null) window.clearTimeout(timer);
+        timer = null;
+      };
+      return {
+        update: (v, prev) => {
+          if (prev.doc === v.state.doc) return;
+          cancel();
+          timer = window.setTimeout(() => {
+            timer = null;
+            const sink = getSink();
+            if (!sink) return;
+            const records = readTableWidths(v.state.doc);
+            const key = tableWidthsKey(records);
+            if (key === last) return;
+            last = key;
+            sink(records);
+          }, EMIT_DEBOUNCE_MS);
+        },
+        destroy: cancel,
+      };
+    },
+  });
+}
+
+// How a host opts into persistence. Both sides are optional and independent:
+// `initial` alone renders stored widths read-only, `sink` alone captures
+// widths for a document that had none.
+export type TableWidthStore = {
+  initial: TableCols[];
+  // Null while this editor doesn't own the document (a read-only mirror, or
+  // the unfocused pane of a split) — resizes there stay session-only.
+  sink: () => ((records: TableCols[]) => void) | null;
+};
+
 // .config() entry. View: null — the colgroup lives in ResizableTableNodeView,
 // so the plugin's own table node view (shadowed anyway) is disabled outright.
-export function enableColumnResizing(ctx: Ctx) {
+export function enableColumnResizing(ctx: Ctx, store?: TableWidthStore) {
   ctx.update(editorStateOptionsCtx, (prev) => (options) => {
     const opts = prev(options);
     return {
       ...opts,
+      // The stored widths land on the doc that CREATES the state, so the
+      // first render is already correct and the emitter's baseline below
+      // matches what was loaded.
+      doc:
+        opts.doc && store ? applyTableWidths(opts.doc, store.initial) : opts.doc,
       plugins: [
         columnResizing({ View: null }),
         readOnlyColumnResizing(),
+        ...(store ? [tableWidthsWatcher(store.sink)] : []),
         ...(opts.plugins ?? []),
       ],
     };
