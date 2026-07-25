@@ -9,11 +9,29 @@ export type TreeNode =
   | { kind: "file"; name: string; path: string; paired?: boolean }
   | { kind: "dir"; name: string; path: string; children: TreeNode[] };
 
-// The explorer's selection (VS Code-style): the row last clicked or
-// right-clicked, file or folder. Owned by App — it doubles as the creation
-// context for saving drafts (the save dialog defaults into the selected
-// folder / next to the selected file).
+// One selected explorer row (VS Code-style), file or folder. The selection is
+// a list — ⌘-click toggles rows in and out, ⇧-click extends over the visible
+// range — whose LAST entry is the primary one (the row acted on most
+// recently). Owned by App — the primary entry doubles as the creation context
+// for saving drafts (the save dialog defaults into the selected folder / next
+// to the selected file).
 export type SidebarSelection = { path: string; kind: "file" | "dir" };
+
+// Mirror of the app-wide file clipboard (it lives in the Rust backend — see
+// FileClipboard in lib.rs — so every workspace window shares it). The sidebar
+// only reads it: to enable Paste and to dim rows a Cut is about to move.
+export type FileClipboardPayload = { items: SidebarSelection[]; cut: boolean };
+
+// Nested entries collapse into their selected ancestor: moving, pasting, or
+// trashing a folder already takes everything inside it, so acting on a
+// selected child again would double-move or double-trash it.
+export const pruneNestedSelection = (sels: SidebarSelection[]): SidebarSelection[] =>
+  sels.filter(
+    (s) =>
+      !sels.some(
+        (o) => o.kind === "dir" && o.path !== s.path && s.path.startsWith(o.path + "/"),
+      ),
+  );
 
 // Where an in-progress "New File…" / "New Folder…" will land. The input row is
 // rendered inline inside `parentDir`, like VS Code's explorer.
@@ -26,9 +44,11 @@ type PendingRename = { path: string; kind: "file" | "dir" };
 // is a right-click on empty sidebar space (creation lands at the workspace root).
 type MenuState = { x: number; y: number; target: { path: string; kind: "file" | "dir" | "root" } };
 
-// The row being dragged (pointer-based move, VS Code-style). HTML5 drag events
+// One row in a drag (pointer-based move, VS Code-style). HTML5 drag events
 // are intercepted by Tauri's native drag-drop handling, so — like the tab bar's
-// reorder — this is built on pointer capture instead.
+// reorder — this is built on pointer capture instead. A drag carries a SET of
+// entries: grabbing a row that's part of the multi-selection drags the whole
+// selection; grabbing any other row drags just that row.
 type DragEntry = { path: string; kind: "file" | "dir" };
 
 // The pointer-drag plumbing every row needs, bundled so TreeItem's prop list
@@ -45,19 +65,25 @@ type TreeDnd = {
 type Props = {
   root: string;
   currentPath: string | null;
-  selection: SidebarSelection | null;
+  selection: SidebarSelection[];
+  // The shared file clipboard (null/empty = nothing to paste).
+  clipboard: FileClipboardPayload | null;
   refreshToken: number;
   // The share registries, for row badges and the context menu's share items:
   // a shared file/folder gets a quiet dot; folders offer share/manage, files
   // inside a shared folder offer include/remove.
   shares: Record<string, ShareEntry>;
   collections: Record<string, CollectionEntry>;
-  onSelect: (sel: SidebarSelection | null) => void;
+  onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
   onOpenFolder: () => void;
   onOpenFilePicker: () => void;
   onRevealInFinder: (path: string) => void;
-  onDelete: (path: string, kind: "file" | "dir") => void;
+  onDelete: (entries: SidebarSelection[]) => void;
+  // Park entries on the app-wide file clipboard (Cut when `cut`), and paste
+  // the clipboard's contents into a destination folder.
+  onCopyEntries: (entries: SidebarSelection[], cut: boolean) => void;
+  onPasteEntries: (destDir: string) => void;
   // Move/rename `from` to `to` on disk and repoint app state (tabs, watcher…).
   // Resolves to an error message to surface, or null on success.
   onMovePath: (from: string, to: string, kind: "file" | "dir") => Promise<string | null>;
@@ -114,6 +140,7 @@ export default function Sidebar({
   root,
   currentPath,
   selection,
+  clipboard,
   refreshToken,
   shares,
   collections,
@@ -123,6 +150,8 @@ export default function Sidebar({
   onOpenFilePicker,
   onRevealInFinder,
   onDelete,
+  onCopyEntries,
+  onPasteEntries,
   onMovePath,
   onShareFolder,
   onShareFile,
@@ -180,16 +209,93 @@ export default function Sidebar({
     });
   }, []);
 
+  /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
+
+  // The rows in on-screen order, respecting collapsed folders — the universe
+  // a ⇧-click range spans.
+  const visibleEntries = useMemo(() => {
+    const out: SidebarSelection[] = [];
+    const walk = (n: TreeNode) => {
+      if (n.kind !== "dir") return;
+      for (const c of n.children) {
+        out.push({ path: c.path, kind: c.kind });
+        if (c.kind === "dir" && !collapsed.has(c.path)) walk(c);
+      }
+    };
+    if (tree) walk(tree);
+    return out;
+  }, [tree, collapsed]);
+
+  // The fixed end of a ⇧-click range: the row last plain- or ⌘-clicked.
+  const selectionAnchorRef = useRef<string | null>(null);
+
+  // Modifier-aware row selection (VS Code's explorer): plain click selects
+  // just this row (and the row goes on to open/toggle); ⌘-click toggles
+  // membership; ⇧-click selects the visible range from the anchor. Returns
+  // true when the click was a multi-select gesture the row must NOT also act
+  // on (multi-selecting shouldn't open files or fold folders).
+  const handleRowSelect = useCallback(
+    (e: React.MouseEvent, entry: SidebarSelection): boolean => {
+      if (e.shiftKey) {
+        const anchor = selectionAnchorRef.current;
+        const ai = anchor ? visibleEntries.findIndex((v) => v.path === anchor) : -1;
+        const bi = visibleEntries.findIndex((v) => v.path === entry.path);
+        if (ai !== -1 && bi !== -1) {
+          const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+          // Clicked end last = primary, whichever direction the range ran.
+          const range = visibleEntries.slice(lo, hi + 1);
+          const ordered = ai <= bi ? range : range.reverse();
+          onSelect(ordered);
+          return true;
+        }
+        // Anchor (or target) vanished from view — fall through to plain click.
+      }
+      if (e.metaKey || e.ctrlKey) {
+        const rest = selection.filter((s) => s.path !== entry.path);
+        onSelect(rest.length === selection.length ? [...selection, entry] : rest);
+        selectionAnchorRef.current = entry.path;
+        return true;
+      }
+      selectionAnchorRef.current = entry.path;
+      onSelect([entry]);
+      return false;
+    },
+    [visibleEntries, selection, onSelect],
+  );
+
+  // The primary selection — the creation context for the header's New File /
+  // New Folder buttons.
+  const primarySelection = selection[selection.length - 1] ?? null;
+
+  // Rows a pending Cut would move away: dimmed. Only cut ROOTS dim — children
+  // ride along implicitly, VS Code-style.
+  const cutPaths = useMemo(
+    () =>
+      clipboard?.cut
+        ? new Set(clipboard.items.map((i) => i.path))
+        : new Set<string>(),
+    [clipboard],
+  );
+  const clipboardHasFiles = (clipboard?.items.length ?? 0) > 0;
+
   /* ---------- Drag-to-move ---------- */
 
-  // Render state: the dragged entry (dims its row, shows the ghost pill) and
-  // the currently valid destination folder (highlights it; root = empty space).
-  const [dragging, setDragging] = useState<DragEntry | null>(null);
+  // Render state: the dragged entries (dim their rows; the grabbed one leads
+  // the ghost pill) and the currently valid destination folder (highlights
+  // it; root = empty space).
+  const [dragging, setDragging] = useState<DragEntry[] | null>(null);
   const [dropDir, setDropDir] = useState<string | null>(null);
+  // Rows riding the in-flight drag (dimmed in place while the ghost moves).
+  const dragPaths = useMemo(
+    () => new Set((dragging ?? []).map((en) => en.path)),
+    [dragging],
+  );
   // Pointer tracking lives in refs — pointermove is high-frequency, and the
   // capturing row's handlers must read fresh values without re-registering.
   const dragRef = useRef<{
+    // The grabbed row, then the rest of the dragged set (nested-pruned).
     entry: DragEntry;
+    entries: DragEntry[];
     startX: number;
     startY: number;
     moved: boolean;
@@ -211,15 +317,16 @@ export default function Sidebar({
     collapsedRef.current = collapsed;
   }, [collapsed]);
 
-  // A drop is valid when it actually moves something: not into the folder the
-  // entry is already in, and never a folder into itself or its own subtree.
-  const canDrop = useCallback((entry: DragEntry, toDir: string | null): boolean => {
+  // A drop is valid when it actually moves something: at least one entry
+  // isn't already in the destination, and the destination is never inside a
+  // dragged folder (a folder can't move into itself or its own subtree).
+  const canDrop = useCallback((entries: DragEntry[], toDir: string | null): boolean => {
     if (!toDir) return false;
-    if (dirname(entry.path) === toDir) return false;
-    if (entry.kind === "dir" && (toDir === entry.path || toDir.startsWith(entry.path + "/"))) {
-      return false;
-    }
-    return true;
+    if (entries.every((en) => dirname(en.path) === toDir)) return false;
+    return !entries.some(
+      (en) =>
+        en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
+    );
   }, []);
 
   const setDropState = useCallback((dir: string | null) => {
@@ -253,7 +360,7 @@ export default function Sidebar({
       } else if (el && bodyRef.current?.contains(el)) {
         toDir = root;
       }
-      const valid = canDrop(drag.entry, toDir);
+      const valid = canDrop(drag.entries, toDir);
       setDropState(valid ? toDir : null);
       document.body.classList.toggle("tree-drag-invalid", !valid);
 
@@ -325,15 +432,24 @@ export default function Sidebar({
   }, [setDropState]);
 
   const performDrop = useCallback(
-    async (entry: DragEntry, toDir: string) => {
-      const to = `${toDir}/${basename(entry.path)}`;
-      const err = await onMovePath(entry.path, to, entry.kind);
-      if (err) {
-        window.alert(`Could not move "${basename(entry.path)}"\n${err}`);
-        return;
+    async (entries: DragEntry[], toDir: string) => {
+      const moved: SidebarSelection[] = [];
+      const errors: string[] = [];
+      for (const entry of entries) {
+        if (dirname(entry.path) === toDir) continue; // already lives here
+        const to = `${toDir}/${basename(entry.path)}`;
+        const err = await onMovePath(entry.path, to, entry.kind);
+        if (err) errors.push(`"${basename(entry.path)}": ${err}`);
+        else moved.push({ path: to, kind: entry.kind });
       }
-      onSelect({ path: to, kind: entry.kind });
-      // Open the destination folder so the moved row is visible where it landed.
+      if (errors.length === 1) {
+        window.alert(`Could not move ${errors[0]}`);
+      } else if (errors.length > 1) {
+        window.alert(`Could not move:\n${errors.join("\n")}`);
+      }
+      if (moved.length === 0) return;
+      onSelect(moved);
+      // Open the destination folder so the moved rows are visible where they landed.
       setCollapsed((prev) => {
         if (!prev.has(toDir)) return prev;
         const next = new Set(prev);
@@ -347,8 +463,17 @@ export default function Sidebar({
   const onRowPointerDown = useCallback(
     (e: React.PointerEvent<HTMLElement>, entry: DragEntry) => {
       if (e.button !== 0) return; // right-click stays the context menu
+      // Grabbing a row inside the multi-selection drags the whole selection
+      // (VS Code); any other row drags alone. The grabbed row leads the set —
+      // it's the ghost pill's face.
+      const inSelection = selection.some((s) => s.path === entry.path);
+      const entries =
+        inSelection && selection.length > 1
+          ? pruneNestedSelection([entry, ...selection.filter((s) => s.path !== entry.path)])
+          : [entry];
       dragRef.current = {
         entry,
+        entries,
         startX: e.clientX,
         startY: e.clientY,
         moved: false,
@@ -357,7 +482,7 @@ export default function Sidebar({
       };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
-    [],
+    [selection],
   );
 
   const onRowPointerMove = useCallback(
@@ -369,18 +494,20 @@ export default function Sidebar({
           return;
         }
         drag.moved = true;
-        setDragging(drag.entry);
+        setDragging(drag.entries);
         document.body.classList.add("tree-dragging");
         startAutoScroll();
       }
       lastPointRef.current = { x: e.clientX, y: e.clientY };
       positionGhost(e.clientX, e.clientY);
-      // A FILE dragged past the sidebar's right edge tears out toward the
-      // editor area — the app's split drop zones take over; coming back
-      // resumes the tree move.
+      // A single FILE dragged past the sidebar's right edge tears out toward
+      // the editor area — the app's split drop zones take over; coming back
+      // resumes the tree move. (Multi-drags stay tree moves: only one document
+      // can open in a pane.)
       const aside = asideRef.current;
       const isOut =
-        drag.entry.kind === "file" &&
+        drag.entries.length === 1 &&
+        drag.entries[0].kind === "file" &&
         onDragFileToEditor != null &&
         aside != null &&
         e.clientX > aside.getBoundingClientRect().right;
@@ -418,8 +545,8 @@ export default function Sidebar({
       else onDragFileCancel?.();
       return;
     }
-    if (!drag.cancelled && canDrop(drag.entry, toDir)) {
-      void performDrop(drag.entry, toDir!);
+    if (!drag.cancelled && canDrop(drag.entries, toDir)) {
+      void performDrop(drag.entries, toDir!);
     }
   }, [clearDragVisuals, canDrop, performDrop, onDropFileToEditor, onDragFileCancel]);
 
@@ -528,7 +655,7 @@ export default function Sidebar({
       }
       setPendingCreate(null);
       await refresh();
-      onSelect({ path, kind: pc.kind });
+      onSelect([{ path, kind: pc.kind }]);
       if (pc.kind === "file") onOpenFile(path);
       return null;
     },
@@ -569,7 +696,7 @@ export default function Sidebar({
       const err = await onMovePath(pr.path, to, pr.kind);
       if (err) return err;
       setPendingRename(null);
-      onSelect({ path: to, kind: pr.kind });
+      onSelect([{ path: to, kind: pr.kind }]);
       return null;
     },
     [pendingRename, onMovePath, onSelect],
@@ -581,10 +708,15 @@ export default function Sidebar({
     (e: React.MouseEvent, target: { path: string; kind: "file" | "dir" }) => {
       e.preventDefault();
       e.stopPropagation();
-      onSelect(target); // right-click selects, like VS Code
+      // Right-click selects, like VS Code — but keeps a multi-selection when
+      // the target is already part of it (the menu then acts on the whole set).
+      if (!selection.some((s) => s.path === target.path)) {
+        selectionAnchorRef.current = target.path;
+        onSelect([target]);
+      }
       setCtxMenu({ x: e.clientX, y: e.clientY, target });
     },
-    [onSelect],
+    [selection, onSelect],
   );
 
   const rootName = useMemo(() => basename(root), [root]);
@@ -613,6 +745,21 @@ export default function Sidebar({
   const ctxItems: ContextMenuItem[] = useMemo(() => {
     if (!ctxMenu) return [];
     const { target } = ctxMenu;
+    // A right-click on a row that's part of a multi-selection acts on the
+    // whole set, with only the operations that make sense for many rows at
+    // once (per-document items like Share and Rename need a single target).
+    if (
+      target.kind !== "root" &&
+      selection.length > 1 &&
+      selection.some((s) => s.path === target.path)
+    ) {
+      const entries = [...selection];
+      return [
+        { label: "Cut", onClick: () => onCopyEntries(entries, true) },
+        { label: "Copy", onClick: () => onCopyEntries(entries, false) },
+        { label: "Delete", danger: true, onClick: () => onDelete(entries) },
+      ];
+    }
     const items: ContextMenuItem[] = [
       { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
       { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
@@ -621,6 +768,28 @@ export default function Sidebar({
         onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
       },
     ];
+    // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
+    // target, next to a file target, at the root for empty space — and stays
+    // visible-but-disabled while the clipboard is empty.
+    if (target.kind !== "root") {
+      const entry: SidebarSelection = { path: target.path, kind: target.kind };
+      items.push(
+        { label: "Cut", onClick: () => onCopyEntries([entry], true) },
+        { label: "Copy", onClick: () => onCopyEntries([entry], false) },
+      );
+    }
+    items.push({
+      label: "Paste",
+      disabled: !clipboardHasFiles,
+      onClick: () =>
+        onPasteEntries(
+          target.kind === "dir"
+            ? target.path
+            : target.kind === "root"
+              ? root
+              : dirname(target.path),
+        ),
+    });
     let sharedFileEntry: ShareEntry | null = null;
     if (target.kind === "file") {
       sharedFileEntry = shares[target.path] ?? null;
@@ -682,17 +851,21 @@ export default function Sidebar({
       items.push({
         label: "Delete",
         danger: true,
-        onClick: () => onDelete(target.path, target.kind as "file" | "dir"),
+        onClick: () => onDelete([{ path: target.path, kind: target.kind as "file" | "dir" }]),
       });
     }
     return items;
   }, [
     ctxMenu,
+    selection,
+    clipboardHasFiles,
     startCreate,
     startRename,
     createDirFor,
     onRevealInFinder,
     onDelete,
+    onCopyEntries,
+    onPasteEntries,
     onShareFolder,
     onShareFile,
     onStopSharingFile,
@@ -748,8 +921,8 @@ export default function Sidebar({
         onShareWorkspace={() => onShareFolder(root)}
         onRefresh={() => void refresh()}
         onSwitchToSearch={onSwitchToSearch}
-        onNewFile={() => startCreate("file", createDirFor(selection))}
-        onNewFolder={() => startCreate("dir", createDirFor(selection))}
+        onNewFile={() => startCreate("file", createDirFor(primarySelection))}
+        onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
       />
       <div
         ref={bodyRef}
@@ -757,13 +930,13 @@ export default function Sidebar({
         onClick={(e) => {
           // Clicking empty space clears the selection (root becomes the
           // creation context again).
-          if (e.target === e.currentTarget) onSelect(null);
+          if (e.target === e.currentTarget) onSelect([]);
         }}
         onContextMenu={(e) => {
           // Right-click on empty space targets the workspace root. Row-level
           // handlers stopPropagation, so reaching here means no row was hit.
           e.preventDefault();
-          onSelect(null);
+          onSelect([]);
           setCtxMenu({ x: e.clientX, y: e.clientY, target: { path: root, kind: "root" } });
         }}
       >
@@ -794,10 +967,11 @@ export default function Sidebar({
                 parentDir={root}
                 currentPath={currentPath}
                 selection={selection}
+                cutPaths={cutPaths}
                 collapsed={collapsed}
                 pendingCreate={pendingCreate}
                 pendingRename={pendingRename}
-                dragPath={dragging?.path ?? null}
+                dragPaths={dragPaths}
                 dropDir={dropDir === root ? null : dropDir}
                 dnd={dnd}
                 sharedFilePaths={sharedFilePaths}
@@ -805,7 +979,7 @@ export default function Sidebar({
                 presence={presence}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
-                onSelect={onSelect}
+                onRowClick={handleRowSelect}
                 onRowMenu={openRowMenu}
                 onCommitCreate={commitCreate}
                 onCancelCreate={cancelCreate}
@@ -824,7 +998,7 @@ export default function Sidebar({
           onClose={() => setCtxMenu(null)}
         />
       )}
-      {dragging && (
+      {dragging && dragging.length > 0 && (
         <div
           ref={ghostRef}
           className={`tree-drag-ghost ${dropDir == null ? "is-invalid" : ""}`}
@@ -835,11 +1009,13 @@ export default function Sidebar({
           }}
           aria-hidden
         >
-          {dragging.kind === "dir" ? <FolderIcon /> : <FileIcon />}
+          {dragging[0].kind === "dir" ? <FolderIcon /> : <FileIcon />}
           <span className="tree-drag-ghost-label">
-            {dragging.kind === "file"
-              ? stripDocExt(basename(dragging.path))
-              : basename(dragging.path)}
+            {dragging.length > 1
+              ? `${dragging.length} items`
+              : dragging[0].kind === "file"
+                ? stripDocExt(basename(dragging[0].path))
+                : basename(dragging[0].path)}
           </span>
           {dropDir != null && (
             <span className="tree-drag-ghost-dest">→ {basename(dropDir)}</span>
@@ -1015,10 +1191,11 @@ function TreeItem({
   parentDir,
   currentPath,
   selection,
+  cutPaths,
   collapsed,
   pendingCreate,
   pendingRename,
-  dragPath,
+  dragPaths,
   dropDir,
   dnd,
   sharedFilePaths,
@@ -1026,7 +1203,7 @@ function TreeItem({
   presence,
   onToggle,
   onOpenFile,
-  onSelect,
+  onRowClick,
   onRowMenu,
   onCommitCreate,
   onCancelCreate,
@@ -1037,14 +1214,16 @@ function TreeItem({
   depth: number;
   parentDir: string;
   currentPath: string | null;
-  selection: SidebarSelection | null;
+  selection: SidebarSelection[];
+  // Roots of a pending Cut (dimmed until pasted or replaced).
+  cutPaths: Set<string>;
   collapsed: Set<string>;
   pendingCreate: PendingCreate | null;
   pendingRename: PendingRename | null;
-  // The dragged row's path (dimmed) and the highlighted destination folder.
+  // The dragged rows' paths (dimmed) and the highlighted destination folder.
   // dropDir is null when the target is the workspace root — the tree container
   // carries that highlight instead of any row.
-  dragPath: string | null;
+  dragPaths: Set<string>;
   dropDir: string | null;
   dnd: TreeDnd;
   // Rows in these sets carry the quiet "live share" dot.
@@ -1054,15 +1233,18 @@ function TreeItem({
   presence: Record<string, string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onSelect: (sel: SidebarSelection) => void;
+  // Modifier-aware selection; true = a multi-select gesture the row must not
+  // also act on (no open/toggle).
+  onRowClick: (e: React.MouseEvent, entry: SidebarSelection) => boolean;
   onRowMenu: (e: React.MouseEvent, target: { path: string; kind: "file" | "dir" }) => void;
   onCommitCreate: (name: string) => Promise<string | null>;
   onCancelCreate: () => void;
   onCommitRename: (name: string) => Promise<string | null>;
   onCancelRename: () => void;
 }) {
-  const isSelected = selection?.path === node.path;
-  const isDragSource = dragPath === node.path;
+  const isSelected = selection.some((s) => s.path === node.path);
+  const isCut = cutPaths.has(node.path);
+  const isDragSource = dragPaths.has(node.path);
   // Rows inside the destination folder get a soft wash, so the whole drop
   // container reads as one region (the folder row itself gets the strong ring).
   const inDropDir = dropDir != null && node.path.startsWith(dropDir + "/");
@@ -1086,14 +1268,14 @@ function TreeItem({
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
-          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="file"
           data-tree-parent={parentDir}
-          onClick={() => {
+          onClick={(e) => {
             if (dnd.suppressClick()) return;
-            onSelect({ path: node.path, kind: "file" });
+            if (onRowClick(e, { path: node.path, kind: "file" })) return;
             onOpenFile(node.path);
           }}
           onPointerDown={(e) => dnd.onPointerDown(e, { path: node.path, kind: "file" })}
@@ -1139,14 +1321,14 @@ function TreeItem({
         />
       ) : (
         <button
-          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="dir"
           data-tree-parent={parentDir}
-          onClick={() => {
+          onClick={(e) => {
             if (dnd.suppressClick()) return;
-            onSelect({ path: node.path, kind: "dir" });
+            if (onRowClick(e, { path: node.path, kind: "dir" })) return;
             onToggle(node.path);
           }}
           onPointerDown={(e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })}
@@ -1185,10 +1367,11 @@ function TreeItem({
               parentDir={node.path}
               currentPath={currentPath}
               selection={selection}
+              cutPaths={cutPaths}
               collapsed={collapsed}
               pendingCreate={pendingCreate}
               pendingRename={pendingRename}
-              dragPath={dragPath}
+              dragPaths={dragPaths}
               dropDir={dropDir}
               dnd={dnd}
               sharedFilePaths={sharedFilePaths}
@@ -1196,7 +1379,7 @@ function TreeItem({
               presence={presence}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
-              onSelect={onSelect}
+              onRowClick={onRowClick}
               onRowMenu={onRowMenu}
               onCommitCreate={onCommitCreate}
               onCancelCreate={onCancelCreate}
@@ -1313,7 +1496,13 @@ function NameRow({
   );
 }
 
-type ContextMenuItem = { label: string; danger?: boolean; onClick: () => void };
+type ContextMenuItem = {
+  label: string;
+  danger?: boolean;
+  // Visible but inert (greyed out) — e.g. Paste with an empty clipboard.
+  disabled?: boolean;
+  onClick: () => void;
+};
 
 // A fixed-position right-click menu. Reuses the sidebar dropdown's visual
 // language; closes on outside click, Esc, or after running an item.
@@ -1357,6 +1546,7 @@ function ContextMenu({
           key={item.label}
           role="menuitem"
           className={`sidebar-menu-item ${item.danger ? "is-danger" : ""}`}
+          disabled={item.disabled}
           onClick={() => {
             onClose();
             item.onClick();

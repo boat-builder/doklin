@@ -136,10 +136,19 @@ const SOURCE_BUTTON = `<button class="dk-mermaid-edit" type="button" title="Edit
 <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
 Source</button>`;
 
+// Opens the diagram in the full-screen zoom/pan canvas (MermaidModal). Rides
+// the top-left corner (Source sits top-right) so the two chips never collide;
+// like Source, behavior comes from the delegated handler in ensureDomHooks, not
+// inline attributes. Only rendered diagrams carry it — an unparsed source has
+// nothing to zoom, so error cards omit it.
+const EXPAND_BUTTON = `<button class="dk-mermaid-expand" type="button" title="Open in zoom view">
+<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+</button>`;
+
 // The wrapper carries its own source (URI-encoded — attribute-safe and
 // newline-proof) so a theme flip can re-render diagrams already in the DOM.
 function diagramHtml(source: string, svg: string): string {
-  return `<div class="dk-mermaid" data-dk-mermaid-src="${encodeURIComponent(source)}">${svg}${SOURCE_BUTTON}</div>`;
+  return `<div class="dk-mermaid" data-dk-mermaid-src="${encodeURIComponent(source)}">${svg}${EXPAND_BUTTON}${SOURCE_BUTTON}</div>`;
 }
 
 const ERROR_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
@@ -252,7 +261,7 @@ async function rerenderAll() {
     // only touch it if it's still connected.
     if (result.ok && el.isConnected) {
       memoSet(source, result.svg);
-      el.innerHTML = result.svg + SOURCE_BUTTON;
+      el.innerHTML = result.svg + EXPAND_BUTTON + SOURCE_BUTTON;
     }
   }
 }
@@ -288,7 +297,9 @@ function ensureDomHooks() {
   // between mousedown and mouseup and the click never lands.
   document.addEventListener("mousedown", (e) => {
     const target = e.target instanceof Element ? e.target : null;
-    if (target?.closest(".dk-mermaid-edit")) e.preventDefault();
+    // Both chips sit inside the block: taking focus would flip :focus-within,
+    // opening the source view and hiding the chip before the click lands.
+    if (target?.closest(".dk-mermaid-edit, .dk-mermaid-expand")) e.preventDefault();
   });
   document.addEventListener("click", (e) => {
     const target = e.target instanceof Element ? e.target : null;
@@ -300,6 +311,30 @@ function ensureDomHooks() {
         block.classList.remove("dk-mermaid-editing");
       }
     }
+    // The expand chip: hand the already-rendered SVG (and its source) to
+    // App's MermaidModal via a window event. It's a self-contained <svg>, so
+    // the modal needs nothing more to draw the zoom/pan canvas.
+    const expand = target?.closest(".dk-mermaid-expand");
+    if (expand) {
+      const wrapper = expand.closest(".dk-mermaid");
+      const svg = wrapper?.querySelector("svg");
+      if (svg) {
+        let source = "";
+        const encoded = wrapper?.getAttribute("data-dk-mermaid-src");
+        if (encoded) {
+          try {
+            source = decodeURIComponent(encoded);
+          } catch {
+            source = "";
+          }
+        }
+        window.dispatchEvent(
+          new CustomEvent("dk-mermaid-expand", { detail: { svg: svg.outerHTML, source } }),
+        );
+      }
+      return;
+    }
+
     const button = target?.closest(".dk-mermaid-edit");
     const block = button?.closest(".milkdown-code-block");
     if (!block) return;
