@@ -29,6 +29,15 @@ node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the di
 node verify-harness/drive-inline-code.mjs  # 7 steps: hard-wrapped inline code spans parse to a
                                            # single-space value, render one-line, and serialize
                                            # back on one line
+node verify-harness/drive-meta.mjs         # 8 steps: boots the REAL <App/> (meta.html seeds
+                                           # OLD-layout docs) and walks the entity-meta layout
+                                           # (src/metaFile.ts) — lazy migration on open (inline
+                                           # thread bodies → <stem>.meta.jsonl, legacy html
+                                           # sidecar folded in and left in place), the workspace
+                                           # sweep migrating unopened docs, expansion feeding the
+                                           # editor full CriticMarkup, a reply saving meta-only
+                                           # (markdown byte-identical), reload persistence,
+                                           # orphan cards, deletion scrubbing both files
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, sync probes) and walks the split view —

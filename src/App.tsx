@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
-import Sidebar, { type SidebarSelection } from "./Sidebar";
+import Sidebar, { type SidebarSelection, type TreeNode } from "./Sidebar";
 import TabBar from "./TabBar";
 import DraftsPanel from "./DraftsPanel";
 import FindBar from "./FindBar";
@@ -86,9 +86,24 @@ import {
   commentsSidecarOf,
   mergeHtmlThreads,
   parseHtmlComments,
-  serializeHtmlComments,
   type HtmlThread,
 } from "./htmlComments";
+import { sanitizeAuthor, sanitizeBody } from "./criticMarkup";
+import {
+  metaFileOf,
+  parseEntityMeta,
+  serializeEntityMeta,
+  metaIsEmpty,
+  emptyMeta,
+  expandMarkdown,
+  extractMarkdown,
+  markerIds,
+  migrateEntity,
+  unionThreads,
+  type EntityMeta,
+  type MdThread,
+  type ForeignRecord,
+} from "./metaFile";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -146,16 +161,34 @@ const isHtmlPath = (p: string) => HTML_EXT_RE.test(p);
 const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html";
 const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
 
-// The companion files the document watcher rides along with a tab: the html
-// rendition (when the tab is its markdown side) and the rendition's comments
-// sidecar. watch_file skips paths that don't exist, so the sidecar is always
-// offered.
-const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] =>
-  htmlPath === null
-    ? []
-    : htmlPath === tabPath
-      ? [commentsSidecarOf(htmlPath)]
-      : [htmlPath, commentsSidecarOf(htmlPath)];
+// The companion files the document watcher rides along with a tab: the
+// entity meta file (thread bodies for both renditions), the html rendition
+// (when the tab is its markdown side), and — transition window — the legacy
+// comments sidecar an old app version may still write. watch_file skips
+// paths that don't exist, so companions are always offered.
+const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] => {
+  const extras = [metaFileOf(tabPath)];
+  if (htmlPath !== null) {
+    if (htmlPath !== tabPath) extras.push(htmlPath);
+    extras.push(commentsSidecarOf(htmlPath));
+  }
+  return extras;
+};
+
+// Three-way merge for markdown thread bodies (externally-changed meta vs the
+// open editor's marks): reuses the html merge — which carries the deletion-
+// sticks and entry-dedup semantics — under a placeholder anchor.
+const MD_MERGE_ANCHOR = { path: "", tag: "", text: "" };
+const mergeMdThreads = (
+  base: MdThread[],
+  mine: MdThread[],
+  theirs: MdThread[],
+): MdThread[] =>
+  mergeHtmlThreads(
+    base.map((t) => ({ id: t.id, anchor: MD_MERGE_ANCHOR, comments: t.comments })),
+    mine.map((t) => ({ id: t.id, anchor: MD_MERGE_ANCHOR, comments: t.comments })),
+    theirs.map((t) => ({ id: t.id, anchor: MD_MERGE_ANCHOR, comments: t.comments })),
+  ).map(({ id, comments }) => ({ id, comments }));
 
 type DocView = "md" | "html";
 
@@ -203,6 +236,11 @@ type CompanionDoc = {
   htmlContent: string | null;
   threads: HtmlThread[];
   sidecarExists: boolean;
+  // The entity meta's markdown-side sections ride the stash too, so a swap
+  // never has a window where a meta write could drop them (see metaFile.ts).
+  mdThreads: MdThread[];
+  mdOrphans: MdThread[];
+  metaForeign: ForeignRecord[];
   conflict: Conflict | null;
   dirty: boolean;
 };
@@ -676,15 +714,32 @@ export default function App() {
   const htmlContentRef = useRef<string | null>(null);
   const htmlPathRef = useRef<string | null>(null);
   // Comment threads on the ACTIVE document's html rendition, mirrored from
-  // its sidecar file (see htmlComments.ts). The ref mirrors state for async
-  // readers (watcher events, debounced writes) — same pattern as pathRef.
-  // `htmlSidecarExistsRef` remembers whether the sidecar is on disk: an empty
-  // thread list never CREATES a file, and the first write re-arms the watcher
-  // (a file that didn't exist at watch time couldn't be watched).
+  // the entity META file (see metaFile.ts; formerly its own sidecar). The ref
+  // mirrors state for async readers (watcher events, debounced writes) —
+  // same pattern as pathRef. `htmlSidecarExistsRef` remembers whether the
+  // meta file is on disk: an empty thread list never CREATES a file, and the
+  // first write re-arms the watcher (a file that didn't exist at watch time
+  // couldn't be watched).
   const [htmlThreads, setHtmlThreads] = useState<HtmlThread[]>([]);
   const htmlThreadsRef = useRef<HtmlThread[]>([]);
   const htmlSidecarExistsRef = useRef(false);
   const sidecarWriteTimerRef = useRef<number | null>(null);
+  // The rest of the ACTIVE entity's meta file: markdown thread bodies (live =
+  // rooted by a marker in the doc; orphans = marker gone, kept + railed),
+  // plus records a newer app version owns (carried through rewrites). The
+  // markdown on DISK is the hybrid form — markers only; expandMarkdown /
+  // extractMarkdown convert at every read/write, so the editor (and the web
+  // share, whose comment layer parses CriticMarkup) always see full form.
+  const mdThreadsRef = useRef<MdThread[]>([]);
+  const [mdOrphans, setMdOrphans] = useState<MdThread[]>([]);
+  const mdOrphansRef = useRef<MdThread[]>([]);
+  const metaForeignRef = useRef<ForeignRecord[]>([]);
+  // The hybrid markdown as last read from / written to disk — lets a
+  // body-only comment edit skip the (byte-identical) markdown write.
+  const lastDiskMdRef = useRef<string>("");
+  // Legacy <stem>.html.comments.jsonl seen for the active entity (transition
+  // window: old app versions still write it; we fold, never write back).
+  const legacySidecarPathRef = useRef<string | null>(null);
   // Remembered view per document path (session-scoped): a tab you left on HTML
   // comes back on HTML; an html file opened explicitly starts on HTML.
   const viewPrefsRef = useRef<Map<string, DocView>>(new Map());
@@ -1310,6 +1365,42 @@ export default function App() {
     [pushCollectionNow],
   );
 
+  // Land a markdown save's thread bodies in the entity meta of a document
+  // that is NOT the active one (a background flush after a focus swap, a
+  // web-edit pull): a guarded read-modify-write preserving the sections this
+  // write doesn't own — html threads, foreign records — and any orphaned
+  // bodies whose marker is still missing from the given hybrid markdown.
+  const writeMdThreadsToMeta = useCallback(
+    async (target: string, hybridMd: string, mthreads: MdThread[]) => {
+      let base = emptyMeta();
+      let exists = false;
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
+        base = parseEntityMeta(r.contents);
+        exists = true;
+      } catch {
+        // no meta yet
+      }
+      const rooted = new Set(mthreads.map((t) => t.id));
+      const ids = markerIds(hybridMd);
+      const out: EntityMeta = {
+        hthreads: base.hthreads,
+        mthreads: [
+          ...mthreads,
+          ...base.mthreads.filter((t) => !rooted.has(t.id) && !ids.has(t.id)),
+        ],
+        foreign: base.foreign,
+      };
+      if (metaIsEmpty(out) && !exists) return;
+      await invoke<FileSnapshot>("write_file", {
+        path: metaFileOf(target),
+        contents: serializeEntityMeta(out),
+        expected: null,
+      }).catch((e) => console.error("meta save failed", target, e));
+    },
+    [],
+  );
+
   // Assemble what a share push carries: the markdown document and/or its html
   // rendition, always read fresh from DISK — the disk is what a share mirrors
   // (in-editor keystrokes reach it through autosave, which schedules its own
@@ -1334,6 +1425,15 @@ export default function App() {
         mdSnap = r.snapshot;
       } catch {
         return null;
+      }
+      // The disk keeps the hybrid form; the web page's comment layer is
+      // built from CriticMarkup in the markdown it receives — push (and
+      // fingerprint) the EXPANDED document, thread bodies re-inlined.
+      try {
+        const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
+        markdown = expandMarkdown(markdown, parseEntityMeta(m.contents).mthreads).md;
+      } catch {
+        // no meta — nothing to expand
       }
       let html: string | null = null;
       let htmlSnap: FileSnapshot | null = null;
@@ -1474,8 +1574,39 @@ export default function App() {
         return true; // vanished mid-check; the push path sorts it out
       }
     };
+    // The markdown side compares the EXPANDED document (pushes carry thread
+    // bodies re-inlined from the meta, and the stored hash describes that) —
+    // so a body-only comment edit, which leaves the markdown file untouched,
+    // still registers as a needed push. The stat shortcut holds only while
+    // the entity has no meta file to expand from.
+    const mdChanged = async (path: string, pushed: PushedFingerprint | null) => {
+      const snap = await invoke<FileSnapshot>("stat_file", { path }).catch(() => null);
+      if (!snap) return pushed !== null; // gone locally; the published copy is stale
+      if (!pushed) return true; // appeared since the last push
+      const mdSnapMatches =
+        pushed.snap != null &&
+        pushed.snap.mtime_ms === snap.mtime_ms &&
+        pushed.snap.size === snap.size;
+      let mthreads: MdThread[] = [];
+      let hasMeta = false;
+      try {
+        const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(path) });
+        mthreads = parseEntityMeta(m.contents).mthreads;
+        hasMeta = true;
+      } catch {
+        // no meta file
+      }
+      if (mdSnapMatches && !hasMeta) return false;
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path });
+        const expanded = expandMarkdown(r.contents, mthreads).md;
+        return (await contentHash(expanded)) !== pushed.hash;
+      } catch {
+        return true; // vanished mid-check; the push path sorts it out
+      }
+    };
     if (isHtmlPath(entry.path)) return changed(entry.path, fp.html);
-    if (await changed(entry.path, fp.md)) return true;
+    if (await mdChanged(entry.path, fp.md)) return true;
     return changed(htmlSiblingOf(entry.path), fp.html);
   }, []);
 
@@ -1521,20 +1652,26 @@ export default function App() {
         markConflict();
         return;
       }
-      let snap = await invoke<FileSnapshot>("stat_file", { path: target }).catch(() => null);
+      // "Unchanged since the last push" compares the EXPANDED document (the
+      // stored hash describes the pushed expansion) — so a local body-only
+      // comment edit, invisible in the markdown file, still counts as a
+      // local change and parks a conflict instead of being overwritten.
+      let snap: FileSnapshot | null = null;
       let unchanged = false;
-      if (snap) {
-        if (fp.snap && fp.snap.mtime_ms === snap.mtime_ms && fp.snap.size === snap.size) {
-          unchanged = true;
-        } else {
-          try {
-            const r = await invoke<ReadFileResult>("read_file", { path: target });
-            unchanged = (await contentHash(r.contents)) === fp.hash;
-            snap = r.snapshot;
-          } catch {
-            unchanged = false;
-          }
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path: target });
+        snap = r.snapshot;
+        let mthreads: MdThread[] = [];
+        try {
+          const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
+          mthreads = parseEntityMeta(m.contents).mthreads;
+        } catch {
+          // no meta file
         }
+        const expanded = expandMarkdown(r.contents, mthreads).md;
+        unchanged = (await contentHash(expanded)) === fp.hash;
+      } catch {
+        unchanged = false;
       }
       if (!unchanged || !snap) {
         markConflict();
@@ -1549,19 +1686,23 @@ export default function App() {
         return;
       }
       // Local copy is exactly what we last pushed — the web edit fast-forwards
-      // it. The conditional write keeps a keystroke that lands mid-pull safe
-      // (it fails; the next reconcile pass sees a diverged file instead).
+      // it, split back into the hybrid layout: markers to the markdown file
+      // (a web visitor's comments arrive inline), bodies to the meta. The
+      // conditional write keeps a keystroke that lands mid-pull safe (it
+      // fails; the next reconcile pass sees a diverged file instead).
+      const pulled = extractMarkdown(content.markdown);
       let newSnap: FileSnapshot;
       try {
         newSnap = await invoke<FileSnapshot>("write_file", {
           path: target,
-          contents: content.markdown,
+          contents: pulled.md,
           expected: snap,
         });
       } catch {
         markConflict();
         return;
       }
+      await writeMdThreadsToMeta(target, pulled.md, pulled.mthreads);
       const hash = await contentHash(content.markdown);
       updateShares((prev) =>
         prev[target]
@@ -1591,7 +1732,7 @@ export default function App() {
         await reloadFromDiskRef.current({ push: false });
       }
     },
-    [connectionForEntry, updateShares, markWebActivity],
+    [connectionForEntry, updateShares, markWebActivity, writeMdThreadsToMeta],
   );
 
   // Html-rendition comment threads sync bidirectionally with the worker's
@@ -1875,15 +2016,33 @@ export default function App() {
     writeDraftsOpen(draftsOpen);
   }, [draftsOpen]);
 
+  // Defined with the meta helpers below; writeToDisk needs it before then.
+  const writeSidecarNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
+  // `contents` is the editor's serialization — FULL CriticMarkup. The disk
+  // gets the hybrid split: markers-only markdown plus thread-body records in
+  // the entity meta (see metaFile.ts). A body-only edit (a reply typed in
+  // the rail) leaves the hybrid markdown byte-identical and skips that
+  // write entirely — only the meta moves.
   const writeToDisk = useCallback(async (target: string, contents: string) => {
+    const { md: hybrid, mthreads } = extractMarkdown(contents);
     try {
-      const newSnapshot = await invoke<FileSnapshot>("write_file", {
-        path: target,
-        contents,
-        expected: snapshotRef.current,
-      });
+      const isActive = pathRef.current === target;
+      let newSnapshot: FileSnapshot | null = null;
+      // Never skip a file's FIRST write (no snapshot = nothing on disk yet
+      // — a promoted draft must be created even when its content is empty).
+      const mdUnchanged =
+        isActive && snapshotRef.current !== null && hybrid === lastDiskMdRef.current;
+      if (!mdUnchanged) {
+        newSnapshot = await invoke<FileSnapshot>("write_file", {
+          path: target,
+          contents: hybrid,
+          expected: snapshotRef.current,
+        });
+      }
       // The remote mirror follows every successful disk write of a shared doc —
-      // even one that resolves after switching tabs.
+      // even one that resolves after switching tabs. Body-only edits count:
+      // the published page renders the expanded threads.
       scheduleSharePush(target);
       // Presence: an autosave landing is the definition of "actively editing"
       // — the sync engine heartbeats it to other members of the workspace.
@@ -1901,17 +2060,38 @@ export default function App() {
       // snapshot and the next autosave would false-conflict.
       if ((pathRef.current) !== target) {
         const s = splitRef.current;
-        if (s?.doc && s.doc.path === target) {
+        if (s?.doc && s.doc.path === target && newSnapshot) {
           companionMdRef.current.baseline = contents;
           setSplitState({
             ...s,
             doc: { ...s.doc, snapshot: newSnapshot, contents, dirty: false },
           });
         }
+        // The doc's thread bodies still land in ITS meta — a guarded
+        // read-modify-write that preserves the sections this save doesn't
+        // own (html threads, foreign records) and any orphaned bodies.
+        await writeMdThreadsToMeta(target, hybrid, mthreads);
         return;
       }
-      snapshotRef.current = newSnapshot;
+      if (newSnapshot) {
+        snapshotRef.current = newSnapshot;
+        lastDiskMdRef.current = hybrid;
+      }
       lastSavedRef.current = contents;
+      // This save's extraction is the live thread-body set; an orphan whose
+      // marker came back (undo, paste) is live again and leaves the orphan
+      // list.
+      mdThreadsRef.current = mthreads;
+      const rooted = new Set(mthreads.map((t) => t.id));
+      const ids = markerIds(hybrid);
+      if (mdOrphansRef.current.some((t) => rooted.has(t.id) || ids.has(t.id))) {
+        const remaining = mdOrphansRef.current.filter(
+          (t) => !rooted.has(t.id) && !ids.has(t.id),
+        );
+        mdOrphansRef.current = remaining;
+        setMdOrphans(remaining);
+      }
+      await writeSidecarNowRef.current();
       if (currentMarkdownRef.current === contents) setDirty(false);
       // A same-document mirror pane tracks the live editor through its
       // autosaves — the cheapest safe point to sync two Milkdown instances.
@@ -1938,7 +2118,7 @@ export default function App() {
         console.error("autosave failed", e);
       }
     }
-  }, [scheduleSharePush, setSplitState, refreshMirror]);
+  }, [scheduleSharePush, setSplitState, refreshMirror, writeMdThreadsToMeta]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -1983,25 +2163,92 @@ export default function App() {
   }, []);
 
   // Read the active rendition's sidecar (missing file = no comments yet).
-  const loadSidecar = useCallback(
-    async (htmlPath: string | null) => {
-      if (!htmlPath) {
-        htmlSidecarExistsRef.current = false;
-        applyHtmlThreads([]);
-        return;
-      }
+  // Read an entity's meta from disk WITHOUT touching the active-doc refs: the
+  // meta file first, then — transition window — a legacy html comments
+  // sidecar an old app version may have (re)written, folded in by thread id.
+  // Never writes; migration (and ordinary saves) normalize later.
+  const readEntityMeta = useCallback(
+    async (
+      docPath: string,
+      htmlPath: string | null,
+    ): Promise<{
+      meta: EntityMeta;
+      metaExists: boolean;
+      legacyExists: boolean;
+      // The meta FILE's bytes before the legacy fold — what a migration
+      // write-back must diff against to know the disk needs updating.
+      diskRaw: string | null;
+    }> => {
+      let meta = emptyMeta();
+      let metaExists = false;
+      let diskRaw: string | null = null;
       try {
-        const r = await invoke<ReadFileResult>("read_file", {
-          path: commentsSidecarOf(htmlPath),
-        });
-        htmlSidecarExistsRef.current = true;
-        applyHtmlThreads(parseHtmlComments(r.contents));
+        const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(docPath) });
+        meta = parseEntityMeta(r.contents);
+        metaExists = true;
+        diskRaw = r.contents;
       } catch {
+        // no meta file yet
+      }
+      let legacyExists = false;
+      if (htmlPath) {
+        try {
+          const r = await invoke<ReadFileResult>("read_file", {
+            path: commentsSidecarOf(htmlPath),
+          });
+          meta = {
+            ...meta,
+            hthreads: unionThreads(meta.hthreads, parseHtmlComments(r.contents)),
+          };
+          legacyExists = true;
+        } catch {
+          // no legacy sidecar
+        }
+      }
+      return { meta, metaExists, legacyExists, diskRaw };
+    },
+    [],
+  );
+
+  // Load the ACTIVE entity's meta into the app refs. The markdown-side split
+  // into live threads vs orphans needs the markdown text — callers that have
+  // it pass it; an html-only document parks every mthread record as a hidden
+  // orphan (unreachable without a markdown side, but never dropped).
+  const loadEntityMeta = useCallback(
+    async (
+      docPath: string | null,
+      htmlPath: string | null,
+      md: string | null,
+    ): Promise<{ meta: EntityMeta; diskRaw: string | null }> => {
+      if (!docPath) {
         htmlSidecarExistsRef.current = false;
         applyHtmlThreads([]);
+        mdThreadsRef.current = [];
+        mdOrphansRef.current = [];
+        setMdOrphans([]);
+        metaForeignRef.current = [];
+        legacySidecarPathRef.current = null;
+        return { meta: emptyMeta(), diskRaw: null };
       }
+      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath, htmlPath);
+      htmlSidecarExistsRef.current = metaExists;
+      applyHtmlThreads(meta.hthreads);
+      metaForeignRef.current = meta.foreign;
+      legacySidecarPathRef.current = htmlPath ? commentsSidecarOf(htmlPath) : null;
+      if (md !== null) {
+        const ids = markerIds(md);
+        mdThreadsRef.current = meta.mthreads.filter((t) => ids.has(t.id));
+        const orphans = meta.mthreads.filter((t) => !ids.has(t.id));
+        mdOrphansRef.current = orphans;
+        setMdOrphans(orphans);
+      } else {
+        mdThreadsRef.current = [];
+        mdOrphansRef.current = meta.mthreads;
+        setMdOrphans([]);
+      }
+      return { meta, diskRaw };
     },
-    [applyHtmlThreads],
+    [applyHtmlThreads, readEntityMeta],
   );
 
   // (Re)arm the file watcher with the full CURRENT document set: the active
@@ -2041,18 +2288,31 @@ export default function App() {
     }
   }, []);
 
+  // Compose the ACTIVE entity's full meta from the app refs. Every meta
+  // write goes through this one composer — the html rail and the markdown
+  // save path both mutate sections of the same file, and independent writers
+  // would clobber each other's records.
+  const composeActiveMeta = useCallback(
+    (): EntityMeta => ({
+      hthreads: htmlThreadsRef.current,
+      mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
+      foreign: metaForeignRef.current,
+    }),
+    [],
+  );
+
   const writeSidecarNow = useCallback(async () => {
-    const htmlPath = htmlPathRef.current;
-    if (!htmlPath) return;
-    const threads = htmlThreadsRef.current;
+    const docPath = pathRef.current ?? htmlPathRef.current;
+    if (!docPath) return;
+    const meta = composeActiveMeta();
     // Deleting the last thread empties the file rather than deleting it (the
     // only remover the app has is the Trash — too loud for a sidecar); a doc
     // that never had comments never gets one.
-    if (threads.length === 0 && !htmlSidecarExistsRef.current) return;
+    if (metaIsEmpty(meta) && !htmlSidecarExistsRef.current) return;
     try {
       await invoke<FileSnapshot>("write_file", {
-        path: commentsSidecarOf(htmlPath),
-        contents: serializeHtmlComments(threads),
+        path: metaFileOf(docPath),
+        contents: serializeEntityMeta(meta),
         expected: null,
       });
       const isNew = !htmlSidecarExistsRef.current;
@@ -2061,7 +2321,8 @@ export default function App() {
     } catch (e) {
       console.error("comment save failed", e);
     }
-  }, [refreshWatchSet]);
+  }, [refreshWatchSet, composeActiveMeta]);
+  writeSidecarNowRef.current = writeSidecarNow;
 
   const scheduleSidecarWrite = useCallback(() => {
     if (sidecarWriteTimerRef.current != null) {
@@ -2082,6 +2343,86 @@ export default function App() {
     return writeSidecarNow();
   }, [writeSidecarNow]);
 
+  /* ---------- The one-time layout migration ----------
+     Normalize an entity's files to the hybrid layout: full inline threads in
+     the markdown move to meta records (bare markers stay), a legacy html
+     comments sidecar's threads fold into the meta. Pure logic in
+     metaFile.migrateEntity; this wrapper does the guarded IO. Idempotent and
+     conflict-safe: markdown writes are conditional on the snapshot the
+     content was read at, so racing a concurrent edit (or another device's
+     migration — byte-identical by construction) just skips; the next open
+     retries. The legacy sidecar is left in place for the transition window —
+     old app versions still read it; removal ships with the version that
+     drops old-format support. */
+  const migrateEntityOnDisk = useCallback(
+    async (
+      docPath: string,
+      htmlPath: string | null,
+      known?: { md: string; snapshot: FileSnapshot; meta: EntityMeta; diskRaw: string | null },
+    ): Promise<void> => {
+      const htmlOnly = isHtmlPath(docPath);
+      let md: string | null = null;
+      let snapshot: FileSnapshot | null = null;
+      let meta: EntityMeta;
+      let diskRaw: string | null;
+      if (known) {
+        md = htmlOnly ? null : known.md;
+        snapshot = known.snapshot;
+        meta = known.meta;
+        diskRaw = known.diskRaw;
+      } else {
+        if (!htmlOnly) {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: docPath });
+            md = r.contents;
+            snapshot = r.snapshot;
+          } catch {
+            return; // unreadable right now; nothing to migrate
+          }
+        }
+        const read = await readEntityMeta(docPath, htmlPath);
+        meta = read.meta;
+        diskRaw = read.diskRaw;
+      }
+      const result = migrateEntity({ diskMd: md, meta, legacyHtmlThreads: null });
+      if (result.mdChanged && result.md !== null) {
+        try {
+          const newSnap = await invoke<FileSnapshot>("write_file", {
+            path: docPath,
+            contents: result.md,
+            expected: snapshot,
+          });
+          // The active document's disk baseline moved (its EXPANDED editor
+          // content is unchanged — that's the point of the split layout).
+          if (pathRef.current === docPath) {
+            snapshotRef.current = newSnap;
+            lastDiskMdRef.current = result.md;
+          }
+        } catch {
+          return; // lost to a concurrent edit; retried on the next open
+        }
+      }
+      const desired = serializeEntityMeta(result.meta);
+      const mustWriteMeta =
+        diskRaw === null ? !metaIsEmpty(result.meta) : desired !== diskRaw;
+      if (mustWriteMeta) {
+        try {
+          await invoke<FileSnapshot>("write_file", {
+            path: metaFileOf(docPath),
+            contents: desired,
+            expected: null,
+          });
+          if ((pathRef.current ?? htmlPathRef.current) === docPath) {
+            htmlSidecarExistsRef.current = true;
+          }
+        } catch (e) {
+          console.error("meta migration write failed", docPath, e);
+        }
+      }
+    },
+    [readEntityMeta],
+  );
+
   /* ---------- Shared docs: sidecar ⇄ worker thread pool ----------
      A shared page's rendition threads also live in the worker's per-page
      pool, where comment/edit-role browser sessions read and write them. This
@@ -2098,30 +2439,44 @@ export default function App() {
       const entry = sharesRef.current[target];
       if (!entry || entry.kind !== "file") return;
       const htmlPath = isHtmlPath(entry.path) ? entry.path : htmlSiblingOf(entry.path);
-      const sidecarPath = commentsSidecarOf(htmlPath);
+      const metaPath = metaFileOf(entry.path);
       const config = await connectionForEntry(entry);
       if (!config) return;
 
       // The local truth for this doc: the live rail when it's the active
       // document (which may be ahead of disk — flush it down first), else the
-      // sidecar on disk. Captured with a snapshot so the write-back can detect
-      // an external change (cloud sync) that landed during the round-trip.
+      // entity meta on disk (legacy sidecar folded in, so an old device's
+      // comments reach the pool too). Captured with the meta file's snapshot
+      // so the write-back can detect an external change (cloud sync) that
+      // landed during the round-trip.
       const activeAtStart = htmlPathRef.current === htmlPath;
       if (activeAtStart) await flushSidecarWrite();
       let local: HtmlThread[] = [];
       let localSnap: FileSnapshot | null = null;
       let sidecarExists = false;
+      // Non-hthread sections of the background doc's meta, preserved
+      // verbatim by the write-back below.
+      let bgMeta: EntityMeta = emptyMeta();
       if (activeAtStart) {
         local = htmlThreadsRef.current;
         sidecarExists = htmlSidecarExistsRef.current;
       } else {
         try {
-          const r = await invoke<ReadFileResult>("read_file", { path: sidecarPath });
-          local = parseHtmlComments(r.contents);
+          const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
+          bgMeta = parseEntityMeta(r.contents);
           localSnap = r.snapshot;
           sidecarExists = true;
         } catch {
-          // no sidecar yet — nothing local
+          // no meta file yet
+        }
+        local = bgMeta.hthreads;
+        try {
+          const r = await invoke<ReadFileResult>("read_file", {
+            path: commentsSidecarOf(htmlPath),
+          });
+          local = unionThreads(local, parseHtmlComments(r.contents));
+        } catch {
+          // no legacy sidecar
         }
       }
       const base = entry.commentsBase ?? [];
@@ -2141,12 +2496,36 @@ export default function App() {
             : prev,
         );
 
-      const writeSidecar = async (threads: HtmlThread[], expected: FileSnapshot | null) => {
-        if (threads.length === 0 && !sidecarExists) return true;
+      // Land threads in the entity meta while preserving its other sections
+      // (markdown thread bodies, foreign records). Background docs get a
+      // guarded read-modify-write; `fresh` re-reads when the captured base
+      // is unusable (the doc was active at start but got switched away).
+      const writeBgThreads = async (
+        threads: HtmlThread[],
+        mode: { fresh: true } | { fresh: false; expected: FileSnapshot | null },
+      ) => {
+        let baseMeta = bgMeta;
+        let expected: FileSnapshot | null = mode.fresh ? null : mode.expected;
+        if (mode.fresh) {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
+            baseMeta = parseEntityMeta(r.contents);
+            expected = r.snapshot;
+          } catch {
+            baseMeta = emptyMeta();
+            expected = null;
+          }
+        }
+        const out: EntityMeta = {
+          hthreads: threads,
+          mthreads: baseMeta.mthreads,
+          foreign: baseMeta.foreign,
+        };
+        if (metaIsEmpty(out) && !sidecarExists) return true;
         try {
           await invoke<FileSnapshot>("write_file", {
-            path: sidecarPath,
-            contents: serializeHtmlComments(threads),
+            path: metaPath,
+            contents: serializeEntityMeta(out),
             expected,
           });
         } catch {
@@ -2154,13 +2533,7 @@ export default function App() {
           // caller re-syncs against the fresh local.
           return false;
         }
-        if (!sidecarExists) {
-          sidecarExists = true;
-          if (htmlPathRef.current === htmlPath) {
-            htmlSidecarExistsRef.current = true;
-            await refreshWatchSet();
-          }
-        }
+        sidecarExists = true;
         return true;
       };
 
@@ -2181,22 +2554,25 @@ export default function App() {
             // the pre-edit rail (base of this mini-merge), `live` is the
             // user's edit (mine), `result` is the reconciled pool state.
             const folded = mergeHtmlThreads(local, live, result);
-            await writeSidecar(folded, null);
             applyHtmlThreads(folded);
+            await writeSidecarNow();
             commit(rev, poolAgreed, true); // the folded-in edit still owes the pool
             scheduleShareThreadsSyncRef.current(target);
             return;
           }
-          await writeSidecar(result, null);
           applyHtmlThreads(result);
+          await writeSidecarNow();
           // Any pool-cap overflow (result > poolAgreed) is accepted as
           // local-only, so we don't keep the entry dirty and loop on it.
           commit(rev, poolAgreed, false);
           return;
         }
-        // A background doc: write its sidecar (guarded against a concurrent
+        // A background doc: write its meta (guarded against a concurrent
         // external change) but never touch the rail — it shows another doc.
-        const ok = await writeSidecar(result, activeAtStart ? null : localSnap);
+        const ok = await writeBgThreads(
+          result,
+          activeAtStart ? { fresh: true } : { fresh: false, expected: localSnap },
+        );
         if (!ok) {
           scheduleShareThreadsSyncRef.current(target);
           return;
@@ -2250,7 +2626,7 @@ export default function App() {
       connectionForEntry,
       updateShares,
       flushSidecarWrite,
-      refreshWatchSet,
+      writeSidecarNow,
       applyHtmlThreads,
     ],
   );
@@ -2294,6 +2670,63 @@ export default function App() {
       if (active?.kind === "file") scheduleShareThreadsSync(active.path);
     },
     [applyHtmlThreads, scheduleSidecarWrite, scheduleShareThreadsSync],
+  );
+
+  // Orphaned markdown threads (meta records whose marker left the document)
+  // live outside the editor; the rail's mutations on them land here and go
+  // straight to the entity meta.
+  const mutateMdOrphans = useCallback(
+    (fn: (prev: MdThread[]) => MdThread[]) => {
+      const next = fn(mdOrphansRef.current);
+      mdOrphansRef.current = next;
+      setMdOrphans(next);
+      scheduleSidecarWrite();
+    },
+    [scheduleSidecarWrite],
+  );
+
+  const mdOrphanOps = useMemo(
+    () => ({
+      threads: mdOrphans,
+      onReply: (id: string, author: string, body: string) => {
+        const clean = sanitizeBody(body);
+        if (!clean) return;
+        mutateMdOrphans((prev) =>
+          prev.map((t) =>
+            t.id === id
+              ? {
+                  ...t,
+                  comments: [
+                    ...t.comments,
+                    { author: sanitizeAuthor(author), at: Date.now(), body: clean },
+                  ],
+                }
+              : t,
+          ),
+        );
+      },
+      onDeleteThread: (id: string) =>
+        mutateMdOrphans((prev) => prev.filter((t) => t.id !== id)),
+      onDeleteReply: (id: string, index: number) =>
+        mutateMdOrphans((prev) =>
+          prev.map((t) =>
+            t.id === id && index > 0 && index < t.comments.length
+              ? { ...t, comments: t.comments.filter((_, i) => i !== index) }
+              : t,
+          ),
+        ),
+      onUpdateBody: (id: string, index: number, body: string) =>
+        mutateMdOrphans((prev) =>
+          prev.map((t) => {
+            const entry = t.comments[index];
+            if (t.id !== id || !entry) return t;
+            const next = t.comments.slice();
+            next[index] = { ...entry, body: sanitizeBody(body) };
+            return { ...t, comments: next };
+          }),
+        ),
+    }),
+    [mdOrphans, mutateMdOrphans],
   );
 
   const addRecent = useCallback((p: string, kind: "file" | "folder") => {
@@ -2404,6 +2837,9 @@ export default function App() {
       htmlContent: htmlContentRef.current,
       threads: htmlThreadsRef.current,
       sidecarExists: htmlSidecarExistsRef.current,
+      mdThreads: mdThreadsRef.current,
+      mdOrphans: mdOrphansRef.current,
+      metaForeign: metaForeignRef.current,
       conflict: conflictRef.current,
       dirty: dirtyRef.current,
     };
@@ -2435,6 +2871,9 @@ export default function App() {
             htmlContent: null,
             threads: [],
             sidecarExists: false,
+            mdThreads: [],
+            mdOrphans: [],
+            metaForeign: [],
             conflict: null,
             dirty: false,
           },
@@ -2466,38 +2905,36 @@ export default function App() {
               .then((r) => r.contents)
               .catch(() => null);
       }
-      let threads: HtmlThread[] = [];
-      let sidecarExists = false;
-      if (htmlPath) {
-        try {
-          const r = await invoke<ReadFileResult>("read_file", {
-            path: commentsSidecarOf(htmlPath),
-          });
-          threads = parseHtmlComments(r.contents);
-          sidecarExists = true;
-        } catch {
-          // no comments yet
-        }
-      }
+      // The pane's threads and thread bodies come from the entity meta
+      // (legacy sidecar folded); the pane editor gets EXPANDED markdown —
+      // same read boundary as the active document.
+      const { meta, metaExists } = await readEntityMeta(tab.path, htmlPath);
+      const full = htmlOnly ? "" : expandMarkdown(contents, meta.mthreads).md;
+      const ids = htmlOnly ? new Set<string>() : markerIds(contents);
       return {
         doc: {
           path: tab.path,
           kind: tab.kind,
           missing: false,
-          contents: htmlOnly ? "" : contents,
+          contents: full,
           snapshot: htmlOnly ? null : snapshot,
           htmlPath,
           hasHtml: htmlPath != null,
           htmlContent: view === "html" ? htmlContentValue : null,
-          threads,
-          sidecarExists,
+          threads: meta.hthreads,
+          sidecarExists: metaExists,
+          mdThreads: meta.mthreads.filter((t) => ids.has(t.id)),
+          mdOrphans: htmlOnly
+            ? meta.mthreads
+            : meta.mthreads.filter((t) => !ids.has(t.id)),
+          metaForeign: meta.foreign,
           conflict: null,
           dirty: false,
         },
         view: view === "html" && htmlContentValue === null && !htmlOnly ? "md" : view,
       };
     },
-    [],
+    [readEntityMeta],
   );
 
   // A same-document split whose focused side is moving to ANOTHER tab: the
@@ -2556,30 +2993,22 @@ export default function App() {
       currentMarkdownRef.current = "";
       lastSavedRef.current = "";
       snapshotRef.current = null;
+      lastDiskMdRef.current = "";
       setInitialMarkdown("");
       setDirty(false);
       setConflict(null);
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
-      await loadSidecar(null);
+      await loadEntityMeta(null, null, null);
       applyDocView("md");
       await refreshWatchSet(); // nothing active to watch (a split pane may remain)
       return;
     }
     setTabMissing(tab.id, false); // the file is back (or was never gone)
-    baselineCapturedRef.current = false;
-    pathRef.current = htmlOnly ? null : tab.path;
-    currentMarkdownRef.current = htmlOnly ? "" : contents;
-    lastSavedRef.current = htmlOnly ? "" : contents;
-    snapshotRef.current = htmlOnly ? null : snapshot;
-    setInitialMarkdown(htmlOnly ? "" : contents);
-    setDirty(false);
-    setConflict(null);
 
-    // Resolve the document's html rendition and which view to show. Markdown
-    // files probe for a same-stem .html sibling; drafts are app-managed
-    // markdown and never have one.
+    // Resolve the document's html rendition first — the entity meta load
+    // folds a legacy comments sidecar, which is named after the rendition.
     let htmlPath: string | null = null;
     if (htmlOnly) {
       htmlPath = tab.path;
@@ -2590,9 +3019,38 @@ export default function App() {
       );
       if (exists) htmlPath = sibling;
     }
+    const { meta, diskRaw } = await loadEntityMeta(
+      tab.path,
+      htmlPath,
+      htmlOnly ? null : contents,
+    );
+    // The editor speaks full CriticMarkup; the disk keeps the hybrid form
+    // (markers only). Expand thread bodies from the meta records here, at the
+    // read boundary — see metaFile.ts.
+    const full = htmlOnly ? "" : expandMarkdown(contents, meta.mthreads).md;
+    baselineCapturedRef.current = false;
+    pathRef.current = htmlOnly ? null : tab.path;
+    currentMarkdownRef.current = full;
+    lastSavedRef.current = full;
+    snapshotRef.current = htmlOnly ? null : snapshot;
+    lastDiskMdRef.current = htmlOnly ? "" : contents;
+    setInitialMarkdown(full);
+    setDirty(false);
+    setConflict(null);
     htmlPathRef.current = htmlPath;
     setHasHtml(htmlPath != null);
-    await loadSidecar(htmlPath);
+    // Old-layout content (full threads inline, or a legacy sidecar's threads
+    // not yet in the meta) normalizes on open — fire-and-forget; conditional
+    // writes make racing edits safe. Drafts migrate through their own saves.
+    if (tab.kind === "file" && snapshot) {
+      const snap = snapshot;
+      void migrateEntityOnDisk(tab.path, htmlPath, {
+        md: contents,
+        snapshot: snap,
+        meta,
+        diskRaw,
+      });
+    }
     const view: DocView =
       htmlOnly || (htmlPath != null && viewPrefsRef.current.get(tab.path) === "html")
         ? "html"
@@ -2619,10 +3077,18 @@ export default function App() {
 
     // Watch the document set: the markdown for the edit/conflict flow, the
     // rendition so external regeneration re-renders (and re-pushes a share)
-    // live, the comments sidecar so sync-delivered threads pop in — plus the
+    // live, the entity meta so sync-delivered threads pop in — plus the
     // split pane's set. Drafts aren't externally watched.
     await refreshWatchSet();
-  }, [setTabMissing, applyDocView, flushSidecarWrite, loadSidecar, refreshWatchSet, bumpEditorSeq]);
+  }, [
+    setTabMissing,
+    applyDocView,
+    flushSidecarWrite,
+    loadEntityMeta,
+    migrateEntityOnDisk,
+    refreshWatchSet,
+    bumpEditorSeq,
+  ]);
 
   // Re-materialize stored tab descriptors against disk: a readable tab keeps its
   // identity (a draft regains its Untitled-N title; a stale `missing` flag
@@ -2658,6 +3124,7 @@ export default function App() {
     currentMarkdownRef.current = "";
     lastSavedRef.current = "";
     snapshotRef.current = null;
+    lastDiskMdRef.current = "";
     baselineCapturedRef.current = false;
     setInitialMarkdown("");
     setDirty(false);
@@ -2665,11 +3132,10 @@ export default function App() {
     htmlPathRef.current = null;
     setHtmlContent(null);
     setHasHtml(false);
-    htmlSidecarExistsRef.current = false;
-    applyHtmlThreads([]);
+    await loadEntityMeta(null, null, null);
     applyDocView("md");
     await refreshWatchSet(); // drops the active set; keeps a split pane's watch alive
-  }, [applyDocView, flushSidecarWrite, applyHtmlThreads, refreshWatchSet]);
+  }, [applyDocView, flushSidecarWrite, loadEntityMeta, refreshWatchSet]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -3405,11 +3871,16 @@ export default function App() {
     captureActiveScroll();
     try {
       const result = await invoke<ReadFileResult>("read_file", { path: target });
+      // The disk holds hybrid markdown; refresh the meta alongside it and
+      // hand the editor the expanded form (same boundary as the first load).
+      const { meta } = await loadEntityMeta(target, htmlPathRef.current, result.contents);
+      const full = expandMarkdown(result.contents, meta.mthreads).md;
       baselineCapturedRef.current = false;
-      setInitialMarkdown(result.contents);
-      currentMarkdownRef.current = result.contents;
-      lastSavedRef.current = result.contents;
+      setInitialMarkdown(full);
+      currentMarkdownRef.current = full;
+      lastSavedRef.current = full;
       snapshotRef.current = result.snapshot;
+      lastDiskMdRef.current = result.contents;
       setDirty(false);
       setConflict(null);
       if (activeIdRef.current) bumpEditorSeq(activeIdRef.current);
@@ -3418,7 +3889,7 @@ export default function App() {
       {
         const s = splitRef.current;
         if (s && !s.doc && s.tabId === activeIdRef.current && s.view === "md") {
-          refreshMirror(result.contents);
+          refreshMirror(full);
         }
       }
       // The document just adopted outside edits; a live share follows them
@@ -3429,7 +3900,7 @@ export default function App() {
     } catch (e) {
       console.error("reload failed", e);
     }
-  }, [captureActiveScroll, scheduleSharePush, bumpEditorSeq, refreshMirror]);
+  }, [captureActiveScroll, scheduleSharePush, bumpEditorSeq, refreshMirror, loadEntityMeta]);
   reloadFromDiskRef.current = reloadFromDisk;
 
   const keepMyVersion = useCallback(() => {
@@ -3461,12 +3932,16 @@ export default function App() {
       if (!config) throw new Error("Sharing is not configured.");
       const content = await fetchPageContent(config, entry.id);
       if (content.markdown === null) throw new Error("The web version has no markdown.");
-      // The user chose the web side explicitly — last write wins on disk.
+      // The user chose the web side explicitly — last write wins on disk,
+      // split back into the hybrid layout (markers in the markdown, bodies
+      // in the entity meta).
+      const pulled = extractMarkdown(content.markdown);
       const newSnap = await invoke<FileSnapshot>("write_file", {
         path: target,
-        contents: content.markdown,
+        contents: pulled.md,
         expected: null,
       });
+      await writeMdThreadsToMeta(target, pulled.md, pulled.mthreads);
       const hash = await contentHash(content.markdown);
       updateShares((prev) =>
         prev[target]
@@ -3491,7 +3966,7 @@ export default function App() {
       // push-back: disk already equals the web copy we just pulled.
       if (pathRef.current === target) await reloadFromDisk({ push: false });
     },
-    [pushSharedNow, connectionForEntry, updateShares, reloadFromDisk],
+    [pushSharedNow, connectionForEntry, updateShares, reloadFromDisk, writeMdThreadsToMeta],
   );
 
   // The share popover's manual "Check for web changes": pull this one page's
@@ -3541,7 +4016,10 @@ export default function App() {
           const htmlPath = htmlPathRef.current;
           if (!htmlPath) return;
           await dictationRef.current?.stop();
-          flushPendingAutosave();
+          // Awaited: the meta reload below re-reads the entity from disk,
+          // and a still-in-flight autosave (markdown + thread bodies) must
+          // land first or the reload adopts a stale thread set.
+          await flushPendingAutosave();
           let contents: string;
           try {
             contents = (await invoke<ReadFileResult>("read_file", { path: htmlPath }))
@@ -3551,7 +4029,11 @@ export default function App() {
             return;
           }
           await flushSidecarWrite();
-          await loadSidecar(htmlPath);
+          await loadEntityMeta(
+            pathRef.current ?? htmlPath,
+            htmlPath,
+            pathRef.current ? currentMarkdownRef.current : null,
+          );
           setHtmlContent(contents);
           // The surviving markdown pane keeps ITS reading position: the live
           // editor remounts over there and restores from the tab key.
@@ -3580,7 +4062,9 @@ export default function App() {
         // Dictation is an editing mode and the html view is read-only: end an
         // active session (its pending chunks flush) before hiding the editor.
         await dictationRef.current?.stop();
-        flushPendingAutosave();
+        // Awaited for the same reason as the pane-swap branch above: the
+        // meta reload must see this document's landed thread bodies.
+        await flushPendingAutosave();
         setFindOpen(false);
         setFindQuery(""); // find targets the markdown editor only
         let contents: string;
@@ -3594,7 +4078,11 @@ export default function App() {
         // Freshen the comment threads along with the rendition (same doc, so
         // land any pending write first — the reload round-trips it).
         await flushSidecarWrite();
-        await loadSidecar(htmlPath);
+        await loadEntityMeta(
+          pathRef.current ?? htmlPath,
+          htmlPath,
+          pathRef.current ? currentMarkdownRef.current : null,
+        );
         setHtmlContent(contents);
         applyDocView("html");
         viewPrefsRef.current.set(tab.path, "html");
@@ -3611,7 +4099,7 @@ export default function App() {
       applyDocView,
       restoreActiveScroll,
       flushSidecarWrite,
-      loadSidecar,
+      loadEntityMeta,
       remountFocusedEditor,
       setSplitState,
     ],
@@ -3669,6 +4157,13 @@ export default function App() {
       htmlThreadsRef.current = incoming.threads;
       setHtmlThreads(incoming.threads);
       htmlSidecarExistsRef.current = incoming.sidecarExists;
+      mdThreadsRef.current = incoming.mdThreads;
+      mdOrphansRef.current = incoming.mdOrphans;
+      setMdOrphans(incoming.mdOrphans);
+      metaForeignRef.current = incoming.metaForeign;
+      legacySidecarPathRef.current = incoming.htmlPath
+        ? commentsSidecarOf(incoming.htmlPath)
+        : null;
       setConflict(incoming.conflict);
       applyDocView(incomingView);
       setCommentCount(0); // the promoted editor re-reports on its readOnly flip
@@ -4268,8 +4763,33 @@ export default function App() {
       if (kind === "file" && MD_EXT_RE.test(target)) {
         const sibling = htmlSiblingOf(target);
         await trashCompanion(sibling, "HTML version");
+        await trashCompanion(metaFileOf(target), "comments");
         await trashCompanion(commentsSidecarOf(sibling), "comments");
       } else if (kind === "file" && HTML_EXT_RE.test(target)) {
+        // A standalone html document owns the entity meta; a rendition of a
+        // live pair doesn't — there, only its own (hthread) records die with
+        // it and the markdown side's stay.
+        const mdSide = mdSiblingOf(target);
+        const mdExists = await invoke<boolean>("path_exists", { path: mdSide }).catch(
+          () => false,
+        );
+        if (!mdExists) {
+          await trashCompanion(metaFileOf(target), "comments");
+        } else {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
+            const m = parseEntityMeta(r.contents);
+            if (m.hthreads.length > 0) {
+              await invoke<FileSnapshot>("write_file", {
+                path: metaFileOf(target),
+                contents: serializeEntityMeta({ ...m, hthreads: [] }),
+                expected: r.snapshot,
+              });
+            }
+          } catch {
+            // no meta (or it moved underneath) — nothing to scrub
+          }
+        }
         await trashCompanion(commentsSidecarOf(target), "comments");
       }
       // A deleted member drops off its folder share's TOC (the published page
@@ -4392,12 +4912,19 @@ export default function App() {
         const fromHtml = htmlSiblingOf(from);
         const toHtml = htmlSiblingOf(to);
         await moveCompanion(fromHtml, toHtml, "HTML version");
+        await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
         await moveCompanion(
           commentsSidecarOf(fromHtml),
           commentsSidecarOf(toHtml),
           "comments",
         );
       } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
+        // A standalone html document carries the entity meta; a rendition of
+        // a pair leaves it with the markdown side.
+        const mdExists = await invoke<boolean>("path_exists", {
+          path: mdSiblingOf(from),
+        }).catch(() => false);
+        if (!mdExists) await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
         await moveCompanion(commentsSidecarOf(from), commentsSidecarOf(to), "comments");
       }
       const remap = (p: string) =>
@@ -4745,12 +5272,14 @@ export default function App() {
               companionMdRef.current = { md: "", baseline: "", baselined: false };
               bumpEditorSeq(cur.tabId);
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
+              const { meta } = await readEntityMeta(sd.path, cur.doc.htmlPath);
+              const full = htmlOnly ? "" : expandMarkdown(r.contents, meta.mthreads).md;
               setSplitState({
                 ...cur,
                 doc: {
                   ...cur.doc,
                   missing: false,
-                  contents: htmlOnly ? "" : r.contents,
+                  contents: full,
                   snapshot: htmlOnly ? null : r.snapshot,
                   htmlContent: htmlOnly ? r.contents : cur.doc.htmlContent,
                   dirty: false,
@@ -4779,20 +5308,37 @@ export default function App() {
           })();
           return;
         }
-        if (sd.htmlPath && e.payload.path === commentsSidecarOf(sd.htmlPath)) {
+        // The pane entity's META changed (sync delivered a teammate's thread
+        // or reply): refresh the pane's threads and re-expand its markdown.
+        if (e.payload.path === metaFileOf(sd.path)) {
           void (async () => {
             try {
-              const r = await invoke<ReadFileResult>("read_file", {
-                path: commentsSidecarOf(sd.htmlPath!),
-              });
+              const { meta, metaExists } = await readEntityMeta(sd.path, sd.htmlPath);
               const cur = splitRef.current;
-              if (!cur?.doc || cur.doc.htmlPath !== sd.htmlPath) return;
+              if (!cur?.doc || cur.doc.path !== sd.path) return;
+              const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
+              let contents = cur.doc.contents;
+              let ids = new Set<string>();
+              if (!htmlOnly) {
+                const r = await invoke<ReadFileResult>("read_file", { path: sd.path });
+                ids = markerIds(r.contents);
+                contents = expandMarkdown(r.contents, meta.mthreads).md;
+                if (contents !== cur.doc.contents) {
+                  captureCompanionScroll();
+                  companionMdRef.current = { md: "", baseline: "", baselined: false };
+                  bumpEditorSeq(cur.tabId);
+                }
+              }
               setSplitState({
                 ...cur,
                 doc: {
                   ...cur.doc,
-                  threads: parseHtmlComments(r.contents),
-                  sidecarExists: true,
+                  contents,
+                  threads: meta.hthreads,
+                  sidecarExists: metaExists,
+                  mdThreads: meta.mthreads.filter((t) => ids.has(t.id)),
+                  mdOrphans: meta.mthreads.filter((t) => !ids.has(t.id)),
+                  metaForeign: meta.foreign,
                 },
               });
             } catch {
@@ -4801,23 +5347,82 @@ export default function App() {
           })();
           return;
         }
+        // A legacy sidecar write (an old app version, via sync): fold it into
+        // the pane's thread set; the meta on disk normalizes on next touch.
+        if (sd.htmlPath && e.payload.path === commentsSidecarOf(sd.htmlPath)) {
+          void (async () => {
+            try {
+              const { meta, metaExists } = await readEntityMeta(sd.path, sd.htmlPath);
+              const cur = splitRef.current;
+              if (!cur?.doc || cur.doc.htmlPath !== sd.htmlPath) return;
+              setSplitState({
+                ...cur,
+                doc: { ...cur.doc, threads: meta.hthreads, sidecarExists: metaExists },
+              });
+            } catch {
+              // mid-rewrite; the next event covers it
+            }
+          })();
+          return;
+        }
       }
-      // The active rendition's comments sidecar changed (cloud sync delivered
-      // a teammate's thread, or another window wrote): reload it — unless a
-      // local write is pending, which would clobber a comment mid-typing;
-      // that write lands in a moment and last-write-wins.
-      const sidecar = htmlPathRef.current
-        ? commentsSidecarOf(htmlPathRef.current)
-        : null;
-      if (sidecar !== null && e.payload.path === sidecar) {
+      // The active entity's META changed (cloud sync delivered a teammate's
+      // thread, another window wrote): fold it in — unless a local write is
+      // pending, which would clobber a comment mid-typing; that write lands
+      // in a moment and last-write-wins. Html threads land on the rail;
+      // markdown thread bodies land IN PLACE on the open editor's marks
+      // (three-way against the last disk state, so a reply typed here while
+      // the change was in flight survives).
+      const activeDocPath = pathRef.current ?? htmlPathRef.current;
+      const metaPath = activeDocPath ? metaFileOf(activeDocPath) : null;
+      if (metaPath !== null && e.payload.path === metaPath) {
         if (sidecarWriteTimerRef.current != null) return;
         void (async () => {
           try {
-            const r = await invoke<ReadFileResult>("read_file", { path: sidecar });
+            const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
+            const meta = parseEntityMeta(r.contents);
             htmlSidecarExistsRef.current = true;
-            applyHtmlThreads(parseHtmlComments(r.contents));
+            applyHtmlThreads(meta.hthreads);
+            metaForeignRef.current = meta.foreign;
+            if (pathRef.current) {
+              const ids = markerIds(currentMarkdownRef.current);
+              const theirs = meta.mthreads.filter((t) => ids.has(t.id));
+              const mine = extractMarkdown(currentMarkdownRef.current).mthreads;
+              const mergedLive = mergeMdThreads(mdThreadsRef.current, mine, theirs);
+              mdThreadsRef.current = mergedLive;
+              editorRef.current?.refreshThreadBodies(
+                new Map(mergedLive.map((t) => [t.id, t.comments])),
+              );
+              const orphans = meta.mthreads.filter((t) => !ids.has(t.id));
+              mdOrphansRef.current = orphans;
+              setMdOrphans(orphans);
+            } else {
+              mdOrphansRef.current = meta.mthreads;
+              setMdOrphans([]);
+            }
             // If this doc is shared, an externally-delivered thread change
             // (cloud sync) may owe the web pool a push — reconcile the two.
+            const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+            if (active?.kind === "file" && sharesRef.current[active.path]) {
+              scheduleShareThreadsSyncRef.current(active.path);
+            }
+          } catch {
+            // mid-rewrite; the next event covers it
+          }
+        })();
+        return;
+      }
+      // A legacy sidecar write for the ACTIVE entity: fold the old device's
+      // threads into the rail and persist the union to the meta.
+      const legacy = htmlPathRef.current ? commentsSidecarOf(htmlPathRef.current) : null;
+      if (legacy !== null && e.payload.path === legacy) {
+        void (async () => {
+          try {
+            const r = await invoke<ReadFileResult>("read_file", { path: legacy });
+            applyHtmlThreads(
+              unionThreads(htmlThreadsRef.current, parseHtmlComments(r.contents)),
+            );
+            await writeSidecarNowRef.current();
             const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
             if (active?.kind === "file" && sharesRef.current[active.path]) {
               scheduleShareThreadsSyncRef.current(active.path);
@@ -4861,6 +5466,7 @@ export default function App() {
     captureCompanionScroll,
     bumpEditorSeq,
     setSplitState,
+    readEntityMeta,
   ]);
 
   // Reconcile shares with edits made outside the app at the moments staleness
@@ -4874,6 +5480,66 @@ export default function App() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [ready, reconcileShares]);
+
+  // The one-time layout migration, workspace-wide: every entity the tree
+  // knows normalizes to the hybrid layout (inline thread bodies → meta
+  // records; legacy html-comments sidecars fold in). Runs once per
+  // workspace root in the main window; open tabs are skipped — they
+  // migrate through their own load/save path. Interrupted or failed runs
+  // leave the flag unset and retry on the next launch; re-running is safe
+  // (migrateEntity is idempotent, and two devices migrating the same file
+  // concurrently produce byte-identical writes).
+  useEffect(() => {
+    if (!ready || !workspaceRoot || !isMainWindow) return;
+    const FLAG = `doklin:meta-migrated-v1:${workspaceRoot}`;
+    try {
+      if (localStorage.getItem(FLAG) === "1") return;
+    } catch {
+      // storage unavailable; sweep anyway (idempotent)
+    }
+    let cancelled = false;
+    void (async () => {
+      let tree: TreeNode;
+      try {
+        tree = await invoke<TreeNode>("list_md_tree", { path: workspaceRoot });
+      } catch {
+        return; // workspace unreadable right now; retried next launch
+      }
+      const files: { path: string; paired: boolean }[] = [];
+      const walk = (n: TreeNode) => {
+        if (n.kind === "file") files.push({ path: n.path, paired: n.paired === true });
+        else for (const c of n.children) walk(c);
+      };
+      walk(tree);
+      const open = new Set(tabsRef.current.map((t) => t.path));
+      for (const f of files) {
+        if (cancelled) return;
+        if (open.has(f.path)) continue;
+        const htmlPath = isHtmlPath(f.path)
+          ? f.path
+          : f.paired
+            ? htmlSiblingOf(f.path)
+            : null;
+        try {
+          await migrateEntityOnDisk(f.path, htmlPath);
+        } catch (e) {
+          console.error("meta migration failed", f.path, e);
+          return; // flag stays unset; the next launch retries
+        }
+        // Yield between entities so a large workspace never janks the UI.
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      if (cancelled) return;
+      try {
+        localStorage.setItem(FLAG, "1");
+      } catch {
+        // storage unavailable — the sweep just reruns next launch
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, workspaceRoot, migrateEntityOnDisk]);
 
   // Robust quit flush: type-then-⌘Q within the autosave debounce would lose the
   // last keystrokes if the process exits before the fire-and-forget write_file
@@ -5288,8 +5954,32 @@ export default function App() {
       autosaveTimerRef.current = null;
     }
     const draftPath = active.path;
+    // The chosen stem may already have an entity meta (an existing rendition
+    // with comments): adopt it BEFORE the first write — writeToDisk composes
+    // the meta from the app refs, and stale draft refs would clobber it. The
+    // draft's own unanchored bodies ride along.
+    const draftOrphans = mdOrphansRef.current;
+    const sibling0 = htmlSiblingOf(chosen);
+    const siblingExists0 = await invoke<boolean>("path_exists", { path: sibling0 }).catch(
+      () => false,
+    );
+    await loadEntityMeta(
+      chosen,
+      siblingExists0 ? sibling0 : null,
+      currentMarkdownRef.current,
+    );
+    if (draftOrphans.length > 0) {
+      const have = new Set(mdOrphansRef.current.map((t) => t.id));
+      const merged = [
+        ...mdOrphansRef.current,
+        ...draftOrphans.filter((t) => !have.has(t.id)),
+      ];
+      mdOrphansRef.current = merged;
+      setMdOrphans(merged);
+    }
     pathRef.current = chosen;
     snapshotRef.current = null; // Save As: overwrite the chosen target unconditionally
+    lastDiskMdRef.current = "";
     await writeToDisk(chosen, currentMarkdownRef.current);
     // Flip the tab from draft to a real file (in place, keeping its position).
     const nextTabs = tabsRef.current.map((t) =>
@@ -5312,18 +6002,13 @@ export default function App() {
       // share record there too.
       queueShareOp(chosen);
     }
-    // The promoted file may have landed next to an existing html rendition of
-    // the same stem — adopt it (enables the toggle, watches the set, loads
-    // any comments the rendition already carries).
-    const sibling = htmlSiblingOf(chosen);
-    const siblingExists = await invoke<boolean>("path_exists", { path: sibling }).catch(
-      () => false,
-    );
-    htmlPathRef.current = siblingExists ? sibling : null;
-    setHasHtml(siblingExists);
-    await loadSidecar(htmlPathRef.current);
+    // The rendition (probed before the write — its meta was adopted there)
+    // enables the view toggle and joins the watch set.
+    htmlPathRef.current = siblingExists0 ? sibling0 : null;
+    setHasHtml(siblingExists0);
     await refreshWatchSet();
-    // The content now lives in a real file; remove the draft + its metadata.
+    // The content now lives in a real file; remove the draft + its metadata
+    // (the backend clears the draft's own meta sidecar with it).
     try {
       await invoke("delete_draft", { path: draftPath });
     } catch (e) {
@@ -5334,7 +6019,15 @@ export default function App() {
     writeDraftsMeta(rest);
     addRecent(chosen, "file");
     setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
-  }, [writeToDisk, addRecent, updateShares, scheduleSharePush, queueShareOp, loadSidecar, refreshWatchSet]);
+  }, [
+    writeToDisk,
+    addRecent,
+    updateShares,
+    scheduleSharePush,
+    queueShareOp,
+    loadEntityMeta,
+    refreshWatchSet,
+  ]);
 
   const handleSave = useCallback(async () => {
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
@@ -5866,6 +6559,7 @@ export default function App() {
               onCommentsCount={focused ? setCommentCount : undefined}
               onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
               readOnly={!focused}
+              orphans={focused ? mdOrphanOps : undefined}
             />
           )}
           {showHtmlHere && (

@@ -195,7 +195,7 @@ import { WEB_APP } from "./webAssets.js";
 // so the lazy mount/teardown swap no longer shifts the document mid-scroll
 // (shell-only: no API change — the bump rolls the fix out through the
 // update dialog).
-const WORKER_VERSION = 16;
+const WORKER_VERSION = 17;
 const WORKER_FEATURES = [
   "pages",
   "collections",

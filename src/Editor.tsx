@@ -50,6 +50,8 @@ import {
   addReply,
   deleteReply,
   deleteThread,
+  refreshThreadBodies,
+  type CommentEntry,
 } from "./criticMark";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
@@ -99,6 +101,21 @@ export type EditorHandle = {
   // selection toolbar there, so they provide their own affordance and route
   // it here. Returns false when there's nothing usable selected.
   commentSelection: () => boolean;
+  // Swap thread bodies in place (external meta change — a teammate's reply
+  // arriving through sync). Caret-safe, history-free; see criticMark.ts.
+  refreshThreadBodies: (bodies: Map<string, CommentEntry[]>) => void;
+};
+
+// Markdown threads whose meta record lost its marker (deleted in another
+// editor, an old revision restored): shown as orphan cards at the top of the
+// rail — never silently dropped — with their mutations routed to the host
+// (they live in the entity meta file, not in the document).
+export type OrphanOps = {
+  threads: { id: string; comments: CommentEntry[] }[];
+  onReply: (id: string, author: string, body: string) => void;
+  onDeleteThread: (id: string) => void;
+  onDeleteReply: (id: string, index: number) => void;
+  onUpdateBody: (id: string, index: number, body: string) => void;
 };
 
 type Props = {
@@ -125,6 +142,8 @@ type Props = {
   // mutations still dispatch — they go through the rail and commentSelection,
   // not through DOM editing.
   readOnly?: boolean;
+  // Marker-less markdown threads from the entity meta file (see OrphanOps).
+  orphans?: OrphanOps;
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -235,6 +254,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     onCommentsCount,
     onRequestShowComments,
     readOnly = false,
+    orphans,
   },
   ref,
 ) {
@@ -285,6 +305,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onCommentsCountRef.current = onCommentsCount;
   const onRequestShowCommentsRef = useRef(onRequestShowComments);
   onRequestShowCommentsRef.current = onRequestShowComments;
+  const orphansRef = useRef(orphans);
+  orphansRef.current = orphans;
 
   const report = () => {
     const view = viewRef.current;
@@ -311,6 +333,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       }
       const wrapRect = wrap.getBoundingClientRect();
       const items: RailThread[] = [];
+      // Orphaned meta threads (marker gone) lead the rail, pinned to the top
+      // — same presentation as the html view's unresolvable anchors.
+      const docIds = new Set(collectThreads(view.state.doc).map((t) => t.id));
+      for (const o of orphansRef.current?.threads ?? []) {
+        if (docIds.has(o.id)) continue; // its marker is back (undo, paste)
+        items.push({ id: o.id, comments: o.comments, anchorTop: 0, orphaned: true });
+      }
       for (const t of collectThreads(view.state.doc)) {
         let top: number;
         try {
@@ -540,26 +569,38 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       if (pending) {
         if (pending.kind === "raf") cancelAnimationFrame(pending.id);
         else clearTimeout(pending.id);
+        // Clear the handle, or the next recompute() thinks a tick is still
+        // pending and skips — under StrictMode's dev-only effect replay this
+        // wedged the rail empty for the whole session.
+        rafRef.current = null;
       }
     };
   }, []);
 
   // Rail callbacks. All of them resolve the thread from the CURRENT doc by
   // its stable id at dispatch time, so stale rail state can never touch the
-  // wrong text.
+  // wrong text. Ids the doc doesn't know are orphaned meta threads — their
+  // mutations route to the host (they live in the meta file, not the doc).
+  const orphanOf = useCallback((id: string) => {
+    return orphansRef.current?.threads.find((t) => t.id === id) ?? null;
+  }, []);
+
   const onActivate = useCallback((id: string) => {
     const view = viewRef.current;
     if (!view) return;
     const t = getThread(view.state, id);
-    if (!t) return;
+    if (!t) {
+      if (orphanOf(id)) setActiveId(id); // nothing to highlight or scroll to
+      return;
+    }
     setActiveThread(view, id);
     setActiveId(id);
     scrollPosIntoView(view, t.ranges[0].from);
-  }, []);
+  }, [orphanOf]);
 
   const onStartEdit = useCallback((id: string, index: number) => {
     const view = viewRef.current;
-    if (view) setActiveThread(view, id);
+    if (view && getThread(view.state, id)) setActiveThread(view, id);
     setActiveId(id);
     setEditing({ id, index });
   }, []);
@@ -569,7 +610,14 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     const view = viewRef.current;
     if (!view) return;
     const entry = getThread(view.state, id)?.comments[index];
-    if (!entry) return;
+    if (!entry) {
+      const o = orphanOf(id);
+      const oEntry = o?.comments[index];
+      if (o && oEntry && body.trim() !== "" && body !== oEntry.body) {
+        orphansRef.current?.onUpdateBody(id, index, body);
+      }
+      return;
+    }
     if (body.trim() === "") {
       if (index === 0 && entry.body === "") {
         // An abandoned draft (opened, never written) is discarded on blur.
@@ -581,7 +629,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     } else if (body !== entry.body) {
       updateCommentBody(view, id, index, body);
     }
-  }, []);
+  }, [orphanOf]);
 
   const onCancelEdit = useCallback((id: string, index: number) => {
     setEditing(null);
@@ -596,24 +644,42 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
 
   const onReply = useCallback((id: string, body: string) => {
     const view = viewRef.current;
-    if (view) addReply(view, id, authorRef.current, body);
-  }, []);
+    if (!view) return;
+    if (!getThread(view.state, id) && orphanOf(id)) {
+      orphansRef.current?.onReply(id, authorRef.current, body);
+      return;
+    }
+    addReply(view, id, authorRef.current, body);
+  }, [orphanOf]);
 
   const onDeleteThread = useCallback((id: string) => {
     const view = viewRef.current;
     if (!view) return;
     setEditing((e) => (e?.id === id ? null : e));
     setActiveId((a) => (a === id ? null : a));
+    if (!getThread(view.state, id) && orphanOf(id)) {
+      orphansRef.current?.onDeleteThread(id);
+      return;
+    }
     deleteThread(view, id);
     setActiveThread(view, null);
-  }, []);
+  }, [orphanOf]);
 
   const onDeleteReply = useCallback((id: string, index: number) => {
     const view = viewRef.current;
     if (!view) return;
     setEditing((e) => (e && e.id === id && e.index === index ? null : e));
+    if (!getThread(view.state, id) && orphanOf(id)) {
+      orphansRef.current?.onDeleteReply(id, index);
+      return;
+    }
     deleteReply(view, id, index);
-  }, []);
+  }, [orphanOf]);
+
+  // Orphans arrive/leave outside editor transactions — re-derive the rail.
+  useEffect(() => {
+    recompute();
+  }, [orphans, recompute]);
 
   useImperativeHandle(
     ref,
@@ -755,6 +821,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         }
         createCommentRef.current(view);
         return true;
+      },
+      refreshThreadBodies(bodies: Map<string, CommentEntry[]>) {
+        const view = viewRef.current;
+        if (!view) return;
+        refreshThreadBodies(view, bodies);
       },
     }),
     [],

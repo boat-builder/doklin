@@ -352,6 +352,30 @@ export function deleteReply(view: EditorView, id: string, index: number): void {
   );
 }
 
+// Adopt externally-arrived thread bodies (cloud sync delivering a teammate's
+// reply through the entity meta file) into the open document IN PLACE: swap
+// each thread's mark attrs without touching text or caret. Ids absent from
+// `bodies` are left alone — thread deletion travels through the markdown
+// side (the marker), never through a body refresh. Kept out of the undo
+// history: ⌘Z must not revert a teammate's comment into oblivion.
+export function refreshThreadBodies(
+  view: EditorView,
+  bodies: Map<string, CommentEntry[]>,
+): void {
+  const mt = markTypeOf(view);
+  const tr = view.state.tr;
+  let touched = false;
+  for (const t of collectThreads(view.state.doc)) {
+    const next = bodies.get(t.id);
+    if (!next || JSON.stringify(next) === JSON.stringify(t.comments)) continue;
+    for (const r of t.ranges) tr.addMark(r.from, r.to, mt.create({ id: t.id, comments: next }));
+    touched = true;
+  }
+  if (!touched) return;
+  tr.setMeta("addToHistory", false);
+  view.dispatch(tr);
+}
+
 // Delete a whole thread: remove the mark from every run — the anchor text
 // stays in the document. Undo (⌘Z) brings the thread back.
 export function deleteThread(view: EditorView, id: string): void {
