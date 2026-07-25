@@ -39,6 +39,7 @@ import {
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
+import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
 import {
   criticCommentSchema,
@@ -144,6 +145,16 @@ type Props = {
   readOnly?: boolean;
   // Marker-less markdown threads from the entity meta file (see OrphanOps).
   orphans?: OrphanOps;
+  // Persisted table column widths (entity meta `tcols` records). Read ONCE,
+  // at mount: they are applied to the parsed document before the editor
+  // state exists, so a later prop change is deliberately inert — nothing
+  // should resize a table under the user's hands mid-session.
+  tableWidths?: TableCols[];
+  // Where this editor's live width set goes when it changes. Omit for views
+  // that don't own the document (read-only mirrors, the unfocused pane) —
+  // their resizes stay session-only. Unlike `tableWidths` this IS read
+  // live, so a pane promoted without a remount starts persisting at once.
+  onTableWidths?: (records: TableCols[]) => void;
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -255,6 +266,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     onRequestShowComments,
     readOnly = false,
     orphans,
+    tableWidths,
+    onTableWidths,
   },
   ref,
 ) {
@@ -307,6 +320,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onRequestShowCommentsRef.current = onRequestShowComments;
   const orphansRef = useRef(orphans);
   orphansRef.current = orphans;
+  const onTableWidthsRef = useRef(onTableWidths);
+  onTableWidthsRef.current = onTableWidths;
 
   const report = () => {
     const view = viewRef.current;
@@ -453,8 +468,16 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(ghostPlugin);
     crepe.editor.use(polishRevertPlugin);
     // Column drag-resize; must come after the Crepe features so its table
-    // node view overrides the table block's (see tableResize.ts).
-    crepe.editor.config(enableColumnResizing);
+    // node view overrides the table block's (see tableResize.ts). The store
+    // reads the widths prop from THIS render (mount-time by definition) and
+    // routes emissions through the ref, so the callback can come and go with
+    // the pane's ownership of the document.
+    crepe.editor.config((ctx) =>
+      enableColumnResizing(ctx, {
+        initial: tableWidths ?? [],
+        sink: () => onTableWidthsRef.current ?? null,
+      }),
+    );
     crepe.editor.use(resizableTableView);
     crepeRef.current = crepe;
     // Crepe's readonly flag silences its own chrome (toolbar, slash menu,

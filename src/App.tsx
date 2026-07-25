@@ -109,7 +109,9 @@ import {
   type EntityMeta,
   type MdThread,
   type ForeignRecord,
+  type TableCols,
 } from "./metaFile";
+import { tableWidthsKey } from "./tableWidths";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -273,6 +275,7 @@ type CompanionDoc = {
   // never has a window where a meta write could drop them (see metaFile.ts).
   mdThreads: MdThread[];
   mdOrphans: MdThread[];
+  tcols: TableCols[];
   metaForeign: ForeignRecord[];
   conflict: Conflict | null;
   dirty: boolean;
@@ -768,6 +771,12 @@ export default function App() {
   const mdThreadsRef = useRef<MdThread[]>([]);
   const [mdOrphans, setMdOrphans] = useState<MdThread[]>([]);
   const mdOrphansRef = useRef<MdThread[]>([]);
+  // The active document's persisted table column widths. State because the
+  // editor takes them as a mount-time prop (they're applied to the parsed
+  // doc before the first paint); ref for the async writers, as everywhere
+  // else here. See tableWidths.ts for how a record finds its table.
+  const [tableWidths, setTableWidths] = useState<TableCols[]>([]);
+  const tableWidthsRef = useRef<TableCols[]>([]);
   const metaForeignRef = useRef<ForeignRecord[]>([]);
   // The hybrid markdown as last read from / written to disk — lets a
   // body-only comment edit skip the (byte-identical) markdown write.
@@ -1418,8 +1427,9 @@ export default function App() {
   // Land a markdown save's thread bodies in the entity meta of a document
   // that is NOT the active one (a background flush after a focus swap, a
   // web-edit pull): a guarded read-modify-write preserving the sections this
-  // write doesn't own — html threads, foreign records — and any orphaned
-  // bodies whose marker is still missing from the given hybrid markdown.
+  // write doesn't own — html threads, table widths, foreign records — and
+  // any orphaned bodies whose marker is still missing from the given hybrid
+  // markdown.
   const writeMdThreadsToMeta = useCallback(
     async (target: string, hybridMd: string, mthreads: MdThread[]) => {
       let base = emptyMeta();
@@ -1439,6 +1449,7 @@ export default function App() {
           ...mthreads,
           ...base.mthreads.filter((t) => !rooted.has(t.id) && !ids.has(t.id)),
         ],
+        tcols: base.tcols,
         foreign: base.foreign,
       };
       if (metaIsEmpty(out) && !exists) return;
@@ -1462,7 +1473,13 @@ export default function App() {
       if (isHtmlPath(target)) {
         try {
           const r = await invoke<ReadFileResult>("read_file", { path: target });
-          return { markdown: null, mdSnap: null, html: r.contents, htmlSnap: r.snapshot };
+          return {
+            markdown: null,
+            mdSnap: null,
+            html: r.contents,
+            htmlSnap: r.snapshot,
+            tcols: [], // an html-only share has no markdown tables to size
+          };
         } catch {
           return null;
         }
@@ -1478,12 +1495,17 @@ export default function App() {
       }
       // The disk keeps the hybrid form; the web page's comment layer is
       // built from CriticMarkup in the markdown it receives — push (and
-      // fingerprint) the EXPANDED document, thread bodies re-inlined.
+      // fingerprint) the EXPANDED document, thread bodies re-inlined. Table
+      // widths come out of the same read, but they can't be inlined into
+      // markdown: they travel beside it as their own field.
+      let tcols: TableCols[] = [];
       try {
         const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
-        markdown = expandMarkdown(markdown, parseEntityMeta(m.contents).mthreads).md;
+        const meta = parseEntityMeta(m.contents);
+        markdown = expandMarkdown(markdown, meta.mthreads).md;
+        tcols = meta.tcols;
       } catch {
-        // no meta — nothing to expand
+        // no meta — nothing to expand, no widths to carry
       }
       let html: string | null = null;
       let htmlSnap: FileSnapshot | null = null;
@@ -1497,7 +1519,7 @@ export default function App() {
       } catch {
         // rendition unreadable right now; share the markdown alone
       }
-      return { markdown, mdSnap, html, htmlSnap };
+      return { markdown, mdSnap, html, htmlSnap, tcols };
     },
     [],
   );
@@ -2212,6 +2234,14 @@ export default function App() {
     setHtmlThreads(threads);
   }, []);
 
+  // Adopt a width set as the active document's. The state half only matters
+  // at the next editor MOUNT (the prop is read once); the ref half is what
+  // every meta write composes from.
+  const adoptTableWidths = useCallback((cols: TableCols[]) => {
+    tableWidthsRef.current = cols;
+    setTableWidths(cols);
+  }, []);
+
   // Read the active rendition's sidecar (missing file = no comments yet).
   // Read an entity's meta from disk WITHOUT touching the active-doc refs: the
   // meta file first, then — transition window — a legacy html comments
@@ -2276,6 +2306,7 @@ export default function App() {
         mdThreadsRef.current = [];
         mdOrphansRef.current = [];
         setMdOrphans([]);
+        adoptTableWidths([]);
         metaForeignRef.current = [];
         legacySidecarPathRef.current = null;
         return { meta: emptyMeta(), diskRaw: null };
@@ -2283,6 +2314,7 @@ export default function App() {
       const { meta, metaExists, diskRaw } = await readEntityMeta(docPath, htmlPath);
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
+      adoptTableWidths(meta.tcols);
       metaForeignRef.current = meta.foreign;
       legacySidecarPathRef.current = htmlPath ? commentsSidecarOf(htmlPath) : null;
       if (md !== null) {
@@ -2298,7 +2330,7 @@ export default function App() {
       }
       return { meta, diskRaw };
     },
-    [applyHtmlThreads, readEntityMeta],
+    [applyHtmlThreads, adoptTableWidths, readEntityMeta],
   );
 
   // (Re)arm the file watcher with the full CURRENT document set: the active
@@ -2346,6 +2378,7 @@ export default function App() {
     (): EntityMeta => ({
       hthreads: htmlThreadsRef.current,
       mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
+      tcols: tableWidthsRef.current,
       foreign: metaForeignRef.current,
     }),
     [],
@@ -2569,6 +2602,7 @@ export default function App() {
         const out: EntityMeta = {
           hthreads: threads,
           mthreads: baseMeta.mthreads,
+          tcols: baseMeta.tcols,
           foreign: baseMeta.foreign,
         };
         if (metaIsEmpty(out) && !sidecarExists) return true;
@@ -2889,6 +2923,7 @@ export default function App() {
       sidecarExists: htmlSidecarExistsRef.current,
       mdThreads: mdThreadsRef.current,
       mdOrphans: mdOrphansRef.current,
+      tcols: tableWidthsRef.current,
       metaForeign: metaForeignRef.current,
       conflict: conflictRef.current,
       dirty: dirtyRef.current,
@@ -2923,6 +2958,7 @@ export default function App() {
             sidecarExists: false,
             mdThreads: [],
             mdOrphans: [],
+            tcols: [],
             metaForeign: [],
             conflict: null,
             dirty: false,
@@ -2977,6 +3013,7 @@ export default function App() {
           mdOrphans: htmlOnly
             ? meta.mthreads
             : meta.mthreads.filter((t) => !ids.has(t.id)),
+          tcols: meta.tcols,
           metaForeign: meta.foreign,
           conflict: null,
           dirty: false,
@@ -4210,6 +4247,10 @@ export default function App() {
       mdThreadsRef.current = incoming.mdThreads;
       mdOrphansRef.current = incoming.mdOrphans;
       setMdOrphans(incoming.mdOrphans);
+      // The promoted pane keeps its mounted editor (no remount on a swap), so
+      // this only re-points the meta writer at the incoming document's
+      // records — the widths on screen are already the ones it mounted with.
+      adoptTableWidths(incoming.tcols);
       metaForeignRef.current = incoming.metaForeign;
       legacySidecarPathRef.current = incoming.htmlPath
         ? commentsSidecarOf(incoming.htmlPath)
@@ -4236,6 +4277,7 @@ export default function App() {
       flushSidecarWrite,
       captureActiveScroll,
       stashActiveDoc,
+      adoptTableWidths,
       applyDocView,
       scheduleAutosave,
       setSplitState,
@@ -5566,6 +5608,13 @@ export default function App() {
             const meta = parseEntityMeta(r.contents);
             htmlSidecarExistsRef.current = true;
             applyHtmlThreads(meta.hthreads);
+            // Table widths adopt the incoming set for the NEXT open, but the
+            // mounted editor is left alone: re-laying out a table under the
+            // reader (possibly mid-drag) to match another device is worse
+            // than the columns being one session out of date. Taking the
+            // records now also means our next meta write echoes them back
+            // rather than resurrecting what we loaded.
+            adoptTableWidths(meta.tcols);
             metaForeignRef.current = meta.foreign;
             if (pathRef.current) {
               const ids = markerIds(currentMarkdownRef.current);
@@ -5646,6 +5695,7 @@ export default function App() {
     reloadFromDisk,
     scheduleSharePush,
     applyHtmlThreads,
+    adoptTableWidths,
     captureCompanionScroll,
     bumpEditorSeq,
     setSplitState,
@@ -6127,6 +6177,20 @@ export default function App() {
     [scheduleAutosave],
   );
 
+  // The focused editor's table columns were resized (or a header edit moved a
+  // record to a new id — see tableWidths.ts). Widths never reach the markdown,
+  // so this is their only save path: straight into the entity meta, on the
+  // same debounce the comment rail uses. The document is NOT marked dirty —
+  // its text is byte-for-byte what it was.
+  const onTableWidthsChange = useCallback(
+    (records: TableCols[]) => {
+      if (tableWidthsKey(records) === tableWidthsKey(tableWidthsRef.current)) return;
+      adoptTableWidths(records);
+      scheduleSidecarWrite();
+    },
+    [adoptTableWidths, scheduleSidecarWrite],
+  );
+
   // Move the active draft's content into the real file `chosen`: write it,
   // flip the tab in place, re-key any share, start watching the file, and
   // delete the draft. The final step of every Save As path — the in-app prompt
@@ -6142,6 +6206,7 @@ export default function App() {
     // the meta from the app refs, and stale draft refs would clobber it. The
     // draft's own unanchored bodies ride along.
     const draftOrphans = mdOrphansRef.current;
+    const draftTableWidths = tableWidthsRef.current;
     const sibling0 = htmlSiblingOf(chosen);
     const siblingExists0 = await invoke<boolean>("path_exists", { path: sibling0 }).catch(
       () => false,
@@ -6159,6 +6224,17 @@ export default function App() {
       ];
       mdOrphansRef.current = merged;
       setMdOrphans(merged);
+    }
+    // The document travels with the draft, so its table widths do too — but
+    // an existing entity at the target keeps its own (the same rule the
+    // thread bodies above follow: adopt the destination, add what only the
+    // draft had).
+    if (draftTableWidths.length > 0) {
+      const have = new Set(tableWidthsRef.current.map((t) => t.id));
+      adoptTableWidths([
+        ...tableWidthsRef.current,
+        ...draftTableWidths.filter((t) => !have.has(t.id)),
+      ]);
     }
     pathRef.current = chosen;
     snapshotRef.current = null; // Save As: overwrite the chosen target unconditionally
@@ -6209,6 +6285,7 @@ export default function App() {
     scheduleSharePush,
     queueShareOp,
     loadEntityMeta,
+    adoptTableWidths,
     refreshWatchSet,
   ]);
 
@@ -6779,6 +6856,11 @@ export default function App() {
               onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
               readOnly={!focused}
               orphans={focused ? mdOrphanOps : undefined}
+              // A mirror shows the active document, so it renders the active
+              // widths; a two-document companion carries its own. Only the
+              // focused pane writes them back — see tableWidths.ts.
+              tableWidths={focused || isMirror ? tableWidths : doc!.tcols}
+              onTableWidths={focused ? onTableWidthsChange : undefined}
             />
           )}
           {showHtmlHere && (

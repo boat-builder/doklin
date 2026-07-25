@@ -25,6 +25,14 @@
 //       — a bare CriticMarkup reference. Text-embedded anchors survive
 //       edits, external editors, and content merges; only the
 //       conversations move out of the prose.
+//   {"t":"tcols", id, cols}                — one table's column widths in
+//       px (0 = auto). Unlike a thread this record has NO anchor in the
+//       prose: its id is derived from the table's own shape (see
+//       tableWidths.ts). Widths are a view preference, not content — worth
+//       remembering, not worth writing a marker into someone's markdown
+//       for — so identity is content-addressed and best-effort: a table
+//       whose header row or column count changes outside the app simply
+//       falls back to auto widths.
 //   anything else                          — preserved verbatim (a newer
 //       app version's records must survive a rewrite by this one).
 //
@@ -45,6 +53,11 @@ import type { HtmlThread, HtmlAnchor } from "./htmlComments";
 
 export type MdThread = { id: string; comments: CommentEntry[] };
 
+// One table's persisted column widths: `cols[i]` is column i's width in
+// CSS px, 0 meaning "auto" (never resized). Dense — one slot per column —
+// so the array's length doubles as a shape check against the live table.
+export type TableCols = { id: string; cols: number[] };
+
 // A record this app version doesn't understand, carried through rewrites.
 // `sortId` is whatever `id` the line declared ("" when it had none).
 export type ForeignRecord = { t: string; sortId: string; raw: string };
@@ -52,10 +65,16 @@ export type ForeignRecord = { t: string; sortId: string; raw: string };
 export type EntityMeta = {
   mthreads: MdThread[];
   hthreads: HtmlThread[];
+  tcols: TableCols[];
   foreign: ForeignRecord[];
 };
 
-export const emptyMeta = (): EntityMeta => ({ mthreads: [], hthreads: [], foreign: [] });
+export const emptyMeta = (): EntityMeta => ({
+  mthreads: [],
+  hthreads: [],
+  tcols: [],
+  foreign: [],
+});
 
 const HEADER = `{"doklin":"meta","v":1}`;
 
@@ -84,6 +103,14 @@ const isEntry = (value: unknown): value is CommentEntry => {
     typeof e.body === "string"
   );
 };
+
+// A width array: finite, non-negative, integral px. Anything else (NaN from
+// a bad merge, a negative from a hand edit) disqualifies the whole record —
+// a partially-applied width set would render worse than none.
+const isColWidths = (value: unknown): value is number[] =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
 
 const isAnchor = (value: unknown): value is HtmlAnchor => {
   const a = value as HtmlAnchor;
@@ -137,6 +164,10 @@ export function parseEntityMeta(raw: string): EntityMeta {
         anchor: r.anchor as HtmlAnchor,
         comments: r.comments as CommentEntry[],
       });
+    } else if (r.t === "tcols") {
+      if (id === "" || !isColWidths(r.cols)) continue;
+      seen.add(key);
+      meta.tcols.push({ id, cols: r.cols.map((n) => Math.round(n)) });
     } else {
       seen.add(key);
       meta.foreign.push({ t: r.t, sortId: id, raw: trimmed });
@@ -179,6 +210,12 @@ export function serializeEntityMeta(meta: EntityMeta): string {
       }),
     });
   }
+  for (const t of meta.tcols) {
+    rows.push({
+      key: `tcols ${t.id}`,
+      line: JSON.stringify({ t: "tcols", id: t.id, cols: t.cols }),
+    });
+  }
   for (const f of meta.foreign) {
     rows.push({ key: `${f.t} ${f.sortId} ${f.raw}`, line: f.raw });
   }
@@ -188,7 +225,10 @@ export function serializeEntityMeta(meta: EntityMeta): string {
 
 // Does this meta carry anything worth a file on disk?
 export const metaIsEmpty = (meta: EntityMeta): boolean =>
-  meta.mthreads.length === 0 && meta.hthreads.length === 0 && meta.foreign.length === 0;
+  meta.mthreads.length === 0 &&
+  meta.hthreads.length === 0 &&
+  meta.tcols.length === 0 &&
+  meta.foreign.length === 0;
 
 /* ---------- entry / thread union (fold-ins) ---------- */
 
@@ -222,11 +262,11 @@ export function unionThreads<T extends { id: string; comments: CommentEntry[] }>
 
 /* ---------- expand / extract: the disk ⇄ editor boundary ---------- */
 
-// A deterministic id for a thread that arrived without one (hand-written or
-// legacy CriticMarkup). Content-derived so two machines migrating the same
-// file mint the same id and their rewrites stay byte-identical; salted by
-// occurrence index so identical duplicate threads in one document diverge.
-// FNV-1a, twice with different seeds — no async, no crypto dependency.
+// A deterministic id derived from content: two machines looking at the same
+// material mint the same id, so their independent rewrites of this file stay
+// byte-identical. Salted by an occurrence index so identical material
+// appearing twice in one document still gets two ids. FNV-1a, twice with
+// different seeds — no async, no crypto dependency.
 function fnv1a(s: string, seed: number): number {
   let h = seed >>> 0;
   for (let i = 0; i < s.length; i++) {
@@ -236,13 +276,17 @@ function fnv1a(s: string, seed: number): number {
   return h >>> 0;
 }
 
-export function deriveThreadId(material: string, index: number): string {
+export function deriveId(material: string, index: number): string {
   const src = `${index} ${material}`;
   const id = (
     fnv1a(src, 0x811c9dc5).toString(36) + fnv1a(src, 0x01234567).toString(36)
   ).replace(/[^a-z0-9]/g, "");
   return (id + "000000").slice(0, 8);
 }
+
+// The id for a thread that arrived without one (hand-written or legacy
+// CriticMarkup) — see extractMarkdown.
+export const deriveThreadId = deriveId;
 
 export type ExpandResult = {
   md: string;
@@ -384,7 +428,14 @@ export function migrateEntity(input: MigrateInput): MigrateResult {
   const hthreads = input.legacyHtmlThreads
     ? unionThreads(input.meta.hthreads, input.legacyHtmlThreads)
     : input.meta.hthreads;
-  const meta: EntityMeta = { mthreads, hthreads, foreign: input.meta.foreign };
+  // Table widths have no old format to migrate from and no anchor in the
+  // prose to reconcile against — they ride through untouched.
+  const meta: EntityMeta = {
+    mthreads,
+    hthreads,
+    tcols: input.meta.tcols,
+    foreign: input.meta.foreign,
+  };
   return {
     md,
     meta,

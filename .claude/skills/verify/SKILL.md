@@ -38,6 +38,12 @@ node verify-harness/drive-meta.mjs         # 8 steps: boots the REAL <App/> (met
                                            # editor full CriticMarkup, a reply saving meta-only
                                            # (markdown byte-identical), reload persistence,
                                            # orphan cards, deletion scrubbing both files
+node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSISTENCE against
+                                           # the real Editor — a drag emits `tcols` records and
+                                           # leaves the markdown byte-identical, a remount
+                                           # restores the columns on first paint, a header
+                                           # rename re-keys the record instead of orphaning it,
+                                           # and a read-only view resizes without ever emitting
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, sync probes) and walks the split view —
@@ -92,10 +98,12 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 18 steps: gate → comment-mode html comment →
+node verify-harness/drive-web.mjs        # 21 steps: gate → comment-mode html comment →
                                          # reply → read-only md + selection comment
                                          # (CriticMarkup save) → view-role stripping →
                                          # edit-role autosave → desktop-pushed thread pins
+                                         # → desktop-pushed table column widths on BOTH
+                                         # reading paths (static-page colgroup, shell editor)
 node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
                                            # dark), broken-source fallback, shell renders via
                                            # the worker-served /__web mermaid module
@@ -106,7 +114,11 @@ import leaves the embedded-assets stub empty — that's expected; deployable
 bundles embed them via scripts/bundle-worker.mjs).
 
 Also: `node share-worker/test/run.mjs` is the pure-node e2e suite for every
-worker route (no browser needed) — run it for any worker change.
+worker route (no browser needed) — run it for any worker change. It bakes in
+the table-identity ids that `verify-harness/tablewidths.test.mjs` also pins:
+the worker re-derives them from marked's tokens, so a change to
+`src/tableWidths.ts` fails BOTH suites instead of silently dropping column
+widths from published pages. Re-pin in both places, never one.
 
 The desktop⇄web comment-thread three-way merge (the correctness core of pool
 sync) has its own fast unit test — run it for any change to
@@ -114,6 +126,17 @@ sync) has its own fast unit test — run it for any change to
 
 ```sh
 node verify-harness/merge.test.mjs   # deletions stick, eid dedupe, concurrent replies
+```
+
+Two more pure-node unit suites (vite-compiled, no browser):
+
+```sh
+node verify-harness/metafile.test.mjs      # the entity meta file: expand/extract round trip,
+                                           # tolerant parse, deterministic serialization,
+                                           # the idempotent migration step
+node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidths.ts): what
+                                           # keeps a column width and what deliberately drops
+                                           # it, colspan/rowspan, junk records
 ```
 
 ## Rust side
