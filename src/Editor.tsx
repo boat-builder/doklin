@@ -14,7 +14,7 @@ import {
   clearTextInCurrentBlockCommand,
   codeBlockSchema,
 } from "@milkdown/kit/preset/commonmark";
-import { codeBlockConfig } from "@milkdown/kit/component/code-block";
+import { codeBlockConfig, CodeMirrorBlock } from "@milkdown/kit/component/code-block";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import {
@@ -58,6 +58,31 @@ import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
+
+/* ---------- Code block lifetime ----------
+   Crepe's code-block node view lazy-mounts CodeMirror when a block comes
+   within 200px of the viewport and tears it back down 5s after it leaves,
+   swapping a static <pre> placeholder back in. App.css gives that placeholder
+   the mounted editor's exact metrics so the swap costs no height — but a
+   DIAGRAM block can't be matched that way: mounted it shows a rendered
+   mermaid SVG, torn down it shows the source text, and the two differ by
+   hundreds of pixels.
+
+   That mismatch is enough to make the swap self-sustaining. With the block
+   just off-screen, a teardown that grows it (source taller than diagram)
+   pushes it back inside the observer's 200px margin, which remounts it,
+   which shrinks it out of the margin again — so 5s later it tears down once
+   more. The reader sees the document jump, forever, on a page nobody is
+   touching (verify-harness/blink-idle.*: a 5.03s beat, ~±500px of scroll).
+
+   So once a block is mounted, it stays mounted. What that gives up is a
+   memory optimization — one CodeMirror per code block the reader actually
+   scrolled past, a handful in a document-sized editor — and what it buys
+   back, besides the oscillation, is the jump when scrolling up past a
+   diagram. The value must stay a legal setTimeout delay: past 2^31-1 ms
+   timers fire immediately, which would bring the teardown back with worse
+   timing than it has now. */
+CodeMirrorBlock.TEARDOWN_DELAY = 2 ** 31 - 1;
 
 // Document context handed to the dictation polish pass: enough surrounding
 // text for the LLM to disambiguate misheard words, never to rewrite them.

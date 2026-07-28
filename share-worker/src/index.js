@@ -202,7 +202,12 @@ import { WEB_APP } from "./webAssets.js";
 // sessions hand them to the same editor the desktop uses. An older app
 // pushes no `tcols`, which reads as "no stored widths" — the page simply
 // renders at auto width, exactly as it does today.
-const WORKER_VERSION = 18;
+// 19 = a code block, once mounted, keeps its CodeMirror instead of being
+// torn back down off-screen: a diagram block's source and its rendered SVG
+// have different heights, and the teardown/mount swap between them settled
+// into a 5s oscillation that jumped the page on its own (shell-only: no API
+// change — the bump rolls the fix out through the update dialog).
+const WORKER_VERSION = 19;
 const WORKER_FEATURES = [
   "pages",
   "collections",
