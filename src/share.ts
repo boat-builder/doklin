@@ -79,6 +79,13 @@ export type ShareEntry = {
   // root: with it, "no longer in the manifest" reads as remotely unshared
   // (drop the entry); without it, as never-synced (publish it there).
   wsSynced?: boolean;
+  // When reconciliation first found the local file gone (deleting a document
+  // unshares it — the remote mirrors the disk). One grace period must pass,
+  // with the file still missing on a later pass, before the share actually
+  // stops: external tools move files through delete+recreate windows, and a
+  // true rename is adopted (re-keyed) instead. Cleared whenever the file is
+  // seen again.
+  missingSince?: number;
 };
 
 // A folder (or whole-workspace) share: one published "collection" page whose
@@ -109,6 +116,8 @@ export type CollectionEntry = {
   wsSynced?: boolean;
   // Folder codes cover the TOC and every member page — see ShareEntry.
   protected?: boolean;
+  // Missing-directory grace stamp — see ShareEntry.missingSince.
+  missingSince?: number;
 };
 
 // One member reference inside a pushed manifest: the page's id, its display
@@ -780,6 +789,77 @@ export async function deletePage(config: ShareConfig, id: string): Promise<void>
   const res = await apiFetch(config, `/api/pages/${id}`, { method: "DELETE" });
   // 404 = already gone remotely; treat as success so a stale entry can be cleared.
   if (!res.ok && res.status !== 404) throw new Error(`unshare failed (${res.status})`);
+}
+
+/* ---------- Pending unshares ----------
+
+   Deleting a document unshares it, but the remote deletion can't be allowed
+   to depend on the network being up at that moment. So every delete-driven
+   unshare drops the registry entry IMMEDIATELY (all UI agrees the share is
+   over) and parks the remote deletion here; the reconcile pass drains the
+   queue until each page is confirmed gone. Explicit "Stop sharing" keeps its
+   old await-and-throw path — the user is watching, errors should surface. */
+
+export type PendingUnshare = { connectionId: string; pageId: string };
+
+const PENDING_UNSHARES_STORAGE_KEY = "doklin:pending-unshares";
+
+export function readPendingUnshares(): PendingUnshare[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PENDING_UNSHARES_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is PendingUnshare =>
+        p && typeof p.connectionId === "string" && typeof p.pageId === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writePendingUnshares(items: PendingUnshare[]) {
+  try {
+    localStorage.setItem(PENDING_UNSHARES_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // ignore
+  }
+}
+
+const samePending = (a: PendingUnshare, b: PendingUnshare) =>
+  a.connectionId === b.connectionId && a.pageId === b.pageId;
+
+export function enqueuePendingUnshares(items: PendingUnshare[]) {
+  if (items.length === 0) return;
+  const cur = readPendingUnshares();
+  const add = items.filter((i) => !cur.some((c) => samePending(c, i)));
+  if (add.length > 0) writePendingUnshares([...cur, ...add]);
+}
+
+// An undo that restores a share must also rescue its page from the queue —
+// otherwise a not-yet-flushed deletion would kill the page it just revived.
+export function removePendingUnshares(items: PendingUnshare[]) {
+  if (items.length === 0) return;
+  const cur = readPendingUnshares();
+  const kept = cur.filter((c) => !items.some((i) => samePending(c, i)));
+  if (kept.length !== cur.length) writePendingUnshares(kept);
+}
+
+// One queue item's deletion attempt. "done" means the item is finished:
+// deleted, already gone (404), or permanently out of this token's hands
+// (403 — the page belongs to another workspace member; their own device
+// runs the same cleanup). Anything else — offline, 5xx, an auth hiccup the
+// owner may yet fix — is "retry" and stays queued.
+export async function tryDeletePage(
+  config: ShareConfig,
+  id: string,
+): Promise<"done" | "retry"> {
+  let res: Response;
+  try {
+    res = await apiFetch(config, `/api/pages/${id}`, { method: "DELETE" });
+  } catch {
+    return "retry";
+  }
+  return res.ok || res.status === 404 || res.status === 403 ? "done" : "retry";
 }
 
 // Every page the backend holds — the whole deployment's list, not this Mac's

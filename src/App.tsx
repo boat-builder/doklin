@@ -54,6 +54,7 @@ import {
   contentHash,
   deletePage,
   deriveDocTitle,
+  enqueuePendingUnshares,
   fetchPageContent,
   fetchPageThreads,
   fetchWorkerVersion,
@@ -68,7 +69,10 @@ import {
   pushOgImage,
   pushPage,
   readCollections,
+  readPendingUnshares,
   readShares,
+  removePendingUnshares,
+  tryDeletePage,
   readWorkspaceConnectionMap,
   resolveConnection,
   saveConnections,
@@ -405,6 +409,11 @@ const SHARE_PUSH_DEBOUNCE_MS = 1500;
 // Reconciliation (disk vs last-pushed fingerprints) runs at launch and on
 // window focus, but at most this often — focus events come in bursts.
 const SHARE_RECONCILE_MIN_MS = 15_000;
+// How long a share's file must stay missing (across reconcile passes) before
+// the share is stopped for it. Long enough to ride out delete+recreate
+// windows external tools move files through; short enough that a deleted
+// document's public page doesn't outlive it by much.
+const SHARE_MISSING_GRACE_MS = 30_000;
 
 // What a push reads from disk: each rendition's content plus the snapshot of
 // the file it came from, so the stored fingerprint describes exactly the bytes
@@ -412,6 +421,15 @@ const SHARE_RECONCILE_MIN_MS = 15_000;
 type SharePartsOnDisk = ShareParts & {
   mdSnap: FileSnapshot | null;
   htmlSnap: FileSnapshot | null;
+};
+
+// One in-app delete, as undo needs to see it — see deletedStackRef.
+type DeletedRecord = {
+  files: { path: string; trashPath: string }[];
+  openPaths: string[];
+  memberships: { dir: string; member: string }[];
+  shares: ShareEntry[];
+  collections: CollectionEntry[];
 };
 
 // Fingerprint freshly-pushed parts — what reconciliation later compares the
@@ -702,14 +720,11 @@ export default function App() {
   // the file tabs the delete closed (the entry itself for a file, everything
   // under it for a folder) so ⌘Z can reopen them after restoring;
   // `memberships` are the folder-share listings the delete removed, so undo
-  // can put the pages back on their TOC.
-  const deletedStackRef = useRef<
-    {
-      files: { path: string; trashPath: string }[];
-      openPaths: string[];
-      memberships: { dir: string; member: string }[];
-    }[]
-  >([]);
+  // can put the pages back on their TOC. Deleting unshares (the remote
+  // mirrors the disk), so `shares`/`collections` keep the dropped registry
+  // entries — undo cancels their queued page deletions and republishes them
+  // at the same addresses.
+  const deletedStackRef = useRef<DeletedRecord[]>([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
   const baselineCapturedRef = useRef<boolean>(false);
@@ -1534,7 +1549,7 @@ export default function App() {
   // entry instead of being silently overwritten. `force` drops that claim —
   // the explicit "keep mine" resolution.
   const pushSharedNow = useCallback(
-    async (target: string, opts?: { force?: boolean }) => {
+    async (target: string, opts?: { force?: boolean; og?: boolean }) => {
       const entry = sharesRef.current[target];
       if (!entry) return;
       const config = await connectionForEntry(entry);
@@ -1544,7 +1559,7 @@ export default function App() {
         ? (Object.values(collectionsRef.current).find((c) => c.id === entry.collectionId) ?? null)
         : null;
       const parts = await readShareParts(target);
-      if (!parts) return; // source is gone; the share stays until stopped explicitly
+      if (!parts) return; // source is gone; reconcile's disk-truth pass stops the share
       // The document names itself when it opens with an H1 (html-only pages:
       // their <title>); only untitled documents fall back to the file name.
       const title =
@@ -1560,7 +1575,9 @@ export default function App() {
           wsStampFor(target, entry.connectionId),
           opts?.force ? null : entry.pushedRev,
         );
-        if (title !== entry.title) await pushOgImage(config, entry.id, title);
+        // `og` forces the image (an undo republishing a deleted page — the
+        // remote OG died with it); otherwise only a title change re-renders.
+        if (opts?.og || title !== entry.title) await pushOgImage(config, entry.id, title);
         const pushed = await fingerprintParts(parts);
         updateShares((prev) =>
           prev[target]
@@ -1615,6 +1632,238 @@ export default function App() {
       );
     },
     [pushSharedNow],
+  );
+
+  /* ---------- Delete-driven unshares ----------
+     Deleting a document (or losing it to an external tool) stops its share:
+     the registry forgets the entry NOW — every badge, TOC and count agrees
+     immediately — and the remote page deletion is parked on a durable queue
+     (share.ts) that reconciliation drains, so being offline at delete time
+     changes nothing. Explicit Stop sharing keeps its await-and-surface path
+     in stopSharing below. */
+
+  // Drain the pending-unshare queue: one DELETE per parked page, item
+  // removed on "done" (gone, or permanently untouchable), kept on "retry".
+  // Re-reads the queue before each attempt so an undo that just rescued a
+  // page (removePendingUnshares) wins over an in-flight flush.
+  const pendingUnshareBusyRef = useRef(false);
+  const flushPendingUnshares = useCallback(async () => {
+    if (pendingUnshareBusyRef.current) return;
+    pendingUnshareBusyRef.current = true;
+    try {
+      const items = readPendingUnshares();
+      if (items.length === 0) return;
+      const st = await getConnections();
+      for (const it of items) {
+        const still = readPendingUnshares().some(
+          (p) => p.pageId === it.pageId && p.connectionId === it.connectionId,
+        );
+        if (!still) continue;
+        const config = st.connections.find((c) => c.id === it.connectionId);
+        if (!config) {
+          // Connection removed: the page is out of reach forever — drop the
+          // item rather than wedging the queue (same call stopSharing makes).
+          removePendingUnshares([it]);
+          continue;
+        }
+        if ((await tryDeletePage(config, it.pageId)) === "done") {
+          removePendingUnshares([it]);
+        }
+      }
+    } finally {
+      pendingUnshareBusyRef.current = false;
+    }
+  }, []);
+
+  // Stop a share because its file is gone: queue the remote deletion, forget
+  // the entry, delist it from every surviving folder TOC, and tell a synced
+  // workspace. `record` collects what an undo must restore (in-app deletes);
+  // reconciliation passes none — there's nothing to undo to.
+  const dropShareEntry = useCallback(
+    (target: string, record?: DeletedRecord) => {
+      const entry = sharesRef.current[target];
+      if (!entry) return;
+      enqueuePendingUnshares([{ connectionId: entry.connectionId, pageId: entry.id }]);
+      const timers = sharePushTimersRef.current;
+      const pending = timers.get(target);
+      if (pending != null) {
+        window.clearTimeout(pending);
+        timers.delete(target);
+      }
+      // The page (and its access section) is going away — the cached
+      // plaintext codes are dead weight now.
+      forgetAccessCodes(entry.connectionId, entry.id);
+      record?.shares.push(entry);
+      updateShares((prev) => {
+        const { [target]: _gone, ...rest } = prev;
+        return rest;
+      });
+      for (const c of Object.values(collectionsRef.current)) {
+        if (!c.members.includes(target)) continue;
+        record?.memberships.push({ dir: c.path, member: target });
+        updateCollections((prev) =>
+          prev[c.path]
+            ? {
+                ...prev,
+                [c.path]: {
+                  ...prev[c.path],
+                  members: prev[c.path].members.filter((m) => m !== target),
+                },
+              }
+            : prev,
+        );
+        scheduleCollectionPush(c.path);
+      }
+      // In a synced workspace: the entry is gone, so this queues a "forget".
+      queueShareOp(target);
+    },
+    [updateShares, updateCollections, scheduleCollectionPush, queueShareOp],
+  );
+
+  // The folder-share counterpart: queue the collection page's deletion and
+  // forget the entry. Member pages are NOT touched here — the caller decides
+  // (an in-app folder delete drops them too, since their files died with the
+  // folder; reconciliation reaches them through their own missing files).
+  const dropCollectionEntry = useCallback(
+    (dirPath: string, record?: DeletedRecord) => {
+      const entry = collectionsRef.current[dirPath];
+      if (!entry) return;
+      enqueuePendingUnshares([{ connectionId: entry.connectionId, pageId: entry.id }]);
+      const timers = collectionPushTimersRef.current;
+      const pending = timers.get(dirPath);
+      if (pending != null) {
+        window.clearTimeout(pending);
+        timers.delete(dirPath);
+      }
+      forgetAccessCodes(entry.connectionId, entry.id);
+      record?.collections.push(entry);
+      updateCollections((prev) => {
+        const { [dirPath]: _gone, ...rest } = prev;
+        return rest;
+      });
+      // In a synced workspace: forget the collection everywhere.
+      queueCollectionOp(dirPath, entry.id);
+    },
+    [updateCollections, queueCollectionOp],
+  );
+
+  // A share's file vanished — but a rename done outside the app (an agent,
+  // Finder, `mv`) looks exactly like that, and killing the page over it
+  // would burn the address for nothing. A true rename preserves content
+  // byte-for-byte and the entry's fingerprint remembers exactly what was
+  // pushed, so: scan the file's own directory for an unshared document of
+  // the same kind whose raw size matches the fingerprint's snapshot and
+  // whose (expanded, for markdown) hash matches its hash, and re-key the
+  // share onto it — same page id, same URL, folder membership follows.
+  // Anything less certain returns false and falls through to the grace
+  // path: an edited-then-renamed file reads as delete + new document.
+  const tryAdoptRename = useCallback(
+    async (entry: ShareEntry): Promise<boolean> => {
+      if (entry.kind !== "file") return false;
+      const isMd = MD_EXT_RE.test(entry.path);
+      const fp = isMd ? entry.pushed?.md : entry.pushed?.html;
+      if (!fp?.snap || !fp.hash) return false;
+      let tree: TreeNode;
+      try {
+        tree = await invoke<TreeNode>("list_md_tree", { path: dirname(entry.path) });
+      } catch {
+        return false; // parent directory gone too — nothing to adopt from
+      }
+      const candidates: string[] = [];
+      const collect = (n: TreeNode) => {
+        if (n.kind === "file") candidates.push(n.path);
+        else for (const c of n.children) collect(c);
+      };
+      collect(tree);
+      for (const cand of candidates) {
+        if (cand === entry.path) continue;
+        if (MD_EXT_RE.test(cand) !== isMd) continue; // same document kind only
+        if (sharesRef.current[cand]) continue; // already its own share
+        const snap = await invoke<FileSnapshot>("stat_file", { path: cand }).catch(
+          () => null,
+        );
+        if (!snap || snap.size !== fp.snap.size) continue;
+        let hash: string;
+        try {
+          const r = await invoke<ReadFileResult>("read_file", { path: cand });
+          let content = r.contents;
+          if (isMd) {
+            // The fingerprint hashes the EXPANDED document (thread bodies
+            // re-inlined from the meta) — mirror that. A renamed file whose
+            // meta rode along expands identically; one whose meta was left
+            // behind expands to itself, which still matches a share that
+            // never had threads.
+            let mthreads: MdThread[] = [];
+            try {
+              const m = await invoke<ReadFileResult>("read_file", {
+                path: metaFileOf(cand),
+              });
+              mthreads = parseEntityMeta(m.contents).mthreads;
+            } catch {
+              // no meta file
+            }
+            content = expandMarkdown(content, mthreads).md;
+          }
+          hash = await contentHash(content);
+        } catch {
+          continue;
+        }
+        if (hash !== fp.hash) continue;
+        // The scans above awaited; make sure the entry is still ours to move
+        // (not re-keyed or replaced underneath) before committing.
+        if (sharesRef.current[entry.path]?.id !== entry.id) return false;
+        // Adopt: re-key the entry, keep everything else (id, fingerprints,
+        // comment state — the content is bit-identical).
+        const { missingSince: _clear, ...rest } = entry;
+        const adopted: ShareEntry = { ...rest, path: cand };
+        updateShares((prev) => {
+          const { [entry.path]: _gone, ...others } = prev;
+          return { ...others, [cand]: adopted };
+        });
+        // Folder membership follows the rename while the file stays under
+        // the shared folder; a move OUT of it delists (the page share lives
+        // on, its crumb clears with the next push) — same rules as movePath.
+        for (const c of Object.values(collectionsRef.current)) {
+          if (!c.members.includes(entry.path)) continue;
+          const keep = cand.startsWith(c.path + "/");
+          updateCollections((prev) =>
+            prev[c.path]
+              ? {
+                  ...prev,
+                  [c.path]: {
+                    ...prev[c.path],
+                    members: keep
+                      ? prev[c.path].members.map((m) => (m === entry.path ? cand : m))
+                      : prev[c.path].members.filter((m) => m !== entry.path),
+                  },
+                }
+              : prev,
+          );
+          scheduleCollectionPush(c.path);
+          if (!keep) {
+            updateShares((prev) => {
+              const cur = prev[cand];
+              if (!cur?.collectionId) return prev;
+              const { collectionId: _c, ...restCur } = cur;
+              return { ...prev, [cand]: restCur };
+            });
+          }
+        }
+        // A filename-derived title (and the folder crumb) may have changed;
+        // one push refreshes both, and the OG image follows a title change.
+        scheduleSharePush(cand);
+        queueShareOp(cand);
+        return true;
+      }
+      return false;
+    },
+    [
+      updateShares,
+      updateCollections,
+      scheduleCollectionPush,
+      scheduleSharePush,
+      queueShareOp,
+    ],
   );
 
   // Does `entry`'s local disk content differ from what was last pushed?
@@ -1829,11 +2078,21 @@ export default function App() {
   // page without waiting for the next focus.
   const lastReconcileRef = useRef(0);
   const reconcileTimerRef = useRef<number | null>(null);
+  // Armed when a pass leaves something in its missing-file grace window, so
+  // the confirming pass arrives on its own instead of waiting for the next
+  // focus.
+  const missingRecheckTimerRef = useRef<number | null>(null);
   const reconcileShares = useCallback(async () => {
     if (!isMainWindow) return;
     const entries = Object.values(sharesRef.current);
     const colEntries = Object.values(collectionsRef.current);
-    if (entries.length === 0 && colEntries.length === 0) return;
+    if (
+      entries.length === 0 &&
+      colEntries.length === 0 &&
+      readPendingUnshares().length === 0
+    ) {
+      return;
+    }
     const now = Date.now();
     const wait = SHARE_RECONCILE_MIN_MS - (now - lastReconcileRef.current);
     if (wait > 0) {
@@ -1847,8 +2106,81 @@ export default function App() {
     }
     lastReconcileRef.current = now;
     const st = await getConnections();
+    // Remote page deletions parked by delete-driven unshares drain here —
+    // before the connections guard, since the flush is also what drops items
+    // whose connection no longer exists.
+    await flushPendingUnshares();
     if (st.connections.length === 0) return;
+    // ---- Disk truth first. A share whose file is GONE isn't stale — it's
+    // over: deleting a document unshares it. An external rename is adopted
+    // (same bytes, new path, same page) before anything drastic; a genuine
+    // disappearance gets one grace window (missingSince) so the
+    // delete+recreate churn external tools produce can't kill a page, then
+    // the share stops and the page deletion joins the durable queue.
+    // Entries under a synced root delegate the verdict to the workspace
+    // manifest instead — local absence may just be a download that hasn't
+    // landed yet — and stop only when the manifest says the file is dead
+    // (alive:false) while the engine is settled (a mid-sync snapshot isn't
+    // evidence).
+    const skip = new Set<string>();
+    let inGrace = false;
+    let dropped = false;
     for (const entry of entries) {
+      const ws = syncStatusesRef.current.find(
+        (w) =>
+          w.phase !== "removed" &&
+          w.connectionId === entry.connectionId &&
+          (entry.path === w.root || entry.path.startsWith(w.root + "/")),
+      );
+      const stripMissing = () => {
+        updateShares((prev) => {
+          const cur = prev[entry.path];
+          if (!cur || cur.missingSince === undefined) return prev;
+          const { missingSince: _m, ...rest } = cur;
+          return { ...prev, [entry.path]: rest };
+        });
+      };
+      if (ws) {
+        const eff = ws.shares.find((s) => s.id === entry.id);
+        const settled = ws.phase === "idle" || ws.phase === "pending-deletes";
+        if (eff && !eff.alive && settled) {
+          dropShareEntry(entry.path);
+          skip.add(entry.path);
+          dropped = true;
+        } else if (entry.missingSince !== undefined) {
+          stripMissing();
+        }
+        continue;
+      }
+      const snap = await invoke<FileSnapshot>("stat_file", { path: entry.path }).catch(
+        () => null,
+      );
+      if (snap) {
+        if (entry.missingSince !== undefined) stripMissing();
+        continue;
+      }
+      skip.add(entry.path);
+      try {
+        if (await tryAdoptRename(entry)) continue;
+      } catch (e) {
+        console.error("rename adoption failed", entry.path, e);
+      }
+      if (entry.missingSince === undefined) {
+        updateShares((prev) =>
+          prev[entry.path]
+            ? { ...prev, [entry.path]: { ...prev[entry.path], missingSince: now } }
+            : prev,
+        );
+        inGrace = true;
+      } else if (now - entry.missingSince >= SHARE_MISSING_GRACE_MS) {
+        dropShareEntry(entry.path);
+        dropped = true;
+      } else {
+        inGrace = true;
+      }
+    }
+    for (const entry of entries) {
+      if (skip.has(entry.path)) continue;
       try {
         if (await shareNeedsPush(entry)) scheduleSharePush(entry.path);
       } catch (e) {
@@ -1861,6 +2193,7 @@ export default function App() {
     // a popover conflict when it doesn't.
     const byConn = new Map<string, ShareEntry[]>();
     for (const entry of entries) {
+      if (skip.has(entry.path)) continue; // missing or just unshared
       const list = byConn.get(entry.connectionId);
       if (list) list.push(entry);
       else byConn.set(entry.connectionId, [entry]);
@@ -1907,7 +2240,48 @@ export default function App() {
     // A folder share's manifest is derived state (member ids, names, relative
     // paths); recompute it and re-push when it drifts from what's live — this
     // also catches a push that failed offline (the stored hash never updated).
+    // Disk truth applies to the folder itself first (non-synced roots only:
+    // a synced collection's directory may simply not have materialized on
+    // this machine yet — and an empty-but-wanted folder never will — so the
+    // manifest owns those verdicts).
     for (const c of colEntries) {
+      const ws = syncStatusesRef.current.find(
+        (w) =>
+          w.phase !== "removed" &&
+          w.connectionId === c.connectionId &&
+          (c.path === w.root || c.path.startsWith(w.root + "/")),
+      );
+      if (!ws) {
+        const exists = await invoke<boolean>("path_exists", { path: c.path }).catch(
+          () => true,
+        );
+        if (!exists) {
+          if (c.missingSince === undefined) {
+            updateCollections((prev) =>
+              prev[c.path]
+                ? { ...prev, [c.path]: { ...prev[c.path], missingSince: now } }
+                : prev,
+            );
+            inGrace = true;
+          } else if (now - c.missingSince >= SHARE_MISSING_GRACE_MS) {
+            // Members died with the directory; their own missing files run
+            // the file pass above, so only the collection page stops here.
+            dropCollectionEntry(c.path);
+            dropped = true;
+          } else {
+            inGrace = true;
+          }
+          continue;
+        }
+        if (c.missingSince !== undefined) {
+          updateCollections((prev) => {
+            const cur = prev[c.path];
+            if (!cur || cur.missingSince === undefined) return prev;
+            const { missingSince: _m, ...rest } = cur;
+            return { ...prev, [c.path]: rest };
+          });
+        }
+      }
       try {
         const hash = await collectionManifestHash(c.title, collectionItemsFor(c), c.description);
         if (hash !== c.pushedHash || c.title !== c.pushedTitle) {
@@ -1917,7 +2291,30 @@ export default function App() {
         console.error("collection reconcile failed", c.path, e);
       }
     }
-  }, [shareNeedsPush, scheduleSharePush, pullWebEdit, collectionItemsFor, scheduleCollectionPush]);
+    // Shares stopped this pass parked page deletions after the flush above
+    // already ran — send them now rather than waiting for the next focus.
+    if (dropped) void flushPendingUnshares();
+    // Something is mid-grace: make sure the confirming pass happens even if
+    // no focus event brings one.
+    if (inGrace && missingRecheckTimerRef.current == null) {
+      missingRecheckTimerRef.current = window.setTimeout(() => {
+        missingRecheckTimerRef.current = null;
+        void reconcileShares();
+      }, SHARE_MISSING_GRACE_MS + 1_000);
+    }
+  }, [
+    shareNeedsPush,
+    scheduleSharePush,
+    pullWebEdit,
+    collectionItemsFor,
+    scheduleCollectionPush,
+    flushPendingUnshares,
+    dropShareEntry,
+    dropCollectionEntry,
+    tryAdoptRename,
+    updateShares,
+    updateCollections,
+  ]);
 
   // In-file find (⌘F): a bar over the editor that drives the ProseMirror search
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
@@ -4751,6 +5148,11 @@ export default function App() {
           } catch (e) {
             console.error("delete_draft failed", e);
           }
+          // A shared draft dies with its file — deleting unshares.
+          if (sharesRef.current[tab.path]) {
+            dropShareEntry(tab.path);
+            void flushPendingUnshares();
+          }
           const { [tab.id]: _removed, ...rest } = draftsMetaRef.current;
           draftsMetaRef.current = rest;
           writeDraftsMeta(rest);
@@ -4779,7 +5181,15 @@ export default function App() {
         if (target) await loadActiveContent(target);
       }
     },
-    [flushPendingAutosave, clearActiveDoc, loadActiveContent, swapFocus, closeSplit],
+    [
+      flushPendingAutosave,
+      clearActiveDoc,
+      loadActiveContent,
+      swapFocus,
+      closeSplit,
+      dropShareEntry,
+      flushPendingUnshares,
+    ],
   );
 
   // Discard a draft from the drafts panel: if it's open in a tab, close that tab
@@ -4795,13 +5205,18 @@ export default function App() {
         } catch (e) {
           console.error("delete_draft failed", e);
         }
+        // A shared draft dies with its file — deleting unshares.
+        if (sharesRef.current[p]) {
+          dropShareEntry(p);
+          void flushPendingUnshares();
+        }
         const { [id]: _removed, ...rest } = draftsMetaRef.current;
         draftsMetaRef.current = rest;
         writeDraftsMeta(rest);
       }
       await refreshDraftsPanel();
     },
-    [closeTab, refreshDraftsPanel],
+    [closeTab, refreshDraftsPanel, dropShareEntry, flushPendingUnshares],
   );
 
   // Keep the drafts panel in sync: refresh when it opens, whenever the open
@@ -4815,7 +5230,8 @@ export default function App() {
   // menu). The backend returns where the entry landed inside the Trash so
   // undoDelete can pull it straight back out — a true restore that leaves no
   // stale copy. Any tabs on the entry (or inside it, for a folder) are closed
-  // first.
+  // first. Shares on (or under) the target stop with it — deleting unshares —
+  // and undo brings them back at the same addresses.
   const deleteEntry = useCallback(
     async (target: string, kind: "file" | "dir") => {
       // Close affected tabs first (flushing their content while the files still
@@ -4884,19 +5300,34 @@ export default function App() {
         }
         await trashCompanion(commentsSidecarOf(target), "comments");
       }
-      // A deleted member drops off its folder share's TOC (the published page
-      // itself stays live — delete ≠ unshare, same as standalone shares). A
-      // deleted folder that IS a shared folder (or contains one) is left
-      // frozen instead: its collection page stays live for cleanup from
-      // Shared pages, and undo restores everything exactly as it was.
-      const memberships: { dir: string; member: string }[] = [];
+      // Deleting unshares — the remote mirrors the disk. Folder shares
+      // rooted at (or under) the target stop first (captured whole, members
+      // intact, so undo can restore them verbatim), then every shared file
+      // at (or under) it: page deletions are queued durably, the registry
+      // forgets the entries, and surviving folder TOCs delist them. Undo
+      // reverses all of it — same page ids, so the links come back.
+      const record: DeletedRecord = {
+        files,
+        openPaths: affected.map((t) => t.path),
+        memberships: [],
+        shares: [],
+        collections: [],
+      };
+      const under = (p: string) =>
+        p === target || (kind === "dir" && p.startsWith(target + "/"));
+      for (const p of Object.keys(collectionsRef.current).filter(under)) {
+        dropCollectionEntry(p, record);
+      }
+      for (const p of Object.keys(sharesRef.current).filter(under)) {
+        dropShareEntry(p, record);
+      }
+      // Belt over braces: delist any member path under the target that had
+      // no share entry of its own (a registry that drifted shouldn't leave
+      // phantom TOC rows behind).
       for (const c of Object.values(collectionsRef.current)) {
-        if (c.path === target || c.path.startsWith(target + "/")) continue;
-        const gone = c.members.filter(
-          (m) => m === target || (kind === "dir" && m.startsWith(target + "/")),
-        );
+        const gone = c.members.filter(under);
         if (gone.length === 0) continue;
-        for (const m of gone) memberships.push({ dir: c.path, member: m });
+        for (const m of gone) record.memberships.push({ dir: c.path, member: m });
         updateCollections((prev) =>
           prev[c.path]
             ? {
@@ -4910,11 +5341,8 @@ export default function App() {
         );
         scheduleCollectionPush(c.path);
       }
-      deletedStackRef.current.push({
-        files,
-        openPaths: affected.map((t) => t.path),
-        memberships,
-      });
+      void flushPendingUnshares();
+      deletedStackRef.current.push(record);
       const sels = sidebarSelectionRef.current;
       const kept = sels.filter(
         (s) => s.path !== target && !s.path.startsWith(target + "/"),
@@ -4922,12 +5350,21 @@ export default function App() {
       if (kept.length !== sels.length) selectSidebarEntries(kept);
       setTreeRefreshToken((t) => t + 1);
     },
-    [closeTab, selectSidebarEntries, updateCollections, scheduleCollectionPush],
+    [
+      closeTab,
+      selectSidebarEntries,
+      updateCollections,
+      scheduleCollectionPush,
+      dropShareEntry,
+      dropCollectionEntry,
+      flushPendingUnshares,
+    ],
   );
 
   // Undo the most recent trash (⌘Z outside the editor): move the entry (and
-  // any rendition trashed with it) back out of the Trash to its original path
-  // and reopen the tabs the delete closed.
+  // any rendition trashed with it) back out of the Trash to its original
+  // path, revive the shares the delete stopped, and reopen the tabs it
+  // closed.
   const undoDelete = useCallback(async () => {
     const entry = deletedStackRef.current.pop();
     if (!entry) return;
@@ -4946,6 +5383,48 @@ export default function App() {
     }
     if (!restoredAny) return;
     setTreeRefreshToken((t) => t + 1);
+    // Rescue the queued page deletions FIRST — a flush racing this undo
+    // re-checks the queue before each DELETE, so pages pulled back here
+    // survive. (A deletion already in flight loses to the republish below,
+    // which lands after it.)
+    removePendingUnshares([
+      ...entry.shares.map((s) => ({ connectionId: s.connectionId, pageId: s.id })),
+      ...entry.collections.map((c) => ({ connectionId: c.connectionId, pageId: c.id })),
+    ]);
+    // Folder shares come back whole (members intact). The remote page may
+    // already be gone, so drop the pushed markers: the absent hash forces an
+    // establishing manifest push, the absent title a fresh OG image.
+    for (const c of entry.collections) {
+      const { pushedHash: _h, pushedTitle: _t, missingSince: _m, ...rest } = c;
+      updateCollections((prev) => ({ ...prev, [c.path]: rest }));
+      scheduleCollectionPush(c.path);
+      queueCollectionOp(c.path);
+    }
+    // Page shares republish at their old ids — but as a fresh page: the
+    // deletion took the revision counter, comment pool, OG image and access
+    // codes with it, so every marker describing remote state is dropped
+    // (fingerprints force the establishing push; commentsDirty re-seeds the
+    // pool from the local sidecar when there was one to lose; protection is
+    // gone and its cached plaintexts were already forgotten).
+    for (const s of entry.shares) {
+      const {
+        pushed: _p,
+        pushedRev: _r,
+        webConflict: _w,
+        commentsRev: _cr,
+        commentsBase: _cb,
+        protected: _sec,
+        missingSince: _m,
+        ...rest
+      } = s;
+      const revived: ShareEntry = {
+        ...rest,
+        ...(s.commentsRev !== undefined || s.commentsDirty ? { commentsDirty: true } : {}),
+      };
+      updateShares((prev) => ({ ...prev, [s.path]: revived }));
+      queueShareOp(s.path);
+      void pushSharedNow(s.path, { og: true });
+    }
     // Restored members return to the folder shares that listed them (when
     // those shares still exist).
     const tocDirs = new Set<string>();
@@ -4959,7 +5438,15 @@ export default function App() {
     }
     for (const d of tocDirs) scheduleCollectionPush(d);
     for (const p of entry.openPaths) await openTab(p, "file");
-  }, [openTab, updateCollections, scheduleCollectionPush]);
+  }, [
+    openTab,
+    updateCollections,
+    updateShares,
+    scheduleCollectionPush,
+    queueCollectionOp,
+    queueShareOp,
+    pushSharedNow,
+  ]);
 
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint every piece of state that keys
@@ -6023,9 +6510,9 @@ export default function App() {
           }
         }
         for (const eff of ws.shares) {
-          // Dead shares (file deleted, page kept) grow no new entries; the
-          // machines that already list them keep theirs, same as a local
-          // delete has always behaved.
+          // Dead shares (file deleted workspace-wide) grow no new entries;
+          // machines that still list one stop it through the reconcile
+          // pass's alive:false check — deleting unshares everywhere.
           if (!eff.alive || seenIds.has(eff.id)) continue;
           const abs = absOf(eff.path);
           if (nextShares[abs]) continue; // occupied by another share — local wins
