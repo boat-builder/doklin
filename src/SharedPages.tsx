@@ -5,10 +5,10 @@
 // to the folder-share dialog for management, since stopping a folder needs
 // its keep-or-stop-the-pages choice.
 //
-// The registry is keyed by local path, so a share whose source was deleted or
-// moved outside the app stays listed (the published copy is still live) —
-// those rows get a "file missing" flag, and this modal is where such orphans
-// get stopped manually.
+// The registry is keyed by local path. A share whose source vanished outside
+// the app shows a transient "file missing" flag: the reconcile pass adopts a
+// rename (same content, new path) or, after its grace window, stops the share
+// — deleting unshares — so such rows clean themselves up shortly.
 //
 // This modal is also where a deployment's public face is managed, per
 // connection: the landing-page branding (name + profile link, stored in the
