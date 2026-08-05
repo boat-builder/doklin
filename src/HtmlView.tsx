@@ -65,6 +65,14 @@ type Props = {
   // Any pointerdown inside the sandboxed frame (which the app can't observe
   // directly) — the split view uses it to move pane focus here.
   onGesture?: () => void;
+  // Document zoom (⌘+ / ⌘-), the same factor the markdown editor scales by.
+  // The rendition lives behind the sandbox, so the bridge applies it inside
+  // the frame; hosts that don't zoom (the web share, where the browser's own
+  // zoom does the job) leave it at 1.
+  zoom?: number;
+  // A zoom chord pressed while focus is inside the frame (1 in, -1 out, 0
+  // reset) — the app's own key handler can't see those.
+  onZoomKey?: (dir: number) => void;
 };
 
 // Imperative surface for the split view's scroll sync: drive this rendition
@@ -88,6 +96,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     commentsEnabled = true,
     onScrollRatio,
     onGesture,
+    zoom = 1,
+    onZoomKey,
   }: Props,
   ref,
 ) {
@@ -123,6 +133,10 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   onScrollRatioRef.current = onScrollRatio;
   const onGestureRef = useRef(onGesture);
   onGestureRef.current = onGesture;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const onZoomKeyRef = useRef(onZoomKey);
+  onZoomKeyRef.current = onZoomKey;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
 
@@ -161,6 +175,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
       threads: bridgeThreads(threadsRef.current),
       activeId: activeIdRef.current,
       visible: modeRef.current,
+      zoom: zoomRef.current,
     });
   }, [postToBridge]);
 
@@ -169,7 +184,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   // fresh bridge says "ready" and gets the same sync.)
   useEffect(() => {
     syncBridge();
-  }, [threads, activeId, mode, syncBridge]);
+  }, [threads, activeId, mode, zoom, syncBridge]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -210,6 +225,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         onScrollRatioRef.current?.(msg.ratio);
       } else if (msg.type === "gesture") {
         onGestureRef.current?.();
+      } else if (msg.type === "zoom-key") {
+        onZoomKeyRef.current?.(msg.dir);
       }
     };
     window.addEventListener("message", onMessage);

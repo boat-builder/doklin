@@ -356,6 +356,44 @@ const SESSION_STORAGE_KEY = "doklin:session";
 const DRAFT_SEQ_STORAGE_KEY = "doklin:draft-seq";
 const DRAFTS_META_STORAGE_KEY = "doklin:drafts-meta";
 const DRAFTS_OPEN_STORAGE_KEY = "doklin:drafts-open";
+const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
+
+/* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
+   One factor scales BOTH versions of a document, so switching MD↔HTML never
+   changes the reading size: the markdown editor's typography derives from
+   --doc-zoom on <html> (App.css), and the html rendition is zoomed inside its
+   sandboxed frame by the comment bridge (htmlBridge.ts). App chrome doesn't
+   scale — this is a reading control, not a window zoom.
+
+   The setting is per app, not per document, and persists across launches —
+   font size is about the reader's eyes, not about the file. Discrete rungs
+   (browser-style) keep every step meaningful and reversible. */
+const DOC_ZOOM_STEPS = [0.75, 0.85, 1, 1.15, 1.3, 1.5, 1.75, 2];
+const DOC_ZOOM_DEFAULT = 1;
+
+function nearestZoomStep(z: number): number {
+  return DOC_ZOOM_STEPS.reduce(
+    (best, s) => (Math.abs(s - z) < Math.abs(best - z) ? s : best),
+    DOC_ZOOM_DEFAULT,
+  );
+}
+
+// Snapped to a rung on the way in: a stale or hand-edited value would
+// otherwise strand ⌘+/⌘- off the ladder.
+function readStoredDocZoom(): number {
+  try {
+    const v = parseFloat(localStorage.getItem(DOC_ZOOM_STORAGE_KEY) || "");
+    if (Number.isFinite(v)) return nearestZoomStep(v);
+  } catch {
+    // ignore
+  }
+  return DOC_ZOOM_DEFAULT;
+}
+
+function stepDocZoom(current: number, dir: 1 | -1): number {
+  const i = DOC_ZOOM_STEPS.indexOf(nearestZoomStep(current));
+  return DOC_ZOOM_STEPS[Math.min(DOC_ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
+}
 
 type RecentEntry = { path: string; kind: "file" | "folder" };
 
@@ -751,6 +789,7 @@ export default function App() {
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+  const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
   // rendition exists on disk; `docView` = which version the editor area shows;
@@ -2461,6 +2500,18 @@ export default function App() {
       // ignore
     }
   }, [theme]);
+
+  // The markdown editor reads the factor straight off <html> (App.css); the
+  // html rendition gets it as a prop, since only the bridge can reach inside
+  // the sandboxed frame.
+  useEffect(() => {
+    document.documentElement.style.setProperty("--doc-zoom", String(docZoom));
+    try {
+      localStorage.setItem(DOC_ZOOM_STORAGE_KEY, String(docZoom));
+    } catch {
+      // ignore
+    }
+  }, [docZoom]);
 
   useEffect(() => {
     writeStoredSidebarOpen(sidebarOpen);
@@ -6922,6 +6973,13 @@ export default function App() {
     [openTab, selectDocView, wsCase],
   );
 
+  // The one place document zoom moves: the window key handler below and the
+  // rendition frame's forwarded chords (it swallows keys of its own — see
+  // HtmlView) both land here. 1 = in, -1 = out, 0 = reset.
+  const nudgeDocZoom = useCallback((dir: number) => {
+    setDocZoom((z) => (dir === 0 ? DOC_ZOOM_DEFAULT : stepDocZoom(z, dir > 0 ? 1 : -1)));
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Esc dismisses an active in-file highlight even when the find bar isn't
@@ -7056,6 +7114,20 @@ export default function App() {
           if (docViewRef.current === "html") await selectDocView("md");
           await dictationRef.current?.toggle();
         })();
+      } else if (e.code === "Equal" || e.code === "NumpadAdd") {
+        // ⌘+ / ⌘- / ⌘0: document zoom, both versions (see DOC_ZOOM_STEPS).
+        // e.code, not e.key: on most layouts ⌘+ arrives as ⌘⇧= — matching the
+        // physical key accepts it with or without shift, like every browser.
+        // It fires wherever focus is (typing included): resizing the text you
+        // are reading is never ambiguous.
+        e.preventDefault();
+        nudgeDocZoom(1);
+      } else if (e.code === "Minus" || e.code === "NumpadSubtract") {
+        e.preventDefault();
+        nudgeDocZoom(-1);
+      } else if (e.code === "Digit0" || e.code === "Numpad0") {
+        e.preventDefault();
+        nudgeDocZoom(0);
       } else if (k === "z" && !e.shiftKey) {
         // ⌘Z restores a trashed file — but only when focus is outside the
         // editor, so it stays as Milkdown's text-undo while typing.
@@ -7088,6 +7160,7 @@ export default function App() {
     openWorkspaceSearch,
     selectDocView,
     toggleSplit,
+    nudgeDocZoom,
   ]);
 
   useEffect(() => {
@@ -7366,6 +7439,8 @@ export default function App() {
               onThreadsChange={focused || !doc ? onHtmlThreadsChange : noopThreadsChange}
               commentAuthor={syncDeviceName}
               commentsEnabled={focused || !doc}
+              zoom={docZoom}
+              onZoomKey={nudgeDocZoom}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}
               onGesture={
                 side === effectiveSplit?.side && !focused

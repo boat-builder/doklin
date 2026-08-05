@@ -48,13 +48,15 @@ import type { HtmlAnchor, HtmlThread } from "./htmlComments";
 
 // What the app sends the bridge. `threads` carries anchors only — bodies stay
 // app-side. Sent on ready and on every change (threads are few; simplicity
-// over deltas).
+// over deltas). `zoom` is the document-zoom factor (⌘+ / ⌘-), applied to the
+// rendition inside the frame — the app can't touch its DOM from out here.
 export type BridgeSyncMsg = {
   dk: "doklin-comments";
   type: "sync";
   threads: { id: string; anchor: HtmlAnchor }[];
   activeId: string | null;
   visible: boolean;
+  zoom: number;
 };
 export type BridgeScrollToMsg = { dk: "doklin-comments"; type: "scroll-to"; id: string };
 // Split-view scroll sync: the app drives the iframe's document scroll to a
@@ -96,6 +98,10 @@ export type BridgeScrollMsg = { dk: "doklin-comments"; type: "scroll"; ratio: nu
 // Any pointerdown inside the rendition. The iframe swallows clicks (separate
 // browsing context), so this is how the app knows to move pane focus there.
 export type BridgeGestureMsg = { dk: "doklin-comments"; type: "gesture" };
+// A zoom chord pressed while focus sits inside the frame: 1 = in, -1 = out,
+// 0 = reset. Key events don't cross the frame boundary either, so without
+// this the shortcuts would go dead the moment the reader clicks the page.
+export type BridgeZoomKeyMsg = { dk: "doklin-comments"; type: "zoom-key"; dir: number };
 export type BridgeOutMsg =
   | BridgeReadyMsg
   | BridgeLayoutMsg
@@ -103,7 +109,8 @@ export type BridgeOutMsg =
   | BridgeActivateMsg
   | BridgeOpenMsg
   | BridgeScrollMsg
-  | BridgeGestureMsg;
+  | BridgeGestureMsg
+  | BridgeZoomKeyMsg;
 
 export function isBridgeMsg(data: unknown): data is BridgeOutMsg {
   const d = data as { dk?: string; type?: string };
@@ -203,6 +210,8 @@ const BRIDGE_SCRIPT = `
   var activeId = null;
   var resolved = {}; // id -> Element (may go stale; layout() re-resolves)
   var hoverEl = null;
+  var zoom = 1; // document zoom (⌘+ / ⌘-), driven by the app
+  var rectK = 1; // getBoundingClientRect -> viewport px (see measureRectK)
 
   function post(msg) {
     msg.dk = NS;
@@ -269,6 +278,45 @@ const BRIDGE_SCRIPT = `
     return best;
   }
 
+  /* ----- document zoom ----- */
+
+  // The rendition scales with CSS \`zoom\`, not a transform: zoom is a
+  // layout-level scale, so text re-flows and re-renders crisply at the new
+  // size (a transform rasterizes once and stretches the bitmap — see the
+  // WKWebView blur that rules transforms out for zoom UIs). It rides on
+  // <body>, so the comment layer's own chrome — appended to body, hence
+  // inside the zoomed subtree — cancels it with the inverse and keeps
+  // living in viewport pixels.
+  function applyZoom(z) {
+    zoom = typeof z === "number" && z > 0 ? z : 1;
+    document.body.style.zoom = zoom === 1 ? "" : String(zoom);
+    var inv = zoom === 1 ? "" : String(1 / zoom);
+    scrim.style.zoom = inv;
+    bubble.style.zoom = inv;
+    measureRectK();
+  }
+
+  // Rects cross to the app in VIEWPORT pixels (the overlay shares the
+  // iframe's box but none of its zoom). Spec-compliant \`zoom\` already
+  // reports getBoundingClientRect that way; implementations predating the
+  // 2024 zoom spec report unzoomed layout pixels instead. Rather than bet on
+  // the engine, measure a known-width probe inside the zoomed subtree: it
+  // comes back as 100*zoom under the new behavior (factor 1) and 100 under
+  // the old one (factor zoom).
+  function measureRectK() {
+    if (zoom === 1) {
+      rectK = 1;
+      return;
+    }
+    var probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;top:0;left:0;width:100px;height:0;visibility:hidden;pointer-events:none";
+    document.body.appendChild(probe);
+    var w = probe.getBoundingClientRect().width;
+    document.body.removeChild(probe);
+    rectK = w > 0 ? (100 * zoom) / w : 1;
+  }
+
   /* ----- paint + layout ----- */
 
   var layoutQueued = false;
@@ -281,9 +329,16 @@ const BRIDGE_SCRIPT = `
     });
   }
 
+  // Every rect the bridge acts on goes through here, so the zoom correction
+  // is applied exactly once, in one place.
   function rectOf(el) {
     var r = el.getBoundingClientRect();
-    return { top: r.top, left: r.left, width: r.width, height: r.height };
+    return {
+      top: r.top * rectK,
+      left: r.left * rectK,
+      width: r.width * rectK,
+      height: r.height * rectK
+    };
   }
 
   function layout() {
@@ -346,12 +401,12 @@ const BRIDGE_SCRIPT = `
     for (var i = 0; i < threads.length; i++) {
       var el = resolved[threads[i].id];
       if (el && el.isConnected) {
-        var r = el.getBoundingClientRect();
+        var r = rectOf(el);
         ctx.clearRect(r.left - 6, r.top - 6, r.width + 12, r.height + 12);
       }
     }
     if (hoverEl && hoverEl.isConnected) {
-      var hr = hoverEl.getBoundingClientRect();
+      var hr = rectOf(hoverEl);
       ctx.clearRect(hr.left - 6, hr.top - 6, hr.width + 12, hr.height + 12);
     }
   }
@@ -377,7 +432,7 @@ const BRIDGE_SCRIPT = `
       if (node.id !== "dk-bubble") {
         var d = getComputedStyle(node).display;
         if (d !== "inline" && d !== "contents" && d !== "none") {
-          var r = node.getBoundingClientRect();
+          var r = rectOf(node);
           if (r.height > 4 && r.width > 4) {
             if (r.height <= window.innerHeight * 0.7) return node;
             return null; // page-sized wrapper: no bubble here
@@ -399,9 +454,10 @@ const BRIDGE_SCRIPT = `
       return;
     }
     el.setAttribute("data-dk-hover", "1");
-    var r = el.getBoundingClientRect();
+    var r = rectOf(el);
     bubble.style.top = Math.max(4, Math.min(r.top + 4, window.innerHeight - 32)) + "px";
-    bubble.style.left = Math.max(4, Math.min(r.right - 30, window.innerWidth - 34)) + "px";
+    bubble.style.left =
+      Math.max(4, Math.min(r.left + r.width - 30, window.innerWidth - 34)) + "px";
     bubble.classList.add("dk-on");
     drawScrim();
   }
@@ -507,6 +563,8 @@ const BRIDGE_SCRIPT = `
       threads = Array.isArray(msg.threads) ? msg.threads : [];
       activeId = typeof msg.activeId === "string" ? msg.activeId : null;
       visible = msg.visible !== false;
+      var z = typeof msg.zoom === "number" && msg.zoom > 0 ? msg.zoom : 1;
+      if (z !== zoom) applyZoom(z);
       if (!visible) setHover(null);
       scheduleLayout();
     } else if (msg.type === "scroll-to") {
@@ -555,6 +613,25 @@ const BRIDGE_SCRIPT = `
     "pointerdown",
     function () {
       post({ type: "gesture" });
+    },
+    true
+  );
+
+  // Once the reader clicks into the rendition, keystrokes stop at the frame
+  // boundary — the app's window listener never sees them. Forward the three
+  // zoom chords so ⌘+ / ⌘- / ⌘0 keep working here; nothing else crosses (this
+  // is not a general key tunnel out of arbitrary markup).
+  document.addEventListener(
+    "keydown",
+    function (e) {
+      if (!e.metaKey && !e.ctrlKey) return;
+      var dir = null;
+      if (e.code === "Equal" || e.code === "NumpadAdd") dir = 1;
+      else if (e.code === "Minus" || e.code === "NumpadSubtract") dir = -1;
+      else if (e.code === "Digit0" || e.code === "Numpad0") dir = 0;
+      if (dir === null) return;
+      e.preventDefault();
+      post({ type: "zoom-key", dir: dir });
     },
     true
   );
