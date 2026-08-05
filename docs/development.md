@@ -65,6 +65,12 @@ Switching tabs and quitting also flush, so unsaved keystrokes aren't lost.
 - `⌘⇧D` — toggle the drafts panel
 - `⌘Z` / `⌘⇧Z` — undo / redo (also `⌘Y` for redo). `⌘Z` outside the editor
   restores a file deleted with `⌘⌫` from the sidebar.
+- `⌘+` / `⌘-` / `⌘0` — zoom the document in / out / back to 100%. One ladder of
+  steps scales both versions of a document — the markdown editor through the
+  `--doc-zoom` variable on `<html>` (`App.css`), the html rendition through the
+  comment bridge inside its sandboxed frame (which also forwards these chords
+  back out, since keys pressed in the frame never reach the app). App chrome
+  doesn't scale; the setting is per app and persists across launches.
 - All Milkdown/Crepe inline-format shortcuts: `⌘B` bold, `⌘I` italic, `⌘K` link, etc.
 - `/` on a new line — slash menu (headings, lists, code blocks, tables, …)
 

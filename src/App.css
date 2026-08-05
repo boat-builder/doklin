@@ -723,12 +723,23 @@ body,
   min-height: 100%;
 }
 
+/* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
+   --doc-zoom is set on <html> by App.tsx; the html rendition scales by the
+   same factor inside its iframe (see htmlBridge.ts), so both versions of a
+   document read at one size. Only the DOCUMENT scales — app chrome
+   (sidebar, tabs, menus) is deliberately untouched.
+
+   Everything in the document derives from the .ProseMirror base below: the
+   headings are in em, and crepe leaves the rest (lists, quotes, table cells,
+   CodeMirror content) inheriting. Keep it that way — a px font-size added
+   anywhere inside .ProseMirror silently opts that element out of zoom.
+   The canvas padding stays fixed: zoom is about type size, not margins. */
 .editor-wrap .milkdown .ProseMirror {
   max-width: 1080px;
   margin: 0 auto;
   padding: 24px 64px 240px;
   min-height: calc(100vh - 74px);
-  font-size: 16px;
+  font-size: calc(16px * var(--doc-zoom, 1));
   line-height: 1.6;
 }
 
@@ -990,30 +1001,32 @@ body,
   letter-spacing: -0.01em;
 }
 
+/* Sizes are em (of the 16px-at-100% base above) so document zoom carries
+   them: 2em = 32px, 1.5em = 24px, 1.1875em = 19px, 1em = 16px. */
 .editor-wrap .milkdown .ProseMirror h1 {
-  font-size: 32px;
+  font-size: 2em;
   line-height: 1.25;
   margin-top: 28px;
 }
 .editor-wrap .milkdown .ProseMirror h2 {
-  font-size: 24px;
+  font-size: 1.5em;
   line-height: 1.3;
   margin-top: 24px;
 }
 .editor-wrap .milkdown .ProseMirror h3 {
-  font-size: 19px;
+  font-size: 1.1875em;
   line-height: 1.35;
   margin-top: 20px;
 }
 .editor-wrap .milkdown .ProseMirror h4,
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
-  font-size: 16px;
+  font-size: 1em;
   margin-top: 16px;
 }
 
 .editor-wrap .milkdown .ProseMirror p {
-  font-size: 16px;
+  font-size: 1em;
   line-height: 1.6;
   padding: 3px 0;
 }
