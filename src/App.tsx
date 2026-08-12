@@ -116,6 +116,7 @@ import {
   type TableCols,
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
+import { linkTargetPath } from "./docLinks";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -3991,6 +3992,33 @@ export default function App() {
     );
   }, []);
 
+  // A link the reader clicked inside a note (see linkOpen.ts for which clicks
+  // count as following one). Notion's split, applied to files: an external URL
+  // leaves for the browser or mail client, an internal one — a markdown/html
+  // file next to the note — opens in a tab right here. Anything else is left
+  // alone: a link to a .png or a missing file does nothing rather than
+  // guessing, and a foreign scheme (javascript:, data:, a custom app scheme)
+  // is never handed to the OS.
+  const followDocLink = useCallback(
+    async (href: string, fromPath: string | null) => {
+      const url = href.trim();
+      if (/^(https?:|mailto:)/i.test(url)) {
+        openExternal(url);
+        return;
+      }
+      const target = linkTargetPath(url, fromPath);
+      if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
+      try {
+        if (await invoke<boolean>("path_exists", { path: target })) {
+          await openTab(target, "file");
+        }
+      } catch (e) {
+        console.error("open linked document failed", e);
+      }
+    },
+    [openExternal, openTab],
+  );
+
   // Publish the active document at <endpoint>/<id> on the given connection
   // and record the share. Throws on failure so the share popover can surface
   // the error.
@@ -7421,6 +7449,10 @@ export default function App() {
               // focused pane writes them back — see tableWidths.ts.
               tableWidths={focused || isMirror ? tableWidths : doc!.tcols}
               onTableWidths={focused ? onTableWidthsChange : undefined}
+              // Relative links resolve against the document this pane is
+              // showing, so a note in another folder links to its own
+              // neighbours correctly.
+              onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
             />
           )}
           {showHtmlHere && (

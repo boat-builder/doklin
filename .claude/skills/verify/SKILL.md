@@ -29,6 +29,12 @@ node verify-harness/shot-mermaid.mjs       # optional: full-page shots of the di
 node verify-harness/drive-inline-code.mjs  # 7 steps: hard-wrapped inline code spans parse to a
                                            # single-space value, render one-line, and serialize
                                            # back on one line
+node verify-harness/drive-links.mjs        # 25 steps: click-to-follow for links (src/linkOpen.ts)
+                                           # — which clicks follow and which fall through to the
+                                           # caret (modifier, drag, second half of a double click),
+                                           # a follow never navigating the page, #anchors scrolling
+                                           # in-editor, Crepe's hover tooltip url, read-only
+                                           # documents, and the schemes openInBrowserTab refuses
 node verify-harness/drive-meta.mjs         # 8 steps: boots the REAL <App/> (meta.html seeds
                                            # OLD-layout docs) and walks the entity-meta layout
                                            # (src/metaFile.ts) — lazy migration on open (inline
@@ -53,7 +59,10 @@ node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (sp
                                            # iframe gesture, sync scroll off-by-default then
                                            # chained (md↔html and md↔md), divider + sidebar
                                            # resize, sidebar-file and tab drag-to-pane drop
-                                           # zones, session-restore round trip
+                                           # zones, session-restore round trip, and (riding the
+                                           # same real-app boot) following a link between notes:
+                                           # a sibling opens in a tab, a missing target does
+                                           # nothing, an external url goes to open_external
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -128,7 +137,7 @@ sync) has its own fast unit test — run it for any change to
 node verify-harness/merge.test.mjs   # deletions stick, eid dedupe, concurrent replies
 ```
 
-Two more pure-node unit suites (vite-compiled, no browser):
+Three more pure-node unit suites (vite-compiled, no browser):
 
 ```sh
 node verify-harness/metafile.test.mjs      # the entity meta file: expand/extract round trip,
@@ -137,6 +146,10 @@ node verify-harness/metafile.test.mjs      # the entity meta file: expand/extrac
 node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidths.ts): what
                                            # keeps a column width and what deliberately drops
                                            # it, colspan/rowspan, junk records
+node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
+                                           # (src/docLinks.ts): relative/absolute/file:// targets,
+                                           # percent escapes, dropped fragments, what is
+                                           # deliberately not a path, "." / ".." folding
 ```
 
 ## Rust side

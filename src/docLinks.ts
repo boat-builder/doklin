@@ -1,0 +1,55 @@
+// Where a link written inside a note points on disk.
+//
+// The click gesture lives in linkOpen.ts; this is the other half of Notion's
+// "an internal link opens in the app" — except that in a folder of markdown
+// files, "internal" means a path: `[the other note](./other.md)`. Pure string
+// work, so it can be tested without a filesystem (verify-harness/doclinks.test.mjs);
+// whether the target actually exists is the caller's question.
+
+// Fold "." and ".." out of a slash path, the way the filesystem would. A ".."
+// that walks past an absolute root is dropped; on a relative path it is kept,
+// so the result stays a truthful (if unopenable) path rather than a wrong one.
+export function normalizePath(p: string): string {
+  const absolute = p.startsWith("/");
+  const out: string[] = [];
+  for (const seg of p.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+      else if (!absolute) out.push("..");
+      continue;
+    }
+    out.push(seg);
+  }
+  return (absolute ? "/" : "") + out.join("/");
+}
+
+const dirOf = (p: string) => {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : p;
+};
+
+/**
+ * Resolve a link's href against the note it was written in — "./other.md",
+ * "../archive/x.md", "/Users/me/notes/x.md", "file:///…". Returns null when
+ * the target can't be placed: an external URL, or a relative link in a
+ * document that has no path of its own (an unsaved draft).
+ *
+ * A #fragment or ?query is dropped — opening the document is as far as a link
+ * between files takes us.
+ */
+export function linkTargetPath(href: string, fromPath: string | null): string | null {
+  let raw = href.trim();
+  if (/^file:\/\//i.test(raw)) raw = raw.slice("file://".length);
+  else if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return null; // some other scheme: not a path
+  raw = raw.split("#")[0].split("?")[0];
+  if (!raw) return null;
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // a malformed escape sequence — take the path as written
+  }
+  if (raw.startsWith("/")) return normalizePath(raw);
+  if (!fromPath) return null;
+  return normalizePath(`${dirOf(fromPath)}/${raw}`);
+}

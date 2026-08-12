@@ -261,6 +261,45 @@ step(
   dupTitles && (await page.locator(".editor-pane").count()) === 2,
 );
 
+/* 19 — following a link between notes (rides this harness because it is the
+   one that boots the REAL app on a workspace; the click gesture itself is
+   drive-links.mjs) */
+await header("right").locator(".pane-header-close").click();
+await poll(async () => (await page.locator(".pane-header").count()) === 0);
+await page.locator('[data-tree-path="/docs/linked.md"]').click();
+await poll(async () =>
+  (await page.locator(".ProseMirror h1").first().textContent())?.includes("Linked"),
+);
+const activeTabLabel = () => page.locator(".tab.is-active .tab-label").textContent();
+const tabCount = () => page.locator(".tab").count();
+
+await page.locator(".milkdown .ProseMirror a", { hasText: "the other note" }).click();
+await poll(async () => (await activeTabLabel())?.includes("other"));
+step(
+  "a link to a note next door opens that note (Notion's internal link)",
+  (await activeTabLabel())?.includes("other"),
+  await activeTabLabel(),
+);
+
+await page.locator(".tab", { hasText: "linked" }).click();
+await poll(async () => (await activeTabLabel())?.includes("linked"));
+const beforeMissing = await tabCount();
+await page.locator(".milkdown .ProseMirror a", { hasText: "a missing one" }).click();
+await page.waitForTimeout(300);
+step(
+  "a link to a file that isn't there does nothing (no empty tab)",
+  (await tabCount()) === beforeMissing && (await activeTabLabel())?.includes("linked"),
+);
+
+await page.locator(".milkdown .ProseMirror a", { hasText: "the web" }).click();
+await poll(async () =>
+  page.evaluate(() => (window.__opened ?? []).includes("https://example.com/")),
+);
+step(
+  "an external link goes to the system browser, not into a tab",
+  (await tabCount()) === beforeMissing && (await activeTabLabel())?.includes("linked"),
+);
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} steps passed`);
 await browser.close();

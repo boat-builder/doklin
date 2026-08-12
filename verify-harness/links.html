@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Editor link-click harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+      #controls { padding: 8px; display: flex; gap: 8px; border-bottom: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Minimal Tauri IPC stub. The editor never invokes on its own — the host
+      // decides where a followed link goes — but the stub keeps any stray
+      // invoke from throwing, and records open_external so a missing host
+      // handler would still be visible.
+      window.__invoked = [];
+      window.__TAURI_INTERNALS__ = {
+        invoke: (cmd, args) => {
+          window.__invoked.push({ cmd, args });
+          return Promise.resolve(null);
+        },
+        transformCallback: (cb) => cb,
+        metadata: {},
+      };
+    </script>
+    <div id="controls">
+      <button id="toggle-readonly">toggle read-only</button>
+      <span id="readonly-state">editable</span>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="./links.tsx"></script>
+  </body>
+</html>

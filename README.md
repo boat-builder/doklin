@@ -20,6 +20,12 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   in the app's own palette (all four themes), the document stays plain
   markdown, and shared pages render them too — the reading view, the web
   editor, everywhere.
+- **Links that go somewhere** — click a link to follow it, the way you would in
+  Notion: a web address opens in your browser, an address next door
+  (`[the plan](./plan.md)`) opens that note in a tab, and a `#heading` jumps
+  down the page. Hovering shows the URL with edit/copy/remove, so changing a
+  link never means opening it — and `⌘`-click puts the caret in the link text
+  when you want to type there.
 - **Folder workspaces** — open a directory to get a collapsible sidebar of its
   markdown files, with VS Code-style file management: create, rename, and
   delete files and folders from the context menu, and drag rows onto a folder

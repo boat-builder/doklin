@@ -39,6 +39,7 @@ import {
 import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
+import { linkOpenPlugin, openInBrowserTab } from "./linkOpen";
 import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
 import {
@@ -180,6 +181,13 @@ type Props = {
   // their resizes stay session-only. Unlike `tableWidths` this IS read
   // live, so a pane promoted without a remount starts persisting at once.
   onTableWidths?: (records: TableCols[]) => void;
+  // A link the reader followed (clicked), href verbatim from the markdown —
+  // see linkOpen.ts for which clicks count. Hosts route it: the desktop app
+  // sends external URLs to the system browser and in-workspace paths to a tab,
+  // the web shell opens a browser tab. In-document `#anchors` never arrive
+  // here; the editor scrolls to them itself. Read-only views follow links too
+  // — a published page is exactly where links matter most.
+  onOpenLink?: (href: string) => void;
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -293,6 +301,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     orphans,
     tableWidths,
     onTableWidths,
+    onOpenLink,
   },
   ref,
 ) {
@@ -347,6 +356,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   orphansRef.current = orphans;
   const onTableWidthsRef = useRef(onTableWidths);
   onTableWidthsRef.current = onTableWidths;
+  const onOpenLinkRef = useRef(onOpenLink);
+  onOpenLinkRef.current = onOpenLink;
 
   const report = () => {
     const view = viewRef.current;
@@ -488,6 +499,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // (see inlineCodeNewlines.ts).
     crepe.editor.use([...inlineCodeNewlines]);
     crepe.editor.use(searchPlugin);
+    // Click-to-follow for links (linkOpen.ts). Registered for read-only views
+    // too — following a link is reading, not editing. Hosts that don't say
+    // where links go get a browser tab.
+    crepe.editor.use(linkOpenPlugin(() => onOpenLinkRef.current ?? openInBrowserTab));
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
     crepe.editor.use(ghostPlugin);
