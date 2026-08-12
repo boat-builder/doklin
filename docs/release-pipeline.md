@@ -4,7 +4,7 @@ How a commit on `main` becomes a signed, notarized, downloadable app that
 existing installs update themselves to. Written from Doklin's actual pipeline
 (`.github/workflows/release.yml`), but structured so it can be lifted into any
 future Tauri desktop app — the per-app knobs are collected in
-[Reusing this for a new app](#reusing-this-for-a-new-app).
+[Reusing this for a new app](#8-reusing-this-for-a-new-app).
 
 **Scope: macOS, Apple Silicon.** That's what Doklin ships and what this pipeline
 builds — the Rust backend has macOS-only call sites (grep `macOS-only`) and the
@@ -308,6 +308,10 @@ Frontend contract lives in [`src/updater.ts`](../src/updater.ts): a quiet check
 on mount, a manual re-check from Settings, and a
 download→verify→install→relaunch action, with `RELEASES_PAGE` as the
 manual-download fallback when any of it fails.
+
+The consumer side of this — the client state machine, the Settings UI, the
+security model, and a portable checklist for adding one-click updates to another
+Tauri app — is written up in [auto-update.md](auto-update.md).
 
 ---
 

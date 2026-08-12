@@ -95,9 +95,13 @@ Deeper docs live in dedicated files to keep this page focused:
   publishing works, the storage layout, the API contract, and
   **[step-by-step setup of your own backend](share-worker/README.md#set-up-your-own-backend)**
   (Cloudflare Worker + R2; a compatible backend on any other stack also works).
-- **[docs/release-pipeline.md](docs/release-pipeline.md)** — how a push to
-  `main` becomes a signed, notarized DMG on GitHub Releases: the CI/CD jobs,
-  Apple signing + notarization, the auto-update manifest, the secrets, a failure
-  playbook, and a checklist for reusing the pipeline in another app.
+- **[docs/release-pipeline.md](docs/release-pipeline.md)** — the *producer* side:
+  how a push to `main` becomes a signed, notarized DMG on GitHub Releases —
+  the CI/CD jobs, Apple signing + notarization, the auto-update manifest, the
+  secrets, a failure playbook, and a checklist for reusing the pipeline.
+- **[docs/auto-update.md](docs/auto-update.md)** — the *consumer* side: the
+  one-click in-app update feature — its UI flow and state machine, the
+  signed-manifest architecture and why it's safe, and a **portable checklist
+  for adding the same feature to another Tauri app**.
 - **[docs/tabs-drafts-followups.md](docs/tabs-drafts-followups.md)** — design
   notes and deferred follow-ups for the tabs + drafts system.
