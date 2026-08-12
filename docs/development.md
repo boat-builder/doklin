@@ -2,8 +2,9 @@
 
 Architecture, saving internals, and the full keyboard / UI / theme reference.
 Start here for any code change. For the share backend see
-[../share-worker/README.md](../share-worker/README.md); for tabs/drafts design
-notes see [tabs-drafts-followups.md](tabs-drafts-followups.md).
+[../share-worker/README.md](../share-worker/README.md); for the in-app updater
+and the release pipeline see [auto-update.md](auto-update.md); for tabs/drafts
+design notes see [tabs-drafts-followups.md](tabs-drafts-followups.md).
 
 ## Run from source
 
