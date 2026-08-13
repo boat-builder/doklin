@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type EditorHandle } from "../src/Editor";
+import { openInBrowserTab } from "../src/linkOpen";
 import type { TableCols } from "../src/tableWidths";
 import HtmlView from "../src/HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "../src/htmlComments";
@@ -561,6 +562,11 @@ export default function WebApp({ boot }: { boot: Boot }) {
             // local adjustment for the length of the session, same as it is
             // in a read-only pane on the desktop.
             tableWidths={boot.tcols ?? []}
+            // A followed link behaves like a link on any web page: a new tab,
+            // the browser resolving it against this page. The desktop's other
+            // half — a relative link opening the note next door — has no
+            // meaning here, where the note's neighbours aren't published.
+            onOpenLink={openInBrowserTab}
           />
           {showBubble && (
             <SelectionCommentBubble

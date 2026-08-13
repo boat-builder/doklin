@@ -36,6 +36,13 @@
         ["/docs/notes.html", htmlDoc("Notes rendition", 80)],
         ["/docs/other.md", `# Other\n\n${para("other", 40)}\n`],
         ["/docs/third.md", `# Third\n\n${para("third", 40)}\n`],
+        // A note that links to its neighbours — the internal half of
+        // click-to-follow (src/linkOpen.ts → App's followDocLink).
+        [
+          "/docs/linked.md",
+          `# Linked\n\nSee [the other note](./other.md) and ` +
+            `[a missing one](./gone.md), plus [the web](https://example.com/).\n`,
+        ],
       ]);
       window.__mtime = 1000;
       window.__writes = [];
@@ -83,6 +90,7 @@
                   { kind: "file", name: "notes.md", path: "/docs/notes.md", paired: true },
                   { kind: "file", name: "other.md", path: "/docs/other.md" },
                   { kind: "file", name: "third.md", path: "/docs/third.md" },
+                  { kind: "file", name: "linked.md", path: "/docs/linked.md" },
                 ],
               });
             case "stat_file": {

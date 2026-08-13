@@ -1694,12 +1694,21 @@ fn delete_share_config(app: AppHandle) -> Result<(), String> {
     }
 }
 
-/// Opens an http(s) URL in the default browser (share links). macOS-only, like
-/// `reveal_in_finder`; a cross-platform port would use xdg-open / `start`.
+/// Opens a URL with the system handler: http(s) in the default browser (share
+/// links, links followed inside a note) and mailto: in the mail client. Every
+/// other scheme is refused — `open` would happily launch a local app for a
+/// custom scheme, and nothing in the app has a reason to ask for that.
+/// macOS-only, like `reveal_in_finder`; a cross-platform port would use
+/// xdg-open / `start`.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(format!("refusing to open non-http url: {}", url));
+    let scheme_ok = ["https://", "http://", "mailto:"].iter().any(|prefix| {
+        url.len() > prefix.len()
+            // get(): a url starting with a multi-byte char must not panic the slice
+            && url.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    });
+    if !scheme_ok {
+        return Err(format!("refusing to open url: {}", url));
     }
     #[cfg(target_os = "macos")]
     {

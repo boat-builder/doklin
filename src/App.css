@@ -1036,6 +1036,14 @@ body,
   font-style: normal;
 }
 
+/* Links follow on click (linkOpen.ts), so they get a link's cursor — set on
+   the anchor itself, which beats the text cursor the surface (and web.css's
+   read-only rule) hands down by inheritance. The Crepe theme already gives
+   them the underline; hovering brings up Crepe's tooltip with the URL. */
+.editor-wrap .milkdown .ProseMirror a {
+  cursor: pointer;
+}
+
 /* Table column drag-resize (tableResize.ts). prosemirror-tables' stock css
    (imported by the Crepe theme) provides the handle box and col-resize
    cursor; this restyles its hardcoded #adf to the app accent. Widths are
