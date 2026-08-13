@@ -101,6 +101,12 @@ Deeper docs live in dedicated files to keep this page focused:
   publishing works, the storage layout, the API contract, and
   **[step-by-step setup of your own backend](share-worker/README.md#set-up-your-own-backend)**
   (Cloudflare Worker + R2; a compatible backend on any other stack also works).
+- **[docs/self-hosted-backend-flow.md](docs/self-hosted-backend-flow.md)** — the
+  *flow* around that backend rather than its contract: how a user deploys their
+  own instance in three ways, how the app detects a deployment running older
+  worker code and guides the redeploy, the naming/ownership hazards, and a
+  **portable checklist for giving another app the same user-deployed backend
+  flow**.
 - **[docs/release-pipeline.md](docs/release-pipeline.md)** — the *producer* side:
   how a push to `main` becomes a signed, notarized DMG on GitHub Releases —
   the CI/CD jobs, Apple signing + notarization, the auto-update manifest, the

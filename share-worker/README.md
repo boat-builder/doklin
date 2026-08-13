@@ -539,6 +539,11 @@ Updating by hand works the same way: fetch the latest bundle (or pull the
 repo), deploy over the **same worker name** — a different name creates a
 second worker instead of updating this one.
 
+How that whole loop is built — the version handshake, the three setup/update
+routes, the naming hazards, and a checklist for giving another app the same
+flow — is documented in
+[docs/self-hosted-backend-flow.md](../docs/self-hosted-backend-flow.md).
+
 ## Using a non-Cloudflare / S3 backend
 
 This worker is Cloudflare-specific: it stores objects through the R2 *binding*
