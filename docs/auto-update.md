@@ -65,9 +65,8 @@ independent key for updates:
   Yours, generated locally, unrelated to Apple.
 
 You need both. The updater key is the one you generate once per app and must
-never lose (losing it means every installed copy is permanently stranded on its
-current version — they'll only accept artifacts signed by the pubkey they were
-built with; the only recovery is telling users to download a fresh build by hand).
+never lose — see [the gotchas](#gotchas-paid-for-the-hard-way) for why that's
+unrecoverable rather than merely annoying.
 
 ### Client state machine
 
@@ -128,9 +127,9 @@ Whatever CI you use, it must, in one run, for one version number:
 5. **Publish** the artifact, the human-download installer, and a freshly
    generated manifest to a stable, publicly fetchable location.
 
-Step 1 is the one people underrate. If the app reports `0.1.59` but the manifest
-says `0.1.60` and the tag is `v0.1.61`, users get an update loop or no update at
-all.
+Step 1 is the one people underrate — see
+[version drift](#gotchas-paid-for-the-hard-way). Doklin's implementation of all
+five is [docs/release-pipeline.md](release-pipeline.md).
 
 ### Manifest format (Tauri v2 static)
 
@@ -291,7 +290,7 @@ from Part 1:
 
 | Pipeline step | Why the updater needs it |
 | --- | --- |
-| The `bump` job stamps one version into `package.json`, `tauri.conf.json`, `Cargo.toml` and `Cargo.lock`, asserting after each | The version the app *reports* and the version the manifest *advertises* must be the same number, or the semver compare misfires — see [version drift](#gotchas-paid-for-the-hard-way) |
+| The `bump` job stamps one version into every file that carries one, asserting after each | The version the app *reports* and the version the manifest *advertises* must be the same number, or the semver compare misfires — see [version drift](#gotchas-paid-for-the-hard-way) |
 | `TAURI_SIGNING_PRIVATE_KEY` is set during `tauri build` | Produces the `.sig` — without it, `createUpdaterArtifacts` fails the build rather than shipping an unsigned artifact |
 | The publish step generates `latest.json` (inlining the `.sig`, pinning the artifact URL to the tag) and marks the release `make_latest` | `make_latest` is what makes the stable `releases/latest/download/latest.json` endpoint resolve to this build |
 
@@ -388,6 +387,10 @@ Apple holding a submission past the 6-hour job ceiling — see
   Removing `darwin-x86_64` doesn't break existing Intel installs — they simply
   stop seeing updates, which is how Doklin retired Intel. Announce it in release
   notes; nothing in the app will.
+- **A pubkey that doesn't match the signing key fails silently too.** Nothing in
+  CI compares `plugins.updater.pubkey` against the `TAURI_SIGNING_PRIVATE_KEY`
+  secret, so the release looks perfect and every install rejects it. Suspect this
+  first when a *newly configured* app has never successfully updated.
 - **Losing the private key is unrecoverable.** Installed copies only accept
   artifacts signed by the pubkey they were built with. Back it up outside CI.
 

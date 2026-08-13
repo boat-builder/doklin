@@ -1,14 +1,18 @@
-# Release pipeline — build, sign, notarize, publish, auto-update
+# Release pipeline — build, sign, notarize, publish
 
-How a commit on `main` becomes a signed, notarized, downloadable app that
-existing installs update themselves to. Written from Doklin's actual pipeline
-(`.github/workflows/release.yml`), but structured so it can be lifted into any
-future Tauri desktop app — the per-app knobs are collected in
-[Reusing this for a new app](#8-reusing-this-for-a-new-app).
+How a commit on `main` becomes a signed, notarized, downloadable app. Written
+from Doklin's actual pipeline (`.github/workflows/release.yml`), but structured
+so it can be lifted into any future Tauri desktop app — the per-app knobs are
+collected in [Reusing this for a new app](#8-reusing-this-for-a-new-app).
 
 **Scope: macOS, Apple Silicon.** That's what Doklin ships and what this pipeline
 builds — the Rust backend has macOS-only call sites (grep `macOS-only`) and the
 dictation sidecar is Swift/Metal.
+
+**Companion doc.** This is the *producer* half. What a running app does with
+what CI publishes — the update manifest's semantics, the client state machine,
+the Settings UI, the app-side plugin wiring — is
+[docs/auto-update.md](auto-update.md), and this doc defers to it for all of it.
 
 ---
 
@@ -243,24 +247,15 @@ ticket.
 
 ### 4.7 Updater manifest
 
-The `.app.tar.gz` from the build is copied as-is; its `.sig` contents go into a
-hand-built `latest.json`:
+The `.app.tar.gz` from the build is copied as-is, and CI hand-builds a
+`latest.json` beside it: this run's version and a UTC `pub_date`, the `.sig`
+file's contents inlined as `signature`, and a `url` pinned to **this tag** — the
+manifest is fetched from a moving `latest` URL, but the payload it names is
+immutable. Only `darwin-aarch64` is emitted.
 
-```json
-{
-  "version": "0.1.60",
-  "notes": "Automatic update to Doklin v0.1.60. …",
-  "pub_date": "<UTC ISO8601>",
-  "platforms": {
-    "darwin-aarch64": { "signature": "<contents of .sig>", "url": "https://github.com/…/releases/download/v0.1.60/Doklin.app.tar.gz" }
-  }
-}
-```
-
-The `url` is pinned to the **tag**, not to `latest` — the manifest is fetched
-from `latest`, but the payload it names is immutable. Only `darwin-aarch64` is
-listed; Intel installs of old universal builds simply stop seeing updates
-(accepted trade-off).
+The manifest's shape, its field-by-field semantics, and what an absent platform
+key does to installs are in
+[auto-update.md § Manifest format](auto-update.md#manifest-format-tauri-v2-static).
 
 ### 4.8 Publish
 
@@ -279,39 +274,22 @@ half-empty release.
 
 ---
 
-## 5. The auto-update loop
+## 5. Handing off to the updater
 
-```
-tauri.conf.json  plugins.updater.endpoints = [ …/releases/latest/download/latest.json ]
-                 plugins.updater.pubkey    = <minisign public key>
-                    │
-app boot ──► src/updater.ts: check() ──► fetch latest.json ──► newer? show "Update available"
-                    │
-     user clicks ──► download Doklin.app.tar.gz ──► verify signature against pubkey
-                 ──► swap bundle in place ──► tauri-plugin-process relaunch()
-```
+The pipeline's responsibility ends at three outputs of the publish step: the
+signed `Doklin.app.tar.gz`, the `latest.json` beside it (§4.7), and
+`make_latest: 'true'` on the release. What each one buys on the client side is
+[auto-update.md § What the release pipeline has to hand it](auto-update.md#what-the-release-pipeline-has-to-hand-it).
 
-Pieces that must line up, or the update silently never happens:
+One invariant no step here can check for you: the `TAURI_SIGNING_PRIVATE_KEY`
+secret must be the private half of the `plugins.updater.pubkey` compiled into
+the shipped app. Mismatch them and every build stays green while every installed
+app silently refuses the update.
 
-- `plugins.updater.pubkey` in `tauri.conf.json` ↔ `TAURI_SIGNING_PRIVATE_KEY`
-  secret. Generated once per app with `pnpm tauri signer generate`. Losing the
-  private key means shipped installs can never auto-update again — they'd need
-  a manual re-download.
-- `updater:default` in `src-tauri/capabilities/default.json`.
-- `tauri_plugin_updater` registered in `lib.rs`, `tauri-plugin-process` for the
-  relaunch.
-- `createUpdaterArtifacts: true` in `bundle`.
-- The `tauri-plugin-updater` dep is **desktop-gated** in `src-tauri/Cargo.toml`
-  (a `[target.'cfg(…)'.dependencies]` block), per Tauri's plugin guidance.
-
-Frontend contract lives in [`src/updater.ts`](../src/updater.ts): a quiet check
-on mount, a manual re-check from Settings, and a
-download→verify→install→relaunch action, with `RELEASES_PAGE` as the
-manual-download fallback when any of it fails.
-
-The consumer side of this — the client state machine, the Settings UI, the
-security model, and a portable checklist for adding one-click updates to another
-Tauri app — is written up in [auto-update.md](auto-update.md).
+Everything past that boundary — the client state machine, the Settings UI, the
+app-side plugin and capability wiring, the security model, and a portable
+checklist for adding one-click updates to another Tauri app — is
+[auto-update.md](auto-update.md).
 
 ---
 
@@ -355,8 +333,12 @@ multi-day hold (6h ceiling); recovery is re-running the failed job.
 | Release contains `index.html` and JS assets | Something staged into `dist/` | Stage only into `release-assets/` |
 | Users see "app is damaged" / Gatekeeper prompt | Unsigned or unstapled artifact | Verify locally: `spctl -a -vvv -t install Doklin.app` |
 | Landing-page download 404s | Alias filename changed | Redeploy the share worker (`DEFAULT_DOWNLOAD_URL`) |
-| Installed app never offers an update | pubkey/private-key mismatch, or `latest.json` platform key wrong | Compare `latest.json` `platforms` key against the app's target triple |
 | Sidecar can't reach the mic in the release build only | Entitlement missing under hardened runtime | The `codesign -d --entitlements` assertion should have caught it — check it still names the right binary |
+
+Build, signing and publishing symptoms only. When the release itself looks
+correct but installed apps don't take it, the causes are client-side and are
+tabulated in
+[auto-update.md § Gotchas](auto-update.md#gotchas-paid-for-the-hard-way).
 
 ---
 
@@ -373,8 +355,6 @@ Copy `.github/workflows/release.yml` and `ci.yml` verbatim, then change:
 
 **`src-tauri/tauri.conf.json`**
 - [ ] `productName`, `version`, `identifier` (`com.<you>.<app>`)
-- [ ] `plugins.updater.endpoints` → your repo's `releases/latest/download/latest.json`
-- [ ] `plugins.updater.pubkey`
 - [ ] `bundle.createUpdaterArtifacts: true`, `bundle.targets: "all"`
 - [ ] `bundle.macOS.minimumSystemVersion` + `entitlements` path
 - [ ] `bundle.icon` list, `fileAssociations` if the app owns a file type
@@ -391,10 +371,9 @@ Copy `.github/workflows/release.yml` and `ci.yml` verbatim, then change:
       check, DMG notarize+staple, alias copy, `SHA256SUMS`, `latest.json`
 
 **App code**
-- [ ] `tauri-plugin-updater` (desktop-gated in `Cargo.toml`) +
-      `tauri-plugin-process`, registered in `lib.rs`
-- [ ] `updater:default` in `capabilities/default.json`
-- [ ] Port `src/updater.ts` and its Settings entry point
+- [ ] The updater client is its own checklist — plugins, capabilities, `lib.rs`
+      registration, `plugins.updater` pubkey + endpoint, and the Settings UI:
+      [auto-update.md § Porting checklist](auto-update.md#part-3--porting-checklist-for-a-new-app)
 
 **Sanity check before the first push to main:** run `pnpm tauri build` locally
 unsigned, confirm the bundle paths in the workflow match what you get, then let
