@@ -514,6 +514,21 @@ fn meta_file_of(doc_path: &str) -> String {
     format!("{}.meta.jsonl", doc_path)
 }
 
+/// True for the files Doklin writes beside a document to store what the editor
+/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads) and
+/// the legacy html comments sidecar (`<name>.html.comments.jsonl`). They're
+/// part of the document, not content of the user's own — so even "show every
+/// file" leaves them out.
+fn is_app_sidecar(path: &Path) -> bool {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".meta.jsonl") || lower.ends_with(".comments.jsonl")
+        }
+        None => false,
+    }
+}
+
 fn is_html(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => ext.eq_ignore_ascii_case("html"),
@@ -544,7 +559,8 @@ pub(crate) fn is_hidden_or_ignored(name: &str) -> bool {
 /// With `all`, every other file is listed too (marked `supported: false`) so
 /// the sidebar can show the real filesystem, greyed out. Hidden/ignored names
 /// stay excluded either way — this is "show every file", not "show hidden
-/// files", and letting node_modules in would eat the entry budget whole.
+/// files", and letting node_modules in would eat the entry budget whole. The
+/// app's own per-document sidecars are excluded too (see `is_app_sidecar`).
 fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeNode> {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return None;
@@ -578,7 +594,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeN
             files.push(path);
         } else if ft.is_file() && is_html(&path) {
             html_files.push(path);
-        } else if ft.is_file() && all {
+        } else if ft.is_file() && all && !is_app_sidecar(&path) {
             others.push(path);
         }
     }
@@ -2062,13 +2078,23 @@ mod tree_tests {
 
     /// Documents-only listing skips other files; "show all" adds them as
     /// unsupported rows, in one alphabetical run with the documents, and the
-    /// md+html fold is unchanged either way.
+    /// md+html fold is unchanged either way. The app's own comment sidecars
+    /// stay out of both — their content reaches the user as threads in the
+    /// editor, not as files.
     #[test]
     fn all_mode_adds_unsupported_rows() {
         let dir = std::env::temp_dir().join(format!("doklin-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        for name in ["a.md", "a.html", "b.html", "c.png", "d.txt"] {
+        for name in [
+            "a.md",
+            "a.html",
+            "b.html",
+            "c.png",
+            "d.txt",
+            "a.meta.jsonl",
+            "b.html.comments.jsonl",
+        ] {
             std::fs::write(dir.join(name), "x").unwrap();
         }
 
