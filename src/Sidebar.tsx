@@ -6,8 +6,15 @@ export type TreeNode =
   // `paired` marks a markdown row that also has an html rendition folded into
   // it (a same-stem .html sibling), so the tree can icon md-only, html-only,
   // and bundled md+html rows distinctly. Absent/false for standalone html.
-  | { kind: "file"; name: string; path: string; paired?: boolean }
+  // `supported: false` marks a file the app can't open — only ever present in
+  // "show every file" mode, where those rows are listed greyed out so their
+  // existence is visible. Absent means openable (the documents-only tree).
+  | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
   | { kind: "dir"; name: string; path: string; children: TreeNode[] };
+
+// A file row the app can open (markdown, html, or a bundled pair). Folders and
+// documents-only trees are always openable; only "show every file" rows differ.
+const isOpenable = (node: TreeNode) => node.kind !== "file" || node.supported !== false;
 
 // One selected explorer row (VS Code-style), file or folder. The selection is
 // a list — ⌘-click toggles rows in and out, ⇧-click extends over the visible
@@ -38,18 +45,22 @@ export const pruneNestedSelection = (sels: SidebarSelection[]): SidebarSelection
 type PendingCreate = { parentDir: string; kind: "file" | "dir" };
 
 // An in-progress inline rename: the row at `path` is replaced by a name input.
-type PendingRename = { path: string; kind: "file" | "dir" };
+// `openable: false` (an unsupported file in show-all mode) keeps the row's own
+// extension out of the document-extension rules — its name is edited whole.
+type PendingRename = { path: string; kind: "file" | "dir"; openable?: boolean };
 
 // A context-menu invocation: where it was opened and what it targets. "root"
 // is a right-click on empty sidebar space (creation lands at the workspace root).
-type MenuState = { x: number; y: number; target: { path: string; kind: "file" | "dir" | "root" } };
+type MenuTarget = { path: string; kind: "file" | "dir" | "root"; openable?: boolean };
+type MenuState = { x: number; y: number; target: MenuTarget };
 
 // One row in a drag (pointer-based move, VS Code-style). HTML5 drag events
 // are intercepted by Tauri's native drag-drop handling, so — like the tab bar's
 // reorder — this is built on pointer capture instead. A drag carries a SET of
 // entries: grabbing a row that's part of the multi-selection drags the whole
-// selection; grabbing any other row drags just that row.
-type DragEntry = { path: string; kind: "file" | "dir" };
+// selection; grabbing any other row drags just that row. `openable: false`
+// rows still move within the tree, but never tear out into an editor pane.
+type DragEntry = { path: string; kind: "file" | "dir"; openable?: boolean };
 
 // The pointer-drag plumbing every row needs, bundled so TreeItem's prop list
 // stays readable. `suppressClick` swallows the click that trails a finished
@@ -136,6 +147,18 @@ const dirname = (p: string) => {
 const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 const HTML_EXT_RE = /\.html$/i;
 
+// "Show all files" — whether the tree lists the whole filesystem (with
+// non-documents greyed out) or only openable documents. A view preference, so
+// it lives in localStorage and applies to every workspace.
+const SHOW_ALL_STORAGE_KEY = "doklin:sidebar-show-all";
+const readShowAll = () => {
+  try {
+    return localStorage.getItem(SHOW_ALL_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
 export default function Sidebar({
   root,
   currentPath,
@@ -175,12 +198,25 @@ export default function Sidebar({
   const [ctxMenu, setCtxMenu] = useState<MenuState | null>(null);
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
   const [pendingRename, setPendingRename] = useState<PendingRename | null>(null);
+  const [showAll, setShowAll] = useState<boolean>(readShowAll);
+
+  const toggleShowAll = useCallback(() => {
+    setShowAll((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SHOW_ALL_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        /* private mode / quota — the toggle still works for this session */
+      }
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const node = await invoke<TreeNode>("list_md_tree", { path: root });
+      const node = await invoke<TreeNode>("list_md_tree", { path: root, all: showAll });
       setTree(node);
     } catch (e) {
       setError(String(e));
@@ -188,7 +224,7 @@ export default function Sidebar({
     } finally {
       setLoading(false);
     }
-  }, [root]);
+  }, [root, showAll]);
 
   useEffect(() => {
     void refresh();
@@ -508,6 +544,8 @@ export default function Sidebar({
       const isOut =
         drag.entries.length === 1 &&
         drag.entries[0].kind === "file" &&
+        // A file the app can't open has no pane to tear out into.
+        drag.entry.openable !== false &&
         onDragFileToEditor != null &&
         aside != null &&
         e.clientX > aside.getBoundingClientRect().right;
@@ -664,7 +702,7 @@ export default function Sidebar({
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
 
-  const startRename = useCallback((target: { path: string; kind: "file" | "dir" }) => {
+  const startRename = useCallback((target: PendingRename) => {
     setCtxMenu(null);
     setMenuOpen(false);
     setPendingCreate(null); // one inline input at a time
@@ -685,7 +723,10 @@ export default function Sidebar({
       if (name.startsWith(".")) return "Names can't start with a dot.";
       const oldName = basename(pr.path);
       let newName = name;
-      if (pr.kind === "file" && !DOC_EXT_RE.test(name)) {
+      // Unsupported files show (and rename) their full name, extension
+      // included — the document-extension rules would turn "photo.png" into
+      // "photo.png.md".
+      if (pr.openable !== false && pr.kind === "file" && !DOC_EXT_RE.test(name)) {
         newName = `${name}${oldName.match(DOC_EXT_RE)?.[0] ?? ".md"}`;
       }
       if (newName === oldName) {
@@ -705,7 +746,7 @@ export default function Sidebar({
   const cancelRename = useCallback(() => setPendingRename(null), []);
 
   const openRowMenu = useCallback(
-    (e: React.MouseEvent, target: { path: string; kind: "file" | "dir" }) => {
+    (e: React.MouseEvent, target: { path: string; kind: "file" | "dir"; openable?: boolean }) => {
       e.preventDefault();
       e.stopPropagation();
       // Right-click selects, like VS Code — but keeps a multi-selection when
@@ -791,23 +832,27 @@ export default function Sidebar({
         ),
     });
     let sharedFileEntry: ShareEntry | null = null;
+    // Sharing publishes a rendered document, so it's offered only for files
+    // the app can actually open; the rest get plain filesystem operations.
     if (target.kind === "file") {
-      sharedFileEntry = shares[target.path] ?? null;
-      if (sharedFileEntry) {
-        items.push({
-          label: "Copy share link",
-          onClick: () => onCopyShareLink(sharedFileEntry!.id),
-        });
-      } else {
-        items.push({ label: "Share…", onClick: () => onShareFile(target.path) });
-      }
-      const col = nearestCollectionFor(target.path);
-      if (col) {
-        const included = col.members.includes(target.path);
-        items.push({
-          label: included ? `Remove from “${col.title}”` : `Include in “${col.title}”`,
-          onClick: () => onToggleMembership(target.path, col.path, !included),
-        });
+      if (target.openable !== false) {
+        sharedFileEntry = shares[target.path] ?? null;
+        if (sharedFileEntry) {
+          items.push({
+            label: "Copy share link",
+            onClick: () => onCopyShareLink(sharedFileEntry!.id),
+          });
+        } else {
+          items.push({ label: "Share…", onClick: () => onShareFile(target.path) });
+        }
+        const col = nearestCollectionFor(target.path);
+        if (col) {
+          const included = col.members.includes(target.path);
+          items.push({
+            label: included ? `Remove from “${col.title}”` : `Include in “${col.title}”`,
+            onClick: () => onToggleMembership(target.path, col.path, !included),
+          });
+        }
       }
     } else {
       const dirPath = target.kind === "root" ? root : target.path;
@@ -830,7 +875,7 @@ export default function Sidebar({
         onClick: () => onShareFolder(dirPath),
       });
     }
-    if (target.kind === "file" && onFileHistory) {
+    if (target.kind === "file" && target.openable !== false && onFileHistory) {
       items.push({
         label: "Version history…",
         onClick: () => onFileHistory(target.path),
@@ -839,7 +884,12 @@ export default function Sidebar({
     if (target.kind !== "root") {
       items.push({
         label: "Rename…",
-        onClick: () => startRename({ path: target.path, kind: target.kind as "file" | "dir" }),
+        onClick: () =>
+          startRename({
+            path: target.path,
+            kind: target.kind as "file" | "dir",
+            openable: target.openable,
+          }),
       });
       if (sharedFileEntry) {
         items.push({
@@ -920,6 +970,8 @@ export default function Sidebar({
         onRevealInFinder={() => onRevealInFinder(root)}
         onShareWorkspace={() => onShareFolder(root)}
         onRefresh={() => void refresh()}
+        showAll={showAll}
+        onToggleShowAll={toggleShowAll}
         onSwitchToSearch={onSwitchToSearch}
         onNewFile={() => startCreate("file", createDirFor(primarySelection))}
         onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
@@ -1037,6 +1089,8 @@ function SidebarHeader({
   onRevealInFinder,
   onShareWorkspace,
   onRefresh,
+  showAll,
+  onToggleShowAll,
   onSwitchToSearch,
   onNewFile,
   onNewFolder,
@@ -1053,6 +1107,10 @@ function SidebarHeader({
   onRevealInFinder: () => void;
   onShareWorkspace: () => void;
   onRefresh: () => void;
+  // Whether the tree lists every file (non-documents greyed out) or documents
+  // only, and the toggle for it.
+  showAll: boolean;
+  onToggleShowAll: () => void;
   onSwitchToSearch: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
@@ -1169,6 +1227,18 @@ function SidebarHeader({
             Reveal in Finder
           </button>
           <button
+            role="menuitemcheckbox"
+            aria-checked={showAll}
+            className="sidebar-menu-item sidebar-menu-item-check"
+            onClick={() => {
+              setMenuOpen(false);
+              onToggleShowAll();
+            }}
+          >
+            <span>Show all files</span>
+            {showAll && <MenuCheckIcon />}
+          </button>
+          <button
             role="menuitem"
             className="sidebar-menu-item"
             onClick={() => {
@@ -1236,7 +1306,10 @@ function TreeItem({
   // Modifier-aware selection; true = a multi-select gesture the row must not
   // also act on (no open/toggle).
   onRowClick: (e: React.MouseEvent, entry: SidebarSelection) => boolean;
-  onRowMenu: (e: React.MouseEvent, target: { path: string; kind: "file" | "dir" }) => void;
+  onRowMenu: (
+    e: React.MouseEvent,
+    target: { path: string; kind: "file" | "dir"; openable?: boolean },
+  ) => void;
   onCommitCreate: (name: string) => Promise<string | null>;
   onCancelCreate: () => void;
   onCommitRename: (name: string) => Promise<string | null>;
@@ -1251,6 +1324,10 @@ function TreeItem({
   const renamingHere = pendingRename?.path === node.path;
 
   if (node.kind === "file") {
+    // A file the app can't open (only ever listed in "Show all files"): the
+    // row exists so its presence is visible, greyed out and inert to clicks.
+    // Everything filesystem-level — select, move, rename, delete — still works.
+    const openable = isOpenable(node);
     if (renamingHere) {
       return (
         <NameRow
@@ -1258,7 +1335,7 @@ function TreeItem({
           icon={<FileIcon />}
           placeholder="File name"
           ariaLabel={`Rename ${node.name}`}
-          initialValue={stripDocExt(node.name)}
+          initialValue={openable ? stripDocExt(node.name) : node.name}
           onCommit={onCommitRename}
           onCancel={onCancelRename}
         />
@@ -1268,7 +1345,7 @@ function TreeItem({
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
-          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""} ${openable ? "" : "is-unsupported"}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="file"
@@ -1276,17 +1353,19 @@ function TreeItem({
           onClick={(e) => {
             if (dnd.suppressClick()) return;
             if (onRowClick(e, { path: node.path, kind: "file" })) return;
-            onOpenFile(node.path);
+            if (openable) onOpenFile(node.path);
           }}
-          onPointerDown={(e) => dnd.onPointerDown(e, { path: node.path, kind: "file" })}
+          onPointerDown={(e) =>
+            dnd.onPointerDown(e, { path: node.path, kind: "file", openable })
+          }
           onPointerMove={dnd.onPointerMove}
           onPointerUp={dnd.onPointerUp}
           onPointerCancel={dnd.onPointerCancel}
-          onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "file" })}
-          title={node.path}
+          onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "file", openable })}
+          title={openable ? node.path : `${node.path} — Doklin can’t open this file type`}
         >
-          <DocTypeIcon node={node} />
-          <span className="tree-label">{stripDocExt(node.name)}</span>
+          {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
+          <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
           {presence[node.path] && (
             <span
               className="tree-presence"
@@ -1597,6 +1676,25 @@ function ChevronRightIcon() {
       aria-hidden
     >
       <polyline points="9 6 15 12 9 18" />
+    </svg>
+  );
+}
+
+// The tick on a checked workspace-menu item ("Show all files").
+function MenuCheckIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="20 6 9 17 4 12" />
     </svg>
   );
 }

@@ -131,7 +131,9 @@ export default function ShareFolder({
     let cancelled = false;
     void (async () => {
       try {
-        const node = await invoke<TreeNode>("list_md_tree", { path: dirPath });
+        // Documents only — the share picker publishes pages, so the sidebar's
+        // "show all files" view has no bearing here.
+        const node = await invoke<TreeNode>("list_md_tree", { path: dirPath, all: false });
         if (!cancelled) setTree(node);
       } catch (e) {
         if (!cancelled) setTreeError(String(e));
