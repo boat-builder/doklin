@@ -472,6 +472,10 @@ enum TreeNode {
         // and bundled md+html rows with distinct icons. Always false for a
         // standalone html file (it renders as its own html row).
         paired: bool,
+        // False for a row the app can't open — only ever produced in
+        // "show every file" mode, where the tree lists non-document files so
+        // their existence is visible. The sidebar greys those rows out.
+        supported: bool,
     },
     Dir {
         name: String,
@@ -536,7 +540,12 @@ pub(crate) fn is_hidden_or_ignored(name: &str) -> bool {
 /// place, so an empty folder must stay visible as a creation target. Returns
 /// None only when the directory is unreadable or a traversal cap is hit.
 /// Mutates `budget` to enforce a global entry cap.
-fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
+///
+/// With `all`, every other file is listed too (marked `supported: false`) so
+/// the sidebar can show the real filesystem, greyed out. Hidden/ignored names
+/// stay excluded either way — this is "show every file", not "show hidden
+/// files", and letting node_modules in would eat the entry budget whole.
+fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeNode> {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return None;
     }
@@ -545,6 +554,8 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
     let mut subdirs: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut html_files: Vec<PathBuf> = Vec::new();
+    // Non-document files, gathered only in `all` mode.
+    let mut others: Vec<PathBuf> = Vec::new();
 
     for entry in entries.flatten() {
         if *budget == 0 {
@@ -567,6 +578,8 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
             files.push(path);
         } else if ft.is_file() && is_html(&path) {
             html_files.push(path);
+        } else if ft.is_file() && all {
+            others.push(path);
         }
     }
 
@@ -583,16 +596,21 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
         }
     }
 
+    // Documents and (in `all` mode) everything else sort together, so the
+    // greyed rows sit in plain alphabetical order among the openable ones.
+    let mut rows: Vec<(PathBuf, bool)> = files.into_iter().map(|f| (f, true)).collect();
+    rows.extend(others.into_iter().map(|f| (f, false)));
+
     subdirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    rows.sort_by(|a, b| a.0.file_name().cmp(&b.0.file_name()));
 
     let mut children: Vec<TreeNode> = Vec::new();
     for sub in subdirs {
-        if let Some(node) = walk(&sub, depth + 1, budget) {
+        if let Some(node) = walk(&sub, depth + 1, budget, all) {
             children.push(node);
         }
     }
-    for f in files {
+    for (f, supported) in rows {
         // A markdown file whose stem matches an html file is a bundled pair; a
         // standalone html file (or a markdown file with no rendition) is not.
         let paired = is_markdown(&f) && f.file_stem().is_some_and(|s| html_stems.contains(s));
@@ -600,6 +618,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Option<TreeNode> {
             name: f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             path: f.to_string_lossy().to_string(),
             paired,
+            supported,
         });
     }
 
@@ -989,8 +1008,10 @@ fn path_exists(path: String) -> bool {
     Path::new(&path).exists()
 }
 
+/// The sidebar tree. `all` (absent = false) switches from documents-only to
+/// every file, with non-documents marked unsupported for the greyed rows.
 #[tauri::command]
-fn list_md_tree(path: String) -> Result<TreeNode, String> {
+fn list_md_tree(path: String, all: Option<bool>) -> Result<TreeNode, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {}", path));
@@ -998,7 +1019,7 @@ fn list_md_tree(path: String) -> Result<TreeNode, String> {
     let mut budget = MAX_TREE_ENTRIES;
     // Always return a Dir node for the root, even when empty, so the UI can
     // show "no markdown files here" rather than an error.
-    if let Some(node) = walk(&root, 0, &mut budget) {
+    if let Some(node) = walk(&root, 0, &mut budget, all.unwrap_or(false)) {
         Ok(node)
     } else {
         Ok(TreeNode::Dir {
@@ -2018,4 +2039,55 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn rows(node: &TreeNode) -> Vec<(&str, bool, bool)> {
+        match node {
+            TreeNode::Dir { children, .. } => children
+                .iter()
+                .filter_map(|c| match c {
+                    TreeNode::File { name, paired, supported, .. } => {
+                        Some((name.as_str(), *paired, *supported))
+                    }
+                    TreeNode::Dir { .. } => None,
+                })
+                .collect(),
+            TreeNode::File { .. } => Vec::new(),
+        }
+    }
+
+    /// Documents-only listing skips other files; "show all" adds them as
+    /// unsupported rows, in one alphabetical run with the documents, and the
+    /// md+html fold is unchanged either way.
+    #[test]
+    fn all_mode_adds_unsupported_rows() {
+        let dir = std::env::temp_dir().join(format!("doklin-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for name in ["a.md", "a.html", "b.html", "c.png", "d.txt"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+
+        let mut budget = MAX_TREE_ENTRIES;
+        let docs = walk(&dir, 0, &mut budget, false).unwrap();
+        assert_eq!(rows(&docs), vec![("a.md", true, true), ("b.html", false, true)]);
+
+        let mut budget = MAX_TREE_ENTRIES;
+        let all = walk(&dir, 0, &mut budget, true).unwrap();
+        assert_eq!(
+            rows(&all),
+            vec![
+                ("a.md", true, true),
+                ("b.html", false, true),
+                ("c.png", false, false),
+                ("d.txt", false, false),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

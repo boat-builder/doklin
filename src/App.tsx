@@ -1805,7 +1805,10 @@ export default function App() {
       if (!fp?.snap || !fp.hash) return false;
       let tree: TreeNode;
       try {
-        tree = await invoke<TreeNode>("list_md_tree", { path: dirname(entry.path) });
+        tree = await invoke<TreeNode>("list_md_tree", {
+          path: dirname(entry.path),
+          all: false,
+        });
       } catch {
         return false; // parent directory gone too — nothing to adopt from
       }
@@ -6300,7 +6303,7 @@ export default function App() {
     void (async () => {
       let tree: TreeNode;
       try {
-        tree = await invoke<TreeNode>("list_md_tree", { path: workspaceRoot });
+        tree = await invoke<TreeNode>("list_md_tree", { path: workspaceRoot, all: false });
       } catch {
         return; // workspace unreadable right now; retried next launch
       }

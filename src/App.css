@@ -2394,6 +2394,17 @@ body.sidebar-resizing {
 .sidebar-menu-item:hover {
   background: var(--app-hover);
 }
+/* A menu item that toggles a view preference: label left, tick right. */
+.sidebar-menu-item-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sidebar-menu-item-check svg {
+  color: var(--app-text-muted);
+  flex: none;
+}
 
 /* Visible but inert (e.g. Paste with an empty file clipboard). */
 .sidebar-menu-item:disabled {
@@ -2481,6 +2492,18 @@ body.sidebar-resizing {
 
 .tree-file .tree-label {
   color: var(--app-text);
+}
+
+/* Files Doklin can't open, listed only in "Show all files": greyed out and
+   inert to clicks (no open), but still selectable and movable, so the row
+   reads as "this exists on disk" rather than "this is a document". */
+.tree-row.is-unsupported,
+.tree-row.is-unsupported .tree-label {
+  color: var(--app-text-muted);
+  cursor: default;
+}
+.tree-row.is-unsupported {
+  opacity: 0.72;
 }
 
 /* Explorer selection (click / right-click): a quieter highlight than the
