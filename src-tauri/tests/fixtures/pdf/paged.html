@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Paged fixture</title>
+<style>
+  @page { size: 210mm 297mm; margin: 0; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: Calibri, sans-serif; }
+  .page {
+    width: 210mm;
+    height: 297mm;
+    box-sizing: border-box;
+    padding: 18mm;
+    page-break-after: always;
+    background: #f4efe6;
+  }
+  .page:last-child { page-break-after: auto; }
+  h1 { color: #1f3d2e; }
+  .callout {
+    background: #1f3d2e;
+    color: #f4efe6;
+    padding: 12px 16px;
+    border-radius: 8px;
+  }
+  table { border-collapse: collapse; margin-top: 16px; }
+  td, th { border: 1px solid #888; padding: 6px 12px; }
+  th { background: #dbe7df; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>Architecture overview for the ingestion pipeline</h1>
+    <p>This first page describes the deterministic export contract in enough
+       words to give the completeness check real material to sample from.
+       The quick brown fox jumps over the lazy dog while the pipeline keeps
+       every byte accounted for.</p>
+    <p class="callout">Backgrounds must survive printing: this block is dark
+       green with cream text, and it disappears entirely if printBackground
+       is ever dropped.</p>
+    <table>
+      <tr><th>Component</th><th>Responsibility</th></tr>
+      <tr><td>Collector</td><td>Receives events from the edge relays</td></tr>
+      <tr><td>Normalizer</td><td>Rewrites payloads into the canonical schema</td></tr>
+    </table>
+  </div>
+  <div class="page">
+    <h1>Second page: retention and replay semantics</h1>
+    <p>Replay windows are bounded by the retention ledger, and the final
+       sentence of this fixture is deliberately memorable so the tail sample
+       always lands on it: the last row of the ledger is never evicted.</p>
+  </div>
+</body>
+</html>

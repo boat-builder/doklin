@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Diverging fixture</title>
+<style>
+  @page { size: 4in 6in; margin: 0; }
+  html, body { margin: 0; padding: 0; font-family: Helvetica, sans-serif; }
+  .page { width: 4in; height: 6in; box-sizing: border-box; padding: 0.7in 0.4in 0.4in; }
+  .page1 { background: #f2f6f2; }
+  .page2 { background: #f6f2f2; }
+  /* The divergence: browsers paint a fixed element once, at the viewport;
+     Chromium's print pass repeats it at the top of EVERY page. The page-2
+     screenshot has no banner, the PDF's page 2 does — only the visual diff
+     can see that. */
+  .banner { position: fixed; top: 0; left: 0; right: 0; height: 0.5in;
+            background: #1c2333; color: #ffffff; padding: 6px 12px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+  <div class="banner">Repeating header banner</div>
+  <div class="page page1">
+    <p>First page body copy sits under the banner and reads normally in both
+       the browser and the printed output, so every text check passes.</p>
+  </div>
+  <div class="page page2">
+    <p>Second page body copy is also fully present in the extracted text; the
+       print pass nevertheless draws a repeated banner here that the browser
+       never showed at this position.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Missing font fixture</title>
+<style>
+  body { font-family: "Doklin Test Font That Cannot Exist", "Another Ghost Face", sans-serif; }
+</style>
+</head>
+<body>
+  <h1>This heading demands a font no machine has installed</h1>
+  <p>The exporter must refuse this document instead of silently rendering it
+     with substituted metrics that wrap differently from the author's intent.</p>
+</body>
+</html>

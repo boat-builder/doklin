@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Avatar, ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
   addHtmlReply,
@@ -73,7 +74,20 @@ type Props = {
   // A zoom chord pressed while focus is inside the frame (1 in, -1 out, 0
   // reset) — the app's own key handler can't see those.
   onZoomKey?: (dir: number) => void;
+  // Absolute path of the rendition on disk — presence enables the "PDF"
+  // button (desktop only; web hosts omit it). The export itself runs in the
+  // Rust backend against a pinned headless engine (see pdf_export.rs) and
+  // REFUSES rather than emit a PDF its validation gate can prove wrong.
+  pdfExportPath?: string | null;
 };
+
+// Export button states. The error text is the Rust gate's refusal verbatim —
+// it names the failed check (and page), per the export contract.
+type PdfState =
+  | { kind: "idle" }
+  | { kind: "running"; label: string }
+  | { kind: "saved"; name: string }
+  | { kind: "error"; msg: string };
 
 // Imperative surface for the split view's scroll sync: drive this rendition
 // to a proportional scroll offset.
@@ -98,6 +112,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     onGesture,
     zoom = 1,
     onZoomKey,
+    pdfExportPath,
   }: Props,
   ref,
 ) {
@@ -113,6 +128,9 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   const [orphans, setOrphans] = useState<Set<string>>(new Set());
   // The overlay's own box — pins and cards clamp inside it.
   const [size, setSize] = useState({ w: 0, h: 0 });
+  // PDF export: idle → running (stage streamed from Rust via
+  // pdf-export-progress) → a transient "Saved" flash, or an error card.
+  const [pdf, setPdf] = useState<PdfState>({ kind: "idle" });
 
   // Refs for the message handler (installed once).
   const threadsRef = useRef(threads);
@@ -137,6 +155,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   zoomRef.current = zoom;
   const onZoomKeyRef = useRef(onZoomKey);
   onZoomKeyRef.current = onZoomKey;
+  const pdfPathRef = useRef(pdfExportPath);
+  pdfPathRef.current = pdfExportPath;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
 
@@ -273,6 +293,47 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     setMode(next);
   }, []);
 
+  // One-click export (no options, by design). Subscribe to progress BEFORE
+  // invoking so the first stage event can't slip past; the backend serializes
+  // concurrent exports itself, so a second click elsewhere just errors.
+  const exportPdf = useCallback(async () => {
+    const path = pdfPathRef.current;
+    if (!path) return;
+    setPdf({ kind: "running", label: "Exporting…" });
+    const unlisten = await listen<{ stage: string; pct: number | null }>(
+      "pdf-export-progress",
+      (e) => {
+        const { stage, pct } = e.payload;
+        const label =
+          stage === "engine-download"
+            ? `Fetching engine ${pct ?? 0}%`
+            : stage === "pdfium-download"
+              ? "Fetching PDF tools…"
+              : stage === "engine-unpack" || stage === "pdfium-unpack"
+                ? "Unpacking engine…"
+                : stage === "validating"
+                  ? "Checking…"
+                  : "Rendering…";
+        setPdf((p) => (p.kind === "running" ? { kind: "running", label } : p));
+      },
+    );
+    try {
+      const saved = await invoke<string>("export_pdf", { path });
+      setPdf({ kind: "saved", name: saved.split("/").pop() ?? "PDF" });
+    } catch (err) {
+      setPdf({ kind: "error", msg: String(err) });
+    } finally {
+      unlisten();
+    }
+  }, []);
+
+  // The "Saved …" flash decays back to the plain button.
+  useEffect(() => {
+    if (pdf.kind !== "saved") return;
+    const t = window.setTimeout(() => setPdf({ kind: "idle" }), 2500);
+    return () => window.clearTimeout(t);
+  }, [pdf]);
+
   /* ----- card callbacks: same contracts as Editor.tsx, over the sidecar ----- */
 
   const onActivate = useCallback((id: string) => {
@@ -408,19 +469,56 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
       />
       {commentsEnabled && (
       <div className="html-comment-layer">
-        <button
-          type="button"
-          className={`html-comment-btn ${mode ? "is-on" : ""}`}
-          aria-pressed={mode}
-          title={mode ? "Hide comments" : "Review and comment"}
-          onClick={toggleMode}
-        >
-          <BubbleIcon />
-          {mode ? "Done" : "Comment"}
-          {!mode && threads.length > 0 && (
-            <span className="html-comment-btn-count">{threads.length}</span>
+        <div className="html-view-btns">
+          {pdfExportPath != null && (
+            <button
+              type="button"
+              className={`html-comment-btn html-pdf-btn ${pdf.kind === "running" ? "is-busy" : ""}`}
+              disabled={pdf.kind === "running"}
+              title="Export this rendition as a validated PDF"
+              onClick={() => void exportPdf()}
+            >
+              <PdfIcon />
+              {pdf.kind === "running"
+                ? pdf.label
+                : pdf.kind === "saved"
+                  ? `Saved ${pdf.name}`
+                  : "PDF"}
+            </button>
           )}
-        </button>
+          <button
+            type="button"
+            className={`html-comment-btn ${mode ? "is-on" : ""}`}
+            aria-pressed={mode}
+            title={mode ? "Hide comments" : "Review and comment"}
+            onClick={toggleMode}
+          >
+            <BubbleIcon />
+            {mode ? "Done" : "Comment"}
+            {!mode && threads.length > 0 && (
+              <span className="html-comment-btn-count">{threads.length}</span>
+            )}
+          </button>
+        </div>
+        {pdf.kind === "error" && (
+          // The gate's refusal, verbatim: which check failed, on which page.
+          // Stays up until dismissed — this is the feature telling the user
+          // their PDF would have been wrong, not a transient hiccup.
+          <div className="html-pdf-error" role="alert">
+            <div className="html-pdf-error-head">
+              Export refused
+              <button
+                type="button"
+                className="html-pdf-error-x"
+                title="Dismiss"
+                onClick={() => setPdf({ kind: "idle" })}
+              >
+                ×
+              </button>
+            </div>
+            <div className="html-pdf-error-msg">{pdf.msg}</div>
+          </div>
+        )}
         {pins.map((p) => (
           <button
             key={p.id}
@@ -468,6 +566,27 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
 });
 
 export default HtmlView;
+
+function PdfIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M12 11v6" />
+      <path d="m9.5 14.5 2.5 2.5 2.5-2.5" />
+    </svg>
+  );
+}
 
 function BubbleIcon() {
   return (

@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Webfont fixture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
+<style>
+  html, body { margin: 0; padding: 0; }
+  body { font-family: "Inter", sans-serif; }
+  main { width: 640px; padding: 28px; }
+  h1 { letter-spacing: -0.02em; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Remote webfonts must be fully loaded before capture</h1>
+    <p>This fixture loads Inter from Google Fonts, so the exporter has to
+       wait for network idle and document fonts readiness, and the font gate
+       must then accept the webfont as the family the author requested.</p>
+  </main>
+</body>
+</html>

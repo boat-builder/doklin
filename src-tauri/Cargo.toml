@@ -33,6 +33,18 @@ sha2 = "0.10"
 diffy = "0.4"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# PDF export (src/pdf_export.rs): a hand-rolled CDP client over websocket
+# drives the pinned headless-Chromium engine, and the validation gate reads
+# the emitted PDF (structure via lopdf — default features off, its `time`
+# datetime feature doesn't compile; text via pdf-extract, which builds its
+# own lopdf 0.42 so features never unify with ours).
+tokio-tungstenite = "0.30.0"
+futures-util = "0.3.34"
+lopdf = { version = "0.44", default-features = false }
+pdf-extract = "0.12.0"
+base64 = "0.23.1"
+pdfium-render = "0.9.3"
+png = "0.18.1"
 
 [dev-dependencies]
 tempfile = "3"
