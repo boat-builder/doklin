@@ -211,7 +211,11 @@ import { WEB_APP } from "./webAssets.js";
 // Comment button; the shared HtmlView/CSS restructured that corner into a
 // button row (shell-only: web hosts don't get the button, but the markup
 // and stylesheet changed underneath them).
-const WORKER_VERSION = 20;
+// 21 = that button row moved off the rendition itself and docks into the
+// host's chrome — here, the shell's top bar beside the MD/HTML switcher —
+// so app controls no longer stand on the shared document (shell-only: no
+// API change).
+const WORKER_VERSION = 21;
 const WORKER_FEATURES = [
   "pages",
   "collections",

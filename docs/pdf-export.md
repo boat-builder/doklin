@@ -8,7 +8,10 @@ broken document; a document that overflows in the browser fails the export
 with a specific error instead of shipping with content missing.
 
 Implementation: `src-tauri/src/pdf_export.rs`. UI: the `PDF` button in
-`src/HtmlView.tsx` (desktop only — web share hosts don't get the prop).
+`src/HtmlView.tsx` (desktop only — web share hosts don't get the prop),
+which docks into the host's chrome next to the MD/HTML switcher — the tab
+bar with one pane open, the pane's own header when split — rather than
+standing on the rendition (see `controlsSlot`).
 Output lands as `<stem>.pdf` next to the document, replacing a previous
 export of the same document.
 
