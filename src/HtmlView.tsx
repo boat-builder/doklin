@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Avatar, ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
@@ -27,8 +28,11 @@ import {
 } from "./htmlBridge";
 
 // The HTML rendition view: the sandboxed preview iframe plus its comment
-// layer. The layer lives behind an explicit COMMENT MODE — a floating
-// "Comment" button over the rendition. Mode off (the default) shows the
+// layer. The layer lives behind an explicit COMMENT MODE, entered from this
+// view's controls — which dock into the HOST's chrome (the desktop tab bar,
+// a split pane's header, the web share's top bar) instead of floating over
+// the rendition: a generated document owns its whole canvas, and app buttons
+// standing on it read as part of the page. Mode off (the default) shows the
 // pristine page; mode on dims the page (bridge-side scrim), arms the hover
 // "add comment" bubble, and overlays existing threads AT their elements:
 // a small avatar pin on each commented element, expanding into a floating
@@ -79,6 +83,15 @@ type Props = {
   // Rust backend against a pinned headless engine (see pdf_export.rs) and
   // REFUSES rather than emit a PDF its validation gate can prove wrong.
   pdfExportPath?: string | null;
+  // Where this view's controls (Comment mode, and PDF export where it
+  // exists) render. Hosts pass a node inside their own chrome and the row is
+  // portalled into it. Three-valued on purpose: `undefined` means the host
+  // has no chrome to dock into (the bare verification harness) and the row
+  // falls back to floating over the rendition's top-right corner; `null`
+  // means the host DOES dock but its node hasn't mounted yet, so nothing
+  // renders this frame — floating first would flash the buttons across the
+  // document before they jump into the bar.
+  controlsSlot?: HTMLElement | null;
 };
 
 // Export button states. The error text is the Rust gate's refusal verbatim —
@@ -113,6 +126,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     zoom = 1,
     onZoomKey,
     pdfExportPath,
+    controlsSlot,
   }: Props,
   ref,
 ) {
@@ -454,6 +468,45 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   const orphaned = mode ? threads.filter((t) => orphans.has(t.id)) : [];
   const pinFaces = new Map(threads.map((t) => [t.id, t.comments[0]?.author ?? ""]));
 
+  // Docked = the host gave us a place in its chrome (see controlsSlot). The
+  // class swaps the floating pill styling for the compact look the bar's
+  // other controls wear, and moves the refusal card up into the corner the
+  // buttons used to occupy.
+  const docked = controlsSlot !== undefined;
+  const controls = (
+    <div className={`html-view-btns ${docked ? "is-docked" : ""}`}>
+      {pdfExportPath != null && (
+        <button
+          type="button"
+          className={`html-comment-btn html-pdf-btn ${pdf.kind === "running" ? "is-busy" : ""}`}
+          disabled={pdf.kind === "running"}
+          title="Export this rendition as a validated PDF"
+          onClick={() => void exportPdf()}
+        >
+          <PdfIcon />
+          {pdf.kind === "running"
+            ? pdf.label
+            : pdf.kind === "saved"
+              ? `Saved ${pdf.name}`
+              : "PDF"}
+        </button>
+      )}
+      <button
+        type="button"
+        className={`html-comment-btn ${mode ? "is-on" : ""}`}
+        aria-pressed={mode}
+        title={mode ? "Hide comments" : "Review and comment"}
+        onClick={toggleMode}
+      >
+        <BubbleIcon />
+        {mode ? "Done" : "Comment"}
+        {!mode && threads.length > 0 && (
+          <span className="html-comment-btn-count">{threads.length}</span>
+        )}
+      </button>
+    </div>
+  );
+
   return (
     <div className="html-view" ref={rootRef}>
       {/* The rendition is arbitrary generated markup: render it isolated in a
@@ -468,38 +521,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         srcDoc={srcDoc}
       />
       {commentsEnabled && (
-      <div className="html-comment-layer">
-        <div className="html-view-btns">
-          {pdfExportPath != null && (
-            <button
-              type="button"
-              className={`html-comment-btn html-pdf-btn ${pdf.kind === "running" ? "is-busy" : ""}`}
-              disabled={pdf.kind === "running"}
-              title="Export this rendition as a validated PDF"
-              onClick={() => void exportPdf()}
-            >
-              <PdfIcon />
-              {pdf.kind === "running"
-                ? pdf.label
-                : pdf.kind === "saved"
-                  ? `Saved ${pdf.name}`
-                  : "PDF"}
-            </button>
-          )}
-          <button
-            type="button"
-            className={`html-comment-btn ${mode ? "is-on" : ""}`}
-            aria-pressed={mode}
-            title={mode ? "Hide comments" : "Review and comment"}
-            onClick={toggleMode}
-          >
-            <BubbleIcon />
-            {mode ? "Done" : "Comment"}
-            {!mode && threads.length > 0 && (
-              <span className="html-comment-btn-count">{threads.length}</span>
-            )}
-          </button>
-        </div>
+      <div className={`html-comment-layer ${docked ? "is-docked" : ""}`}>
+        {docked ? controlsSlot && createPortal(controls, controlsSlot) : controls}
         {pdf.kind === "error" && (
           // The gate's refusal, verbatim: which check failed, on which page.
           // Stays up until dismissed — this is the feature telling the user

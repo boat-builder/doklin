@@ -118,8 +118,8 @@ await poll(async () => (await frame.locator("#dk-bubble").count()) === 1);
 step("rendition carries the desktop's own comment bridge", true);
 await rev.screenshot({ path: `${SHOTS}/01-html-view.png` });
 
-// 3. Enter comment mode (the floating button), hover → bubble → click → a
-//    floating card opens at the element, focused; type + Enter.
+// 3. Enter comment mode (the topbar's docked button), hover → bubble →
+//    click → a floating card opens at the element, focused; type + Enter.
 await rev.locator(".html-comment-btn").click();
 await poll(async () => frame.locator("#dk-scrim.dk-on").isVisible());
 const opening = frame.locator("#opening");

@@ -326,6 +326,11 @@ export default function WebApp({ boot }: { boot: Boot }) {
   /* ---------- html rendition + thread pool ---------- */
 
   const [htmlContent, setHtmlContent] = useState<string | null>(null);
+  // The rendition's controls (its comment-mode toggle) dock into the top bar
+  // beside the MD/HTML switcher — the web stand-in for the desktop tab bar.
+  // State, not a ref: HtmlView portals into the node, so the portal has to
+  // re-render once it exists (see HtmlView's controlsSlot).
+  const [htmlToolSlot, setHtmlToolSlot] = useState<HTMLDivElement | null>(null);
   const [threads, setThreads] = useState<HtmlThread[]>([]);
   const threadsRevRef = useRef(0);
   const threadsRef = useRef(threads);
@@ -499,8 +504,8 @@ export default function WebApp({ boot }: { boot: Boot }) {
             onChange={(e) => saveName(e.target.value)}
           />
         </label>
-        {/* Markdown only: the html view carries its own floating "Comment"
-            button (comment mode lives inside HtmlView). */}
+        {/* Markdown only: an html view docks its own comment-mode toggle
+            into the slot below instead (the mode lives inside HtmlView). */}
         {view === "md" && commentCount > 0 && (
           <CommentsToggle
             count={commentCount}
@@ -508,6 +513,7 @@ export default function WebApp({ boot }: { boot: Boot }) {
             onToggle={() => setCommentsVisible((v) => !v)}
           />
         )}
+        <div className="html-tool-slot" ref={setHtmlToolSlot} />
         {boot.hasMd && boot.hasHtml && (
           <div className="view-toggle" role="tablist" aria-label="Document view">
             <button
@@ -585,6 +591,7 @@ export default function WebApp({ boot }: { boot: Boot }) {
               threads={threads}
               onThreadsChange={onThreadsChange}
               commentAuthor={author}
+              controlsSlot={htmlToolSlot}
               onOpenExternal={(url) => window.open(url, "_blank", "noopener")}
             />
           </div>

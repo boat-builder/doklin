@@ -899,6 +899,15 @@ export default function App() {
     left: null,
     right: null,
   });
+  // Where an html pane docks its own controls (Comment mode, PDF export):
+  // the tab bar when a single pane is open, that pane's header when split —
+  // the same rule the MD/HTML switcher follows. HtmlView portals its button
+  // row into the node, so these are STATE, not refs: the portal has to
+  // re-render once the node exists. Until then HtmlView renders no row at
+  // all rather than flashing one over the document (see controlsSlot).
+  const [barToolSlot, setBarToolSlot] = useState<HTMLDivElement | null>(null);
+  const [leftToolSlot, setLeftToolSlot] = useState<HTMLDivElement | null>(null);
+  const [rightToolSlot, setRightToolSlot] = useState<HTMLDivElement | null>(null);
   // Which pane the pointer is over — the scroll-sync publisher. Only the
   // hovered pane broadcasts its scrolls; the other only follows, so the two
   // can never feed back.
@@ -7407,6 +7416,7 @@ export default function App() {
             view={paneView}
             hasMd={!paneIsHtmlOnlyDoc}
             hasHtml={paneHasHtml}
+            toolSlotRef={side === "left" ? setLeftToolSlot : setRightToolSlot}
             onSelectView={(v) =>
               focused ? void selectDocView(v) : void setCompanionView(v)
             }
@@ -7491,6 +7501,13 @@ export default function App() {
               // document get it; a two-document split's unfocused pane has
               // its comment layer disabled anyway.
               pdfExportPath={focused || !doc ? activeHtmlPath : undefined}
+              controlsSlot={
+                effectiveSplit
+                  ? side === "left"
+                    ? leftToolSlot
+                    : rightToolSlot
+                  : barToolSlot
+              }
               zoom={docZoom}
               onZoomKey={nudgeDocZoom}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}
@@ -7889,8 +7906,9 @@ export default function App() {
         trailing={
           activeTab && !activeMissing ? (
             <>
-              {/* Markdown only: the html view carries its own floating
-                  "Comment" button (comment mode lives inside HtmlView). */}
+              {/* Markdown only: an html view docks its own comment-mode
+                  toggle (and PDF export) into the slot below instead —
+                  comment mode itself lives inside HtmlView. */}
               {docView === "md" && commentCount > 0 && (
                 <CommentsToggle
                   count={commentCount}
@@ -7898,6 +7916,9 @@ export default function App() {
                   onToggle={() => setCommentsVisible((v) => !v)}
                 />
               )}
+              {/* The unsplit html view's controls dock here; split mode moves
+                  them into each pane's header, like the MD/HTML switcher. */}
+              {!effectiveSplit && <div className="html-tool-slot" ref={setBarToolSlot} />}
               {/* Split mode moves the MD/HTML switcher into each pane's
                   header; the bar keeps the split-wide controls. */}
               {!effectiveSplit && (
@@ -8136,6 +8157,7 @@ function PaneHeader({
   hasHtml,
   mdHint,
   htmlHint,
+  toolSlotRef,
   onSelectView,
   onClose,
 }: {
@@ -8147,6 +8169,7 @@ function PaneHeader({
   hasHtml: boolean;
   mdHint?: string;
   htmlHint?: string;
+  toolSlotRef?: (el: HTMLDivElement | null) => void;
   onSelectView: (v: DocView) => void;
   onClose: () => void;
 }) {
@@ -8155,6 +8178,8 @@ function PaneHeader({
       <span className={`pane-header-title ${missing ? "is-missing" : ""}`} title={title}>
         {title}
       </span>
+      {/* An html pane's own controls land here (empty otherwise). */}
+      <div className="html-tool-slot" ref={toolSlotRef} />
       <ViewToggle
         view={view}
         hasMd={hasMd}

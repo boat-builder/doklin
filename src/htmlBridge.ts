@@ -13,10 +13,10 @@
 // possibly interactive HTML — tabs, accordions, links, its own JS):
 //
 //   1. The whole comment layer lives behind an explicit COMMENT MODE (the
-//      app's floating "Comment" button; `visible` on the sync message). Mode
-//      off — the default — is the pristine rendition: no highlights, no
-//      hover affordance, no scrim. Readers who never comment never see the
-//      machinery.
+//      app's "Comment" button, docked in the host's chrome; `visible` on the
+//      sync message). Mode off — the default — is the pristine rendition: no
+//      highlights, no hover affordance, no scrim. Readers who never comment
+//      never see the machinery.
 //   2. In comment mode the bridge dims the page with a scrim and cuts
 //      spotlight holes over the hovered block and every commented element,
 //      so the comment layer reads clearly against arbitrary markup.
