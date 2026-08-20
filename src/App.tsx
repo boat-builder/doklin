@@ -7286,6 +7286,18 @@ export default function App() {
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
   const showHtmlView = docView === "html" && !activeMissing;
+  // The active document's rendition path, derived the way loadActiveContent
+  // derives htmlPathRef (an html tab is its own rendition; an md tab uses the
+  // existing sibling). The PDF export button needs it at render time, and
+  // refs don't re-render.
+  const activeHtmlPath =
+    activeTab?.kind === "file"
+      ? isHtmlPath(activeTab.path)
+        ? activeTab.path
+        : hasHtml
+          ? htmlSiblingOf(activeTab.path)
+          : null
+      : null;
   // Split-view render model. `effectiveSplit` guards against a transient
   // record whose tab is mid-close (the janitor effect prunes it right after).
   const splitTab = split ? tabs.find((t) => t.id === split.tabId) ?? null : null;
@@ -7474,6 +7486,11 @@ export default function App() {
               onThreadsChange={focused || !doc ? onHtmlThreadsChange : noopThreadsChange}
               commentAuthor={syncDeviceName}
               commentsEnabled={focused || !doc}
+              // Desktop-only validated PDF export (the web share host omits
+              // the prop, hiding the button). Panes showing the ACTIVE
+              // document get it; a two-document split's unfocused pane has
+              // its comment layer disabled anyway.
+              pdfExportPath={focused || !doc ? activeHtmlPath : undefined}
               zoom={docZoom}
               onZoomKey={nudgeDocZoom}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}

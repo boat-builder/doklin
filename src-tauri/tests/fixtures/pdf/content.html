@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Content-sized fixture</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  body { font-family: Helvetica, Arial, sans-serif; background: #ffffff; }
+  main { width: 720px; margin: 0 auto; padding: 32px; }
+  .diagram { display: block; margin: 24px 0; }
+  .band { background: #eef3ff; border-left: 4px solid #3355cc; padding: 10px 14px; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Content-sized document without an at-page rule</h1>
+    <p>This document declares no page size, so the exporter must measure the
+       content bounding box in print media and emit exactly one page of that
+       size with nothing cropped anywhere along the way.</p>
+    <p class="band">Tinted bands, borders and inline SVG below must all
+       appear in the output byte for byte on every run.</p>
+    <svg class="diagram" width="360" height="120" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <symbol id="box"><rect width="140" height="48" rx="8" fill="#3355cc"/></symbol>
+      </defs>
+      <use href="#box" x="10" y="10"/>
+      <use href="#box" x="200" y="60"/>
+      <text x="30" y="40" fill="#ffffff" font-family="Helvetica" font-size="14">collector</text>
+      <text x="220" y="90" fill="#ffffff" font-family="Helvetica" font-size="14">normalizer</text>
+    </svg>
+    <p>The closing paragraph anchors the tail-of-document sample so any
+       truncation of the final region is caught by the content check.</p>
+  </main>
+</body>
+</html>

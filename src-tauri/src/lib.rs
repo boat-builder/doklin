@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 mod dictation;
+// pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
+pub mod pdf_export;
 mod sync;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -1868,6 +1870,7 @@ pub fn run() {
         .manage(Quitting::default())
         .manage(dictation::Dictation::default())
         .manage(sync::SyncManager::default())
+        .manage(pdf_export::PdfExportLock::default())
         .manage(FileClipboard::default())
         .invoke_handler(tauri::generate_handler![
             dictation::dictation_init,
@@ -1886,6 +1889,7 @@ pub fn run() {
             sync::sync_set_shares,
             sync::sync_device,
             sync::sync_reload_connections,
+            pdf_export::export_pdf,
             read_file,
             stat_file,
             write_file,

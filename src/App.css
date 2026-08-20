@@ -911,6 +911,69 @@ body,
   font-variant-numeric: tabular-nums;
 }
 
+/* The rendition's top-right button row (PDF export + Comment). The buttons
+   keep .html-comment-btn's pill look; the row owns the absolute placement
+   the lone button used to carry. */
+.html-view-btns {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.html-view-btns .html-comment-btn {
+  position: static;
+}
+.html-pdf-btn:disabled {
+  cursor: default;
+}
+.html-pdf-btn.is-busy {
+  color: var(--app-text);
+}
+
+/* The export gate's refusal: which check failed, on which page. Persistent
+   until dismissed — it means the PDF would have been wrong. */
+.html-pdf-error {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  width: min(420px, calc(100% - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+  font-size: 12px;
+  color: var(--app-text);
+}
+.html-pdf-error-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.html-pdf-error-x {
+  border: none;
+  background: none;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.html-pdf-error-x:hover {
+  color: var(--app-text);
+}
+.html-pdf-error-msg {
+  color: var(--app-text-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 /* A thread's pin: the opener's avatar sitting on its element's top-right
    corner, with a reply count when the thread grew. */
 .html-comment-pin {

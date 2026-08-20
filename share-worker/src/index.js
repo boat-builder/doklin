@@ -207,7 +207,11 @@ import { WEB_APP } from "./webAssets.js";
 // have different heights, and the teardown/mount swap between them settled
 // into a 5s oscillation that jumped the page on its own (shell-only: no API
 // change — the bump rolls the fix out through the update dialog).
-const WORKER_VERSION = 19;
+// 20 = the desktop app grew a PDF-export button beside the rendition's
+// Comment button; the shared HtmlView/CSS restructured that corner into a
+// button row (shell-only: web hosts don't get the button, but the markup
+// and stylesheet changed underneath them).
+const WORKER_VERSION = 20;
 const WORKER_FEATURES = [
   "pages",
   "collections",
