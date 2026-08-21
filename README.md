@@ -11,8 +11,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 - **Tabs & drafts** — open many documents at once, mixing real `.md` files with
   untitled drafts that persist across restarts and are never silently lost.
 - **Live block editing** — Notion-like WYSIWYG (Milkdown / Crepe): `# ` becomes a
-  heading, `**bold**` bolds inline, `/` opens a block menu, plus drag handles and
-  a lossless markdown round-trip.
+  heading, `**bold**` bolds inline, `[ ] ` starts a GitHub-style checklist you
+  tick by clicking the box, `/` opens a block menu, plus drag handles and a
+  lossless markdown round-trip.
 - **Mermaid diagrams** — a ` ```mermaid ` code block (or `/diagram`) shows the
   rendered diagram, not the code: flowcharts, sequence/state/class diagrams,
   pies, gantts, … A *Source* chip (or just arrowing the caret in) flips the
@@ -38,8 +39,10 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   revocable; visitors enter it once per browser, no accounts involved. Each
   code also carries a role: view only (the default — every public page stays
   read-only unless you say otherwise), comment (a comments section right on
-  the page), or edit (a web markdown editor). Web edits flow back into the
-  local file; if both sides changed, the app asks before either version wins.
+  the page — and checklists a commenter can tick off, without being able to
+  change a word of the text), or edit (a web markdown editor). Web edits flow
+  back into the local file; if both sides changed, the app asks before either
+  version wins.
 - **Cloud sync** — sync a workspace to that same backend (your own Cloudflare
   worker + R2 bucket): it backs up automatically, follows you to another Mac,
   and can be shared with people you invite — they install Doklin, paste a

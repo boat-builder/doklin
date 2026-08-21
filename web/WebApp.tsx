@@ -562,6 +562,12 @@ export default function WebApp({ boot }: { boot: Boot }) {
             onCommentsCount={setCommentCount}
             onRequestShowComments={() => setCommentsVisible(true)}
             readOnly={readOnly}
+            // A comment-role visitor may still tick the boxes: a checklist is
+            // for the people working from it, and a checkbox carries no text
+            // of its own. The worker's save guard says the same thing from
+            // its side — a comment-role save may move check states and
+            // nothing else.
+            taskToggle={readOnly}
             // Column widths the desktop published with the page. No sink:
             // the document's widths belong to the file, and this session has
             // no channel to write them back — dragging a border here is a

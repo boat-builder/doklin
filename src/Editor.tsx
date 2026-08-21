@@ -40,6 +40,7 @@ import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghost
 import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
 import { linkOpenPlugin, openInBrowserTab } from "./linkOpen";
+import { taskTogglePlugin } from "./taskToggle";
 import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
 import {
@@ -169,6 +170,12 @@ type Props = {
   // mutations still dispatch — they go through the rail and commentSelection,
   // not through DOM editing.
   readOnly?: boolean;
+  // Lets a read-only session still tick task-list checkboxes (taskToggle.ts).
+  // Off by default: a read-only view is normally a MIRROR of a document
+  // someone else owns (the unfocused split pane), where nothing should move.
+  // The shared page's comment-role visitor is the exception — a checklist is
+  // usually for exactly the people who may comment on it.
+  taskToggle?: boolean;
   // Marker-less markdown threads from the entity meta file (see OrphanOps).
   orphans?: OrphanOps;
   // Persisted table column widths (entity meta `tcols` records). Read ONCE,
@@ -298,6 +305,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     onCommentsCount,
     onRequestShowComments,
     readOnly = false,
+    taskToggle = false,
     orphans,
     tableWidths,
     onTableWidths,
@@ -348,6 +356,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const visibleRef = useRef(commentsVisible);
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  const taskToggleRef = useRef(taskToggle);
+  taskToggleRef.current = taskToggle;
   const onCommentsCountRef = useRef(onCommentsCount);
   onCommentsCountRef.current = onCommentsCount;
   const onRequestShowCommentsRef = useRef(onRequestShowComments);
@@ -503,6 +513,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // too — following a link is reading, not editing. Hosts that don't say
     // where links go get a browser tab.
     crepe.editor.use(linkOpenPlugin(() => onOpenLinkRef.current ?? openInBrowserTab));
+    // Checkbox ticking for read-only sessions that are allowed it (the plugin
+    // stands down whenever the editor is editable — there the list item's own
+    // node view already owns the box).
+    crepe.editor.use(taskTogglePlugin(() => taskToggleRef.current));
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
     crepe.editor.use(ghostPlugin);
@@ -596,11 +610,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   // re-reports the rail: the split view promotes/demotes a pane by flipping
   // readOnly, and the incoming host callbacks (comment count) need a fresh
   // report even though no transaction happened.
+  // The taskToggle dep is here for the same reason: the toggle plugin decides
+  // from view.editable + the prop, and only a view update re-runs that.
   useEffect(() => {
     crepeRef.current?.setReadonly(readOnly);
     viewRef.current?.setProps({});
     recompute();
-  }, [readOnly, recompute]);
+  }, [readOnly, taskToggle, recompute]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are

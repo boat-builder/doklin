@@ -35,7 +35,8 @@
 //                      edit-role sessions save like the desktop does, and
 //                      comment-role sessions use the same endpoint for their
 //                      comment work under a content-equivalence guard —
-//                      markdown comments ARE the markdown (CriticMarkup)
+//                      markdown comments ARE the markdown (CriticMarkup) —
+//                      which also lets through a task-list checkbox toggle
 //   GET/POST /<id>/html-comments   the rendition's comment-thread pool for
 //                      unlocked comment/edit sessions ({rev, threads},
 //                      rev-guarded whole-list swaps)
@@ -215,7 +216,12 @@ import { WEB_APP } from "./webAssets.js";
 // host's chrome — here, the shell's top bar beside the MD/HTML switcher —
 // so app controls no longer stand on the shared document (shell-only: no
 // API change).
-const WORKER_VERSION = 21;
+// 22 = comment-role sessions can tick task-list checkboxes: POST /<id>/save
+// lets their save through when the two documents differ only in which boxes
+// are checked, and the shell's read-only editor re-arms the click on the box.
+// An older worker simply refuses those saves as text changes, so a page on
+// one keeps behaving exactly as it does today.
+const WORKER_VERSION = 22;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -238,6 +244,8 @@ const WORKER_FEATURES = [
   "web-app",
   // Version 18: a page carries its markdown tables' column widths.
   "table-widths",
+  // Version 22: a comment-role session may tick task-list checkboxes.
+  "task-toggle",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -2388,7 +2396,9 @@ const GATE_CSS = `
      (CriticMarkup), so they ride /<id>/save like any edit. What separates a
      comment-role session from an edit-role one is the content-equivalence
      guard in handleSave — its saves must leave the stripped document
-     unchanged.
+     unchanged, save for which task-list boxes are ticked (version 22:
+     checking an item off is the checklist working as intended, and it moves
+     no text — see taskToggleOnly).
    - Html-rendition comments live in pages/<id>.comments.json as THREADS —
      the exact shape of the app's local sidecar ({id, anchor, comments}),
      plus per-entry provenance this worker stamps (eid + which access code
@@ -2644,6 +2654,39 @@ async function publicJsonContext(request, env, id, url, need) {
   return { data, gate, session };
 }
 
+// A task item's tick in the markdown source: the `[x]` right after a list
+// marker, and nowhere else — a bracket pair mid-sentence is prose.
+const TASK_MARKER_RE = /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[[ xX]\]/gm;
+
+// The same tick in the rendered html: marked writes a GFM task item as
+// `<input checked="" disabled="" type="checkbox">`, so blanking `checked` on
+// checkbox inputs — and only those — erases which boxes are ticked while
+// leaving every other difference between two renderings intact.
+function blankTaskBoxes(html) {
+  return html.replace(/<input\b[^>]*>/gi, (tag) =>
+    /\btype=(["']?)checkbox\1/i.test(tag)
+      ? tag.replace(/\s+checked(=(?:"[^"]*"|'[^']*'|[^\s>]*))?/gi, "")
+      : tag,
+  );
+}
+
+// The shell's editor re-serializes a document in its own style, and one of its
+// habits reaches the rendering: a tight list comes back one blank line looser,
+// which marked renders as `<li><p>text</p></li>` where the original rendered
+// `<li>text</li>` (plus a stray newline or two around the wrapper). That is
+// spacing, not content — and a web session has no other way to touch the
+// document — so the wrapper comes off before two renderings are compared.
+function unwrapLooseItems(html) {
+  return (
+    html
+      .replace(/<li>\s*<p>/g, "<li>")
+      .replace(/<\/p>\s*<\/li>/g, "</li>")
+      .replace(/<\/p>\s*<(ul|ol|blockquote|pre)>/g, "<$1>")
+      // A task item's box picks up a line break behind it in the loose form.
+      .replace(/(<input\b[^>]*>)\s+/g, "$1 ")
+  );
+}
+
 // Everything a view-role or public reader can observe about a page's markdown:
 // the rendered reading view AND the derived description (which feeds the
 // <meta> / og:description and thus link previews). A comment-only save must
@@ -2652,13 +2695,19 @@ async function publicJsonContext(request, env, id, url, need) {
 // *reference* definition, say: `[text]: url` renders to nothing but its text
 // lands in deriveDescription), which a comment-role session could use to plant
 // content on the public page.
-function publicProjection(md) {
+// `blankBoxes` additionally erases WHICH task-list boxes are ticked — the one
+// content change a comment-role session may make (see taskToggleOnly). A tick
+// shows up twice in a projection: as `checked` on the rendered <input>, and as
+// the literal "[x]" in the source the description is derived from.
+function publicProjection(md, blankBoxes = false) {
   const clean = stripComments(md);
-  return `${deriveDescription(clean)} ${marked.parse(clean, {
-    gfm: true,
-    breaks: false,
-    async: false,
-  })}`;
+  const html = unwrapLooseItems(
+    marked.parse(clean, { gfm: true, breaks: false, async: false }),
+  );
+  // The halves are joined with a NUL, written as an escape: a literal one in
+  // the source makes git (and grep) read this whole file as binary.
+  if (!blankBoxes) return `${deriveDescription(clean)}\0${html}`;
+  return `${deriveDescription(clean.replace(TASK_MARKER_RE, "$1[ ]"))}\0${blankTaskBoxes(html)}`;
 }
 
 // Are two markdown documents the same DOCUMENT once editorial comments are
@@ -2672,6 +2721,24 @@ function contentEquivalent(a, b) {
   if (trim(a) === trim(b)) return true;
   try {
     return publicProjection(a) === publicProjection(b);
+  } catch {
+    return false;
+  }
+}
+
+// Do these two documents differ only in which task-list boxes are ticked?
+// That is the one content change a comment-role session may make on top of its
+// comments: a checklist is for the people working from it, and ticking a box
+// moves a bit of state without touching a word of the text.
+//
+// The test is the public projection again, with the tick blanked out of both
+// halves of it — stricter than it sounds. ADDING or removing a box changes the
+// <input> element itself, promoting a plain bullet to a task item adds one,
+// and `- [x]` inside a code fence is escaped text rather than an input: every
+// one of those still reads as a text change, and is refused.
+function taskToggleOnly(a, b) {
+  try {
+    return publicProjection(a, true) === publicProjection(b, true);
   } catch {
     return false;
   }
@@ -2722,9 +2789,19 @@ async function handleSave(request, env, id, url) {
       return json({ error: "the page changed", rev: currentRev, by }, 409);
     }
     const contentChanged = !contentEquivalent(markdown, record.markdown);
-    if (contentChanged && session.role !== "edit") {
+    // Ticking a checkbox IS a content change — the rendition goes stale, the
+    // reading page shows the new state — it is just one a comment-role
+    // session is trusted with, unlike anything that alters the text.
+    if (
+      contentChanged &&
+      session.role !== "edit" &&
+      !taskToggleOnly(markdown, record.markdown)
+    ) {
       return json(
-        { error: "your access code can comment on this page, not change its text" },
+        {
+          error:
+            "your access code can comment on this page and tick its checkboxes, not change its text",
+        },
         403,
       );
     }

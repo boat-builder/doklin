@@ -176,13 +176,19 @@ const fileEntry = (path, rev, hashSeed) => ({
 let ws; // workspace id shared by most tests
 let alice; // member token scoped to ws
 let bob; // second member token
+// WORKER_VERSION as the worker itself reports it. The shell's asset routes are
+// stamped with it, so read it once instead of writing the number into every
+// URL below — it moves whenever a feature lands, and a hardcoded copy just
+// goes stale (it did, for three releases).
+let workerVersion;
 
 await test("auth: /api/meta rejects missing and bad tokens, accepts owner", async () => {
   assert.equal((await call("/api/meta")).status, 401);
   assert.equal((await call("/api/meta", { token: "nope" })).status, 401);
   const ok = await call("/api/meta", { token: OWNER });
   assert.equal(ok.status, 200);
-  assert.equal(ok.json.version, 19);
+  assert.ok(Number.isInteger(ok.json.version) && ok.json.version > 0);
+  workerVersion = ok.json.version;
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("auth"));
   assert.ok(ok.json.features.includes("workspace-pages"));
@@ -193,6 +199,7 @@ await test("auth: /api/meta rejects missing and bad tokens, accepts owner", asyn
   assert.ok(ok.json.features.includes("web-edit"));
   assert.ok(ok.json.features.includes("html-comments"));
   assert.ok(ok.json.features.includes("web-app"));
+  assert.ok(ok.json.features.includes("task-toggle"));
 });
 
 await test("auth: whoami reflects the owner", async () => {
@@ -1253,8 +1260,8 @@ await test("roles: view keeps the classic page; comment/edit get the app shell",
 
   // The shell references version-stamped assets; without an injected bundle
   // (this test build) the asset route says exactly that.
-  assert.ok(commentPage.text.includes("/__web/19/app.js"));
-  assert.equal((await call("/__web/19/app.js")).status, 503);
+  assert.ok(commentPage.text.includes(`/__web/${workerVersion}/app.js`));
+  assert.equal((await call(`/__web/${workerVersion}/app.js`)).status, 503);
 
   // Write-endpoint floors: view can't save or comment; no cookie is a 401.
   const viewSave = await call("/team-page/save", {
@@ -1306,7 +1313,7 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   const withDiagram = await call("/diagram-doc");
   assert.equal(withDiagram.status, 200);
   assert.ok(withDiagram.text.includes('class="language-mermaid"'));
-  assert.ok(withDiagram.text.includes("/__web/19/mermaid.js"));
+  assert.ok(withDiagram.text.includes(`/__web/${workerVersion}/mermaid.js`));
 
   // A page without one doesn't pay for the script.
   await call("/api/pages/plain-doc", {
@@ -1319,8 +1326,10 @@ await test("mermaid: static pages hydrate diagram blocks, shell knows the module
   // The shell hands the module URL to the editor (window.__DK_MERMAID_URL);
   // the asset route answers like app.js does (503 in this bundle-less build).
   const shell = await call("/team-page", { headers: { cookie: commentCookie } });
-  assert.ok(shell.text.includes(`window.__DK_MERMAID_URL = "/__web/19/mermaid.js"`));
-  assert.equal((await call("/__web/19/mermaid.js")).status, 503);
+  assert.ok(
+    shell.text.includes(`window.__DK_MERMAID_URL = "/__web/${workerVersion}/mermaid.js"`),
+  );
+  assert.equal((await call(`/__web/${workerVersion}/mermaid.js`)).status, 503);
 
   await call("/api/pages/diagram-doc", { method: "DELETE", token: OWNER });
   await call("/api/pages/plain-doc", { method: "DELETE", token: OWNER });
@@ -1554,6 +1563,98 @@ await test("markdown comments: a comment-role save must leave the document uncha
   });
   assert.equal(stale.status, 409);
   assert.equal(stale.json.rev, rev + 2);
+});
+
+await test("task lists: a comment-role session ticks boxes, and only boxes", async () => {
+  // Two checkboxes, a plain bullet, and a checkbox that is only a code
+  // sample — everything the guard has to tell apart.
+  const doc = (ship, docs) =>
+    [
+      "# Sprint",
+      "",
+      `- [${ship ? "x" : " "}] Ship the thing`,
+      `- [${docs ? "x" : " "}] Write the doc`,
+      "- a plain bullet",
+      "",
+      "```",
+      "- [ ] a sample in a code fence",
+      "```",
+      "",
+    ].join("\n");
+
+  await call("/api/pages/check-page", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Sprint",
+      markdown: doc(false, true),
+      html: "<html><body>rendition-v1</body></html>",
+    },
+  });
+  await call("/api/pages/check-page/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Priya", code: "check-comment-code", role: "comment" },
+  });
+  await call("/api/pages/check-page/access/codes", {
+    method: "POST",
+    token: OWNER,
+    body: { label: "Reader", code: "check-view-code", role: "view" },
+  });
+  const cookie = cookieOf(await unlock("check-page", "check-comment-code"));
+  const readerCookie = cookieOf(await unlock("check-page", "check-view-code"));
+  const save = (markdown, baseRev) =>
+    call("/check-page/save", {
+      method: "POST",
+      headers: { cookie },
+      body: { markdown, baseRev },
+      ip: freshIp(), // each save its own bucket — the suite shares "unknown"
+    });
+
+  // Ticking one box and clearing another is the whole of what's allowed.
+  const rev0 = (await call("/api/pages/check-page", { token: OWNER })).json.rev;
+  const toggled = await save(doc(true, false), rev0);
+  assert.equal(toggled.status, 200);
+  const stored = (await call("/api/pages/check-page/content", { token: OWNER })).json.markdown;
+  assert.ok(stored.includes("- [x] Ship the thing"));
+  assert.ok(stored.includes("- [ ] Write the doc"));
+
+  // It IS the document now — a view-role reader sees the new state…
+  const readerPage = await call("/check-page", { headers: { cookie: readerCookie } });
+  assert.match(readerPage.text, /<input checked[^>]*>\s*Ship the thing/);
+  // …and the rendition is behind, exactly as it would be after any edit.
+  const meta = await call("/api/pages/check-page", { token: OWNER });
+  assert.equal(meta.json.htmlStale, true);
+  assert.equal(meta.json.webEdit.by, "Priya", "the tick is stamped like any web save");
+  assert.equal(meta.json.title, "Sprint", "ticking a box never retitles");
+
+  // A comment and a tick in the same save: the shell autosaves the whole
+  // document, so the two routinely arrive together.
+  const both = await save(
+    doc(true, true).replace(
+      "Ship the thing",
+      "{==Ship the thing==}{>>#c1d2e3 Priya · 2026-07-15T10:00:00Z: by Friday?<<}",
+    ),
+    toggled.json.rev,
+  );
+  assert.equal(both.status, 200);
+
+  const rev = both.json.rev;
+  const base = doc(true, true);
+  // Everything else stays the edit role's alone, box flip or no box flip.
+  const rewrite = await save(doc(false, true).replace("Ship the thing", "Ship something else"), rev);
+  assert.equal(rewrite.status, 403, "text can't ride along with a toggle");
+  const added = await save(base.replace("- a plain bullet", "- [ ] and one more\n- a plain bullet"), rev);
+  assert.equal(added.status, 403, "adding a checklist item is writing");
+  const removed = await save(base.replace("- [x] Write the doc\n", ""), rev);
+  assert.equal(removed.status, 403, "deleting one is too");
+  const promoted = await save(base.replace("- a plain bullet", "- [ ] a plain bullet"), rev);
+  assert.equal(promoted.status, 403, "a bullet can't become a box");
+  const inCode = await save(base.replace("- [ ] a sample", "- [x] a sample"), rev);
+  assert.equal(inCode.status, 403, "a checkbox in a code fence is text, not a box");
+
+  // Every refusal left the document alone.
+  assert.equal((await call("/api/pages/check-page", { token: OWNER })).json.rev, rev);
 });
 
 await test("web edit: rev bumps, retitles, stamps webEdit; comments ride along", async () => {
