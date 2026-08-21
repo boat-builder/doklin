@@ -435,6 +435,108 @@ await api("/api/pages/widths-web/access/codes", {
   await page.context().close();
 }
 
+/* ================= Task-list checkboxes (worker v22) =================
+   A checklist is usually for exactly the people who may comment on it, so a
+   comment-role session ticks its boxes — in the same read-only editor that
+   refuses every other keystroke, and through the same /save endpoint, which
+   accepts the tick only because the two documents are identical apart from
+   which boxes are checked. */
+
+const CHECK_MD = `# Sprint
+
+- [ ] Ship the thing
+- [x] Write the doc
+- a plain bullet
+`;
+
+await api("/api/pages/check-web", undefined, "DELETE");
+await api("/api/pages/check-web", { title: "Sprint", markdown: CHECK_MD });
+for (const [label, code, role] of [
+  ["Reviewer", "check-comment-code", "comment"],
+  ["Reader", "check-view-code", "view"],
+]) {
+  await api("/api/pages/check-web/access/codes", { label, code, role }, "POST");
+}
+
+{
+  const page = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
+  page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await page.goto(`${BASE}/check-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", "check-comment-code");
+  await page.press("#gate-code", "Enter");
+  await poll(async () => (await page.locator('.ProseMirror[contenteditable="false"]').count()) === 1);
+
+  const box = (text) =>
+    page
+      .locator(".milkdown-list-item-block", { hasText: text })
+      .first()
+      .locator(".label-wrapper");
+  await poll(async () => (await box("Ship the thing").count()) === 1);
+
+  // The node view marks its icon `.readonly` whenever the editor isn't
+  // editable — a session that may tick must not read as a dead box.
+  step(
+    "the box advertises itself as clickable in the read-only editor",
+    (await box("Ship the thing")
+      .locator(".label")
+      .evaluate((el) => getComputedStyle(el).cursor)) === "pointer",
+  );
+
+  // Both directions: tick the open item, clear the done one.
+  await box("Ship the thing").click();
+  await poll(async () => (await box("Ship the thing").locator(".label.checked").count()) === 1);
+  await box("Write the doc").click();
+  await poll(async () => (await box("Write the doc").locator(".label.unchecked").count()) === 1);
+  step("comment role ticks and clears boxes in the read-only editor", true);
+
+  const stored = await poll(async () => {
+    const { json } = await api("/api/pages/check-web/content");
+    return json?.markdown?.includes("[x] Ship the thing") &&
+      json.markdown.includes("[ ] Write the doc")
+      ? json.markdown
+      : null;
+  });
+  step(
+    "the ticks autosave through /save and nothing else moves",
+    stored.includes("a plain bullet") && stored.includes("# Sprint"),
+    stored.replace(/\n/g, " | "),
+  );
+
+  // Same editor, same session: the text itself is still untouchable.
+  await page.locator(".ProseMirror p").first().click();
+  await page.keyboard.type("NOPE");
+  await new Promise((r) => setTimeout(r, 1200));
+  step(
+    "…while typing into the same document still does nothing",
+    !(await api("/api/pages/check-web/content")).json.markdown.includes("NOPE"),
+  );
+  await page.screenshot({ path: `${SHOTS}/06-checkbox.png` });
+  await page.context().close();
+}
+
+// The tick is the document now — a view-role reader sees the ticked box on
+// the plain reading page.
+{
+  const page = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
+  await page.goto(`${BASE}/check-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", "check-view-code");
+  await page.press("#gate-code", "Enter");
+  await poll(async () => (await page.locator(".doc input[type=checkbox]").count()) === 2);
+  const checked = await page.evaluate(() =>
+    [...document.querySelectorAll(".doc li")]
+      .filter((li) => li.querySelector("input[type=checkbox]"))
+      .map((li) => `${li.querySelector("input").checked}:${li.textContent.trim()}`),
+  );
+  step(
+    "a view-role reader sees the ticked box on the static page",
+    checked[0] === "true:Ship the thing" && checked[1] === "false:Write the doc",
+    checked.join(", "),
+  );
+  await page.context().close();
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);
 await browser.close();
 process.exit(results.some((r) => !r.ok) ? 1 : 0);
