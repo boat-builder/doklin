@@ -33,14 +33,26 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   property, drag to move. A card is an ordinary `.md` note whose properties are
   YAML frontmatter at the top, so vim, Obsidian, and GitHub read the same files
   — and the board's own columns live in a plain-text `store.jsonl` beside them.
-  Nothing about a board is binary, and nothing needs Doklin to read. A board
-  also goes **inside a note**: `/board` in the slash menu drops a ` ```kanban `
-  block that names a folder, and the note shows that board in the middle of the
-  prose — live, not a picture. Every other markdown tool shows the block as
-  three lines of config and leaves it alone. Publish that note and the board
-  goes with it: the shared page draws the columns and cards as plain HTML, with
-  no JavaScript, and a card links to its own page when it is part of the same
-  folder share.
+  Nothing about a board is binary, and nothing needs Doklin to read. The same
+  cards also show as a **table**, and the strip above the board switches
+  between the views you save: each one keeps its own filter, sort, columns and
+  properties, and *Export as CSV…* writes out exactly what it shows. Clicking a
+  card **peeks** it beside the board — its properties above its body, editable,
+  with *Open in a tab* for when it turns out to be the document you came for.
+  A board also goes **inside a note**: `/board` in the slash menu drops a
+  ` ```kanban ` block (or `/board` → *Board as a table* for a ` ```table ` one)
+  that names a folder, and the note shows that view in the middle of the prose
+  — live, not a picture. Every other markdown tool shows the block as three
+  lines of config and leaves it alone. Publish that note and the view goes with
+  it: the shared page draws the columns and cards, or the rows, as plain HTML
+  with no JavaScript, and a card links to its own page when it is part of the
+  same folder share.
+- **Properties on any note** — every document has a quiet properties header
+  above it. On a card the rows are its board's fields; on any other note they
+  are the frontmatter keys the file already carries, including ones written by
+  another tool. *Add property* adds a key to a note, or declares a field on the
+  whole board when the note is a card. A note with no properties shows nothing
+  until you go looking.
 - **Folder workspaces** — open a directory to get a collapsible sidebar of its
   markdown files, with VS Code-style file management: create, rename, and
   delete files and folders from the context menu, and drag rows onto a folder
@@ -137,7 +149,8 @@ Deeper docs live in dedicated files to keep this page focused:
 - **[docs/datastores-kanban.md](docs/datastores-kanban.md)** — the design for
   structured data: *datastores* (a folder of markdown cards with frontmatter
   plus a `store.jsonl` definition), the kanban view as a tab and as a
-  ` ```kanban ` embed in notes, how it rides sync / history / sharing, and
-  the phased plan. Phases 1-3 (a board from a folder, a board embedded in a
-  note, and boards on published pages) are built; phase 4 (a second view,
-  properties on any note) is not.
+  kanban and table views as a tab and as a ` ```kanban ` / ` ```table `
+  embed in notes, how it rides sync / history / sharing, and the phased
+  plan. All four phases are built: a board from a folder, a board embedded
+  in a note, boards on published pages, and the second view with properties
+  on any note.

@@ -117,8 +117,9 @@ import {
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
-import KanbanBoard from "./KanbanBoard";
-import type { KanbanEmbedHost, StoreChoice } from "./KanbanEmbed";
+import StoreView from "./StoreView";
+import CardPeek from "./CardPeek";
+import type { StoreEmbedHost, StoreChoice } from "./StoreEmbed";
 import PropertiesHeader from "./PropertiesHeader";
 import {
   parseFrontmatter,
@@ -902,6 +903,9 @@ export default function App() {
   const cardOpaqueRef = useRef<string[]>([]);
   const [cardProps, setCardProps] = useState<CardProps>({});
   const [cardOpaque, setCardOpaque] = useState<string[]>([]);
+  // The keys the file itself carries, in file order — what an ordinary note's
+  // properties header shows rows for (a card's rows come from its board).
+  const [cardOrder, setCardOrder] = useState<string[]>([]);
   // Adopt a document's frontmatter block: the refs the writers read and the
   // state the header renders, in one place so the two can't drift.
   const adoptFrontmatter = useCallback((fullText: string) => {
@@ -911,6 +915,7 @@ export default function App() {
     cardOpaqueRef.current = fm.opaque;
     setCardProps(fm.props);
     setCardOpaque(fm.opaque);
+    setCardOrder(fm.order);
     return fm;
   }, []);
   // Legacy <stem>.html.comments.jsonl seen for the active entity (transition
@@ -7623,8 +7628,13 @@ export default function App() {
     activeFilePath && MD_EXT_RE.test(activeFilePath)
       ? dirname(activeFilePath)
       : null;
-  const { state: cardStore } = useStore(activeCardDir);
+  const { state: cardStore, model: cardModel } = useStore(activeCardDir);
   const activeCardDef = activeCardDir && !activeIsStore ? cardStore.def : null;
+
+  // A card peeked from a board: the panel beside it, not a tab. Held here
+  // rather than inside the board so it survives a re-render of the board and
+  // so the app's own rename / open-in-a-tab plumbing is one call away.
+  const [peekCard, setPeekCard] = useState<string | null>(null);
 
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
@@ -7678,6 +7688,37 @@ export default function App() {
     }
   };
 
+  // Clicking a card PEEKS it — the panel beside the board, not a tab. A card
+  // already open in a tab is the exception: the tab is the better answer and
+  // it is already there, so we just go to it.
+  const openCardFromStore = (target: string) => {
+    if (tabsRef.current.some((t) => t.kind === "file" && t.path === target)) {
+      void openTab(target, "file");
+      return;
+    }
+    setPeekCard(target);
+  };
+
+  // A view, as a spreadsheet. StoreView builds the text (it knows which cards
+  // and which columns the view shows); the app only knows where to put it.
+  const exportStoreCsv = async (fileName: string, text: string) => {
+    const chosen = await saveDialog({
+      title: "Export as CSV",
+      defaultPath: workspaceRoot ? `${workspaceRoot}/${fileName}` : fileName,
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (!chosen) return;
+    try {
+      await invoke<FileSnapshot>("write_file", {
+        path: chosen,
+        contents: text,
+        expected: null,
+      });
+    } catch (e) {
+      console.error("csv export failed", chosen, e);
+    }
+  };
+
   const openBoard = (dirPath: string) => void openTab(dirPath, "store");
 
   // Turn a folder into a board: write the definition file, nothing else. Not
@@ -7728,10 +7769,10 @@ export default function App() {
     return path;
   };
 
-  // What a ```kanban embed inside a pane's note can reach. Built per pane
+  // What an embed inside a pane's note can reach. Built per pane
   // because a relative `store:` resolves against the note the embed is
   // written in — a draft has nowhere to resolve against, and says so.
-  const kanbanHostFor = (tab: Tab | null): KanbanEmbedHost | null => {
+  const kanbanHostFor = (tab: Tab | null): StoreEmbedHost | null => {
     if (!tab || tab.kind === "store") return null;
     const docPath = tab.kind === "file" ? tab.path : null;
     return {
@@ -7743,8 +7784,10 @@ export default function App() {
           : // A draft has no folder of its own to put one beside. The picker
             // says so and disables the button; this is the backstop.
             Promise.reject(new Error("Save this note first.")),
-      // A card opens the way a followed link does: a tab, right here.
-      openCard: (p) => void openTab(p, "file"),
+      // A card peeks, here as on a board tab — clicking one in the middle of
+      // your prose should not yank you out of the note you are reading.
+      openCard: openCardFromStore,
+      openCardTab: (p) => void openTab(p, "file"),
       renameCard: (from, to) => movePath(from, to, "file"),
       deleteCard: (p) => void deleteEntries([{ path: p, kind: "file" }]),
       revealCard: revealInFinder,
@@ -7867,25 +7910,56 @@ export default function App() {
             />
           )}
           {showBoardHere && (
-            // A board reads and writes its own folder; the pane just hosts it.
+            // A store reads and writes its own folder; the pane just hosts it.
             // An unfocused pane shows the same DOM with writing off.
-            <KanbanBoard
+            <StoreView
               dir={paneTab.path}
               readOnly={!focused}
-              onOpenCard={(p) => void openTab(p, "file")}
+              onOpenCard={openCardFromStore}
+              onOpenCardTab={(p) => void openTab(p, "file")}
               onRenameCard={(from, to) => movePath(from, to, "file")}
               onDeleteCard={(p) => void deleteEntries([{ path: p, kind: "file" }])}
               onRevealInFinder={revealInFinder}
+              onExport={exportStoreCsv}
             />
           )}
-          {focused && showEditorHere && activeCardDef && (
-            // A card's properties, above its note. Changing a pill writes the
-            // frontmatter block and nothing else — the body never moves.
+          {focused && showEditorHere && paneTab?.kind === "file" && (
+            // This note's properties, above it. Changing a pill writes the
+            // frontmatter block and nothing else — the body never moves. Every
+            // note gets a header: a card's rows are its board's fields, any
+            // other note's are the keys its own file carries. A DRAFT gets
+            // none — it has no file to write a property to yet.
             <PropertiesHeader
               def={activeCardDef}
               props={cardProps}
+              order={cardOrder}
               opaqueCount={cardOpaque.length}
               onChange={setCardProperty}
+              onAddField={
+                activeCardDef && cardModel
+                  ? (name, type) => void cardModel.addField(name, type)
+                  : undefined
+              }
+              onRenameField={
+                activeCardDef && cardModel
+                  ? (id, name) => void cardModel.renameField(id, name)
+                  : undefined
+              }
+              onRetypeField={
+                activeCardDef && cardModel
+                  ? (id, type) => void cardModel.retypeField(id, type)
+                  : undefined
+              }
+              onDeleteField={
+                activeCardDef && cardModel
+                  ? (id) => void cardModel.deleteField(id)
+                  : undefined
+              }
+              onAddOption={
+                activeCardDef && cardModel
+                  ? (field, name) => void cardModel.addOption(field, name)
+                  : undefined
+              }
             />
           )}
           {showEditorHere && (
@@ -8309,6 +8383,22 @@ export default function App() {
       )}
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
+      )}
+      {peekCard && (
+        <CardPeek
+          path={peekCard}
+          dir={dirname(peekCard)}
+          onClose={() => setPeekCard(null)}
+          onOpenTab={(p) => void openTab(p, "file")}
+          // The panel follows the file it is looking at: movePath answers with
+          // an error message, or null once the card has moved.
+          onRename={async (from, to) => {
+            const failed = await movePath(from, to, "file");
+            if (!failed) setPeekCard(to);
+            return failed;
+          }}
+          onWriteThreads={writeMdThreadsToMeta}
+        />
       )}
       {historyTarget &&
         syncedWorkspace &&

@@ -184,9 +184,45 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   );
 }
 
-/* ---------- 7. a card opens as an ordinary note, with its properties ------- */
+/* ---------- 7. a card PEEKS, then opens as an ordinary note ---------- */
 {
+  // Clicking a card is a light question — "what does this say?" — so it opens
+  // the panel beside the board, not a tab. The tab is one click further on.
   await column("Done").locator(".dk-card").first().click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 1);
+  step("a click peeks the card rather than opening a tab", true);
+  step(
+    "the board is still on screen behind it",
+    (await page.locator(".dk-board").count()) === 1,
+  );
+  const peekProse = (await page.locator(".dk-peek .ProseMirror").first().innerText()).trim();
+  step(
+    "the peek shows the body, never the frontmatter",
+    !peekProse.includes("status:") && peekProse.startsWith("Repro:"),
+    peekProse.slice(0, 40),
+  );
+  step(
+    "and its properties above it",
+    (await page.locator(".dk-peek .dk-prop-label").allTextContents()).join(",").includes("Status"),
+  );
+  // A body typed in the peek is spliced in under the frontmatter block, which
+  // comes back byte for byte (write_body, the mirror of write_frontmatter).
+  const headBeforePeek = await headOf(CARD_A);
+  await page.locator(".dk-peek .ProseMirror").first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Peeked.");
+  await poll(async () => (await bodyOf(CARD_A)).includes("Peeked."), 8000);
+  step("the peek writes the body", (await bodyOf(CARD_A)).includes("Peeked."));
+  step(
+    "and leaves the frontmatter block exactly as it was",
+    (await headOf(CARD_A)) === headBeforePeek,
+    JSON.stringify(await headOf(CARD_A)),
+  );
+  await page.screenshot({ path: SHOTS + "kanban-peek.png" });
+
+  await page.locator(".dk-peek-tab").click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 0);
+  step("Open in a tab closes the peek and opens the document", true);
   await poll(async () => (await page.locator(".ProseMirror").count()) > 0);
   const prose = (await page.locator(".ProseMirror").first().innerText()).trim();
   step(
@@ -280,18 +316,129 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   await page.screenshot({ path: SHOTS + "kanban-board-after.png" });
 }
 
-/* ---------- 11. an ordinary note is untouched by any of it ---------- */
+/* ---------- 11. properties on a note that is not a card ---------- */
 {
   await page.locator(".tree-row.tree-file", { hasText: "Roadmap" }).click();
   await poll(async () => (await page.locator(".ProseMirror").count()) > 0);
   step(
-    "a note outside a board shows no properties header",
-    (await page.locator(".dk-props").count()) === 0,
+    "every note has a properties header, empty for a note with no properties",
+    (await page.locator(".dk-props.is-empty").count()) === 1 &&
+      (await page.locator(".dk-prop-row").count()) === 0,
   );
   step(
-    "and is not rewritten",
+    "opening it rewrites nothing",
     (await fileOf("/docs/Roadmap.md")) ===
       "# Roadmap\n\nWhere things stand this quarter.\n",
+  );
+  // Adding one to an ordinary note adds a KEY to that note. A note with no
+  // frontmatter grows one only when someone asks for it.
+  await page.locator(".dk-prop-add").click();
+  await page.locator(".dk-prop-name-input").fill("Owner");
+  await page.locator(".dk-prop-add-go").click();
+  await poll(async () => (await page.locator(".dk-prop-label").count()) === 1);
+  step(
+    "an empty property is not yet a line in the file",
+    (await fileOf("/docs/Roadmap.md")).startsWith("# Roadmap"),
+  );
+  await page.locator(".dk-prop-input").fill("Ada");
+  await page.keyboard.press("Enter");
+  await poll(async () => (await headOf("/docs/Roadmap.md")).includes("Owner: Ada"), 8000);
+  step("giving it a value writes the frontmatter", true, await headOf("/docs/Roadmap.md"));
+  step(
+    "and leaves the body byte-identical",
+    (await bodyOf("/docs/Roadmap.md")) === "# Roadmap\n\nWhere things stand this quarter.\n",
+  );
+  await page.screenshot({ path: SHOTS + "kanban-note-props.png" });
+}
+
+/* ---------- 12. a property declared on a card is a FIELD of the board ---- */
+{
+  await page.locator(".tree-row.tree-board").click();
+  await poll(async () => (await page.locator(".dk-board").count()) === 1);
+  // A card ALREADY open in a tab is never peeked: the tab is the better
+  // answer and it is already there, so the click just goes to it.
+  await column("Backlog").locator(".dk-card", { hasText: "Fix login redirect" }).click();
+  await settle(600);
+  step(
+    "a card already open in a tab goes to the tab, not to a peek",
+    (await page.locator(".dk-peek").count()) === 0 &&
+      (await page.locator(".ProseMirror").count()) > 0,
+  );
+
+  await page.locator(".tree-row.tree-board").click();
+  await poll(async () => (await page.locator(".dk-board").count()) === 1);
+  await column("Backlog").locator(".dk-card", { hasText: "Ship dark mode" }).click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 1);
+  await page.locator(".dk-peek .dk-prop-add").click();
+  await page.locator(".dk-peek .dk-prop-name-input").fill("Due");
+  await page.locator(".dk-peek .dk-prop-type").selectOption("date");
+  await page.locator(".dk-peek .dk-prop-add-go").click();
+  await poll(async () => (await fileOf("/docs/Projects/store.jsonl")).includes('"id":"due"'), 8000);
+  step(
+    "a card's new property is declared on the store, not on the one card",
+    (await fileOf("/docs/Projects/store.jsonl")).includes(
+      '{"t":"field","id":"due","name":"Due","type":"date"}',
+    ),
+  );
+  step(
+    "no card was rewritten to hold it",
+    !(await headOf(CARD_A)).includes("due:"),
+    await headOf(CARD_A),
+  );
+  await page.locator(".dk-peek-close").click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 0);
+}
+
+/* ---------- 13. the second view: a table of the same cards ---------- */
+{
+  const names = await page.locator(".dk-view-tab").allTextContents();
+  step("the board tab names its saved views", names.includes("Board"), names.join(" | "));
+  await page.locator(".dk-view-add").click();
+  await page.locator(".dk-popover-item", { hasText: "New table" }).click();
+  await poll(async () => (await page.locator(".dk-table").count()) === 1);
+  step("a new table view is saved to store.jsonl", true);
+  step(
+    "it is one line of the definition file, and nothing else changed",
+    (await fileOf("/docs/Projects/store.jsonl")).includes('"kind":"table"'),
+  );
+  const heads = await page.locator(".dk-th").allTextContents();
+  step(
+    "the table's columns are the store's fields, after the title",
+    heads[0].startsWith("Title") && heads.join(",").includes("Status"),
+    heads.join(" | "),
+  );
+  const rows = await page.locator(".dk-row-title").allTextContents();
+  step(
+    "one row per card, in title order",
+    rows.length >= 4 && JSON.stringify(rows) === JSON.stringify([...rows].sort()),
+    rows.join(" | "),
+  );
+  // A cell writes the same frontmatter a board's drag writes.
+  const bodyBefore = await bodyOf(CARD_B);
+  const row = page.locator(".dk-tr", { hasText: "Ship dark mode" });
+  await row.locator(".dk-prop-trigger").first().click();
+  await poll(async () => (await page.locator(".dk-prop-popover").count()) > 0);
+  await page.locator(".dk-prop-popover .dk-popover-item", { hasText: "Done" }).first().click();
+  await poll(async () => /status: Done/.test(await headOf(CARD_B)), 8000);
+  step("a cell writes the card's frontmatter", /status: Done/.test(await headOf(CARD_B)));
+  step("and not its body", (await bodyOf(CARD_B)) === bodyBefore);
+  await page.screenshot({ path: SHOTS + "kanban-table.png" });
+
+  // Sorting is the view's, saved with it.
+  await page.locator(".dk-th-btn", { hasText: "Status" }).click();
+  await poll(async () => (await fileOf("/docs/Projects/store.jsonl")).includes('"sort"'), 8000);
+  step(
+    "clicking a heading saves the sort on the view",
+    (await fileOf("/docs/Projects/store.jsonl")).includes('"sort":{"f":"status","dir":"asc"}'),
+  );
+
+  // Back to the board: the same cards, the same files.
+  await page.locator(".dk-view-tab", { hasText: "Board" }).click();
+  await poll(async () => (await page.locator(".dk-board-cols").count()) === 1);
+  step(
+    "switching back shows the board again",
+    (await cardsIn("Done")).includes("Ship dark mode"),
+    (await cardsIn("Done")).join(" | "),
   );
 }
 

@@ -2033,6 +2033,116 @@ await test("boards: junk degrades quietly, a wrong type is a client error", asyn
   }
 });
 
+const TABLE_NOTE = `# Planning
+
+The same cards, as a table:
+
+\`\`\`table
+store: ./Projects
+\`\`\`
+
+And the same store as a board:
+
+\`\`\`kanban
+store: ./Projects
+\`\`\`
+`;
+
+const PROJECTS_TABLE = {
+  fence: "store: ./Projects",
+  name: "Projects",
+  kind: "table",
+  fields: ["Status", "Owner"],
+  rows: [
+    {
+      title: "Ship the boat",
+      page: "card-ship",
+      cells: [[{ text: "In progress", color: "blue" }], [{ text: "Ada", color: "green" }]],
+    },
+    { title: "Paint it", cells: [[{ text: "Backlog" }], []] },
+  ],
+  more: 3,
+};
+
+await test("tables: the same store publishes as a table and as a board", async () => {
+  await call("/api/pages/table-note", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Planning",
+      markdown: TABLE_NOTE,
+      // The SAME fence text in two languages: two different views of one
+      // store, and each fence must find its own.
+      boards: [PROJECTS_TABLE, PROJECTS_BOARD],
+    },
+  });
+  const page = await call("/table-note");
+  assert.equal(page.status, 200);
+  assert.ok(!page.text.includes("language-table"), "the table fence is gone");
+  assert.ok(!page.text.includes("language-kanban"), "and so is the board fence");
+  assert.ok(page.text.includes('<span class="dk-board-kind">Table</span>'));
+  assert.ok(page.text.includes('<span class="dk-board-kind">Board</span>'), "both drew");
+  assert.ok(page.text.includes('<th class="dk-th is-title">Title</th>'));
+  assert.ok(page.text.includes('<th class="dk-th">Status</th>'));
+  assert.ok(page.text.includes('<a class="dk-row-title" href="/card-ship">Ship the boat</a>'));
+  assert.ok(page.text.includes('<span class="dk-row-title">Paint it</span>'));
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-blue">In progress</span>'));
+  assert.ok(page.text.includes('<div class="dk-col-more">+3 more</div>'), "cut rows are counted");
+  assert.ok(page.text.includes('<span class="dk-board-sub">5 cards</span>'), "2 rows + 3 more");
+  // The stored markdown still has both fences: a view is presentation, the
+  // fence is content.
+  assert.equal(
+    (await call("/api/pages/table-note/content", { token: OWNER })).json.markdown,
+    TABLE_NOTE,
+  );
+});
+
+await test("tables: junk degrades row by row, and a v23 board still reads", async () => {
+  await call("/api/pages/table-note", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Planning",
+      markdown: TABLE_NOTE,
+      boards: [
+        {
+          fence: "store: ./Projects",
+          kind: "table",
+          name: "Projects",
+          fields: ["Status", 7, "Owner"],
+          rows: [
+            null,
+            { cells: [] },
+            {
+              title: "Kept",
+              page: "no/slash",
+              // More cells than headings, and a junk chip inside one.
+              cells: [[{ text: "Todo" }], [{ text: "x", color: "../evil" }], [{ text: "spill" }]],
+            },
+          ],
+          more: -4,
+        },
+        // A snapshot with no kind is a board — what version 23 pushed.
+        PROJECTS_BOARD,
+      ],
+    },
+  });
+  const page = await call("/table-note");
+  assert.ok(page.text.includes('<th class="dk-th">Owner</th>'), "a readable heading survives");
+  assert.ok(!page.text.includes(">7<"), "a heading that isn't text is not a heading");
+  assert.ok(page.text.includes('<span class="dk-row-title">Kept</span>'), "the readable row survives");
+  assert.ok(!page.text.includes("no/slash"), "a page reference is a page id or nothing");
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-grey">x</span>'));
+  assert.ok(!page.text.includes("evil"), "a colour is a palette name or nothing");
+  assert.ok(!page.text.includes("spill"), "a row never draws more cells than the table has headings");
+  // 1 readable row and no `more`: a negative count is no count. (The board
+  // further down the same page has its own +12, so this is the table's own
+  // subtitle rather than a search for the string.)
+  assert.ok(page.text.includes('<span class="dk-board-sub">1 card</span>'));
+  assert.ok(page.text.includes('<span class="dk-col-name">In progress</span>'),
+    "a version-23 board, with no kind, still draws as a board");
+});
+
 await test("boards: a card page shows its properties above its body", async () => {
   // The app splits a card's frontmatter off the markdown before pushing, so
   // what arrives is the body plus the properties — never a raw `---` block,

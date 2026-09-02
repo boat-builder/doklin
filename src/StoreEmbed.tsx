@@ -1,20 +1,21 @@
-// The frame a ` ```kanban ` fence turns into inside a note.
+// The frame an embed fence turns into inside a note.
 //
-// Everything here is what surrounds the board, not the board: which store the
+// Everything here is what surrounds the view, not the view: which store the
 // fence names, what to do when it names none (a picker), what to say when the
 // name can't be resolved, and the Source chip that flips the frame back to
-// the config text. The board itself is the same <KanbanBoard> a board tab
+// the config text. The view itself is the same <StoreView> a board tab
 // mounts — one component, two hosts, so a drag in a note and a drag in a tab
 // are the same code writing the same files.
 //
-// The frame is mounted by the ProseMirror node view in kanbanEmbed.ts, inside
+// The frame is mounted by the ProseMirror node view in storeEmbed.ts, inside
 // a contenteditable=false element whose stopEvent() answers true for
 // everything: typing a card title in here never reaches the document.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import KanbanBoard from "./KanbanBoard";
+import StoreView from "./StoreView";
 import BoardSnapshot from "./BoardSnapshot";
 import type { BoardSnap } from "./store/board";
+import type { ViewKind } from "./store/storeFile";
 import { linkTargetPath, relativeLinkPath } from "./docLinks";
 import {
   parseEmbedConfig,
@@ -30,15 +31,17 @@ export type StoreChoice = { path: string; name: string };
  * this (its pages carry no workspace), so a host is optional everywhere and
  * its absence is a state the frame draws rather than a crash.
  */
-export type KanbanEmbedHost = {
+export type StoreEmbedHost = {
   /** The note this editor is showing — what a relative `store:` resolves against. */
   docPath: string | null;
   /** Every board in the workspace, for the picker. */
   listStores: () => Promise<StoreChoice[]>;
   /** Create a board of this name beside the note; resolves to its folder. */
   createStore: (name: string) => Promise<string>;
-  /** Open a card's note in a tab, the way following a link does. */
+  /** Open a card — a peek beside the note, the way a board tab does it. */
   openCard: (path: string) => void;
+  /** …and the tab, for when the peek turns out not to be enough. */
+  openCardTab?: (path: string) => void;
   renameCard?: (from: string, to: string) => Promise<string | null>;
   deleteCard?: (path: string) => void;
   revealCard?: (path: string) => void;
@@ -47,6 +50,8 @@ export type KanbanEmbedHost = {
 type Props = {
   /** The fence's body, verbatim. */
   config: string;
+  /** Which view the fence's LANGUAGE asks for. */
+  kind: ViewKind;
   /**
    * The host, read through a GETTER rather than handed over as an object.
    * The app rebuilds its host on every render; a captured copy would go
@@ -54,14 +59,14 @@ type Props = {
    * re-render the whole board for nothing. The getter is stable for the life
    * of the node view, so callbacks always reach the current app.
    */
-  getHost: () => KanbanEmbedHost | null;
+  getHost: () => StoreEmbedHost | null;
   /**
    * The board as a PUBLISHED page carries it — a picture, not a folder. Set
    * only where there is no host to read a real one from (the app shell); a
    * fence the page carries no snapshot for still says so rather than
    * pretending.
    */
-  getSnapshot?: (config: string) => BoardSnap | null;
+  getSnapshot?: (kind: ViewKind, config: string) => BoardSnap | null;
   readOnly: boolean;
   /** The node is selected in the document (⌫ would delete it). */
   selected: boolean;
@@ -69,8 +74,9 @@ type Props = {
   onConfigChange: (next: string) => void;
 };
 
-export default function KanbanEmbedFrame({
+export default function StoreEmbedFrame({
   config,
+  kind,
   getHost,
   getSnapshot,
   readOnly,
@@ -78,7 +84,8 @@ export default function KanbanEmbedFrame({
   onConfigChange,
 }: Props) {
   const host = getHost();
-  const snapshot = host ? null : (getSnapshot?.(config) ?? null);
+  const snapshot = host ? null : (getSnapshot?.(kind, config) ?? null);
+  const noun = kind === "table" ? "table" : "board";
   const cfg = useMemo(() => parseEmbedConfig(config), [config]);
   const [editingSource, setEditingSource] = useState(false);
   // A fence with nothing in it is what the slash menu inserts: the picker is
@@ -101,7 +108,7 @@ export default function KanbanEmbedFrame({
       data-dk-embed=""
     >
       <div className="dk-embed-bar">
-        <span className="dk-embed-kind">Board</span>
+        <span className="dk-embed-kind">{kind === "table" ? "Table" : "Board"}</span>
         {cfg.store && <span className="dk-embed-ref">{cfg.store}</span>}
         {!readOnly && (
           <button
@@ -133,7 +140,7 @@ export default function KanbanEmbedFrame({
         // board had already been deleted when the page was published. The
         // fence still says what it is.
         <div className="dk-embed-note">
-          <p>This board isn’t available on this page.</p>
+          <p>This {noun} isn’t available on this page.</p>
           {config.trim() !== "" && <pre className="dk-embed-src">{config}</pre>}
         </div>
       ) : blank ? (
@@ -155,8 +162,9 @@ export default function KanbanEmbedFrame({
           </p>
         </div>
       ) : (
-        <KanbanBoard
+        <StoreView
           dir={target}
+          kind={kind}
           viewId={cfg.view}
           group={cfg.group}
           hide={cfg.hide}
@@ -165,6 +173,9 @@ export default function KanbanEmbedFrame({
           // Every callback goes back through the getter, so a card opened
           // ten minutes from now reaches the app as it is then.
           onOpenCard={(p) => getHost()?.openCard(p)}
+          onOpenCardTab={
+            host.openCardTab ? (p) => getHost()?.openCardTab?.(p) : undefined
+          }
           onRenameCard={
             host.renameCard
               ? (from, to) => getHost()?.renameCard?.(from, to) ?? Promise.resolve(null)
@@ -231,7 +242,7 @@ function StorePicker({
   readOnly,
   onPick,
 }: {
-  getHost: () => KanbanEmbedHost | null;
+  getHost: () => StoreEmbedHost | null;
   docPath: string | null;
   readOnly: boolean;
   onPick: (path: string) => void;

@@ -15,9 +15,11 @@ The short version:
   The note body is the card's page — an ordinary Doklin document with
   everything that already works for notes: the editor, comments, links,
   search, sync, history, sharing.
-- A **view** is how a store is shown. The only view for now is **kanban**: it
-  opens as its own tab from the sidebar, and it can be **embedded in any note**
-  with a ` ```kanban ` fenced block that names the store — the same trick the
+- A **view** is how a store is shown: **kanban** (columns of cards) or
+  **table** (rows of the same cards). A store opens as its own tab from the
+  sidebar, which switches between its saved views, and any view can be
+  **embedded in a note** with a fenced block that names the store — one
+  language per kind, ` ```kanban ` and ` ```table `, the same trick the
   ` ```mermaid ` block plays for diagrams.
 - Nothing binary, nothing that needs the app to read: every file is text that
   a person can open in vim, Obsidian, or GitHub, and that cloud sync merges
@@ -43,7 +45,8 @@ Non-goals (for now):
 
 - Relations between stores, rollups, formulas.
 - Boards inside html renditions or PDF exports.
-- Views other than kanban (the design leaves room; the plan doesn't build them).
+- Views beyond kanban and table — a calendar, a gallery, a list (the design
+  leaves room; the plan doesn't build them).
 
 ## The choice: what is a datastore on disk?
 
@@ -110,14 +113,16 @@ and useful on its own.
 | **Card** | one `.md` file directly inside a store folder; its frontmatter holds the properties, its body is the card's page | database page |
 | **Field** | a named, typed property every card may carry (`status: select`, `due: date`, …), declared in `store.jsonl` | property |
 | **Option** | one allowed value of a `select` / `multi_select` field; for the group-by field of a board, one option = one column | select option |
-| **View** | a saved way of showing a store — for now always `kanban` with a `groupBy` field | view |
+| **View** | a saved way of showing a store: a `kind` (`kanban` / `table`), what it groups by, and its own `filter`, `sort`, `show` and `hide` | view |
 | **Board** | the kanban view, as the user sees it: a tab, or an embed inside a note | board view |
-| **Embed** | a ` ```kanban ` block in a note that shows a view of a store | linked database |
+| **Embed** | a ` ```kanban ` or ` ```table ` block in a note that shows a view of a store | linked database |
 
-User-facing, the whole thing is called a **board** in phase 1 ("New board…",
-a board icon in the sidebar). "Datastore" is the name of the concept in code
-and in this document; it becomes a user-facing word only once a second view
-exists and "board" stops being the whole story.
+User-facing, the whole thing is called a **board** — "New board…", a board
+icon in the sidebar — and a *view* of it is a "Board" or a "Table" in the
+strip above it. "Datastore" stays the name of the concept in code and in this
+document. Phase 4 gave a store its second view without giving the folder a
+second name: "board" is what people already call it, and a table of a board
+is not a different thing to own.
 
 ## On disk
 
@@ -222,6 +227,7 @@ empty:                    # null
 {"t":"option","field":"tags","name":"auth","rank":"a0"}
 {"t":"option","field":"tags","name":"bug","rank":"a1","color":"red"}
 {"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}
+{"t":"view","id":"open","kind":"table","name":"Open work","groupBy":"","filter":[{"f":"status","op":"is_not","v":"Done"}],"sort":{"f":"due","dir":"asc"},"show":["status","due"],"hide":[]}
 ```
 
 Same shape and same rules as the entity meta file, for the same reason:
@@ -245,12 +251,31 @@ Same shape and same rules as the entity meta file, for the same reason:
   opaque ids in the frontmatter. Deleting an option deletes no data: the
   cards keep their value and appear in the trailing "unknown value" column
   described below.
-- **Views** hold what is view-specific: `groupBy`, later `hide`, `filter`,
-  `sort`, `show` (which fields the card face shows). A store can have
-  several; the embed and the sidebar tab pick one by `id`.
+- **Views** hold what is view-specific: the `kind` (`kanban` or `table`),
+  `groupBy`, `filter`, `sort`, `show` (which fields the card face or the
+  table shows) and `hide` (which columns a board leaves out). A store can
+  have several; the tab's strip switches between them and an embed names one
+  by `id`. Only what a view actually carries is written, so a view nobody
+  has filtered or sorted keeps the bytes it has always had.
+  A clause is `{"f": field, "op": …, "v": value}` with five ops — `is`,
+  `is_not`, `has`, `empty`, `not_empty` — ANDed together; `has` means "the
+  list carries it" on a multi_select and "the text contains it" on anything
+  else, because a person filtering a board means the same thing either way.
+  A clause whose value is still empty passes everything: half a filter,
+  typed into the View panel, must not blank the board under the person
+  building it.
 
-Field types in phase 1: `select`, `multi_select`, `text`, `number`, `date`,
-`checkbox`. The group-by field of a kanban view must be a `select`.
+Field types: `select`, `multi_select`, `text`, `number`, `date`, `checkbox`.
+A kanban view can group by a `select`, a `multi_select` (a card is then in a
+column for each value it carries) or a `date` (the columns are the dates the
+cards carry, in order — ISO dates sort as text chronologically, so no date
+parser is needed anywhere).
+
+A field's **id is its frontmatter key**, slugged from its name once when it
+is declared and never changed after: renaming a field renames what people
+read, not what the files say. Deleting one deletes no data — the key stays
+in every card that carries it and is preserved verbatim, the way a key
+another tool wrote always has been.
 
 Why not a directory-level *hidden* file (`.doklin-store.json`)? Hidden names
 are excluded by `is_hidden_or_ignored`, which both the sidebar walk and the
@@ -281,10 +306,21 @@ to promote existing notes onto a board. The inline *New File…* is not
 offered inside a board; cards are created from the board.
 
 A new **tab kind** `store` (today `TabKind` is `"draft" | "file"`) keyed on
-the folder path renders `<KanbanBoard>` instead of the editor, with the app's
+the folder path renders `<StoreView>` instead of the editor, with the app's
 document machinery (autosave, watcher, comments, share) standing down the
 way it does for an html-only document. Session restore treats it like any
 tab; a folder that vanished becomes a ghost tab.
+
+`StoreView` is the shell every view sits in, in a tab or in a note: it holds
+the store's model, decides which saved view is on screen, and draws the
+heading, the **view strip** (one chip per saved view, plus `+` for a new
+board or table) and the **View** panel — group-by, sort, filter, which
+properties show, which columns are hidden, *Export as CSV…*, and *Delete
+this view*. Everything in that panel is one line of `store.jsonl`, which is
+to say everyone's; so only a TAB offers it. An embed shows the one view its
+fence names and changes nothing: the note said what it wanted to show, and
+a reader scrolling past should not be able to rewrite that for the whole
+workspace.
 
 Context menu: **New board…** on a folder or empty space creates
 `<Name>/store.jsonl` with the default field set (`status` with
@@ -292,7 +328,7 @@ Backlog / In progress / Done) and opens it. **Turn into board** on an
 existing folder of notes adds the definition file; every note becomes a
 card with no status. Neither touches any existing file's content.
 
-### 2. The embed — a ` ```kanban ` block in a note
+### 2. The embed — a ` ```kanban ` or ` ```table ` block in a note
 
 ````markdown
 # Roadmap
@@ -305,8 +341,11 @@ store: ./Projects
 ````
 
 Optional keys, same `key: value` dialect as frontmatter: `view: <id>` (a
-saved view; default the store's first kanban view), `group: <field>` and
-`hide: [Done]` (override the view for this embed only). The path resolves
+saved view; default the store's first view of the fence's kind),
+`group: <field>` and `hide: [Done]` (override the view for this embed only).
+The fence's LANGUAGE, not the config, decides which kind of view is drawn —
+a ` ```table ` naming a kanban view still shows a table, because the
+language is what every other markdown renderer sees. The path resolves
 relative to the note through `linkTargetPath` in `src/docLinks.ts`, exactly
 as a link between notes does — so an unsaved draft can't embed a relative
 store and says so in place.
@@ -319,16 +358,19 @@ ride a ` ```mermaid ` fence.
 
 Unlike mermaid it is **not** rendered through Crepe's code-block preview
 hook: that panel is sanitized `innerHTML`, fine for an SVG, wrong for a
-component with drag-and-drop and inputs. Instead, `src/kanbanEmbed.ts`
-registers its own block node:
+component with drag-and-drop and inputs. Instead, `src/storeEmbed.ts`
+registers its own block node — ONE node type for every view kind, with the
+fence's language riding along as an attribute so the block serializes back
+into the language it was written in:
 
 - a `$remark` transform (the pattern `criticRemark` uses) rewrites a `code`
-  mdast node with `lang === "kanban"` into a `kanbanEmbed` node at parse
-  time and back into a `code` node at serialize time — so the code block
-  schema never sees it and the markdown round-trips byte-for-byte;
-- a `$nodeSchema` for `kanbanEmbed` (attrs: the raw config text), an atom;
+  mdast node whose lang is an embed language into a `storeEmbed` node at
+  parse time and back into a `code` node at serialize time — so the code
+  block schema never sees it and the markdown round-trips byte-for-byte;
+- a `$nodeSchema` for `storeEmbed` (attrs: the raw config text and the
+  kind), an atom;
 - a `$view` node view (the mechanism `resizableTableView` uses) that mounts
-  a React root with `<KanbanBoard>` inside a `contenteditable=false` frame,
+  a React root with `<StoreView>` inside a `contenteditable=false` frame,
   answers `stopEvent` for everything inside it and `ignoreMutation` always,
   so ProseMirror neither eats the board's pointer events nor re-parses its
   DOM;
@@ -339,20 +381,56 @@ registers its own block node:
   ProseMirror marks `draggable` will otherwise begin a native HTML5 drag
   from anywhere inside it, and that drag swallows the pointer events the
   board's own card drag is built on.
-- a **Board** item in the slash menu's *advanced* group next to *Diagram*.
-  It inserts an embed with an empty config, and the frame asks which board
-  in place — the workspace's boards, or a new one beside this note — rather
-  than opening a modal to ask first.
+- a **Board** item in the slash menu's *advanced* group next to *Diagram*,
+  and a **Board as a table** beside it. Either inserts an embed with an
+  empty config, and the frame asks which board in place — the workspace's
+  boards, or a new one beside this note — rather than opening a modal to
+  ask first.
 
 ### 3. The card page — a properties header
 
 A card opened in a tab is the ordinary editor for its body, with a
-**properties header** above it: the title, then one pill per declared field
-(a select popover, a tag picker, a date, a checkbox, plain text). Changing a
-pill writes the frontmatter and nothing else. In phase 1 the header shows
-only inside stores; for any other note frontmatter is preserved untouched
-but not shown. ("Properties on any page" is then a small follow-up: the same
-header, with an *Add property* affordance.)
+**properties header** above it: one pill per declared field (a select
+popover, a tag picker, a date, a checkbox, plain text). Changing a pill
+writes the frontmatter and nothing else.
+
+**Every note has one**, not only a card. A card's rows are the fields its
+board declares, in the board's order, with their types and colours; any
+other note's rows are the keys its own file carries, as text — including
+keys a card's board doesn't declare, which are shown and kept rather than
+hidden and kept. Both can grow a property: on a card *Add property*
+declares a FIELD on the store, so it appears on every card and in every
+view; on an ordinary note it just adds a key. A property with no value yet
+is not a line in anyone's file — it is a row in the header until something
+is typed into it, so a note with no frontmatter still never grows one by
+accident. And a note with no properties shows nothing but a quiet
+*Add property* that surfaces on hover: an empty header above every document
+would be a tax on every document.
+
+The row's label opens the property's own menu — rename, change type, delete.
+Renaming and retyping a field rewrite one line of `store.jsonl` and no card
+at all; deleting one leaves every card's value in its file, untouched, and
+the view records that pointed at it drop the reference so nothing sorts or
+filters by something nobody can see.
+
+### 4. The card peek
+
+Clicking a card opens it **beside the board**, not as a tab: a panel with
+the card's properties above its body, an *Open in a tab* for when it turns
+out to be the document you came for, and Escape to close. Most of the time
+the question a card raises is light — what does this say, what is it
+blocked on — and answering it should not cost the board you were reading.
+
+A card already open in a tab is never peeked; the click goes to the tab,
+which is the better answer and is already on screen. That also removes the
+one race a peek could otherwise cause: two editors over one file.
+
+The peek writes both halves of a card through their own guarded splices —
+properties through `write_frontmatter`, the body through `write_body` — so
+a sentence typed here and a card dragged on the board behind it cannot lose
+each other. Comment threads pass through untouched: the panel expands the
+markdown from the note's meta sidecar exactly as a tab does, and writes the
+threads back the same way.
 
 ### The frontmatter boundary
 
@@ -383,33 +461,57 @@ header onto whatever body is on disk *at that moment*, under the same
 snapshot guard, so a drag can't lose a keystroke that an open tab hasn't
 flushed yet.
 
-## The kanban view
+## The views
 
-`src/KanbanBoard.tsx`, one component for both hosts:
+`src/StoreView.tsx` is the shell (the model, the view strip, the View panel,
+the empty states); `src/KanbanBoard.tsx` and `src/TableView.tsx` draw what is
+under it. Both read the same derivation in `src/store/board.ts`, so what they
+show can never drift apart — and neither can a published page, which freezes
+that same derivation.
+
+### The kanban view
 
 - **Columns** are the group-by field's options in rank order, plus two
   synthetic ones: **No status** (cards whose field is empty; dropping a card
   here clears the field) at the front, and one trailing column per value
   that isn't a declared option (a typo, a value written in another tool),
   each offering *Add as option*. Columns can be empty and stay — they are
-  options, not derived from data.
-- **Cards** show the title and a chip per non-empty field the view lists
-  (all of them, by default). Click opens the card's note in a tab; in an
-  embed, the tab opens beside the note the way a followed link does.
+  options, not derived from data. A `date` group-by is the exception that
+  proves it: it has no options, so its columns ARE the dates the cards
+  carry, and there is nothing to declare or to add.
+- **Cards** show the title and a chip per non-empty field the view shows
+  (all of them, by default). A click peeks the card beside the board; in an
+  embed the peek opens the same way.
 - **Drag** is pointer-based, like the sidebar's row drag (Tauri intercepts
   HTML5 drag events; `Sidebar.tsx` explains). Dropping writes one card's
-  `status` + `rank`. Column headers drag to reorder (rewrites option ranks
-  in `store.jsonl`).
+  `status` + `rank`. On a `multi_select` board a card is in a column for
+  every value it carries, so a drag says which column it LEFT: that value
+  goes, the new one comes, the card's other values are none of the drag's
+  business. Column headers drag to reorder (rewrites option ranks in
+  `store.jsonl`).
 - **Add card** at a column's foot: inline title → `create_card` with the
   column's value and a rank after the column's last card. **Add column**
-  after the last one; column header menu: rename, colour, delete (cards
-  keep their value; see above), hide (a view setting).
+  after the last one (only where columns ARE options); column header menu:
+  rename, colour, hide in this view, delete (cards keep their value; see
+  above).
 - **Read-only** boards (a published page's shell, the unfocused split pane's
   mirror) render the same DOM with drag and inputs off, like `readOnly` on
   the editor.
 - Themed from the `--app-*` tokens in `App.css`, all four themes; option
   colours are a small named palette mapped per theme, never raw hex in the
   files.
+
+### The table view
+
+The same cards as rows: the title, then one column per field the view shows.
+A cell is the same `PropertyControl` a properties header uses, so editing one
+writes exactly the frontmatter a drag writes, through the same guarded
+splice. Clicking a heading cycles the view's sort — ascending, descending,
+back to the table's own order, which is by title — and saves it on the view.
+The foot composes a new card the way a column's foot does.
+
+Nothing about a store changes when it is shown this way. A board answers
+"what is in progress"; a table answers "what does every card say".
 
 ## Data flow and code layout
 
@@ -421,7 +523,7 @@ flowchart LR
   end
   subgraph rust [Rust commands]
     RS[read_store]
-    WF[write_frontmatter<br/>create_card]
+    WF[write_frontmatter<br/>write_body<br/>create_card]
     WD[watch_dir]
   end
   subgraph model [src/store]
@@ -430,10 +532,13 @@ flowchart LR
     M[model.ts<br/>Store: cards, mutations, watch]
   end
   subgraph views [Views]
+    SV[StoreView.tsx<br/>the shell + the view strip]
     KB[KanbanBoard.tsx]
+    TV[TableView.tsx]
     TAB[store tab]
-    EMB[kanbanEmbed.ts<br/>node view in a note]
-    PH[PropertiesHeader.tsx<br/>above a card's editor]
+    EMB[storeEmbed.ts<br/>node view in a note]
+    PH[PropertiesHeader.tsx<br/>above any note]
+    PK[CardPeek.tsx<br/>a card beside the board]
   end
   SJ --> RS
   C1 --> RS
@@ -443,10 +548,13 @@ flowchart LR
   WD -. dir-changed .-> M
   FM --- M
   SF --- M
-  M --> KB
-  KB --> TAB
-  KB --> EMB
+  M --> SV
+  SV --> KB
+  SV --> TV
+  SV --> TAB
+  SV --> EMB
   M --> PH
+  M --> PK
   SYNC[cloud sync engine] <-- files, line-merged --> disk
 ```
 
@@ -454,19 +562,33 @@ flowchart LR
 - `src/store/storeFile.ts` — `store.jsonl` parse / canonical serialize;
   pure; mirrors `metaFile.ts`.
 - `src/store/rank.ts` — fractional indexing (`between(a, b)`), pure.
+- `src/store/board.ts` — the pure derivation and the frozen picture a
+  published page carries: what a card is, which cards land in which column,
+  a card's chips, a view's filter and sort, and `boardSnapshot`. No Tauri,
+  so the whole thing is unit-tested without a browser.
+- `src/store/publish.ts` — the disk-reading half of that: walk a note's
+  fences, resolve each to a folder, snapshot what is there.
+- `src/store/csv.ts` — a view as a spreadsheet; pure.
 - `src/store/model.ts` — the `Store` object: `load()`, `cards`, `fields`,
-  `views`, mutations (`setProp`, `moveCard`, `createCard`, `renameCard`,
-  `addOption`, `renameOption`, `reorderOptions`, …), a `subscribe()`, and a
-  **registry keyed by folder path** so a board tab and an embed of the same
-  store in one window share one instance and one watcher. Every mutation is
-  a disk write followed by the watcher's rescan; the model is a cache of
-  disk, not a second truth — the posture tabs already take.
-- `src/KanbanBoard.tsx`, `src/PropertiesHeader.tsx`, `src/kanbanEmbed.ts`.
+  `views`, mutations (`setCardProp`, `moveCard`, `createCard`, `addField`,
+  `renameField`, `retypeField`, `deleteField`, `addOption`, `renameOption`,
+  `moveOption`, `addView`, `updateView`, `deleteView`, …), a `subscribe()`,
+  and a **registry keyed by folder path** so a board tab and an embed of the
+  same store in one window share one instance and one watcher. Every
+  mutation is a disk write followed by the watcher's rescan; the model is a
+  cache of disk, not a second truth — the posture tabs already take.
+- `src/StoreView.tsx` (the shell), `src/KanbanBoard.tsx`,
+  `src/TableView.tsx`, `src/PropertiesHeader.tsx` + `src/PropertyControl.tsx`,
+  `src/CardPeek.tsx`, `src/storeChrome.tsx` (the popover, the inline input
+  and the card menu every view shares), `src/storeEmbed.ts` +
+  `src/StoreEmbed.tsx`, `src/BoardSnapshot.tsx` (a published view, drawn
+  from a snapshot).
 - `App.tsx`: the `store` tab kind, the frontmatter boundary in
   `loadActiveContent` / `writeToDisk`, the properties-only branch of the
-  external-change handler, `followDocLink` accepting a store folder, the
-  sidebar wiring, and `store.jsonl` in the companion lists that the trash /
-  rename / paste flows already keep for sidecars.
+  external-change handler, the peek (and the rule that a card already in a
+  tab goes to the tab), the CSV save dialog, `followDocLink` accepting a
+  store folder, the sidebar wiring, and `store.jsonl` in the companion lists
+  that the trash / rename / paste flows already keep for sidecars.
 
 ### Backend (Rust) additions
 
@@ -474,6 +596,7 @@ flowchart LR
 | --- | --- |
 | `read_store(path)` | one round-trip for a whole board: `store.jsonl` raw text plus, for every direct-child `.md`, its name, snapshot, and the **frontmatter block only** (first few KB, fences located by line scan — Rust never parses the dialect). Hundreds of cards are one IPC call. |
 | `write_frontmatter(path, head, expected)` | replaces the file's leading frontmatter block (or inserts one) keeping the body bytes identical, under the same `expected` snapshot guard as `write_file`; same `conflict` error. |
+| `write_body(path, body, expected)` | the mirror image: replaces the body, keeping the leading frontmatter block byte for byte, under the same guard. A card has two halves and two kinds of writer (a board or a header owns the block, a peek owns the body); one splice per half means neither can clobber the other's. |
 | `create_card(path, head)` | new file with a frontmatter block and empty body; refuses to clobber (`create_file`'s rule). |
 | `watch_dir(path)` / `unwatch_dir` | a recursive, debounced `notify` watcher on the store folder emitting `dir-changed {root, paths}`; the model rescans through `read_store`. (The existing `watch_file` is one non-recursive watcher for the active document; a board needs the folder.) |
 | `list_md_tree` | `Dir` gains `store: bool`; `is_app_sidecar` gains `store.jsonl`. |
@@ -505,18 +628,21 @@ Nothing in the sync engine changes; the design is shaped to it:
 
 ## Sharing and publishing (phase 3)
 
-A published note that embeds a board shows the board. The worker renders
-markdown with `marked` and knows nothing about the workspace, so the board's
-data **travels with the page**, the way `tcols` do:
+A published note that embeds a view of a store shows that view. The worker
+renders markdown with `marked` and knows nothing about the workspace, so the
+store's data **travels with the page**, the way `tcols` do:
 
-- `readShareParts` collects, for each ` ```kanban ` block in the page, a
-  **snapshot** of the view: `{fence, name, columns: [{name, color, cards:
-  [{title, chips, page?}], more?}]}`; `pushPage` sends it as a `boards`
-  field beside `tcols`; the worker validates it record by record and stores
-  it on the page. The fences are found by scanning the file's bytes
-  (`kanbanFences`) — a push has no parsed document — and each snapshot is
-  keyed by the fence's own config text, so it keeps finding its fence when
-  the document around it moves.
+- `readShareParts` collects, for each embed fence in the page, a **snapshot**
+  of the view: for a board `{fence, name, columns: [{name, color, cards:
+  [{title, chips, page?}], more?}]}`, for a table `{fence, name, kind:
+  "table", fields, rows: [{title, page?, cells}], more?}`; `pushPage` sends
+  them as one `boards` field beside `tcols`; the worker validates them record
+  by record and stores them on the page. The fences are found by scanning the
+  file's bytes (`storeFences`) — a push has no parsed document — and each
+  snapshot is keyed by the fence's own config text AND its language, so it
+  keeps finding its fence when the document around it moves, and so the same
+  config in two languages stays two different views. A snapshot with no kind
+  is a board: that is what version 23 pushed, and those pages still read.
 - The public page renders the snapshot **server-side as static HTML** in
   place of the fence (a `marked` `code` renderer override, beside the
   table-width `table` one) — no JavaScript needed, honest in light and dark,
@@ -527,12 +653,13 @@ data **travels with the page**, the way `tcols` do:
   the code block it has always been: the fence stays, nothing is rewritten.
 - The app shell (comment / edit roles) gets the same snapshot in its boot
   payload and draws it with `BoardSnapshot.tsx`, inside the same embed frame
-  the desktop uses. It is deliberately not `<KanbanBoard>` with a flag:
-  KanbanBoard is built on the store model and writes files, and there is
-  nothing here to write to. Editing a board from the web is out of scope —
+  the desktop uses. It is deliberately not `<StoreView>` with a flag: the
+  live views are built on the store model and write files, and there is
+  nothing here to write to. Editing a store from the web is out of scope —
   the web editor can only write the page's own markdown.
 - A shared *card* page renders its properties as a small table above the
-  body. That needs the frontmatter as its own field, not just a nicer
+  body — and so does any other shared note that carries frontmatter, which
+  is what its own properties header shows in the app. That needs the frontmatter as its own field, not just a nicer
   render: `marked` reads a `---` block followed by text as a **setext
   heading**, so a web edit could round-trip a card's fields into
   `## status: Done`. The push splits the block off the markdown — exactly as
@@ -550,10 +677,12 @@ markdown, reconciliation re-derives it for any page that carried a fence and
 pushes when it differs — which catches a card that arrived by sync while the
 board was closed.
 
-Worth saying plainly: sharing a note that embeds a board **publishes what
-the board says**, whether or not the board's folder is part of any share.
-That is the point of the feature, and it is the same bargain a table in the
-note makes.
+Worth saying plainly: sharing a note that embeds a store **publishes what
+that view says**, whether or not the store's folder is part of any share —
+and a table view says more per card than a board does, since it shows every
+field the view lists rather than a card's chips. That is the point of the
+feature, and it is the same bargain a table written in the note makes; but
+it is worth knowing which view a note embeds before sharing it.
 
 ## Edge cases, decided
 
@@ -575,6 +704,24 @@ note makes.
 - **Frontmatter the dialect can't read** → opaque lines, preserved; the
   properties header shows the fields it can, and a small "n lines this app
   doesn't edit" note.
+- **A key the store doesn't declare** (an `aliases:` line from Obsidian) →
+  a row of its own in the properties header, as text, after the declared
+  fields. Shown and kept, rather than hidden and kept. Removing it from the
+  header clears it from that note and nothing else.
+- **Deleting a field that cards carry** → the field record goes; every
+  card's value stays in its file, preserved verbatim from then on as a key
+  the store doesn't declare. Views that sorted or filtered by it drop the
+  reference, so nothing is ordered by something nobody can see.
+- **A card open in a tab, clicked on the board** → the tab, not a peek. Two
+  editors over one file is a race nobody asked for, and the tab is already
+  the better answer.
+- **A peek's write losing to a board drag** → the guarded splice fails, the
+  panel says the note changed elsewhere and points at the tab. It never
+  overwrites; the two halves of a card have separate splices precisely so
+  this can only happen when two writers touch the SAME half.
+- **A view grouped by a field somebody then deletes** → the board says it
+  has no field to group by and offers the table; the cards and their values
+  are untouched.
 - **Renaming an option used by 300 cards** → 300 guarded writes, batched in
   one backend command later if it ever feels slow; each is a one-line
   change, so sync and history stay legible.
@@ -588,12 +735,12 @@ note makes.
   scope, documented. (A *published* page is different: it draws the board,
   because the push sends one.)
 - **A shared page** → the shell mounts the same editor with no host behind
-  it, and draws the board from the snapshot the page was published with
-  (read-only: there is no folder here to write to). A page published before
-  phase 3, or one whose fence names a board that was already gone, still
-  draws the frame and says the board isn't available. Either way a comment-
-  or edit-role save re-serializes the document and the fence comes back out
-  unchanged.
+  it, and draws the board or table from the snapshot the page was published
+  with (read-only: there is no folder here to write to). A page published
+  before phase 3, or one whose fence names a store that was already gone,
+  still draws the frame and says the view isn't available. Either way a
+  comment- or edit-role save re-serializes the document and the fence comes
+  back out unchanged.
 
 ## Plan
 
@@ -722,15 +869,68 @@ any share. That is the feature — a note that shows a board should show it —
 but it means "share this note" is also "share what this board says", the
 same way it is for a table in the note.
 
-**Phase 4 — the second view, and properties everywhere.**
-A `table` view over the same store (one fenced language per view, as
-`kanban` is), per-view `filter` / `sort` / `show` and a saved `hide` (the
-embed-level one shipped in phase 2), the properties header with *Add
-property* on any note, group-by `multi_select` and `date`, a card *peek*
-panel instead of a tab, CSV export of a store. Two gaps phases 1–3 leave
-behind belong here too: there is no way to add a FIELD from the app (only
-options on a field), and nothing creates or switches views, so a second
-view can only be written by hand.
+**Phase 4 — the second view, and properties everywhere. Built.**
+`View` in `storeFile.ts` grows a kind (`kanban` | `table`) and the parts a
+view owns — `filter`, `sort`, `show`, `hide`; `board.ts` grows the pure half
+of those (`applyFilter`, `sortCards`, `viewCards`, `visibleFields`) plus
+`multi_select` and `date` grouping; `StoreView.tsx` is the new shell both
+views sit in (the view strip, the View panel, the empty states) with
+`KanbanBoard.tsx` and the new `TableView.tsx` under it; `PropertyControl.tsx`
+is the one pill a header row and a table cell both use; `PropertiesHeader`
+now serves every note and can declare a field; `CardPeek.tsx` opens a card
+beside the board instead of in a tab, on the back of a new `write_body`
+command — the mirror image of `write_frontmatter`; `store/csv.ts` exports
+what a view shows. The ` ```kanban ` fence gains a sibling, ` ```table `,
+and with it `kanbanEmbed.ts` / `KanbanEmbed.tsx` become `storeEmbed.ts` /
+`StoreEmbed.tsx` (one node type, the language as an attribute) and
+`kanbanFences` becomes `storeFences`. Worker version 24 carries table
+snapshots on the same `boards` array.
+Verification: `store.test.mjs` covers the view record, the filter and the
+sort, both new groupings, the table snapshot and the CSV (2252 checks);
+`share-worker/test/run.mjs` covers the table wire contract and its renderer
+(49 tests); `drive-kanban.mjs` walks the peek, properties on an ordinary
+note, declaring a field from a card, and the table view end to end (58
+steps); `drive-kanban-embed.mjs` puts a ` ```table ` fence beside a
+` ```kanban ` one in the same note (53 steps); `drive-web.mjs` publishes a
+table and reads it back on the static page with JavaScript off and in the
+shell (42 steps); `cargo test --lib store` covers `write_body`.
+
+Six things the build settled that the design left implicit:
+
+- **A card has two halves and two writers, so it gets two guarded splices.**
+  `write_frontmatter` was already one of them. A peek panel that edits the
+  body needed the other — `write_body`, which keeps the leading block byte
+  for byte — because otherwise a sentence typed into the peek and a card
+  dragged on the board behind it would race for the whole file. One splice
+  per half means only two writers of the SAME half can collide, and the
+  snapshot guard turns that into the usual honest `conflict`.
+- **A click peeks; a card already open in a tab goes to the tab.** The peek
+  is the light answer to the light question. But a card that is already a
+  tab has a better answer on screen, and opening a second editor over the
+  same file would be a race nobody asked for.
+- **The fence's language decides the view kind — the config only picks which
+  saved view.** A ` ```table ` naming a kanban view still shows a table: the
+  language is what every other markdown tool sees, so it has to be the
+  truth. And because the same config in two languages is two different
+  views of one store, the snapshot key carries the language (`snapKeyOf`
+  here, `snapKey` in the worker).
+- **A field is renamed, not re-keyed.** A field's id is the frontmatter key
+  every card carries, so it is slugged once at creation and never changes;
+  renaming changes the name people read. Deleting a field deletes no data
+  either — the key stays in every file that has it, preserved verbatim the
+  way a key from another tool always has been. Only an OPTION rename
+  rewrites cards, and that was already true in phase 1.
+- **Everything on is not a list.** A view's `show` is null until someone
+  narrows it, and goes back to null when every field is ticked again — so a
+  property declared tomorrow appears in the view instead of being invisible
+  until somebody remembers to tick it. `hide` is the opposite: it names
+  exactly the columns left out, and nothing else.
+- **A board grouped by a date has no columns to add.** Columns come from
+  declared options for a select and a multi_select, and from the data for a
+  date — ISO dates sort as text in chronological order, so the columns come
+  out right without a date parser anywhere. A `multi_select` card is in a
+  column for every value it carries, which makes a drag ambiguous unless it
+  says which column it left: it does, and only that value is replaced.
 
 ## Decisions
 

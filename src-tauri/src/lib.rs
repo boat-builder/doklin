@@ -1932,6 +1932,7 @@ pub fn run() {
             create_dir,
             store::read_store,
             store::write_frontmatter,
+            store::write_body,
             store::create_card,
             store::watch_dir,
             store::unwatch_dir,

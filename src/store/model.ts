@@ -16,6 +16,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   parseFrontmatter,
+  propList,
   serializeFrontmatter,
   type Props,
   type PropValue,
@@ -23,14 +24,20 @@ import {
 import {
   cardKeyOrder,
   defaultStoreDef,
+  fieldOf,
+  groupableFields,
+  newView,
   parseStoreDef,
   RANK_KEY,
   serializeStoreDef,
   storeFileOf,
   STORE_FILE,
+  type FieldType,
   type Option,
   type OptionColor,
   type StoreDef,
+  type View,
+  type ViewKind,
 } from "./storeFile";
 import { rankBetween } from "./rank";
 // The pure half — what a card is, what a column is, and how the two derive.
@@ -317,6 +324,11 @@ export class StoreModel {
    * Drop a card into a column, between two of its neighbours. `value` is the
    * group-by option's name, or "" for the "No status" column (which clears
    * the field rather than writing an empty string).
+   *
+   * On a MULTI_SELECT board a card is in a column for every value it carries,
+   * so a drag has to say which column it left: that value goes, the new one
+   * comes, and the card's other values are none of this drag's business.
+   * Dropping into the empty column means "none of them", and clears the field.
    */
   async moveCard(
     path: string,
@@ -324,12 +336,22 @@ export class StoreModel {
     value: string,
     before: Card | null,
     after: Card | null,
+    from?: string,
   ): Promise<void> {
     const card = this.state.cards.find((c) => c.path === path);
     if (!card) return;
     const next: Props = { ...card.props };
-    if (value === "") delete next[field];
-    else next[field] = value;
+    const multi = this.state.def
+      ? fieldOf(this.state.def, field)?.type === "multi_select"
+      : false;
+    if (value === "") {
+      delete next[field];
+    } else if (multi) {
+      const kept = propList(card.props[field]).filter((v) => v !== "" && v !== from);
+      next[field] = kept.includes(value) ? kept : [...kept, value];
+    } else {
+      next[field] = value;
+    }
     next[RANK_KEY] = rankBetween(
       before ? cardRank(before) : null,
       after ? cardRank(after) : null,
@@ -460,6 +482,132 @@ export class StoreModel {
   async adoptValue(field: string, name: string): Promise<void> {
     await this.addOption(field, name);
   }
+
+  /* ---------- fields ---------- */
+
+  /**
+   * Declare a new property. Its ID is the frontmatter key every card will
+   * carry, so it is slugged once, at creation, and never changes again —
+   * renaming a field renames what people READ, not what the files say.
+   * Returns the id, or null when there was nothing to add.
+   */
+  async addField(name: string, type: FieldType): Promise<string | null> {
+    const def = this.state.def;
+    const clean = name.trim();
+    if (!def || !clean) return null;
+    const id = slugId(clean, new Set(def.fields.map((f) => f.id)));
+    await this.writeDef({ ...def, fields: [...def.fields, { id, name: clean, type }] });
+    return id;
+  }
+
+  /** Rename a field. The id — the key in every card — is untouched. */
+  async renameField(id: string, name: string): Promise<void> {
+    const def = this.state.def;
+    const clean = name.trim();
+    if (!def || !clean) return;
+    await this.writeDef({
+      ...def,
+      fields: def.fields.map((f) => (f.id === id ? { ...f, name: clean } : f)),
+    });
+  }
+
+  /**
+   * Change what a field holds. No card is rewritten either: a value that was
+   * text is still text on disk, it is simply read and edited as a date (or a
+   * select, or a number) from now on. A value the new type can't make sense
+   * of stays exactly as it is — the dialect keeps what it doesn't understand.
+   */
+  async retypeField(id: string, type: FieldType): Promise<void> {
+    const def = this.state.def;
+    if (!def) return;
+    await this.writeDef({
+      ...def,
+      fields: def.fields.map((f) => (f.id === id ? { ...f, type } : f)),
+    });
+  }
+
+  /**
+   * Undeclare a field. No card is rewritten: the key stays in every file that
+   * carries it and is preserved verbatim on the next write, the way a key
+   * some other tool wrote always has been. Views that pointed at it drop the
+   * reference so they don't sort or filter by something nobody can see.
+   */
+  async deleteField(id: string): Promise<void> {
+    const def = this.state.def;
+    if (!def) return;
+    await this.writeDef({
+      ...def,
+      fields: def.fields.filter((f) => f.id !== id),
+      options: def.options.filter((o) => o.field !== id),
+      views: def.views.map((v) => ({
+        ...v,
+        filter: v.filter.filter((f) => f.field !== id),
+        sort: v.sort?.field === id ? null : v.sort,
+        show: v.show ? v.show.filter((f) => f !== id) : null,
+      })),
+    });
+  }
+
+  /* ---------- views ---------- */
+
+  /** Save a new view. Returns its id, or null when there was nothing to add. */
+  async addView(kind: ViewKind, name: string): Promise<string | null> {
+    const def = this.state.def;
+    const clean = name.trim();
+    if (!def || !clean) return null;
+    const id = slugId(clean, new Set(def.views.map((v) => v.id)));
+    // A board needs a field to put in columns; a table needs none.
+    const groupBy = kind === "kanban" ? (groupableFields(def)[0]?.id ?? "") : "";
+    if (kind === "kanban" && !groupBy) return null;
+    await this.writeDef({ ...def, views: [...def.views, newView(id, kind, clean, groupBy)] });
+    return id;
+  }
+
+  /**
+   * Change a view — its name, what it groups by, its filter, sort, shown
+   * fields, or hidden columns. One mutation rather than six: they are all one
+   * line of one file, and a view is only ever edited as a whole.
+   *
+   * Takes the view itself, not its id, because the one on screen may be
+   * SYNTHETIC — a store whose definition never had a view record still opens
+   * one (resolveView). Narrowing that view is how it gets saved.
+   */
+  async updateView(view: View, patch: Partial<Omit<View, "id" | "kind">>): Promise<void> {
+    const def = this.state.def;
+    if (!def) return;
+    const next: View = { ...view, ...patch };
+    const saved = def.views.some((v) => v.id === view.id);
+    await this.writeDef({
+      ...def,
+      views: saved
+        ? def.views.map((v) => (v.id === view.id ? next : v))
+        : [...def.views, next],
+    });
+  }
+
+  /** Forget a saved view. No card and no option is touched. */
+  async deleteView(id: string): Promise<void> {
+    const def = this.state.def;
+    if (!def) return;
+    await this.writeDef({ ...def, views: def.views.filter((v) => v.id !== id) });
+  }
+}
+
+/**
+ * An id for a name: lowercase, words joined by underscores, unique among
+ * `taken`. Field ids become frontmatter keys, so the alphabet is deliberately
+ * narrower than the dialect accepts — a key nobody has to quote.
+ */
+function slugId(name: string, taken: Set<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40) || "field";
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+  return id;
 }
 
 /* ---------- registry + folder watch ---------- */

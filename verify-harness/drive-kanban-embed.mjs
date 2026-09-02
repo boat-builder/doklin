@@ -149,13 +149,25 @@ const openNote = async (name) => {
   step("the card moved column", (await cardsIn("In progress")).includes("Ship dark mode"));
 }
 
-/* ---------- 4. a card opens as an ordinary note ---------- */
+/* ---------- 4. a card peeks, here as on a board tab ---------- */
 {
   await page.locator(".dk-card", { hasText: "Fix login redirect" }).first().click();
-  await poll(async () => (await page.locator(".dk-props").count()) === 1);
+  await poll(async () => (await page.locator(".dk-peek").count()) === 1);
+  step(
+    "clicking a card in a note peeks it rather than leaving the note",
+    (await page.locator(".dk-peek-title").innerText()).trim() === "Fix login redirect",
+    (await page.locator(".dk-peek-title").innerText()).trim(),
+  );
+  step(
+    "with its properties above the prose",
+    (await page.locator(".dk-peek .dk-prop-label").allTextContents()).join(",").includes("Status"),
+  );
+  // …and the tab is one click away, which is where the rest of this file
+  // expects to be.
+  await page.locator(".dk-peek-tab").click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 0);
   const tabs = (await page.locator(".tab-title, .tab-label, .tab").allTextContents()).join(" ");
-  step("clicking a card opens its note in a tab", tabs.includes("Fix login redirect"), tabs);
-  step("with its properties above the prose", (await page.locator(".dk-props").count()) === 1);
+  step("Open in a tab opens the card's note", tabs.includes("Fix login redirect"), tabs);
 }
 
 /* ---------- 5. an ordinary edit to the note keeps the fence byte for byte -- */
@@ -226,9 +238,17 @@ const openNote = async (name) => {
   await page.keyboard.press("Control+End");
   await page.keyboard.press("Enter");
   await page.keyboard.type("/board");
-  await poll(async () => (await page.locator(".milkdown-slash-menu li[data-index]").count()) === 1);
-  step("the slash menu offers a Board", true);
-  await page.locator(".milkdown-slash-menu li[data-index]").first().click();
+  // Two items, because a store has two ways to be shown: "Board" and
+  // "Board as a table". Both insert the same kind of block; only the fence's
+  // language differs.
+  await poll(async () => (await page.locator(".milkdown-slash-menu li[data-index]").count()) === 2);
+  step(
+    "the slash menu offers a Board and a table of one",
+    (await page.locator(".milkdown-slash-menu li[data-index]").allTextContents()).join("|"),
+    (await page.locator(".milkdown-slash-menu li[data-index]").allTextContents()).join(" | "),
+  );
+  // The items are in the order they were added: Board, then Board as a table.
+  await page.locator(".milkdown-slash-menu li[data-index]").nth(0).click();
   await poll(async () => (await page.locator(".dk-embed-pick").count()) === 1);
   step(
     "a fresh embed asks which board, in place",
@@ -246,6 +266,55 @@ const openNote = async (name) => {
   );
   step("the prose that was already there is intact", text.startsWith(before.trimEnd()));
   await page.screenshot({ path: SHOTS + "kanban-embed-picked.png" });
+}
+
+/* ---------- 8b. the same store, embedded as a table ---------- */
+{
+  // Roadmap already carries a ```kanban embed from the step above; a second
+  // fence in the other language shows the same cards as rows.
+  await page.locator(".ProseMirror").first().click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/board");
+  await poll(async () => (await page.locator(".milkdown-slash-menu li[data-index]").count()) === 2);
+  await page.locator(".milkdown-slash-menu li[data-index]").nth(1).click();
+  await poll(async () => (await page.locator(".dk-embed-pick").count()) === 1);
+  await page.locator(".dk-embed-pick-item", { hasText: "Projects" }).click();
+  await poll(async () => (await page.locator(".dk-table").count()) === 1);
+  step("a table embed draws the same store as rows", true);
+  step(
+    "the frame says which view it is",
+    (await page.locator(".dk-embed-kind").allTextContents()).includes("Table"),
+    (await page.locator(".dk-embed-kind").allTextContents()).join(" | "),
+  );
+  await poll(async () => (await fileOf("/docs/Roadmap.md")).includes("```table"), 6000);
+  const text = await fileOf("/docs/Roadmap.md");
+  step(
+    "and the fence is written in the table language",
+    text.includes("```table\nstore: ./Projects\n```"),
+    JSON.stringify(text),
+  );
+  step(
+    "the board fence beside it is untouched",
+    text.includes("```kanban\nstore: ./Projects\n```"),
+  );
+  const rows = await page.locator(".dk-row-title").allTextContents();
+  step("one row per card", rows.length >= 4, rows.join(" | "));
+  await page.screenshot({ path: SHOTS + "kanban-embed-table.png" });
+
+  // The round trip is what the whole feature is judged on: an ordinary edit
+  // re-serializes the document, and both fences must come back as they were.
+  await page.locator(".ProseMirror").first().click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type("\nAfter both.");
+  await poll(async () => (await fileOf("/docs/Roadmap.md")).includes("After both."), 8000);
+  const after = await fileOf("/docs/Roadmap.md");
+  step(
+    "an edit re-serializes the note with both fences byte for byte",
+    after.includes("```kanban\nstore: ./Projects\n```") &&
+      after.includes("```table\nstore: ./Projects\n```"),
+    JSON.stringify(after),
+  );
 }
 
 /* ---------- 9. an embed pointing at a folder that isn't a board ---------- */
@@ -277,7 +346,9 @@ const openNote = async (name) => {
 
   // Two documents, each with its own embed — then hand the focus over.
   await page.locator(".tree-row.tree-file", { hasText: "Roadmap" }).click();
-  await poll(async () => (await page.locator(".dk-embed-bar").count()) === 2);
+  // Roadmap carries two embeds of its own by now (a board and a table), so
+  // the pair of panes shows three frames between them.
+  await poll(async () => (await page.locator(".dk-embed-bar").count()) >= 2);
   await settle(600);
   const focusedBar = async (focused) =>
     (
@@ -295,7 +366,7 @@ const openNote = async (name) => {
   await page.locator(".editor-pane:not(.is-focused)").locator(".ProseMirror p").first().click();
   await poll(
     async () =>
-      (await page.locator(".editor-pane.is-focused .dk-embed-source").count()) === 1,
+      (await page.locator(".editor-pane.is-focused .dk-embed-source").count()) >= 1,
   );
   step(
     "promoting a pane makes its board live, and the other one read-only",
@@ -329,6 +400,13 @@ const openNote = async (name) => {
         () => undefined,
       ),
       none: await collectBoardSnapshots("# Just prose\n", "/docs/Roadmap.md", () => undefined),
+      // The same store in both languages, in one note: two snapshots, one
+      // per fence, told apart by the kind their language asks for.
+      both: await collectBoardSnapshots(
+        "```kanban\nstore: ./Projects\n```\n\n```table\nstore: ./Projects\n```\n",
+        "/docs/Embed.md",
+        (p) => pages[p],
+      ),
       props: await cardProperties(
         "/docs/Projects/Fix login redirect.md",
         { status: "In progress", tags: ["bug", "auth"], rank: "a1" },
@@ -337,6 +415,7 @@ const openNote = async (name) => {
     };
   });
   const board = out.snapped?.boards?.[0];
+  const table = out.both?.boards?.find((b) => b.kind === "table");
   step(
     "a note's fence resolves to its folder and snapshots the board there",
     board?.fence === "store: ./Projects" &&
@@ -375,6 +454,30 @@ const openNote = async (name) => {
   step(
     "a note with no fence at all is told apart from one whose fences found nothing",
     out.none === null,
+  );
+  step(
+    "one fence in each language is two snapshots of one store",
+    out.both?.boards?.length === 2 && out.both.dirs.join() === "/docs/Projects",
+    JSON.stringify(out.both?.boards?.map((b) => b.kind ?? "kanban")),
+  );
+  // Same store, same cards: the table's rows are exactly the board's cards,
+  // in title order rather than by column.
+  const boardTitles = board?.columns.flatMap((c) => c.cards.map((k) => k.title)).sort();
+  step(
+    "the table snapshot carries the store's fields and one row per card",
+    table?.fields.join("|") === "Status|Tags" &&
+      JSON.stringify(table?.rows.map((r) => r.title)) === JSON.stringify(boardTitles),
+    JSON.stringify(table?.rows.map((r) => r.title)),
+  );
+  step(
+    "a row's cells line up with the headings, and only its own page is a link",
+    JSON.stringify(table?.rows.find((r) => r.title === "Ship dark mode")) ===
+      JSON.stringify({
+        title: "Ship dark mode",
+        page: "page-dark",
+        cells: [[{ text: "Backlog", color: "grey" }], []],
+      }),
+    JSON.stringify(table?.rows.find((r) => r.title === "Ship dark mode")),
   );
   step(
     "a card's properties publish as its board names and colours them",

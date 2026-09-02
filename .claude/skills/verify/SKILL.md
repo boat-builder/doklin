@@ -12,7 +12,8 @@ currently covers the HTML-rendition comment layer (`HtmlView` + the injected
 iframe bridge + `CommentsRail` + the sidecar model), the mermaid diagram
 pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
-(`src/store/` + `KanbanBoard` + `PropertiesHeader` + the sidebar's board row).
+(`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
+`PropertiesHeader` + `CardPeek` + the sidebar's board row).
 
 ```sh
 pnpm install
@@ -51,18 +52,22 @@ node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSIS
                                            # restores the columns on first paint, a header
                                            # rename re-keys the record instead of orphaning it,
                                            # and a read-only view resizes without ever emitting
-node verify-harness/drive-kanban.mjs       # 36 steps: boots the REAL <App/> (kanban.html seeds a
+node verify-harness/drive-kanban.mjs       # 58 steps: boots the REAL <App/> (kanban.html seeds a
                                           # /docs workspace holding a DATASTORE) and walks the
                                           # board end to end — the sidebar's one-row board with
                                           # no cards under it, the board tab, columns from
                                           # store.jsonl in rank order, a pointer drag between
                                           # columns, the inline card and column composers,
-                                          # opening a card as an ordinary note, the properties
-                                          # header, and at every step the invariant the design
-                                          # rests on: a card's BODY bytes never move when its
-                                          # properties do (and a note with no frontmatter never
-                                          # grows one)
-node verify-harness/drive-kanban-embed.mjs # 43 steps over the SAME harness page: a ```kanban
+                                          # peeking a card and then opening it as an ordinary
+                                          # note, the properties header on a card AND on a plain
+                                          # note (+ Add property adds a key there, and on a card
+                                          # declares a FIELD on the store), the view strip adding
+                                          # a table view, a table cell writing a card and a
+                                          # heading saving the view's sort — and at every step
+                                          # the invariant the design rests on: a card's BODY
+                                          # bytes never move when its properties do (and a note
+                                          # with no frontmatter never grows one)
+node verify-harness/drive-kanban-embed.mjs # 53 steps over the SAME harness page: a ```kanban
                                           # fence in a note (kanban.html seeds /docs/Embed.md
                                           # and /docs/Broken.md) rendering as a live board —
                                           # a card composed in the embed never reaching
@@ -71,9 +76,12 @@ node verify-harness/drive-kanban-embed.mjs # 43 steps over the SAME harness page
                                           # with the fence BYTE-IDENTICAL, the Source chip
                                           # rewriting the config, ⌫ + undo on the block, the
                                           # slash menu's Board item and its in-place store
-                                          # picker (writing a path relative to the note), an
-                                          # embed pointing at a folder that isn't a board, and
-                                          # a split pane's board going read-only until promoted.
+                                          # picker (writing a path relative to the note), a
+                                          # ```table fence beside a ```kanban one in the SAME
+                                          # note (both round-tripping through one ordinary
+                                          # edit), an embed pointing at a folder that isn't a
+                                          # board, and a split pane's board going read-only
+                                          # until promoted.
                                           # The last block drives what a SHARE would publish
                                           # (src/store/publish.ts) straight against the stubbed
                                           # fs — the one seam store.test.mjs can't reach, since
@@ -126,6 +134,14 @@ Gotchas learned the hard way:
   `drive-web.mjs`. Inside either, use a `<div>` rather than a `<p>` for
   board chrome: `.doc p` and the editor's own paragraph styling will claim
   a paragraph.
+- Clicking a card on a board PEEKS it (`CardPeek`), it does not open a tab —
+  unless the card is already open in a tab, in which case the click goes to
+  the tab. A driver that expects an editor after a card click has to click
+  `.dk-peek-tab` first, and the harness's IPC stub needs `write_body` (the
+  peek's body write) or every keystroke in the panel is silently dropped.
+- `/board` in the slash menu now matches TWO items (Board, Board as a table),
+  in that order. Filtering by text won't separate them — "Board as a table"
+  contains "Board"; index them.
 - A ProseMirror node view for a `draggable` node gets `draggable=true` on its
   DOM, and the native HTML5 drag that starts from it swallows the pointer
   events any inner drag needs. If a drag inside a node view "does nothing",
@@ -152,7 +168,7 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 37 steps: gate → comment-mode html comment →
+node verify-harness/drive-web.mjs        # 42 steps: gate → comment-mode html comment →
                                          # reply → read-only md + selection comment
                                          # (CriticMarkup save) → view-role stripping →
                                          # edit-role autosave → desktop-pushed thread pins
@@ -165,7 +181,10 @@ node verify-harness/drive-web.mjs        # 37 steps: gate → comment-mode html 
                                          # page) and an edit-role save still returns the fence
                                          # byte for byte; and the static reading view renders
                                          # the same board server-side with JAVASCRIPT OFF,
-                                         # plus a shared card's properties table
+                                         # plus a shared card's properties table; then the
+                                         # SAME store as a ```table fence, drawn server-side
+                                         # and in the shell, with an edit-role save still
+                                         # returning the table fence byte for byte
 node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
                                            # dark), broken-source fallback, shell renders via
                                            # the worker-served /__web mermaid module
@@ -218,14 +237,19 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # the fractional index (strict ordering under a
                                            # thousand same-gap inserts, short keys when
                                            # appending, junk ranks that never block a drag),
-                                           # plus the ```kanban embed's config (the same dialect
-                                           # without a block around it) and its fence, which
-                                           # grows past any backtick run in the config; the scan
-                                           # that finds fences in raw bytes (kanbanFences — a
-                                           # share push has no parsed document); and the board
-                                           # derivation and snapshot (src/store/board.ts) that
-                                           # the board tab, the embed and a published page all
-                                           # share, so they can't disagree
+                                           # the saved VIEW record (its kind, filter, sort,
+                                           # show and hide, parsed tolerantly and written back
+                                           # byte-identically when it carries nothing new);
+                                           # plus an embed's config (the same dialect without a
+                                           # block around it) and its fence, which grows past
+                                           # any backtick run in the config; the scan that finds
+                                           # fences in raw bytes (storeFences — a share push has
+                                           # no parsed document); the board and table derivation
+                                           # and snapshot (src/store/board.ts) that a tab, an
+                                           # embed and a published page all share, so they can't
+                                           # disagree — filters, sorts, multi_select and date
+                                           # grouping included; and the CSV a view exports
+                                           # (2252 checks)
 ```
 
 ## Rust side

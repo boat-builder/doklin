@@ -1,56 +1,195 @@
-// A card's properties, above its editor.
+// A note's properties, above its editor.
 //
 // The note below is an ordinary Doklin document; this header is the only
 // place its frontmatter is shown, and changing a pill writes the frontmatter
 // and nothing else — the body's bytes never move (see write_frontmatter in
 // store.rs and the frontmatter boundary in App.tsx).
 //
-// Phase 1 shows the header only for cards — notes inside a datastore. Any
-// other note keeps its frontmatter untouched but doesn't display it;
-// "properties on any page" is the same header with an *Add property*
-// affordance, and is deliberately left for later.
+// Every note gets one, not just a card. A card's rows are the fields its
+// board declares, in the board's order, with their types and colours; any
+// other note shows the keys its own file carries, as text. Both can grow a
+// property — on a card that DECLARES a field on the store (so it appears on
+// every card and in every view), on a plain note it just adds a key. A note
+// with no properties shows nothing but a quiet "Add property", which only
+// surfaces on hover: an empty header must not push every document down the
+// page.
 
 import { useEffect, useRef, useState } from "react";
+import PropertyControl from "./PropertyControl";
 import type { Props as CardProps, PropValue } from "./store/frontmatter";
-import { propList } from "./store/frontmatter";
-import type { Field, OptionColor, StoreDef } from "./store/storeFile";
+import {
+  RANK_KEY,
+  type Field,
+  type FieldType,
+  type StoreDef,
+} from "./store/storeFile";
+
+const FIELD_TYPE_NAMES: { type: FieldType; label: string }[] = [
+  { type: "text", label: "Text" },
+  { type: "select", label: "Select" },
+  { type: "multi_select", label: "Multi-select" },
+  { type: "date", label: "Date" },
+  { type: "number", label: "Number" },
+  { type: "checkbox", label: "Checkbox" },
+];
+
+/** A store with no fields — what an ordinary note's rows hang off. */
+const LOOSE_DEF: StoreDef = {
+  name: "",
+  fields: [],
+  options: [],
+  views: [],
+  foreign: [],
+};
 
 type Props = {
-  def: StoreDef;
+  /** The board this note is a card of, or null for an ordinary note. */
+  def: StoreDef | null;
   props: CardProps;
+  /** The frontmatter keys the file carries, in file order. */
+  order?: string[];
   /** Lines the dialect couldn't read; reported, never silently dropped. */
   opaqueCount?: number;
   readOnly?: boolean;
   onChange: (key: string, value: PropValue) => void;
+  /** Declare a field on the board. Absent when the note isn't a card. */
+  onAddField?: (name: string, type: FieldType) => void;
+  onRenameField?: (id: string, name: string) => void;
+  onRetypeField?: (id: string, type: FieldType) => void;
+  onDeleteField?: (id: string) => void;
+  /** Declare a value a select field doesn't offer yet. */
+  onAddOption?: (fieldId: string, name: string) => void;
 };
 
 export default function PropertiesHeader({
   def,
   props,
+  order = [],
   opaqueCount = 0,
   readOnly = false,
   onChange,
+  onAddField,
+  onRenameField,
+  onRetypeField,
+  onDeleteField,
+  onAddOption,
 }: Props) {
   const [open, setOpen] = useState<string | null>(null);
-  if (def.fields.length === 0 && opaqueCount === 0) return null;
+  const [menu, setMenu] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  // Keys added here but not yet given a value. Until one is typed there is
+  // nothing to write: an empty property is not a line in someone's file.
+  const [pending, setPending] = useState<string[]>([]);
+
+  const declared = def?.fields ?? [];
+  const declaredIds = new Set(declared.map((f) => f.id));
+  // Keys the store doesn't declare — written by another tool, or by an
+  // ordinary note that was never a card. Shown as text, kept verbatim.
+  const loose = [...order, ...pending].filter(
+    (k, i, all) => k !== RANK_KEY && !declaredIds.has(k) && all.indexOf(k) === i,
+  );
+  const rows: { field: Field; declared: boolean }[] = [
+    ...declared.map((field) => ({ field, declared: true })),
+    ...loose.map((k) => ({ field: { id: k, name: k, type: "text" as FieldType }, declared: false })),
+  ];
+
+  // Nothing to show and nothing anyone can add: not a header at all.
+  if (rows.length === 0 && opaqueCount === 0 && readOnly) return null;
+
   return (
-    <div className="dk-props">
-      {def.fields.map((f) => (
-        <div className="dk-prop-row" key={f.id}>
-          <div className="dk-prop-label">{f.name}</div>
+    <div className={`dk-props ${rows.length === 0 ? "is-empty" : ""}`}>
+      {rows.map(({ field, declared: isDeclared }) => (
+        <div className="dk-prop-row" key={field.id}>
+          {renaming === field.id ? (
+            <NameInput
+              initial={field.name}
+              ariaLabel="Rename property"
+              onCommit={(name) => {
+                setRenaming(null);
+                if (name !== field.name) onRenameField?.(field.id, name);
+              }}
+              onCancel={() => setRenaming(null)}
+            />
+          ) : (
+            <button
+              className="dk-prop-label"
+              disabled={readOnly}
+              title={isDeclared ? field.name : `${field.name} — not a field of this board`}
+              onClick={(e) => {
+                if (readOnly) return;
+                e.stopPropagation();
+                setMenu(menu === field.id ? null : field.id);
+              }}
+            >
+              {field.name}
+            </button>
+          )}
           <div className="dk-prop-value">
             <PropertyControl
-              def={def}
-              field={f}
-              value={props[f.id] ?? null}
+              def={def ?? LOOSE_DEF}
+              field={field}
+              value={props[field.id] ?? null}
               readOnly={readOnly}
-              open={open === f.id}
-              onOpen={(v) => setOpen(v ? f.id : null)}
-              onChange={(v) => onChange(f.id, v)}
+              open={open === field.id}
+              onOpen={(v) => setOpen(v ? field.id : null)}
+              onChange={(v) => {
+                onChange(field.id, v);
+                if (v !== null) setPending((p) => p.filter((k) => k !== field.id));
+              }}
+              onAddOption={
+                onAddOption && isDeclared
+                  ? (name) => onAddOption(field.id, name)
+                  : undefined
+              }
             />
           </div>
+          {menu === field.id && (
+            <FieldMenu
+              field={field}
+              declared={isDeclared}
+              canRename={isDeclared && !!onRenameField}
+              canRetype={isDeclared && !!onRetypeField}
+              onRename={() => {
+                setMenu(null);
+                setRenaming(field.id);
+              }}
+              onRetype={(type) => {
+                setMenu(null);
+                onRetypeField?.(field.id, type);
+              }}
+              onRemove={() => {
+                setMenu(null);
+                setPending((p) => p.filter((k) => k !== field.id));
+                if (isDeclared) onDeleteField?.(field.id);
+                else onChange(field.id, null);
+              }}
+              onClose={() => setMenu(null)}
+            />
+          )}
         </div>
       ))}
+      {!readOnly && (
+        <div className="dk-prop-add-row">
+          {adding ? (
+            <AddProperty
+              typed={!!onAddField}
+              onCommit={(name, type) => {
+                setAdding(false);
+                const clean = name.trim();
+                if (!clean) return;
+                if (onAddField) onAddField(clean, type);
+                else setPending((p) => (p.includes(clean) ? p : [...p, clean]));
+              }}
+              onCancel={() => setAdding(false)}
+            />
+          ) : (
+            <button className="dk-prop-add" onClick={() => setAdding(true)}>
+              + Add property
+            </button>
+          )}
+        </div>
+      )}
       {opaqueCount > 0 && (
         <div className="dk-prop-note">
           {opaqueCount} {opaqueCount === 1 ? "line" : "lines"} of this note’s
@@ -62,140 +201,137 @@ export default function PropertiesHeader({
   );
 }
 
-function PropertyControl({
-  def,
-  field,
-  value,
-  readOnly,
-  open,
-  onOpen,
-  onChange,
+/** A one-line name input: Enter commits, Escape and blur cancel. */
+function NameInput({
+  initial,
+  ariaLabel,
+  placeholder,
+  onCommit,
+  onCancel,
 }: {
-  def: StoreDef;
-  field: Field;
-  value: PropValue;
-  readOnly: boolean;
-  open: boolean;
-  onOpen: (open: boolean) => void;
-  onChange: (v: PropValue) => void;
+  initial: string;
+  ariaLabel: string;
+  placeholder?: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
 }) {
-  const options = def.options.filter((o) => o.field === field.id);
-  const colorOf = (name: string): OptionColor | null =>
-    options.find((o) => o.name === name)?.color ?? null;
-
-  if (field.type === "checkbox") {
-    return (
-      <input
-        type="checkbox"
-        className="dk-prop-check"
-        disabled={readOnly}
-        checked={value === true}
-        onChange={(e) => onChange(e.target.checked ? true : null)}
-      />
-    );
-  }
-
-  if (field.type === "select" || field.type === "multi_select") {
-    const many = field.type === "multi_select";
-    const selected = propList(value);
-    return (
-      <div className="dk-prop-select">
-        <button
-          className="dk-prop-trigger"
-          disabled={readOnly}
-          onClick={() => onOpen(!open)}
-        >
-          {selected.length === 0 ? (
-            <span className="dk-prop-empty">Empty</span>
-          ) : (
-            selected.map((s) => (
-              <span key={s} className={`dk-chip dk-color-${colorOf(s) ?? "grey"}`}>
-                {s}
-              </span>
-            ))
-          )}
-        </button>
-        {open && !readOnly && (
-          <SelectPopover
-            options={options.map((o) => o.name)}
-            selected={selected}
-            multi={many}
-            colorOf={colorOf}
-            onPick={(name) => {
-              if (!many) {
-                onChange(selected[0] === name ? null : name);
-                onOpen(false);
-                return;
-              }
-              const next = selected.includes(name)
-                ? selected.filter((s) => s !== name)
-                : [...selected, name];
-              onChange(next.length ? next : null);
-            }}
-            onClose={() => onOpen(false)}
-          />
-        )}
-      </div>
-    );
-  }
-
-  const text =
-    value === null || value === undefined
-      ? ""
-      : Array.isArray(value)
-        ? value.join(", ")
-        : String(value);
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
   return (
     <input
-      className="dk-prop-input"
-      type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
-      placeholder="Empty"
-      disabled={readOnly}
-      defaultValue={text}
-      key={text}
-      onBlur={(e) => commit(e.target.value)}
+      ref={ref}
+      className="dk-prop-name-input"
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          (e.target as HTMLInputElement).blur();
+          const v = value.trim();
+          if (v) onCommit(v);
+          else onCancel();
         } else if (e.key === "Escape") {
           e.preventDefault();
-          (e.target as HTMLInputElement).value = text;
-          (e.target as HTMLInputElement).blur();
+          onCancel();
         }
       }}
+      onBlur={onCancel}
     />
   );
-
-  function commit(raw: string) {
-    const v = raw.trim();
-    if (v === text.trim()) return;
-    if (v === "") {
-      onChange(null);
-      return;
-    }
-    if (field.type === "number") {
-      const n = Number(v);
-      onChange(Number.isFinite(n) ? n : v);
-      return;
-    }
-    onChange(v);
-  }
 }
 
-function SelectPopover({
-  options,
-  selected,
-  multi,
-  colorOf,
-  onPick,
+/**
+ * Name and type for a new property. Two controls, so — unlike the one-line
+ * rename above — a blur is not a cancel: moving from the name to the type
+ * picker is part of filling this in. Focus leaving the form altogether is.
+ */
+function AddProperty({
+  typed,
+  onCommit,
+  onCancel,
+}: {
+  typed: boolean;
+  onCommit: (name: string, type: FieldType) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<FieldType>("text");
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+  const commit = () => {
+    const clean = name.trim();
+    if (clean) onCommit(clean, type);
+    else onCancel();
+  };
+  return (
+    <div
+      className="dk-prop-add-form"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onCancel();
+      }}
+    >
+      <input
+        ref={ref}
+        className="dk-prop-name-input"
+        aria-label="New property name"
+        placeholder="Property name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      {typed && (
+        <select
+          className="dk-prop-type"
+          aria-label="Property type"
+          value={type}
+          onChange={(e) => setType(e.target.value as FieldType)}
+        >
+          {FIELD_TYPE_NAMES.map((t) => (
+            <option key={t.type} value={t.type}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      )}
+      <button className="dk-prop-add-go" onClick={commit}>
+        Add
+      </button>
+    </div>
+  );
+}
+
+function FieldMenu({
+  field,
+  declared,
+  canRename,
+  canRetype,
+  onRename,
+  onRetype,
+  onRemove,
   onClose,
 }: {
-  options: string[];
-  selected: string[];
-  multi: boolean;
-  colorOf: (name: string) => OptionColor | null;
-  onPick: (name: string) => void;
+  field: Field;
+  declared: boolean;
+  canRename: boolean;
+  canRetype: boolean;
+  onRename: () => void;
+  onRetype: (type: FieldType) => void;
+  onRemove: () => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -217,23 +353,37 @@ function SelectPopover({
     };
   }, [onClose]);
   return (
-    <div className="dk-popover dk-prop-popover" ref={ref}>
-      {options.length === 0 && <div className="dk-popover-note">No options yet.</div>}
-      {options.map((name) => (
-        <button
-          key={name}
-          className={`dk-popover-item ${selected.includes(name) ? "is-on" : ""}`}
-          onClick={() => onPick(name)}
-        >
-          <span className={`dk-chip dk-color-${colorOf(name) ?? "grey"}`}>{name}</span>
-          {selected.includes(name) && <span className="dk-popover-tick">✓</span>}
-        </button>
-      ))}
-      {!multi && selected.length > 0 && (
-        <button className="dk-popover-item" onClick={() => onPick(selected[0])}>
-          Clear
+    <div className="dk-popover dk-prop-field-menu" ref={ref}>
+      {canRename && (
+        <button className="dk-popover-item" onClick={onRename}>
+          Rename…
         </button>
       )}
+      {canRetype && (
+        <label className="dk-popover-row">
+          Type
+          <select
+            className="dk-prop-type"
+            aria-label={`Type of ${field.name}`}
+            value={field.type}
+            onChange={(e) => onRetype(e.target.value as FieldType)}
+          >
+            {FIELD_TYPE_NAMES.map((t) => (
+              <option key={t.type} value={t.type}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <button className="dk-popover-item is-danger" onClick={onRemove}>
+        {declared ? "Delete property" : "Remove from this note"}
+      </button>
+      <div className="dk-popover-note">
+        {declared
+          ? "Deleting a property leaves every card’s value in its file, untouched."
+          : "This key isn’t a field of the board; removing it clears it from this note."}
+      </div>
     </div>
   );
 }

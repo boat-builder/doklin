@@ -240,6 +240,52 @@ pub(crate) fn write_frontmatter(
     })
 }
 
+/// Replace a note's BODY, keeping its leading frontmatter block byte for byte
+/// — the mirror image of `write_frontmatter`.
+///
+/// A card has two halves and two kinds of writer: a board or a properties
+/// header owns the block, a peek panel owns the body. Splicing each half
+/// against the file as it is on disk at THIS moment means neither writer can
+/// clobber the other's half; only two writers of the SAME half race, and the
+/// snapshot guard turns that into the usual `conflict`.
+///
+/// Like `write_frontmatter`, and unlike `write_file`, it does not prime the
+/// file watcher: a body written here is a real change to anyone else showing
+/// the same note, and they should hear about it.
+#[tauri::command]
+pub(crate) fn write_body(
+    path: String,
+    body: String,
+    expected: Option<FileSnapshot>,
+) -> Result<FileSnapshot, WriteError> {
+    let path_buf = PathBuf::from(&path);
+    let existed = path_buf.exists();
+    if let Some(expected) = expected {
+        if existed {
+            let current = stat_snapshot(&path_buf).map_err(|e| WriteError::Io {
+                message: format!("stat {}: {}", path, e),
+            })?;
+            if current != expected {
+                return Err(WriteError::Conflict { current });
+            }
+        }
+    }
+    let head = if existed {
+        let text = std::fs::read_to_string(&path_buf).map_err(|e| WriteError::Io {
+            message: format!("read {}: {}", path, e),
+        })?;
+        text[..head_len(&text)].to_string()
+    } else {
+        String::new()
+    };
+    std::fs::write(&path_buf, format!("{}{}", head, body)).map_err(|e| WriteError::Io {
+        message: format!("write {}: {}", path, e),
+    })?;
+    stat_snapshot(&path_buf).map_err(|e| WriteError::Io {
+        message: format!("stat {}: {}", path, e),
+    })
+}
+
 /// A new card: a file holding only its frontmatter block. Refuses to clobber
 /// anything that already exists, like `create_file`.
 #[tauri::command]
@@ -427,6 +473,44 @@ mod tests {
             Some(stale),
         )
         .unwrap_err();
+        assert!(matches!(err, WriteError::Conflict { .. }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_body_keeps_the_frontmatter_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("doklin-store-body-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let card = dir.join("card.md");
+
+        // The mirror image of write_frontmatter: the block stays, the body goes.
+        std::fs::write(&card, "---\nstatus: Done\nrank: a0\n---\nOld body\n").unwrap();
+        write_body(
+            card.to_string_lossy().to_string(),
+            "New body\nwith --- inside\n".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&card).unwrap(),
+            "---\nstatus: Done\nrank: a0\n---\nNew body\nwith --- inside\n"
+        );
+
+        // A note with no block never grows one.
+        std::fs::write(&card, "Just prose\n").unwrap();
+        write_body(card.to_string_lossy().to_string(), "Other prose\n".into(), None).unwrap();
+        assert_eq!(std::fs::read_to_string(&card).unwrap(), "Other prose\n");
+
+        // The snapshot guard rejects a stale writer, exactly as it does for
+        // the other half of the file.
+        let stale = FileSnapshot {
+            mtime_ms: 1,
+            size: 1,
+        };
+        let err = write_body(card.to_string_lossy().to_string(), "x".into(), Some(stale))
+            .unwrap_err();
         assert!(matches!(err, WriteError::Conflict { .. }));
 
         let _ = std::fs::remove_dir_all(&dir);

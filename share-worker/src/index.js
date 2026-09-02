@@ -228,7 +228,11 @@ import { WEB_APP } from "./webAssets.js";
 // no JavaScript — and shell sessions get them in the boot payload. An older
 // app sends neither, which reads as "no board, no properties": the fence
 // renders as the code block it has always been.
-const WORKER_VERSION = 23;
+// 24 = a store embed can also be a ```table fence. One `boards` array carries
+// both kinds, told apart by a `kind` field (absent = kanban, so every page
+// pushed by a version-23 app still reads correctly), and the same fence text
+// in two languages is two different views of the same store.
+const WORKER_VERSION = 24;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -256,6 +260,9 @@ const WORKER_FEATURES = [
   // Version 23: a page carries the boards its notes embed, and its own
   // frontmatter as properties.
   "boards",
+  // Version 24: an embed can also be a ```table fence, which publishes as a
+  // table of the same cards.
+  "store-tables",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -3222,16 +3229,17 @@ function renderPageMarkdown(md, records, boards) {
   return instance.parse(md);
 }
 
-/* ---------- Boards and properties (version 23) ----------
+/* ---------- Boards and properties (versions 23 and 24) ----------
 
-   A note can embed a datastore's board with a ```kanban fence. The fence's
-   body only NAMES the board (`store: ./Projects`) — the board itself is a
-   folder of card files back in the owner's workspace, which this worker has
-   never seen and never will. So the app sends a picture of it: for each
-   distinct fence, the columns, their colours, and each card's title and
-   chips (src/store/publish.ts). `boardsRenderer` at the end of this section
-   swaps that picture in for the fence; `renderPageMarkdown` hands it to
-   marked beside the table-width override.
+   A note can embed a datastore with a ```kanban fence (columns of cards) or
+   a ```table one (rows of the same cards). The fence's body only NAMES the
+   store (`store: ./Projects`) — the store itself is a folder of card files
+   back in the owner's workspace, which this worker has never seen and never
+   will. So the app sends a picture of it: for each distinct fence, the
+   columns and each card's title and chips, or the fields and rows
+   (src/store/publish.ts). `boardsRenderer` at the end of this section swaps
+   that picture in for the fence; `renderPageMarkdown` hands it to marked
+   beside the table-width override.
 
    It renders as STATIC HTML. A board on a shared page is something to read,
    not something to drag — no script, no hydration, correct in light and dark
@@ -3260,6 +3268,7 @@ const MAX_BOARDS = 20;
 const MAX_BOARD_COLUMNS = 60;
 const MAX_BOARD_CARDS = 200;
 const MAX_BOARD_CHIPS = 12;
+const MAX_BOARD_FIELDS = 24;
 const MAX_BOARD_TEXT = 200;
 const MAX_PROPS = 40;
 const MAX_PROP_VALUES = 32;
@@ -3269,9 +3278,31 @@ const boardText = (v) =>
 
 const boardColor = (v) => (typeof v === "string" && BOARD_COLORS.has(v) ? v : null);
 
-// A fence and its snapshot are matched by the fence's own text. Both sides
-// normalize the same way so a stray trailing newline can't lose a board.
+// A fence and its snapshot are matched by the fence's own text AND its
+// language: the same config as ```kanban and as ```table is two different
+// views of one store. Both sides normalize the same way (src/store/board.ts,
+// `fenceKeyOf` and `snapKeyOf`) so a stray trailing newline can't lose a
+// board.
 const fenceKey = (v) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+const snapKind = (v) => (v === "table" ? "table" : "kanban");
+const snapKey = (kind, fence) => `${kind}\u0000${fenceKey(fence)}`;
+
+// One cell's or one card face's chips.
+function sanitizeChips(raw) {
+  const chips = [];
+  for (const chip of Array.isArray(raw) ? raw : []) {
+    if (!chip || typeof chip !== "object") continue;
+    const text = boardText(chip.text);
+    if (text === null) continue;
+    const color = boardColor(chip.color);
+    chips.push({ text, ...(color ? { color } : {}) });
+    if (chips.length >= MAX_BOARD_CHIPS) break;
+  }
+  return chips;
+}
+
+const snapPage = (v) => (typeof v === "string" && validId(v) ? v : null);
+const snapMore = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
 
 // Shape-check pushed boards — same contract as sanitizeThreads and
 // sanitizeTableCols: junk reads as "no boards" rather than crashing a render.
@@ -3283,50 +3314,79 @@ function sanitizeBoards(raw) {
   const seen = new Set();
   for (const b of raw) {
     if (!b || typeof b !== "object" || typeof b.fence !== "string") continue;
+    const kind = snapKind(b.kind);
     const fence = fenceKey(b.fence);
-    if (seen.has(fence)) continue;
-    seen.add(fence);
-    const columns = [];
-    for (const c of Array.isArray(b.columns) ? b.columns : []) {
-      if (!c || typeof c !== "object") continue;
-      const name = boardText(c.name);
-      if (name === null) continue;
-      const cards = [];
-      for (const card of Array.isArray(c.cards) ? c.cards : []) {
-        if (!card || typeof card !== "object") continue;
-        const title = boardText(card.title);
-        if (title === null) continue;
-        const chips = [];
-        for (const chip of Array.isArray(card.chips) ? card.chips : []) {
-          if (!chip || typeof chip !== "object") continue;
-          const text = boardText(chip.text);
-          if (text === null) continue;
-          const color = boardColor(chip.color);
-          chips.push({ text, ...(color ? { color } : {}) });
-          if (chips.length >= MAX_BOARD_CHIPS) break;
-        }
-        const page = typeof card.page === "string" && validId(card.page) ? card.page : null;
-        cards.push({
-          title,
-          ...(chips.length > 0 ? { chips } : {}),
-          ...(page ? { page } : {}),
-        });
-        if (cards.length >= MAX_BOARD_CARDS) break;
-      }
-      const more = Number.isFinite(c.more) && c.more > 0 ? Math.floor(c.more) : 0;
-      const color = boardColor(c.color);
-      columns.push({
-        name,
-        ...(color ? { color } : {}),
-        cards,
-        ...(more > 0 ? { more } : {}),
-      });
-      if (columns.length >= MAX_BOARD_COLUMNS) break;
-    }
-    out.push({ fence, name: boardText(b.name) ?? "", columns });
+    const key = snapKey(kind, fence);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const name = boardText(b.name) ?? "";
+    out.push(
+      kind === "table"
+        ? sanitizeTableSnap(fence, name, b)
+        : sanitizeKanbanSnap(fence, name, b),
+    );
     if (out.length >= MAX_BOARDS) break;
   }
   return out;
+}
+
+function sanitizeKanbanSnap(fence, name, b) {
+  const columns = [];
+  for (const c of Array.isArray(b.columns) ? b.columns : []) {
+    if (!c || typeof c !== "object") continue;
+    const colName = boardText(c.name);
+    if (colName === null) continue;
+    const cards = [];
+    for (const card of Array.isArray(c.cards) ? c.cards : []) {
+      if (!card || typeof card !== "object") continue;
+      const title = boardText(card.title);
+      if (title === null) continue;
+      const chips = sanitizeChips(card.chips);
+      const page = snapPage(card.page);
+      cards.push({
+        title,
+        ...(chips.length > 0 ? { chips } : {}),
+        ...(page ? { page } : {}),
+      });
+      if (cards.length >= MAX_BOARD_CARDS) break;
+    }
+    const more = snapMore(c.more);
+    const color = boardColor(c.color);
+    columns.push({
+      name: colName,
+      ...(color ? { color } : {}),
+      cards,
+      ...(more > 0 ? { more } : {}),
+    });
+    if (columns.length >= MAX_BOARD_COLUMNS) break;
+  }
+  return { fence, kind: "kanban", name, columns };
+}
+
+function sanitizeTableSnap(fence, name, b) {
+  const fields = [];
+  for (const f of Array.isArray(b.fields) ? b.fields : []) {
+    const text = boardText(f);
+    if (text === null) continue;
+    fields.push(text);
+    if (fields.length >= MAX_BOARD_FIELDS) break;
+  }
+  const rows = [];
+  for (const r of Array.isArray(b.rows) ? b.rows : []) {
+    if (!r || typeof r !== "object") continue;
+    const title = boardText(r.title);
+    if (title === null) continue;
+    // One cell per heading, never more: a row that claims extra columns
+    // would draw a table wider than its own header.
+    const cells = [];
+    const raw = Array.isArray(r.cells) ? r.cells : [];
+    for (let i = 0; i < fields.length; i++) cells.push(sanitizeChips(raw[i]));
+    const page = snapPage(r.page);
+    rows.push({ title, ...(page ? { page } : {}), cells });
+    if (rows.length >= MAX_BOARD_CARDS) break;
+  }
+  const more = snapMore(b.more);
+  return { fence, kind: "table", name, fields, rows, ...(more > 0 ? { more } : {}) };
 }
 
 // The document's own frontmatter, as rows of coloured values.
@@ -3393,6 +3453,37 @@ function boardHtml(board) {
   }</span></div><div class="dk-board-cols">${cols}</div></div>`;
 }
 
+// One table, as the page shows it. Same class names as the shell's React
+// version (src/BoardSnapshot.tsx) and, deliberately, as a markdown table's own
+// cells are NOT reused: this is a picture of a store, not a table someone
+// wrote, and the two should not be confused by a stylesheet.
+function tableHtml(board) {
+  const total = board.rows.length + (board.more ?? 0);
+  const head = `<tr><th class="dk-th is-title">Title</th>${board.fields
+    .map((f) => `<th class="dk-th">${escapeHtml(f)}</th>`)
+    .join("")}</tr>`;
+  const rows = board.rows
+    .map((row) => {
+      const title = escapeHtml(row.title);
+      const face = row.page
+        ? `<a class="dk-row-title" href="/${row.page}">${title}</a>`
+        : `<span class="dk-row-title">${title}</span>`;
+      const cells = board.fields
+        .map(
+          (_, i) =>
+            `<td class="dk-td">${(row.cells[i] ?? []).map(chipHtml).join("")}</td>`,
+        )
+        .join("");
+      return `<tr class="dk-tr"><td class="dk-td is-title">${face}</td>${cells}</tr>`;
+    })
+    .join("");
+  const more = board.more ? `<div class="dk-col-more">+${board.more} more</div>` : "";
+  const name = board.name ? `<span class="dk-board-name">${escapeHtml(board.name)}</span>` : "";
+  return `<div class="dk-board"><div class="dk-board-head"><span class="dk-board-kind">Table</span>${name}<span class="dk-board-sub">${total} ${
+    total === 1 ? "card" : "cards"
+  }</span></div><div class="dk-table-wrap"><table class="dk-table"><thead>${head}</thead><tbody>${rows}</tbody></table>${more}</div></div>`;
+}
+
 /** A document's properties, above its body. Empty rows never reach here. */
 function propsHtml(props) {
   if (!props || props.length === 0) return "";
@@ -3407,23 +3498,25 @@ function propsHtml(props) {
   return `<div class="dk-props">${rows}</div>`;
 }
 
-// The renderer override itself: a ```kanban fence becomes its board. A
-// fence with no snapshot — an older page, or a board deleted since — keeps
-// marked's own code block: the fence stays, nothing is rewritten, which is
-// the same posture the app takes.
+// The renderer override itself: an embed fence becomes its board or its
+// table. A fence with no snapshot — an older page, or a store deleted since —
+// keeps marked's own code block: the fence stays, nothing is rewritten, which
+// is the same posture the app takes.
 //
 // Plain object, not a Renderer subclass, for the reason tableColsRenderer
 // gives: marked enumerates the overrides it is handed.
 function boardsRenderer(boards) {
-  const byFence = new Map(boards.map((b) => [b.fence, b]));
+  const byKey = new Map(boards.map((b) => [snapKey(b.kind, b.fence), b]));
   const base = new Renderer();
   return {
     code(token) {
       base.parser = this.parser;
       base.options = this.options;
-      if (String(token.lang ?? "").trim() !== "kanban") return base.code(token);
-      const board = byFence.get(fenceKey(token.text));
-      return board ? boardHtml(board) : base.code(token);
+      const lang = String(token.lang ?? "").trim();
+      if (lang !== "kanban" && lang !== "table") return base.code(token);
+      const snap = byKey.get(snapKey(lang, token.text));
+      if (!snap) return base.code(token);
+      return snap.kind === "table" ? tableHtml(snap) : boardHtml(snap);
     },
   };
 }
@@ -4702,6 +4795,25 @@ main.doc {
 .doc a.dk-card-title:hover { text-decoration: underline; }
 .doc .dk-card-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .doc .dk-col-more { margin: 6px 4px 2px; font-size: 11px; color: var(--muted); }
+/* A store shown as a table. Its own rules, not the document table's: this is
+   a picture of a store, not a table someone wrote in the note. */
+.doc .dk-table-wrap { padding: 0 12px 12px; overflow-x: auto; }
+.doc table.dk-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 13px; }
+.doc .dk-th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+.doc .dk-th.is-title { min-width: 160px; }
+.doc .dk-td { border-bottom: 1px solid var(--border); padding: 6px 8px; vertical-align: middle; }
+.doc .dk-td .dk-chip { margin-right: 4px; }
+.doc .dk-row-title { font-size: 13px; overflow-wrap: anywhere; }
+.doc a.dk-row-title { color: var(--link); text-decoration: none; }
+.doc a.dk-row-title:hover { text-decoration: underline; }
 .doc input[type="checkbox"] { margin-right: 6px; }
 .doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
 .shell { text-align: center; padding-top: 20vh; }

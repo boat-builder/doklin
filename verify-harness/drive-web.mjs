@@ -697,7 +697,90 @@ for (const [label, code, role] of [
       (await staticPage.locator(".doc h2").count()) === 0,
   );
   await staticPage.screenshot({ path: SHOTS + "card-public.png", fullPage: true });
+
+  /* ---- phase 4: the same store, embedded as a ```table ---- */
+  const TABLE_MD =
+    "# Table Web\n\n```table\nstore: ./Projects\n```\n\nAnd after it, prose.\n";
+  const TABLE = {
+    fence: "store: ./Projects",
+    name: "Projects",
+    kind: "table",
+    fields: ["Status", "Owner"],
+    rows: [
+      {
+        title: "Ship the boat",
+        page: "card-web",
+        cells: [[{ text: "In progress", color: "blue" }], [{ text: "Ada", color: "purple" }]],
+      },
+      { title: "Paint it", cells: [[{ text: "Backlog", color: "grey" }], []] },
+    ],
+    more: 3,
+  };
+  await api("/api/pages/table-web", undefined, "DELETE");
+  await api("/api/pages/table-web", {
+    title: "Table Web",
+    markdown: TABLE_MD,
+    boards: [TABLE],
+  });
+  await staticPage.goto(`${BASE}/table-web`);
+  step(
+    "a ```table fence renders as a table server-side, with scripting off",
+    (await staticPage.locator(".doc .dk-table").count()) === 1 &&
+      (await staticPage.locator(".doc code.language-table").count()) === 0,
+  );
+  step(
+    "its headings are the fields, its rows the cards",
+    (await staticPage.locator(".doc .dk-th").allInnerTexts()).join("|") ===
+      "Title|Status|Owner" &&
+      (await staticPage.locator(".doc .dk-row-title").allInnerTexts()).join("|") ===
+        "Ship the boat|Paint it" &&
+      (await staticPage.locator('.doc a.dk-row-title[href="/card-web"]').count()) === 1,
+  );
+  step(
+    "cut rows are counted, and the prose around it is untouched",
+    (await staticPage.locator(".doc .dk-col-more").innerText()) === "+3 more" &&
+      (await staticPage.locator(".doc").innerText()).includes("And after it, prose."),
+  );
+  await staticPage.screenshot({ path: SHOTS + "table-public.png", fullPage: true });
   await staticCtx.close();
+
+  // …and the shell draws the same table from the same snapshot.
+  await api(
+    "/api/pages/table-web/access/codes",
+    { label: "Editor", code: "table-edit-code", role: "edit" },
+    "POST",
+  );
+  const shellTable = await (
+    await browser.newContext({ viewport: { width: 1200, height: 860 } })
+  ).newPage();
+  shellTable.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await shellTable.goto(`${BASE}/table-web`);
+  await poll(async () => shellTable.locator("#gate-code").isVisible());
+  await shellTable.fill("#gate-code", "table-edit-code");
+  await shellTable.press("#gate-code", "Enter");
+  await poll(async () => (await shellTable.locator(".dk-table-wrap.is-snapshot").count()) === 1);
+  step(
+    "the shell draws the same table the static page draws",
+    (await shellTable.locator(".dk-table-wrap.is-snapshot .dk-th").allInnerTexts()).join("|") ===
+      "Title|Status|Owner" &&
+      (await shellTable
+        .locator('.dk-table-wrap.is-snapshot a.dk-row-title[href="/card-web"]')
+        .count()) === 1,
+  );
+  await shellTable.screenshot({ path: SHOTS + "table-shell.png", fullPage: true });
+  // And an edit-role save still returns the fence byte for byte.
+  await shellTable.locator(".ProseMirror p", { hasText: "And after it, prose." }).first().click();
+  await shellTable.keyboard.press("End");
+  await shellTable.keyboard.type(" Edited.");
+  await poll(async () =>
+    (await api("/api/pages/table-web/content")).json.markdown.includes("Edited."),
+  );
+  step(
+    "and an edit beside a drawn table round-trips the table fence",
+    (await api("/api/pages/table-web/content")).json.markdown ===
+      TABLE_MD.replace("prose.", "prose. Edited."),
+  );
+  await shellTable.context().close();
 }
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);

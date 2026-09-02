@@ -1,16 +1,22 @@
-// The kanban view — the one way a datastore is shown today.
+// The kanban view — a datastore shown as columns of cards.
 //
-// One component for both hosts: the board tab a sidebar row opens, and (from
-// phase 2) a board embedded in a note. It renders from the shared store model
-// and writes through it; every change is a file on disk, so a drag here and a
-// drag on another machine meet in the sync engine like any other edit.
+// One component for every host: the board tab a sidebar row opens, a board
+// embedded in a note, and the read-only mirror an unfocused split pane shows.
+// It renders from the shared store model and writes through it; every change
+// is a file on disk, so a drag here and a drag on another machine meet in the
+// sync engine like any other edit.
+//
+// The store itself — loading it, which view is showing, the header above the
+// columns — belongs to StoreView.tsx, which hosts this and the table view
+// alike. What is here is the columns and the drag.
 //
 // Drag is POINTER-based, not HTML5 drag-and-drop: Tauri intercepts native
 // drag events for its own file-drop handling, which is why the sidebar's row
 // drag and the tab bar's reorder are built the same way.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "./store/useStore";
+import { CardMenu, InlineInput, Popover } from "./storeChrome";
+import type { StoreModel } from "./store/model";
 import {
   boardColumns,
   cardChips,
@@ -20,10 +26,10 @@ import {
   type Card,
 } from "./store/board";
 import {
-  kanbanView,
-  fieldOf,
   OPTION_COLORS,
+  type Field,
   type OptionColor,
+  type Sort,
   type StoreDef,
 } from "./store/storeFile";
 
@@ -33,6 +39,9 @@ type CardDrag = {
   kind: "card";
   path: string;
   title: string;
+  /** The column the card was picked up from — a multi_select card is in
+   *  several at once, and only the one it left should lose its value. */
+  from: string;
   startX: number;
   startY: number;
   x: number;
@@ -60,24 +69,29 @@ const DRAG_THRESHOLD = 4;
 const NO_VALUE = "";
 
 type Props = {
-  /** The store's folder. */
-  dir: string;
-  /** Which saved view to show; the store's first kanban view by default. */
-  viewId?: string | null;
-  /**
-   * Group by this field instead of the view's. An embed's `group:` key —
-   * one note showing the same store split a different way, without changing
-   * the store for everyone else.
-   */
-  group?: string | null;
-  /** Column values to leave out (an embed's `hide:` key). */
+  def: StoreDef;
+  /** The cards this view shows — already through the view's filter. */
+  cards: Card[];
+  model: StoreModel | null;
+  /** The field the columns come from. */
+  groupBy: string;
+  groupField: Field;
+  /** Column values to leave out (a view's or an embed's `hide`). */
   hide?: string[];
-  /** Inside a note rather than filling a tab: sits in the text flow. */
-  embedded?: boolean;
+  /** The view's sort, which replaces rank order inside every column. */
+  sort?: Sort | null;
+  /** Which fields a card's face shows chips for; null = all but the group-by. */
+  show?: string[] | null;
   /** A published page or an unfocused pane: same DOM, no writing. */
   readOnly?: boolean;
-  /** Open a card's note. */
+  /** Told when a drag starts and ends, so the host can dress the whole board. */
+  onDragging?: (dragging: boolean) => void;
+  /** Leave a column out of the saved view. Absent where the view is fixed. */
+  onHideColumn?: (value: string) => void;
+  /** Open a card — a peek where the host offers one, else its note. */
   onOpenCard: (path: string) => void;
+  /** Present when a click PEEKS, so the tab is still one menu item away. */
+  onOpenCardTab?: (path: string) => void;
   /** Rename through the app, so open tabs, shares and the sidecar follow. */
   onRenameCard?: (from: string, to: string) => Promise<string | null>;
   /** Delete through the app, so it lands in the Trash with its sidecar. */
@@ -86,25 +100,23 @@ type Props = {
 };
 
 export default function KanbanBoard({
-  dir,
-  viewId = null,
-  group = null,
+  def,
+  cards,
+  model,
+  groupBy,
+  groupField,
   hide,
-  embedded = false,
+  sort = null,
+  show = null,
   readOnly = false,
+  onDragging,
+  onHideColumn,
   onOpenCard,
+  onOpenCardTab,
   onRenameCard,
   onDeleteCard,
   onRevealInFinder,
 }: Props) {
-  const { state, model } = useStore(dir);
-  const { def, cards } = state;
-  const view = useMemo(() => (def ? kanbanView(def, viewId) : null), [def, viewId]);
-  // The embed's override wins over the saved view — it is the narrower
-  // statement, made by the page the reader is on.
-  const groupBy = group ?? view?.groupBy ?? null;
-  const groupField = def && groupBy ? fieldOf(def, groupBy) : null;
-
   const [drag, setDrag] = useState<Drag | null>(null);
   const [drop, setDrop] = useState<DropTarget>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -124,16 +136,21 @@ export default function KanbanBoard({
   // also what a share push snapshots — a published board and this one can't
   // disagree about what it shows.
   const columns: BoardColumn[] = useMemo(
-    () => (def && groupBy ? boardColumns(def, cards, groupBy, hide) : []),
-    [def, groupBy, cards, hide],
+    () => boardColumns(def, cards, groupBy, { hide, sort }),
+    [def, groupBy, cards, hide, sort],
   );
 
-  // The chips a card face shows: every declared field except the one the
-  // board groups by (the column already says it) and the position key.
+  // The chips a card face shows: the fields this view shows, except the one
+  // the board groups by (the column already says it).
   const chipFields = useMemo(
-    () => (def ? chipFieldsOf(def, groupBy) : []),
-    [def, groupBy],
+    () => chipFieldsOf(def, groupBy, show),
+    [def, groupBy, show],
   );
+
+  // Only a field whose values ARE options can grow a column. A board grouped
+  // by a date has columns because cards carry dates; there is nothing to add.
+  const declaresOptions =
+    groupField.type === "select" || groupField.type === "multi_select";
 
   /* ---------- pointer drag ---------- */
 
@@ -142,7 +159,8 @@ export default function KanbanBoard({
     dropRef.current = null;
     setDrag(null);
     setDrop(null);
-  }, []);
+    onDragging?.(false);
+  }, [onDragging]);
 
   // Where a pointer at (x, y) would drop the dragged card: the column under
   // it, and the index among that column's OTHER cards.
@@ -191,6 +209,7 @@ export default function KanbanBoard({
         d.started ||
         Math.abs(e.clientX - d.startX) > DRAG_THRESHOLD ||
         Math.abs(e.clientY - d.startY) > DRAG_THRESHOLD;
+      if (started && !d.started) onDragging?.(true);
       if (d.kind === "card") {
         const next: CardDrag = { ...d, x: e.clientX, y: e.clientY, started };
         dragRef.current = next;
@@ -211,7 +230,7 @@ export default function KanbanBoard({
       const d = dragRef.current;
       const target = dropRef.current;
       clearDrag();
-      if (!d || !d.started || !model || !groupBy) return;
+      if (!d || !d.started || !model) return;
       if (d.kind === "card") {
         if (!target) return;
         const col = columns.find((c) => c.key === target.colKey);
@@ -223,11 +242,12 @@ export default function KanbanBoard({
           col.key,
           list[target.index - 1] ?? null,
           list[target.index] ?? null,
+          d.from,
         );
         return;
       }
-      const declared = orderedOptions(def!, groupBy).filter((o) => o.name !== d.key);
-      const me = def!.options.find((o) => o.field === groupBy && o.name === d.key);
+      const declared = orderedOptions(def, groupBy).filter((o) => o.name !== d.key);
+      const me = def.options.find((o) => o.field === groupBy && o.name === d.key);
       if (!me) return;
       void model.moveOption(
         groupBy,
@@ -249,15 +269,20 @@ export default function KanbanBoard({
       window.removeEventListener("pointercancel", clearDrag);
       window.removeEventListener("keydown", onKey);
     };
-  }, [drag, columns, def, groupBy, model, hitCard, hitColumn, clearDrag]);
+  }, [drag, columns, def, groupBy, model, hitCard, hitColumn, clearDrag, onDragging]);
 
-  const startCardDrag = (e: React.PointerEvent<HTMLElement>, card: Card) => {
+  const startCardDrag = (
+    e: React.PointerEvent<HTMLElement>,
+    card: Card,
+    from: string,
+  ) => {
     if (readOnly || e.button !== 0) return;
     const box = e.currentTarget.getBoundingClientRect();
     const next: CardDrag = {
       kind: "card",
       path: card.path,
       title: card.title,
+      from,
       startX: e.clientX,
       startY: e.clientY,
       x: e.clientX,
@@ -289,7 +314,7 @@ export default function KanbanBoard({
   /* ---------- composers ---------- */
 
   const addCard = async (col: BoardColumn, title: string) => {
-    if (!model || !groupBy) return;
+    if (!model) return;
     const clean = title.trim();
     if (!clean) return;
     const props: Record<string, string> = { [groupBy]: col.key };
@@ -300,87 +325,14 @@ export default function KanbanBoard({
     });
   };
 
-  const addColumn = async (name: string) => {
-    if (!model || !groupBy) return;
-    await model.addOption(groupBy, name);
-  };
-
-  /* ---------- render ---------- */
-
-  if (state.loading) {
-    return <div className="dk-board-empty">Loading board…</div>;
-  }
-  if (state.error) {
-    return <div className="dk-board-empty">This board couldn’t be read: {state.error}</div>;
-  }
-  if (!def) {
-    // A tab can only be opened on a folder that WAS a board, so there the
-    // honest report is that it stopped being one. An embed points wherever
-    // its fence says, so there the folder may simply never have been one.
-    return (
-      <div className="dk-board-empty">
-        {embedded ? (
-          <>
-            There’s no board here: this folder has no <code>store.jsonl</code>.
-          </>
-        ) : (
-          <>
-            This folder is no longer a board — its <code>store.jsonl</code> is gone.
-            The notes inside it are intact.
-          </>
-        )}
-      </div>
-    );
-  }
-  if (!groupBy || !groupField) {
-    return (
-      <div className="dk-board-empty">
-        This board has no select field to group by. Add one to{" "}
-        <code>store.jsonl</code> to see columns.
-      </div>
-    );
-  }
-
   const dragging = drag?.started === true;
-  // What this view actually shows: `hide` can leave cards out, and the line
-  // under the title should say what is on screen, not what is on disk.
-  const shown = columns.reduce((n, c) => n + c.cards.length, 0);
-  const title = def.name || state.dir.split("/").pop();
 
   return (
-    <div
-      className={`dk-board ${embedded ? "is-embed" : ""} ${dragging ? "is-dragging" : ""}`}
-      ref={boardRef}
-    >
-      <header className="dk-board-head">
-        {/* An embed lives inside someone's prose, where an <h1> would join
-            the document outline and the table of contents. Only the tab —
-            where the board IS the page — gets the heading. */}
-        {embedded ? (
-          <div className="dk-board-title">{title}</div>
-        ) : (
-          <h1 className="dk-board-title">{title}</h1>
-        )}
-        <span className="dk-board-sub">
-          {shown} {shown === 1 ? "card" : "cards"} · grouped by {groupField.name}
-        </span>
-      </header>
-      {state.conflicts.length > 0 && (
-        <div className="dk-board-warn">
-          This board’s definition has a conflict copy from sync (
-          {state.conflicts.join(", ")}). Open it to see what differs, then delete it.
-        </div>
-      )}
-      {state.truncated && (
-        <div className="dk-board-warn">
-          This folder holds more notes than one board can show; some cards are not
-          listed.
-        </div>
-      )}
-      <div className="dk-board-cols">
+    <>
+      <div className="dk-board-cols" ref={boardRef}>
         {columns.map((col) => (
           <section
-            key={col.key || " none"}
+            key={col.key || " none"}
             className={`dk-col ${col.declared ? "" : "is-loose"} ${
               drop?.colKey === col.key && dragging ? "is-drop-target" : ""
             }`}
@@ -434,7 +386,7 @@ export default function KanbanBoard({
                   <article
                     className="dk-card"
                     data-dk-card={card.path}
-                    onPointerDown={(e) => startCardDrag(e, card)}
+                    onPointerDown={(e) => startCardDrag(e, card, col.key)}
                     onClick={() => {
                       if (dragRef.current?.started) return;
                       onOpenCard(card.path);
@@ -456,7 +408,7 @@ export default function KanbanBoard({
                 drop.index >= visibleCards(col, drag).length && (
                   <div className="dk-drop-line" />
                 )}
-              {!col.declared && col.key !== NO_VALUE && !readOnly && (
+              {col.adoptable && !readOnly && (
                 <button
                   className="dk-col-adopt"
                   onClick={() => void model?.adoptValue(groupBy, col.key)}
@@ -487,7 +439,7 @@ export default function KanbanBoard({
             )}
           </section>
         ))}
-        {!readOnly && (
+        {!readOnly && declaresOptions && (
           <div className="dk-col dk-col-new">
             {addingColumn ? (
               <InlineInput
@@ -496,7 +448,7 @@ export default function KanbanBoard({
                 ariaLabel="New column"
                 onCommit={async (name) => {
                   setAddingColumn(false);
-                  await addColumn(name);
+                  await model?.addOption(groupBy, name);
                 }}
                 onCancel={() => setAddingColumn(false)}
               />
@@ -522,6 +474,15 @@ export default function KanbanBoard({
             void model?.setOptionColor(groupBy, menu.key, color);
             setMenu(null);
           }}
+          onHide={
+            onHideColumn
+              ? () => {
+                  const key = menu.key;
+                  setMenu(null);
+                  onHideColumn(key);
+                }
+              : undefined
+          }
           onDelete={() => {
             void model?.deleteOption(groupBy, menu.key);
             setMenu(null);
@@ -537,6 +498,14 @@ export default function KanbanBoard({
             onOpenCard(cardMenu.path);
             setCardMenu(null);
           }}
+          onOpenTab={
+            onOpenCardTab
+              ? () => {
+                  onOpenCardTab(cardMenu.path);
+                  setCardMenu(null);
+                }
+              : undefined
+          }
           onRename={
             onRenameCard
               ? () => {
@@ -586,9 +555,8 @@ export default function KanbanBoard({
           {drag.label}
         </div>
       )}
-    </div>
+    </>
   );
-
 }
 
 /** A column's cards minus the one currently in flight. */
@@ -605,7 +573,7 @@ function Chips({
 }: {
   card: Card;
   def: StoreDef;
-  fields: StoreDef["fields"];
+  fields: Field[];
 }) {
   const chips = cardChips(card, def, fields);
   if (chips.length === 0) return null;
@@ -620,104 +588,13 @@ function Chips({
   );
 }
 
-/** A one-line input that commits on Enter and cancels on Escape or blur. */
-function InlineInput({
-  initial,
-  placeholder,
-  ariaLabel,
-  keepOpen = false,
-  onCommit,
-  onCancel,
-}: {
-  initial: string;
-  placeholder?: string;
-  ariaLabel: string;
-  /** Stay open after committing — how a column takes several cards in a row. */
-  keepOpen?: boolean;
-  onCommit: (value: string) => void | Promise<void>;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
-  return (
-    <input
-      ref={ref}
-      className="dk-inline-input"
-      aria-label={ariaLabel}
-      placeholder={placeholder}
-      value={value}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          const v = value.trim();
-          if (!v) {
-            onCancel();
-            return;
-          }
-          void onCommit(v);
-          if (keepOpen) setValue("");
-          else onCancel();
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-      onBlur={() => onCancel()}
-    />
-  );
-}
-
-function Popover({
-  x,
-  y,
-  onClose,
-  children,
-}: {
-  x: number;
-  y: number;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  useEffect(() => {
-    const onDown = () => onClose();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    // Defer: the click that opened the popover is still propagating.
-    const id = window.setTimeout(() => {
-      window.addEventListener("pointerdown", onDown);
-      window.addEventListener("keydown", onKey);
-    }, 0);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-  return (
-    <div
-      className="dk-popover"
-      style={{ left: x, top: y }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      {children}
-    </div>
-  );
-}
-
 function ColumnMenu({
   x,
   y,
   declared,
   onRename,
   onColor,
+  onHide,
   onDelete,
   onClose,
 }: {
@@ -725,10 +602,12 @@ function ColumnMenu({
   y: number;
   /** False for a value no option declares: there is no record to colour or
    *  delete yet, only cards carrying the value. Renaming still works — it
-   *  rewrites the value in every card that uses it. */
+   *  rewrites the value in every card that uses it — and so does hiding,
+   *  which is a property of the view, not of the option. */
   declared: boolean;
   onRename: () => void;
   onColor: (c: OptionColor) => void;
+  onHide?: () => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
@@ -750,6 +629,11 @@ function ColumnMenu({
           ))}
         </div>
       )}
+      {onHide && (
+        <button className="dk-popover-item" onClick={onHide}>
+          Hide in this view
+        </button>
+      )}
       {declared && (
         <>
           <button className="dk-popover-item is-danger" onClick={onDelete}>
@@ -760,47 +644,6 @@ function ColumnMenu({
             own.
           </div>
         </>
-      )}
-    </Popover>
-  );
-}
-
-function CardMenu({
-  x,
-  y,
-  onOpen,
-  onRename,
-  onReveal,
-  onDelete,
-  onClose,
-}: {
-  x: number;
-  y: number;
-  onOpen: () => void;
-  onRename?: () => void;
-  onReveal?: () => void;
-  onDelete?: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <Popover x={x} y={y} onClose={onClose}>
-      <button className="dk-popover-item" onClick={onOpen}>
-        Open
-      </button>
-      {onRename && (
-        <button className="dk-popover-item" onClick={onRename}>
-          Rename…
-        </button>
-      )}
-      {onReveal && (
-        <button className="dk-popover-item" onClick={onReveal}>
-          Reveal in Finder
-        </button>
-      )}
-      {onDelete && (
-        <button className="dk-popover-item is-danger" onClick={onDelete}>
-          Delete
-        </button>
       )}
     </Popover>
   );

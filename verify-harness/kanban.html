@@ -13,7 +13,7 @@
       // that contains a DATASTORE: /docs/Projects is a board (store.jsonl
       // plus three card notes) and /docs/Roadmap.md is an ordinary note.
       //
-      // read_store / write_frontmatter / create_card mirror src-tauri/src/
+      // read_store / write_frontmatter / write_body / create_card mirror src-tauri/src/
       // store.rs, including the one rule the whole design rests on: a
       // frontmatter write replaces the leading block and leaves every byte of
       // the body alone.
@@ -163,6 +163,13 @@
               window.__fs.set(args.path, args.head + body);
               window.__writes.push(args.path);
               return Promise.resolve(snap(args.head + body));
+            }
+            case "write_body": {
+              const before = window.__fs.get(args.path) ?? "";
+              const head = before.slice(0, headLen(before));
+              window.__fs.set(args.path, head + args.body);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(head + args.body));
             }
             case "create_card": {
               if (window.__fs.has(args.path)) return Promise.reject("exists");

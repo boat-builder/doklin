@@ -35,7 +35,9 @@ const {
   parseStoreDef,
   serializeStoreDef,
   defaultStoreDef,
-  kanbanView,
+  resolveView,
+  newView,
+  groupableFields,
   cardKeyOrder,
   storeFileOf,
   isStoreConflictName,
@@ -48,18 +50,32 @@ const {
   FIRST_RANK,
   parseEmbedConfig,
   serializeEmbedConfig,
-  fenceKanban,
-  isKanbanFence,
-  kanbanFences,
+  fenceEmbed,
+  embedKind,
+  storeFences,
+  langOf,
   KANBAN_LANG,
+  TABLE_LANG,
+  applyFilter,
   boardColumns,
   boardSnapshot,
   cardChips,
+  cardPasses,
   cardValue,
+  cardValues,
   chipFieldsOf,
   columnCards,
   fenceKeyOf,
   orderedOptions,
+  snapKeyOf,
+  snapKind,
+  sortCards,
+  viewCards,
+  visibleFields,
+  csvField,
+  csvFileName,
+  storeCsv,
+  toCsv,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 
 let checks = 0;
@@ -314,11 +330,86 @@ const eq = (a, b, msg) => {
   // The default a new board starts with, and the view fallbacks.
   const fresh = defaultStoreDef("Ideas");
   eq(fresh.options.length, 3);
-  eq(kanbanView(fresh).groupBy, "status");
+  eq(resolveView(fresh, "kanban").groupBy, "status");
   const noView = { ...fresh, views: [] };
-  eq(kanbanView(noView).groupBy, "status", "falls back to the first select field");
-  eq(kanbanView({ ...fresh, views: [], fields: [], options: [] }), null);
+  eq(
+    resolveView(noView, "kanban").groupBy,
+    "status",
+    "falls back to the first select field",
+  );
+  eq(resolveView({ ...fresh, views: [], fields: [], options: [] }, "kanban"), null);
   eq(cardKeyOrder(fresh), ["status", "rank"]);
+
+  // A ```table fence works before anyone has saved a table view: the fence's
+  // LANGUAGE decides the kind, so it gets a synthetic one rather than the
+  // kanban view that happens to be saved.
+  eq(resolveView(fresh, "table").kind, "table");
+  eq(resolveView(fresh, "table").groupBy, "", "a table groups by nothing");
+  eq(
+    resolveView(fresh, "kanban", "nope").id,
+    "board",
+    "an id nobody declares falls back to the first view of the kind",
+  );
+  // A saved view whose group-by field was deleted is still THE view: showing
+  // a different one silently would be worse than saying what it is missing.
+  const orphaned = { ...fresh, fields: [], options: [] };
+  eq(resolveView(orphaned, "kanban").id, "board");
+  eq(resolveView(orphaned, "kanban").groupBy, "status", "even though nothing declares it");
+  // A synthetic view never takes a saved view's id, so narrowing it saves a
+  // NEW view rather than overwriting somebody else's.
+  const tableNamedBoard = {
+    ...fresh,
+    views: [newView("board", "table", "Board", "")],
+  };
+  eq(resolveView(tableNamedBoard, "kanban").id, "board_2");
+  eq(
+    groupableFields({
+      ...fresh,
+      fields: [
+        { id: "note", name: "Note", type: "text" },
+        { id: "due", name: "Due", type: "date" },
+        { id: "tags", name: "Tags", type: "multi_select" },
+      ],
+    }).map((f) => f.id),
+    ["due", "tags"],
+    "a board can put selects, multi-selects and dates in columns — nothing else",
+  );
+
+  /* ---- what a view carries ---- */
+  const viewed = parseStoreDef(
+    [
+      '{"doklin":"store","v":1,"name":"P"}',
+      '{"t":"field","id":"status","name":"Status","type":"select"}',
+      '{"t":"view","id":"b","kind":"kanban","name":"Board","groupBy":"status",' +
+        '"filter":[{"f":"status","op":"is","v":"Done"},{"f":"status","op":"nope","v":"x"}],' +
+        '"sort":{"f":"status","dir":"desc"},"show":["status"],"hide":["Done"]}',
+      '{"t":"view","id":"t","kind":"table","name":"Table","groupBy":""}',
+      '{"t":"view","id":"bad","kind":"gantt","name":"Gantt","groupBy":"status"}',
+      '{"t":"view","id":"ungrouped","kind":"kanban","name":"X","groupBy":""}',
+      "",
+    ].join("\n"),
+  );
+  eq(viewed.views.map((v) => v.id), ["b", "t"], "an unknown kind is not a view");
+  eq(viewed.views[0].filter, [{ field: "status", op: "is", value: "Done" }],
+    "a clause with an op this version doesn't know is skipped, the view is not");
+  eq(viewed.views[0].sort, { field: "status", dir: "desc" });
+  eq(viewed.views[0].show, ["status"]);
+  eq(viewed.views[0].hide, ["Done"]);
+  eq(viewed.views[1].kind, "table");
+  eq(viewed.views[1].show, null, "a view nobody has narrowed shows every field");
+  // Equal state, equal bytes — and a view carrying nothing keeps the bytes it
+  // has always had.
+  eq(
+    serializeStoreDef(viewed),
+    serializeStoreDef(parseStoreDef(serializeStoreDef(viewed))),
+    "a view round-trips",
+  );
+  ok(
+    serializeStoreDef({ ...viewed, views: [newView("b", "kanban", "Board", "status")] }).includes(
+      '{"t":"view","id":"b","kind":"kanban","name":"Board","groupBy":"status"}',
+    ),
+    "an unfiltered, unsorted view writes exactly what version 1 wrote",
+  );
 
   eq(storeFileOf("/w/Projects"), `/w/Projects/${STORE_FILE}`);
   ok(isStoreConflictName("store (conflict — Alice, Sep 2 14.32).jsonl"));
@@ -445,23 +536,32 @@ const eq = (a, b, msg) => {
 
 /* ---------- the fence ---------- */
 {
-  eq(fenceKanban("store: ./P"), "```kanban\nstore: ./P\n```");
-  eq(fenceKanban(""), "```kanban\n```", "an empty embed is still a fence");
+  eq(fenceEmbed("kanban", "store: ./P"), "```kanban\nstore: ./P\n```");
+  eq(fenceEmbed("table", "store: ./P"), "```table\nstore: ./P\n```");
+  eq(fenceEmbed("kanban", ""), "```kanban\n```", "an empty embed is still a fence");
   eq(KANBAN_LANG, "kanban");
+  eq(TABLE_LANG, "table");
+  eq(langOf("kanban"), "kanban");
+  eq(langOf("table"), "table");
   // A config carrying a backtick run can't break out of its own fence: the
   // fence grows past the longest run, exactly as a markdown serializer's does.
-  eq(fenceKanban("store: ./``x"), "```kanban\nstore: ./``x\n```", "a short run needs no growth");
-  eq(fenceKanban("a\n```\nb"), "````kanban\na\n```\nb\n````");
-  eq(fenceKanban("````"), "`````kanban\n````\n`````");
+  eq(
+    fenceEmbed("kanban", "store: ./``x"),
+    "```kanban\nstore: ./``x\n```",
+    "a short run needs no growth",
+  );
+  eq(fenceEmbed("kanban", "a\n```\nb"), "````kanban\na\n```\nb\n````");
+  eq(fenceEmbed("kanban", "````"), "`````kanban\n````\n`````");
 
-  // Which fences the app claims. Strict on purpose: anything else stays an
-  // ordinary code block, which round-trips byte for byte.
-  ok(isKanbanFence("kanban", null));
-  ok(isKanbanFence("kanban", ""));
-  ok(!isKanbanFence("Kanban", null), "case matters");
-  ok(!isKanbanFence("kanban", "tight"), "a fence with meta is not ours");
-  ok(!isKanbanFence("mermaid", null));
-  ok(!isKanbanFence(null, null), "a bare fence is not ours");
+  // Which fences the app claims, and as what. Strict on purpose: anything
+  // else stays an ordinary code block, which round-trips byte for byte.
+  eq(embedKind("kanban", null), "kanban");
+  eq(embedKind("kanban", ""), "kanban");
+  eq(embedKind("table", null), "table");
+  eq(embedKind("Kanban", null), null, "case matters");
+  eq(embedKind("kanban", "tight"), null, "a fence with meta is not ours");
+  eq(embedKind("mermaid", null), null);
+  eq(embedKind(null, null), null, "a bare fence is not ours");
 }
 
 
@@ -470,38 +570,50 @@ const eq = (a, b, msg) => {
    for ```kanban fences itself. The scan has to agree with the editor's
    parser about what IS a fence. */
 {
-  eq(kanbanFences("no fences here\n"), []);
-  eq(kanbanFences("```kanban\nstore: ./P\n```\n"), ["store: ./P"]);
+  const texts = (md) => storeFences(md).map((f) => f.text);
+  eq(storeFences("no fences here\n"), []);
+  eq(storeFences("```kanban\nstore: ./P\n```\n"), [{ kind: "kanban", text: "store: ./P" }]);
+  eq(storeFences("```table\nstore: ./P\n```\n"), [{ kind: "table", text: "store: ./P" }]);
   eq(
-    kanbanFences("# Hi\n\n```kanban\nstore: ./A\n```\n\ntext\n\n```kanban\nstore: ./B\n```\n"),
-    ["store: ./A", "store: ./B"],
-    "every fence, in document order",
+    storeFences("# Hi\n\n```kanban\nstore: ./A\n```\n\ntext\n\n```table\nstore: ./B\n```\n"),
+    [
+      { kind: "kanban", text: "store: ./A" },
+      { kind: "table", text: "store: ./B" },
+    ],
+    "every fence, in document order, each as what its language says",
   );
-  eq(kanbanFences("```js\nstore: ./P\n```\n"), [], "another language is not ours");
-  eq(kanbanFences("```kanban tight\nstore: ./P\n```\n"), [], "a fence with meta is not ours");
-  eq(kanbanFences("```Kanban\nstore: ./P\n```\n"), [], "case matters");
-  eq(kanbanFences("```kanban\n```\n"), [""], "an empty fence is still a fence");
-  eq(kanbanFences("```kanban\nstore: ./P\n"), ["store: ./P"], "an unclosed fence ends at EOF");
+  eq(texts("```js\nstore: ./P\n```\n"), [], "another language is not ours");
+  eq(texts("```kanban tight\nstore: ./P\n```\n"), [], "a fence with meta is not ours");
+  eq(texts("```Kanban\nstore: ./P\n```\n"), [], "case matters");
+  eq(texts("```kanban\n```\n"), [""], "an empty fence is still a fence");
+  eq(texts("```kanban\nstore: ./P\n"), ["store: ./P"], "an unclosed fence ends at EOF");
   // A kanban fence written INSIDE a longer fence is an example, not a board.
   eq(
-    kanbanFences("````markdown\n```kanban\nstore: ./P\n```\n````\n"),
+    texts("````markdown\n```kanban\nstore: ./P\n```\n````\n"),
     [],
     "a fence inside a fence is text",
   );
   // A longer opener needs a closer at least as long.
-  eq(kanbanFences("````kanban\nstore: ./P\n```\nmore\n````\n"), ["store: ./P\n```\nmore"]);
+  eq(texts("````kanban\nstore: ./P\n```\nmore\n````\n"), ["store: ./P\n```\nmore"]);
   // Indentation: up to three spaces opens a fence, and the body is dedented
   // by as much as the opener carried.
-  eq(kanbanFences("  ```kanban\n  store: ./P\n  ```\n"), ["store: ./P"]);
-  eq(kanbanFences("    ```kanban\n    store: ./P\n    ```\n"), [], "four spaces is code, not a fence");
-  eq(kanbanFences("```kanban\r\nstore: ./P\r\n```\r\n"), ["store: ./P"], "CRLF");
-  eq(kanbanFences("~~~kanban\nstore: ./P\n~~~\n"), ["store: ./P"], "tildes fence too");
+  eq(texts("  ```kanban\n  store: ./P\n  ```\n"), ["store: ./P"]);
+  eq(texts("    ```kanban\n    store: ./P\n    ```\n"), [], "four spaces is code, not a fence");
+  eq(texts("```kanban\r\nstore: ./P\r\n```\r\n"), ["store: ./P"], "CRLF");
+  eq(texts("~~~kanban\nstore: ./P\n~~~\n"), ["store: ./P"], "tildes fence too");
 
   // The key a fence and its snapshot are matched by; the worker's fenceKey
-  // must normalize identically (share-worker/src/index.js).
+  // and snapKey must normalize identically (share-worker/src/index.js).
   eq(fenceKeyOf("store: ./P"), "store: ./P");
   eq(fenceKeyOf("store: ./P\n\n"), "store: ./P");
   eq(fenceKeyOf("store: ./P\r\n"), "store: ./P");
+  ok(
+    snapKeyOf("kanban", "store: ./P") !== snapKeyOf("table", "store: ./P"),
+    "the same config in two languages is two different views",
+  );
+  eq(snapKeyOf("kanban", "store: ./P\n"), snapKeyOf("kanban", "store: ./P"));
+  eq(snapKind({ fence: "", name: "", columns: [] }), "kanban", "no kind means kanban");
+  eq(snapKind({ fence: "", name: "", kind: "table", fields: [], rows: [] }), "table");
 }
 
 /* ============ the columns a board shows ============
@@ -522,7 +634,7 @@ const eq = (a, b, msg) => {
       { field: "status", name: "Done", rank: "a2", color: "green" },
       { field: "owner", name: "Ada", rank: "a0", color: "purple" },
     ],
-    views: [{ id: "board", kind: "kanban", name: "Board", groupBy: "status" }],
+    views: [newView("board", "kanban", "Board", "status")],
     foreign: [],
   };
   const card = (title, props) => ({
@@ -553,7 +665,7 @@ const eq = (a, b, msg) => {
   eq(cols[4].label, "Shipped?", "a stray value is shown, never normalized away");
 
   eq(
-    boardColumns(def, cards, "status", ["Done", ""]).map((c) => c.key),
+    boardColumns(def, cards, "status", { hide: ["Done", ""] }).map((c) => c.key),
     ["Backlog", "In progress", "Shipped?"],
     "hide leaves a column out of THIS view",
   );
@@ -564,7 +676,12 @@ const eq = (a, b, msg) => {
   );
   eq(cardValue(cards[0], "status"), "In progress");
   eq(cardValue(cards[2], "status"), "", "an unset field is the empty value");
-  eq(columnCards(cards, "status", "").map((c) => c.title), ["Idea"]);
+  eq(columnCards(def, cards, "status", "").map((c) => c.title), ["Idea"]);
+  eq(
+    cols.map((c) => c.adoptable),
+    [false, false, false, false, true],
+    "only a stray value of a select field is something to declare",
+  );
   eq(orderedOptions(def, "status").map((o) => o.name), ["Backlog", "In progress", "Done"]);
 
   // Chips: every declared field but the one the board groups by.
@@ -578,7 +695,7 @@ const eq = (a, b, msg) => {
 
   /* ---- the picture a published page carries ---- */
   const pages = { "/w/Projects/Hull.md": "page-hull" };
-  const snap = boardSnapshot("store: ./Projects", def, cards, (p) => pages[p]);
+  const snap = boardSnapshot("store: ./Projects", "kanban", def, cards, (p) => pages[p]);
   eq(snap.fence, "store: ./Projects");
   eq(snap.name, "Projects");
   eq(
@@ -589,7 +706,9 @@ const eq = (a, b, msg) => {
   // …but an EMPTY undeclared column is dropped: it exists on the desktop so
   // you can drag into it, and nobody drags on a published page.
   eq(
-    boardSnapshot("store: ./P", def, [cards[0]], () => undefined).columns.map((c) => c.name),
+    boardSnapshot("store: ./P", "kanban", def, [cards[0]], () => undefined).columns.map(
+      (c) => c.name,
+    ),
     ["Backlog", "In progress", "Done"],
   );
   eq(snap.columns[2], {
@@ -616,13 +735,13 @@ const eq = (a, b, msg) => {
 
   // The embed's own keys narrow the picture, exactly as they narrow the board.
   eq(
-    boardSnapshot("store: ./P\nhide: [Done, Shipped?]", def, cards, () => undefined).columns.map(
-      (c) => c.name,
-    ),
+    boardSnapshot("store: ./P\nhide: [Done, Shipped?]", "kanban", def, cards, () =>
+      undefined,
+    ).columns.map((c) => c.name),
     ["No status", "Backlog", "In progress"],
   );
   eq(
-    boardSnapshot("store: ./P\ngroup: owner", def, cards, () => undefined).columns.map(
+    boardSnapshot("store: ./P\ngroup: owner", "kanban", def, cards, () => undefined).columns.map(
       (c) => c.name,
     ),
     ["No owner", "Ada"],
@@ -633,16 +752,207 @@ const eq = (a, b, msg) => {
   const many = Array.from({ length: 260 }, (_, i) =>
     card(`C${String(i).padStart(3, "0")}`, { status: "Backlog", rank: `a${i}` }),
   );
-  const big = boardSnapshot("store: ./P", def, many, () => undefined);
+  const big = boardSnapshot("store: ./P", "kanban", def, many, () => undefined);
   const backlog = big.columns.find((c) => c.name === "Backlog");
   eq(backlog.cards.length, 200);
   eq(backlog.more, 60);
 
   // A definition with no groupable field at all has no board to draw.
   eq(
-    boardSnapshot("store: ./P", { ...def, fields: [], options: [], views: [] }, [], () => undefined),
+    boardSnapshot(
+      "store: ./P",
+      "kanban",
+      { ...def, fields: [], options: [], views: [] },
+      [],
+      () => undefined,
+    ),
     null,
   );
+}
+
+/* ============ what a VIEW does to the cards ============
+   Filter, sort, and which fields show. All of it pure, all of it shared by
+   the board tab, a note's embed and the picture a published page carries. */
+{
+  const def = {
+    name: "Work",
+    fields: [
+      { id: "status", name: "Status", type: "select" },
+      { id: "tags", name: "Tags", type: "multi_select" },
+      { id: "due", name: "Due", type: "date" },
+      { id: "size", name: "Size", type: "number" },
+    ],
+    options: [
+      { field: "status", name: "Todo", rank: "a0", color: "grey" },
+      { field: "status", name: "Done", rank: "a1", color: "green" },
+      { field: "tags", name: "bug", rank: "a0", color: "red" },
+      { field: "tags", name: "auth", rank: "a1" },
+    ],
+    views: [newView("b", "kanban", "Board", "status")],
+    foreign: [],
+  };
+  const card = (title, props) => ({
+    path: `/w/Work/${title}.md`,
+    name: `${title}.md`,
+    title,
+    snapshot: { mtime_ms: 0, size: 0 },
+    props,
+    opaque: [],
+  });
+  const cards = [
+    card("Alpha", { status: "Todo", tags: ["bug", "auth"], due: "2026-09-12", size: 10, rank: "a0" }),
+    card("Beta", { status: "Done", tags: ["auth"], due: "2026-09-02", size: 2, rank: "a1" }),
+    card("Gamma", { status: "Todo", rank: "a2" }),
+  ];
+  const titles = (list) => list.map((c) => c.title);
+
+  /* ---- filter ---- */
+  const pass = (op, value, field = "status") =>
+    titles(applyFilter(def, cards, [{ field, op, value }]));
+  eq(pass("is", "Todo"), ["Alpha", "Gamma"]);
+  eq(pass("is", "todo"), ["Alpha", "Gamma"], "a value's case is not the point");
+  eq(pass("is_not", "Todo"), ["Beta"]);
+  eq(pass("empty", "", "due"), ["Gamma"]);
+  eq(pass("not_empty", "", "due"), ["Alpha", "Beta"]);
+  eq(pass("has", "aut", "tags"), ["Alpha", "Beta"], "has looks inside a multi-select");
+  eq(
+    pass("is", ""),
+    ["Alpha", "Beta", "Gamma"],
+    "a clause with no value yet passes everything — half a filter must not blank a board",
+  );
+  eq(
+    titles(
+      applyFilter(def, cards, [
+        { field: "status", op: "is", value: "Todo" },
+        { field: "tags", op: "not_empty", value: "" },
+      ]),
+    ),
+    ["Alpha"],
+    "clauses are ANDed",
+  );
+  ok(cardPasses(def, cards[0], { field: "tags", op: "is", value: "auth" }),
+    "is on a multi-select means one of its values");
+
+  /* ---- sort ---- */
+  eq(titles(sortCards(def, cards, { field: "due", dir: "asc" })), ["Beta", "Alpha", "Gamma"]);
+  eq(
+    titles(sortCards(def, cards, { field: "due", dir: "desc" })),
+    ["Alpha", "Beta", "Gamma"],
+    "an empty value sorts last in BOTH directions — a card nobody dated is not the earliest",
+  );
+  eq(
+    titles(sortCards(def, cards, { field: "size", dir: "asc" })),
+    ["Beta", "Alpha", "Gamma"],
+    "a number sorts as a number",
+  );
+  eq(titles(sortCards(def, cards, null)), ["Alpha", "Beta", "Gamma"], "no sort, no reorder");
+  eq(
+    titles(viewCards(def, cards, newView("t", "table", "T", ""))),
+    ["Alpha", "Beta", "Gamma"],
+    "a table with no opinion is in title order",
+  );
+
+  /* ---- which fields show ---- */
+  eq(visibleFields(def, null).map((f) => f.id), ["status", "tags", "due", "size"]);
+  eq(visibleFields(def, ["due", "status"]).map((f) => f.id), ["status", "due"],
+    "shown fields keep the store's order, not the tick order");
+  eq(chipFieldsOf(def, "status", ["status", "tags"]).map((f) => f.id), ["tags"],
+    "the group-by field is never a chip — the column already says it");
+
+  /* ---- grouping by a multi-select: one card, several columns ---- */
+  const byTag = boardColumns(def, cards, "tags");
+  eq(byTag.map((c) => c.key), ["", "bug", "auth"]);
+  eq(titles(byTag[0].cards), ["Gamma"], "a card with no tags is in the empty column");
+  eq(titles(byTag[1].cards), ["Alpha"]);
+  eq(titles(byTag[2].cards), ["Alpha", "Beta"], "a card is in a column for EVERY value it carries");
+  eq(cardValues(cards[0], def.fields[1], "tags"), ["bug", "auth"]);
+  eq(cardValues(cards[0], def.fields[0], "status"), ["Todo"], "one value for anything else");
+
+  /* ---- grouping by a date: the columns ARE the data ---- */
+  const byDue = boardColumns(def, cards, "due");
+  eq(byDue.map((c) => c.key), ["", "2026-09-02", "2026-09-12"],
+    "dates in order — sorting ISO dates as text IS chronological");
+  eq(byDue.map((c) => c.adoptable), [false, false, false],
+    "a date has no options, so there is nothing to declare");
+  eq(byDue[0].label, "No due");
+
+  /* ---- a published table ---- */
+  const pages = { "/w/Work/Alpha.md": "page-alpha" };
+  const view = { ...newView("t", "table", "T", ""), show: ["status", "tags"] };
+  const table = boardSnapshot("store: ./W\nview: t", "table", { ...def, views: [view] }, cards, (p) => pages[p]);
+  eq(table.kind, "table");
+  eq(table.fields, ["Status", "Tags"], "the columns a view shows, named as the store names them");
+  eq(table.rows.length, 3);
+  eq(table.rows[0], {
+    title: "Alpha",
+    page: "page-alpha",
+    cells: [[{ text: "Todo", color: "grey" }], [{ text: "bug", color: "red" }, { text: "auth" }]],
+  });
+  ok(!("page" in table.rows[2]), "a card with no page of its own isn't a link");
+  eq(table.rows[2].cells, [[{ text: "Todo", color: "grey" }], []], "an empty cell is empty, not missing");
+  // The same store, the same config, two languages: two different views.
+  eq(boardSnapshot("store: ./W", "kanban", def, cards, () => undefined).kind, undefined);
+
+  const sorted = boardSnapshot(
+    "store: ./W",
+    "table",
+    { ...def, views: [{ ...newView("t", "table", "T", ""), sort: { field: "due", dir: "asc" } }] },
+    cards,
+    () => undefined,
+  );
+  eq(sorted.rows.map((r) => r.title), ["Beta", "Alpha", "Gamma"], "the view's sort is what it publishes");
+
+  const filtered = boardSnapshot(
+    "store: ./W",
+    "table",
+    {
+      ...def,
+      views: [
+        { ...newView("t", "table", "T", ""), filter: [{ field: "status", op: "is", value: "Done" }] },
+      ],
+    },
+    cards,
+    () => undefined,
+  );
+  eq(filtered.rows.map((r) => r.title), ["Beta"], "a view's filter travels with it");
+
+  // Rows beyond the cap are counted, never silently dropped.
+  const many = Array.from({ length: 240 }, (_, i) =>
+    card(`C${String(i).padStart(3, "0")}`, { status: "Todo", rank: `a${i}` }),
+  );
+  const big = boardSnapshot("store: ./W", "table", def, many, () => undefined);
+  eq(big.rows.length, 200);
+  eq(big.more, 40);
+}
+
+/* ============ a view, as a spreadsheet ============ */
+{
+  eq(csvField("plain"), "plain");
+  eq(csvField("a,b"), '"a,b"');
+  eq(csvField('say "hi"'), '"say ""hi"""');
+  eq(csvField("two\nlines"), '"two\nlines"');
+  eq(csvField(" padded "), '" padded "', "a reader would otherwise eat the spaces");
+  eq(toCsv([["a", "b"], ["c", "d"]]), "a,b\r\nc,d\r\n", "CRLF, as every spreadsheet expects");
+
+  const fields = [
+    { id: "status", name: "Status", type: "select" },
+    { id: "tags", name: "Tags", type: "multi_select" },
+  ];
+  const card = (title, props) => ({
+    path: `/w/W/${title}.md`,
+    name: `${title}.md`,
+    title,
+    snapshot: { mtime_ms: 0, size: 0 },
+    props,
+    opaque: [],
+  });
+  eq(
+    storeCsv([card("Hull", { status: "Todo", tags: ["bug", "auth"] }), card("Sails", {})], fields),
+    'Title,Status,Tags\r\nHull,Todo,"bug, auth"\r\nSails,,\r\n',
+  );
+  eq(csvFileName("Projects"), "Projects.csv");
+  eq(csvFileName("a/b:c"), "a-b-c.csv", "nothing a path separator could make something of");
+  eq(csvFileName("  "), "Store.csv");
 }
 
 console.log(`store.test.mjs: ${checks} checks passed`);

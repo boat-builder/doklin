@@ -6721,3 +6721,548 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   padding: 4px 6px;
 }
+
+/* ---------- Views: the strip above a store, and its settings ---------- */
+
+.dk-board-spacer {
+  flex: 1 1 auto;
+}
+
+.dk-view-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dk-view-tab {
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dk-view-tab:hover {
+  background: var(--app-hover);
+}
+
+.dk-view-tab.is-on {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.dk-view-add,
+.dk-view-opts {
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dk-view-add:hover,
+.dk-view-opts:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+/* The settings panel is wider than a menu — it holds selects and inputs. */
+.dk-popover.dk-view-panel {
+  box-sizing: border-box;
+  width: 300px;
+  max-width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.dk-view-name {
+  padding: 2px 2px 6px;
+}
+
+.dk-view-rename {
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.dk-view-rename:hover {
+  background: var(--app-hover);
+}
+
+.dk-view-kind {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.dk-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.dk-popover-row select,
+.dk-view-clause select,
+.dk-prop-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--app-text);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  padding: 2px 4px;
+}
+
+.dk-view-dir {
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dk-view-dir:hover {
+  background: var(--app-hover);
+}
+
+.dk-view-section {
+  border-top: 1px solid var(--app-border);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.dk-view-section-head {
+  padding: 2px 6px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--app-text-muted);
+}
+
+.dk-view-clause {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+}
+
+.dk-view-value {
+  flex: 1 1 60px;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--app-text);
+  background: transparent;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  padding: 2px 4px;
+}
+
+.dk-view-drop {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.dk-view-drop:hover {
+  color: var(--app-text);
+}
+
+.dk-view-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--app-text);
+  cursor: pointer;
+}
+
+.dk-view-check input {
+  accent-color: var(--app-accent);
+}
+
+/* ---------- The table view ---------- */
+
+.dk-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 24px 24px;
+}
+
+.dk-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.dk-th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  color: var(--app-text-muted);
+  background: var(--app-surface);
+  border-bottom: 1px solid var(--app-border);
+  padding: 0;
+  white-space: nowrap;
+}
+
+.dk-th.is-title {
+  min-width: 200px;
+}
+
+.dk-th-btn {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.dk-th-btn:disabled {
+  cursor: default;
+}
+
+.dk-th-btn:hover:not(:disabled) {
+  background: var(--app-hover);
+}
+
+.dk-td {
+  border-bottom: 1px solid var(--app-border);
+  padding: 0 2px;
+  vertical-align: middle;
+  position: relative;
+}
+
+.dk-td.is-empty {
+  padding: 14px 8px;
+  color: var(--app-text-muted);
+  font-size: 12px;
+}
+
+.dk-tr:hover .dk-td {
+  background: var(--app-hover);
+}
+
+.dk-row-title {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-table-foot {
+  padding: 6px 0 0;
+}
+
+/* A table inside a note takes the document's measure, and scrolls sideways
+   on its own rather than widening the prose around it. */
+.dk-table-wrap.is-embed {
+  padding: 2px 14px 14px;
+  overflow-y: visible;
+}
+
+/* A published table: values, never controls (src/BoardSnapshot.tsx). */
+.dk-table-wrap.is-snapshot .dk-td {
+  padding: 6px 8px;
+}
+
+.dk-table-wrap.is-snapshot .dk-th {
+  padding: 6px 8px;
+}
+
+.dk-table-wrap.is-snapshot .dk-tr:hover .dk-td {
+  background: transparent;
+}
+
+.dk-table-wrap.is-snapshot .dk-row-title {
+  padding: 0;
+  cursor: default;
+}
+
+.dk-table-wrap.is-snapshot a.dk-row-title {
+  color: var(--app-accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.dk-table-wrap.is-snapshot a.dk-row-title:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Properties on any note ---------- */
+
+/* The label is a button (it opens the property's own menu), so it has to
+   shed every button default and keep the row's alignment. */
+.dk-prop-label {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 5px;
+}
+
+.dk-prop-label:hover:not(:disabled) {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.dk-prop-label:disabled {
+  cursor: default;
+}
+
+.dk-prop-name-input {
+  flex: 0 0 130px;
+  box-sizing: border-box;
+  border: 1px solid var(--app-accent);
+  border-radius: 5px;
+  background: transparent;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--app-text);
+}
+
+.dk-prop-add-row {
+  min-height: 26px;
+}
+
+.dk-prop-add-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dk-prop-add {
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dk-prop-add:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+/* A note with no properties gets no visible header until you go looking for
+   one: an empty row above every document would be a tax on every document. */
+.dk-props.is-empty .dk-prop-add {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.dk-props.is-empty:hover .dk-prop-add,
+.dk-props.is-empty:focus-within .dk-prop-add {
+  opacity: 1;
+}
+
+.dk-prop-field-menu {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 70;
+}
+
+.dk-popover-search {
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  border-bottom: 1px solid var(--app-border);
+  background: transparent;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--app-text);
+  margin-bottom: 4px;
+}
+
+.dk-popover-search:focus {
+  outline: none;
+}
+
+/* ---------- The card peek ---------- */
+
+.dk-peek {
+  position: fixed;
+  /* Below the window's drag strip — the panel is part of the app, not
+     something laid over its title bar. */
+  top: 38px;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 55vw);
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-surface);
+  border-left: 1px solid var(--app-border);
+  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.16);
+}
+
+.dk-peek-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.dk-peek-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-peek-title:hover:not(:disabled) {
+  background: var(--app-hover);
+}
+
+.dk-peek-title:disabled {
+  cursor: default;
+}
+
+.dk-peek-tab,
+.dk-peek-close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dk-peek-tab:hover,
+.dk-peek-close:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.dk-peek-warn {
+  flex: 0 0 auto;
+  margin: 8px 12px 0;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--app-text);
+  background: hsl(45 80% 50% / 0.16);
+}
+
+.dk-peek-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The peek is narrow; the document's page margins would leave a column of
+   text two words wide. */
+.dk-peek-body .dk-props {
+  max-width: none;
+  padding: 14px 20px 0;
+}
+
+.dk-peek-body .milkdown .ProseMirror {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.dk-prop-add-go {
+  border: 0;
+  background: var(--app-hover);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dk-prop-add-go:hover {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+/* An unset date input draws the browser's own "mm/dd/yyyy" and a calendar
+   button. One row of that is fine; a table column of it is noise. */
+.dk-prop-input.is-blank[type="date"]:not(:focus):not(:hover) {
+  color: transparent;
+}
+
+.dk-prop-input.is-blank[type="date"]:not(:focus):not(:hover)::-webkit-calendar-picker-indicator {
+  opacity: 0;
+}
+
+.dk-popover-item:disabled {
+  color: var(--app-text-muted);
+  cursor: default;
+}
+
+.dk-popover-item:disabled:hover {
+  background: transparent;
+}

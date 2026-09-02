@@ -58,14 +58,14 @@ import {
   type CommentEntry,
 } from "./criticMark";
 import {
-  insertKanbanEmbed,
-  kanbanEmbedRemark,
-  kanbanEmbedSchema,
-  kanbanEmbedView,
-  refreshKanbanEmbeds,
-  type KanbanEmbedHost,
-} from "./kanbanEmbed";
-import { fenceKeyOf, type BoardSnap } from "./store/board";
+  insertStoreEmbed,
+  storeEmbedRemark,
+  storeEmbedSchema,
+  storeEmbedView,
+  refreshStoreEmbeds,
+  type StoreEmbedHost,
+} from "./storeEmbed";
+import { snapKeyOf, snapKind, type BoardSnap } from "./store/board";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
@@ -205,13 +205,13 @@ type Props = {
   // here; the editor scrolls to them itself. Read-only views follow links too
   // — a published page is exactly where links matter most.
   onOpenLink?: (href: string) => void;
-  // What a ```kanban embed in this document can reach: which note it is
+  // What an embed in this document can reach: which note it is
   // written in (a relative `store:` resolves against it), the workspace's
   // boards, and how to open a card. Omitted by hosts with no workspace
   // behind them — the shared-page shell — where the embed says so in place
   // instead of drawing a board it can't read.
-  kanban?: KanbanEmbedHost | null;
-  // Boards as a PUBLISHED page carries them: a picture per ` ```kanban `
+  kanban?: StoreEmbedHost | null;
+  // Boards as a PUBLISHED page carries them: a picture per embed
   // fence, sent with the markdown because the page has no workspace to read
   // one from (src/store/publish.ts). The shared-page shell passes these; the
   // desktop passes a host instead, and a host always wins — a real board
@@ -406,7 +406,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   // it, so a stray trailing newline can't lose a board.
   const boardsRef = useRef<Map<string, BoardSnap>>(new Map());
   const boardsByFence = useMemo(
-    () => new Map((boards ?? []).map((b) => [fenceKeyOf(b.fence), b])),
+    () => new Map((boards ?? []).map((b) => [snapKeyOf(snapKind(b), b.fence), b])),
     [boards],
   );
   boardsRef.current = boardsByFence;
@@ -519,12 +519,18 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
                 });
               },
             });
-            // "/board" → a ```kanban embed. It starts with no store named:
-            // the frame asks which one, in place (see KanbanEmbed.tsx).
+            // "/board" → a ```kanban embed, "/table" → a ```table one. Both
+            // start with no store named: the frame asks which one, in place
+            // (see StoreEmbed.tsx).
             builder.getGroup("advanced").addItem("kanban", {
               label: "Board",
               icon: boardIcon,
-              onRun: (ctx) => insertKanbanEmbed(ctx),
+              onRun: (ctx) => insertStoreEmbed(ctx, "kanban"),
+            });
+            builder.getGroup("advanced").addItem("table_view", {
+              label: "Board as a table",
+              icon: boardIcon,
+              onRun: (ctx) => insertStoreEmbed(ctx, "table"),
             });
           },
         },
@@ -558,11 +564,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // the schema it names is already registered. Every host gets all three —
     // a host with no workspace behind it draws the frame and says so, which
     // still round-trips the fence byte for byte.
-    crepe.editor.use([...kanbanEmbedSchema, ...kanbanEmbedRemark]);
+    crepe.editor.use([...storeEmbedSchema, ...storeEmbedRemark]);
     crepe.editor.use(
-      kanbanEmbedView(
+      storeEmbedView(
         () => kanbanRef.current ?? null,
-        (config) => boardsRef.current.get(fenceKeyOf(config)) ?? null,
+        (kind, config) => boardsRef.current.get(snapKeyOf(kind, config)) ?? null,
         () => readOnlyRef.current === true,
       ),
     );
@@ -688,7 +694,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   // redrawing every board that often would be pure waste.
   const kanbanDoc = kanban?.docPath ?? null;
   useEffect(() => {
-    refreshKanbanEmbeds();
+    refreshStoreEmbeds();
   }, [readOnly, kanbanDoc, boardsByFence]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
