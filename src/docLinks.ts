@@ -24,7 +24,7 @@ export function normalizePath(p: string): string {
   return (absolute ? "/" : "") + out.join("/");
 }
 
-const dirOf = (p: string) => {
+export const dirOf = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
 };
@@ -52,4 +52,24 @@ export function linkTargetPath(href: string, fromPath: string | null): string | 
   if (raw.startsWith("/")) return normalizePath(raw);
   if (!fromPath) return null;
   return normalizePath(`${dirOf(fromPath)}/${raw}`);
+}
+
+/**
+ * The inverse: how to write a link to `target` from inside `fromPath`, as a
+ * relative path (`./Projects`, `../archive/x.md`). Both are absolute
+ * workspace paths. Relative is what gets written because it is what survives
+ * the folder being moved, renamed, or synced onto a machine that keeps its
+ * notes somewhere else — the same reason a note links to its neighbour by
+ * `./other.md` rather than by an absolute path.
+ */
+export function relativeLinkPath(fromPath: string, target: string): string {
+  const from = normalizePath(dirOf(fromPath)).split("/").filter(Boolean);
+  const to = normalizePath(target).split("/").filter(Boolean);
+  let same = 0;
+  while (same < from.length && same < to.length && from[same] === to[same]) same++;
+  const up = from.length - same;
+  const down = to.slice(same);
+  if (up === 0 && down.length === 0) return ".";
+  if (up === 0) return `./${down.join("/")}`;
+  return [...Array<string>(up).fill(".."), ...down].join("/");
 }

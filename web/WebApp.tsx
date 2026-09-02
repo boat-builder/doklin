@@ -23,6 +23,8 @@ import Editor, { type EditorHandle } from "../src/Editor";
 import { openInBrowserTab } from "../src/linkOpen";
 import type { TableCols } from "../src/tableWidths";
 import HtmlView from "../src/HtmlView";
+import { SnapshotProperties } from "../src/BoardSnapshot";
+import type { BoardSnap, PageProp } from "../src/store/board";
 import { mergeHtmlThreads, type HtmlThread } from "../src/htmlComments";
 import {
   beaconHtmlThreads,
@@ -47,6 +49,12 @@ export type Boot = {
   // entity meta file (worker v18; older workers send nothing, hence the
   // fallback where it's read).
   tcols?: TableCols[];
+  // The boards this document embeds and the properties it carries, as the
+  // desktop published them (worker v23; older workers send neither, hence
+  // the fallbacks where they're read). Both are read-only here: this session
+  // can write the page's markdown, and neither of these IS the markdown.
+  boards?: BoardSnap[];
+  props?: PageProp[];
   crumb: { id: string; title: string } | null;
   host: string;
 };
@@ -449,6 +457,9 @@ export default function WebApp({ boot }: { boot: Boot }) {
   /* ---------- chrome ---------- */
 
   const readOnly = boot.role !== "edit";
+  // Constant for the life of the page, but `boot.boards ?? []` would be a new
+  // array on every render — and the editor keys a redraw of its boards on it.
+  const boards = useMemo(() => boot.boards ?? [], [boot.boards]);
   const showBubble = view === "md" && readOnly;
 
   const saveLabel = useMemo(() => {
@@ -553,6 +564,13 @@ export default function WebApp({ boot }: { boot: Boot }) {
           ref={wrapRef}
           className={`editor-wrap web-editor-wrap ${readOnly ? "is-readonly" : ""}`}
         >
+          {/* The document's own frontmatter. It never reaches the editor —
+              the desktop splits it off before publishing, the same way its
+              own editor never sees it — so it can't be edited here and can't
+              be mangled by a save. */}
+          {boot.props && boot.props.length > 0 && (
+            <SnapshotProperties rows={boot.props} />
+          )}
           <Editor
             ref={editorRef}
             initialMarkdown={boot.markdown}
@@ -574,6 +592,11 @@ export default function WebApp({ boot }: { boot: Boot }) {
             // local adjustment for the length of the session, same as it is
             // in a read-only pane on the desktop.
             tableWidths={boot.tcols ?? []}
+            // Each ```kanban fence draws the board the page was published
+            // with. There is no workspace here to read a live one from, and
+            // no way to write one back — a reader sees the board, and the
+            // fence round-trips unchanged through any save they make.
+            boards={boards}
             // A followed link behaves like a link on any web page: a new tab,
             // the browser resolving it against this page. The desktop's other
             // half — a relative link opening the note next door — has no

@@ -22,7 +22,7 @@ const out = await build({
   },
 });
 const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
-const { linkTargetPath, normalizePath } = await import(
+const { linkTargetPath, normalizePath, relativeLinkPath } = await import(
   `data:text/javascript,${encodeURIComponent(chunk.code)}`
 );
 
@@ -92,6 +92,31 @@ const NOTE = "/Users/me/notes/projects/plan.md";
   // (an honestly unopenable path, not a wrong one).
   assert.equal(normalizePath("../../b"), "../../b");
   assert.equal(normalizePath("a/../../b"), "../b");
+}
+
+/* ---------- relativeLinkPath: the inverse, for links the app writes ---------- */
+{
+  // The board picker writes `store: ./Projects` into a ```kanban fence; the
+  // rule is the one a person would follow by hand.
+  assert.equal(relativeLinkPath(NOTE, "/Users/me/notes/projects/Board"), "./Board");
+  assert.equal(relativeLinkPath(NOTE, "/Users/me/notes/Board"), "../Board");
+  assert.equal(relativeLinkPath(NOTE, "/Users/me/notes/inbox/x.md"), "../inbox/x.md");
+  assert.equal(relativeLinkPath(NOTE, "/Users/me/Board"), "../../Board");
+  assert.equal(
+    relativeLinkPath(NOTE, "/Users/me/notes/projects/deep/nest/Board"),
+    "./deep/nest/Board",
+  );
+  // The note's own folder.
+  assert.equal(relativeLinkPath(NOTE, "/Users/me/notes/projects"), ".");
+  // And what it writes reads back to the same place.
+  for (const target of [
+    "/Users/me/notes/projects/Board",
+    "/Users/me/notes/Board",
+    "/Users/me/Board",
+    "/Users/me/notes/projects/deep/nest/Board",
+  ]) {
+    assert.equal(linkTargetPath(relativeLinkPath(NOTE, target), NOTE), target, target);
+  }
 }
 
 console.log("PASS doclinks.test.mjs");

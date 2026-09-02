@@ -537,6 +537,252 @@ for (const [label, code, role] of [
   await page.context().close();
 }
 
+/* ================= A ```kanban embed on a shared page =================
+   A note with a board in it can be published like any other. The shell has
+   no workspace behind it, so it can't draw the board (that is phase 3 of
+   datastores) — what it MUST do is say so and leave the fence alone, because
+   an edit-role visitor's autosave re-serializes the whole document. */
+{
+  const EMBED_MD = "# Embed Web\n\n```kanban\nstore: ./Projects\n```\n\nAfter.\n";
+  const BOARD = {
+    fence: "store: ./Projects",
+    name: "Projects",
+    columns: [
+      { name: "Backlog", color: "grey", cards: [{ title: "Rename the thing" }] },
+      {
+        name: "In progress",
+        color: "blue",
+        cards: [
+          { title: "Ship the boat", chips: [{ text: "Ada", color: "purple" }], page: "card-web" },
+          { title: "Paint it" },
+        ],
+        more: 12,
+      },
+      { name: "Done", color: "green", cards: [] },
+    ],
+  };
+  await api("/api/pages/embed-web", undefined, "DELETE");
+  await api("/api/pages/embed-web", { title: "Embed Web", markdown: EMBED_MD });
+  await api(
+    "/api/pages/embed-web/access/codes",
+    { label: "Editor", code: "embed-edit-code", role: "edit" },
+    "POST",
+  );
+  const page = await (await browser.newContext({ viewport: { width: 1200, height: 860 } })).newPage();
+  page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await page.goto(`${BASE}/embed-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", "embed-edit-code");
+  await page.press("#gate-code", "Enter");
+  await poll(async () => (await page.locator(".dk-embed-frame").count()) === 1);
+  const frame = (await page.locator(".dk-embed-frame").innerText()).replace(/\s+/g, " ");
+  step("a kanban fence renders as a frame, not a crash", true);
+  step(
+    "the shell says the board isn't available and shows the config",
+    frame.includes("isn’t available on this page") && frame.includes("store: ./Projects"),
+    frame,
+  );
+  await page.locator(".ProseMirror p", { hasText: "After." }).first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Edited.");
+  await poll(async () =>
+    (await api("/api/pages/embed-web/content")).json.markdown.includes("Edited."),
+  );
+  step(
+    "an edit-role save keeps the fence byte for byte",
+    (await api("/api/pages/embed-web/content")).json.markdown ===
+      EMBED_MD.replace("After.", "After. Edited."),
+  );
+  await page.context().close();
+
+  /* ---- phase 3: the page carries the board, so the shell draws it ---- */
+  await api("/api/pages/embed-web", {
+    title: "Embed Web",
+    markdown: EMBED_MD,
+    boards: [BOARD],
+  });
+  const withBoard = await (
+    await browser.newContext({ viewport: { width: 1200, height: 860 } })
+  ).newPage();
+  withBoard.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await withBoard.goto(`${BASE}/embed-web`);
+  await poll(async () => withBoard.locator("#gate-code").isVisible());
+  await withBoard.fill("#gate-code", "embed-edit-code");
+  await withBoard.press("#gate-code", "Enter");
+  await poll(async () => (await withBoard.locator(".dk-board.is-snapshot").count()) === 1);
+  step("the shell draws the board the page was published with", true);
+  step(
+    "columns keep their names, colours and counts",
+    (await withBoard.locator(".dk-board.is-snapshot .dk-col-name").allInnerTexts()).join("|") ===
+      "Backlog|In progress|Done" &&
+      (await withBoard
+        .locator(".dk-board.is-snapshot .dk-col")
+        .nth(1)
+        .locator(".dk-col-count")
+        .innerText()) === "14",
+  );
+  step(
+    "a card that is a page of the same share links to it; the rest are titles",
+    (await withBoard.locator('.dk-board.is-snapshot a.dk-card-title[href="/card-web"]').count()) ===
+      1 &&
+      (await withBoard.locator(".dk-board.is-snapshot div.dk-card-title").allInnerTexts()).join(
+        "|",
+      ) === "Rename the thing|Paint it",
+  );
+  step(
+    "chips and the truncation count come through",
+    (await withBoard.locator(".dk-board.is-snapshot .dk-chip").innerText()) === "Ada" &&
+      (await withBoard.locator(".dk-board.is-snapshot .dk-col-more").innerText()) === "+12 more",
+  );
+  await withBoard.screenshot({ path: SHOTS + "board-shell.png", fullPage: true });
+  // The board is a picture, not the document: an edit-role save still returns
+  // the fence exactly as written.
+  await withBoard.locator(".ProseMirror p", { hasText: "After." }).first().click();
+  await withBoard.keyboard.press("End");
+  await withBoard.keyboard.type(" Again.");
+  await poll(async () =>
+    (await api("/api/pages/embed-web/content")).json.markdown.includes("Again."),
+  );
+  step(
+    "typing beside a drawn board still round-trips the fence",
+    (await api("/api/pages/embed-web/content")).json.markdown ===
+      EMBED_MD.replace("After.", "After. Again."),
+  );
+  await withBoard.context().close();
+
+  /* ---- the static reading view: no shell, no JavaScript ---- */
+  await api("/api/pages/board-web", undefined, "DELETE");
+  await api("/api/pages/board-web", {
+    title: "Board Web",
+    markdown: EMBED_MD,
+    boards: [BOARD],
+  });
+  const staticCtx = await browser.newContext({
+    viewport: { width: 1100, height: 900 },
+    javaScriptEnabled: false,
+  });
+  const staticPage = await staticCtx.newPage();
+  await staticPage.goto(`${BASE}/board-web`);
+  step(
+    "the public page renders the board server-side, with scripting off",
+    (await staticPage.locator(".doc .dk-board").count()) === 1 &&
+      (await staticPage.locator(".doc code.language-kanban").count()) === 0,
+  );
+  step(
+    "and it says the same things the shell's board says",
+    (await staticPage.locator(".doc .dk-col-name").allInnerTexts()).join("|") ===
+      "Backlog|In progress|Done" &&
+      (await staticPage.locator('.doc a.dk-card-title[href="/card-web"]').count()) === 1 &&
+      (await staticPage.locator(".doc .dk-chip").innerText()) === "Ada",
+  );
+  await staticPage.screenshot({ path: SHOTS + "board-public.png", fullPage: true });
+
+  /* ---- a shared card page shows its properties ---- */
+  await api("/api/pages/card-web", undefined, "DELETE");
+  await api("/api/pages/card-web", {
+    title: "Ship the boat",
+    markdown: "The hull is done.\n",
+    props: [
+      { name: "Status", values: [{ text: "In progress", color: "blue" }] },
+      { name: "Owner", values: [{ text: "Ada", color: "purple" }, { text: "Grace" }] },
+    ],
+  });
+  await staticPage.goto(`${BASE}/card-web`);
+  step(
+    "a card page renders its frontmatter as properties, not as a heading",
+    (await staticPage.locator(".doc .dk-props .dk-prop-label").allInnerTexts()).join("|") ===
+      "Status|Owner" &&
+      (await staticPage.locator(".doc .dk-props .dk-chip").allInnerTexts()).join("|") ===
+        "In progress|Ada|Grace" &&
+      (await staticPage.locator(".doc h2").count()) === 0,
+  );
+  await staticPage.screenshot({ path: SHOTS + "card-public.png", fullPage: true });
+
+  /* ---- phase 4: the same store, embedded as a ```table ---- */
+  const TABLE_MD =
+    "# Table Web\n\n```table\nstore: ./Projects\n```\n\nAnd after it, prose.\n";
+  const TABLE = {
+    fence: "store: ./Projects",
+    name: "Projects",
+    kind: "table",
+    fields: ["Status", "Owner"],
+    rows: [
+      {
+        title: "Ship the boat",
+        page: "card-web",
+        cells: [[{ text: "In progress", color: "blue" }], [{ text: "Ada", color: "purple" }]],
+      },
+      { title: "Paint it", cells: [[{ text: "Backlog", color: "grey" }], []] },
+    ],
+    more: 3,
+  };
+  await api("/api/pages/table-web", undefined, "DELETE");
+  await api("/api/pages/table-web", {
+    title: "Table Web",
+    markdown: TABLE_MD,
+    boards: [TABLE],
+  });
+  await staticPage.goto(`${BASE}/table-web`);
+  step(
+    "a ```table fence renders as a table server-side, with scripting off",
+    (await staticPage.locator(".doc .dk-table").count()) === 1 &&
+      (await staticPage.locator(".doc code.language-table").count()) === 0,
+  );
+  step(
+    "its headings are the fields, its rows the cards",
+    (await staticPage.locator(".doc .dk-th").allInnerTexts()).join("|") ===
+      "Title|Status|Owner" &&
+      (await staticPage.locator(".doc .dk-row-title").allInnerTexts()).join("|") ===
+        "Ship the boat|Paint it" &&
+      (await staticPage.locator('.doc a.dk-row-title[href="/card-web"]').count()) === 1,
+  );
+  step(
+    "cut rows are counted, and the prose around it is untouched",
+    (await staticPage.locator(".doc .dk-col-more").innerText()) === "+3 more" &&
+      (await staticPage.locator(".doc").innerText()).includes("And after it, prose."),
+  );
+  await staticPage.screenshot({ path: SHOTS + "table-public.png", fullPage: true });
+  await staticCtx.close();
+
+  // …and the shell draws the same table from the same snapshot.
+  await api(
+    "/api/pages/table-web/access/codes",
+    { label: "Editor", code: "table-edit-code", role: "edit" },
+    "POST",
+  );
+  const shellTable = await (
+    await browser.newContext({ viewport: { width: 1200, height: 860 } })
+  ).newPage();
+  shellTable.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await shellTable.goto(`${BASE}/table-web`);
+  await poll(async () => shellTable.locator("#gate-code").isVisible());
+  await shellTable.fill("#gate-code", "table-edit-code");
+  await shellTable.press("#gate-code", "Enter");
+  await poll(async () => (await shellTable.locator(".dk-table-wrap.is-snapshot").count()) === 1);
+  step(
+    "the shell draws the same table the static page draws",
+    (await shellTable.locator(".dk-table-wrap.is-snapshot .dk-th").allInnerTexts()).join("|") ===
+      "Title|Status|Owner" &&
+      (await shellTable
+        .locator('.dk-table-wrap.is-snapshot a.dk-row-title[href="/card-web"]')
+        .count()) === 1,
+  );
+  await shellTable.screenshot({ path: SHOTS + "table-shell.png", fullPage: true });
+  // And an edit-role save still returns the fence byte for byte.
+  await shellTable.locator(".ProseMirror p", { hasText: "And after it, prose." }).first().click();
+  await shellTable.keyboard.press("End");
+  await shellTable.keyboard.type(" Edited.");
+  await poll(async () =>
+    (await api("/api/pages/table-web/content")).json.markdown.includes("Edited."),
+  );
+  step(
+    "and an edit beside a drawn table round-trips the table fence",
+    (await api("/api/pages/table-web/content")).json.markdown ===
+      TABLE_MD.replace("prose.", "prose. Edited."),
+  );
+  await shellTable.context().close();
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);
 await browser.close();
 process.exit(results.some((r) => !r.ok) ? 1 : 0);

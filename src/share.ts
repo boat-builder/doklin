@@ -18,6 +18,7 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { stripComments } from "./criticMarkup";
 import type { HtmlThread } from "./htmlComments";
 import type { TableCols } from "./metaFile";
+import type { BoardSnap, PageProp } from "./store/board";
 
 export type FileSnapshot = { mtime_ms: number; size: number };
 
@@ -42,7 +43,17 @@ export type ShareEntry = {
   // Fingerprints of the content last successfully pushed, per rendition
   // (null = that version didn't exist at push time). Absent on entries from
   // before reconciliation existed — the next pass re-pushes once to establish.
-  pushed?: { md: PushedFingerprint | null; html: PushedFingerprint | null };
+  pushed?: {
+    md: PushedFingerprint | null;
+    html: PushedFingerprint | null;
+    // Hash of the board snapshots this page carries (store/publish.ts).
+    // Null means the document has no ` ```kanban ` fence — nothing to check.
+    boards?: string | null;
+  };
+  // The store folders those snapshots were read from. A board changes
+  // without touching any note, so this is how a change to one finds the
+  // pages that mirror it.
+  boardDirs?: string[];
   // The folder share (CollectionEntry.id) this page is included in, if any.
   // Membership is always explicit — sharing a folder shares no files by
   // itself, and sharing a file inside a shared folder doesn't enroll it.
@@ -408,14 +419,23 @@ function apiFetch(config: ShareConfig, path: string, init?: RequestInit): Promis
 
 // The two renditions a share can carry: the markdown document and/or a
 // standalone html version of it (see App.tsx's readShareParts) — plus the
-// markdown's table column widths, read from the same entity meta file that
-// supplied the comment bodies. Widths can't live in markdown, so unlike the
-// comments (which the push re-inlines as CriticMarkup) they travel beside it
-// and are re-attached at render time on the other end.
+// three things about the markdown that can't live IN the markdown and so
+// travel beside it, to be re-attached at render time on the other end:
+//
+//   • tcols — table column widths, from the same entity meta file that
+//     supplied the comment bodies (comments are different: the push
+//     re-inlines those as CriticMarkup).
+//   • boards — a picture of each ` ```kanban ` embed's board, since the
+//     worker has no workspace to read one from (store/publish.ts).
+//   • props — the document's frontmatter, which is split OFF the pushed
+//     markdown the same way the editor splits it off the document: the web
+//     never sees a raw block, so a web edit can never mangle one.
 export type ShareParts = {
   markdown: string | null;
   html: string | null;
   tcols: TableCols[];
+  boards: BoardSnap[] | null;
+  props: PageProp[] | null;
 };
 
 /* ---------- Document titles ---------- */
@@ -532,6 +552,10 @@ export async function pushPage(
       // Sent every push like the renditions: an empty array means "this
       // document has no stored column widths", not "keep the last ones".
       tcols: parts.tcols,
+      // Same rule (v22 workers): null is "this document embeds no board" /
+      // "carries no properties", and clears whatever the page held.
+      boards: parts.boards,
+      props: parts.props,
       ...(collection ? { collection } : {}),
       ...(ws ? { ws } : {}),
       ...(typeof baseRev === "number" ? { baseRev } : {}),

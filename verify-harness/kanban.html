@@ -1,0 +1,244 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Kanban / datastore verification harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Tauri IPC stub broad enough to boot the REAL <App/> over a workspace
+      // that contains a DATASTORE: /docs/Projects is a board (store.jsonl
+      // plus three card notes) and /docs/Roadmap.md is an ordinary note.
+      //
+      // read_store / write_frontmatter / write_body / create_card mirror src-tauri/src/
+      // store.rs, including the one rule the whole design rests on: a
+      // frontmatter write replaces the leading block and leaves every byte of
+      // the body alone.
+      const store = [
+        '{"doklin":"store","v":1,"name":"Projects"}',
+        '{"t":"field","id":"status","name":"Status","type":"select"}',
+        '{"t":"field","id":"tags","name":"Tags","type":"multi_select"}',
+        '{"t":"option","field":"status","name":"Backlog","rank":"a0","color":"grey"}',
+        '{"t":"option","field":"status","name":"Done","rank":"a2","color":"green"}',
+        '{"t":"option","field":"status","name":"In progress","rank":"a1","color":"blue"}',
+        '{"t":"option","field":"tags","name":"auth","rank":"a0"}',
+        '{"t":"option","field":"tags","name":"bug","rank":"a1","color":"red"}',
+        '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}',
+        "",
+      ].join("\n");
+
+      window.__fs = new Map([
+        ["/docs/Roadmap.md", "# Roadmap\n\nWhere things stand this quarter.\n"],
+        ["/docs/Projects/store.jsonl", store],
+        [
+          "/docs/Projects/Fix login redirect.md",
+          "---\nstatus: In progress\ntags: [bug, auth]\nrank: a1\n---\nRepro: sign in from a deep link.\n",
+        ],
+        [
+          "/docs/Projects/Ship dark mode.md",
+          "---\nstatus: Backlog\nrank: a0\n---\nThe tokens are already there.\n",
+        ],
+        [
+          "/docs/Projects/Write onboarding docs.md",
+          "A card that arrived from another tool: no properties at all.\n",
+        ],
+        // A note that EMBEDS the board with a ```kanban fence (phase 2). The
+        // fence's bytes are what drive-kanban-embed.mjs watches: every
+        // autosave re-serializes this whole document.
+        [
+          "/docs/Embed.md",
+          "# Planning\n\nThe quarter, as a board:\n\n```kanban\nstore: ./Projects\n```\n\nEverything after the board is ordinary prose.\n",
+        ],
+        // A second embed pointing nowhere, for the "says so in place" case.
+        [
+          "/docs/Broken.md",
+          "# Broken\n\n```kanban\nstore: ./Nowhere\n```\n",
+        ],
+      ]);
+      window.__mtime = 1000;
+      window.__writes = [];
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+
+      const isDir = (p) =>
+        p === "/docs" ||
+        p === "/docs/Projects" ||
+        [...window.__fs.keys()].some((k) => k.startsWith(p + "/"));
+
+      // Byte-for-byte the rule in store.rs: a block only when the very first
+      // line is exactly `---` and a closing `---` line follows.
+      const headLen = (text) => {
+        const lines = text.split("\n");
+        if (lines.length < 2 || lines[0].trimEnd() !== "---") return 0;
+        let offset = lines[0].length + 1;
+        for (let i = 1; i < lines.length; i++) {
+          const isLast = i === lines.length - 1;
+          offset += lines[i].length + (isLast ? 0 : 1);
+          if (lines[i].trimEnd() === "---") return isLast ? 0 : offset;
+        }
+        return 0;
+      };
+
+      const childrenOf = (dir) =>
+        [...window.__fs.keys()].filter(
+          (k) => k.startsWith(dir + "/") && !k.slice(dir.length + 1).includes("/"),
+        );
+
+      const readStore = (dir) => {
+        const defPath = dir + "/store.jsonl";
+        const def = window.__fs.get(defPath) ?? null;
+        const cards = childrenOf(dir)
+          .filter((p) => /\.md$/i.test(p) && !/\.meta\.jsonl$/i.test(p))
+          .sort()
+          .map((p) => {
+            const text = window.__fs.get(p);
+            return {
+              name: p.slice(dir.length + 1),
+              path: p,
+              snapshot: snap(text),
+              head: text.slice(0, headLen(text)),
+            };
+          });
+        return {
+          def,
+          defSnapshot: def === null ? null : snap(def),
+          cards,
+          conflicts: childrenOf(dir)
+            .map((p) => p.slice(dir.length + 1))
+            .filter((n) => /^store \(conflict.*\)\.jsonl$/.test(n)),
+          truncated: false,
+        };
+      };
+
+      const treeFor = () => ({
+        kind: "dir",
+        name: "docs",
+        path: "/docs",
+        store: false,
+        children: [
+          // A board: one row, marked, with NO children.
+          { kind: "dir", name: "Projects", path: "/docs/Projects", store: true, children: [] },
+          { kind: "file", name: "Broken.md", path: "/docs/Broken.md" },
+          { kind: "file", name: "Embed.md", path: "/docs/Embed.md" },
+          { kind: "file", name: "Roadmap.md", path: "/docs/Roadmap.md" },
+        ],
+      });
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          switch (cmd) {
+            case "take_window_init":
+              return Promise.resolve({
+                isMain: true,
+                folder: "/docs",
+                file: null,
+                files: [],
+                activeFile: null,
+                restored: false,
+              });
+            case "take_pending_folder":
+            case "migrate_scratch":
+              return Promise.resolve(null);
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject(`no such file: ${args.path}`)
+                : Promise.resolve({ contents: c, snapshot: snap(c) });
+            }
+            case "write_file": {
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.contents));
+            }
+            case "write_frontmatter": {
+              const before = window.__fs.get(args.path) ?? "";
+              const body = before.slice(headLen(before));
+              window.__fs.set(args.path, args.head + body);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.head + body));
+            }
+            case "write_body": {
+              const before = window.__fs.get(args.path) ?? "";
+              const head = before.slice(0, headLen(before));
+              window.__fs.set(args.path, head + args.body);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(head + args.body));
+            }
+            case "create_card": {
+              if (window.__fs.has(args.path)) return Promise.reject("exists");
+              window.__fs.set(args.path, args.head);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.head));
+            }
+            case "read_store":
+              return Promise.resolve(readStore(args.path));
+            case "watch_dir":
+              (window.__watchedDirs ??= []).push(args.path);
+              return Promise.resolve(null);
+            case "unwatch_dir":
+              return Promise.resolve(null);
+            case "create_dir":
+              return Promise.resolve(null);
+            case "path_exists":
+              return Promise.resolve(window.__fs.has(args.path) || isDir(args.path));
+            case "list_md_tree":
+              return Promise.resolve(treeFor());
+            case "stat_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined ? Promise.reject("missing") : Promise.resolve(snap(c));
+            }
+            case "watch_file": {
+              const c = window.__fs.get(args.path) ?? "";
+              window.__watched = [args.path, ...(args.extras ?? [])];
+              return Promise.resolve(snap(c));
+            }
+            case "unwatch_file":
+              window.__watched = [];
+              return Promise.resolve(null);
+            case "sync_status":
+              return Promise.resolve([]);
+            case "sync_device":
+              return Promise.resolve({ name: "Test Mac" });
+            case "list_drafts":
+              return Promise.resolve([]);
+            case "open_external":
+              (window.__opened ??= []).push(args.url);
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:event|listen":
+              return Promise.resolve(1);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+
+      // A /docs workspace with nothing open: the drive opens the board from
+      // the sidebar itself. Seeded once per browser context, like split.html.
+      if (!localStorage.getItem("doklin:kanban-seeded")) {
+        localStorage.clear();
+        localStorage.setItem("doklin:kanban-seeded", "1");
+        localStorage.setItem(
+          "doklin:session",
+          JSON.stringify({
+            version: 2,
+            lastRoot: "/docs",
+            sessions: { "/docs": { tabs: [], activeId: null } },
+          }),
+        );
+      }
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./kanban.tsx"></script>
+  </body>
+</html>

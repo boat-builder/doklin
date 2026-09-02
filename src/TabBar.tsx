@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-type TabKind = "draft" | "file";
+// "store" is a datastore folder shown as a kanban board — a tab whose path
+// is a directory rather than a document (see App.tsx).
+type TabKind = "draft" | "file" | "store";
 type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
