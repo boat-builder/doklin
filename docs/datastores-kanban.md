@@ -150,10 +150,13 @@ Repro: sign in from a deep link, land on the home page instead.
 ```
 
 - **The title is the file name** (`Fix login redirect`), the same rule notes
-  already follow in the sidebar and tab bar. Renaming a card renames the
-  file through the existing `move_path`, and sync's rename detection carries
-  it. Two cards can't share a title inside one store; the app uniquifies
-  (`Title 2`) the way `uniquePastePath` already does for pastes.
+  already follow in the sidebar and tab bar. Spaces are fine — file names
+  hold them, and Doklin's notes already do; what a name can't hold is `/`
+  and `:`, which the board's title input turns into a dash (Obsidian's rule
+  for note names). Renaming a card renames the file through the existing
+  `move_path`, and sync's rename detection carries it. Two cards can't share
+  a title inside one store; the app uniquifies (`Title 2`) the way
+  `uniquePastePath` already does for pastes.
 - **Properties are frontmatter keys** whose names are field ids from
   `store.jsonl`. Keys the store doesn't declare are kept verbatim and never
   written differently — a file that came from Obsidian keeps its
@@ -260,11 +263,22 @@ acceptably most of the time and badly at the worst time.
 ### 1. The board tab (sidebar)
 
 `list_md_tree`'s `Dir` node grows a `store: bool` flag (a `store.jsonl` with
-the header exists directly inside). The sidebar draws such a folder with a
-board icon; a click opens the board in a tab, the disclosure triangle still
-expands the folder to its card notes (they are notes, and users will want to
-see them). `store.jsonl` itself joins `is_app_sidecar` and is never listed,
-like `.meta.jsonl`.
+the header exists directly inside) and, for such a folder, returns **no
+children**: a board is one row in the sidebar, drawn with a board icon, with
+no disclosure triangle. A board can hold hundreds of cards and the tree is
+not the place to list them — they are reached from the board itself, from
+search, and from links. Leaving them out also keeps a big board from eating
+the tree's 5000-entry budget. `store.jsonl` itself joins `is_app_sidecar`
+and is never listed, like `.meta.jsonl`. The **Show all files** mode, whose
+job is to show the real filesystem, lists the cards as ordinary openable
+notes.
+
+Because a card has no row of its own, the sidebar highlights the **board
+row** as active while a card's tab is focused, and the row is a **drop
+target**: dragging notes onto it moves them into the folder, which makes
+them cards (with no status until someone gives them one) — the quickest way
+to promote existing notes onto a board. The inline *New File…* is not
+offered inside a board; cards are created from the board.
 
 A new **tab kind** `store` (today `TabKind` is `"draft" | "file"`) keyed on
 the folder path renders `<KanbanBoard>` instead of the editor, with the app's
@@ -538,7 +552,9 @@ path, found by the same scan that resolves embeds.
 - **Two boards of one store in one window** → one model instance; the
   drag lands in both.
 - **Search** → cards are notes: workspace search already finds their
-  bodies (and their frontmatter lines, which is fine).
+  bodies (and their frontmatter lines, which is fine). A card opened from a
+  search hit or a link is a tab like any note; the sidebar marks its board
+  row.
 - **Html rendition / PDF** → the fence shows as its config text. Out of
   scope, documented.
 
@@ -576,21 +592,24 @@ A `table` view over the same store (one fenced language per view, as
 properties header with *Add property* on any note, group-by `multi_select`
 and `date`, a card *peek* panel instead of a tab, CSV export of a store.
 
-## Open decisions
+## Decisions
 
-Three choices where a different answer changes the work; everything else
-above is a recommendation you can take as decided.
+Three choices were open in the first draft; all three are settled.
 
-1. **Title = file name** (recommended: it is what notes do, it keeps links
-   and search working, and renames are one `move_path`) vs. a `title:`
-   property or the first `# H1`, which allow characters a file name can't
-   hold and duplicate titles — at the price of a second identity to keep in
-   step.
-2. **`store.jsonl` as the definition file's name.** Fixed name, header line
-   as the real marker. The alternative — a suffix-named file such as
-   `Projects.store.jsonl` — reads better in Finder but has to be renamed
-   whenever the folder is, and drifts when someone renames the folder in
-   another tool.
-3. **Cards visible under the board in the sidebar** (recommended: they are
-   notes; hiding them makes "where did my file go" questions) vs. a board
-   row that opens the board and shows nothing else.
+1. **Title = file name.** It is what notes do, it keeps links and search
+   working, and a rename is one `move_path`. Spaces are fine — the worry
+   that a file name can't hold them doesn't apply; Doklin's notes already
+   do — and `/` and `:` become a dash on creation. No `title:` property, so
+   no second identity to keep in step.
+2. **`store.jsonl` is the definition file**: one per board, inside the
+   board's folder, never shown in the sidebar. It holds what isn't any one
+   card's business — the list of fields, the columns (as select options,
+   with their order and colour), and the saved views. It exists so that an
+   empty column persists, a column has a colour, and the board knows which
+   field to group by; none of that can live in a card file. The only
+   question was its name: a fixed name, with the header line as the real
+   marker, wins over a suffix-named file (`Projects.store.jsonl`) that
+   would drift whenever the folder is renamed in another tool.
+3. **The board row hides its cards.** A board with hundreds of tasks would
+   make the tree noise. The row opens the board; cards are reached from the
+   board, search, and links, and *Show all files* still lists them.
