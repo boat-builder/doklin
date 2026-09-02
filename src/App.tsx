@@ -117,6 +117,17 @@ import {
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
+import KanbanBoard from "./KanbanBoard";
+import PropertiesHeader from "./PropertiesHeader";
+import {
+  parseFrontmatter,
+  serializeFrontmatter,
+  type Props as CardProps,
+  type PropValue,
+} from "./store/frontmatter";
+import { cardKeyOrder, RANK_KEY, STORE_FILE } from "./store/storeFile";
+import { createStoreFile } from "./store/model";
+import { useStore } from "./store/useStore";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -230,6 +241,19 @@ const uniquePastePath = async (
   }
 };
 
+// The leading frontmatter block a file currently carries. A rewrite that
+// replaces a document's WHOLE text (pulling a web edit over it) must put the
+// block back: the web editor only ever saw the body.
+async function headOnDisk(path: string): Promise<string> {
+  try {
+    const r = await invoke<ReadFileResult>("read_file", { path });
+    const fm = parseFrontmatter(r.contents);
+    return r.contents.slice(0, r.contents.length - fm.body.length);
+  } catch {
+    return "";
+  }
+}
+
 type DocView = "md" | "html";
 
 /* ---------- Split view ----------
@@ -282,6 +306,13 @@ type CompanionDoc = {
   mdOrphans: MdThread[];
   tcols: TableCols[];
   metaForeign: ForeignRecord[];
+  // The pane document's frontmatter block, split off the same way the active
+  // document's is: `contents` above is the BODY, so promoting this pane must
+  // hand the block back to the writers or the next save would prepend the
+  // other document's properties.
+  head: string;
+  props: CardProps;
+  opaque: string[];
   conflict: Conflict | null;
   dirty: boolean;
 };
@@ -401,7 +432,11 @@ type RecentEntry = { path: string; kind: "file" | "folder" };
 // A tab is a lightweight descriptor; the document's content always lives on disk
 // (drafts in app_data_dir/drafts/<id>.md, files at their real path) and autosaves
 // there, so disk — not memory — is the source of truth across tabs.
-type TabKind = "draft" | "file";
+// "store" is a DATASTORE folder shown as a kanban board — a tab whose path is
+// a directory, not a document. The app's document machinery (autosave,
+// watcher, comments, share, dictation, find) stands down for one, the way it
+// does for an html-only document: the board owns its own reads and writes.
+type TabKind = "draft" | "file" | "store";
 // `missing` marks a file tab whose path failed to read (drive unmounted, file
 // moved) — kept visible as a "ghost" tab instead of silently dropped. Every
 // activation re-checks the path, so the flag self-heals if the file returns.
@@ -588,7 +623,9 @@ function sanitizeTabs(raw: unknown): Tab[] {
           !!t &&
           typeof (t as Tab).id === "string" &&
           typeof (t as Tab).path === "string" &&
-          ((t as Tab).kind === "draft" || (t as Tab).kind === "file"),
+          ((t as Tab).kind === "draft" ||
+            (t as Tab).kind === "file" ||
+            (t as Tab).kind === "store"),
       )
     : [];
 }
@@ -834,8 +871,36 @@ export default function App() {
   const tableWidthsRef = useRef<TableCols[]>([]);
   const metaForeignRef = useRef<ForeignRecord[]>([]);
   // The hybrid markdown as last read from / written to disk — lets a
-  // body-only comment edit skip the (byte-identical) markdown write.
+  // body-only comment edit skip the (byte-identical) markdown write. This is
+  // the BODY: a leading frontmatter block never reaches it (see below).
   const lastDiskMdRef = useRef<string>("");
+  /* ---------- The frontmatter boundary ----------
+     Milkdown never sees frontmatter. Like expandMarkdown / extractMarkdown
+     for comment bodies, the split happens at the IO boundary: a load parses
+     the block off the top and hands the editor the body; a save prepends the
+     block back, byte for byte, so an edit to the prose can't rewrite someone
+     else's `aliases:` line and a properties-only change from a board (or
+     another device) leaves the body untouched.
+
+     `cardHeadRef` is the exact block text as last seen on disk — what the
+     next write re-attaches. `cardProps` is its parsed form, for the
+     properties header. */
+  const cardHeadRef = useRef<string>("");
+  const cardPropsRef = useRef<CardProps>({});
+  const cardOpaqueRef = useRef<string[]>([]);
+  const [cardProps, setCardProps] = useState<CardProps>({});
+  const [cardOpaque, setCardOpaque] = useState<string[]>([]);
+  // Adopt a document's frontmatter block: the refs the writers read and the
+  // state the header renders, in one place so the two can't drift.
+  const adoptFrontmatter = useCallback((fullText: string) => {
+    const fm = parseFrontmatter(fullText);
+    cardHeadRef.current = fullText.slice(0, fullText.length - fm.body.length);
+    cardPropsRef.current = fm.props;
+    cardOpaqueRef.current = fm.opaque;
+    setCardProps(fm.props);
+    setCardOpaque(fm.opaque);
+    return fm;
+  }, []);
   // Legacy <stem>.html.comments.jsonl seen for the active entity (transition
   // window: old app versions still write it; we fold, never write back).
   const legacySidecarPathRef = useRef<string | null>(null);
@@ -2064,11 +2129,12 @@ export default function App() {
       // conditional write keeps a keystroke that lands mid-pull safe (it
       // fails; the next reconcile pass sees a diverged file instead).
       const pulled = extractMarkdown(content.markdown);
+      const head = await headOnDisk(target);
       let newSnap: FileSnapshot;
       try {
         newSnap = await invoke<FileSnapshot>("write_file", {
           path: target,
-          contents: pulled.md,
+          contents: head + pulled.md,
           expected: snap,
         });
       } catch {
@@ -2559,6 +2625,10 @@ export default function App() {
   // write entirely — only the meta moves.
   const writeToDisk = useCallback(async (target: string, contents: string) => {
     const { md: hybrid, mthreads } = extractMarkdown(contents);
+    // The editor never saw the document's frontmatter block; put it back,
+    // byte for byte, in front of what it did see. Captured now, because the
+    // active document can change while the write is in flight.
+    const head = pathRef.current === target ? cardHeadRef.current : "";
     try {
       const isActive = pathRef.current === target;
       let newSnapshot: FileSnapshot | null = null;
@@ -2569,7 +2639,7 @@ export default function App() {
       if (!mdUnchanged) {
         newSnapshot = await invoke<FileSnapshot>("write_file", {
           path: target,
-          contents: hybrid,
+          contents: head + hybrid,
           expected: snapshotRef.current,
         });
       }
@@ -2940,7 +3010,9 @@ export default function App() {
           // content is unchanged — that's the point of the split layout).
           if (pathRef.current === docPath) {
             snapshotRef.current = newSnap;
-            lastDiskMdRef.current = result.md;
+            // The disk baseline is the body — the migration rewrote the whole
+            // file, frontmatter block and all (it only touches CriticMarkup).
+            lastDiskMdRef.current = parseFrontmatter(result.md).body;
           }
         } catch {
           return; // lost to a concurrent edit; retried on the next open
@@ -3386,6 +3458,9 @@ export default function App() {
       mdOrphans: mdOrphansRef.current,
       tcols: tableWidthsRef.current,
       metaForeign: metaForeignRef.current,
+      head: cardHeadRef.current,
+      props: cardPropsRef.current,
+      opaque: cardOpaqueRef.current,
       conflict: conflictRef.current,
       dirty: dirtyRef.current,
     };
@@ -3421,6 +3496,9 @@ export default function App() {
             mdOrphans: [],
             tcols: [],
             metaForeign: [],
+            head: "",
+            props: {},
+            opaque: [],
             conflict: null,
             dirty: false,
           },
@@ -3456,8 +3534,11 @@ export default function App() {
       // (legacy sidecar folded); the pane editor gets EXPANDED markdown —
       // same read boundary as the active document.
       const { meta, metaExists } = await readEntityMeta(tab.path, htmlPath);
-      const full = htmlOnly ? "" : expandMarkdown(contents, meta.mthreads).md;
-      const ids = htmlOnly ? new Set<string>() : markerIds(contents);
+      // The frontmatter boundary again: this pane's editor is handed the body,
+      // and the block rides along in the record.
+      const fm = parseFrontmatter(htmlOnly ? "" : contents);
+      const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
+      const ids = htmlOnly ? new Set<string>() : markerIds(fm.body);
       return {
         doc: {
           path: tab.path,
@@ -3476,6 +3557,9 @@ export default function App() {
             : meta.mthreads.filter((t) => !ids.has(t.id)),
           tcols: meta.tcols,
           metaForeign: meta.foreign,
+          head: htmlOnly ? "" : contents.slice(0, contents.length - fm.body.length),
+          props: fm.props,
+          opaque: fm.opaque,
           conflict: null,
           dirty: false,
         },
@@ -3517,6 +3601,33 @@ export default function App() {
     // A pending comment write still targets the PREVIOUS document's sidecar
     // (htmlPathRef switches below) — land it first.
     await flushSidecarWrite();
+    // A BOARD tab: its path is a folder, and KanbanBoard owns every read and
+    // write inside it. Stand the document machinery down completely — the
+    // same posture an html-only document takes, one step further.
+    if (tab.kind === "store") {
+      const exists = await invoke<boolean>("path_exists", { path: tab.path }).catch(
+        () => false,
+      );
+      setTabMissing(tab.id, !exists);
+      adoptFrontmatter("");
+      baselineCapturedRef.current = false;
+      pathRef.current = null;
+      currentMarkdownRef.current = "";
+      lastSavedRef.current = "";
+      snapshotRef.current = null;
+      lastDiskMdRef.current = "";
+      setInitialMarkdown("");
+      setDirty(false);
+      setConflict(null);
+      htmlPathRef.current = null;
+      setHtmlContent(null);
+      setHasHtml(false);
+      await loadEntityMeta(null, null, null);
+      applyDocView("md");
+      setLoadKey((k) => k + 1);
+      await refreshWatchSet(); // nothing of the board's is watched as a file
+      return;
+    }
     // An html-only document: rendered read-only, never loaded into the
     // markdown editor and never an autosave target (pathRef stays null).
     const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
@@ -3536,6 +3647,7 @@ export default function App() {
       // Ghost state: pathRef stays null so autosave can't recreate the file at
       // its old path, and nothing is watched. The editor is not rendered.
       setTabMissing(tab.id, true);
+      adoptFrontmatter("");
       baselineCapturedRef.current = false;
       pathRef.current = null;
       currentMarkdownRef.current = "";
@@ -3567,21 +3679,26 @@ export default function App() {
       );
       if (exists) htmlPath = sibling;
     }
+    // The frontmatter boundary: split the leading block off the top and keep
+    // it in the refs. Everything below — the meta layer, the editor, the disk
+    // baseline — works on the BODY alone, so prose edits can never rewrite
+    // properties and property edits never touch the prose.
+    const body = adoptFrontmatter(htmlOnly ? "" : contents).body;
     const { meta, diskRaw } = await loadEntityMeta(
       tab.path,
       htmlPath,
-      htmlOnly ? null : contents,
+      htmlOnly ? null : body,
     );
     // The editor speaks full CriticMarkup; the disk keeps the hybrid form
     // (markers only). Expand thread bodies from the meta records here, at the
     // read boundary — see metaFile.ts.
-    const full = htmlOnly ? "" : expandMarkdown(contents, meta.mthreads).md;
+    const full = htmlOnly ? "" : expandMarkdown(body, meta.mthreads).md;
     baselineCapturedRef.current = false;
     pathRef.current = htmlOnly ? null : tab.path;
     currentMarkdownRef.current = full;
     lastSavedRef.current = full;
     snapshotRef.current = htmlOnly ? null : snapshot;
-    lastDiskMdRef.current = htmlOnly ? "" : contents;
+    lastDiskMdRef.current = body;
     setInitialMarkdown(full);
     setDirty(false);
     setConflict(null);
@@ -3630,6 +3747,7 @@ export default function App() {
     await refreshWatchSet();
   }, [
     setTabMissing,
+    adoptFrontmatter,
     applyDocView,
     flushSidecarWrite,
     loadEntityMeta,
@@ -3646,6 +3764,13 @@ export default function App() {
   const rebuildTabs = useCallback(async (stored: Tab[]): Promise<Tab[]> => {
     const out: Tab[] = [];
     for (const t of stored) {
+      if (t.kind === "store") {
+        const exists = await invoke<boolean>("path_exists", { path: t.path }).catch(
+          () => false,
+        );
+        out.push(exists ? { ...t, missing: undefined } : { ...t, missing: true });
+        continue;
+      }
       try {
         await invoke<ReadFileResult>("read_file", { path: t.path });
         out.push(
@@ -3673,6 +3798,7 @@ export default function App() {
     lastSavedRef.current = "";
     snapshotRef.current = null;
     lastDiskMdRef.current = "";
+    adoptFrontmatter("");
     baselineCapturedRef.current = false;
     setInitialMarkdown("");
     setDirty(false);
@@ -3683,7 +3809,7 @@ export default function App() {
     await loadEntityMeta(null, null, null);
     applyDocView("md");
     await refreshWatchSet(); // drops the active set; keeps a split pane's watch alive
-  }, [applyDocView, flushSidecarWrite, loadEntityMeta, refreshWatchSet]);
+  }, [adoptFrontmatter, applyDocView, flushSidecarWrite, loadEntityMeta, refreshWatchSet]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -4038,6 +4164,12 @@ export default function App() {
     async (id: string, connectionId: string) => {
       const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
       if (!active) throw new Error("No document open.");
+      // Publishing a board is phase 3 (a page carries a snapshot of the view);
+      // for now a board tab simply isn't a document to share.
+      if (active.kind === "store") throw new Error("A board can't be shared yet.");
+      // Narrowed here rather than at the use site: the registry write below
+      // is a closure, and TypeScript doesn't carry property narrowing into one.
+      const shareKind: "draft" | "file" = active.kind;
       const st = await getConnections();
       const config = st.connections.find((c) => c.id === connectionId);
       if (!config) throw new Error("Sharing is not configured.");
@@ -4069,7 +4201,7 @@ export default function App() {
         [active.path]: {
           id,
           path: active.path,
-          kind: active.kind,
+          kind: shareKind,
           title,
           sharedAt: now,
           updatedAt: now,
@@ -4448,14 +4580,15 @@ export default function App() {
       const result = await invoke<ReadFileResult>("read_file", { path: target });
       // The disk holds hybrid markdown; refresh the meta alongside it and
       // hand the editor the expanded form (same boundary as the first load).
-      const { meta } = await loadEntityMeta(target, htmlPathRef.current, result.contents);
-      const full = expandMarkdown(result.contents, meta.mthreads).md;
+      const body = adoptFrontmatter(result.contents).body;
+      const { meta } = await loadEntityMeta(target, htmlPathRef.current, body);
+      const full = expandMarkdown(body, meta.mthreads).md;
       baselineCapturedRef.current = false;
       setInitialMarkdown(full);
       currentMarkdownRef.current = full;
       lastSavedRef.current = full;
       snapshotRef.current = result.snapshot;
-      lastDiskMdRef.current = result.contents;
+      lastDiskMdRef.current = body;
       setDirty(false);
       setConflict(null);
       if (activeIdRef.current) bumpEditorSeq(activeIdRef.current);
@@ -4475,7 +4608,14 @@ export default function App() {
     } catch (e) {
       console.error("reload failed", e);
     }
-  }, [captureActiveScroll, scheduleSharePush, bumpEditorSeq, refreshMirror, loadEntityMeta]);
+  }, [
+    captureActiveScroll,
+    scheduleSharePush,
+    bumpEditorSeq,
+    refreshMirror,
+    loadEntityMeta,
+    adoptFrontmatter,
+  ]);
   reloadFromDiskRef.current = reloadFromDisk;
 
   const keepMyVersion = useCallback(() => {
@@ -4511,9 +4651,10 @@ export default function App() {
       // split back into the hybrid layout (markers in the markdown, bodies
       // in the entity meta).
       const pulled = extractMarkdown(content.markdown);
+      const head = await headOnDisk(target);
       const newSnap = await invoke<FileSnapshot>("write_file", {
         path: target,
-        contents: pulled.md,
+        contents: head + pulled.md,
         expected: null,
       });
       await writeMdThreadsToMeta(target, pulled.md, pulled.mthreads);
@@ -4735,6 +4876,14 @@ export default function App() {
       mdThreadsRef.current = incoming.mdThreads;
       mdOrphansRef.current = incoming.mdOrphans;
       setMdOrphans(incoming.mdOrphans);
+      // The promoted document's frontmatter block becomes the one the writers
+      // re-attach; without this the next save would prepend the demoted
+      // document's properties to this one.
+      cardHeadRef.current = incoming.head;
+      cardPropsRef.current = incoming.props;
+      cardOpaqueRef.current = incoming.opaque;
+      setCardProps(incoming.props);
+      setCardOpaque(incoming.opaque);
       // The promoted pane keeps its mounted editor (no remount on a swap), so
       // this only re-points the meta writer at the incoming document's
       // records — the widths on screen are already the ones it mounted with.
@@ -5330,7 +5479,7 @@ export default function App() {
       // autosave write and the watcher has already moved to a neighbor tab.
       const affected = tabsRef.current.filter(
         (t) =>
-          t.kind === "file" &&
+          (t.kind === "file" || t.kind === "store") &&
           (t.path === target || (kind === "dir" && t.path.startsWith(target + "/"))),
       );
       for (const t of affected) await closeTab(t.id);
@@ -5528,7 +5677,13 @@ export default function App() {
       if (collectionsRef.current[dir]) tocDirs.add(dir);
     }
     for (const d of tocDirs) scheduleCollectionPush(d);
-    for (const p of entry.openPaths) await openTab(p, "file");
+    for (const p of entry.openPaths) {
+      // A restored path is a document or a board folder; ask disk which.
+      const isBoard = await invoke<boolean>("path_exists", {
+        path: `${p}/${STORE_FILE}`,
+      }).catch(() => false);
+      await openTab(p, isBoard ? "store" : "file");
+    }
   }, [
     openTab,
     updateCollections,
@@ -6076,12 +6231,18 @@ export default function App() {
               bumpEditorSeq(cur.tabId);
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
               const { meta } = await readEntityMeta(sd.path, cur.doc.htmlPath);
-              const full = htmlOnly ? "" : expandMarkdown(r.contents, meta.mthreads).md;
+              const fm = parseFrontmatter(htmlOnly ? "" : r.contents);
+              const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
               setSplitState({
                 ...cur,
                 doc: {
                   ...cur.doc,
                   missing: false,
+                  head: htmlOnly
+                    ? cur.doc.head
+                    : r.contents.slice(0, r.contents.length - fm.body.length),
+                  props: fm.props,
+                  opaque: fm.opaque,
                   contents: full,
                   snapshot: htmlOnly ? null : r.snapshot,
                   htmlContent: htmlOnly ? r.contents : cur.doc.htmlContent,
@@ -6124,8 +6285,9 @@ export default function App() {
               let ids = new Set<string>();
               if (!htmlOnly) {
                 const r = await invoke<ReadFileResult>("read_file", { path: sd.path });
-                ids = markerIds(r.contents);
-                contents = expandMarkdown(r.contents, meta.mthreads).md;
+                const body = parseFrontmatter(r.contents).body;
+                ids = markerIds(body);
+                contents = expandMarkdown(body, meta.mthreads).md;
                 if (contents !== cur.doc.contents) {
                   captureCompanionScroll();
                   companionMdRef.current = { md: "", baseline: "", baselined: false };
@@ -6260,11 +6422,33 @@ export default function App() {
         return;
       }
       if (e.payload.path !== pathRef.current) return;
-      if (dirtyRef.current || conflictRef.current) {
-        setConflict({ diskSnapshot: e.payload.snapshot });
-      } else {
-        void reloadFromDisk();
-      }
+      // The active document changed on disk. A PROPERTIES-ONLY change — a
+      // board dragged this card, a teammate set a field, another window's
+      // header wrote a pill — leaves the body exactly as we last saved it, so
+      // there is nothing to reload: adopt the new block, refresh the header,
+      // take the new snapshot, and leave the editor and its caret alone. Only
+      // a body change from outside still goes through reload / conflict.
+      void (async () => {
+        const target = e.payload.path;
+        let r: ReadFileResult;
+        try {
+          r = await invoke<ReadFileResult>("read_file", { path: target });
+        } catch {
+          return; // mid-rewrite; the next event covers it
+        }
+        if (pathRef.current !== target) return;
+        const fm = parseFrontmatter(r.contents);
+        if (fm.body === lastDiskMdRef.current) {
+          adoptFrontmatter(r.contents);
+          snapshotRef.current = r.snapshot;
+          return;
+        }
+        if (dirtyRef.current || conflictRef.current) {
+          setConflict({ diskSnapshot: r.snapshot });
+        } else {
+          await reloadFromDisk();
+        }
+      })();
     });
     return () => {
       void un.then((f) => f());
@@ -6278,6 +6462,7 @@ export default function App() {
     bumpEditorSeq,
     setSplitState,
     readEntityMeta,
+    adoptFrontmatter,
   ]);
 
   // Reconcile shares with edits made outside the app at the moments staleness
@@ -7291,6 +7476,12 @@ export default function App() {
   const showSidebar = workspaceRoot != null && sidebarOpen;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
+  // A board tab: its path is a FOLDER, and the whole document machinery is
+  // standing down for it (see loadActiveContent).
+  const activeIsStore = activeTab?.kind === "store";
+  // The sidebar's active row. A board's cards have no rows of their own, so
+  // the board's row carries the highlight for whatever inside it is focused.
+  const sidebarCurrentPath = activeIsStore ? activeTab.path : activeFilePath;
   // html-only documents render in the iframe alone; there is no markdown
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
@@ -7312,7 +7503,9 @@ export default function App() {
   const splitTab = split ? tabs.find((t) => t.id === split.tabId) ?? null : null;
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
-  const canSplit = activeTab != null && !activeMissing;
+  // A board owns the whole pane: it has no second rendition to show beside
+  // itself, and none of the split's document machinery applies to it.
+  const canSplit = activeTab != null && !activeMissing && !activeIsStore;
   // The folder share the active document's include/remove toggle binds to
   // (drafts have no directory, so never a collection).
   const activeShareCollection = activeFilePath
@@ -7325,10 +7518,82 @@ export default function App() {
     reportSyncActivity(activeFilePath);
   }, [activeFilePath]);
 
+  // The store the active note belongs to, if it belongs to one. A note in an
+  // ordinary folder costs a single `path_exists` — the model checks for a
+  // definition file before it reads anything else — so this is cheap to ask
+  // for every note.
+  const activeCardDir =
+    activeFilePath && MD_EXT_RE.test(activeFilePath)
+      ? dirname(activeFilePath)
+      : null;
+  const { state: cardStore } = useStore(activeCardDir);
+  const activeCardDef = activeCardDir && !activeIsStore ? cardStore.def : null;
+
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
   // `ready` flips, unmounting the whole app.
   if (!ready) return null;
+
+  // Write one of the ACTIVE CARD's properties. Two writers can touch a card's
+  // frontmatter — this header and any board showing it — and both go through
+  // the same guarded splice in the backend, which keeps the body bytes on
+  // disk exactly as they are. So a pill can't lose a keystroke the editor
+  // hasn't flushed, and the loser of a race fails loudly instead of
+  // clobbering.
+  const setCardProperty = async (key: string, value: PropValue) => {
+    const target = pathRef.current;
+    if (!target) return;
+    const next: CardProps = { ...cardPropsRef.current };
+    if (value === null || value === "" || (Array.isArray(value) && value.length === 0)) {
+      delete next[key];
+    } else {
+      next[key] = value;
+    }
+    const head = serializeFrontmatter(
+      next,
+      cardOpaqueRef.current,
+      activeCardDef ? cardKeyOrder(activeCardDef) : [RANK_KEY],
+    );
+    cardPropsRef.current = next;
+    setCardProps(next);
+    cardHeadRef.current = head;
+    try {
+      const snap = await invoke<FileSnapshot>("write_frontmatter", {
+        path: target,
+        head,
+        expected: snapshotRef.current,
+      });
+      if (pathRef.current === target) snapshotRef.current = snap;
+    } catch (e) {
+      // Someone got there first (a board drag here, a teammate over sync).
+      // Disk wins — re-read the block instead of reloading the editor and
+      // dropping the caret.
+      console.error("property write failed", target, e);
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path: target });
+        if (pathRef.current === target) {
+          adoptFrontmatter(r.contents);
+          snapshotRef.current = r.snapshot;
+        }
+      } catch {
+        // unreadable right now; the watcher covers it
+      }
+    }
+  };
+
+  const openBoard = (dirPath: string) => void openTab(dirPath, "store");
+
+  // Turn a folder into a board: write the definition file, nothing else. Not
+  // one note inside it is touched — they simply become cards with no status.
+  const makeBoard = async (dirPath: string): Promise<string | null> => {
+    try {
+      await createStoreFile(dirPath, basename(dirPath));
+      setTreeRefreshToken((t) => t + 1);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  };
 
   // One editor pane (either side, either role). BOTH roles render the same
   // slot structure — header?, [FindBar?, Editor?, HtmlView?, Missing?,
@@ -7346,7 +7611,10 @@ export default function App() {
     // A same-document split pane on markdown is a read-only MIRROR of the
     // live editor (see the SplitPane comment).
     const isMirror = !focused && s != null && !s.doc && s.view === "md";
-    const showEditorHere = focused
+    const showBoardHere = paneTab?.kind === "store" && !paneMissing;
+    const showEditorHere = showBoardHere
+      ? false
+      : focused
       ? activeTab != null && !activeMissing && !activeIsHtmlDoc
       : isMirror
         ? !activeMissing
@@ -7440,6 +7708,28 @@ export default function App() {
               onPrev={() => editorRef.current?.searchPrev()}
               onClose={closeFind}
               focusToken={findFocusToken}
+            />
+          )}
+          {showBoardHere && (
+            // A board reads and writes its own folder; the pane just hosts it.
+            // An unfocused pane shows the same DOM with writing off.
+            <KanbanBoard
+              dir={paneTab.path}
+              readOnly={!focused}
+              onOpenCard={(p) => void openTab(p, "file")}
+              onRenameCard={(from, to) => movePath(from, to, "file")}
+              onDeleteCard={(p) => void deleteEntries([{ path: p, kind: "file" }])}
+              onRevealInFinder={revealInFinder}
+            />
+          )}
+          {focused && showEditorHere && activeCardDef && (
+            // A card's properties, above its note. Changing a pill writes the
+            // frontmatter block and nothing else — the body never moves.
+            <PropertiesHeader
+              def={activeCardDef}
+              props={cardProps}
+              opaqueCount={cardOpaque.length}
+              onChange={setCardProperty}
             />
           )}
           {showEditorHere && (
@@ -7959,7 +8249,7 @@ export default function App() {
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
         <Sidebar
           root={workspaceRoot}
-          currentPath={activeFilePath}
+          currentPath={sidebarCurrentPath}
           selection={sidebarSelection}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
@@ -7967,6 +8257,8 @@ export default function App() {
           collections={collections}
           onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p, "file")}
+          onOpenBoard={openBoard}
+          onMakeBoard={makeBoard}
           onOpenFolder={openFolderPicker}
           onOpenFilePicker={openFilePicker}
           onRevealInFinder={revealInFinder}

@@ -10,8 +10,9 @@ surface, driven in real Chromium.
 (Tauri IPC stubbed via `window.__TAURI_INTERNALS__` in `index.html`). It
 currently covers the HTML-rendition comment layer (`HtmlView` + the injected
 iframe bridge + `CommentsRail` + the sidecar model), the mermaid diagram
-pipeline (`src/mermaid.ts` + the Editor wiring), and the inline-code newline
-normalization (`src/inlineCodeNewlines.ts`).
+pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
+normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
+(`src/store/` + `KanbanBoard` + `PropertiesHeader` + the sidebar's board row).
 
 ```sh
 pnpm install
@@ -50,6 +51,17 @@ node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSIS
                                            # restores the columns on first paint, a header
                                            # rename re-keys the record instead of orphaning it,
                                            # and a read-only view resizes without ever emitting
+node verify-harness/drive-kanban.mjs       # 34 steps: boots the REAL <App/> (kanban.html seeds a
+                                          # /docs workspace holding a DATASTORE) and walks the
+                                          # board end to end — the sidebar's one-row board with
+                                          # no cards under it, the board tab, columns from
+                                          # store.jsonl in rank order, a pointer drag between
+                                          # columns, the inline card and column composers,
+                                          # opening a card as an ordinary note, the properties
+                                          # header, and at every step the invariant the design
+                                          # rests on: a card's BODY bytes never move when its
+                                          # properties do (and a note with no frontmatter never
+                                          # grows one)
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, sync probes) and walks the split view —
@@ -137,7 +149,7 @@ sync) has its own fast unit test — run it for any change to
 node verify-harness/merge.test.mjs   # deletions stick, eid dedupe, concurrent replies
 ```
 
-Three more pure-node unit suites (vite-compiled, no browser):
+Four more pure-node unit suites (vite-compiled, no browser):
 
 ```sh
 node verify-harness/metafile.test.mjs      # the entity meta file: expand/extract round trip,
@@ -150,6 +162,16 @@ node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
                                            # deliberately not a path, "." / ".." folding
+node verify-harness/store.test.mjs         # the three pure modules a datastore is built from
+                                           # (src/store/): the frontmatter dialect (what IS a
+                                           # block, the value grammar, opaque lines that survive
+                                           # verbatim, canonical round-tripping bytes), the
+                                           # store.jsonl definition file (header-or-nothing,
+                                           # tolerant parse, equal state ⇒ equal bytes, options
+                                           # sorted by name so a column MOVE is one line), and
+                                           # the fractional index (strict ordering under a
+                                           # thousand same-gap inserts, short keys when
+                                           # appending, junk ranks that never block a drag)
 ```
 
 ## Rust side
@@ -159,5 +181,13 @@ node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a
 creating dummy gitignored resources the build script expects:
 `binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
 `binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
-`cargo test --lib sync` runs the sync engine tests. Menu-constant dead-code
-warnings on Linux are pre-existing (macOS-only paths).
+`cargo test --lib` runs every Rust test: the sync engine's two-device
+merge/conflict/CAS matrix (`--lib sync`), the sidebar tree walk including the
+one-row board (`--lib tree_tests`), and the datastore file surface
+(`--lib store`: locating a card's leading frontmatter block, splicing a new one
+in with the body byte-identical, the snapshot guard, what `read_store` lists
+and what it leaves out). Menu-constant dead-code warnings on Linux are
+pre-existing (macOS-only paths).
+
+Two steps of `drive-links.mjs` (Crepe's hover tooltip) fail on this runner and
+did before any of this — don't chase them.

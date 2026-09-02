@@ -560,17 +560,32 @@ path, found by the same scan that resolves embeds.
 
 ## Plan
 
-**Phase 1 — a board from a folder.**
+**Phase 1 — a board from a folder. Built.**
 `frontmatter.ts` + boundary in `App.tsx` (every note preserves frontmatter
 from this point on; cards get the properties header); `storeFile.ts`,
 `rank.ts`, `model.ts`; the four Rust commands and the tree flag; the sidebar
-row, *New board…*, *Turn into board*; `KanbanBoard.tsx` with drag, add card,
+row, *New Board…*, *Turn into Board*; `KanbanBoard.tsx` with drag, add card,
 columns; the `store` tab kind; companion handling on trash / rename / paste.
-Verification: pure-node suites for the dialect, the store file, and rank;
-a Chromium drive (`verify-harness/drive-kanban.mjs`, booting the real
-`<App/>` over the split-harness's in-memory fs stub) walking create board →
-add cards → drag → open card → change a pill → reload; `cargo test` for the
-fence splice.
+Verification: `verify-harness/store.test.mjs` for the dialect, the store file,
+and rank; `verify-harness/drive-kanban.mjs`, a Chromium drive booting the real
+`<App/>` over an in-memory fs stub, walking open board → drag between columns
+→ add card → add column → open card → change a pill → type → reload;
+`cargo test --lib store` for the fence splice and `--lib tree_tests` for the
+one-row board.
+
+Three things the build settled that the design left implicit:
+
+- **A board tab never splits.** It has no second rendition to show beside
+  itself and none of the split's document machinery applies, so `⌘⇧\` is off
+  for one.
+- **Deleting a folder closes the board tabs inside it**, and undo reopens them
+  as boards (the restore asks disk whether a restored path carries a
+  definition file). Cards need nothing new: a card is a note, so the existing
+  sidecar handling on trash / rename / paste already covers it, and a store
+  folder moves whole.
+- **Renaming a card from the board** goes through a plain prompt rather than
+  an inline field — the one rough edge left in phase 1. Renaming from the
+  sidebar (in *Show all files*) or from the tab is unchanged.
 
 **Phase 2 — boards inside notes.**
 `kanbanEmbed.ts` (remark transform, node schema, node view), the Source

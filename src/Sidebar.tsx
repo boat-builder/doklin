@@ -10,7 +10,11 @@ export type TreeNode =
   // "show every file" mode, where those rows are listed greyed out so their
   // existence is visible. Absent means openable (the documents-only tree).
   | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
-  | { kind: "dir"; name: string; path: string; children: TreeNode[] };
+  // `store: true` marks a DATASTORE folder — a board. The backend returns no
+  // children for one (a board can hold hundreds of cards, and the tree is not
+  // where they belong), so the row has no disclosure triangle: clicking it
+  // opens the board.
+  | { kind: "dir"; name: string; path: string; children: TreeNode[]; store?: boolean };
 
 // A file row the app can open (markdown, html, or a bundled pair). Folders and
 // documents-only trees are always openable; only "show every file" rows differ.
@@ -42,7 +46,7 @@ export const pruneNestedSelection = (sels: SidebarSelection[]): SidebarSelection
 
 // Where an in-progress "New File…" / "New Folder…" will land. The input row is
 // rendered inline inside `parentDir`, like VS Code's explorer.
-type PendingCreate = { parentDir: string; kind: "file" | "dir" };
+type PendingCreate = { parentDir: string; kind: "file" | "dir" | "board" };
 
 // An in-progress inline rename: the row at `path` is replaced by a name input.
 // `openable: false` (an unsupported file in show-all mode) keeps the row's own
@@ -87,6 +91,12 @@ type Props = {
   collections: Record<string, CollectionEntry>;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
+  // Open a datastore folder as a board tab.
+  onOpenBoard: (dirPath: string) => void;
+  // Write `store.jsonl` into an (already created) folder and open it as a
+  // board. Backs both "New Board…" and "Turn into Board" — the second adds
+  // the definition file to a folder of notes, touching no note's content.
+  onMakeBoard: (dirPath: string) => Promise<string | null>;
   onOpenFolder: () => void;
   onOpenFilePicker: () => void;
   onRevealInFinder: (path: string) => void;
@@ -169,6 +179,8 @@ export default function Sidebar({
   collections,
   onSelect,
   onOpenFile,
+  onOpenBoard,
+  onMakeBoard,
   onOpenFolder,
   onOpenFilePicker,
   onRevealInFinder,
@@ -244,6 +256,19 @@ export default function Sidebar({
       return next;
     });
   }, []);
+
+  // Every board in the tree, by path — the context menu asks whether a folder
+  // is already a board, and the row asks whether to draw a disclosure.
+  const storeDirs = useMemo(() => {
+    const out = new Set<string>();
+    const walk = (n: TreeNode) => {
+      if (n.kind !== "dir") return;
+      if (n.store) out.add(n.path);
+      for (const c of n.children) walk(c);
+    };
+    if (tree) walk(tree);
+    return out;
+  }, [tree]);
 
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
@@ -644,7 +669,7 @@ export default function Sidebar({
   // Begin inline creation inside `parentDir`, expanding it (and any collapsed
   // ancestors) so the input row is actually visible.
   const startCreate = useCallback(
-    (kind: "file" | "dir", parentDir: string) => {
+    (kind: "file" | "dir" | "board", parentDir: string) => {
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
@@ -691,13 +716,20 @@ export default function Sidebar({
       } catch (e) {
         return String(e);
       }
+      // A board is a folder plus its definition file. If the definition can't
+      // be written the folder stays — an empty folder, not a broken board.
+      if (pc.kind === "board") {
+        const err = await onMakeBoard(path);
+        if (err) return err;
+      }
       setPendingCreate(null);
       await refresh();
-      onSelect([{ path, kind: pc.kind }]);
+      onSelect([{ path, kind: pc.kind === "file" ? "file" : "dir" }]);
       if (pc.kind === "file") onOpenFile(path);
+      if (pc.kind === "board") onOpenBoard(path);
       return null;
     },
-    [pendingCreate, refresh, onSelect, onOpenFile],
+    [pendingCreate, refresh, onSelect, onOpenFile, onOpenBoard, onMakeBoard],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -801,14 +833,41 @@ export default function Sidebar({
         { label: "Delete", danger: true, onClick: () => onDelete(entries) },
       ];
     }
-    const items: ContextMenuItem[] = [
-      { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
-      { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
-      {
-        label: "Reveal in Finder",
-        onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
-      },
-    ];
+    // Cards are created from the board itself, so a board offers no inline
+    // New File / New Folder — its folder is the board's own storage.
+    const insideBoard = storeDirs.has(createDirFor(target));
+    const items: ContextMenuItem[] = [];
+    if (!insideBoard) {
+      items.push(
+        { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
+        { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
+        { label: "New Board…", onClick: () => startCreate("board", createDirFor(target)) },
+      );
+    }
+    // An existing folder of notes becomes a board by gaining a definition
+    // file; not one note's content is touched.
+    if (target.kind === "dir" && !storeDirs.has(target.path)) {
+      items.push({
+        label: "Turn into Board",
+        onClick: () => {
+          void (async () => {
+            const err = await onMakeBoard(target.path);
+            if (err) window.alert(err);
+            else {
+              await refresh();
+              onOpenBoard(target.path);
+            }
+          })();
+        },
+      });
+    }
+    if (target.kind === "dir" && storeDirs.has(target.path)) {
+      items.push({ label: "Open Board", onClick: () => onOpenBoard(target.path) });
+    }
+    items.push({
+      label: "Reveal in Finder",
+      onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
+    });
     // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
     // target, next to a file target, at the root for empty space — and stays
     // visible-but-disabled while the clipboard is empty.
@@ -909,6 +968,10 @@ export default function Sidebar({
     ctxMenu,
     selection,
     clipboardHasFiles,
+    storeDirs,
+    refresh,
+    onOpenBoard,
+    onMakeBoard,
     startCreate,
     startRename,
     createDirFor,
@@ -1004,9 +1067,9 @@ export default function Sidebar({
             {showCreateAtRoot && pendingCreate && (
               <NameRow
                 depth={0}
-                icon={pendingCreate.kind === "dir" ? <NewFolderIcon /> : <FileIcon />}
-                placeholder={pendingCreate.kind === "dir" ? "Folder name" : "File name"}
-                ariaLabel={pendingCreate.kind === "dir" ? "New folder name" : "New file name"}
+                icon={createRowIcon(pendingCreate.kind)}
+                placeholder={createRowLabel(pendingCreate.kind)}
+                ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
                 onCommit={commitCreate}
                 onCancel={cancelCreate}
               />
@@ -1031,6 +1094,7 @@ export default function Sidebar({
                 presence={presence}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
+                onOpenBoard={onOpenBoard}
                 onRowClick={handleRowSelect}
                 onRowMenu={openRowMenu}
                 onCommitCreate={commitCreate}
@@ -1273,6 +1337,7 @@ function TreeItem({
   presence,
   onToggle,
   onOpenFile,
+  onOpenBoard,
   onRowClick,
   onRowMenu,
   onCommitCreate,
@@ -1303,6 +1368,7 @@ function TreeItem({
   presence: Record<string, string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
+  onOpenBoard: (path: string) => void;
   // Modifier-aware selection; true = a multi-select gesture the row must not
   // also act on (no open/toggle).
   onRowClick: (e: React.MouseEvent, entry: SidebarSelection) => boolean;
@@ -1382,16 +1448,25 @@ function TreeItem({
     );
   }
 
-  const isCollapsed = collapsed.has(node.path);
+  const isBoard = node.store === true;
+  // A board never expands: the backend hands it no children, and its cards are
+  // reached from the board, from search, and from links.
+  const isCollapsed = isBoard || collapsed.has(node.path);
   const creatingHere = pendingCreate?.parentDir === node.path;
   const isDropTarget = dropDir === node.path;
+  // With no row of their own, a board's cards borrow the board's: the row
+  // reads as active while a card inside it is the focused tab.
+  const boardActive =
+    isBoard &&
+    currentPath != null &&
+    (currentPath === node.path || currentPath.startsWith(node.path + "/"));
   return (
     <li role="treeitem" aria-expanded={!isCollapsed} aria-selected={isSelected}>
       {renamingHere ? (
         <NameRow
           depth={depth}
-          icon={<FolderIcon />}
-          placeholder="Folder name"
+          icon={isBoard ? <BoardIcon /> : <FolderIcon />}
+          placeholder={isBoard ? "Board name" : "Folder name"}
           ariaLabel={`Rename ${node.name}`}
           initialValue={node.name}
           asListItem={false}
@@ -1400,7 +1475,7 @@ function TreeItem({
         />
       ) : (
         <button
-          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-dir ${isBoard ? "tree-board" : ""} ${boardActive ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="dir"
@@ -1408,7 +1483,8 @@ function TreeItem({
           onClick={(e) => {
             if (dnd.suppressClick()) return;
             if (onRowClick(e, { path: node.path, kind: "dir" })) return;
-            onToggle(node.path);
+            if (isBoard) onOpenBoard(node.path);
+            else onToggle(node.path);
           }}
           onPointerDown={(e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })}
           onPointerMove={dnd.onPointerMove}
@@ -1417,9 +1493,13 @@ function TreeItem({
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "dir" })}
           title={node.path}
         >
-          <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
-            <ChevronRightIcon />
-          </span>
+          {isBoard ? (
+            <BoardIcon />
+          ) : (
+            <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
+              <ChevronRightIcon />
+            </span>
+          )}
           <span className="tree-label tree-dir-label">{node.name}</span>
           {sharedDirPaths.has(node.path) && (
             <span className="tree-share-dot" title="Folder is shared" aria-hidden />
@@ -1431,9 +1511,9 @@ function TreeItem({
           {creatingHere && pendingCreate && (
             <NameRow
               depth={depth + 1}
-              icon={pendingCreate.kind === "dir" ? <NewFolderIcon /> : <FileIcon />}
-              placeholder={pendingCreate.kind === "dir" ? "Folder name" : "File name"}
-              ariaLabel={pendingCreate.kind === "dir" ? "New folder name" : "New file name"}
+              icon={createRowIcon(pendingCreate.kind)}
+              placeholder={createRowLabel(pendingCreate.kind)}
+              ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
               onCommit={onCommitCreate}
               onCancel={onCancelCreate}
             />
@@ -1458,6 +1538,7 @@ function TreeItem({
               presence={presence}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
+              onOpenBoard={onOpenBoard}
               onRowClick={onRowClick}
               onRowMenu={onRowMenu}
               onCommitCreate={onCommitCreate}
@@ -1808,6 +1889,32 @@ function NewFileIcon() {
       <polyline points="14 2 14 8 20 8" />
       <line x1="12" y1="12" x2="12" y2="18" />
       <line x1="9" y1="15" x2="15" y2="15" />
+    </svg>
+  );
+}
+
+const createRowLabel = (kind: "file" | "dir" | "board") =>
+  kind === "dir" ? "Folder name" : kind === "board" ? "Board name" : "File name";
+
+const createRowIcon = (kind: "file" | "dir" | "board") =>
+  kind === "dir" ? <NewFolderIcon /> : kind === "board" ? <BoardIcon /> : <FileIcon />;
+
+// A board: three columns, the shape of the thing the row opens.
+function BoardIcon() {
+  return (
+    <svg
+      className="tree-icon"
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      aria-hidden
+    >
+      <rect x="2" y="3" width="3.2" height="10" rx="1" />
+      <rect x="6.4" y="3" width="3.2" height="7" rx="1" />
+      <rect x="10.8" y="3" width="3.2" height="8.5" rx="1" />
     </svg>
   );
 }
