@@ -120,3 +120,8 @@ Deeper docs live in dedicated files to keep this page focused:
   for adding the same feature to another Tauri app**.
 - **[docs/tabs-drafts-followups.md](docs/tabs-drafts-followups.md)** — design
   notes and deferred follow-ups for the tabs + drafts system.
+- **[docs/datastores-kanban.md](docs/datastores-kanban.md)** — the design for
+  structured data: *datastores* (a folder of markdown cards with frontmatter
+  plus a `store.jsonl` definition), the kanban view as a tab and as a
+  ` ```kanban ` embed in notes, how it rides sync / history / sharing, and
+  the phased plan.
