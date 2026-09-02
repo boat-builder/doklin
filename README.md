@@ -154,3 +154,8 @@ Deeper docs live in dedicated files to keep this page focused:
   plan. All four phases are built: a board from a folder, a board embedded
   in a note, boards on published pages, and the second view with properties
   on any note.
+- **[docs/cloud-redesign.md](docs/cloud-redesign.md)** — the design and
+  phased plan for the cloud rewrite: one domain per workspace, a single
+  Rust engine as the only writer, publishing as a flag in the workspace
+  manifest with pages rendered from synced files, agent + wrangler setup,
+  and what the old share/sync/backend code is replaced by.
