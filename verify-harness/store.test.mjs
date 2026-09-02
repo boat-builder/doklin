@@ -1,7 +1,7 @@
-// Unit tests for the three pure modules a datastore is built from
-// (src/store/): the frontmatter dialect that holds a card's properties, the
-// `store.jsonl` definition file, and the fractional index that positions
-// cards and columns. Run:
+// Unit tests for the pure modules a datastore is built from (src/store/): the
+// frontmatter dialect that holds a card's properties, the `store.jsonl`
+// definition file, the fractional index that positions cards and columns, and
+// the ```kanban embed's config. Run:
 //
 //   node verify-harness/store.test.mjs
 //
@@ -46,6 +46,11 @@ const {
   sortByRank,
   validateRank,
   FIRST_RANK,
+  parseEmbedConfig,
+  serializeEmbedConfig,
+  fenceKanban,
+  isKanbanFence,
+  KANBAN_LANG,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 
 let checks = 0;
@@ -371,6 +376,83 @@ const eq = (a, b, msg) => {
     ["b", "a", "c", "d"],
     "unranked cards sort last, by title",
   );
+}
+
+/* ======================================================================
+   4. The ```kanban embed's config (embedConfig.ts)
+   ====================================================================== */
+
+/* ---------- the config is read in the frontmatter dialect ---------- */
+{
+  const c = parseEmbedConfig("store: ./Projects\nview: board\ngroup: status\nhide: [Done, Archive]");
+  eq(c.store, "./Projects");
+  eq(c.view, "board");
+  eq(c.group, "status");
+  eq(c.hide, ["Done", "Archive"]);
+
+  // The only key that has to be there is `store` — and an embed that names
+  // none is the state the picker draws, never an error.
+  const empty = parseEmbedConfig("");
+  eq(empty.store, null, "an empty fence names no store");
+  eq(empty.hide, []);
+  eq(parseEmbedConfig("   \n\n").store, null, "whitespace names no store");
+
+  // A quoted path (a name with a comma or a colon in it) reads back whole.
+  eq(parseEmbedConfig('store: "./Q3: plans, revised"').store, "./Q3: plans, revised");
+
+  // A single hidden value doesn't have to be a list.
+  eq(parseEmbedConfig("store: ./P\nhide: Done").hide, ["Done"]);
+
+  // Junk is ignored, not fatal: the keys it understands still land.
+  const messy = parseEmbedConfig("nonsense\nstore: ./P\n# a comment\nnested:\n  a: 1");
+  eq(messy.store, "./P", "an unreadable line doesn't lose the store");
+  eq(messy.view, null);
+
+  // An empty value is the same as an absent one.
+  eq(parseEmbedConfig("store:\nview:").store, null);
+}
+
+/* ---------- what the picker writes reads back ---------- */
+{
+  const round = (c) => parseEmbedConfig(serializeEmbedConfig(c));
+  const full = { store: "./Projects", view: "board", group: "status", hide: ["Done"] };
+  eq(round(full), full, "a full config round-trips");
+  eq(
+    serializeEmbedConfig({ store: "./Projects", view: null, group: null, hide: [] }),
+    "store: ./Projects",
+    "only what is set gets written",
+  );
+  eq(serializeEmbedConfig({ store: null, view: null, group: null, hide: [] }), "");
+  // Equal state, equal bytes — the same discipline the store file follows.
+  eq(
+    serializeEmbedConfig(full),
+    serializeEmbedConfig({ hide: ["Done"], group: "status", view: "board", store: "./Projects" }),
+    "key insertion order doesn't change the text",
+  );
+  // A path the dialect would misread comes back quoted.
+  const tricky = { store: "./a, b", view: null, group: null, hide: ["x, y"] };
+  eq(round(tricky), tricky, "a comma survives both the scalar and the list");
+}
+
+/* ---------- the fence ---------- */
+{
+  eq(fenceKanban("store: ./P"), "```kanban\nstore: ./P\n```");
+  eq(fenceKanban(""), "```kanban\n```", "an empty embed is still a fence");
+  eq(KANBAN_LANG, "kanban");
+  // A config carrying a backtick run can't break out of its own fence: the
+  // fence grows past the longest run, exactly as a markdown serializer's does.
+  eq(fenceKanban("store: ./``x"), "```kanban\nstore: ./``x\n```", "a short run needs no growth");
+  eq(fenceKanban("a\n```\nb"), "````kanban\na\n```\nb\n````");
+  eq(fenceKanban("````"), "`````kanban\n````\n`````");
+
+  // Which fences the app claims. Strict on purpose: anything else stays an
+  // ordinary code block, which round-trips byte for byte.
+  ok(isKanbanFence("kanban", null));
+  ok(isKanbanFence("kanban", ""));
+  ok(!isKanbanFence("Kanban", null), "case matters");
+  ok(!isKanbanFence("kanban", "tight"), "a fence with meta is not ours");
+  ok(!isKanbanFence("mermaid", null));
+  ok(!isKanbanFence(null, null), "a bare fence is not ours");
 }
 
 console.log(`store.test.mjs: ${checks} checks passed`);

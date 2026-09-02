@@ -6471,3 +6471,211 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 auto;
   color: var(--app-text-muted);
 }
+
+/* ---------- A board inside a note (the ```kanban embed) ----------
+   The frame is a block in the prose: it takes the document's measure, not the
+   pane's, and the board inside it drops the absolute fill a board tab uses.
+   Everything below the bar is React inside a contenteditable=false element —
+   ProseMirror never reads it back (see kanbanEmbed.ts). */
+
+.dk-embed {
+  margin: 18px 0;
+}
+
+.dk-embed-frame {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  overflow: hidden;
+}
+
+.dk-embed.is-selected .dk-embed-frame {
+  box-shadow: 0 0 0 2px var(--app-accent);
+}
+
+.dk-embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-text) 3%, transparent);
+  /* The bar is the block's handle: a click here selects the node. */
+  cursor: default;
+  user-select: none;
+}
+
+.dk-embed-kind {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-text-muted);
+}
+
+.dk-embed-ref {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dk-embed-source {
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-surface);
+  color: var(--app-text-muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.dk-embed-source:hover,
+.dk-embed-source.is-on {
+  color: var(--app-text);
+  border-color: var(--app-text-muted);
+}
+
+.dk-embed-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  outline: none;
+  resize: vertical;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--app-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.dk-embed-note {
+  padding: 14px 16px;
+  color: var(--app-text-muted);
+  font-size: 13px;
+}
+
+.dk-embed-note p {
+  margin: 0;
+}
+
+.dk-embed-src {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--app-text) 4%, transparent);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* The picker: an embed that names no board yet. */
+.dk-embed-pick {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dk-embed-pick-head {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.dk-embed-pick-none {
+  margin: 0;
+  font-size: 13px;
+  color: var(--app-text-muted);
+}
+
+.dk-embed-pick-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dk-embed-pick-item {
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.dk-embed-pick-item:hover:not(:disabled) {
+  border-color: var(--app-accent);
+}
+
+.dk-embed-pick-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dk-embed-pick-item.is-new {
+  align-self: flex-start;
+  color: var(--app-text-muted);
+}
+
+.dk-embed-pick-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dk-embed-pick-go {
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.dk-embed-pick-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--crepe-color-error, #b91c1c);
+}
+
+/* The board itself, in the flow of a note rather than filling a pane. */
+.dk-board.is-embed {
+  position: static;
+  inset: auto;
+  background: transparent;
+}
+
+.dk-board.is-embed .dk-board-head {
+  padding: 12px 14px 6px;
+}
+
+.dk-board.is-embed .dk-board-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--app-text);
+  letter-spacing: 0;
+}
+
+.dk-board.is-embed .dk-board-cols {
+  padding: 2px 14px 14px;
+  /* No pane to fill: the columns grow with their cards, and the row scrolls
+     sideways on its own when the board is wider than the text column. */
+  align-items: flex-start;
+  overflow-y: visible;
+}
+
+.dk-board.is-embed .dk-col {
+  max-height: none;
+}

@@ -118,6 +118,7 @@ import {
 import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
 import KanbanBoard from "./KanbanBoard";
+import type { KanbanEmbedHost, StoreChoice } from "./KanbanEmbed";
 import PropertiesHeader from "./PropertiesHeader";
 import {
   parseFrontmatter,
@@ -7595,6 +7596,65 @@ export default function App() {
     }
   };
 
+  // Every board in the workspace, for an embed's picker. Asked for on demand
+  // (opening the picker) rather than kept in state: the sidebar already owns
+  // the tree, and a board list that is one call old is a worse answer than
+  // one that is one call fresh.
+  const listStores = async (): Promise<StoreChoice[]> => {
+    if (!workspaceRoot) return [];
+    const tree = await invoke<TreeNode>("list_md_tree", {
+      path: workspaceRoot,
+      all: false,
+    });
+    const out: StoreChoice[] = [];
+    const walk = (n: TreeNode) => {
+      if (n.kind !== "dir") return;
+      // A board is a leaf here — the backend hands one no children, and a
+      // board inside a board is not a thing to offer.
+      if (n.store) out.push({ path: n.path, name: n.name });
+      else for (const c of n.children) walk(c);
+    };
+    walk(tree);
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  };
+
+  // "New board…" from inside an embed: a folder beside the note, plus its
+  // definition file. Resolves to the folder so the embed can name it.
+  const createStoreBeside = async (parentDir: string, name: string): Promise<string> => {
+    const clean = name.trim().replace(/[/\\:]/g, "-");
+    if (!clean) throw new Error("A name is required.");
+    if (clean.startsWith(".")) throw new Error("Names can't start with a dot.");
+    const path = `${parentDir}/${clean}`;
+    await invoke("create_dir", { path });
+    const err = await makeBoard(path);
+    if (err) throw new Error(err);
+    return path;
+  };
+
+  // What a ```kanban embed inside a pane's note can reach. Built per pane
+  // because a relative `store:` resolves against the note the embed is
+  // written in — a draft has nowhere to resolve against, and says so.
+  const kanbanHostFor = (tab: Tab | null): KanbanEmbedHost | null => {
+    if (!tab || tab.kind === "store") return null;
+    const docPath = tab.kind === "file" ? tab.path : null;
+    return {
+      docPath,
+      listStores,
+      createStore: (name) =>
+        docPath
+          ? createStoreBeside(dirname(docPath), name)
+          : // A draft has no folder of its own to put one beside. The picker
+            // says so and disables the button; this is the backstop.
+            Promise.reject(new Error("Save this note first.")),
+      // A card opens the way a followed link does: a tab, right here.
+      openCard: (p) => void openTab(p, "file"),
+      renameCard: (from, to) => movePath(from, to, "file"),
+      deleteCard: (p) => void deleteEntries([{ path: p, kind: "file" }]),
+      revealCard: revealInFinder,
+    };
+  };
+
   // One editor pane (either side, either role). BOTH roles render the same
   // slot structure — header?, [FindBar?, Editor?, HtmlView?, Missing?,
   // Scratch?, Hud?] — so a focus swap only changes props: the editors are
@@ -7768,6 +7828,8 @@ export default function App() {
               // showing, so a note in another folder links to its own
               // neighbours correctly.
               onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
+              // A ```kanban fence in this note becomes a board (kanbanEmbed.ts).
+              kanban={kanbanHostFor(paneTab)}
             />
           )}
           {showHtmlHere && (

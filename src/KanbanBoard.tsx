@@ -71,6 +71,16 @@ type Props = {
   dir: string;
   /** Which saved view to show; the store's first kanban view by default. */
   viewId?: string | null;
+  /**
+   * Group by this field instead of the view's. An embed's `group:` key —
+   * one note showing the same store split a different way, without changing
+   * the store for everyone else.
+   */
+  group?: string | null;
+  /** Column values to leave out (an embed's `hide:` key). */
+  hide?: string[];
+  /** Inside a note rather than filling a tab: sits in the text flow. */
+  embedded?: boolean;
   /** A published page or an unfocused pane: same DOM, no writing. */
   readOnly?: boolean;
   /** Open a card's note. */
@@ -85,6 +95,9 @@ type Props = {
 export default function KanbanBoard({
   dir,
   viewId = null,
+  group = null,
+  hide,
+  embedded = false,
   readOnly = false,
   onOpenCard,
   onRenameCard,
@@ -94,7 +107,9 @@ export default function KanbanBoard({
   const { state, model } = useStore(dir);
   const { def, cards } = state;
   const view = useMemo(() => (def ? kanbanView(def, viewId) : null), [def, viewId]);
-  const groupBy = view?.groupBy ?? null;
+  // The embed's override wins over the saved view — it is the narrower
+  // statement, made by the page the reader is on.
+  const groupBy = group ?? view?.groupBy ?? null;
   const groupField = def && groupBy ? fieldOf(def, groupBy) : null;
 
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -134,12 +149,15 @@ export default function KanbanBoard({
       declared: isDeclared,
       cards: columnCards(cards, groupBy, key),
     });
+    const hidden = new Set(hide ?? []);
     return [
       build(NO_VALUE, `No ${(groupField?.name ?? groupBy).toLowerCase()}`, null, false),
       ...declared.map((o) => build(o.name, o.name, o, true)),
       ...[...stray].sort().map((v) => build(v, v, null, false)),
-    ];
-  }, [def, groupBy, groupField, cards]);
+      // `hide` leaves a column out of THIS view; the option stays declared and
+      // its cards stay where they are. Nothing is filtered out of the store.
+    ].filter((c) => !hidden.has(c.key));
+  }, [def, groupBy, groupField, cards, hide]);
 
   // The chips a card face shows: every declared field except the one the
   // board groups by (the column already says it) and the position key.
@@ -327,10 +345,21 @@ export default function KanbanBoard({
     return <div className="dk-board-empty">This board couldn’t be read: {state.error}</div>;
   }
   if (!def) {
+    // A tab can only be opened on a folder that WAS a board, so there the
+    // honest report is that it stopped being one. An embed points wherever
+    // its fence says, so there the folder may simply never have been one.
     return (
       <div className="dk-board-empty">
-        This folder is no longer a board — its <code>store.jsonl</code> is gone. The
-        notes inside it are intact.
+        {embedded ? (
+          <>
+            There’s no board here: this folder has no <code>store.jsonl</code>.
+          </>
+        ) : (
+          <>
+            This folder is no longer a board — its <code>store.jsonl</code> is gone.
+            The notes inside it are intact.
+          </>
+        )}
       </div>
     );
   }
@@ -344,14 +373,27 @@ export default function KanbanBoard({
   }
 
   const dragging = drag?.started === true;
+  // What this view actually shows: `hide` can leave cards out, and the line
+  // under the title should say what is on screen, not what is on disk.
+  const shown = columns.reduce((n, c) => n + c.cards.length, 0);
+  const title = def.name || state.dir.split("/").pop();
 
   return (
-    <div className={`dk-board ${dragging ? "is-dragging" : ""}`} ref={boardRef}>
+    <div
+      className={`dk-board ${embedded ? "is-embed" : ""} ${dragging ? "is-dragging" : ""}`}
+      ref={boardRef}
+    >
       <header className="dk-board-head">
-        <h1 className="dk-board-title">{def.name || state.dir.split("/").pop()}</h1>
+        {/* An embed lives inside someone's prose, where an <h1> would join
+            the document outline and the table of contents. Only the tab —
+            where the board IS the page — gets the heading. */}
+        {embedded ? (
+          <div className="dk-board-title">{title}</div>
+        ) : (
+          <h1 className="dk-board-title">{title}</h1>
+        )}
         <span className="dk-board-sub">
-          {cards.length} {cards.length === 1 ? "card" : "cards"} · grouped by{" "}
-          {groupField.name}
+          {shown} {shown === 1 ? "card" : "cards"} · grouped by {groupField.name}
         </span>
       </header>
       {state.conflicts.length > 0 && (

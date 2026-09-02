@@ -1,7 +1,8 @@
 // Test entry for store.test.mjs: the three PURE modules a datastore is built
 // from, in one bundle so the suite pays for one vite build instead of three.
 // Nothing here touches Tauri — src/store/model.ts (which does) is exercised
-// by the browser drive, not by this suite.
+// by the browser drive, not by this suite. (embedConfig.ts is pure too — the
+// ```kanban fence's config; its EDITOR side lives in kanbanEmbed.ts.)
 export {
   parseFrontmatter,
   serializeFrontmatter,
@@ -19,6 +20,13 @@ export {
   isStoreConflictName,
   STORE_FILE,
 } from "../src/store/storeFile";
+export {
+  parseEmbedConfig,
+  serializeEmbedConfig,
+  fenceKanban,
+  isKanbanFence,
+  KANBAN_LANG,
+} from "../src/store/embedConfig";
 export {
   keyBetween,
   rankBetween,

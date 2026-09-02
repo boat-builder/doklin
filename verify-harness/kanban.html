@@ -45,6 +45,18 @@
           "/docs/Projects/Write onboarding docs.md",
           "A card that arrived from another tool: no properties at all.\n",
         ],
+        // A note that EMBEDS the board with a ```kanban fence (phase 2). The
+        // fence's bytes are what drive-kanban-embed.mjs watches: every
+        // autosave re-serializes this whole document.
+        [
+          "/docs/Embed.md",
+          "# Planning\n\nThe quarter, as a board:\n\n```kanban\nstore: ./Projects\n```\n\nEverything after the board is ordinary prose.\n",
+        ],
+        // A second embed pointing nowhere, for the "says so in place" case.
+        [
+          "/docs/Broken.md",
+          "# Broken\n\n```kanban\nstore: ./Nowhere\n```\n",
+        ],
       ]);
       window.__mtime = 1000;
       window.__writes = [];
@@ -108,6 +120,8 @@
         children: [
           // A board: one row, marked, with NO children.
           { kind: "dir", name: "Projects", path: "/docs/Projects", store: true, children: [] },
+          { kind: "file", name: "Broken.md", path: "/docs/Broken.md" },
+          { kind: "file", name: "Embed.md", path: "/docs/Embed.md" },
           { kind: "file", name: "Roadmap.md", path: "/docs/Roadmap.md" },
         ],
       });

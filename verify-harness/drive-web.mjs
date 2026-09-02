@@ -537,6 +537,48 @@ for (const [label, code, role] of [
   await page.context().close();
 }
 
+/* ================= A ```kanban embed on a shared page =================
+   A note with a board in it can be published like any other. The shell has
+   no workspace behind it, so it can't draw the board (that is phase 3 of
+   datastores) — what it MUST do is say so and leave the fence alone, because
+   an edit-role visitor's autosave re-serializes the whole document. */
+{
+  const EMBED_MD = "# Embed Web\n\n```kanban\nstore: ./Projects\n```\n\nAfter.\n";
+  await api("/api/pages/embed-web", undefined, "DELETE");
+  await api("/api/pages/embed-web", { title: "Embed Web", markdown: EMBED_MD });
+  await api(
+    "/api/pages/embed-web/access/codes",
+    { label: "Editor", code: "embed-edit-code", role: "edit" },
+    "POST",
+  );
+  const page = await (await browser.newContext({ viewport: { width: 1200, height: 860 } })).newPage();
+  page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await page.goto(`${BASE}/embed-web`);
+  await poll(async () => page.locator("#gate-code").isVisible());
+  await page.fill("#gate-code", "embed-edit-code");
+  await page.press("#gate-code", "Enter");
+  await poll(async () => (await page.locator(".dk-embed-frame").count()) === 1);
+  const frame = (await page.locator(".dk-embed-frame").innerText()).replace(/\s+/g, " ");
+  step("a kanban fence renders as a frame, not a crash", true);
+  step(
+    "the shell says the board isn't available and shows the config",
+    frame.includes("isn’t available on this page") && frame.includes("store: ./Projects"),
+    frame,
+  );
+  await page.locator(".ProseMirror p", { hasText: "After." }).first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Edited.");
+  await poll(async () =>
+    (await api("/api/pages/embed-web/content")).json.markdown.includes("Edited."),
+  );
+  step(
+    "an edit-role save keeps the fence byte for byte",
+    (await api("/api/pages/embed-web/content")).json.markdown ===
+      EMBED_MD.replace("After.", "After. Edited."),
+  );
+  await page.context().close();
+}
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);
 await browser.close();
 process.exit(results.some((r) => !r.ok) ? 1 : 0);

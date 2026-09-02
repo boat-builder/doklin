@@ -56,6 +56,14 @@ import {
   refreshThreadBodies,
   type CommentEntry,
 } from "./criticMark";
+import {
+  insertKanbanEmbed,
+  kanbanEmbedRemark,
+  kanbanEmbedSchema,
+  kanbanEmbedView,
+  refreshKanbanEmbeds,
+  type KanbanEmbedHost,
+} from "./kanbanEmbed";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
@@ -195,6 +203,12 @@ type Props = {
   // here; the editor scrolls to them itself. Read-only views follow links too
   // — a published page is exactly where links matter most.
   onOpenLink?: (href: string) => void;
+  // What a ```kanban embed in this document can reach: which note it is
+  // written in (a relative `store:` resolves against it), the workspace's
+  // boards, and how to open a card. Omitted by hosts with no workspace
+  // behind them — the shared-page shell — where the embed says so in place
+  // instead of drawing a board it can't read.
+  kanban?: KanbanEmbedHost | null;
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -214,6 +228,14 @@ const commentIcon = `
 const diagramIcon = `
   <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor">
     <path d="M600-120v-120H440v-400h-80v120H80v-320h280v120h240v-120h280v320H600v-120h-80v320h80v-120h280v320H600Zm-440-520h120v-160H160v160Zm520 400h120v-160H680v160Zm0-400h120v-160H680v160ZM160-640Zm520 240Zm0-240Z"/>
+  </svg>
+`;
+
+// Material "view_kanban" — the slash menu's Board item, in the same filled
+// style as the Diagram icon beside it.
+const boardIcon = `
+  <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor">
+    <path d="M200-160q-33 0-56.5-23.5T120-240v-480q0-33 23.5-56.5T200-800h560q33 0 56.5 23.5T840-720v480q0 33-23.5 56.5T760-160H200Zm0-80h133v-480H200v480Zm213 0h133v-480H413v480Zm213 0h134v-480H626v480Z"/>
   </svg>
 `;
 
@@ -310,6 +332,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     tableWidths,
     onTableWidths,
     onOpenLink,
+    kanban,
   },
   ref,
 ) {
@@ -368,6 +391,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onTableWidthsRef.current = onTableWidths;
   const onOpenLinkRef = useRef(onOpenLink);
   onOpenLinkRef.current = onOpenLink;
+  const kanbanRef = useRef(kanban);
+  kanbanRef.current = kanban;
 
   const report = () => {
     const view = viewRef.current;
@@ -477,6 +502,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
                 });
               },
             });
+            // "/board" → a ```kanban embed. It starts with no store named:
+            // the frame asks which one, in place (see KanbanEmbed.tsx).
+            builder.getGroup("advanced").addItem("kanban", {
+              label: "Board",
+              icon: boardIcon,
+              onRun: (ctx) => insertKanbanEmbed(ctx),
+            });
           },
         },
       },
@@ -504,6 +536,18 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // The comment mark + its remark round-trip must be registered together.
     // Spread each composable into its underlying MilkdownPlugins.
     crepe.editor.use([...criticCommentSchema, ...criticRemark]);
+    // ```kanban fences become a board. Schema and remark go in together (the
+    // node has no meaning without its round trip); the node view follows, so
+    // the schema it names is already registered. Every host gets all three —
+    // a host with no workspace behind it draws the frame and says so, which
+    // still round-trips the fence byte for byte.
+    crepe.editor.use([...kanbanEmbedSchema, ...kanbanEmbedRemark]);
+    crepe.editor.use(
+      kanbanEmbedView(
+        () => kanbanRef.current ?? null,
+        () => readOnlyRef.current === true,
+      ),
+    );
     // Hard-wrapped inline code spans: collapse the source newline to a space
     // at parse time so the code pill doesn't render as a stacked two-line box
     // (see inlineCodeNewlines.ts).
@@ -617,6 +661,17 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     viewRef.current?.setProps({});
     recompute();
   }, [readOnly, taskToggle, recompute]);
+
+  // Node views get no props, so an embed can't see a readOnly flip or a host
+  // arriving; both are read through getters and this is the nudge to re-read
+  // them. Mounted boards then go live (or read-only) without the editor
+  // remounting and losing the caret. Keyed on what a board can actually see
+  // change — the host object itself is rebuilt on every host render, and
+  // redrawing every board that often would be pure waste.
+  const kanbanDoc = kanban?.docPath ?? null;
+  useEffect(() => {
+    refreshKanbanEmbeds();
+  }, [readOnly, kanbanDoc]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are

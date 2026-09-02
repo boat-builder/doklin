@@ -33,7 +33,11 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   property, drag to move. A card is an ordinary `.md` note whose properties are
   YAML frontmatter at the top, so vim, Obsidian, and GitHub read the same files
   — and the board's own columns live in a plain-text `store.jsonl` beside them.
-  Nothing about a board is binary, and nothing needs Doklin to read.
+  Nothing about a board is binary, and nothing needs Doklin to read. A board
+  also goes **inside a note**: `/board` in the slash menu drops a ` ```kanban `
+  block that names a folder, and the note shows that board in the middle of the
+  prose — live, not a picture. Every other markdown tool shows the block as
+  three lines of config and leaves it alone.
 - **Folder workspaces** — open a directory to get a collapsible sidebar of its
   markdown files, with VS Code-style file management: create, rename, and
   delete files and folders from the context menu, and drag rows onto a folder
@@ -131,5 +135,5 @@ Deeper docs live in dedicated files to keep this page focused:
   structured data: *datastores* (a folder of markdown cards with frontmatter
   plus a `store.jsonl` definition), the kanban view as a tab and as a
   ` ```kanban ` embed in notes, how it rides sync / history / sharing, and
-  the phased plan. Phase 1 (a board from a folder) is built; phases 2-4
-  (embeds in notes, published boards, a second view) are not.
+  the phased plan. Phases 1-2 (a board from a folder, and a board embedded in
+  a note) are built; phases 3-4 (published boards, a second view) are not.

@@ -335,9 +335,14 @@ registers its own block node:
 - a **Source** chip on the frame, like the diagram's, flips the block to a
   small editor for the config text; leaving it flips back. The block is
   selectable as a node, so Backspace deletes it and Crepe's block handle
-  drags it.
-- a **Kanban** item in the slash menu's *advanced* group next to *Diagram*:
-  pick an existing store from the workspace or create one beside the note.
+  drags it. Dragging is allowed to start only from the frame's bar: a node
+  ProseMirror marks `draggable` will otherwise begin a native HTML5 drag
+  from anywhere inside it, and that drag swallows the pointer events the
+  board's own card drag is built on.
+- a **Board** item in the slash menu's *advanced* group next to *Diagram*.
+  It inserts an embed with an empty config, and the frame asks which board
+  in place — the workspace's boards, or a new one beside this note — rather
+  than opening a modal to ask first.
 
 ### 3. The card page — a properties header
 
@@ -557,6 +562,11 @@ path, found by the same scan that resolves embeds.
   row.
 - **Html rendition / PDF** → the fence shows as its config text. Out of
   scope, documented.
+- **A shared page** → the shell mounts the same editor with no host behind
+  it, so the embed draws its frame, names the store, shows the config, and
+  says the board isn't available here. Drawing it for real is phase 3; what
+  matters until then is that a comment- or edit-role save re-serializes the
+  document and the fence comes back out unchanged.
 
 ## Plan
 
@@ -588,12 +598,44 @@ Three things the build settled that the design left implicit:
   an inline field — the one rough edge left in phase 1. Renaming from the
   sidebar (in *Show all files*) or from the tab is unchanged.
 
-**Phase 2 — boards inside notes.**
-`kanbanEmbed.ts` (remark transform, node schema, node view), the Source
-chip, the slash-menu item and its store picker, embed-level `group` /
-`hide`. Verification: a drive over the real editor asserting byte-identical
-round-trip of the fence, and that typing in a card title never reaches
-ProseMirror.
+**Phase 2 — boards inside notes. Built.**
+`kanbanEmbed.ts` (the remark transform, the node schema, the node view) and
+`KanbanEmbed.tsx` (the frame: the Source chip, the store picker, and what to
+say when there is no board at the end of the path); `store/embedConfig.ts`
+for the config dialect and the fence text; the slash menu's *Board* item;
+embed-level `group` / `hide` in `KanbanBoard`. Verification:
+`verify-harness/store.test.mjs` covers the config and the fence,
+`verify-harness/doclinks.test.mjs` the relative path the picker writes, and
+`verify-harness/drive-kanban-embed.mjs` walks 37 steps in Chromium over the
+real editor — the fence rendering as a board, a card composed inside it
+never reaching ProseMirror, a drag writing one card and not the note, an
+ordinary edit re-serializing the note with the fence byte-identical, the
+Source chip, ⌫ and undo, the slash menu and its picker, and a split pane's
+board going read-only. `drive-web.mjs` covers the shared page, where the
+frame says the board isn't available and an edit-role save still keeps the
+fence byte for byte.
+
+Four things the build settled that the design left implicit:
+
+- **The frame's bar is the block's handle.** ProseMirror marks a draggable
+  node's DOM `draggable=true`, and a native HTML5 drag started anywhere
+  inside the frame swallows the pointer events the board's own drag is built
+  on — the same interception that made the sidebar's row drag pointer-based.
+  So the node view cancels `dragstart` everywhere except the bar, where a
+  drag moves the whole embed and a click selects the block for ⌫.
+- **The picker is in the block, not in a modal.** `/board` inserts an embed
+  with an empty config; the frame then lists the workspace's boards and
+  offers a new one beside the note. Picking writes `store: ./Projects` —
+  relative, through the same `docLinks` rules a link between notes follows
+  (`relativeLinkPath` is the new inverse of `linkTargetPath`).
+- **The embed shows the store's name, not a heading.** A board tab's title is
+  an `<h1>` because the board is the page; inside a note the same line is a
+  plain `<div>`, so it never joins the document's outline.
+- **A shared page draws the frame and says so.** The web shell mounts the
+  same editor with no host, so the embed renders as a frame naming the store
+  with its config below it. That keeps the one property that matters on the
+  web — a comment- or edit-role save re-serializes the whole document, and
+  the fence has to come back out unchanged.
 
 **Phase 3 — boards on published pages.**
 `boards` snapshots on `ShareParts` and the page record, the worker's

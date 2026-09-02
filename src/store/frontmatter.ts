@@ -167,33 +167,15 @@ function parseScalar(raw: string): PropValue | undefined {
 }
 
 /**
- * Split `text` into its frontmatter block and its body. A file with no block
- * comes back with `present: false` and the whole text as the body — the shape
- * every existing note has, so the boundary is a no-op for prose.
+ * The dialect's key/value reader, over the lines INSIDE a block. Shared by
+ * the frontmatter block and the ```kanban embed's config (kanbanEmbed.ts):
+ * one grammar, one set of rules about what stays opaque.
  */
-export function parseFrontmatter(text: string): Frontmatter {
-  const firstBreak = text.indexOf("\n");
-  const firstLine = stripCr(firstBreak === -1 ? text : text.slice(0, firstBreak));
-  if (!isFence(firstLine) || firstBreak === -1) return emptyFrontmatter(text);
-
-  const rest = text.slice(firstBreak + 1);
-  const lines = rest.split("\n");
-  let close = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (isFence(stripCr(lines[i]))) {
-      close = i;
-      break;
-    }
-  }
-  if (close === -1) return emptyFrontmatter(text); // no closing fence: prose
-
-  const inner = lines.slice(0, close).map(stripCr);
-  // The body starts after the closing fence's newline. An eof-terminated
-  // fence leaves an empty body.
-  let bodyStart = firstBreak + 1;
-  for (let i = 0; i <= close; i++) bodyStart += lines[i].length + 1;
-  const body = bodyStart <= text.length ? text.slice(bodyStart) : "";
-
+export function parseProps(inner: string[]): {
+  props: Props;
+  order: string[];
+  opaque: string[];
+} {
   const props: Props = {};
   const order: string[] = [];
   const opaque: string[] = [];
@@ -260,6 +242,38 @@ export function parseFrontmatter(text: string): Frontmatter {
     props[key] = value;
     order.push(key);
   }
+  return { props, order, opaque };
+}
+
+/**
+ * Split `text` into its frontmatter block and its body. A file with no block
+ * comes back with `present: false` and the whole text as the body — the shape
+ * every existing note has, so the boundary is a no-op for prose.
+ */
+export function parseFrontmatter(text: string): Frontmatter {
+  const firstBreak = text.indexOf("\n");
+  const firstLine = stripCr(firstBreak === -1 ? text : text.slice(0, firstBreak));
+  if (!isFence(firstLine) || firstBreak === -1) return emptyFrontmatter(text);
+
+  const rest = text.slice(firstBreak + 1);
+  const lines = rest.split("\n");
+  let close = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (isFence(stripCr(lines[i]))) {
+      close = i;
+      break;
+    }
+  }
+  if (close === -1) return emptyFrontmatter(text); // no closing fence: prose
+
+  const inner = lines.slice(0, close).map(stripCr);
+  // The body starts after the closing fence's newline. An eof-terminated
+  // fence leaves an empty body.
+  let bodyStart = firstBreak + 1;
+  for (let i = 0; i <= close; i++) bodyStart += lines[i].length + 1;
+  const body = bodyStart <= text.length ? text.slice(bodyStart) : "";
+
+  const { props, order, opaque } = parseProps(inner);
   return { props, order, opaque, body, present: true };
 }
 
@@ -305,6 +319,16 @@ function valueText(v: PropValue): string {
 }
 
 /**
+ * One `key: value` line in the dialect — an empty value writes the bare key.
+ * Exported because the ```kanban embed writes its config in the same grammar
+ * (kanbanEmbed.ts) without a block around it.
+ */
+export function propLine(key: string, value: PropValue): string {
+  const text = valueText(value);
+  return text === "" ? `${key}:` : `${key}: ${text}`;
+}
+
+/**
  * The canonical block for `props`, ending in a newline — or "" when there is
  * nothing to write and no opaque line to preserve (a card with no properties
  * is a plain note again, which is the honest file).
@@ -329,10 +353,7 @@ export function serializeFrontmatter(
   }
   for (const k of keys.filter((k) => !seen.has(k)).sort()) ordered.push(k);
   if (ordered.length === 0 && opaque.length === 0) return "";
-  const lines = ordered.map((k) => {
-    const text = valueText(props[k]);
-    return text === "" ? `${k}:` : `${k}: ${text}`;
-  });
+  const lines = ordered.map((k) => propLine(k, props[k]));
   return `${FENCE}\n${[...lines, ...opaque].join("\n")}\n${FENCE}\n`;
 }
 

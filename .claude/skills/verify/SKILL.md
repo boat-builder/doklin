@@ -62,6 +62,18 @@ node verify-harness/drive-kanban.mjs       # 36 steps: boots the REAL <App/> (ka
                                           # rests on: a card's BODY bytes never move when its
                                           # properties do (and a note with no frontmatter never
                                           # grows one)
+node verify-harness/drive-kanban-embed.mjs # 37 steps over the SAME harness page: a ```kanban
+                                          # fence in a note (kanban.html seeds /docs/Embed.md
+                                          # and /docs/Broken.md) rendering as a live board —
+                                          # a card composed in the embed never reaching
+                                          # ProseMirror, a drag writing one card and not the
+                                          # note, an ordinary prose edit re-serializing the note
+                                          # with the fence BYTE-IDENTICAL, the Source chip
+                                          # rewriting the config, ⌫ + undo on the block, the
+                                          # slash menu's Board item and its in-place store
+                                          # picker (writing a path relative to the note), an
+                                          # embed pointing at a folder that isn't a board, and
+                                          # a split pane's board going read-only until promoted
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, sync probes) and walks the split view —
@@ -97,6 +109,16 @@ Gotchas learned the hard way:
 - In the MD rail, with a card active, cards above it clamp toward the rail
   top and may overlap — that's the designed "cram" behavior. Deselect (click
   a non-commented spot) before clicking buttons on other cards.
+- Leaving a document whose LAST block is a leaf node (a thematic break, a
+  ```kanban embed) can log `Context "editorView" not found` — milkdown's
+  listener debounces its serialize by 200ms and fires it after the editor's
+  ctx is gone. Pre-existing (a note ending in `---` does it with every kanban
+  plugin unregistered) and harmless; drive-kanban-embed.mjs filters it by
+  name so it isn't mistaken for a defect.
+- A ProseMirror node view for a `draggable` node gets `draggable=true` on its
+  DOM, and the native HTML5 drag that starts from it swallows the pointer
+  events any inner drag needs. If a drag inside a node view "does nothing",
+  check for a `dragstart` before blaming the pointer handlers.
 - The harness runs under StrictMode: wire harness buttons with `onclick=`
   assignment, not `addEventListener` (double-mount would double-toggle).
 - split.html seeds localStorage ONCE per browser context (guarded by
@@ -119,12 +141,16 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 21 steps: gate → comment-mode html comment →
+node verify-harness/drive-web.mjs        # 29 steps: gate → comment-mode html comment →
                                          # reply → read-only md + selection comment
                                          # (CriticMarkup save) → view-role stripping →
                                          # edit-role autosave → desktop-pushed thread pins
                                          # → desktop-pushed table column widths on BOTH
                                          # reading paths (static-page colgroup, shell editor)
+                                         # → a ```kanban embed: the shell has no workspace, so
+                                         # it draws the frame, says the board isn't available,
+                                         # and an edit-role save still returns the fence byte
+                                         # for byte
 node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
                                            # dark), broken-source fallback, shell renders via
                                            # the worker-served /__web mermaid module
@@ -161,8 +187,10 @@ node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidt
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
-                                           # deliberately not a path, "." / ".." folding
-node verify-harness/store.test.mjs         # the three pure modules a datastore is built from
+                                           # deliberately not a path, "." / ".." folding, and
+                                           # relativeLinkPath (the inverse the board picker
+                                           # writes) round-tripping back through it
+node verify-harness/store.test.mjs         # the pure modules a datastore is built from
                                            # (src/store/): the frontmatter dialect (what IS a
                                            # block, the value grammar, opaque lines that survive
                                            # verbatim, canonical round-tripping bytes), the
@@ -171,7 +199,10 @@ node verify-harness/store.test.mjs         # the three pure modules a datastore 
                                            # sorted by name so a column MOVE is one line), and
                                            # the fractional index (strict ordering under a
                                            # thousand same-gap inserts, short keys when
-                                           # appending, junk ranks that never block a drag)
+                                           # appending, junk ranks that never block a drag),
+                                           # plus the ```kanban embed's config (the same dialect
+                                           # without a block around it) and its fence, which
+                                           # grows past any backtick run in the config
 ```
 
 ## Rust side
