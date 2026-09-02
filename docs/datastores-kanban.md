@@ -567,9 +567,10 @@ from this point on; cards get the properties header); `storeFile.ts`,
 row, *New Board…*, *Turn into Board*; `KanbanBoard.tsx` with drag, add card,
 columns; the `store` tab kind; companion handling on trash / rename / paste.
 Verification: `verify-harness/store.test.mjs` for the dialect, the store file,
-and rank; `verify-harness/drive-kanban.mjs`, a Chromium drive booting the real
-`<App/>` over an in-memory fs stub, walking open board → drag between columns
-→ add card → add column → open card → change a pill → type → reload;
+and rank; `verify-harness/drive-kanban.mjs`, 36 steps in Chromium booting
+the real `<App/>` over an in-memory fs stub, walking open board → drag
+between columns → add card → add column → open card → change a pill → type
+→ reload;
 `cargo test --lib store` for the fence splice and `--lib tree_tests` for the
 one-row board.
 

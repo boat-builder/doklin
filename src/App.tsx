@@ -7914,7 +7914,7 @@ export default function App() {
           </button>
         )}
       </div>
-      {activeTab && !activeMissing && (
+      {activeTab && !activeMissing && !activeIsStore && (
         <ShareMenu
           key={activeTab.path}
           docTitle={docShareTitle(activeTab)}
@@ -8194,7 +8194,7 @@ export default function App() {
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
         trailing={
-          activeTab && !activeMissing ? (
+          activeTab && !activeMissing && !activeIsStore ? (
             <>
               {/* Markdown only: an html view docks its own comment-mode
                   toggle (and PDF export) into the slot below instead —

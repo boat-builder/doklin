@@ -206,6 +206,13 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
     "the board row stays highlighted while a card is focused",
     await page.locator(".tree-row.tree-board").evaluate((el) => el.classList.contains("is-active")),
   );
+  // Splitting the block off must not read as an edit: a card that opens
+  // dirty would autosave a document nobody touched.
+  await settle(600);
+  step(
+    "opening a card does not mark it dirty",
+    (await page.locator(".tab.is-active .tab-dirty").count()) === 0,
+  );
   await page.screenshot({ path: SHOTS + "kanban-card.png" });
 }
 
@@ -263,6 +270,13 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   );
   step("the added column is still there",
     (await page.locator(".dk-col-name").allTextContents()).includes("Blocked"));
+  // A board is not a document: no MD/HTML switch, no Share, nothing that
+  // would try to publish or split a folder.
+  step(
+    "a board tab offers no document chrome",
+    (await page.locator(".view-toggle").count()) === 0 &&
+      (await page.locator(".share-wrap").count()) === 0,
+  );
   await page.screenshot({ path: SHOTS + "kanban-board-after.png" });
 }
 

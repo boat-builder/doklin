@@ -51,7 +51,7 @@ node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSIS
                                            # restores the columns on first paint, a header
                                            # rename re-keys the record instead of orphaning it,
                                            # and a read-only view resizes without ever emitting
-node verify-harness/drive-kanban.mjs       # 34 steps: boots the REAL <App/> (kanban.html seeds a
+node verify-harness/drive-kanban.mjs       # 36 steps: boots the REAL <App/> (kanban.html seeds a
                                           # /docs workspace holding a DATASTORE) and walks the
                                           # board end to end — the sidebar's one-row board with
                                           # no cards under it, the board tab, columns from
