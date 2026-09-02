@@ -505,31 +505,55 @@ Nothing in the sync engine changes; the design is shaped to it:
 
 ## Sharing and publishing (phase 3)
 
-A published note that embeds a board should show the board. The worker
-renders markdown with `marked` and knows nothing about the workspace, so the
-board's data has to **travel with the page**, the way `tcols` do:
+A published note that embeds a board shows the board. The worker renders
+markdown with `marked` and knows nothing about the workspace, so the board's
+data **travels with the page**, the way `tcols` do:
 
 - `readShareParts` collects, for each ` ```kanban ` block in the page, a
-  **snapshot** of the view: `{fence, columns: [{name, color, cards: [{title,
-  chips, page?}]}]}`; `pushPage` sends it as a `boards` field beside
-  `tcols`; the worker validates and stores it in the page record.
+  **snapshot** of the view: `{fence, name, columns: [{name, color, cards:
+  [{title, chips, page?}], more?}]}`; `pushPage` sends it as a `boards`
+  field beside `tcols`; the worker validates it record by record and stores
+  it on the page. The fences are found by scanning the file's bytes
+  (`kanbanFences`) — a push has no parsed document — and each snapshot is
+  keyed by the fence's own config text, so it keeps finding its fence when
+  the document around it moves.
 - The public page renders the snapshot **server-side as static HTML** in
-  place of the fence (a `marked` renderer override keyed on the fence's
-  position, like the table-width override) — no JavaScript needed, honest
-  in light and dark. Card titles link to their pages when the card is part
-  of the same folder share (`page` is the member page id the share registry
-  already knows), and are plain text otherwise.
+  place of the fence (a `marked` `code` renderer override, beside the
+  table-width `table` one) — no JavaScript needed, honest in light and dark,
+  and identical for a visitor with scripting off. Card titles link to their
+  pages when the card is part of the same folder share (`page` is the member
+  page id the share registry already knows), and are plain text otherwise.
+  A fence with no snapshot — an older page, or a board deleted since — keeps
+  the code block it has always been: the fence stays, nothing is rewritten.
 - The app shell (comment / edit roles) gets the same snapshot in its boot
-  payload and renders `<KanbanBoard readOnly>`. Editing a board from the web
-  is out of scope: the web editor can only write the page's own markdown.
-- A shared *card* page renders its frontmatter as a small properties table
-  above the body rather than as `marked`'s horizontal rule + paragraphs
-  (a few lines in `renderPageMarkdown`).
+  payload and draws it with `BoardSnapshot.tsx`, inside the same embed frame
+  the desktop uses. It is deliberately not `<KanbanBoard>` with a flag:
+  KanbanBoard is built on the store model and writes files, and there is
+  nothing here to write to. Editing a board from the web is out of scope —
+  the web editor can only write the page's own markdown.
+- A shared *card* page renders its properties as a small table above the
+  body. That needs the frontmatter as its own field, not just a nicer
+  render: `marked` reads a `---` block followed by text as a **setext
+  heading**, so a web edit could round-trip a card's fields into
+  `## status: Done`. The push splits the block off the markdown — exactly as
+  the editor splits it off the document — and sends the readable pairs as
+  `props`, named and coloured by the card's own board. `pullWebEdit` was
+  already putting the block back from disk, so a web edit now returns only a
+  body, which is all it ever saw.
 
-Every autosave of the note re-pushes the page already; a board change that
-doesn't touch the note needs the store's watcher to also mark the embedding
-notes for a re-push — `scheduleSharePush` keyed by the embedding note's
-path, found by the same scan that resolves embeds.
+Every autosave of the note re-pushes the page already. A board change that
+doesn't touch the note is caught twice: the store's watcher fires
+`onStoreChanged`, and the registry remembers which pages read which folders
+(`ShareEntry.boardDirs`), so the embedding notes are scheduled without
+scanning anything; and because the snapshot is fingerprinted alongside the
+markdown, reconciliation re-derives it for any page that carried a fence and
+pushes when it differs — which catches a card that arrived by sync while the
+board was closed.
+
+Worth saying plainly: sharing a note that embeds a board **publishes what
+the board says**, whether or not the board's folder is part of any share.
+That is the point of the feature, and it is the same bargain a table in the
+note makes.
 
 ## Edge cases, decided
 
@@ -561,12 +585,15 @@ path, found by the same scan that resolves embeds.
   search hit or a link is a tab like any note; the sidebar marks its board
   row.
 - **Html rendition / PDF** → the fence shows as its config text. Out of
-  scope, documented.
+  scope, documented. (A *published* page is different: it draws the board,
+  because the push sends one.)
 - **A shared page** → the shell mounts the same editor with no host behind
-  it, so the embed draws its frame, names the store, shows the config, and
-  says the board isn't available here. Drawing it for real is phase 3; what
-  matters until then is that a comment- or edit-role save re-serializes the
-  document and the fence comes back out unchanged.
+  it, and draws the board from the snapshot the page was published with
+  (read-only: there is no folder here to write to). A page published before
+  phase 3, or one whose fence names a board that was already gone, still
+  draws the frame and says the board isn't available. Either way a comment-
+  or edit-role save re-serializes the document and the fence comes back out
+  unchanged.
 
 ## Plan
 
@@ -637,18 +664,73 @@ Four things the build settled that the design left implicit:
   web — a comment- or edit-role save re-serializes the whole document, and
   the fence has to come back out unchanged.
 
-**Phase 3 — boards on published pages.**
-`boards` snapshots on `ShareParts` and the page record, the worker's
-server-side renderer and sanitizer, the shell's read-only board, frontmatter
-on shared card pages, re-push on board change. Verification:
-`share-worker/test/run.mjs` for the contract, `drive-web.mjs` for the
-static page and the shell.
+**Phase 3 — boards on published pages. Built.**
+`store/board.ts` (the pure derivation, split out of `model.ts`, plus the
+snapshot it freezes into) and `store/publish.ts` (reading a workspace to
+build one); `boards` and `props` on `ShareParts` and on the page record;
+the worker's sanitizers, its `code` renderer override and the board's page
+CSS; `BoardSnapshot.tsx` for the shell; `kanbanFences` for finding the
+fences in a file's bytes. Verification: `verify-harness/store.test.mjs`
+covers the fence scan and the snapshot (2178 checks);
+`share-worker/test/run.mjs` covers the wire contract and both renderers (47
+tests); `drive-kanban-embed.mjs` walks the reading half against the stubbed
+filesystem; `drive-web.mjs` drives the shell's board, the static page with
+JavaScript **off**, and a shared card's properties.
+
+Five things the build settled that the design left implicit:
+
+- **A snapshot is keyed by the fence's own text, not by its position.** The
+  design said "keyed on the fence's position", which breaks the moment a
+  paragraph is added above. The config text is the natural key: two embeds
+  writing the same config show the same board and share one snapshot, and an
+  embed that narrows the view (`group:`, `hide:`) writes different config
+  and gets its own. Both sides normalize line endings and trailing
+  whitespace before matching (`fenceKeyOf` here, `fenceKey` in the worker).
+- **The push splits frontmatter off the markdown.** The design asked for a
+  properties table on a shared card page; the reason it has to be a separate
+  field rather than a nicer render of the block is that `marked` reads
+  `---` / `status: Done` / `---` as a setext heading — so an edit-role save
+  used to round-trip a card's fields into `## status: Done`. Splitting the
+  block off before the push (exactly as the editor splits it off the
+  document) is what makes that impossible, and `pullWebEdit` already put the
+  block back from disk. The published markdown is the body; the block
+  travels as `props`.
+- **One derivation, in a pure module.** `boardColumns` and `cardChips` moved
+  out of `KanbanBoard.tsx` into `store/board.ts`, so the board tab, a note's
+  embed and the published snapshot all read the same columns and a published
+  board can't quietly disagree with the board it was published from. It also
+  puts the whole derivation in the fast unit suite.
+- **What a published board leaves out.** An empty column that an option
+  DECLARES still shows — it is part of the board's shape. An empty "No
+  status" column, or an empty column for a value nothing declares, doesn't:
+  those exist on the desktop so you can drag into them, and nobody drags on
+  a published page. Cards beyond 200 in a column are counted (`+12 more`),
+  never silently dropped; the same goes for 60 columns and 20 boards.
+- **Staleness is caught twice.** The store's watcher tells the app that a
+  board changed (`onStoreChanged`), and the registry remembers which pages
+  read which folders (`ShareEntry.boardDirs`), so a drag in a board tab
+  re-pushes the notes that embed it without scanning anything. That only
+  covers boards this app is watching, so the pushed snapshot is also
+  fingerprinted: reconciliation re-derives it for pages that carried a fence
+  and pushes when it differs, which catches a card that arrived by sync
+  while the board was closed.
+
+One thing publishing a note now does that is worth saying out loud: **a
+board embedded in a shared note is published with it.** The card titles and
+chips go out with the page, whether or not the board's own folder is part of
+any share. That is the feature — a note that shows a board should show it —
+but it means "share this note" is also "share what this board says", the
+same way it is for a table in the note.
 
 **Phase 4 — the second view, and properties everywhere.**
 A `table` view over the same store (one fenced language per view, as
-`kanban` is), per-view `filter` / `sort` / `show`, `hide` for columns, the
-properties header with *Add property* on any note, group-by `multi_select`
-and `date`, a card *peek* panel instead of a tab, CSV export of a store.
+`kanban` is), per-view `filter` / `sort` / `show` and a saved `hide` (the
+embed-level one shipped in phase 2), the properties header with *Add
+property* on any note, group-by `multi_select` and `date`, a card *peek*
+panel instead of a tab, CSV export of a store. Two gaps phases 1–3 leave
+behind belong here too: there is no way to add a FIELD from the app (only
+options on a field), and nothing creates or switches views, so a second
+view can only be written by hand.
 
 ## Decisions
 

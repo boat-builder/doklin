@@ -221,7 +221,14 @@ import { WEB_APP } from "./webAssets.js";
 // are checked, and the shell's read-only editor re-arms the click on the box.
 // An older worker simply refuses those saves as text changes, so a page on
 // one keeps behaving exactly as it does today.
-const WORKER_VERSION = 22;
+// 23 = boards travel with a page: PUT /api/pages/<id> accepts `boards` (a
+// snapshot of each ```kanban embed's columns and cards) and `props` (the
+// document's frontmatter, split off the markdown by the app the way its own
+// editor splits it off). The public reading view renders both server-side —
+// no JavaScript — and shell sessions get them in the boot payload. An older
+// app sends neither, which reads as "no board, no properties": the fence
+// renders as the code block it has always been.
+const WORKER_VERSION = 23;
 const WORKER_FEATURES = [
   "pages",
   "collections",
@@ -246,6 +253,9 @@ const WORKER_FEATURES = [
   "table-widths",
   // Version 22: a comment-role session may tick task-list checkboxes.
   "task-toggle",
+  // Version 23: a page carries the boards its notes embed, and its own
+  // frontmatter as properties.
+  "boards",
 ];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -678,6 +688,13 @@ async function handleApi(request, env, url, ctx) {
       // app, which sends none at all, simply publishes pages without them.
       const tcols = sanitizeTableCols(body.tcols);
       if (tcols === null) return json({ error: "tcols must be an array" }, 400);
+      // Embedded boards and the document's own frontmatter (v23). Same rule
+      // again: sent on every push, so an empty list means "none", and an
+      // older app that sends neither publishes pages without them.
+      const boards = sanitizeBoards(body.boards);
+      if (boards === null) return json({ error: "boards must be an array" }, 400);
+      const props = sanitizeProps(body.props);
+      if (props === null) return json({ error: "props must be an array" }, 400);
       // A member of a folder share carries a back-reference so its public page
       // can show a "back to the folder" crumb. Sent (or omitted) on every push,
       // like the renditions: absent means "not in a folder share".
@@ -731,6 +748,8 @@ async function handleApi(request, env, url, ctx) {
           ...(markdown !== null ? { markdown } : {}),
           ...(html !== null ? { html } : {}),
           ...(tcols.length > 0 ? { tcols } : {}),
+          ...(boards.length > 0 ? { boards } : {}),
+          ...(props.length > 0 ? { props } : {}),
           ...(htmlStale ? { htmlStale: true } : {}),
           ...(collection ? { collection } : {}),
           ...(access ? { access } : {}),
@@ -3013,6 +3032,11 @@ function appShellPage(id, data, session, url, cacheControl) {
     // hands them straight to the editor, which matches them to tables with
     // the same code the desktop used to record them.
     tcols: view === "md" && hasMd ? sanitizeTableCols(data.tcols) : [],
+    // Boards and properties belong to the markdown too, so they ride with
+    // it. The shell renders both read-only: the web editor writes the page's
+    // own markdown and nothing else, and neither of these IS the markdown.
+    boards: view === "md" && hasMd ? sanitizeBoards(data.boards) : [],
+    props: view === "md" && hasMd ? sanitizeProps(data.props) : [],
     crumb,
     host: url.hostname,
   };
@@ -3177,19 +3201,231 @@ function tableColsRenderer(records) {
   };
 }
 
-// Render a document's markdown, with column widths applied when the page has
-// any. Without records this is exactly the pre-18 call.
-function renderPageMarkdown(md, records) {
-  if (!records || records.length === 0) {
+// Render a document's markdown, with column widths applied and embedded
+// boards drawn when the page carries either. Without both this is exactly
+// the pre-18 call.
+function renderPageMarkdown(md, records, boards) {
+  const hasCols = records && records.length > 0;
+  const hasBoards = boards && boards.length > 0;
+  if (!hasCols && !hasBoards) {
     return marked.parse(md, { gfm: true, breaks: false, async: false });
   }
   const instance = new Marked({
     gfm: true,
     breaks: false,
     async: false,
-    renderer: tableColsRenderer(records),
+    renderer: {
+      ...(hasCols ? tableColsRenderer(records) : {}),
+      ...(hasBoards ? boardsRenderer(boards) : {}),
+    },
   });
   return instance.parse(md);
+}
+
+/* ---------- Boards and properties (version 23) ----------
+
+   A note can embed a datastore's board with a ```kanban fence. The fence's
+   body only NAMES the board (`store: ./Projects`) — the board itself is a
+   folder of card files back in the owner's workspace, which this worker has
+   never seen and never will. So the app sends a picture of it: for each
+   distinct fence, the columns, their colours, and each card's title and
+   chips (src/store/publish.ts). `boardsRenderer` at the end of this section
+   swaps that picture in for the fence; `renderPageMarkdown` hands it to
+   marked beside the table-width override.
+
+   It renders as STATIC HTML. A board on a shared page is something to read,
+   not something to drag — no script, no hydration, correct in light and dark
+   the moment the page paints, and identical for a visitor with JavaScript
+   off. The only interactive thing on it is a card title that happens to be a
+   link, which it is exactly when the card is a page of the same folder share.
+
+   `props` arrives the same way: a document's frontmatter, split off its
+   markdown by the app before the push. That split is why it has to travel —
+   the page's markdown no longer contains it — and it is also the point: a
+   raw `---` block handed to `marked` becomes a setext heading, so a web edit
+   used to be able to eat a card's fields by round-tripping through it. */
+
+const BOARD_COLORS = new Set([
+  "grey",
+  "brown",
+  "orange",
+  "yellow",
+  "green",
+  "blue",
+  "purple",
+  "pink",
+  "red",
+]);
+const MAX_BOARDS = 20;
+const MAX_BOARD_COLUMNS = 60;
+const MAX_BOARD_CARDS = 200;
+const MAX_BOARD_CHIPS = 12;
+const MAX_BOARD_TEXT = 200;
+const MAX_PROPS = 40;
+const MAX_PROP_VALUES = 32;
+
+const boardText = (v) =>
+  typeof v === "string" && v.length > 0 ? v.slice(0, MAX_BOARD_TEXT) : null;
+
+const boardColor = (v) => (typeof v === "string" && BOARD_COLORS.has(v) ? v : null);
+
+// A fence and its snapshot are matched by the fence's own text. Both sides
+// normalize the same way so a stray trailing newline can't lose a board.
+const fenceKey = (v) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+
+// Shape-check pushed boards — same contract as sanitizeThreads and
+// sanitizeTableCols: junk reads as "no boards" rather than crashing a render.
+// Null means "not even an array" (the caller's 400).
+function sanitizeBoards(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const b of raw) {
+    if (!b || typeof b !== "object" || typeof b.fence !== "string") continue;
+    const fence = fenceKey(b.fence);
+    if (seen.has(fence)) continue;
+    seen.add(fence);
+    const columns = [];
+    for (const c of Array.isArray(b.columns) ? b.columns : []) {
+      if (!c || typeof c !== "object") continue;
+      const name = boardText(c.name);
+      if (name === null) continue;
+      const cards = [];
+      for (const card of Array.isArray(c.cards) ? c.cards : []) {
+        if (!card || typeof card !== "object") continue;
+        const title = boardText(card.title);
+        if (title === null) continue;
+        const chips = [];
+        for (const chip of Array.isArray(card.chips) ? card.chips : []) {
+          if (!chip || typeof chip !== "object") continue;
+          const text = boardText(chip.text);
+          if (text === null) continue;
+          const color = boardColor(chip.color);
+          chips.push({ text, ...(color ? { color } : {}) });
+          if (chips.length >= MAX_BOARD_CHIPS) break;
+        }
+        const page = typeof card.page === "string" && validId(card.page) ? card.page : null;
+        cards.push({
+          title,
+          ...(chips.length > 0 ? { chips } : {}),
+          ...(page ? { page } : {}),
+        });
+        if (cards.length >= MAX_BOARD_CARDS) break;
+      }
+      const more = Number.isFinite(c.more) && c.more > 0 ? Math.floor(c.more) : 0;
+      const color = boardColor(c.color);
+      columns.push({
+        name,
+        ...(color ? { color } : {}),
+        cards,
+        ...(more > 0 ? { more } : {}),
+      });
+      if (columns.length >= MAX_BOARD_COLUMNS) break;
+    }
+    out.push({ fence, name: boardText(b.name) ?? "", columns });
+    if (out.length >= MAX_BOARDS) break;
+  }
+  return out;
+}
+
+// The document's own frontmatter, as rows of coloured values.
+function sanitizeProps(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const p of raw) {
+    if (!p || typeof p !== "object") continue;
+    const name = boardText(p.name);
+    if (name === null) continue;
+    const values = [];
+    for (const v of Array.isArray(p.values) ? p.values : []) {
+      if (!v || typeof v !== "object") continue;
+      const text = boardText(v.text);
+      if (text === null) continue;
+      const color = boardColor(v.color);
+      values.push({ text, ...(color ? { color } : {}) });
+      if (values.length >= MAX_PROP_VALUES) break;
+    }
+    if (values.length === 0) continue;
+    out.push({ name, values });
+    if (out.length >= MAX_PROPS) break;
+  }
+  return out;
+}
+
+// Every chip names a palette colour, grey when it has none — the same
+// `dk-color-${color ?? "grey"}` the app writes, so the two markups match.
+const chipHtml = (chip) =>
+  `<span class="dk-chip dk-color-${chip.color ?? "grey"}">${escapeHtml(chip.text)}</span>`;
+
+// One board, as the page shows it. The markup mirrors src/BoardSnapshot.tsx
+// (the shell's React version of exactly this) class for class, so a reader
+// who arrives with a code and one who arrives without see the same board.
+function boardHtml(board) {
+  const total = board.columns.reduce((n, c) => n + c.cards.length + (c.more ?? 0), 0);
+  const cols = board.columns
+    .map((col) => {
+      const cards = col.cards
+        .map((card) => {
+          const title = escapeHtml(card.title);
+          const face = card.page
+            ? `<a class="dk-card-title" href="/${card.page}">${title}</a>`
+            : `<span class="dk-card-title">${title}</span>`;
+          const chips = card.chips
+            ? `<div class="dk-card-chips">${card.chips.map(chipHtml).join("")}</div>`
+            : "";
+          return `<li class="dk-card">${face}${chips}</li>`;
+        })
+        .join("");
+      // A div, not a <p>: `.doc p` is the document's paragraph styling.
+      const more = col.more ? `<div class="dk-col-more">+${col.more} more</div>` : "";
+      return `<section class="dk-col"><header class="dk-col-head"><span class="dk-col-dot dk-color-${
+        col.color ?? "grey"
+      }"></span><span class="dk-col-name">${escapeHtml(
+        col.name,
+      )}</span><span class="dk-col-count">${col.cards.length + (col.more ?? 0)}</span></header><ul class="dk-col-list">${cards}</ul>${more}</section>`;
+    })
+    .join("");
+  const name = board.name ? `<span class="dk-board-name">${escapeHtml(board.name)}</span>` : "";
+  return `<div class="dk-board"><div class="dk-board-head"><span class="dk-board-kind">Board</span>${name}<span class="dk-board-sub">${total} ${
+    total === 1 ? "card" : "cards"
+  }</span></div><div class="dk-board-cols">${cols}</div></div>`;
+}
+
+/** A document's properties, above its body. Empty rows never reach here. */
+function propsHtml(props) {
+  if (!props || props.length === 0) return "";
+  const rows = props
+    .map(
+      (p) =>
+        `<div class="dk-prop-row"><div class="dk-prop-label">${escapeHtml(
+          p.name,
+        )}</div><div class="dk-prop-value">${p.values.map(chipHtml).join("")}</div></div>`,
+    )
+    .join("");
+  return `<div class="dk-props">${rows}</div>`;
+}
+
+// The renderer override itself: a ```kanban fence becomes its board. A
+// fence with no snapshot — an older page, or a board deleted since — keeps
+// marked's own code block: the fence stays, nothing is rewritten, which is
+// the same posture the app takes.
+//
+// Plain object, not a Renderer subclass, for the reason tableColsRenderer
+// gives: marked enumerates the overrides it is handed.
+function boardsRenderer(boards) {
+  const byFence = new Map(boards.map((b) => [b.fence, b]));
+  const base = new Renderer();
+  return {
+    code(token) {
+      base.parser = this.parser;
+      base.options = this.options;
+      if (String(token.lang ?? "").trim() !== "kanban") return base.code(token);
+      const board = byFence.get(fenceKey(token.text));
+      return board ? boardHtml(board) : base.code(token);
+    },
+  };
 }
 
 /* ---------- Public pages ---------- */
@@ -3386,7 +3622,9 @@ ${pill("html") ? `<div class="page-top">${pill("html")}</div>` : ""}
     });
   }
 
-  const body = renderPageMarkdown(clean, sanitizeTableCols(data.tcols));
+  const body =
+    propsHtml(sanitizeProps(data.props)) +
+    renderPageMarkdown(clean, sanitizeTableCols(data.tcols), sanitizeBoards(data.boards));
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -4340,6 +4578,130 @@ main.doc {
 .doc table.dk-cols { display: table; table-layout: fixed; margin: 0; }
 .doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
 .doc th { background: var(--surface); font-weight: 600; }
+/* ---- Boards and properties (version 23) ----
+   The app's own board (src/App.css) rendered for a reader: same class names,
+   same named palette, no drag affordances and no scroll traps. Colours are
+   one hue/saturation pair per name with the ink and wash swapped for dark,
+   exactly as the app does it, so "green" means the same green on both. */
+.dk-color-grey { --dk-h: 220; --dk-s: 6%; }
+.dk-color-brown { --dk-h: 25; --dk-s: 35%; }
+.dk-color-orange { --dk-h: 32; --dk-s: 80%; }
+.dk-color-yellow { --dk-h: 45; --dk-s: 80%; }
+.dk-color-green { --dk-h: 145; --dk-s: 50%; }
+.dk-color-blue { --dk-h: 214; --dk-s: 72%; }
+.dk-color-purple { --dk-h: 268; --dk-s: 50%; }
+.dk-color-pink { --dk-h: 330; --dk-s: 62%; }
+.dk-color-red { --dk-h: 2; --dk-s: 68%; }
+:root { --dk-ink: 30%; --dk-wash: 0.15; }
+@media (prefers-color-scheme: dark) {
+  :root { --dk-ink: 76%; --dk-wash: 0.24; }
+}
+.dk-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50% / var(--dk-wash));
+  color: hsl(var(--dk-h, 220) var(--dk-s, 6%) var(--dk-ink));
+}
+/* The document's own frontmatter, above the body and ruled off from it. */
+.doc .dk-props {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.doc .dk-prop-row { display: flex; align-items: baseline; gap: 8px; min-height: 24px; }
+.doc .dk-prop-label {
+  flex: 0 0 130px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc .dk-prop-value { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+/* A board embedded in the document. It sits in the text flow (it is a block
+   of the document, not a pane), and scrolls sideways within itself — the
+   page itself never scrolls sideways. */
+.doc .dk-board {
+  margin: 16px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.doc .dk-board-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.doc .dk-board-kind { text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.doc .dk-board-name { color: var(--text); font-weight: 600; font-size: 13px; }
+.doc .dk-board-sub { margin-left: auto; }
+.doc .dk-board-cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 0 12px 12px;
+  overflow-x: auto;
+}
+.doc .dk-col {
+  flex: 0 0 220px;
+  border-radius: 8px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+.doc .dk-col-head { display: flex; align-items: center; gap: 6px; padding: 4px 4px 8px; }
+.doc .dk-col-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50%);
+}
+.doc .dk-col-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc .dk-col-count { font-size: 11px; color: var(--muted); margin-left: auto; }
+.doc .dk-col-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc .dk-col-list li { margin: 0; }
+.doc .dk-card {
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.09), 0 0 0 1px var(--border);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc .dk-card-title { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.doc a.dk-card-title { color: var(--link); text-decoration: none; }
+.doc a.dk-card-title:hover { text-decoration: underline; }
+.doc .dk-card-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.doc .dk-col-more { margin: 6px 4px 2px; font-size: 11px; color: var(--muted); }
 .doc input[type="checkbox"] { margin-right: 6px; }
 .doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
 .shell { text-align: center; padding-top: 20vh; }

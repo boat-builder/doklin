@@ -544,6 +544,23 @@ for (const [label, code, role] of [
    an edit-role visitor's autosave re-serializes the whole document. */
 {
   const EMBED_MD = "# Embed Web\n\n```kanban\nstore: ./Projects\n```\n\nAfter.\n";
+  const BOARD = {
+    fence: "store: ./Projects",
+    name: "Projects",
+    columns: [
+      { name: "Backlog", color: "grey", cards: [{ title: "Rename the thing" }] },
+      {
+        name: "In progress",
+        color: "blue",
+        cards: [
+          { title: "Ship the boat", chips: [{ text: "Ada", color: "purple" }], page: "card-web" },
+          { title: "Paint it" },
+        ],
+        more: 12,
+      },
+      { name: "Done", color: "green", cards: [] },
+    ],
+  };
   await api("/api/pages/embed-web", undefined, "DELETE");
   await api("/api/pages/embed-web", { title: "Embed Web", markdown: EMBED_MD });
   await api(
@@ -577,6 +594,110 @@ for (const [label, code, role] of [
       EMBED_MD.replace("After.", "After. Edited."),
   );
   await page.context().close();
+
+  /* ---- phase 3: the page carries the board, so the shell draws it ---- */
+  await api("/api/pages/embed-web", {
+    title: "Embed Web",
+    markdown: EMBED_MD,
+    boards: [BOARD],
+  });
+  const withBoard = await (
+    await browser.newContext({ viewport: { width: 1200, height: 860 } })
+  ).newPage();
+  withBoard.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+  await withBoard.goto(`${BASE}/embed-web`);
+  await poll(async () => withBoard.locator("#gate-code").isVisible());
+  await withBoard.fill("#gate-code", "embed-edit-code");
+  await withBoard.press("#gate-code", "Enter");
+  await poll(async () => (await withBoard.locator(".dk-board.is-snapshot").count()) === 1);
+  step("the shell draws the board the page was published with", true);
+  step(
+    "columns keep their names, colours and counts",
+    (await withBoard.locator(".dk-board.is-snapshot .dk-col-name").allInnerTexts()).join("|") ===
+      "Backlog|In progress|Done" &&
+      (await withBoard
+        .locator(".dk-board.is-snapshot .dk-col")
+        .nth(1)
+        .locator(".dk-col-count")
+        .innerText()) === "14",
+  );
+  step(
+    "a card that is a page of the same share links to it; the rest are titles",
+    (await withBoard.locator('.dk-board.is-snapshot a.dk-card-title[href="/card-web"]').count()) ===
+      1 &&
+      (await withBoard.locator(".dk-board.is-snapshot div.dk-card-title").allInnerTexts()).join(
+        "|",
+      ) === "Rename the thing|Paint it",
+  );
+  step(
+    "chips and the truncation count come through",
+    (await withBoard.locator(".dk-board.is-snapshot .dk-chip").innerText()) === "Ada" &&
+      (await withBoard.locator(".dk-board.is-snapshot .dk-col-more").innerText()) === "+12 more",
+  );
+  await withBoard.screenshot({ path: SHOTS + "board-shell.png", fullPage: true });
+  // The board is a picture, not the document: an edit-role save still returns
+  // the fence exactly as written.
+  await withBoard.locator(".ProseMirror p", { hasText: "After." }).first().click();
+  await withBoard.keyboard.press("End");
+  await withBoard.keyboard.type(" Again.");
+  await poll(async () =>
+    (await api("/api/pages/embed-web/content")).json.markdown.includes("Again."),
+  );
+  step(
+    "typing beside a drawn board still round-trips the fence",
+    (await api("/api/pages/embed-web/content")).json.markdown ===
+      EMBED_MD.replace("After.", "After. Again."),
+  );
+  await withBoard.context().close();
+
+  /* ---- the static reading view: no shell, no JavaScript ---- */
+  await api("/api/pages/board-web", undefined, "DELETE");
+  await api("/api/pages/board-web", {
+    title: "Board Web",
+    markdown: EMBED_MD,
+    boards: [BOARD],
+  });
+  const staticCtx = await browser.newContext({
+    viewport: { width: 1100, height: 900 },
+    javaScriptEnabled: false,
+  });
+  const staticPage = await staticCtx.newPage();
+  await staticPage.goto(`${BASE}/board-web`);
+  step(
+    "the public page renders the board server-side, with scripting off",
+    (await staticPage.locator(".doc .dk-board").count()) === 1 &&
+      (await staticPage.locator(".doc code.language-kanban").count()) === 0,
+  );
+  step(
+    "and it says the same things the shell's board says",
+    (await staticPage.locator(".doc .dk-col-name").allInnerTexts()).join("|") ===
+      "Backlog|In progress|Done" &&
+      (await staticPage.locator('.doc a.dk-card-title[href="/card-web"]').count()) === 1 &&
+      (await staticPage.locator(".doc .dk-chip").innerText()) === "Ada",
+  );
+  await staticPage.screenshot({ path: SHOTS + "board-public.png", fullPage: true });
+
+  /* ---- a shared card page shows its properties ---- */
+  await api("/api/pages/card-web", undefined, "DELETE");
+  await api("/api/pages/card-web", {
+    title: "Ship the boat",
+    markdown: "The hull is done.\n",
+    props: [
+      { name: "Status", values: [{ text: "In progress", color: "blue" }] },
+      { name: "Owner", values: [{ text: "Ada", color: "purple" }, { text: "Grace" }] },
+    ],
+  });
+  await staticPage.goto(`${BASE}/card-web`);
+  step(
+    "a card page renders its frontmatter as properties, not as a heading",
+    (await staticPage.locator(".doc .dk-props .dk-prop-label").allInnerTexts()).join("|") ===
+      "Status|Owner" &&
+      (await staticPage.locator(".doc .dk-props .dk-chip").allInnerTexts()).join("|") ===
+        "In progress|Ada|Grace" &&
+      (await staticPage.locator(".doc h2").count()) === 0,
+  );
+  await staticPage.screenshot({ path: SHOTS + "card-public.png", fullPage: true });
+  await staticCtx.close();
 }
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} steps passed`);

@@ -1864,6 +1864,246 @@ await test("web edit: only content changes outdate the rendition", async () => {
   await call("/api/pages/dual-page", { method: "DELETE", token: OWNER });
 });
 
+/* ---------- Boards and properties (version 23) ----------
+
+   A ```kanban fence names a board that lives in the owner's workspace; the
+   push sends a picture of it alongside the markdown, keyed by the fence's
+   own text. These check the three things that can go wrong: the picture
+   doesn't reach the page, it reaches the page but doesn't find its fence, or
+   something in it is junk and takes the render down with it.               */
+
+const BOARD_NOTE = `# Planning
+
+The quarter, as a board:
+
+\`\`\`kanban
+store: ./Projects
+\`\`\`
+
+Everything after the board is ordinary prose.
+`;
+
+const PROJECTS_BOARD = {
+  fence: "store: ./Projects",
+  name: "Projects",
+  columns: [
+    { name: "Backlog", color: "grey", cards: [{ title: "Rename the thing" }] },
+    {
+      name: "In progress",
+      color: "blue",
+      cards: [
+        { title: "Ship the boat", chips: [{ text: "Ada", color: "green" }], page: "card-ship" },
+        { title: "Paint it" },
+      ],
+      more: 12,
+    },
+    { name: "Done", color: "green", cards: [] },
+  ],
+};
+
+await test("boards: a published page draws the board its note embeds", async () => {
+  const made = await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Planning", markdown: BOARD_NOTE, boards: [PROJECTS_BOARD] },
+  });
+  assert.equal(made.status, 200);
+
+  const page = await call("/board-note");
+  assert.equal(page.status, 200);
+  // The fence became a board, not a code block.
+  assert.ok(page.text.includes('<div class="dk-board">'), "the board renders");
+  assert.ok(!page.text.includes("language-kanban"), "and the fence is gone");
+  assert.ok(!page.text.includes("store: ./Projects"), "config text never shows");
+  // Columns keep their names, their colours and their counts — `more` counts
+  // toward the count, because it describes cards that exist.
+  assert.ok(page.text.includes('<span class="dk-col-dot dk-color-blue"></span>'));
+  assert.ok(page.text.includes('<span class="dk-col-name">In progress</span>'));
+  assert.ok(page.text.includes('<span class="dk-col-count">14</span>'));
+  assert.ok(page.text.includes('<div class="dk-col-more">+12 more</div>'), "what was cut is counted");
+  assert.ok(page.text.includes('<span class="dk-col-name">Done</span>'), "an empty column still shows");
+  // A card that is a page of the same folder share links to it; one that
+  // isn't is a title, not a dead link.
+  assert.ok(page.text.includes('<a class="dk-card-title" href="/card-ship">Ship the boat</a>'));
+  assert.ok(page.text.includes('<span class="dk-card-title">Paint it</span>'));
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-green">Ada</span>'));
+  // 2 shown + 12 more + 1 + 0.
+  assert.ok(page.text.includes('<span class="dk-board-sub">15 cards</span>'));
+  // The document around it is untouched, and the stored markdown still has
+  // its fence — a board is presentation, the fence is content.
+  assert.ok(page.text.includes("Everything after the board is ordinary prose."));
+  assert.equal(
+    (await call("/api/pages/board-note/content", { token: OWNER })).json.markdown,
+    BOARD_NOTE,
+  );
+});
+
+await test("boards: a fence with no snapshot stays the code block it was", async () => {
+  // An older app pushes no boards at all.
+  await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Planning", markdown: BOARD_NOTE },
+  });
+  let page = await call("/board-note");
+  assert.ok(page.text.includes("language-kanban"), "the fence renders as code");
+  assert.ok(!page.text.includes('class="dk-board"'));
+
+  // A snapshot whose fence text names a different embed doesn't claim this one.
+  await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Planning",
+      markdown: BOARD_NOTE,
+      boards: [{ ...PROJECTS_BOARD, fence: "store: ./Something-else" }],
+    },
+  });
+  page = await call("/board-note");
+  assert.ok(page.text.includes("language-kanban"), "a board is matched by fence, not by position");
+
+  // Trailing whitespace on either side is not a difference.
+  await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Planning",
+      markdown: BOARD_NOTE,
+      boards: [{ ...PROJECTS_BOARD, fence: "store: ./Projects\n\n" }],
+    },
+  });
+  assert.ok((await call("/board-note")).text.includes('class="dk-board"'));
+
+  // A fence in a language we don't claim is left completely alone.
+  const other = "```js\nstore: ./Projects\n```\n";
+  await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: { title: "Planning", markdown: other, boards: [PROJECTS_BOARD] },
+  });
+  const js = await call("/board-note");
+  assert.ok(js.text.includes("language-js"));
+  assert.ok(!js.text.includes('class="dk-board"'));
+});
+
+await test("boards: junk degrades quietly, a wrong type is a client error", async () => {
+  await call("/api/pages/board-note", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Planning",
+      markdown: BOARD_NOTE,
+      boards: [
+        null,
+        { name: "no fence" },
+        {
+          fence: "store: ./Projects",
+          name: "Projects",
+          columns: [
+            null,
+            { cards: [] },
+            {
+              name: "Backlog",
+              color: "chartreuse",
+              cards: [{}, { title: "Kept", chips: [{ text: "x", color: "../evil" }], page: "no/slash" }],
+            },
+          ],
+        },
+        // A second record for a fence already claimed: the first wins.
+        { fence: "store: ./Projects", name: "Impostor", columns: [] },
+      ],
+    },
+  });
+  const page = await call("/board-note");
+  assert.ok(page.text.includes('<span class="dk-col-name">Backlog</span>'), "the readable column survives");
+  assert.ok(page.text.includes('<span class="dk-card-title">Kept</span>'), "and its readable card");
+  assert.ok(page.text.includes('dk-col-dot dk-color-grey'), "an unknown colour falls back to grey");
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-grey">x</span>'));
+  assert.ok(!page.text.includes("evil"), "a colour is a palette name or nothing");
+  assert.ok(!page.text.includes("no/slash"), "a page reference is a page id or nothing");
+  assert.ok(!page.text.includes("Impostor"), "the first record for a fence wins");
+
+  for (const junk of [{ boards: "a board" }, { props: 7 }]) {
+    const bad = await call("/api/pages/board-note", {
+      method: "PUT",
+      token: OWNER,
+      body: { title: "Planning", markdown: BOARD_NOTE, ...junk },
+    });
+    assert.equal(bad.status, 400);
+  }
+});
+
+await test("boards: a card page shows its properties above its body", async () => {
+  // The app splits a card's frontmatter off the markdown before pushing, so
+  // what arrives is the body plus the properties — never a raw `---` block,
+  // which marked would turn into a heading.
+  await call("/api/pages/card-ship", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Ship the boat",
+      markdown: "The hull is done.\n",
+      props: [
+        { name: "Status", values: [{ text: "In progress", color: "blue" }] },
+        { name: "Owner", values: [{ text: "Ada" }, { text: "Grace" }] },
+        { name: "Nothing", values: [] },
+        { name: "" },
+      ],
+    },
+  });
+  const page = await call("/card-ship");
+  assert.ok(page.text.includes('<div class="dk-props">'));
+  assert.ok(page.text.includes('<div class="dk-prop-label">Status</div>'));
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-blue">In progress</span>'));
+  assert.ok(
+    page.text.includes('<span class="dk-chip dk-color-grey">Ada</span>'),
+    "an uncoloured value falls back to grey",
+  );
+  assert.ok(page.text.includes("Grace"), "a multi-valued property lists them all");
+  assert.ok(!page.text.includes("Nothing"), "a property with no values is not a row");
+  assert.ok(page.text.includes("The hull is done."));
+  // The properties sit ABOVE the body — and inside the document, not in the
+  // page chrome. (The body text also appears in the head's description meta,
+  // which is why this anchors on the rendered paragraph.)
+  assert.ok(
+    page.text.indexOf('<main class="doc">') <
+      page.text.indexOf('<div class="dk-props">') &&
+      page.text.indexOf('<div class="dk-props">') <
+        page.text.indexOf("<p>The hull is done.</p>"),
+  );
+
+  await call("/api/pages/card-ship", { method: "DELETE", token: OWNER });
+});
+
+await test("boards: shell sessions get the boards and props in their boot payload", async () => {
+  await call("/api/pages/team-page", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Team page",
+      markdown: (await call("/api/pages/team-page/content", { token: OWNER })).json.markdown,
+      boards: [PROJECTS_BOARD],
+      props: [{ name: "Status", values: [{ text: "Done", color: "green" }] }],
+    },
+  });
+  const boot = bootOf((await call("/team-page", { headers: { cookie: commentCookie } })).text);
+  assert.equal(boot.boards.length, 1);
+  assert.equal(boot.boards[0].fence, "store: ./Projects");
+  assert.equal(boot.boards[0].columns[1].cards[0].page, "card-ship");
+  assert.deepEqual(boot.props, [{ name: "Status", values: [{ text: "Done", color: "green" }] }]);
+
+  // Put the page back the way the rest of the suite expects it.
+  await call("/api/pages/team-page", {
+    method: "PUT",
+    token: OWNER,
+    body: {
+      title: "Team page",
+      markdown: (await call("/api/pages/team-page/content", { token: OWNER })).json.markdown,
+    },
+  });
+  await call("/api/pages/board-note", { method: "DELETE", token: OWNER });
+});
+
 /* ---------- Comment threads on html renditions (version 10) ---------- */
 
 await test("html threads: session pool round-trip with provenance stamping", async () => {

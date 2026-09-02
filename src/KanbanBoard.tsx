@@ -11,28 +11,21 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "./store/useStore";
-import { columnCards, orderedOptions, cardValue, type Card } from "./store/model";
+import {
+  boardColumns,
+  cardChips,
+  chipFieldsOf,
+  orderedOptions,
+  type BoardColumn,
+  type Card,
+} from "./store/board";
 import {
   kanbanView,
   fieldOf,
   OPTION_COLORS,
-  type Option,
   type OptionColor,
   type StoreDef,
 } from "./store/storeFile";
-import { propText } from "./store/frontmatter";
-
-/** A column: a declared option, the empty value, or a value nothing declares. */
-type Column = {
-  /** The group-by value this column holds. "" is the "No status" column. */
-  key: string;
-  label: string;
-  color: OptionColor | null;
-  option: Option | null;
-  /** False for the empty column and for values no option declares. */
-  declared: boolean;
-  cards: Card[];
-};
 
 type DropTarget = { colKey: string; index: number } | null;
 
@@ -127,42 +120,18 @@ export default function KanbanBoard({
   );
   const [renaming, setRenaming] = useState<string | null>(null);
 
-  const columns: Column[] = useMemo(() => {
-    if (!def || !groupBy) return [];
-    const declared = orderedOptions(def, groupBy);
-    const known = new Set(declared.map((o) => o.name));
-    const stray = new Set<string>();
-    for (const c of cards) {
-      const v = cardValue(c, groupBy);
-      if (v !== NO_VALUE && !known.has(v)) stray.add(v);
-    }
-    const build = (
-      key: string,
-      label: string,
-      option: Option | null,
-      isDeclared: boolean,
-    ): Column => ({
-      key,
-      label,
-      color: option?.color ?? null,
-      option,
-      declared: isDeclared,
-      cards: columnCards(cards, groupBy, key),
-    });
-    const hidden = new Set(hide ?? []);
-    return [
-      build(NO_VALUE, `No ${(groupField?.name ?? groupBy).toLowerCase()}`, null, false),
-      ...declared.map((o) => build(o.name, o.name, o, true)),
-      ...[...stray].sort().map((v) => build(v, v, null, false)),
-      // `hide` leaves a column out of THIS view; the option stays declared and
-      // its cards stay where they are. Nothing is filtered out of the store.
-    ].filter((c) => !hidden.has(c.key));
-  }, [def, groupBy, groupField, cards, hide]);
+  // The columns come from the shared derivation (store/board.ts), which is
+  // also what a share push snapshots — a published board and this one can't
+  // disagree about what it shows.
+  const columns: BoardColumn[] = useMemo(
+    () => (def && groupBy ? boardColumns(def, cards, groupBy, hide) : []),
+    [def, groupBy, cards, hide],
+  );
 
   // The chips a card face shows: every declared field except the one the
   // board groups by (the column already says it) and the position key.
   const chipFields = useMemo(
-    () => (def ? def.fields.filter((f) => f.id !== groupBy) : []),
+    () => (def ? chipFieldsOf(def, groupBy) : []),
     [def, groupBy],
   );
 
@@ -300,7 +269,7 @@ export default function KanbanBoard({
     setDrag(next);
   };
 
-  const startColumnDrag = (e: React.PointerEvent<HTMLElement>, col: Column) => {
+  const startColumnDrag = (e: React.PointerEvent<HTMLElement>, col: BoardColumn) => {
     if (readOnly || e.button !== 0 || !col.declared) return;
     const next: ColumnDrag = {
       kind: "column",
@@ -319,7 +288,7 @@ export default function KanbanBoard({
 
   /* ---------- composers ---------- */
 
-  const addCard = async (col: Column, title: string) => {
+  const addCard = async (col: BoardColumn, title: string) => {
     if (!model || !groupBy) return;
     const clean = title.trim();
     if (!clean) return;
@@ -623,7 +592,7 @@ export default function KanbanBoard({
 }
 
 /** A column's cards minus the one currently in flight. */
-function visibleCards(col: Column, drag: Drag | null): Card[] {
+function visibleCards(col: BoardColumn, drag: Drag | null): Card[] {
   return drag?.kind === "card" && drag.started
     ? col.cards.filter((c) => c.path !== drag.path)
     : col.cards;
@@ -638,21 +607,7 @@ function Chips({
   def: StoreDef;
   fields: StoreDef["fields"];
 }) {
-  const chips: { key: string; text: string; color: OptionColor | null }[] = [];
-  for (const f of fields) {
-    const raw = card.props[f.id];
-    const text = propText(raw);
-    if (text === "") continue;
-    if (f.type === "multi_select" && Array.isArray(raw)) {
-      for (const v of raw) {
-        const opt = def.options.find((o) => o.field === f.id && o.name === v);
-        chips.push({ key: `${f.id}:${v}`, text: v, color: opt?.color ?? null });
-      }
-      continue;
-    }
-    const opt = def.options.find((o) => o.field === f.id && o.name === text);
-    chips.push({ key: f.id, text, color: opt?.color ?? null });
-  }
+  const chips = cardChips(card, def, fields);
   if (chips.length === 0) return null;
   return (
     <div className="dk-card-chips">

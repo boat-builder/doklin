@@ -62,7 +62,7 @@ node verify-harness/drive-kanban.mjs       # 36 steps: boots the REAL <App/> (ka
                                           # rests on: a card's BODY bytes never move when its
                                           # properties do (and a note with no frontmatter never
                                           # grows one)
-node verify-harness/drive-kanban-embed.mjs # 37 steps over the SAME harness page: a ```kanban
+node verify-harness/drive-kanban-embed.mjs # 43 steps over the SAME harness page: a ```kanban
                                           # fence in a note (kanban.html seeds /docs/Embed.md
                                           # and /docs/Broken.md) rendering as a live board —
                                           # a card composed in the embed never reaching
@@ -73,7 +73,11 @@ node verify-harness/drive-kanban-embed.mjs # 37 steps over the SAME harness page
                                           # slash menu's Board item and its in-place store
                                           # picker (writing a path relative to the note), an
                                           # embed pointing at a folder that isn't a board, and
-                                          # a split pane's board going read-only until promoted
+                                          # a split pane's board going read-only until promoted.
+                                          # The last block drives what a SHARE would publish
+                                          # (src/store/publish.ts) straight against the stubbed
+                                          # fs — the one seam store.test.mjs can't reach, since
+                                          # it goes through the backend's read_store
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, sync probes) and walks the split view —
@@ -115,6 +119,13 @@ Gotchas learned the hard way:
   ctx is gone. Pre-existing (a note ending in `---` does it with every kanban
   plugin unregistered) and harmless; drive-kanban-embed.mjs filters it by
   name so it isn't mistaken for a defect.
+- A published board is drawn TWICE from one snapshot: as HTML strings in
+  `share-worker/src/index.js` (the static reading view) and as React in
+  `src/BoardSnapshot.tsx` (the app shell). Same class names, same palette,
+  two stylesheets — change one and change the other, and check both in
+  `drive-web.mjs`. Inside either, use a `<div>` rather than a `<p>` for
+  board chrome: `.doc p` and the editor's own paragraph styling will claim
+  a paragraph.
 - A ProseMirror node view for a `draggable` node gets `draggable=true` on its
   DOM, and the native HTML5 drag that starts from it swallows the pointer
   events any inner drag needs. If a drag inside a node view "does nothing",
@@ -141,16 +152,20 @@ the drive exercises the real Milkdown editor and the real rail end to end:
 node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
                                          # (rerun after ANY src/ editor change)
 node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 29 steps: gate → comment-mode html comment →
+node verify-harness/drive-web.mjs        # 37 steps: gate → comment-mode html comment →
                                          # reply → read-only md + selection comment
                                          # (CriticMarkup save) → view-role stripping →
                                          # edit-role autosave → desktop-pushed thread pins
                                          # → desktop-pushed table column widths on BOTH
                                          # reading paths (static-page colgroup, shell editor)
-                                         # → a ```kanban embed: the shell has no workspace, so
-                                         # it draws the frame, says the board isn't available,
-                                         # and an edit-role save still returns the fence byte
-                                         # for byte
+                                         # → a ```kanban embed, three ways: with no snapshot
+                                         # the shell draws the frame and says the board isn't
+                                         # available; WITH one it draws the board (columns,
+                                         # colours, chips, +n more, a card linking to its own
+                                         # page) and an edit-role save still returns the fence
+                                         # byte for byte; and the static reading view renders
+                                         # the same board server-side with JAVASCRIPT OFF,
+                                         # plus a shared card's properties table
 node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
                                            # dark), broken-source fallback, shell renders via
                                            # the worker-served /__web mermaid module
@@ -161,7 +176,10 @@ import leaves the embedded-assets stub empty — that's expected; deployable
 bundles embed them via scripts/bundle-worker.mjs).
 
 Also: `node share-worker/test/run.mjs` is the pure-node e2e suite for every
-worker route (no browser needed) — run it for any worker change. It bakes in
+worker route (no browser needed) — run it for any worker change. It covers
+the `boards` / `props` wire contract too: what a published page does with a
+board snapshot, what it does with a fence that has none, and that junk
+inside one degrades record by record while a wrong TYPE is a 400. It bakes in
 the table-identity ids that `verify-harness/tablewidths.test.mjs` also pins:
 the worker re-derives them from marked's tokens, so a change to
 `src/tableWidths.ts` fails BOTH suites instead of silently dropping column
@@ -202,7 +220,12 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # appending, junk ranks that never block a drag),
                                            # plus the ```kanban embed's config (the same dialect
                                            # without a block around it) and its fence, which
-                                           # grows past any backtick run in the config
+                                           # grows past any backtick run in the config; the scan
+                                           # that finds fences in raw bytes (kanbanFences — a
+                                           # share push has no parsed document); and the board
+                                           # derivation and snapshot (src/store/board.ts) that
+                                           # the board tab, the embed and a published page all
+                                           # share, so they can't disagree
 ```
 
 ## Rust side

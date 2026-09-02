@@ -50,7 +50,16 @@ const {
   serializeEmbedConfig,
   fenceKanban,
   isKanbanFence,
+  kanbanFences,
   KANBAN_LANG,
+  boardColumns,
+  boardSnapshot,
+  cardChips,
+  cardValue,
+  chipFieldsOf,
+  columnCards,
+  fenceKeyOf,
+  orderedOptions,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 
 let checks = 0;
@@ -453,6 +462,187 @@ const eq = (a, b, msg) => {
   ok(!isKanbanFence("kanban", "tight"), "a fence with meta is not ours");
   ok(!isKanbanFence("mermaid", null));
   ok(!isKanbanFence(null, null), "a bare fence is not ours");
+}
+
+
+/* ============ finding the fences in a document ============
+   A share push has only the file's bytes — no parsed document — so it scans
+   for ```kanban fences itself. The scan has to agree with the editor's
+   parser about what IS a fence. */
+{
+  eq(kanbanFences("no fences here\n"), []);
+  eq(kanbanFences("```kanban\nstore: ./P\n```\n"), ["store: ./P"]);
+  eq(
+    kanbanFences("# Hi\n\n```kanban\nstore: ./A\n```\n\ntext\n\n```kanban\nstore: ./B\n```\n"),
+    ["store: ./A", "store: ./B"],
+    "every fence, in document order",
+  );
+  eq(kanbanFences("```js\nstore: ./P\n```\n"), [], "another language is not ours");
+  eq(kanbanFences("```kanban tight\nstore: ./P\n```\n"), [], "a fence with meta is not ours");
+  eq(kanbanFences("```Kanban\nstore: ./P\n```\n"), [], "case matters");
+  eq(kanbanFences("```kanban\n```\n"), [""], "an empty fence is still a fence");
+  eq(kanbanFences("```kanban\nstore: ./P\n"), ["store: ./P"], "an unclosed fence ends at EOF");
+  // A kanban fence written INSIDE a longer fence is an example, not a board.
+  eq(
+    kanbanFences("````markdown\n```kanban\nstore: ./P\n```\n````\n"),
+    [],
+    "a fence inside a fence is text",
+  );
+  // A longer opener needs a closer at least as long.
+  eq(kanbanFences("````kanban\nstore: ./P\n```\nmore\n````\n"), ["store: ./P\n```\nmore"]);
+  // Indentation: up to three spaces opens a fence, and the body is dedented
+  // by as much as the opener carried.
+  eq(kanbanFences("  ```kanban\n  store: ./P\n  ```\n"), ["store: ./P"]);
+  eq(kanbanFences("    ```kanban\n    store: ./P\n    ```\n"), [], "four spaces is code, not a fence");
+  eq(kanbanFences("```kanban\r\nstore: ./P\r\n```\r\n"), ["store: ./P"], "CRLF");
+  eq(kanbanFences("~~~kanban\nstore: ./P\n~~~\n"), ["store: ./P"], "tildes fence too");
+
+  // The key a fence and its snapshot are matched by; the worker's fenceKey
+  // must normalize identically (share-worker/src/index.js).
+  eq(fenceKeyOf("store: ./P"), "store: ./P");
+  eq(fenceKeyOf("store: ./P\n\n"), "store: ./P");
+  eq(fenceKeyOf("store: ./P\r\n"), "store: ./P");
+}
+
+/* ============ the columns a board shows ============
+   One derivation for the board tab, a note's embed, and the picture a
+   published page carries — so a published board can't disagree with the
+   board it was published from. */
+{
+  const def = {
+    name: "Projects",
+    fields: [
+      { id: "status", name: "Status", type: "select" },
+      { id: "owner", name: "Owner", type: "select" },
+      { id: "tags", name: "Tags", type: "multi_select" },
+    ],
+    options: [
+      { field: "status", name: "Backlog", rank: "a0", color: "grey" },
+      { field: "status", name: "In progress", rank: "a1", color: "blue" },
+      { field: "status", name: "Done", rank: "a2", color: "green" },
+      { field: "owner", name: "Ada", rank: "a0", color: "purple" },
+    ],
+    views: [{ id: "board", kind: "kanban", name: "Board", groupBy: "status" }],
+    foreign: [],
+  };
+  const card = (title, props) => ({
+    path: `/w/Projects/${title}.md`,
+    name: `${title}.md`,
+    title,
+    snapshot: { mtime_ms: 0, size: 0 },
+    props,
+    opaque: [],
+  });
+  const cards = [
+    card("Hull", { status: "In progress", rank: "a0", owner: "Ada", tags: ["big", "boat"] }),
+    card("Sails", { status: "In progress", rank: "a1" }),
+    card("Idea", { rank: "a0" }),
+    card("Weird", { status: "Shipped?", rank: "a0" }),
+  ];
+
+  const cols = boardColumns(def, cards, "status");
+  eq(
+    cols.map((c) => c.key),
+    ["", "Backlog", "In progress", "Done", "Shipped?"],
+    "the empty column, the declared options by rank, then values nothing declares",
+  );
+  eq(cols.map((c) => c.declared), [false, true, true, true, false]);
+  eq(cols[0].label, "No status", "the empty column is named after its field");
+  eq(cols[2].color, "blue");
+  eq(cols[2].cards.map((c) => c.title), ["Hull", "Sails"], "cards sort by rank");
+  eq(cols[4].label, "Shipped?", "a stray value is shown, never normalized away");
+
+  eq(
+    boardColumns(def, cards, "status", ["Done", ""]).map((c) => c.key),
+    ["Backlog", "In progress", "Shipped?"],
+    "hide leaves a column out of THIS view",
+  );
+  eq(
+    boardColumns(def, cards, "owner").map((c) => c.key),
+    ["", "Ada"],
+    "grouping by another field regroups the same cards",
+  );
+  eq(cardValue(cards[0], "status"), "In progress");
+  eq(cardValue(cards[2], "status"), "", "an unset field is the empty value");
+  eq(columnCards(cards, "status", "").map((c) => c.title), ["Idea"]);
+  eq(orderedOptions(def, "status").map((o) => o.name), ["Backlog", "In progress", "Done"]);
+
+  // Chips: every declared field but the one the board groups by.
+  eq(chipFieldsOf(def, "status").map((f) => f.id), ["owner", "tags"]);
+  eq(cardChips(cards[0], def, chipFieldsOf(def, "status")), [
+    { key: "owner", text: "Ada", color: "purple" },
+    { key: "tags:big", text: "big", color: null },
+    { key: "tags:boat", text: "boat", color: null },
+  ]);
+  eq(cardChips(cards[1], def, chipFieldsOf(def, "status")), [], "an empty card has no chips");
+
+  /* ---- the picture a published page carries ---- */
+  const pages = { "/w/Projects/Hull.md": "page-hull" };
+  const snap = boardSnapshot("store: ./Projects", def, cards, (p) => pages[p]);
+  eq(snap.fence, "store: ./Projects");
+  eq(snap.name, "Projects");
+  eq(
+    snap.columns.map((c) => c.name),
+    ["No status", "Backlog", "In progress", "Done", "Shipped?"],
+    "a declared column shows even when empty; an undeclared one shows when it holds cards",
+  );
+  // …but an EMPTY undeclared column is dropped: it exists on the desktop so
+  // you can drag into it, and nobody drags on a published page.
+  eq(
+    boardSnapshot("store: ./P", def, [cards[0]], () => undefined).columns.map((c) => c.name),
+    ["Backlog", "In progress", "Done"],
+  );
+  eq(snap.columns[2], {
+    name: "In progress",
+    color: "blue",
+    cards: [
+      {
+        title: "Hull",
+        chips: [
+          { text: "Ada", color: "purple" },
+          { text: "big" },
+          { text: "boat" },
+        ],
+        page: "page-hull",
+      },
+      { title: "Sails" },
+    ],
+  });
+  ok(
+    snap.columns[1].color === "grey" && snap.columns[1].cards.length === 0,
+    "an empty declared column keeps its colour",
+  );
+  ok(!("page" in snap.columns[2].cards[1]), "a card with no page of its own isn't a link");
+
+  // The embed's own keys narrow the picture, exactly as they narrow the board.
+  eq(
+    boardSnapshot("store: ./P\nhide: [Done, Shipped?]", def, cards, () => undefined).columns.map(
+      (c) => c.name,
+    ),
+    ["No status", "Backlog", "In progress"],
+  );
+  eq(
+    boardSnapshot("store: ./P\ngroup: owner", def, cards, () => undefined).columns.map(
+      (c) => c.name,
+    ),
+    ["No owner", "Ada"],
+  );
+
+  // Caps: a page is a document, not a database export — and what is cut is
+  // counted, never silently dropped.
+  const many = Array.from({ length: 260 }, (_, i) =>
+    card(`C${String(i).padStart(3, "0")}`, { status: "Backlog", rank: `a${i}` }),
+  );
+  const big = boardSnapshot("store: ./P", def, many, () => undefined);
+  const backlog = big.columns.find((c) => c.name === "Backlog");
+  eq(backlog.cards.length, 200);
+  eq(backlog.more, 60);
+
+  // A definition with no groupable field at all has no board to draw.
+  eq(
+    boardSnapshot("store: ./P", { ...def, fields: [], options: [], views: [] }, [], () => undefined),
+    null,
+  );
 }
 
 console.log(`store.test.mjs: ${checks} checks passed`);

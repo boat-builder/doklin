@@ -24,7 +24,7 @@ export function normalizePath(p: string): string {
   return (absolute ? "/" : "") + out.join("/");
 }
 
-const dirOf = (p: string) => {
+export const dirOf = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
 };

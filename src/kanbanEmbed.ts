@@ -37,6 +37,7 @@ import { NodeSelection } from "@milkdown/kit/prose/state";
 import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
 import { clearTextInCurrentBlockCommand } from "@milkdown/kit/preset/commonmark";
 import KanbanEmbedFrame, { type KanbanEmbedHost } from "./KanbanEmbed";
+import type { BoardSnap } from "./store/board";
 import { fenceKanban, isKanbanFence, KANBAN_LANG } from "./store/embedConfig";
 
 export type { KanbanEmbedHost };
@@ -140,6 +141,7 @@ class KanbanEmbedNodeView implements NodeView {
   private view: EditorView;
   private getPos: () => number | undefined;
   private host: () => KanbanEmbedHost | null;
+  private snapshot: (config: string) => BoardSnap | null;
   private readOnly: () => boolean;
   private selected = false;
 
@@ -148,12 +150,14 @@ class KanbanEmbedNodeView implements NodeView {
     view: EditorView,
     getPos: () => number | undefined,
     host: () => KanbanEmbedHost | null,
+    snapshot: (config: string) => BoardSnap | null,
     readOnly: () => boolean,
   ) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
     this.host = host;
+    this.snapshot = snapshot;
     this.readOnly = readOnly;
     this.dom = document.createElement("div");
     this.dom.className = "dk-embed";
@@ -186,6 +190,7 @@ class KanbanEmbedNodeView implements NodeView {
       createElement(KanbanEmbedFrame, {
         config: String(this.node.attrs.config ?? ""),
         getHost: this.host,
+        getSnapshot: this.snapshot,
         readOnly: this.readOnly() || !this.view.editable,
         selected: this.selected,
         onConfigChange: (next: string) => this.writeConfig(next),
@@ -249,18 +254,22 @@ class KanbanEmbedNodeView implements NodeView {
 }
 
 /**
- * The node view, bound to its host. Both arguments are getters so a pane that
- * is promoted from read-only to live picks it up without remounting the
+ * The node view, bound to its host. Every argument is a getter so a pane
+ * that is promoted from read-only to live picks it up without remounting the
  * editor (see refreshKanbanEmbeds).
+ *
+ * `snapshot` is the other way a board can be shown: a published page has no
+ * host, but it does carry a picture of each board it embeds.
  */
 export function kanbanEmbedView(
   host: () => KanbanEmbedHost | null,
+  snapshot: (config: string) => BoardSnap | null = () => null,
   readOnly: () => boolean = () => false,
 ) {
   return $view(
     kanbanEmbedSchema.node,
     () => (node: ProseNode, view: EditorView, getPos: () => number | undefined) =>
-      new KanbanEmbedNodeView(node, view, getPos, host, readOnly),
+      new KanbanEmbedNodeView(node, view, getPos, host, snapshot, readOnly),
   );
 }
 

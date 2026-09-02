@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -64,6 +65,7 @@ import {
   refreshKanbanEmbeds,
   type KanbanEmbedHost,
 } from "./kanbanEmbed";
+import { fenceKeyOf, type BoardSnap } from "./store/board";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
@@ -209,6 +211,12 @@ type Props = {
   // behind them — the shared-page shell — where the embed says so in place
   // instead of drawing a board it can't read.
   kanban?: KanbanEmbedHost | null;
+  // Boards as a PUBLISHED page carries them: a picture per ` ```kanban `
+  // fence, sent with the markdown because the page has no workspace to read
+  // one from (src/store/publish.ts). The shared-page shell passes these; the
+  // desktop passes a host instead, and a host always wins — a real board
+  // beats a photograph of one.
+  boards?: BoardSnap[];
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -333,6 +341,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     onTableWidths,
     onOpenLink,
     kanban,
+    boards,
   },
   ref,
 ) {
@@ -393,6 +402,14 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onOpenLinkRef.current = onOpenLink;
   const kanbanRef = useRef(kanban);
   kanbanRef.current = kanban;
+  // Keyed by the fence's own text, normalized the way the worker normalizes
+  // it, so a stray trailing newline can't lose a board.
+  const boardsRef = useRef<Map<string, BoardSnap>>(new Map());
+  const boardsByFence = useMemo(
+    () => new Map((boards ?? []).map((b) => [fenceKeyOf(b.fence), b])),
+    [boards],
+  );
+  boardsRef.current = boardsByFence;
 
   const report = () => {
     const view = viewRef.current;
@@ -545,6 +562,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(
       kanbanEmbedView(
         () => kanbanRef.current ?? null,
+        (config) => boardsRef.current.get(fenceKeyOf(config)) ?? null,
         () => readOnlyRef.current === true,
       ),
     );
@@ -671,7 +689,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const kanbanDoc = kanban?.docPath ?? null;
   useEffect(() => {
     refreshKanbanEmbeds();
-  }, [readOnly, kanbanDoc]);
+  }, [readOnly, kanbanDoc, boardsByFence]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are

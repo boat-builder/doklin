@@ -6679,3 +6679,45 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-board.is-embed .dk-col {
   max-height: none;
 }
+
+/* A board a PUBLISHED page carries (src/BoardSnapshot.tsx): the same board
+   with nothing to drag, no menus and no composer, so every affordance that
+   promises an action it can't deliver comes back off. */
+.dk-board.is-snapshot .dk-col-head,
+.dk-board.is-snapshot .dk-card {
+  cursor: default;
+}
+
+.dk-board.is-snapshot .dk-card:hover {
+  background: var(--app-surface);
+}
+
+.dk-board.is-snapshot .dk-col-count {
+  margin-left: auto;
+}
+
+/* A card title is a link exactly when the card has a page of its own — the
+   one interactive thing on a published board, so it looks like one. */
+.dk-board.is-snapshot a.dk-card-title {
+  color: var(--app-accent);
+  text-decoration: none;
+}
+
+.dk-board.is-snapshot a.dk-card-title:hover {
+  text-decoration: underline;
+}
+
+.dk-board.is-snapshot .dk-col-more {
+  margin: 6px 4px 2px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+/* Properties on a published page: values, never controls. */
+.dk-props.is-snapshot .dk-prop-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 6px;
+}

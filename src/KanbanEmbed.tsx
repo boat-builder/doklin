@@ -13,6 +13,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import KanbanBoard from "./KanbanBoard";
+import BoardSnapshot from "./BoardSnapshot";
+import type { BoardSnap } from "./store/board";
 import { linkTargetPath, relativeLinkPath } from "./docLinks";
 import {
   parseEmbedConfig,
@@ -53,6 +55,13 @@ type Props = {
    * of the node view, so callbacks always reach the current app.
    */
   getHost: () => KanbanEmbedHost | null;
+  /**
+   * The board as a PUBLISHED page carries it — a picture, not a folder. Set
+   * only where there is no host to read a real one from (the app shell); a
+   * fence the page carries no snapshot for still says so rather than
+   * pretending.
+   */
+  getSnapshot?: (config: string) => BoardSnap | null;
   readOnly: boolean;
   /** The node is selected in the document (⌫ would delete it). */
   selected: boolean;
@@ -63,11 +72,13 @@ type Props = {
 export default function KanbanEmbedFrame({
   config,
   getHost,
+  getSnapshot,
   readOnly,
   selected,
   onConfigChange,
 }: Props) {
   const host = getHost();
+  const snapshot = host ? null : (getSnapshot?.(config) ?? null);
   const cfg = useMemo(() => parseEmbedConfig(config), [config]);
   const [editingSource, setEditingSource] = useState(false);
   // A fence with nothing in it is what the slash menu inserts: the picker is
@@ -112,9 +123,15 @@ export default function KanbanEmbedFrame({
           }}
           onCancel={() => setEditingSource(false)}
         />
+      ) : snapshot ? (
+        // A shared page: no workspace behind us, but the page was published
+        // with a picture of this board. Read-only by construction — there is
+        // no folder here to write to.
+        <BoardSnapshot snap={snapshot} />
       ) : !host ? (
-        // No workspace around us (a shared page). The fence still says what
-        // it is; showing the board here is phase 3.
+        // No workspace and no snapshot — an older page, or a fence whose
+        // board had already been deleted when the page was published. The
+        // fence still says what it is.
         <div className="dk-embed-note">
           <p>This board isn’t available on this page.</p>
           {config.trim() !== "" && <pre className="dk-embed-src">{config}</pre>}

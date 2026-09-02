@@ -58,7 +58,8 @@ page.on("pageerror", (e) => {
   console.log("PAGEERROR:", e.message);
 });
 
-await page.goto("http://localhost:1420/verify-harness/kanban.html");
+const HARNESS = "http://localhost:1420/verify-harness/kanban.html";
+await page.goto(HARNESS);
 
 const NOTE = "/docs/Embed.md";
 const CARD_B = "/docs/Projects/Ship dark mode.md";
@@ -301,6 +302,90 @@ const openNote = async (name) => {
     (await page.locator(".editor-pane:not(.is-focused) .dk-embed-source").count()) === 0,
   );
   await page.screenshot({ path: SHOTS + "kanban-embed-split.png" });
+}
+
+/* ---------- what a SHARE would publish (phase 3) ----------
+   A published note carries a picture of the board it embeds, because the
+   share worker has no workspace to read one from. The picture is built by
+   reading the store's folder — the one seam the pure unit tests
+   (verify-harness/store.test.mjs) can't reach, since it goes through the
+   backend's read_store. Driven here against the same stubbed fs the rest of
+   this file uses. */
+{
+  const page = await (await browser.newContext({ viewport: { width: 1100, height: 800 } })).newPage();
+  // A fresh context, so the stubbed fs is the seed rather than whatever the
+  // steps above left behind. Nothing needs the app mounted: the page's setup
+  // script installs both the fs and the Tauri stub that reads it.
+  await page.goto(HARNESS);
+  const out = await page.evaluate(async () => {
+    const { collectBoardSnapshots, cardProperties } = await import("/src/store/publish.ts");
+    const md = window.__fs.get("/docs/Embed.md");
+    const pages = { "/docs/Projects/Ship dark mode.md": "page-dark" };
+    return {
+      snapped: await collectBoardSnapshots(md, "/docs/Embed.md", (p) => pages[p]),
+      broken: await collectBoardSnapshots(
+        window.__fs.get("/docs/Broken.md"),
+        "/docs/Broken.md",
+        () => undefined,
+      ),
+      none: await collectBoardSnapshots("# Just prose\n", "/docs/Roadmap.md", () => undefined),
+      props: await cardProperties(
+        "/docs/Projects/Fix login redirect.md",
+        { status: "In progress", tags: ["bug", "auth"], rank: "a1" },
+        ["status", "tags", "rank"],
+      ),
+    };
+  });
+  const board = out.snapped?.boards?.[0];
+  step(
+    "a note's fence resolves to its folder and snapshots the board there",
+    board?.fence === "store: ./Projects" &&
+      board?.name === "Projects" &&
+      out.snapped.dirs.join() === "/docs/Projects",
+    JSON.stringify(out.snapped?.dirs),
+  );
+  step(
+    "the snapshot holds the same columns, in the same order, as the board tab",
+    board?.columns.map((c) => c.name).join("|") ===
+      "No status|Backlog|In progress|Done",
+    board?.columns.map((c) => `${c.name}:${c.cards.length}`).join(" "),
+  );
+  step(
+    "cards carry their titles, their chips and (only) their own page ids",
+    JSON.stringify(board?.columns.find((c) => c.name === "In progress")) ===
+      JSON.stringify({
+        name: "In progress",
+        color: "blue",
+        cards: [
+          {
+            title: "Fix login redirect",
+            chips: [{ text: "bug", color: "red" }, { text: "auth" }],
+          },
+        ],
+      }) &&
+      JSON.stringify(board?.columns.find((c) => c.name === "Backlog").cards) ===
+        JSON.stringify([{ title: "Ship dark mode", page: "page-dark" }]),
+    JSON.stringify(board?.columns.find((c) => c.name === "In progress")),
+  );
+  step(
+    "a fence pointing at no board publishes no board — and no error",
+    out.broken !== null && out.broken.boards.length === 0 &&
+      out.broken.dirs.join() === "/docs/Nowhere",
+  );
+  step(
+    "a note with no fence at all is told apart from one whose fences found nothing",
+    out.none === null,
+  );
+  step(
+    "a card's properties publish as its board names and colours them",
+    JSON.stringify(out.props) ===
+      JSON.stringify([
+        { name: "Status", values: [{ text: "In progress", color: "blue" }] },
+        { name: "Tags", values: [{ text: "bug", color: "red" }, { text: "auth" }] },
+      ]),
+    JSON.stringify(out.props),
+  );
+  await page.context().close();
 }
 
 await browser.close();

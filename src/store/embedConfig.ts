@@ -102,3 +102,63 @@ export function fenceKanban(config: string): string {
 export function isKanbanFence(lang: unknown, meta: unknown): boolean {
   return lang === KANBAN_LANG && (meta === null || meta === undefined || meta === "");
 }
+
+/**
+ * Every ` ```kanban ` fence in a markdown document, in order, as its config
+ * text (the block's body, no trailing newline).
+ *
+ * The editor finds embeds through the parsed document; a share push has only
+ * the file's bytes, so it scans for fences itself. The scan tracks OPEN
+ * fences the way CommonMark does — an opener's character and run length, a
+ * closer of at least that length — so a ` ```kanban ` written INSIDE a
+ * ` ````markdown ` example is what it looks like: text, not a board.
+ */
+const stripIndent = (line: string, n: number) => {
+  let i = 0;
+  while (i < n && line[i] === " ") i++;
+  return line.slice(i);
+};
+
+export function kanbanFences(md: string): string[] {
+  const out: string[] = [];
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  let open: {
+    char: string;
+    len: number;
+    indent: number;
+    kanban: boolean;
+    body: string[];
+  } | null = null;
+  for (const line of lines) {
+    if (open) {
+      const close = line.match(/^ {0,3}(`+|~+)[ \t]*$/);
+      if (close && close[1][0] === open.char && close[1].length >= open.len) {
+        if (open.kanban) out.push(open.body.join("\n"));
+        open = null;
+        continue;
+      }
+      // CommonMark strips as much leading space as the opener carried.
+      if (open.kanban) open.body.push(stripIndent(line, open.indent));
+      continue;
+    }
+    const m = line.match(/^( {0,3})(`{3,}|~{3,})(.*)$/);
+    if (!m) continue;
+    const info = m[3].trim();
+    // An info string on a backtick fence may not itself contain a backtick.
+    if (m[2][0] === "`" && info.includes("`")) continue;
+    open = {
+      char: m[2][0],
+      len: m[2].length,
+      indent: m[1].length,
+      kanban: isKanbanFence(info, ""),
+      body: [],
+    };
+  }
+  // An unclosed fence still ends at the end of the document. The file's
+  // final newline is a line terminator, not a line of the block.
+  if (open?.kanban) {
+    if (open.body[open.body.length - 1] === "") open.body.pop();
+    out.push(open.body.join("\n"));
+  }
+  return out;
+}

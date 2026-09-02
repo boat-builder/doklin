@@ -127,7 +127,8 @@ import {
   type PropValue,
 } from "./store/frontmatter";
 import { cardKeyOrder, RANK_KEY, STORE_FILE } from "./store/storeFile";
-import { createStoreFile } from "./store/model";
+import { createStoreFile, onStoreChanged } from "./store/model";
+import { cardProperties, collectBoardSnapshots } from "./store/publish";
 import { useStore } from "./store/useStore";
 
 type FileSnapshot = { mtime_ms: number; size: number };
@@ -496,6 +497,8 @@ const SHARE_MISSING_GRACE_MS = 30_000;
 type SharePartsOnDisk = ShareParts & {
   mdSnap: FileSnapshot | null;
   htmlSnap: FileSnapshot | null;
+  /** The store folders this page's boards were read from — see ShareEntry.boardDirs. */
+  boardDirs: string[];
 };
 
 // One in-app delete, as undo needs to see it — see deletedStackRef.
@@ -509,9 +512,11 @@ type DeletedRecord = {
 
 // Fingerprint freshly-pushed parts — what reconciliation later compares the
 // disk against.
-async function fingerprintParts(
-  parts: SharePartsOnDisk,
-): Promise<{ md: PushedFingerprint | null; html: PushedFingerprint | null }> {
+async function fingerprintParts(parts: SharePartsOnDisk): Promise<{
+  md: PushedFingerprint | null;
+  html: PushedFingerprint | null;
+  boards: string | null;
+}> {
   return {
     md:
       parts.markdown === null
@@ -521,6 +526,12 @@ async function fingerprintParts(
       parts.html === null
         ? null
         : { snap: parts.htmlSnap, hash: await contentHash(parts.html) },
+    // A board changes without its note changing — a card dragged in another
+    // window, a card synced from another Mac. Neither file stat moves, so the
+    // published copy would go stale silently; hashing the snapshot is what
+    // makes reconciliation see it. Null (no fence in this document) is also
+    // the signal to stop checking.
+    boards: parts.boards === null ? null : await contentHash(JSON.stringify(parts.boards)),
   };
 }
 const THEME_LABEL: Record<Theme, string> = {
@@ -1599,7 +1610,7 @@ export default function App() {
   // honest. Returns null when the primary file is unreadable (source gone; the
   // share stays until stopped explicitly).
   const readShareParts = useCallback(
-    async (target: string): Promise<SharePartsOnDisk | null> => {
+    async (target: string, collectionId: string | null): Promise<SharePartsOnDisk | null> => {
       if (isHtmlPath(target)) {
         try {
           const r = await invoke<ReadFileResult>("read_file", { path: target });
@@ -1609,20 +1620,30 @@ export default function App() {
             html: r.contents,
             htmlSnap: r.snapshot,
             tcols: [], // an html-only share has no markdown tables to size
+            boards: null,
+            boardDirs: [],
+            props: null,
           };
         } catch {
           return null;
         }
       }
-      let markdown: string;
+      let contents: string;
       let mdSnap: FileSnapshot;
       try {
         const r = await invoke<ReadFileResult>("read_file", { path: target });
-        markdown = r.contents;
+        contents = r.contents;
         mdSnap = r.snapshot;
       } catch {
         return null;
       }
+      // The frontmatter boundary, again (see the editor's above): what
+      // travels is the BODY. The block goes as `props` instead — rendered as
+      // a properties table on the page, and out of reach of a web edit,
+      // which would otherwise serialize `---` + `status: Done` + `---` back
+      // as a setext heading and quietly eat a card's fields.
+      const fm = parseFrontmatter(contents);
+      let markdown = fm.body;
       // The disk keeps the hybrid form; the web page's comment layer is
       // built from CriticMarkup in the markdown it receives — push (and
       // fingerprint) the EXPANDED document, thread bodies re-inlined. Table
@@ -1637,6 +1658,21 @@ export default function App() {
       } catch {
         // no meta — nothing to expand, no widths to carry
       }
+      // A board the note embeds, frozen. Card titles link to their own pages
+      // only within one folder share — that is the only membership whose
+      // pages are guaranteed to live on this same backend.
+      const pageIdFor = (cardPath: string): string | undefined => {
+        if (!collectionId) return undefined;
+        const card = sharesRef.current[cardPath];
+        return card && card.collectionId === collectionId ? card.id : undefined;
+      };
+      // Scanned on the file's own body, not on the expanded copy: the
+      // fences are the same either way, and reconciliation re-derives from
+      // the body too (shareNeedsPush) — one text, one answer.
+      const snapped = await collectBoardSnapshots(fm.body, target, pageIdFor).catch(
+        () => null,
+      );
+      const props = await cardProperties(target, fm.props, fm.order).catch(() => null);
       let html: string | null = null;
       let htmlSnap: FileSnapshot | null = null;
       try {
@@ -1649,7 +1685,16 @@ export default function App() {
       } catch {
         // rendition unreadable right now; share the markdown alone
       }
-      return { markdown, mdSnap, html, htmlSnap, tcols };
+      return {
+        markdown,
+        mdSnap,
+        html,
+        htmlSnap,
+        tcols,
+        boards: snapped?.boards ?? null,
+        boardDirs: snapped?.dirs ?? [],
+        props,
+      };
     },
     [],
   );
@@ -1673,7 +1718,7 @@ export default function App() {
       const collection = entry.collectionId
         ? (Object.values(collectionsRef.current).find((c) => c.id === entry.collectionId) ?? null)
         : null;
-      const parts = await readShareParts(target);
+      const parts = await readShareParts(target, entry.collectionId ?? null);
       if (!parts) return; // source is gone; reconcile's disk-truth pass stops the share
       // The document names itself when it opens with an H1 (html-only pages:
       // their <title>); only untitled documents fall back to the file name.
@@ -1703,6 +1748,7 @@ export default function App() {
                   title,
                   updatedAt: Date.now(),
                   pushed,
+                  boardDirs: parts.boardDirs,
                   ...(rev != null ? { pushedRev: rev } : {}),
                   webConflict: undefined,
                 },
@@ -2038,15 +2084,41 @@ export default function App() {
       if (mdSnapMatches && !hasMeta) return false;
       try {
         const r = await invoke<ReadFileResult>("read_file", { path });
-        const expanded = expandMarkdown(r.contents, mthreads).md;
+        const expanded = expandMarkdown(parseFrontmatter(r.contents).body, mthreads).md;
         return (await contentHash(expanded)) !== pushed.hash;
       } catch {
         return true; // vanished mid-check; the push path sorts it out
       }
     };
+    // Re-derive this page's board snapshots and compare. Only pages that
+    // carried a fence at their last push pay for this (`pushed.boards` is
+    // null otherwise), and a page whose note changed has already answered
+    // yes above.
+    const boardsChanged = async (): Promise<boolean> => {
+      const was = fp.boards;
+      if (was === null || was === undefined) return false;
+      try {
+        const r = await invoke<ReadFileResult>("read_file", { path: entry.path });
+        const pageIdFor = (cardPath: string): string | undefined => {
+          if (!entry.collectionId) return undefined;
+          const card = sharesRef.current[cardPath];
+          return card && card.collectionId === entry.collectionId ? card.id : undefined;
+        };
+        const snapped = await collectBoardSnapshots(
+          parseFrontmatter(r.contents).body,
+          entry.path,
+          pageIdFor,
+        );
+        const now = snapped === null ? null : await contentHash(JSON.stringify(snapped.boards));
+        return now !== was;
+      } catch {
+        return false; // unreadable right now; the next pass tries again
+      }
+    };
     if (isHtmlPath(entry.path)) return changed(entry.path, fp.html);
     if (await mdChanged(entry.path, fp.md)) return true;
-    return changed(htmlSiblingOf(entry.path), fp.html);
+    if (await changed(htmlSiblingOf(entry.path), fp.html)) return true;
+    return boardsChanged();
   }, []);
 
   // Fold a web edit (a restricted visitor with an "edit" code saved through
@@ -2107,7 +2179,7 @@ export default function App() {
         } catch {
           // no meta file
         }
-        const expanded = expandMarkdown(r.contents, mthreads).md;
+        const expanded = expandMarkdown(parseFrontmatter(r.contents).body, mthreads).md;
         unchanged = (await contentHash(expanded)) === fp.hash;
       } catch {
         unchanged = false;
@@ -2155,6 +2227,10 @@ export default function App() {
                 pushed: {
                   md: { snap: newSnap, hash },
                   html: prev[target].pushed?.html ?? null,
+                  // Carried, not recomputed: if the web edit added or removed
+                  // a fence, the stale hash is exactly what makes the next
+                  // reconcile pass push a fresh snapshot.
+                  boards: prev[target].pushed?.boards ?? null,
                 },
                 pushedRev: content.rev,
                 webConflict: undefined,
@@ -4177,7 +4253,7 @@ export default function App() {
       // Pushes read the disk; land any keystrokes still inside the autosave
       // debounce so the first published copy is what the user is looking at.
       await flushPendingAutosave();
-      const parts = await readShareParts(active.path);
+      const parts = await readShareParts(active.path, null);
       if (!parts) throw new Error("Could not read the document.");
       // Lead H1 (html-only: <title>) over file name — same rule as re-pushes.
       const title = deriveDocTitle(parts) ?? docShareTitle(active);
@@ -4207,6 +4283,7 @@ export default function App() {
           sharedAt: now,
           updatedAt: now,
           pushed,
+          boardDirs: parts.boardDirs,
           ...(rev != null ? { pushedRev: rev } : {}),
           connectionId: config.id,
         },
@@ -4432,7 +4509,7 @@ export default function App() {
           // Land any in-flight keystrokes if this is the open document, so the
           // first published copy matches the screen.
           await flushPendingAutosave();
-          const parts = await readShareParts(filePath);
+          const parts = await readShareParts(filePath, collection.id);
           if (!parts) throw new Error("Could not read the document.");
           // Random ids virtually never collide, but a stale page under a
           // recycled id would be silently overwritten — probe once.
@@ -4462,6 +4539,7 @@ export default function App() {
             sharedAt: now,
             updatedAt: now,
             pushed,
+            boardDirs: parts.boardDirs,
             ...(rev != null ? { pushedRev: rev } : {}),
             collectionId: collection.id,
             connectionId: config.id,
@@ -4671,6 +4749,10 @@ export default function App() {
                 pushed: {
                   md: { snap: newSnap, hash },
                   html: prev[target].pushed?.html ?? null,
+                  // Carried, not recomputed: if the web edit added or removed
+                  // a fence, the stale hash is exactly what makes the next
+                  // reconcile pass push a fresh snapshot.
+                  boards: prev[target].pushed?.boards ?? null,
                 },
                 pushedRev: content.rev,
                 webConflict: undefined,
@@ -6465,6 +6547,20 @@ export default function App() {
     readEntityMeta,
     adoptFrontmatter,
   ]);
+
+  // A board changed and no note did — a card dragged in a board tab, a card
+  // arriving from another Mac. A page that embeds that board is stale now,
+  // and nothing else in the app would notice: the note's bytes are exactly
+  // what was published. The registry remembers which pages read which
+  // folders, so this is a lookup rather than a scan of every share.
+  useEffect(() => {
+    if (!isMainWindow) return;
+    return onStoreChanged((dir) => {
+      for (const entry of Object.values(sharesRef.current)) {
+        if (entry.boardDirs?.includes(dir)) scheduleSharePush(entry.path);
+      }
+    });
+  }, [scheduleSharePush]);
 
   // Reconcile shares with edits made outside the app at the moments staleness
   // becomes observable: once after launch/restore, then whenever the window

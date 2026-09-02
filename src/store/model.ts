@@ -32,9 +32,22 @@ import {
   type OptionColor,
   type StoreDef,
 } from "./storeFile";
-import { rankBetween, sortByRank } from "./rank";
+import { rankBetween } from "./rank";
+// The pure half — what a card is, what a column is, and how the two derive.
+// This module fills those shapes from disk and writes changes back; the
+// shapes themselves belong to everything that shows a board, published
+// pages included, so they live apart from Tauri.
+import {
+  cardRank,
+  cardValue,
+  orderedOptions,
+  type Card,
+  type FileSnapshot,
+} from "./board";
 
-export type FileSnapshot = { mtime_ms: number; size: number };
+// The model's own surface speaks in cards and snapshots, so they re-export
+// from here — no caller needs to know which of the two files a type is in.
+export type { Card, FileSnapshot } from "./board";
 
 type CardHead = {
   name: string;
@@ -49,19 +62,6 @@ type StoreRead = {
   cards: CardHead[];
   conflicts: string[];
   truncated: boolean;
-};
-
-export type Card = {
-  /** Absolute path of the card's note. */
-  path: string;
-  /** File name including the extension. */
-  name: string;
-  /** The card's title — the file name, minus `.md`. */
-  title: string;
-  snapshot: FileSnapshot;
-  props: Props;
-  /** Frontmatter lines the dialect couldn't read; carried through writes. */
-  opaque: string[];
 };
 
 export type StoreState = {
@@ -94,34 +94,50 @@ const cardOf = (head: CardHead): Card => {
   };
 };
 
-/** The value a card carries for a field, as a single string ("" = unset). */
-export const cardValue = (card: Card, field: string): string => {
-  const v = card.props[field];
-  if (v === null || v === undefined) return "";
-  if (Array.isArray(v)) return v[0] ?? "";
-  return typeof v === "boolean" ? (v ? "true" : "false") : String(v);
-};
+/* ---------- "this board changed" ---------- */
 
-export const cardRank = (card: Card): string | null => {
-  const v = card.props[RANK_KEY];
-  return typeof v === "string" ? v : null;
-};
+// A board can change without any note changing — someone drags a card, or
+// sync lands a new one. Anything that MIRRORS a board (today: a shared page
+// carrying its snapshot) needs to hear about that, and the folder watcher a
+// live model already arms is the only thing that knows. Listeners are told
+// the folder, not the state: the mirror re-reads whatever it needs.
+const storeWatchers = new Set<(dir: string) => void>();
 
-/** Cards of one column, in board order. */
-export const columnCards = (cards: Card[], field: string, value: string): Card[] =>
-  sortByRank(
-    cards.filter((c) => cardValue(c, field) === value),
-    cardRank,
-    (c) => c.title,
-  );
+/** Hear about content changes to any live store. Returns an unsubscribe. */
+export function onStoreChanged(fn: (dir: string) => void): () => void {
+  storeWatchers.add(fn);
+  return () => storeWatchers.delete(fn);
+}
 
-/** A field's options in column order. */
-export const orderedOptions = (def: StoreDef, field: string): Option[] =>
-  sortByRank(
-    def.options.filter((o) => o.field === field),
-    (o) => o.rank,
-    (o) => o.name,
-  );
+// What a board LOOKS like to anything downstream: the definition plus each
+// card's identity and frontmatter head. A rescan that produces the same
+// signature changed nothing worth telling anyone about — which matters
+// because every write this model makes triggers one.
+const storeSignature = (read: StoreRead): string =>
+  [
+    read.def ?? "",
+    ...read.cards.map((c) => `${c.path}\t${c.snapshot.size}\t${c.head}`),
+  ].join("\n\u0000");
+
+/**
+ * Read a store folder ONCE — no model, no watcher, no refcount. What a
+ * share push needs: it mirrors a board it isn't showing, and arming a
+ * watcher on every published note's board would be a steep price for a read
+ * that happens on a save.
+ */
+export async function readStoreOnce(
+  dir: string,
+): Promise<{ def: StoreDef; cards: Card[] } | null> {
+  try {
+    const read = await invoke<StoreRead>("read_store", { path: dir });
+    if (read.def === null) return null;
+    const def = parseStoreDef(read.def);
+    if (!def) return null;
+    return { def, cards: read.cards.map(cardOf) };
+  } catch {
+    return null; // not a store, or unreadable right now
+  }
+}
 
 type WriteErrorShape = { kind: "io" | "conflict"; message?: string; current?: FileSnapshot };
 const isWriteError = (e: unknown): e is WriteErrorShape =>
@@ -133,6 +149,8 @@ export class StoreModel {
   readonly dir: string;
   private state: StoreState;
   private defSnapshot: FileSnapshot | null = null;
+  /** The last rescan's content signature — see storeSignature. */
+  private contentSig: string | null = null;
   private listeners = new Set<(s: StoreState) => void>();
   private pendingWrites = 0;
   private reloadTimer: number | null = null;
@@ -207,6 +225,13 @@ export class StoreModel {
         loading: false,
         error: null,
       });
+      // The FIRST read only establishes the baseline: opening a board is not
+      // a change to it.
+      const sig = storeSignature(read);
+      if (this.contentSig !== null && sig !== this.contentSig) {
+        for (const fn of storeWatchers) fn(this.dir);
+      }
+      this.contentSig = sig;
     } catch (e) {
       if (this.disposed) return;
       this.emit({ loading: false, error: e instanceof Error ? e.message : String(e) });
