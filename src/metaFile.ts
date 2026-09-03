@@ -8,9 +8,9 @@
 //
 //   notes.md  +  notes.html  +  notes.meta.jsonl
 //
-// Like the html comments sidecar it replaces, the file is JSON Lines — a
-// header line, then ONE record per line — because cloud sync merges files
-// with a three-way *text* merge: two people adding threads concurrently
+// The file is JSON Lines — a header line, then ONE record per line —
+// because cloud sync merges files with a three-way *text* merge
+// (src-tauri/src/cloud/merge.rs): two people adding threads concurrently
 // merge cleanly line-by-line. Records are sorted by (type, id) and
 // serialized with a fixed key order, so two devices writing the same
 // logical state produce the same bytes (a concurrent one-time migration on
@@ -18,8 +18,7 @@
 //
 // Record types:
 //   {"t":"hthread", id, anchor, comments}  — a rendition (html) thread,
-//       exactly htmlComments.ts's HtmlThread; storage moved here from
-//       <stem>.html.comments.jsonl (still read during the transition).
+//       exactly htmlComments.ts's HtmlThread.
 //   {"t":"mthread", id, comments}          — a markdown thread's BODY.
 //       The anchor stays in the markdown itself as `{==anchor==}{>>#id<<}`
 //       — a bare CriticMarkup reference. Text-embedded anchors survive
@@ -241,22 +240,6 @@ function unionEntries(a: CommentEntry[], b: CommentEntry[]): CommentEntry[] {
   return [...a, ...extra];
 }
 
-// Union two thread lists by id; on both sides, entries union (a wins body
-// conflicts). Works for MdThread and HtmlThread alike (b's anchor is kept
-// only when a lacks the thread — a's copy is "ours").
-export function unionThreads<T extends { id: string; comments: CommentEntry[] }>(
-  a: T[],
-  b: T[],
-): T[] {
-  const ours = new Set(a.map((t) => t.id));
-  const out: T[] = a.map((t) => {
-    const other = b.find((x) => x.id === t.id);
-    return other ? { ...t, comments: unionEntries(t.comments, other.comments) } : t;
-  });
-  for (const t of b) if (!ours.has(t.id)) out.push(t);
-  return out;
-}
-
 /* ---------- expand / extract: the disk ⇄ editor boundary ---------- */
 
 // A deterministic id derived from content: two machines looking at the same
@@ -394,8 +377,6 @@ export function extractMarkdown(fullMd: string): ExtractResult {
 export type MigrateInput = {
   diskMd: string | null; // null: an html-only entity (no markdown side)
   meta: EntityMeta;
-  // Threads parsed from a legacy <stem>.html.comments.jsonl, when one exists.
-  legacyHtmlThreads: HtmlThread[] | null;
 };
 
 export type MigrateResult = {
@@ -422,14 +403,11 @@ export function migrateEntity(input: MigrateInput): MigrateResult {
       ...input.meta.mthreads.filter((t) => orphanSet.has(t.id)),
     ];
   }
-  const hthreads = input.legacyHtmlThreads
-    ? unionThreads(input.meta.hthreads, input.legacyHtmlThreads)
-    : input.meta.hthreads;
-  // Table widths have no old format to migrate from and no anchor in the
-  // prose to reconcile against — they ride through untouched.
+  // Html threads and table widths have no old format to migrate from and no
+  // anchor in the prose to reconcile against — they ride through untouched.
   const meta: EntityMeta = {
     mthreads,
-    hthreads,
+    hthreads: input.meta.hthreads,
     tcols: input.meta.tcols,
     foreign: input.meta.foreign,
   };

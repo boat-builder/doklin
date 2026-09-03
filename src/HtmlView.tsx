@@ -45,7 +45,7 @@ import {
 // shares the same box, so they position pins/cards directly), picks, and
 // activations back.
 //
-// Thread DATA lives with the host (App owns the sidecar file and its
+// Thread DATA lives with the host (App owns the entity meta file and its
 // persistence, like it owns the markdown autosave); this component owns the
 // transient UI state — comment mode, active card, which entry is being
 // edited — mirroring Editor.tsx's split, including the draft semantics: a

@@ -42,8 +42,7 @@ node verify-harness/drive-links.mjs        # 25 steps: click-to-follow for links
 node verify-harness/drive-meta.mjs         # 8 steps: boots the REAL <App/> (meta.html seeds
                                            # OLD-layout docs) and walks the entity-meta layout
                                            # (src/metaFile.ts) — lazy migration on open (inline
-                                           # thread bodies → <stem>.meta.jsonl, legacy html
-                                           # sidecar folded in and left in place), the workspace
+                                           # thread bodies → <stem>.meta.jsonl), the workspace
                                            # sweep migrating unopened docs, expansion feeding the
                                            # editor full CriticMarkup, a reply saving meta-only
                                            # (markdown byte-identical), reload persistence,

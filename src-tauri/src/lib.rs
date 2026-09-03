@@ -528,18 +528,16 @@ fn meta_file_of(doc_path: &str) -> String {
 }
 
 /// True for the files Doklin writes beside a document to store what the editor
-/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads), the
-/// legacy html comments sidecar (`<name>.html.comments.jsonl`), and a
-/// datastore's definition file (`store.jsonl`, whose fields and columns reach
-/// the user as the board itself). They're part of the document, not content of
-/// the user's own — so even "show every file" leaves them out.
+/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads and
+/// table widths) and a datastore's definition file (`store.jsonl`, whose
+/// fields and columns reach the user as the board itself). They're part of
+/// the document, not content of the user's own — so even "show every file"
+/// leaves them out.
 pub(crate) fn is_app_sidecar(path: &Path) -> bool {
     match path.file_name().and_then(|n| n.to_str()) {
         Some(name) => {
             let lower = name.to_ascii_lowercase();
-            lower.ends_with(".meta.jsonl")
-                || lower.ends_with(".comments.jsonl")
-                || lower == store::STORE_FILE
+            lower.ends_with(".meta.jsonl") || lower == store::STORE_FILE
         }
         None => false,
     }
@@ -2137,9 +2135,9 @@ mod tree_tests {
 
     /// Documents-only listing skips other files; "show all" adds them as
     /// unsupported rows, in one alphabetical run with the documents, and the
-    /// md+html fold is unchanged either way. The app's own comment sidecars
-    /// stay out of both — their content reaches the user as threads in the
-    /// editor, not as files.
+    /// md+html fold is unchanged either way. The app's own entity meta stays
+    /// out of both — its content reaches the user as threads in the editor,
+    /// not as a file.
     #[test]
     fn all_mode_adds_unsupported_rows() {
         let dir = std::env::temp_dir().join(format!("doklin-tree-{}", std::process::id()));
@@ -2152,7 +2150,6 @@ mod tree_tests {
             "c.png",
             "d.txt",
             "a.meta.jsonl",
-            "b.html.comments.jsonl",
         ] {
             std::fs::write(dir.join(name), "x").unwrap();
         }

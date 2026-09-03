@@ -29,7 +29,6 @@ const {
   expandMarkdown,
   extractMarkdown,
   migrateEntity,
-  unionThreads,
   metaFileOf,
   stemOf,
   metaIsEmpty,
@@ -169,39 +168,17 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   assert.equal(serializeEntityMeta(parseEntityMeta(ser)), ser);
 }
 
-/* ---------- unionThreads: entry union, ours wins bodies ---------- */
-{
-  const a = [{ id: "t1", comments: [entry("A", 1, "mine")] }];
-  const b = [
-    { id: "t1", comments: [entry("A", 1, "theirs"), entry("B", 2, "new reply")] },
-    { id: "t2", comments: [entry("C", 3, "whole new")] },
-  ];
-  const u = unionThreads(a, b);
-  assert.equal(u.length, 2);
-  assert.equal(u[0].comments[0].body, "mine");
-  assert.equal(u[0].comments[1].body, "new reply");
-  assert.equal(u[1].id, "t2");
-  // eid-stamped entries dedupe by eid even when timestamps drifted.
-  const withEid = unionThreads(
-    [{ id: "t3", comments: [entry("A", 1, "x", { eid: "e9" })] }],
-    [{ id: "t3", comments: [entry("A", 99, "x", { eid: "e9" })] }],
-  );
-  assert.equal(withEid[0].comments.length, 1);
-}
-
 /* ---------- migrateEntity: old layout → hybrid, idempotent ---------- */
 {
   const diskMd =
     "# T\n\n{==old==}{>>#aa1x A · 2026-01-01T00:00:00Z: inline body<<} tail\n";
-  const legacy = [{ id: "hh1", anchor: { path: "p", tag: "p", text: "x" }, comments: [entry("W", 7, "web note")] }];
-  const first = migrateEntity({ diskMd, meta: emptyMeta(), legacyHtmlThreads: legacy });
+  const first = migrateEntity({ diskMd, meta: emptyMeta() });
   assert.equal(first.mdChanged, true);
   assert.equal(first.metaChanged, true);
   assert.equal(first.md, "# T\n\n{==old==}{>>#aa1x<<} tail\n");
   assert.equal(first.meta.mthreads.length, 1);
-  assert.equal(first.meta.hthreads.length, 1);
 
-  const again = migrateEntity({ diskMd: first.md, meta: first.meta, legacyHtmlThreads: null });
+  const again = migrateEntity({ diskMd: first.md, meta: first.meta });
   assert.equal(again.mdChanged, false);
   assert.equal(again.metaChanged, false);
   assert.equal(serializeEntityMeta(again.meta), serializeEntityMeta(first.meta));
@@ -215,7 +192,6 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
       tcols: [],
       foreign: [],
     },
-    legacyHtmlThreads: null,
   });
   assert.equal(withOrphan.mdChanged, false);
   assert.equal(withOrphan.meta.mthreads.length, 1);
@@ -225,20 +201,21 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   // an entity worth a file on disk.
   const widths = { ...emptyMeta(), tcols: [{ id: "tw1", cols: [220, 0] }] };
   assert.equal(metaIsEmpty(widths), false);
-  const kept = migrateEntity({ diskMd: "just prose\n", meta: widths, legacyHtmlThreads: null });
+  const kept = migrateEntity({ diskMd: "just prose\n", meta: widths });
   assert.equal(kept.mdChanged, false);
   assert.equal(kept.metaChanged, false);
   assert.deepEqual(kept.meta.tcols, widths.tcols);
 
-  // Html-only entity: markdown side untouched (null), sidecar folds in.
-  const htmlOnly = migrateEntity({ diskMd: null, meta: emptyMeta(), legacyHtmlThreads: legacy });
+  // Html-only entity: markdown side untouched (null), its threads ride through.
+  const hthread = { id: "hh1", anchor: { path: "p", tag: "p", text: "x" }, comments: [entry("W", 7, "a note")] };
+  const htmlOnly = migrateEntity({ diskMd: null, meta: { ...emptyMeta(), hthreads: [hthread] } });
   assert.equal(htmlOnly.md, null);
   assert.equal(htmlOnly.mdChanged, false);
-  assert.equal(htmlOnly.metaChanged, true);
+  assert.equal(htmlOnly.metaChanged, false);
   assert.equal(htmlOnly.meta.hthreads.length, 1);
 
   // A fully empty entity migrates to... nothing to write.
-  const empty = migrateEntity({ diskMd: "just prose\n", meta: emptyMeta(), legacyHtmlThreads: null });
+  const empty = migrateEntity({ diskMd: "just prose\n", meta: emptyMeta() });
   assert.equal(empty.mdChanged, false);
   assert.equal(empty.metaChanged, false);
   assert.ok(metaIsEmpty(empty.meta));

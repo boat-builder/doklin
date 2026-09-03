@@ -1,10 +1,9 @@
 // Drives the REAL App over meta.html's IPC stub through the entity-meta
 // layout (src/metaFile.ts): lazy migration of an old-format document on
-// open (inline thread bodies → meta records, legacy html sidecar folded),
-// the workspace sweep migrating an UNOPENED document, expansion feeding the
-// editor full CriticMarkup, a reply saving as a meta-only write (markdown
-// byte-identical), reload persistence, orphan surfacing, and deletions
-// updating both files.
+// open (inline thread bodies → meta records), the workspace sweep migrating
+// an UNOPENED document, expansion feeding the editor full CriticMarkup, a
+// reply saving as a meta-only write (markdown byte-identical), reload
+// persistence, orphan surfacing, and deletions updating both files.
 import { chromium } from "playwright";
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -61,30 +60,18 @@ step("old-format doc opens: anchor highlighted, body in the rail", true);
 await page.screenshot({ path: `${SHOTS}/meta-01-boot.png` });
 
 // 2. Lazy migration normalized the OPEN document on disk: the markdown
-//    keeps only the bare marker, the body moved to the entity meta, and the
-//    legacy html sidecar's thread folded in — with the legacy file left in
-//    place for old app versions (transition posture).
+//    keeps only the bare marker, the body moved to the entity meta.
 await poll(async () => {
   const md = await fsGet("/docs/notes.md");
   return md?.includes("{>>#m1meta<<}") && !md.includes("needs a stronger opening");
 });
 const meta1 = await poll(async () => {
   const m = await fsGet("/docs/notes.meta.jsonl");
-  return m &&
-    m.includes('"t":"mthread"') &&
-    m.includes("m1meta") &&
-    m.includes("needs a stronger opening") &&
-    m.includes('"t":"hthread"') &&
-    m.includes("legacy html note")
+  return m && m.includes('"t":"mthread"') && m.includes("m1meta") && m.includes("needs a stronger opening")
     ? m
     : null;
 });
-const legacyKept = (await fsGet("/docs/notes.html.comments.jsonl")) !== undefined;
-step(
-  "lazy migration: bare marker in md, body + folded legacy thread in meta",
-  Boolean(meta1) && legacyKept,
-  legacyKept ? "legacy sidecar left for old versions" : "legacy sidecar missing!",
-);
+step("lazy migration: bare marker in md, body in meta", Boolean(meta1));
 
 // 3. The workspace sweep migrated the UNOPENED third.md the same way.
 await poll(async () => {
