@@ -18,6 +18,7 @@
 //! config.rs     cloud.json, the marker, endpoints and names
 //! status.rs     the status/event contract
 //! tests.rs      the in-memory worker and the two-device matrix
+//! versions.rs   the version store's mirror: upload, the cloud ladder, reads
 //! ```
 
 pub mod bus;
@@ -33,6 +34,7 @@ pub(crate) mod scan;
 pub(crate) mod status;
 #[cfg(test)]
 mod tests;
+pub(crate) mod versions;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -182,6 +184,7 @@ fn spawn_engine(inner: &mut ManagerInner, ws: &WorkspaceEntry) {
             domain: ws.domain.clone(),
             endpoint: ws.endpoint.clone(),
             state_dir,
+            data_dir: inner.data_dir.clone(),
             device_id: inner.device.id.clone(),
             device_name: inner.device.name.clone(),
             use_trash: true,
@@ -616,6 +619,42 @@ pub(crate) async fn cloud_history(app: AppHandle, path: String) -> Result<Vec<Re
         route(inner, &path).ok_or_else(|| "that document isn't in a connected workspace".to_string())
     })?;
     ask(tx, |reply| EngineCmd::History { rel, reply }).await
+}
+
+/// The cloud version store's index for the workspace holding `path` — what
+/// the history rail merges with this Mac's own snapshots. `Ok(None)` when
+/// the workspace is connected to a worker that has no `versions` feature.
+pub(crate) async fn versions_index_for(
+    app: &AppHandle,
+    path: &str,
+) -> Result<Option<crate::cloud::versions::VersionsIndex>, String> {
+    let (tx, _rel) = with_inner(app, |inner| {
+        route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::VersionsIndex { reply }).await
+}
+
+/// One mirrored snapshot, downloaded and cached if this Mac hasn't seen it.
+pub(crate) async fn version_snapshot(
+    app: &AppHandle,
+    path: &str,
+    id: &str,
+) -> Result<crate::versions::store::Snapshot, String> {
+    let (tx, _rel) = with_inner(app, |inner| {
+        route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
+    })?;
+    let id = id.to_string();
+    ask(tx, move |reply| EngineCmd::VersionSnapshot { id, reply }).await
+}
+
+/// One mirrored version's content, for a document whose blob this Mac's
+/// store no longer holds (or never did).
+pub(crate) async fn version_blob(app: &AppHandle, path: &str, hash: &str) -> Result<Vec<u8>, String> {
+    let (tx, _rel) = with_inner(app, |inner| {
+        route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
+    })?;
+    let hash = hash.to_string();
+    ask(tx, move |reply| EngineCmd::VersionBlob { hash, reply }).await
 }
 
 /// One revision's text.

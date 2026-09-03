@@ -57,8 +57,12 @@ for s in index["snapshots"]:
     print("  %s  %-11s %5d files %9.1f KB%s%s%s" % (when, s["reason"], s["files"], s["bytes"] / 1024, came_from, pin, name))
 
 blobs = sum(len(files) for _, _, files in os.walk(os.path.join(store, "blobs")))
+# cloud-cache/ holds snapshots other Macs mirrored, pulled down once and kept
+# (docs/versioning.md §6.3). A cache, not the store: it is safe to delete.
+cached = len(next(os.walk(os.path.join(store, "cloud-cache")), (None, None, []))[2])
 disk = sum(os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(store) for f in files)
-print("  %d snapshot(s), %d blob(s), %.1f KB on disk" % (len(index["snapshots"]), blobs, disk / 1024))
+mirrored = "  + %d from other Macs" % cached if cached else ""
+print("  %d snapshot(s), %d blob(s), %.1f KB on disk%s" % (len(index["snapshots"]), blobs, disk / 1024, mirrored))
 PY
 }
 

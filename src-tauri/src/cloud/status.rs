@@ -50,12 +50,25 @@ pub struct CloudStatus {
     pub pending_deletes: u32,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
+    /// The version store's mirror — null when this worker has no `versions`
+    /// feature, which is what the update badge is for.
+    pub versions: Option<VersionsMirror>,
     /// The public map as this device believes it: the last applied manifest
     /// overlaid with the ops queued here — so a page the user just
     /// published shows up immediately, not a CAS later.
     pub public: Vec<PublicPage>,
     /// Every other device here, from the last poll.
     pub presence: Vec<PresenceDevice>,
+}
+
+/// How much of this device's version history is in the bucket, and how much
+/// is up there in total (docs/versioning-plan.md §6.2).
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionsMirror {
+    pub mirrored: u64,
+    pub cloud: u64,
+    pub last_mirror_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

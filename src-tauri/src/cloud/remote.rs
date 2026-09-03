@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::manifest::{HistoryArchive, Manifest, PollResponse};
+use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
 
@@ -155,6 +156,44 @@ pub trait Remote: Send + Sync + 'static {
         file_id: &str,
         archive: &HistoryArchive,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    /* ----- the version store (docs/versioning.md §6.4) ----- */
+
+    /// The index and its etag; None when the workspace has never mirrored.
+    fn get_versions_index(
+        &self,
+    ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send;
+    /// CAS the index. `base_etag` is `versions::NO_INDEX` ("*") to create
+    /// one; a lost race is `RemoteError::Conflict`.
+    fn put_versions_index(
+        &self,
+        base_etag: &str,
+        index: &VersionsIndex,
+    ) -> impl std::future::Future<Output = RemoteResult<String>> + Send;
+    /// The snapshot's bytes, gzip'd as the device wrote them.
+    fn get_version_snapshot(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send;
+    fn put_version_snapshot(
+        &self,
+        id: &str,
+        gz: Vec<u8>,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    fn delete_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    /// One page of the version blob inventory: (hash, uploaded-at ms) plus
+    /// the cursor for the next page, if there is one.
+    fn list_version_blobs(
+        &self,
+        cursor: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send;
+    fn get_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send;
+    fn put_version_blob(
+        &self,
+        hash: &str,
+        gz: Vec<u8>,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
     /// "This device is here" — editing `path` when given, idle otherwise.
     fn put_presence(
         &self,
@@ -458,6 +497,156 @@ impl Remote for HttpRemote {
                 .send()
                 .await
                 .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn get_versions_index(
+        &self,
+    ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
+        async move {
+            let res =
+                self.auth(self.client.get(self.url("versions/index"))).send().await.map_err(transport_err)?;
+            match expect_status(res).await {
+                Ok(res) => {
+                    let etag = res
+                        .headers()
+                        .get("x-versions-etag")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let index = res
+                        .json::<VersionsIndex>()
+                        .await
+                        .map_err(|e| RemoteError::Other(format!("unreadable versions index: {}", e)))?;
+                    Ok(Some((index, etag)))
+                }
+                Err(RemoteError::NotFound) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    fn put_versions_index(
+        &self,
+        base_etag: &str,
+        index: &VersionsIndex,
+    ) -> impl std::future::Future<Output = RemoteResult<String>> + Send {
+        let body = serde_json::to_vec(index).unwrap_or_default();
+        let base = base_etag.to_string();
+        async move {
+            let res = self
+                .auth(self.client.put(self.url("versions/index")))
+                .header("x-base-etag", base)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            Ok(v.get("etag").and_then(|e| e.as_str()).unwrap_or_default().to_string())
+        }
+    }
+
+    fn get_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
+        let url = self.url(&format!("versions/snapshots/{}", id));
+        async move {
+            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            Ok(res.bytes().await.map_err(transport_err)?.to_vec())
+        }
+    }
+
+    fn put_version_snapshot(
+        &self,
+        id: &str,
+        gz: Vec<u8>,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("versions/snapshots/{}", id));
+        async move {
+            let res = self
+                .auth(self.client.put(url))
+                .header("content-type", "application/gzip")
+                .body(gz)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn delete_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("versions/snapshots/{}", id));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn list_version_blobs(
+        &self,
+        cursor: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send {
+        let cursor = cursor.map(String::from);
+        async move {
+            let mut req = self.client.get(self.url("versions/blobs"));
+            if let Some(c) = &cursor {
+                req = req.query(&[("cursor", c.as_str())]);
+            }
+            let res = self.auth(req).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            let blobs = v
+                .get("blobs")
+                .and_then(|b| b.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| {
+                            let hash = b.get("hash")?.as_str()?.to_string();
+                            let uploaded = b
+                                .get("uploaded")
+                                .and_then(|u| u.as_str())
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|d| d.timestamp_millis() as u64)
+                                .unwrap_or(0);
+                            Some((hash, uploaded))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let next = v.get("cursor").and_then(|c| c.as_str()).map(String::from);
+            Ok((blobs, next))
+        }
+    }
+
+    fn get_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
+        let url = self.url(&format!("versions/blobs/{}", hash));
+        async move {
+            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            Ok(res.bytes().await.map_err(transport_err)?.to_vec())
+        }
+    }
+
+    fn put_version_blob(&self, hash: &str, gz: Vec<u8>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("versions/blobs/{}", hash));
+        async move {
+            let res = self
+                .auth(self.client.put(url))
+                .header("content-type", "application/gzip")
+                .body(gz)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("versions/blobs/{}", hash));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
         }
     }

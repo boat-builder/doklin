@@ -17,6 +17,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { build } from "vite";
@@ -82,14 +83,17 @@ async function call(path, { method = "GET", token, device = DEVICE, body, header
     }
   }
   const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), env);
-  const text = await res.text();
+  // Read the bytes, not the text: the version store round-trips gzip, and a
+  // body decoded as UTF-8 could not be compared with what went in.
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const text = new TextDecoder().decode(bytes);
   let json = null;
   try {
     json = JSON.parse(text);
   } catch {
     // html or empty responses are fine
   }
-  return { status: res.status, headers: res.headers, text, json };
+  return { status: res.status, headers: res.headers, text, bytes, json };
 }
 
 let passed = 0;
@@ -147,6 +151,7 @@ await test("auth: /api/meta rejects a missing or wrong token; owner and member g
   workerVersion = ok.json.version;
   assert.ok(ok.json.features.includes("sync"));
   assert.ok(ok.json.features.includes("wipe"));
+  assert.ok(ok.json.features.includes("versions"), "this worker mirrors the version store");
   assert.equal(ok.json.workspace, null, "a fresh domain holds nothing");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 200);
 });
@@ -443,7 +448,162 @@ await test("history: archive round-trip, validation, 404 when there is none", as
   assert.equal(bad.status, 400);
   const wrongVersion = await call("/api/history/f-doc1", { method: "PUT", token: OWNER, body: { version: 2, entries } });
   assert.equal(wrongVersion.status, 400);
-  assert.equal((await call("/api/history/f-doc1", { method: "DELETE", token: OWNER })).status, 405);
+  // Phase 6 of versioning drops these archives; deleting one that is already
+  // gone is the same success, so a sweep never has to look first.
+  assert.equal((await call("/api/history/f-doc1", { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call("/api/history/f-doc1", { token: OWNER })).status, 404);
+  assert.equal((await call("/api/history/f-doc1", { method: "DELETE", token: MEMBER })).status, 204);
+});
+
+/* ---------- The version store (docs/versioning.md §6.4) ---------- */
+
+const snapId = (ts, device = DEVICE) => `${String(ts).padStart(13, "0")}-${device}`;
+const versionsIndex = (snapshots, horizonDays = null) => ({ version: 1, horizonDays, snapshots });
+const versionEntry = (id, extra = {}) => ({
+  id,
+  ts: Number(id.slice(0, 13)),
+  device: id.slice(14),
+  reason: "interval",
+  files: 3,
+  bytes: 4096,
+  digest: sha256(id),
+  ...extra,
+});
+const T0 = 1756900000000;
+
+await test('versions: no index until one is made; "*" creates it, the etag CAS\'s it, a stale base is 412', async () => {
+  assert.equal((await call("/api/versions/index")).status, 401);
+  assert.equal((await call("/api/versions/index", { token: OWNER })).status, 404);
+  assert.equal((await call("/api/versions/index", { method: "POST", token: OWNER })).status, 405);
+  assert.equal((await call("/api/versions/nonsense", { token: OWNER })).status, 404);
+
+  const noBase = await call("/api/versions/index", { method: "PUT", token: OWNER, body: versionsIndex([]) });
+  assert.equal(noBase.status, 428, "a PUT with no base etag never lands");
+
+  const first = versionsIndex([versionEntry(snapId(T0))]);
+  const created = await call("/api/versions/index", {
+    method: "PUT",
+    token: OWNER,
+    headers: { "x-base-etag": "*" },
+    body: first,
+  });
+  assert.equal(created.status, 200);
+  assert.equal(created.json.snapshots, 1);
+
+  // "*" is create-only, so the second device with the same idea loses — and
+  // is told where the index actually is, the way a manifest race is settled.
+  const raced = await call("/api/versions/index", {
+    method: "PUT",
+    token: MEMBER,
+    headers: { "x-base-etag": "*" },
+    body: first,
+  });
+  assert.equal(raced.status, 412);
+  assert.equal(raced.json.etag, created.json.etag, "the loser is told where the index is");
+
+  const got = await call("/api/versions/index", { token: MEMBER });
+  assert.equal(got.status, 200);
+  assert.equal(got.headers.get("x-versions-etag"), created.json.etag);
+  assert.equal(got.headers.get("cache-control"), "no-store");
+  assert.deepEqual(got.json, first, "a member reads the index");
+
+  const second = versionsIndex([...first.snapshots, versionEntry(snapId(T0 + 600000, OTHER_DEVICE))], 90);
+  const moved = await call("/api/versions/index", {
+    method: "PUT",
+    token: MEMBER,
+    headers: { "x-base-etag": created.json.etag },
+    body: second,
+  });
+  assert.equal(moved.status, 200, "a member mirrors too");
+  assert.notEqual(moved.json.etag, created.json.etag);
+  const stale = await call("/api/versions/index", {
+    method: "PUT",
+    token: OWNER,
+    headers: { "x-base-etag": created.json.etag },
+    body: second,
+  });
+  assert.equal(stale.status, 412);
+  assert.equal(stale.json.etag, moved.json.etag, "and where to start the retry from");
+});
+
+await test("versions: the index's shape check — ids, devices, reasons, digests, the horizon and the size cap", async () => {
+  const base = (await call("/api/versions/index", { token: OWNER })).headers.get("x-versions-etag");
+  const put = (body) =>
+    call("/api/versions/index", { method: "PUT", token: OWNER, headers: { "x-base-etag": base }, body });
+  const good = versionEntry(snapId(T0));
+
+  assert.equal((await put([])).status, 400, "an index is an object");
+  assert.equal((await put({ version: 2, horizonDays: null, snapshots: [] })).status, 400);
+  assert.equal((await put({ version: 1, horizonDays: -1, snapshots: [] })).status, 400);
+  assert.equal((await put({ version: 1, horizonDays: null, snapshots: {} })).status, 400);
+  assert.equal((await put(versionsIndex([versionEntry("not-an-id")]))).status, 400);
+  assert.equal((await put(versionsIndex([{ ...good, device: "Bad Device" }]))).status, 400);
+  assert.equal((await put(versionsIndex([{ ...good, reason: "vibes" }]))).status, 400);
+  assert.equal((await put(versionsIndex([{ ...good, digest: good.digest.slice(0, 16) }]))).status, 400, "the whole sha256");
+  assert.equal((await put(versionsIndex([{ ...good, files: -1 }]))).status, 400);
+  assert.equal((await put(versionsIndex([{ ...good, label: 7 }]))).status, 400);
+  assert.equal((await put(versionsIndex([{ ...good, restoredFrom: "yesterday" }]))).status, 400);
+  assert.equal((await put(versionsIndex([good, good]))).status, 400, "one id names one snapshot");
+
+  const oversized = await call("/api/versions/index", {
+    method: "PUT",
+    token: OWNER,
+    headers: { "x-base-etag": base },
+    body: JSON.stringify({ version: 1, horizonDays: null, snapshots: [], pad: "x".repeat(1024 * 1024) }),
+  });
+  assert.equal(oversized.status, 413);
+
+  const ok = await put(versionsIndex([{ ...good, pinned: true, label: "before the rewrite", restoredFrom: null }], 365));
+  assert.equal(ok.status, 200, "a named, pinned, restored row is fine");
+});
+
+await test("versions: snapshots and blobs are immutable and create-only; the inventory pages; the caps hold", async () => {
+  const id = snapId(T0);
+  assert.equal((await call(`/api/versions/snapshots/${id}`, { token: OWNER })).status, 404);
+  assert.equal((await call("/api/versions/snapshots/not-an-id", { token: OWNER })).status, 400);
+
+  const snapshot = gzipSync(Buffer.from(JSON.stringify({ version: 1, ts: T0, files: { "Home.md": { h: "a", s: 1, m: 2 } } })));
+  const put = await call(`/api/versions/snapshots/${id}`, { method: "PUT", token: OWNER, body: snapshot });
+  assert.equal(put.status, 200);
+  assert.deepEqual(put.json, { stored: true, existed: false, id, size: snapshot.length });
+  const again = await call(`/api/versions/snapshots/${id}`, { method: "PUT", token: MEMBER, body: Buffer.from("other bytes") });
+  assert.equal(again.json.existed, true, "an id already written stands");
+  const gotSnapshot = await call(`/api/versions/snapshots/${id}`, { token: MEMBER });
+  assert.deepEqual([...gotSnapshot.bytes], [...snapshot], "the bytes come back as the device wrote them");
+  assert.equal(gotSnapshot.headers.get("content-type"), "application/gzip");
+
+  const content = "one\ntwo\nthree\n";
+  const hash = sha256(content);
+  const body = gzipSync(Buffer.from(content));
+  const stored = await call(`/api/versions/blobs/${hash}`, { method: "PUT", token: MEMBER, body });
+  assert.deepEqual(stored.json, { stored: true, existed: false, hash, size: body.length });
+  assert.equal((await call(`/api/versions/blobs/${hash}`, { method: "PUT", token: OWNER, body: Buffer.from("no") })).json.existed, true);
+  assert.deepEqual([...(await call(`/api/versions/blobs/${hash}`, { token: OWNER })).bytes], [...body]);
+  // A 16-hex prefix addresses a synced blob; a version blob is the whole hash.
+  assert.equal((await call(`/api/versions/blobs/${hash.slice(0, 16)}`, { token: OWNER })).status, 400);
+  assert.equal((await call(`/api/versions/blobs/${sha256("nothing")}`, { token: OWNER })).status, 404);
+  assert.equal((await call("/api/versions/blobs", { method: "POST", token: OWNER })).status, 405);
+
+  // The inventory is paged: this one prefix holds every version of every
+  // file, so a listing answers a page and a cursor, never the whole bucket.
+  for (let i = 0; i < 1001; i += 1) await fake.put(`versions/blobs/${sha256(`pad-${i}`)}`, "x");
+  const page = await call("/api/versions/blobs", { token: OWNER });
+  assert.equal(page.json.blobs.length, 1000);
+  assert.ok(page.json.cursor, "there is more to come");
+  assert.ok(page.json.blobs.every((b) => /^[a-f0-9]{64}$/.test(b.hash) && b.size > 0 && b.uploaded));
+  const rest = await call(`/api/versions/blobs?cursor=${encodeURIComponent(page.json.cursor)}`, { token: OWNER });
+  assert.equal(rest.json.blobs.length, 2, "the last pad and the real blob");
+  assert.equal(rest.json.cursor, undefined, "the last page carries no cursor");
+
+  assert.equal((await call(`/api/versions/blobs/${hash}`, { method: "DELETE", token: OWNER })).status, 200);
+  assert.equal((await call(`/api/versions/blobs/${hash}`, { token: OWNER })).status, 404);
+  assert.equal((await call(`/api/versions/snapshots/${id}`, { method: "DELETE", token: OWNER })).status, 200);
+  assert.equal((await call(`/api/versions/snapshots/${id}`, { token: OWNER })).status, 404);
+
+  const fatSnapshot = new Uint8Array(4 * 1024 * 1024 + 1);
+  assert.equal((await call(`/api/versions/snapshots/${snapId(T0 + 1)}`, { method: "PUT", token: OWNER, body: fatSnapshot })).status, 413);
+  const fatBlob = new Uint8Array(25 * 1024 * 1024 + 1);
+  assert.equal((await call(`/api/versions/blobs/${sha256("huge")}`, { method: "PUT", token: OWNER, body: fatBlob })).status, 413);
 });
 
 await test("presence: the device header names the device; beats upsert, silence prunes, DELETE leaves; the poll carries it", async () => {
@@ -822,12 +982,13 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal((await call("/api/admin/wipe", { method: "POST", token: OWNER, body: {} })).status, 400);
   assert.equal((await call("/api/admin/wipe", { token: OWNER })).status, 405);
   assert.ok(fake.store.size > 0, "there is data to wipe");
+  assert.ok([...fake.store.keys()].some((k) => k.startsWith("versions/")), "the version store is in the bucket");
 
   const res = await call("/api/admin/wipe", { method: "POST", token: OWNER, body: { confirm: "wipe" } });
   assert.equal(res.status, 200);
   assert.equal(res.json.remaining, false);
   assert.ok(res.json.purged > 0);
-  assert.equal(fake.store.size, 0, "the bucket is completely empty");
+  assert.equal(fake.store.size, 0, "the bucket is completely empty — the version store included");
 
   // The member's token died with the bucket; the owner secret lives in the
   // worker's env, so the owner can still talk to the (now free) domain.

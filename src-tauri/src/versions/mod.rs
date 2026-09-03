@@ -25,10 +25,12 @@
 
 mod capture;
 mod history;
-mod retain;
+// The cloud mirror reads the ladder and the store on disk; nothing outside
+// this module ever writes into one (docs/versioning-plan.md §6.2).
+pub(crate) mod retain;
 mod settings;
 mod status;
-mod store;
+pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +46,7 @@ use tokio::time::Instant;
 
 use crate::cloud::scan::{rel_for_touch, MAX_SYNC_ENTRIES};
 use crate::cloud::status::{AppEvents, Events};
+use crate::cloud::versions::VersionsEntry;
 
 use capture::{Cadence, CaptureError};
 use history::{FileHistory, SnapshotCache};
@@ -257,11 +260,14 @@ impl Versioner {
         Ok(())
     }
 
-    /// One document's versions, and what is on disk right now.
-    fn history(&mut self, rel: &str) -> FileHistory {
+    /// One document's versions, and what is on disk right now. `cloud` is
+    /// what the bucket holds — empty for a folder that isn't connected, and
+    /// walked exactly like this Mac's own snapshots when it isn't.
+    fn history(&mut self, rel: &str, cloud: &[VersionsEntry]) -> FileHistory {
         let current_hash = history::hash_on_disk(&self.store.root.join(rel));
+        let retained = history::retained_set(&self.index, cloud);
         let versions =
-            history::file_versions(&self.store, &self.index, &mut self.cache, rel, current_hash.as_deref());
+            history::file_versions(&self.store, &retained, &mut self.cache, rel, current_hash.as_deref());
         FileHistory { root: self.store.root.to_string_lossy().to_string(), current_hash, versions }
     }
 
@@ -380,6 +386,7 @@ enum VersionerCmd {
     },
     History {
         rel: String,
+        cloud: Vec<VersionsEntry>,
         reply: oneshot::Sender<FileHistory>,
     },
     RestoreFile {
@@ -463,8 +470,8 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                     let answer = blocking(&state, |v| v.snapshots()).await;
                     let _ = reply.send(answer.unwrap_or_default());
                 }
-                Some(VersionerCmd::History { rel, reply }) => {
-                    if let Some(history) = blocking(&state, move |v| v.history(&rel)).await {
+                Some(VersionerCmd::History { rel, cloud, reply }) => {
+                    if let Some(history) = blocking(&state, move |v| v.history(&rel, &cloud)).await {
                         let _ = reply.send(history);
                     }
                 }
@@ -760,6 +767,13 @@ fn route(app: &AppHandle, path: &str) -> Result<(mpsc::UnboundedSender<Versioner
     })
 }
 
+/// The version store for a folder, opened straight from its path — no
+/// manager, no running versioner. What the cloud engine mirrors from: it
+/// reads, and never writes.
+pub(crate) fn store_for_root(data_dir: &Path, root: &Path) -> Store {
+    Store::open(data_dir, &store_key(root), root)
+}
+
 /// A store to read from without going through its versioner: reads are pure
 /// filesystem and have no business queueing behind a capture.
 fn store_for(app: &AppHandle, root: &str) -> Result<Store, String> {
@@ -865,15 +879,50 @@ pub(crate) fn versions_set_enabled(app: AppHandle, enabled: bool) -> Result<(), 
     })
 }
 
+/// How many mirrored snapshots one history call will download before it
+/// answers. Opening the rail on a Mac that connected a minute ago should
+/// cost a moment, not the whole bucket; the mirror's daily sweep fetches
+/// the rest into the same cache in the background.
+const CLOUD_PREFETCH: usize = 48;
+
+/// What the bucket holds for the workspace `path` is in, with the snapshots
+/// the rail is about to read pulled into the store's cache. Empty for a
+/// folder that isn't connected, or one whose worker predates `versions` —
+/// history is ungated, so neither is an error.
+async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEntry> {
+    let Ok(Some(index)) = crate::cloud::versions_index_for(app, path).await else { return Vec::new() };
+    let Ok(store) = store_for(app, root) else { return index.snapshots };
+    let mut newest = index.snapshots.clone();
+    newest.sort_by(|a, b| b.ts.cmp(&a.ts));
+    let mut fetched = 0;
+    for entry in &newest {
+        if fetched >= CLOUD_PREFETCH {
+            break;
+        }
+        if store.read_cloud_snapshot(&entry.id).is_some() {
+            continue;
+        }
+        // Offline, or a snapshot another device's sweep has since dropped:
+        // stop asking rather than time out once per row.
+        if crate::cloud::version_snapshot(app, path, &entry.id).await.is_err() {
+            break;
+        }
+        fetched += 1;
+    }
+    index.snapshots
+}
+
 /// Every version of one document, newest first — the rail's whole model.
-/// Where the workspace is connected, the manifest's own revisions are folded
-/// in behind the local ones, so what history shows today does not shrink on
-/// the day this ships (docs/versioning-plan.md §5.3). Phase 6 removes that.
+/// This Mac's snapshots and the ones other devices mirrored are one walk
+/// (docs/versioning-plan.md §6.3); behind them, for a connected workspace,
+/// the sync manifest's own revisions are folded in so what history shows
+/// does not shrink on the day this ships. Phase 6 removes that last part.
 #[tauri::command]
 pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<FileHistory, String> {
-    let (tx, _root, rel) = route(&app, &path)?;
+    let (tx, root, rel) = route(&app, &path)?;
+    let cloud = mirrored_set(&app, &path, &root).await;
     let asked = rel.clone();
-    let mut history = ask(tx, move |reply| VersionerCmd::History { rel: asked, reply }).await?;
+    let mut history = ask(tx, move |reply| VersionerCmd::History { rel: asked, cloud, reply }).await?;
     if let Ok(revisions) = crate::cloud::cloud_history(app, path).await {
         let local = std::mem::take(&mut history.versions);
         history.versions = history::merge_cloud(local, &revisions, history.current_hash.as_deref(), &rel);
@@ -881,13 +930,27 @@ pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<Fil
     Ok(history)
 }
 
+/// One version's text: this Mac's blob, or — for a version only another
+/// device ever held — the mirrored one, fetched through the engine.
+async fn version_text(app: &AppHandle, root: &str, hash: &str) -> Result<String, String> {
+    let store = store_for(app, root)?;
+    let owned = hash.to_string();
+    let local = tokio::task::spawn_blocking(move || history::read_version(&store, &owned))
+        .await
+        .map_err(|_| "that version couldn't be read".to_string())?;
+    match local {
+        Ok(text) => Ok(text),
+        Err(missing) => match crate::cloud::version_blob(app, root, hash).await {
+            Ok(bytes) => history::text_of(bytes),
+            Err(_) => Err(missing),
+        },
+    }
+}
+
 /// One version's text, for the preview.
 #[tauri::command]
 pub(crate) async fn versions_read(app: AppHandle, root: String, hash: String) -> Result<String, String> {
-    let store = store_for(&app, &root)?;
-    tokio::task::spawn_blocking(move || history::read_version(&store, &hash))
-        .await
-        .map_err(|_| "that version couldn't be read".to_string())?
+    version_text(&app, &root, &hash).await
 }
 
 /// A unified diff between two versions. A null hash means the file on disk,
@@ -900,12 +963,20 @@ pub(crate) async fn versions_diff(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<String, String> {
-    let store = store_for(&app, &root)?;
-    tokio::task::spawn_blocking(move || {
-        history::diff(&store, path.as_deref().map(Path::new), from.as_deref(), to.as_deref())
-    })
-    .await
-    .map_err(|_| "that comparison didn't finish".to_string())?
+    let side = |hash: Option<String>| async {
+        match hash {
+            Some(hash) => version_text(&app, &root, &hash).await,
+            None => {
+                let on_disk = path.clone().ok_or_else(|| "there's no file to compare with".to_string())?;
+                tokio::task::spawn_blocking(move || history::read_disk(Path::new(&on_disk)))
+                    .await
+                    .map_err(|_| "that comparison didn't finish".to_string())?
+            }
+        }
+    };
+    let before = side(from).await?;
+    let after = side(to).await?;
+    history::diff_texts(&before, &after)
 }
 
 /// Put an earlier version back. The content is named either by `hash` (a

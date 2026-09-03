@@ -2643,7 +2643,9 @@ export default function App() {
       try {
         const outcome = await versionsRestoreFile(root, docPath, {
           ts: version.ts,
-          hash: version.source === "cloud" ? null : version.hash,
+          // Only a version this Mac's own store holds can be named by its
+          // hash; a mirrored one and a manifest revision arrive as text.
+          hash: version.source === "local" ? version.hash : null,
           text,
         });
         setVersionPreview(null);

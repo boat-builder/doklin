@@ -20,6 +20,7 @@ import {
   cloudToken,
   cloudWipe,
   phaseLine,
+  versionsLine,
   timeAgo,
   workerAhead,
   workerBehind,
@@ -405,6 +406,11 @@ export default function CloudPanel({
             </div>
           </div>
         )}
+
+        <div className="cloud-section-label">Version history</div>
+        <p className="cloud-hint" data-testid="versions-line">
+          {versionsLine(cloud, now)}
+        </p>
 
         <div className="cloud-section-label">Here now</div>
         {others.length === 0 ? (

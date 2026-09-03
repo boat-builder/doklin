@@ -21,6 +21,10 @@ use super::manifest::*;
 use super::remote::*;
 use super::scan::{hash16, now_ms, scan_local};
 use super::status::*;
+use super::versions::{snapshot_id, VersionsEntry, VersionsIndex, CLOUD_GC_GRACE_MS, MIRROR_EVERY, NO_INDEX};
+use crate::versions::store::{
+    digest_of, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
+};
 
 /* ---------- The in-memory worker ---------- */
 
@@ -39,8 +43,17 @@ struct FakeWorker {
     offline: bool,
     reject_schema: bool,
     worker_version: u32,
+    features: Vec<String>,
     racer: Option<Manifest>,
     put_manifest_calls: u64,
+    /* The version store (docs/versioning.md §6.4): its own CAS'd index,
+       immutable snapshots and blobs, with an upload time per blob so the
+       cloud sweep's grace period is testable. */
+    versions_index: Option<VersionsIndex>,
+    versions_etag: u64,
+    version_snapshots: HashMap<String, Vec<u8>>,
+    version_blobs: HashMap<String, (Vec<u8>, u64)>,
+    versions_racer: Option<VersionsIndex>,
 }
 
 impl FakeWorker {
@@ -52,7 +65,11 @@ impl FakeWorker {
 type SharedWorker = Arc<Mutex<FakeWorker>>;
 
 fn fake_worker() -> SharedWorker {
-    Arc::new(Mutex::new(FakeWorker { worker_version: 1, ..Default::default() }))
+    Arc::new(Mutex::new(FakeWorker {
+        worker_version: 1,
+        features: vec!["sync".into(), "wipe".into(), "versions".into()],
+        ..Default::default()
+    }))
 }
 
 #[derive(Clone)]
@@ -81,11 +98,7 @@ impl Remote for FakeRemote {
         async move {
             this.check_offline()?;
             let b = this.be.lock().unwrap();
-            Ok(Meta {
-                version: b.worker_version,
-                features: vec!["sync".into(), "wipe".into()],
-                workspace: b.bound.clone(),
-            })
+            Ok(Meta { version: b.worker_version, features: b.features.clone(), workspace: b.bound.clone() })
         }
     }
 
@@ -240,6 +253,127 @@ impl Remote for FakeRemote {
         }
     }
 
+    /* ----- the version store ----- */
+
+    fn get_versions_index(
+        &self,
+    ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
+        let this = self.clone();
+        async move {
+            this.check_offline()?;
+            let b = this.be.lock().unwrap();
+            Ok(b.versions_index.clone().map(|i| (i, format!("v{}", b.versions_etag))))
+        }
+    }
+
+    fn put_versions_index(
+        &self,
+        base_etag: &str,
+        index: &VersionsIndex,
+    ) -> impl std::future::Future<Output = RemoteResult<String>> + Send {
+        let this = self.clone();
+        let base = base_etag.to_string();
+        let index = index.clone();
+        async move {
+            this.check_offline()?;
+            let mut b = this.be.lock().unwrap();
+            // "Another device landed between your read and your write."
+            if let Some(theirs) = b.versions_racer.take() {
+                b.versions_index = Some(theirs);
+                b.versions_etag += 1;
+                return Err(RemoteError::Conflict);
+            }
+            let current =
+                if b.versions_index.is_some() { format!("v{}", b.versions_etag) } else { NO_INDEX.to_string() };
+            if base != current {
+                return Err(RemoteError::Conflict);
+            }
+            b.versions_index = Some(index);
+            b.versions_etag += 1;
+            Ok(format!("v{}", b.versions_etag))
+        }
+    }
+
+    fn get_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.check_offline()?;
+            let b = this.be.lock().unwrap();
+            b.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
+        }
+    }
+
+    fn put_version_snapshot(&self, id: &str, gz: Vec<u8>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.check_offline()?;
+            // Immutable and create-only, exactly as the worker stores them.
+            this.be.lock().unwrap().version_snapshots.entry(id).or_insert(gz);
+            Ok(())
+        }
+    }
+
+    fn delete_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.be.lock().unwrap().version_snapshots.remove(&id);
+            Ok(())
+        }
+    }
+
+    fn list_version_blobs(
+        &self,
+        cursor: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send {
+        let this = self.clone();
+        let at: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
+        async move {
+            this.check_offline()?;
+            let b = this.be.lock().unwrap();
+            // A deliberately tiny page, so the caller's paging is exercised
+            // by every sweep rather than by one test with a thousand blobs.
+            const PAGE: usize = 2;
+            let mut hashes: Vec<(String, u64)> =
+                b.version_blobs.iter().map(|(h, (_, up))| (h.clone(), *up)).collect();
+            hashes.sort();
+            let page: Vec<(String, u64)> = hashes.iter().skip(at).take(PAGE).cloned().collect();
+            let next = (at + PAGE < hashes.len()).then(|| (at + PAGE).to_string());
+            Ok((page, next))
+        }
+    }
+
+    fn get_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
+        let this = self.clone();
+        let hash = hash.to_string();
+        async move {
+            this.check_offline()?;
+            let b = this.be.lock().unwrap();
+            b.version_blobs.get(&hash).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
+        }
+    }
+
+    fn put_version_blob(&self, hash: &str, gz: Vec<u8>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let hash = hash.to_string();
+        async move {
+            this.check_offline()?;
+            this.be.lock().unwrap().version_blobs.entry(hash).or_insert((gz, now_ms()));
+            Ok(())
+        }
+    }
+
+    fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let hash = hash.to_string();
+        async move {
+            this.be.lock().unwrap().version_blobs.remove(&hash);
+            Ok(())
+        }
+    }
+
     fn put_presence(&self, name: &str, path: Option<&str>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let this = self.clone();
         let entry = PresenceEntry { name: name.to_string(), path: path.map(String::from), ts: now_ms() };
@@ -270,6 +404,9 @@ impl Remote for FakeRemote {
             b.blobs.clear();
             b.histories.clear();
             b.presence.clear();
+            b.versions_index = None;
+            b.version_snapshots.clear();
+            b.version_blobs.clear();
             Ok(WipeRound { purged, remaining: false })
         }
     }
@@ -298,6 +435,8 @@ struct Device {
     engine: Engine<FakeRemote>,
     root: tempfile::TempDir,
     _state: tempfile::TempDir,
+    /// `<app_data>` — where this device's version store lives.
+    data: tempfile::TempDir,
     statuses: StatusTable,
     events: Arc<Collected>,
 }
@@ -310,6 +449,7 @@ fn device(name: &str, be: &SharedWorker) -> Device {
 
 fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: tempfile::TempDir) -> Device {
     std::fs::create_dir_all(state.path().join("base")).unwrap();
+    let data = tempfile::tempdir().unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
     let events = Arc::new(Collected::default());
     let engine = Engine::new(
@@ -320,6 +460,7 @@ fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: temp
             domain: "notes.example.com".into(),
             endpoint: "https://notes.example.com".into(),
             state_dir: state.path().to_path_buf(),
+            data_dir: data.path().to_path_buf(),
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
             use_trash: false,
@@ -328,7 +469,7 @@ fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: temp
         events.clone(),
         statuses.clone(),
     );
-    Device { engine, root, _state: state, statuses, events }
+    Device { engine, root, _state: state, data, statuses, events }
 }
 
 impl Device {
@@ -383,6 +524,66 @@ impl Device {
             desc: None,
         })
     }
+    /* ----- the version store: what the versioner would have written ----- */
+
+    fn store(&self) -> Store {
+        crate::versions::store_for_root(self.data.path(), self.root.path())
+    }
+
+    /// Write a snapshot into this device's local store the way a capture
+    /// would: the blobs, the snapshot file, then the index row. `files` is
+    /// what the folder held at that moment.
+    fn captured(&self, ts: u64, reason: Reason, files: &[(&str, &str)]) -> SnapshotRow {
+        self.captured_as(ts, reason, files, false, None)
+    }
+
+    fn captured_as(
+        &self,
+        ts: u64,
+        reason: Reason,
+        files: &[(&str, &str)],
+        pinned: bool,
+        label: Option<&str>,
+    ) -> SnapshotRow {
+        let store = self.store();
+        let mut map: BTreeMap<String, FileEntry> = BTreeMap::new();
+        let mut bytes = 0u64;
+        for (path, content) in files {
+            let hash = hash_full(content.as_bytes());
+            store.write_blob(&hash, content.as_bytes()).unwrap();
+            bytes += content.len() as u64;
+            map.insert((*path).to_string(), FileEntry { h: hash, s: content.len() as u64, m: ts });
+        }
+        let snap = Snapshot {
+            version: STORE_VERSION,
+            ts,
+            reason,
+            restored_from: None,
+            by: self.engine.device_name_for_test().to_string(),
+            files: map.clone(),
+        };
+        store.write_snapshot(&snap).unwrap();
+        let row = SnapshotRow {
+            ts,
+            reason,
+            files: files.len() as u64,
+            bytes,
+            digest: digest_of(&map),
+            pinned,
+            label: label.map(String::from),
+            restored_from: None,
+        };
+        let mut index: Index = store.read_index();
+        index.snapshots.push(row.clone());
+        index.snapshots.sort_by_key(|r| r.ts);
+        store.write_index(&index).unwrap();
+        row
+    }
+
+    fn device_id(&self) -> String {
+        self.engine.device_id_for_test().to_string()
+    }
+
     fn publish_folder(&mut self, rel: &str, slug: &str, title: &str, desc: &str) -> Result<String, String> {
         self.engine.queue_publish(PublishRequest {
             rel: rel.into(),
@@ -1614,4 +1815,264 @@ fn endpoints_normalize() {
     assert_eq!(super::config::domain_of("http://localhost:8787").as_deref(), Some("localhost:8787"));
     assert_eq!(super::config::sanitize_folder_name("Notes / 2026"), "Notes - 2026");
     assert_eq!(super::config::sanitize_folder_name(" .. "), "Workspace");
+}
+
+/* ---------- The version store's mirror (docs/versioning-plan.md §6.2) ---------- */
+
+const MINUTE: u64 = 60 * 1000;
+const HOUR: u64 = 60 * MINUTE;
+const DAY: u64 = 24 * HOUR;
+
+/// A moment `ago` milliseconds back. The mirror reads the wall clock — the
+/// ladder's whole job is to treat old snapshots differently from new ones —
+/// so a test's timestamps have to be anchored to now, not to a constant.
+fn ago(ms: u64) -> u64 {
+    now_ms() - ms
+}
+
+fn cloud_index(be: &SharedWorker) -> VersionsIndex {
+    be.lock().unwrap().versions_index.clone().unwrap_or_default()
+}
+
+fn cloud_ids(be: &SharedWorker) -> Vec<String> {
+    cloud_index(be).snapshots.into_iter().map(|e| e.id).collect()
+}
+
+#[tokio::test]
+async fn mirror_uploads_local_snapshots_and_their_blobs() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.engine.probe_worker().await;
+    let (first, second) = (ago(40 * MINUTE), ago(20 * MINUTE));
+    a.captured(first, Reason::Seed, &[("Home.md", "one\n")]);
+    a.captured(second, Reason::Interval, &[("Home.md", "one\ntwo\n")]);
+    a.engine.mirror_versions().await;
+
+    let index = cloud_index(&be);
+    assert_eq!(index.version, 1);
+    assert_eq!(index.horizon_days, None, "forever, until settings say otherwise");
+    assert_eq!(
+        cloud_ids(&be),
+        vec![snapshot_id(first, &a.device_id()), snapshot_id(second, &a.device_id())],
+        "oldest first, and named by when and by whom"
+    );
+    let seed = &index.snapshots[0];
+    assert_eq!(seed.reason, "seed");
+    assert_eq!(seed.device, a.device_id());
+    assert_eq!(seed.files, 1);
+
+    {
+        let worker = be.lock().unwrap();
+        assert_eq!(worker.version_snapshots.len(), 2, "both snapshots' bytes are up there");
+        assert_eq!(worker.version_blobs.len(), 2, "and both versions of the file");
+        for hash in [hash_full(b"one\n"), hash_full(b"one\ntwo\n")] {
+            assert!(worker.version_blobs.contains_key(&hash), "the blob is keyed by its whole sha256");
+        }
+    }
+
+    // The status says how much of this Mac's history the domain holds.
+    let versions = a.status().versions.expect("the worker keeps version history");
+    assert_eq!((versions.mirrored, versions.cloud), (2, 2));
+    assert!(versions.last_mirror_ms.is_some());
+
+    // A second pass has nothing to do and nothing to say differently.
+    let before = be.lock().unwrap().versions_etag;
+    a.engine.mirror_versions().await;
+    assert_eq!(be.lock().unwrap().versions_etag, before, "an idempotent pass writes no index");
+}
+
+#[tokio::test]
+async fn mirror_skips_a_snapshot_another_device_already_holds() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let mut b = device("Book", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+
+    // Both Macs see the same folder, so both capture the same content.
+    a.captured(ago(4 * MINUTE), Reason::Seed, &[("Home.md", "one\n")]);
+    a.engine.mirror_versions().await;
+    b.captured(ago(3 * MINUTE), Reason::Closing, &[("Home.md", "one\n")]);
+    b.engine.mirror_versions().await;
+    assert_eq!(cloud_ids(&be).len(), 1, "the same workspace, twice over, goes up once");
+
+    // Different content from the second Mac is a real version and does go.
+    b.captured(ago(2 * MINUTE), Reason::Interval, &[("Home.md", "one\ntwo\n")]);
+    b.engine.mirror_versions().await;
+    assert_eq!(cloud_ids(&be).len(), 2);
+    assert_eq!(cloud_index(&be).snapshots[1].device, b.device_id());
+
+    // A named version is never skipped, however familiar its content: the
+    // user marked that moment, and the name lives in the index.
+    b.captured_as(ago(MINUTE), Reason::Manual, &[("Home.md", "one\ntwo\n")], true, Some("before the rewrite"));
+    b.engine.mirror_versions().await;
+    let index = cloud_index(&be);
+    assert_eq!(index.snapshots.len(), 3);
+    assert_eq!(index.snapshots[2].label.as_deref(), Some("before the rewrite"));
+    assert!(index.snapshots[2].pinned);
+}
+
+#[tokio::test]
+async fn mirror_survives_a_lost_index_cas() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let b = device("Book", &be);
+    a.engine.probe_worker().await;
+    let (mine, theirs_ts) = (ago(2 * MINUTE), ago(3 * MINUTE));
+    a.captured(mine, Reason::Seed, &[("Home.md", "one\n")]);
+
+    // The other Mac lands its own entry between our read and our write.
+    let theirs = VersionsIndex {
+        snapshots: vec![VersionsEntry {
+            id: snapshot_id(theirs_ts, &b.device_id()),
+            ts: theirs_ts,
+            device: b.device_id(),
+            reason: "interval".into(),
+            files: 1,
+            bytes: 4,
+            digest: "0".repeat(64),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    be.lock().unwrap().versions_racer = Some(theirs);
+
+    a.engine.mirror_versions().await;
+    let ids = cloud_ids(&be);
+    assert_eq!(ids.len(), 2, "the loser re-reads and lands after the winner");
+    assert!(ids.contains(&snapshot_id(mine, &a.device_id())));
+    assert!(ids.contains(&snapshot_id(theirs_ts, &b.device_id())));
+}
+
+#[tokio::test]
+async fn cloud_sweep_thins_on_the_cloud_horizon() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.engine.probe_worker().await;
+
+    // Six hours of one snapshot an hour, three days ago — past the ladder's
+    // hourly band, where only the last of each day survives — then today's.
+    let old = ago(3 * DAY);
+    for n in 0..6u64 {
+        a.captured(old + n * HOUR, Reason::Interval, &[("Home.md", &format!("draft {}\n", n))]);
+    }
+    let newest = ago(MINUTE);
+    a.captured(newest, Reason::Interval, &[("Home.md", "the latest\n")]);
+    a.engine.mirror_versions().await;
+
+    let kept = cloud_index(&be).snapshots;
+    assert!(kept.len() < 7, "three-day-old hourly snapshots thin to one a day");
+    assert_eq!(kept.last().unwrap().ts, newest, "the newest state is never thinned");
+    assert!(kept.iter().any(|e| e.ts == old + 5 * HOUR), "the last of that day survives");
+    assert!(!kept.iter().any(|e| e.ts == old), "an earlier one in the same day does not");
+    assert_eq!(
+        be.lock().unwrap().version_snapshots.len(),
+        kept.len(),
+        "the objects the index dropped are deleted too"
+    );
+
+    // And the device does not put back what the sweep took: a second pass
+    // uploads nothing, however many times it runs.
+    let ids = cloud_ids(&be);
+    a.engine.mirror_versions().await;
+    a.engine.mirror_versions().await;
+    assert_eq!(cloud_ids(&be), ids, "what the ladder thinned stays thinned");
+}
+
+#[tokio::test]
+async fn cloud_sweep_spares_young_blobs() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.engine.probe_worker().await;
+    a.captured(ago(MINUTE), Reason::Seed, &[("Home.md", "one\n")]);
+    a.engine.mirror_versions().await;
+
+    // A blob nothing references: another device uploaded it and never won
+    // the CAS naming the snapshot that holds it.
+    let orphan = hash_full(b"a version in flight\n");
+    be.lock().unwrap().version_blobs.insert(orphan.clone(), (vec![1, 2, 3], now_ms()));
+
+    a.engine.state.last_cloud_sweep_ms = None; // due again
+    a.engine.mirror_versions().await;
+    assert!(be.lock().unwrap().version_blobs.contains_key(&orphan), "an hour's grace, so a race can finish");
+
+    // Once it is old enough, and still referenced by nothing, it goes —
+    // while the blob a retained snapshot names stays.
+    be.lock().unwrap().version_blobs.get_mut(&orphan).unwrap().1 = now_ms() - CLOUD_GC_GRACE_MS - 1;
+    a.engine.state.last_cloud_sweep_ms = None;
+    a.engine.mirror_versions().await;
+    let worker = be.lock().unwrap();
+    assert!(!worker.version_blobs.contains_key(&orphan));
+    assert!(worker.version_blobs.contains_key(&hash_full(b"one\n")), "what a snapshot names is kept");
+}
+
+#[tokio::test]
+async fn no_versions_feature_means_no_mirror_and_a_null_status() {
+    let be = fake_worker();
+    be.lock().unwrap().features = vec!["sync".into(), "wipe".into()];
+    let mut a = device("Air", &be);
+    a.engine.probe_worker().await;
+    a.captured(ago(MINUTE), Reason::Seed, &[("Home.md", "one\n")]);
+
+    a.engine.probe_worker().await;
+    a.engine.mirror_versions().await;
+    assert!(be.lock().unwrap().versions_index.is_none(), "an older worker is never written to");
+    assert!(be.lock().unwrap().version_blobs.is_empty());
+
+    a.write("Home.md", "one\n");
+    a.cycle().await;
+    assert!(a.status().versions.is_none(), "and the status says so, which is what lights the badge");
+    assert_eq!(a.phase(), Phase::Idle, "history is not the document: sync is unaffected");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_worker_updated_mid_session_starts_mirroring_on_its_own() {
+    let be = fake_worker();
+    be.lock().unwrap().features = vec!["sync".into(), "wipe".into()];
+    let mut a = device("Air", &be);
+    a.engine.probe_worker().await;
+    a.captured(ago(MINUTE), Reason::Seed, &[("Home.md", "one\n")]);
+    a.engine.mirror_versions().await;
+    assert!(be.lock().unwrap().versions_index.is_none());
+
+    // The user follows the badge and updates the worker. Nothing tells this
+    // engine — so the hourly pass asks again, and the mirror starts without
+    // a restart. A per-cycle pass does not ask: that would be a request per
+    // cycle, forever, on a domain that will never answer differently.
+    be.lock().unwrap().features.push("versions".into());
+    a.engine.mirror_versions().await;
+    assert!(be.lock().unwrap().versions_index.is_none(), "not once per cycle");
+
+    tokio::time::advance(MIRROR_EVERY).await;
+    a.engine.mirror_versions().await;
+    assert!(be.lock().unwrap().versions_index.is_some(), "the mirror starts on its own");
+    assert!(a.status().versions.is_some(), "and the status stops saying the worker cannot");
+}
+
+#[tokio::test]
+async fn read_through_caches_another_devices_snapshot() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let b = device("Book", &be);
+    a.engine.probe_worker().await;
+    let ts = ago(MINUTE);
+    a.captured(ts, Reason::Interval, &[("Home.md", "written on the Air\n")]);
+    a.engine.mirror_versions().await;
+    let id = snapshot_id(ts, &a.device_id());
+
+    // The other Mac has never seen this snapshot: it comes down once, and
+    // is answered out of the cache after that.
+    let store = b.store();
+    assert!(store.read_cloud_snapshot(&id).is_none());
+    let fetched = super::versions::snapshot(&FakeRemote::new(&be, &b.device_id()), &store, &id)
+        .await
+        .expect("the mirrored snapshot downloads");
+    assert_eq!(fetched.files.get("Home.md").unwrap().h, hash_full(b"written on the Air\n"));
+    assert!(store.read_cloud_snapshot(&id).is_some(), "and is kept, so the rail reads it for free");
+
+    be.lock().unwrap().offline = true;
+    assert!(
+        super::versions::snapshot(&FakeRemote::new(&be, &b.device_id()), &store, &id).await.is_some(),
+        "a cached snapshot is readable with the domain unreachable"
+    );
 }

@@ -284,15 +284,15 @@ await page.evaluate(() => {
       pinned: false,
       restoredFrom: null,
       path: "other.md",
-      source: "cloud",
+      source: "manifest",
       current: false,
     },
   ];
 });
 await openRail("/docs/other.md");
-await poll(async () => (await page.locator('[data-source="cloud"]').count()) === 1);
+await poll(async () => (await page.locator('[data-source="manifest"]').count()) === 1);
 const where = await tid("history-trust").textContent();
-const cloudRow = page.locator('[data-source="cloud"]');
+const cloudRow = page.locator('[data-source="manifest"]');
 step(
   "a revision only the cloud has appears, with where history lives",
   where.includes("in the cloud") && (await cloudRow.textContent()).includes("from the cloud"),
@@ -303,9 +303,57 @@ await poll(async () => (await tid("version-preview").innerText()).includes("bob'
 step(
   "and it is read through the cloud, not the local store",
   (await page.evaluate(() => window.__cloud.calls.filter((c) => c.cmd === "cloud_revision").at(-1)?.args.hash)) === "h2" &&
+    // The manifest names its revisions by a 16-character hash the version
+    // store can't resolve, so there is nothing to compare it against.
     (await tid("show-changes").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "versions-04-cloud.png" });
+
+/* 19 — a version another Mac mirrored: the same rail, the same reads. What
+   the cloud adds is depth, and it arrives looking like everything else. */
+await tid("back-to-now").click();
+await poll(async () => (await tid("version-preview").count()) === 0);
+await page.evaluate(() => {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const h = window.__versions.histories["/docs/other.md"];
+  h.versions = [
+    ...h.versions.slice(0, 2),
+    {
+      ts: midnight.getTime() - 86400000 + 17 * 3600000,
+      hash: "f".repeat(64),
+      size: 25,
+      by: "Sherin's iMac",
+      reason: "interval",
+      label: null,
+      pinned: false,
+      restoredFrom: null,
+      path: "other.md",
+      source: "cloud",
+      current: false,
+    },
+    ...h.versions.slice(2),
+  ];
+  window.__versions.blobs["f".repeat(64)] = "# Other\n\nwritten on the iMac\n";
+});
+await tid("history-rail").locator(".history-rail-close").click();
+await poll(async () => (await tid("history-rail").count()) === 0);
+await openRail("/docs/other.md");
+await poll(async () => (await page.locator('[data-source="cloud"]').count()) === 1);
+const mirroredRow = await page.locator('[data-source="cloud"]').textContent();
+const bothCounted = await tid("history-trust").textContent();
+await page.locator('[data-source="cloud"]').click();
+await poll(async () => (await tid("version-preview").innerText()).includes("written on the iMac"));
+step(
+  "a version another Mac made rides the same rail: its device, its reason, read through the store and comparable",
+  mirroredRow.includes("Sherin's iMac") &&
+    mirroredRow.includes("while editing") &&
+    bothCounted.includes("2 in the cloud") &&
+    (await page.evaluate(() => window.__versions.calls.filter((c) => c.cmd === "versions_read").at(-1)?.args.hash)) ===
+      "f".repeat(64) &&
+    (await tid("show-changes").count()) === 1,
+  `${mirroredRow} / ${bothCounted}`,
+);
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;

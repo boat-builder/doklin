@@ -15,13 +15,16 @@ use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::MAX_SYNC_ENTRIES;
 use crate::cloud::status::{Events, Revision};
+use crate::cloud::versions::{snapshot_id, VersionsEntry};
 
 use super::capture::{capture, Cadence, Captured, CAPTURE_MIN_INTERVAL, SESSION_IDLE};
 use super::history::{self, FileVersion, MAX_DIFF_BYTES};
 use super::retain::{retain, sweep, GC_GRACE};
 use super::settings::Settings;
 use super::status::{Phase, RestoreOutcome, EV_APPLIED};
-use super::store::{gunzip, hash_full, Index, Reason, SnapshotRow, Store};
+use super::store::{
+    digest_of, gunzip, gzip, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
+};
 use super::{Clock, VersionBus, Versioner, VersionerCmd};
 
 /* ---------- The fixture ---------- */
@@ -107,15 +110,57 @@ impl Fixture {
         &self.versioner.index.snapshots
     }
 
+    /// A snapshot another Mac mirrored, already in this store's cloud cache
+    /// — which is where the rail reads one from after the engine has pulled
+    /// it down. Answers the index entry that names it.
+    fn mirrored(&self, ts: u64, device: &str, by: &str, files: &[(&str, &str)]) -> VersionsEntry {
+        let mut map: BTreeMap<String, FileEntry> = BTreeMap::new();
+        let mut bytes = 0u64;
+        for (path, content) in files {
+            map.insert(
+                (*path).to_string(),
+                FileEntry { h: hash_full(content.as_bytes()), s: content.len() as u64, m: ts },
+            );
+            bytes += content.len() as u64;
+        }
+        let snap = Snapshot {
+            version: STORE_VERSION,
+            ts,
+            reason: Reason::Interval,
+            restored_from: None,
+            by: by.to_string(),
+            files: map.clone(),
+        };
+        let id = snapshot_id(ts, device);
+        let gz = gzip(&serde_json::to_vec(&snap).unwrap()).unwrap();
+        self.store().write_cloud_snapshot(&id, &gz);
+        VersionsEntry {
+            id,
+            ts,
+            device: device.to_string(),
+            reason: "interval".to_string(),
+            files: files.len() as u64,
+            bytes,
+            digest: digest_of(&map),
+            ..Default::default()
+        }
+    }
+
     fn blob(&self, hash: &str) -> Vec<u8> {
         gunzip(&std::fs::read(self.store().blob_path(hash)).unwrap()).unwrap()
     }
 
     /// One document's versions, newest first, as the rail asks for them.
     fn history(&mut self, rel: &str) -> Vec<FileVersion> {
+        self.history_with(rel, &[])
+    }
+
+    /// The same, with what other devices mirrored folded into the walk.
+    fn history_with(&mut self, rel: &str, cloud: &[VersionsEntry]) -> Vec<FileVersion> {
         let current = history::hash_on_disk(&self.root.path().join(rel));
         let v = &mut self.versioner;
-        history::file_versions(&v.store, &v.index, &mut v.cache, rel, current.as_deref())
+        let retained = history::retained_set(&v.index, cloud);
+        history::file_versions(&v.store, &retained, &mut v.cache, rel, current.as_deref())
     }
 
     /// A restore, with the write the app would do standing in for the one
@@ -738,7 +783,8 @@ fn diff_is_unified_and_capped() {
     let versions = f.history("a.md");
     let (new, old) = (versions[0].hash.clone(), versions[1].hash.clone());
 
-    let patch = history::diff(f.store(), None, Some(&old), Some(&new)).unwrap();
+    let text = |hash: &str| history::read_version(f.store(), hash).unwrap();
+    let patch = history::diff_texts(&text(&old), &text(&new)).unwrap();
     assert!(patch.contains("--- original"), "a unified patch: {}", patch);
     assert!(patch.contains("-one"), "{}", patch);
     assert!(patch.contains("+two and two"), "{}", patch);
@@ -747,13 +793,11 @@ fn diff_is_unified_and_capped() {
     // compared against now.
     f.write("a.md", "three and three\n");
     let path = f.root.path().join("a.md");
-    let against_now = history::diff(f.store(), Some(&path), Some(&new), None).unwrap();
+    let against_now = history::diff_texts(&text(&new), &history::read_disk(&path).unwrap()).unwrap();
     assert!(against_now.contains("+three and three"), "{}", against_now);
 
-    let big = vec![b'a'; MAX_DIFF_BYTES + 1];
-    let big_hash = hash_full(&big);
-    f.store().write_blob(&big_hash, &big).unwrap();
-    let refused = history::diff(f.store(), None, Some(&old), Some(&big_hash)).unwrap_err();
+    let big = String::from_utf8(vec![b'a'; MAX_DIFF_BYTES + 1]).unwrap();
+    let refused = history::diff_texts(&text(&old), &big).unwrap_err();
     assert!(refused.contains("too large to compare"), "{}", refused);
 
     let gone = history::read_version(f.store(), "0".repeat(64).as_str()).unwrap_err();
@@ -793,7 +837,7 @@ fn cloud_prefix_matches_dedupe_against_local() {
     assert_eq!(merged.len(), 3, "two were already known: {:?}", merged);
     assert_eq!(merged[0].ts, T0 + 60_000, "newest first");
     assert_eq!(merged[1].ts, T0 + 30_000);
-    assert_eq!(merged[1].source, "cloud");
+    assert_eq!(merged[1].source, "manifest", "a sync-manifest revision, not a mirrored version");
     assert_eq!(merged[1].by, "Other Mac");
     assert_eq!(merged[1].path, "a.md");
     assert_eq!(merged[2].ts, T0);
@@ -920,4 +964,46 @@ fn restore_never_removes_a_snapshot() {
     let versions = f.history("a.md");
     assert!(versions.iter().any(|v| v.hash == hash_full(b"three, three and three\n")));
     assert!(versions.iter().any(|v| v.hash == hash_full(b"one\n")));
+}
+
+#[test]
+fn read_through_lists_cloud_only_versions() {
+    let mut f = fixture(T0);
+    // This Mac was asleep for the first two of these; it only ever captured
+    // the last one, and the two before it are in the bucket.
+    let older = f.mirrored(T0, "d-book", "Sherin's MacBook", &[("a.md", "one\n")]);
+    let middle = f.mirrored(T0 + 60_000, "d-book", "Sherin's MacBook", &[("a.md", "one and two\n")]);
+    f.at(T0 + 120_000);
+    f.write("a.md", "one, two and three\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history_with("a.md", &[older.clone(), middle.clone()]);
+    assert_eq!(versions.len(), 3, "one walk, both stores: {:?}", versions);
+    assert_eq!(
+        versions.iter().map(|v| (v.ts, v.source.as_str())).collect::<Vec<_>>(),
+        vec![(T0 + 120_000, "local"), (T0 + 60_000, "cloud"), (T0, "cloud")],
+        "newest first, whichever store holds it"
+    );
+    assert_eq!(versions[1].by, "Sherin's MacBook", "a mirrored version says which Mac made it");
+    assert_eq!(versions[1].reason, "interval", "and why — the other Mac recorded that too");
+    assert!(versions[0].current, "the newest is what is on disk");
+    assert_eq!(versions[2].hash, hash_full(b"one\n"));
+
+    // A rename another Mac made is followed exactly like one made here.
+    let renamed = f.mirrored(T0 - 60_000, "d-book", "Sherin's MacBook", &[("was.md", "one\n")]);
+    let followed = f.history_with("a.md", &[renamed, older.clone(), middle.clone()]);
+    assert_eq!(followed.len(), 3, "the oldest two hold the same bytes: {:?}", followed);
+    assert_eq!(followed[2].ts, T0 - 60_000, "so the version dates from where the content appeared");
+    assert_eq!(followed[2].path, "was.md", "under the name it had then");
+
+    // The same snapshot on both sides is one row, not two: a mirrored copy
+    // of what this Mac captured is the same moment, seen twice.
+    let mine = f.rows().last().unwrap().clone();
+    let echo = VersionsEntry {
+        id: snapshot_id(mine.ts, "d-test"),
+        ts: mine.ts,
+        digest: mine.digest.clone(),
+        ..Default::default()
+    };
+    assert_eq!(f.history_with("a.md", &[echo, older, middle]).len(), 3);
 }

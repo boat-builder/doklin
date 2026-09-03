@@ -11,7 +11,12 @@
 //!     index.json                the retained set, newest last
 //!     snapshots/<ts>.json.gz    one workspace state; <ts> zero-padded to 13
 //!     blobs/<hh>/<hash>.gz      one file's content; <hash> full sha256 hex
+//!     cloud-cache/<id>.json.gz  a snapshot another device mirrored, kept so
+//!                               the rail and the cloud sweep read it once
 //! ```
+//!
+//! `cloud-cache/` is a cache, not the store: it holds copies of what the
+//! bucket already has, and anything in it may be dropped and refetched.
 //!
 //! The store never lives under the workspace it versions, and no code
 //! outside retain.rs deletes anything in it.
@@ -216,6 +221,15 @@ impl Store {
         self.snapshots_dir().join(format!("{:013}.json.gz", ts))
     }
 
+    /// Where a mirrored snapshot is kept once it has been downloaded.
+    pub fn cloud_cache_dir(&self) -> PathBuf {
+        self.dir.join("cloud-cache")
+    }
+
+    pub fn cloud_snapshot_path(&self, id: &str) -> PathBuf {
+        self.cloud_cache_dir().join(format!("{}.json.gz", id))
+    }
+
     pub fn blob_path(&self, hash: &str) -> PathBuf {
         let shard = hash.get(0..2).unwrap_or("00");
         self.blobs_dir().join(shard).join(format!("{}.gz", hash))
@@ -252,6 +266,37 @@ impl Store {
         Ok(gz.len() as u64)
     }
 
+    /// A snapshot's bytes exactly as they sit on disk — gzip'd, ready to
+    /// upload without a decompress-and-recompress round trip.
+    pub fn read_snapshot_gz(&self, ts: u64) -> Option<Vec<u8>> {
+        std::fs::read(self.snapshot_path(ts)).ok()
+    }
+
+    /// One mirrored snapshot from the cache, or None when it hasn't been
+    /// downloaded (or the cached bytes are unreadable).
+    pub fn read_cloud_snapshot(&self, id: &str) -> Option<Snapshot> {
+        let bytes = std::fs::read(self.cloud_snapshot_path(id)).ok()?;
+        serde_json::from_slice(&gunzip(&bytes).ok()?).ok()
+    }
+
+    /// Keep a mirrored snapshot's bytes. Best effort — a cache that fails to
+    /// write just means the next reader downloads it again.
+    pub fn write_cloud_snapshot(&self, id: &str, gz: &[u8]) {
+        let _ = write_atomic(&self.cloud_snapshot_path(id), gz);
+    }
+
+    /// Drop cached snapshots the cloud index no longer names.
+    pub fn prune_cloud_cache(&self, live: &std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(self.cloud_cache_dir()) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(id) = name.strip_suffix(".json.gz") else { continue };
+            if !live.contains(id) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     pub fn has_blob(&self, hash: &str) -> bool {
         self.blob_path(hash).exists()
     }
@@ -260,6 +305,12 @@ impl Store {
     /// the horizon, or a hash from a device whose sweep ran first.
     pub fn read_blob(&self, hash: &str) -> Option<Vec<u8>> {
         gunzip(&std::fs::read(self.blob_path(hash)).ok()?).ok()
+    }
+
+    /// One version's bytes as stored — gzip'd, for the same reason
+    /// `read_snapshot_gz` is.
+    pub fn read_blob_gz(&self, hash: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.blob_path(hash)).ok()
     }
 
     /// Write a blob unless it is already there. Answers the bytes written

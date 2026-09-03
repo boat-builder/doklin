@@ -53,6 +53,14 @@ export type PresenceDevice = {
 };
 
 /** The whole model for one connected workspace. */
+/** How much of this Mac's version history is in the bucket, and how much is
+ *  up there in total. Mirrored by src-tauri/src/cloud/status.rs. */
+export type VersionsMirror = {
+  mirrored: number;
+  cloud: number;
+  lastMirrorMs: number | null;
+};
+
 export type CloudStatus = {
   root: string;
   domain: string;
@@ -65,6 +73,9 @@ export type CloudStatus = {
   pendingDeletes: number;
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
+  /** The version store's mirror; null when the worker predates it — which
+   *  is exactly when the update badge is worth showing. */
+  versions: VersionsMirror | null;
   public: PublicPage[];
   presence: PresenceDevice[];
 };
@@ -227,6 +238,27 @@ export function phaseLine(s: CloudStatus, now = Date.now()): string {
 export function describeCloud(s: CloudStatus, now = Date.now()): string {
   const phase = phaseLine(s, now);
   return `${phase.charAt(0).toUpperCase() + phase.slice(1)} · ${s.domain}`;
+}
+
+/** What the Cloud panel's *Version history* line says: how much of this
+ *  folder's history the domain is holding, or that its worker is too old to
+ *  hold any (docs/versioning-plan.md §6.2). History is never gated on the
+ *  cloud, so a worker that can't mirror is a note, not a warning. */
+export function versionsLine(s: CloudStatus, now = Date.now()): string {
+  if (s.versions == null) {
+    // Never having heard from the domain is not the same as hearing that it
+    // is too old, and only one of the two asks the user to do something.
+    return s.workerVersion == null
+      ? `Still checking what ${s.domain} keeps — every version is kept on this Mac either way.`
+      : "This domain’s worker is too old to keep version history — every version is still kept on this Mac.";
+  }
+  const { mirrored, cloud, lastMirrorMs } = s.versions;
+  if (cloud === 0) {
+    return `Nothing on ${s.domain} yet — this Mac’s history goes up within the hour.`;
+  }
+  const mine = mirrored >= cloud ? "all from this Mac" : `${mirrored} from this Mac`;
+  const when = lastMirrorMs == null ? "" : ` · checked ${timeAgo(lastMirrorMs, now)}`;
+  return `${cloud} snapshot${cloud === 1 ? "" : "s"} on ${s.domain}, ${mine}${when}`;
 }
 
 /** The domain's worker is behind the version this app was built for — the

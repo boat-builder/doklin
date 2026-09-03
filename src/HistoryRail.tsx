@@ -126,7 +126,7 @@ export default function HistoryRail({
   const counts = useMemo(
     () => ({
       here: versions.filter((v) => v.source === "local").length,
-      cloud: versions.filter((v) => v.source === "cloud").length,
+      cloud: versions.filter((v) => v.source !== "local").length,
     }),
     [versions],
   );

@@ -83,6 +83,9 @@
         // What a deployed worker reports; the drive sets it to the version
         // the app was built against (parsed from cloud-worker/src/version.ts).
         workerVersion: 1,
+        // What the status's `versions` field carries: the version store's
+        // mirror, or null for a worker too old to hold one.
+        versionsMirror: null,
         wipeResult: 42,
         history: [
           { rev: 3, hash: "h3", size: 30, timeMs: 1757000000000, by: "Test Mac", current: true },
@@ -174,6 +177,7 @@
         error: null,
         pendingDeletes: 0,
         workerVersion: window.__cloud.workerVersion,
+        versions: window.__cloud.versionsMirror,
         public: [],
         presence: [],
       });

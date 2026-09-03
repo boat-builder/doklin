@@ -7,6 +7,9 @@
 //   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
 //   history/<fileId>.json       deep revision archive — entries rolled out of the manifest's tail
 //   presence.json               {devices: {<deviceId>: {name, path?, ts}}}, TTL'd, best effort
+//   versions/index.json         the mirrored version store's retained set (versions.ts)
+//   versions/snapshots/<id>     one workspace state, gzip'd; immutable
+//   versions/blobs/<hash>       one file's content, gzip'd; immutable
 //   auth/tokens/<sha256>.json   per-person tokens (minted by invites — not built; the lookup is)
 //   auth/invites/<sha256>.json  pending invites (not built)
 //
@@ -18,16 +21,26 @@ export const PRESENCE_KEY = "presence.json";
 export const BLOBS_PREFIX = "blobs/";
 export const HISTORY_PREFIX = "history/";
 export const TOKENS_PREFIX = "auth/tokens/";
+export const VERSIONS_PREFIX = "versions/";
+export const VERSIONS_INDEX_KEY = "versions/index.json";
+export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
+export const VERSION_BLOBS_PREFIX = "versions/blobs/";
 
 export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
 export const historyKey = (fileId: string): string => `${HISTORY_PREFIX}${fileId}.json`;
 export const tokenKey = (hash: string): string => `${TOKENS_PREFIX}${hash}.json`;
+export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
+export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;
 
 /** File, device and workspace ids — what the engine mints. */
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
 /** A content address: a hex prefix (16 characters and up) of the blob's sha256. */
 export const BLOB_HASH_RE = /^[a-f0-9]{16,64}$/;
+/** A mirrored snapshot: the millisecond it was taken, then the device that took it. */
+export const SNAPSHOT_ID_RE = /^\d{13}-[a-z0-9][a-z0-9_-]{2,63}$/;
+/** The version store's content address: the WHOLE sha256, never a prefix. */
+export const VERSION_HASH_RE = /^[a-f0-9]{64}$/;
 /** A public page's slug: the one path segment under the domain. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 /** Slugs the worker's own routes speak for. Several cannot match SLUG_RE anyway; the set says what is taken. */
@@ -60,6 +73,13 @@ export const MAX_NAME_LEN = 80;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
 export const PRESENCE_TTL_MS = 90_000;
+/* The version store's caps. A snapshot is a gzip'd map of the whole
+   workspace, so it is bounded by the manifest's own file ceiling; a version
+   blob is one file and gets the same cap as a synced one. */
+export const MAX_VERSIONS_INDEX_BYTES = 1024 * 1024;
+export const MAX_VERSION_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+export const MAX_VERSION_BLOB_BYTES = MAX_FILE_BYTES;
+export const MAX_VERSION_SNAPSHOTS = 2000;
 
 /** A path relative to the workspace root: forward slashes, no traversal, bounded depth and length. */
 export function validPath(p: unknown): p is string {

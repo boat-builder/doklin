@@ -59,7 +59,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   no cloud: ⌘⌥H (or *Version history…* on a file) opens a rail of versions
   grouped by day, shows any of them in place, read-only, and restores or
   copies it out. A restore is itself a version, so it can be undone. Name a
-  version and it is kept for good.
+  version and it is kept for good. Connect the folder and that history is
+  mirrored to your own domain, so it outlives the laptop and every Mac sees
+  what the others wrote.
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
   note. The cloud is one Cloudflare Worker and one bucket on your own account,

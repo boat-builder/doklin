@@ -8,6 +8,10 @@
 //! when the path disappears under it, and emit one row per distinct
 //! content. The contract this answers with is mirrored in src/versions.ts —
 //! change both.
+//!
+//! The retained set is this Mac's snapshots *and* the ones other devices
+//! mirrored into the bucket, in one ts-ordered walk — a rename another Mac
+//! made is followed exactly like one made here.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,7 +20,9 @@ use serde::Serialize;
 
 use crate::cloud::status::Revision;
 
-use super::store::{hash_full, FileEntry, Index, Snapshot, Store};
+use crate::cloud::versions::VersionsEntry;
+
+use super::store::{hash_full, FileEntry, Snapshot, SnapshotRow, Store};
 
 /// Neither side of a diff may be larger than this — the worker's note cap
 /// (`MAX_RENDER_BYTES` in cloud-worker/src/workspace.ts). Past it the user
@@ -45,8 +51,9 @@ pub struct FileVersion {
     /// The path as of that snapshot — not the one asked for, when the file
     /// has been renamed since.
     pub path: String,
-    /// `local` (a blob in this store) or `cloud` (read through
-    /// `cloud_revision`; phase 6 removes the second kind).
+    /// Where the bytes come from: `local` (a blob in this store), `cloud`
+    /// (the mirrored version store) or `manifest` (the sync manifest's own
+    /// per-file revisions, which phase 6 retires).
     pub source: String,
     /// This version is byte-for-byte the file on disk right now.
     pub current: bool,
@@ -65,24 +72,102 @@ pub struct FileHistory {
     pub versions: Vec<FileVersion>,
 }
 
+/* ---------- The retained set ---------- */
+
+/// One snapshot the walk may look inside: this Mac's, or one another device
+/// mirrored. Everything the rail shows about *when* and *why* comes from
+/// here; what the file held comes from the snapshot itself.
+#[derive(Clone, Debug)]
+pub struct Retained {
+    pub ts: u64,
+    pub reason: String,
+    pub label: Option<String>,
+    pub pinned: bool,
+    pub restored_from: Option<u64>,
+    /// The cloud object id, empty for a snapshot only this Mac has.
+    pub id: String,
+    /// `local` or `cloud` — which store the bytes come out of.
+    pub source: &'static str,
+}
+
+impl Retained {
+    pub fn local(row: &SnapshotRow) -> Retained {
+        Retained {
+            ts: row.ts,
+            reason: row.reason.as_str().to_string(),
+            label: row.label.clone(),
+            pinned: row.pinned,
+            restored_from: row.restored_from,
+            id: String::new(),
+            source: "local",
+        }
+    }
+
+    pub fn cloud(entry: &VersionsEntry) -> Retained {
+        Retained {
+            ts: entry.ts,
+            reason: entry.reason.clone(),
+            label: entry.label.clone(),
+            pinned: entry.pinned,
+            restored_from: entry.restored_from,
+            id: entry.id.clone(),
+            source: "cloud",
+        }
+    }
+
+    fn key(&self) -> String {
+        if self.id.is_empty() {
+            format!("local:{}", self.ts)
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
+/// This Mac's retained snapshots and the mirrored ones, oldest first — the
+/// order the walk reverses. A mirrored snapshot this Mac took itself (same
+/// moment, same content) is dropped: it is the same snapshot, seen twice.
+pub fn retained_set(index: &super::store::Index, cloud: &[VersionsEntry]) -> Vec<Retained> {
+    let mut out: Vec<Retained> = index.snapshots.iter().map(Retained::local).collect();
+    out.extend(
+        cloud
+            .iter()
+            .filter(|e| !index.snapshots.iter().any(|r| r.ts == e.ts && r.digest == e.digest))
+            .map(Retained::cloud),
+    );
+    // Where two devices captured in the same millisecond, the local one goes
+    // last so the walk (which runs backwards) reaches it first: reading a
+    // snapshot off this disk never costs a download.
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.source.cmp(b.source)));
+    out
+}
+
 /* ---------- The snapshot cache ---------- */
 
 /// The last few decoded snapshots, most recently used first.
 #[derive(Default)]
 pub struct SnapshotCache {
-    entries: Vec<(u64, Arc<Snapshot>)>,
+    entries: Vec<(String, Arc<Snapshot>)>,
 }
 
 impl SnapshotCache {
-    pub fn get(&mut self, store: &Store, ts: u64) -> Option<Arc<Snapshot>> {
-        if let Some(at) = self.entries.iter().position(|(k, _)| *k == ts) {
-            let hit = self.entries.remove(at);
+    /// The snapshot behind one retained row. A mirrored one comes out of
+    /// `cloud-cache/`; None there means it hasn't been downloaded yet, and
+    /// the walk simply steps over it.
+    pub fn get(&mut self, store: &Store, at: &Retained) -> Option<Arc<Snapshot>> {
+        let key = at.key();
+        if let Some(pos) = self.entries.iter().position(|(k, _)| *k == key) {
+            let hit = self.entries.remove(pos);
             let snap = hit.1.clone();
             self.entries.insert(0, hit);
             return Some(snap);
         }
-        let snap = Arc::new(store.read_snapshot(ts)?);
-        self.entries.insert(0, (ts, snap.clone()));
+        let snap = Arc::new(if at.id.is_empty() {
+            store.read_snapshot(at.ts)?
+        } else {
+            store.read_cloud_snapshot(&at.id)?
+        });
+        self.entries.insert(0, (key, snap.clone()));
         self.entries.truncate(SNAPSHOT_CACHE);
         Some(snap)
     }
@@ -102,7 +187,7 @@ impl SnapshotCache {
 /// `current_hash` is the file on disk, and marks the row that matches it.
 pub fn file_versions(
     store: &Store,
-    index: &Index,
+    retained: &[Retained],
     cache: &mut SnapshotCache,
     rel: &str,
     current_hash: Option<&str>,
@@ -114,8 +199,8 @@ pub fn file_versions(
     // from.
     let mut newer: Option<Arc<Snapshot>> = None;
 
-    for row in index.snapshots.iter().rev() {
-        let Some(snap) = cache.get(store, row.ts) else { continue };
+    for row in retained.iter().rev() {
+        let Some(snap) = cache.get(store, row) else { continue };
         let entry: FileEntry = match snap.files.get(&path) {
             Some(entry) => entry.clone(),
             None => match newer.as_deref() {
@@ -139,12 +224,12 @@ pub fn file_versions(
             hash: entry.h.clone(),
             size: entry.s,
             by: snap.by.clone(),
-            reason: row.reason.as_str().to_string(),
+            reason: row.reason.clone(),
             label: row.label.clone(),
             pinned: row.pinned,
             restored_from: row.restored_from,
             path: path.clone(),
-            source: "local".to_string(),
+            source: row.source.to_string(),
             current: false,
         });
         newer = Some(snap);
@@ -201,12 +286,12 @@ fn renamed_from(older: &Snapshot, newer: &Snapshot, path: &str) -> Option<(Strin
 
 /* ---------- The cloud read-through (phase 6 removes this) ---------- */
 
-/// Fold the manifest's revisions into a local history. A cloud revision is
-/// named by the first 16 characters of the same sha256 the store uses, so
-/// one that prefixes a local version — or the file on disk — is the same
-/// bytes under a shorter name and is dropped. What survives is what only
-/// the cloud still reaches back to, which on the day this ships is most of
-/// it: the local store is hours old and `hist` is not.
+/// Fold the sync manifest's own per-file revisions into a history. A
+/// manifest revision is named by the first 16 characters of the same sha256
+/// the store uses, so one that prefixes a version already listed — or the
+/// file on disk — is the same bytes under a shorter name and is dropped.
+/// What survives is what neither store reaches back to. Phase 6 retires the
+/// manifest's history and this with it.
 pub fn merge_cloud(
     mut local: Vec<FileVersion>,
     cloud: &[Revision],
@@ -229,7 +314,7 @@ pub fn merge_cloud(
             pinned: false,
             restored_from: None,
             path: path.to_string(),
-            source: "cloud".to_string(),
+            source: "manifest".to_string(),
             current: false,
         });
     }
@@ -248,29 +333,26 @@ pub fn read_version(store: &Store, hash: &str) -> Result<String, String> {
     text_of(bytes)
 }
 
-/// A unified diff between two versions. Either side may be the file on disk
-/// instead of a stored version — pass its hash as null — which is how the
-/// newest version is compared against now.
-pub fn diff(store: &Store, path: Option<&Path>, from: Option<&str>, to: Option<&str>) -> Result<String, String> {
-    let side = |hash: Option<&str>| -> Result<String, String> {
-        match hash {
-            Some(hash) => read_version(store, hash),
-            None => {
-                let path = path.ok_or_else(|| "there's no file to compare with".to_string())?;
-                let bytes = std::fs::read(path).map_err(|_| "that file isn't on this Mac any more".to_string())?;
-                text_of(bytes)
-            }
-        }
-    };
-    let before = side(from)?;
-    let after = side(to)?;
+/// The file on disk, as text — the side a diff compares the newest version
+/// against.
+pub fn read_disk(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|_| "that file isn't on this Mac any more".to_string())?;
+    text_of(bytes)
+}
+
+/// A unified diff between two versions, whichever store they came out of.
+/// The caller resolves the text (a mirrored version is a download, a local
+/// one a file read); this only compares.
+pub fn diff_texts(before: &str, after: &str) -> Result<String, String> {
     if before.len() > MAX_DIFF_BYTES || after.len() > MAX_DIFF_BYTES {
         return Err("this document is too large to compare version by version".to_string());
     }
-    Ok(diffy::create_patch(&before, &after).to_string())
+    Ok(diffy::create_patch(before, after).to_string())
 }
 
-fn text_of(bytes: Vec<u8>) -> Result<String, String> {
+/// Bytes as text, or a sentence — the editor has nothing to show for a blob
+/// that isn't UTF-8, and mojibake is worse than an honest no.
+pub fn text_of(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "that version isn't text — there's nothing to show".to_string())
 }
 

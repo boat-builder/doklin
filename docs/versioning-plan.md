@@ -39,7 +39,7 @@ settles the handful of details the spec left open (§2).
 | --- | --- | --- | --- | --- |
 | 1 ✅ | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
 | 2 ✅ | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
-| 3 | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
+| 3 ✅ | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
 | 4 | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
 | 5 | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
 | 6 | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
@@ -770,12 +770,78 @@ engine's `workerVersion` already comes from `version.ts`).
 Docs: `cloud.md` §5.2, §5.3, §5.7 (version 3), §6.7 (the status field);
 `versioning.md` §6.3 *as built* (decision 4); `SKILL.md` counts.
 
-- [ ] `pnpm typecheck:worker`, `pnpm test:worker`, `pnpm bundle:worker` and
+- [x] `pnpm typecheck:worker`, `pnpm test:worker`, `pnpm bundle:worker` and
       the bundle run green; the bundle stays under the ceiling.
-- [ ] Rust and harness green.
+- [x] Rust and harness green.
 - [ ] Manual, against a deployed worker: update it with the app's prompt,
       watch `versions/` fill, open history on a second Mac and see the
-      first Mac's versions.
+      first Mac's versions. *Not run: this runner is Linux and the app is
+      macOS-only. It is the pass [versioning-testing.md](versioning-testing.md)
+      §4 describes.*
+
+### 6.5 As built
+
+Everything above landed as specified, with these decisions the plan left to
+the build. Each is carried into [versioning.md](versioning.md) §6.3, §8 or
+[cloud.md](cloud.md) §6.9.
+
+1. **The cloud index carries only what several devices must agree on** —
+   `{version, horizonDays, snapshots: [{id, ts, device, reason, files,
+   bytes, digest, pinned?, label?, restoredFrom?}]}`. The local index's own
+   bookkeeping (`root`, `createdMs`, `lastCaptureMs`, `lastSweepMs`) is this
+   Mac's business and stays here.
+2. **A snapshot the cloud ladder would not keep is never uploaded.** The
+   plan's step 2 skips a snapshot by digest; that is not enough. With
+   several devices in one workspace the bucket's bucket-winners are not this
+   Mac's, so a snapshot this Mac keeps locally can be one the cloud ladder
+   thins — and without this check the device would re-upload it, and the
+   sweep drop it, on every pass, forever.
+3. **A named version is exempt from every skip**, digest included. *Name
+   this version* is a user act on a moment; the name lives in the index and
+   has to reach the bucket even when the content is already up there.
+4. **A downloaded snapshot is cached at `<store>/cloud-cache/<id>.json.gz`.**
+   Snapshots are immutable, so a cached copy is never stale. The plan gave
+   the cache to the read-through; the daily sweep uses the same one to
+   answer "what do the retained snapshots reference?", which is what keeps
+   that pass to one download per snapshot rather than one per day.
+5. **The read-through is one walk, not a merge.** Mirrored snapshots join
+   this Mac's own retained set ordered by time (`history::retained_set`), so
+   a rename another Mac made is followed exactly like one made here and a
+   run of equal content collapses across both stores. The rail's history
+   call pre-fetches up to `CLOUD_PREFETCH` (48) missing snapshots, newest
+   first, so the first open on a freshly connected Mac costs a moment rather
+   than the whole bucket; the mirror's own sweep fills the rest.
+6. **`source` has three values, not two.** Phase 2 used `cloud` for the sync
+   manifest's revisions; those are now `manifest`, and `cloud` means the
+   mirrored version store. The distinction is real — a `cloud` version is
+   read and diffed through the version store, a `manifest` one only through
+   `cloud_revision` — and phase 6 deletes exactly the `manifest` case. Only
+   a `local` version is restored by hash; the other two hand
+   `versions_restore_file` their text.
+7. **`versions_diff` resolves both sides before comparing**, so *Show
+   changes* works on a mirrored version. `history::diff` became
+   `history::diff_texts` plus a resolver in the command.
+8. **`uploaded` is pruned to what the store still holds** on every pass, so
+   the engine's persisted state cannot grow without bound.
+9. **`DELETE /api/history/<fid>` ships now, unused.** The route is phase 6's;
+   adding it here keeps the worker's version bump to one. No `Remote` method
+   goes with it until phase 6 calls it, so the trait has no dead code.
+10. **The engine opens the version store from its path** (`data_dir` on
+    `EngineConfig` plus `versions::store_for_root`), not through the
+    versions manager. Reads only: the mirror never writes into a local
+    store, so "nothing outside `retain.rs` deletes" still holds.
+11. **The Cloud panel gains a *Version history* line** (`versionsLine` in
+    `src/cloud.ts`): what the domain holds, or that its worker is too old to
+    hold any — beside the update card that fixes it. A worker that has never
+    answered `/api/meta` is a third case, and says so: never having heard is
+    not the same as having heard "too old", and only one of those asks the
+    user to do something.
+12. **The hourly pass re-probes a worker without the feature.** The engine
+    probes `/api/meta` at start and after a 426, so a device that started
+    offline — or one whose worker was updated while it ran — would otherwise
+    never learn it can mirror. The re-probe rides the hourly pass only,
+    never the per-cycle one, so a domain that will never answer differently
+    costs one request an hour rather than one per cycle.
 
 ---
 

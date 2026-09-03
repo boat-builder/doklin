@@ -183,16 +183,26 @@ Phase 4's timeline.
 Phase 3.
 
 - [ ] Connect **Fresh** to a domain. Its existing local history stays and
-      begins mirroring.
-- [ ] The Cloud panel says how much history is here and how much is in the
-      cloud.
-- [ ] A version made here appears in the rail on **Other Mac**.
+      begins mirroring: `versions/` in the bucket fills within the hour, and
+      nothing in `<app_data>/versions/<key>/` changes because of it.
+- [ ] The Cloud panel's *Version history* line says how many snapshots the
+      domain holds and how many of them came from this Mac.
+- [ ] A version made here appears in the rail on **Other Mac** — under the
+      name of the Mac that made it and the reason it was captured, not as
+      an anonymous "from the cloud" row.
+- [ ] *Show changes* works on that version: a mirrored version is read and
+      compared exactly like a local one.
 - [ ] A version older than the local horizon is still readable on either
-      Mac — it comes from the cloud, and says so.
+      Mac, and the trust line counts it under "in the cloud".
 - [ ] Restore, on **Other Mac**, a version whose content only exists in the
       cloud.
+- [ ] Leave both Macs running for a day. The cloud store thins on the same
+      ladder the local one does, and what it thinned does **not** reappear
+      on the next hour's mirror — the bucket's snapshot count settles
+      instead of sawing up and down.
 - [ ] Point the app at a domain whose worker has **not** been updated. Sync
-      keeps working, local history keeps working, and the badge asks for the
+      keeps working, local history keeps working, the Cloud panel says the
+      worker is too old to keep version history, and the badge asks for the
       update instead of an error.
 - [ ] Update the worker. The mirror starts on its own, without a restart.
 - [ ] Edit the same note on both Macs at once and let them fight it out. The

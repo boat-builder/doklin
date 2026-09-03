@@ -160,12 +160,24 @@ manifest.json               the workspace manifest (v2, §6.6) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
 history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
 presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
+versions/index.json         {version, horizonDays, snapshots: [{id, ts, device, reason, files,
+                            bytes, digest, pinned?, label?, restoredFrom?}]} — CAS by etag
+versions/snapshots/<id>.json.gz   one whole workspace state, gzip'd; immutable.
+                            <id> is <ts13>-<deviceId> — when it was taken and by whom
+versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its FULL sha256
 auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
 auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
 
 Nothing public is stored here: public pages are *rendered* from `blobs/`.
 The layout and the grammar of its ids live in `cloud-worker/src/layout.ts`.
+
+`versions/` is the cloud half of versioning ([versioning.md](versioning.md)
+§6.4) and shares nothing with the sync side: its own prefix, its own index,
+its own content addresses (the whole sha256, where a synced blob is named by
+a 16-character prefix). It mirrors what every device keeps locally, so the
+history outlives the laptop that made it; a workspace that has never
+mirrored simply has no `versions/index.json`.
 
 ### 5.3 API
 
@@ -192,6 +204,17 @@ PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored ha
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
 GET    /api/history/<fid>        {version: 1, entries: [{r, h, s, t, b?}]}; 404 when there is none
 PUT    /api/history/<fid>        replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
+DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
+GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
+PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
+                                 on a lost race; 400 on garbage; 413 past 1 MB
+GET    /api/versions/snapshots/<id>   the gzip'd workspace state; 404
+PUT    /api/versions/snapshots/<id>   store it (immutable: a re-PUT is {existed: true}); 413 past 4 MB
+DELETE /api/versions/snapshots/<id>   drop one the ladder thinned away
+GET    /api/versions/blobs[?cursor=c] {blobs: [{hash, size, uploaded}], cursor?} — ONE page
+GET    /api/versions/blobs/<hash>     the bytes
+PUT    /api/versions/blobs/<hash>     store bytes (immutable, {existed: true} on a re-PUT); 413 past 25 MB
+DELETE /api/versions/blobs/<hash>     collect a version no retained snapshot references
 PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
                                  (path absent or null: here, idle); needs x-doklin-device
 DELETE /api/presence             this device left
@@ -352,10 +375,12 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (2 — the sync API was 1; publishing
-  made it 2), `WORKER_FEATURES` (`["sync", "wipe", "publish", "boards"]`; a
-  feature name is a promise about behaviour, listed only once the behaviour
-  exists), `MANIFEST_VERSION` (2) and `COMPATIBILITY_DATE` (the Workers
+  the worker (§7.1): `WORKER_VERSION` (3 — the sync API was 1; publishing
+  made it 2; the version store made it 3), `WORKER_FEATURES`
+  (`["sync", "wipe", "publish", "boards", "versions"]`; a feature name is a
+  promise about behaviour, listed only once the behaviour exists — the
+  engine mirrors nothing to a worker that does not list `versions`),
+  `MANIFEST_VERSION` (2) and `COMPATIBILITY_DATE` (the Workers
   runtime date `wrangler.toml` pins; moving it changes every new deploy's
   runtime, so it is moved on purpose).
 - The engine probes `/api/meta` on start and on every poll and reports
@@ -425,6 +450,7 @@ src-tauri/src/cloud/
   bus.rs        the edit bus (every write command → the engine)
   config.rs     cloud.json, the marker, endpoints and names
   status.rs     the status/event contract (mirrored by src/cloud.ts)
+  versions.rs   the version store's mirror: upload, the cloud ladder, the reads
   tests.rs      the in-memory worker and the two-device matrix
 ```
 
@@ -622,6 +648,9 @@ type CloudStatus = {
        | "revoked" | "worker-outdated" | "error";
   lastSyncMs: number | null; error: string | null; pendingDeletes: number;
   workerVersion: number | null;                 // what /api/meta last reported
+  versions: { mirrored: number; cloud: number; lastMirrorMs: number | null } | null;
+                                                // the version store's mirror; null when the
+                                                // worker has no `versions` feature
   public: { slug: string; kind: "file" | "dir"; path: string; title: string | null;
             desc: string | null; by: string; at: number; alive: boolean; root: boolean }[];
   presence: { deviceId: string; name: string; path: string | null; ts: number }[];
@@ -703,15 +732,35 @@ holds the manifest; the archive and the blob are one request each).
 **Since [versioning.md](versioning.md) phase 2, history is no longer a cloud
 feature.** The surface is the version rail (`HistoryRail.tsx`), and it reads
 the local version store, which every open folder has whether or not it is
-connected. `versions_history` calls `cloud_history` behind it and folds the
-manifest's revisions in behind the local ones — a cloud revision is named by
-the first 16 characters of the same sha256 the store uses, so one that
-prefixes a local version is the same bytes under a shorter name and is
-dropped. What survives is what only the cloud still reaches back to, read
-through `cloud_revision` and restored by handing its text to
-`versions_restore_file`. That read-through is a bridge: on the day the rail
-ships the local store is hours old and `hist` is not. Phase 6 stops writing
-`hist` and removes this branch.
+connected. What being connected adds is depth, from two places, both folded
+in by `versions_history`:
+
+- **The mirrored version store** (phase 3, `cloud/versions.rs`). The engine
+  puts this Mac's snapshots under `versions/`; every other device's
+  snapshots come back the same way. They join the rail's walk as ordinary
+  retained snapshots — a rename another Mac made is followed exactly like
+  one made here — carrying `source: "cloud"`, and are read and compared
+  through the version store like local ones. `EngineCmd::VersionsIndex`,
+  `VersionSnapshot` and `VersionBlob` are the three read-through commands;
+  a downloaded snapshot is cached under `<store>/cloud-cache/<id>.json.gz`,
+  which is also what makes the daily cloud sweep cheap.
+- **The sync manifest's own revisions** (phase 2's bridge). A manifest
+  revision is named by the first 16 characters of the same sha256 the store
+  uses, so one that prefixes a version already listed is the same bytes
+  under a shorter name and is dropped. What survives carries
+  `source: "manifest"`, is read through `cloud_revision`, and is restored by
+  handing its text to `versions_restore_file`. It exists because on the day
+  the rail shipped the local store was hours old and `hist` was not. Phase 6
+  stops writing `hist` and removes this branch.
+
+The mirror itself runs in the engine: after a cycle that changed something,
+and hourly regardless (`MIRROR_EVERY`). It uploads each local snapshot the
+cloud is missing — blobs first, then the snapshot, then the index by CAS —
+skipping one whose content another device already put there, and one the
+cloud ladder would not keep (or the same rows would go up and be swept away
+on every pass). Once a day it applies the ladder to the bucket:
+`versions/index.json` first, then the snapshot objects it dropped, then
+every blob no retained snapshot references and older than an hour's grace.
 
 ---
 
@@ -740,14 +789,14 @@ ships the local store is hours old and `hist` is not. Phase 6 stops writing
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…* and *Open a workspace from a domain…*. Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…* and *Open a workspace from a domain…*. Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any), *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
 | **Setup wizard** (`CloudSetup.tsx`) | the panel's two entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear |
-| **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v1 → v2`), one prompt with no secret that deploys over the same name, *Check again* — which sends the engine a probe; a `worker-outdated` pause resumes on it |
+| **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), one prompt with no secret that deploys over the same name, *Check again* — which sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
 | **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item |
-| **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the manifest's own revisions folded in behind them (§6.9); the selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
+| **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the versions other Macs mirrored — and, behind both, the manifest's own revisions — folded into the same list (§6.9); the trust line counts what is here against what is in the cloud. The selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
 | **Toasts** (`CloudToasts.tsx`) | anywhere | `cloud-conflict` → *Open the copy*; `cloud-pending-deletes` → *Review…* (the panel); `cloud-applied` → the tree refreshes (open tabs reload through the file watcher) |
 
 ### 7.3 Gating
@@ -948,12 +997,12 @@ walks. The cloud's own checks:
 
 ```sh
 pnpm typecheck:worker                      # the worker against the Workers runtime types
-pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (23 cases)
+pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (26 cases)
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
-cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (38 tests)
-node verify-harness/cloudprompts.test.mjs  # the three prompts (112 checks)
-node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (29 steps)
+cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (49 tests)
+node verify-harness/cloudprompts.test.mjs  # the three prompts (111 checks)
+node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
 node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaScript off for the board (8 steps)
 ```

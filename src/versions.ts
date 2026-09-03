@@ -37,20 +37,23 @@ export type VersionsStatus = {
  *  src-tauri/src/versions/history.rs — change both. */
 export type FileVersion = {
   ts: number;
-  /** The full sha256 for a local version; the manifest's 16-character
-   *  prefix for one only the cloud still holds. */
+  /** The full sha256 for a version in either store; the sync manifest's
+   *  16-character prefix for a `manifest` revision. */
   hash: string;
   size: number;
   /** The device that took the snapshot. */
   by: string;
-  /** The capture's reason, or "" for a revision only the cloud has. */
+  /** The capture's reason, or "" for a sync-manifest revision. */
   reason: VersionReason | "";
   label: string | null;
   pinned: boolean;
   restoredFrom: number | null;
   /** The path as of that version — different from today's after a rename. */
   path: string;
-  source: "local" | "cloud";
+  /** Where the bytes come from: `local` (a blob on this Mac), `cloud` (the
+   *  mirrored version store, read through the engine) or `manifest` (the
+   *  sync manifest's own per-file revisions, which phase 6 retires). */
+  source: "local" | "cloud" | "manifest";
   /** This version is byte-for-byte the file on disk right now. */
   current: boolean;
 };
@@ -184,7 +187,10 @@ export const versionsRunning = (s: VersionsStatus | null): boolean =>
 /** The small word a row wears, so a list of times reads as a list of
  *  moments. Kept beside the contract because the reasons are the contract. */
 export function versionReasonWord(v: Pick<FileVersion, "reason" | "source">): string {
-  if (v.source === "cloud") return "from the cloud";
+  // A mirrored version carries the reason the device that took it recorded,
+  // and `by` already says which Mac that was. A manifest revision carries
+  // neither, so the source is all there is to say.
+  if (v.source === "manifest") return "from the cloud";
   switch (v.reason) {
     case "interval":
       return "while editing";
