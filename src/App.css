@@ -5802,80 +5802,306 @@ body.tree-dragging.tree-drag-invalid * {
   transition: width 0.15s ease-out;
 }
 
-/* History */
-.cloud-history-modal {
-  max-width: 860px;
+/* ---------- Version history (docs/versioning-plan.md §5.4) ----------
+   A right rail beside the document, in the place the comments rail takes,
+   and — when a version is selected — that version rendered where the
+   document is, read-only, under a banner with the three exits. */
+
+.history-rail {
+  flex: 0 0 268px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--app-border);
+  background: var(--app-surface);
 }
 
-.cloud-history-layout {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 14px;
-  min-height: 320px;
+.history-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 10px 6px 14px;
 }
 
-.cloud-history-list {
+.history-rail-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.history-rail-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--app-text-muted);
+  cursor: pointer;
+}
+
+.history-rail-close:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+/* The trust line: how far back this document reaches, and where it lives. */
+.history-rail-trust {
+  padding: 0 14px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--app-text-muted);
+}
+
+.history-rail-name {
+  padding: 0 12px 10px;
+}
+
+.history-rail-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 7px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.history-rail-name-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+}
+
+.history-rail-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 8px 14px;
+  min-height: 0;
+}
+
+.history-rail-hint {
+  padding: 10px 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+}
+
+.history-rail-error {
+  color: var(--app-dirty);
+}
+
+.history-day-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-top: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-day-head:hover {
+  background: var(--app-hover);
+}
+
+.history-day-count {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.history-versions {
   list-style: none;
   margin: 0;
-  padding: 0 10px 0 0;
-  overflow-y: auto;
-  max-height: min(56vh, 520px);
-  border-right: 1px solid var(--app-border);
+  padding: 0;
 }
 
-.cloud-history-rev {
+.history-version {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 1px;
   width: 100%;
-  padding: 7px 9px;
+  padding: 6px 10px;
   border: 0;
-  border-radius: 7px;
+  border-left: 2px solid transparent;
+  border-radius: 0 7px 7px 0;
   background: none;
   color: var(--app-text);
+  font: inherit;
   text-align: left;
   cursor: pointer;
-  font: inherit;
 }
 
-.cloud-history-rev:hover {
+.history-version:hover {
   background: var(--app-hover);
 }
 
-.cloud-history-rev.is-active {
+.history-version.is-active {
   background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+  border-left-color: var(--app-accent);
 }
 
-.cloud-history-rev-title {
-  font-size: 13px;
-  font-weight: 600;
+.history-version-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.cloud-history-rev-meta {
-  font-size: 11.5px;
+.history-version-time {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.history-version-pin {
+  display: inline-flex;
+  color: var(--app-accent);
+}
+
+.history-version-now {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--app-hover);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--app-text-muted);
 }
 
-.cloud-history-preview {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
+.history-version-label {
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.cloud-history-pre {
-  margin: 0;
-  padding: 12px 14px;
+.history-version-meta {
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+/* The preview stands in the document area; the live editor is hidden, not
+   unmounted, so Back to now is instant and nothing was lost. */
+/* An html document's wrap stops scrolling (its iframe scrolls itself); a
+   version of it is ordinary content again and needs the canvas back. */
+.editor-wrap.is-version-preview {
+  overflow-y: auto;
+}
+
+.editor-wrap.is-version-preview > .milkdown,
+.editor-wrap.is-version-preview > .comments-rail,
+.editor-wrap.is-version-preview > .dk-props,
+.editor-wrap.is-version-preview > .html-view {
+  display: none;
+}
+
+.version-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.version-banner {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-accent) 8%, var(--app-surface));
+  font-size: 12.5px;
+}
+
+.version-banner-was {
+  color: var(--app-text-muted);
+}
+
+.version-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.version-banner-btn {
+  padding: 4px 10px;
   border: 1px solid var(--app-border);
-  border-radius: 10px;
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.version-banner-btn:hover:not(:disabled) {
   background: var(--app-hover);
+}
+
+.version-banner-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.version-banner-btn.is-primary {
+  border-color: transparent;
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.version-banner-btn.is-on {
+  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+}
+
+.version-preview-body {
+  min-height: 0;
+}
+
+.version-preview-hint {
+  padding: 22px 26px;
+  font-size: 13px;
+  color: var(--app-text-muted);
+}
+
+/* A unified patch, coloured by line. The rendered block-level diff inside
+   the editor is the refinement §12.3.2 describes; this is the first cut. */
+.version-diff {
+  margin: 0;
+  padding: 14px 18px;
   font-size: 12px;
   line-height: 1.55;
-  overflow: auto;
-  max-height: min(46vh, 430px);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.version-diff-line.is-file,
+.version-diff-line.is-hunk {
+  color: var(--app-text-muted);
+}
+
+.version-diff-line.is-add {
+  background: color-mix(in srgb, #3fb950 18%, transparent);
+}
+
+.version-diff-line.is-del {
+  background: color-mix(in srgb, #f85149 16%, transparent);
 }
 
 /* Toasts: bottom-right, above the editor. */

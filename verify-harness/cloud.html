@@ -28,7 +28,11 @@
         ["/docs/other.md", `# Other\n\n${para("other", 6)}\n`],
         ["/docs/third.md", `# Third\n\n${para("third", 6)}\n`],
         ["/docs/Projects/plan.md", `# Plan\n\n${para("plan", 3)}\n`],
+        ["/drafts/d-1.md", "a draft with a history of its own\n"],
       ]);
+      // One draft, so the drafts panel's row menu — the third way into the
+      // version rail — has something to open.
+      window.__drafts = [{ id: "d-1", path: "/drafts/d-1.md", preview: "a draft" }];
       // The folders the workspace holds (publishing a folder is a folder page).
       window.__dirs = new Set(["/docs", "/docs/Projects"]);
       window.__mtime = 1000;
@@ -92,7 +96,72 @@
         },
         calls: [],
       };
+      // The version store, scripted the same way (docs/versioning-plan.md
+      // §5.5): versions_* answers from window.__versions, records itself in
+      // its `calls`, and a restore actually writes the file and emits
+      // `versions-applied`, so the app's reload path is exercised too.
+      const HOUR = 3600000;
+      const DAY = 86400000;
+      const startOfToday = (() => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        return d.getTime();
+      })();
+      // Anchored to the start of a day, so which group a version falls in
+      // never depends on what time the suite runs.
+      const at = (daysAgo, hour) => startOfToday - daysAgo * DAY + hour * HOUR;
+      const H = (c) => c.repeat(64);
+      const version = (ts, hash, extra = {}) => ({
+        ts,
+        hash,
+        size: 120,
+        by: "Test Mac",
+        reason: "closing",
+        label: null,
+        pinned: false,
+        restoredFrom: null,
+        path: "other.md",
+        source: "local",
+        current: false,
+        ...extra,
+      });
+
+      window.__versions = {
+        // path → FileHistory. The drive replaces this wholesale to script a
+        // cloud read-through or an empty history.
+        histories: {
+          "/drafts/d-1.md": {
+            root: "/drafts",
+            currentHash: H("e"),
+            versions: [version(at(0, 10), H("e"), { path: "d-1.md", current: true })],
+          },
+          "/docs/other.md": {
+            root: "/docs",
+            currentHash: H("a"),
+            versions: [
+              version(at(0, 11), H("a"), { current: true }),
+              version(at(0, 9), H("b"), { reason: "interval" }),
+              version(at(1, 16), H("c"), { reason: "manual", pinned: true, label: "Before the rewrite" }),
+              version(at(5, 10), H("d"), { reason: "seed" }),
+            ],
+          },
+        },
+        blobs: {
+          [H("a")]: "# Other\n\nthe current text\n",
+          [H("b")]: "# Other\n\nthis morning's text\n",
+          [H("c")]: "# Other\n\nthe named version\n",
+          [H("d")]: "# Other\n\nthe first text\n",
+          [H("e")]: "a draft with a history of its own\n",
+        },
+        diff: "--- original\n+++ modified\n@@ -1,3 +1,3 @@\n # Other\n \n-the first text\n+the current text\n",
+        calls: [],
+        seq: 0,
+      };
+      const versionsFor = (path) =>
+        window.__versions.histories[path] ?? { root: "/docs", currentHash: null, versions: [] };
+
       const record = (cmd, args) => window.__cloud.calls.push({ cmd, args });
+      const recordVersion = (cmd, args) => window.__versions.calls.push({ cmd, args });
       const hostOf = (endpoint) => endpoint.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
       const statusFor = (root, endpoint, name, wsId) => ({
         root,
@@ -142,6 +211,7 @@
         transformCallback: (cb) => cb,
         invoke: (cmd, args) => {
           if (cmd.startsWith("cloud_")) record(cmd, args);
+          if (cmd.startsWith("versions_")) recordVersion(cmd, args);
           switch (cmd) {
             case "take_window_init":
               return Promise.resolve({
@@ -187,7 +257,7 @@
             case "device_name":
               return Promise.resolve("Test Mac");
             case "list_drafts":
-              return Promise.resolve([]);
+              return Promise.resolve(window.__drafts ?? []);
             case "open_external":
               (window.__opened ??= []).push(args.url);
               return Promise.resolve(null);
@@ -274,6 +344,76 @@
               return Promise.resolve(window.__cloud.wipeResult);
             case "cloud_set_activity":
               return Promise.resolve(null);
+
+            /* ----- the version store ----- */
+            case "versions_status":
+              return Promise.resolve([]);
+            case "versions_snapshots":
+              return Promise.resolve([]);
+            case "versions_history": {
+              // A fresh object every time, the way real IPC hands one over —
+              // the app re-renders on identity, and the fake mutates in place.
+              const h = versionsFor(args.path);
+              return Promise.resolve({ ...h, versions: h.versions.map((v) => ({ ...v })) });
+            }
+            case "versions_read":
+              return Promise.resolve(window.__versions.blobs[args.hash] ?? "");
+            case "versions_diff":
+              return Promise.resolve(window.__versions.diff);
+            case "versions_set_pinned":
+            case "versions_set_enabled":
+              return Promise.resolve(null);
+            case "versions_capture_now": {
+              // A snapshot is the whole folder, so every document in it gains
+              // a row at that moment — and a PINNED one is never collapsed
+              // away, which is what makes naming a moment mean anything.
+              const ts = Date.now();
+              for (const history of Object.values(window.__versions.histories)) {
+                if (history.root !== args.root) continue;
+                history.versions = [
+                  version(ts, history.currentHash ?? H("a"), {
+                    reason: "manual",
+                    pinned: true,
+                    label: args.label ?? null,
+                    current: true,
+                  }),
+                  ...history.versions.map((v) => ({ ...v, current: false })),
+                ];
+              }
+              return Promise.resolve({
+                ts,
+                reason: "manual",
+                files: 4,
+                bytes: 400,
+                pinned: true,
+                label: args.label ?? null,
+                restoredFrom: null,
+              });
+            }
+            case "versions_restore_file": {
+              const history = versionsFor(args.path);
+              const text = args.text ?? window.__versions.blobs[args.hash] ?? "";
+              const preRestoreHash = history.currentHash;
+              const preRestoreTs = Date.now();
+              window.__fs.set(args.path, text);
+              window.__writes.push(args.path);
+              // The store keeps what it left AND what it made; nothing is
+              // removed (docs/versioning-plan.md §12.3.8).
+              const hash = args.hash ?? `text-${++window.__versions.seq}`;
+              window.__versions.blobs[hash] = text;
+              history.currentHash = hash;
+              history.versions = [
+                version(preRestoreTs + 1, hash, {
+                  reason: "restore",
+                  restoredFrom: args.ts ?? null,
+                  current: true,
+                }),
+                version(preRestoreTs, preRestoreHash, { reason: "pre-restore" }),
+                ...history.versions.map((v) => ({ ...v, current: false })),
+              ];
+              window.__emit("versions-applied", { root: history.root, paths: [args.path] });
+              return Promise.resolve({ preRestoreTs, preRestoreHash, ts: preRestoreTs + 1 });
+            }
 
             /* ----- the public map, as the engine would keep it ----- */
             case "cloud_publish": {

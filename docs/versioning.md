@@ -508,10 +508,10 @@ file's versions stays a short read.
 
 ## 8. The surfaces
 
-- **Version history** (a file) — the existing `HistoryPanel.tsx`, fed from
-  the local store instead of `cloud_history`, ungated on the cloud
-  (`Sidebar.tsx:857` drops its `cloud &&`). Gains a diff against the current
-  content, and keeps both existing exits: *Restore* and *Save as new doc*.
+- **Version history** (a file) — a right rail listing the document's
+  versions, fed from the local store instead of `cloud_history` and ungated
+  on the cloud. Selecting one shows it where the document is, read-only,
+  with *Restore*, *Make a copy* and *Show changes*.
 - **Workspace history** — a date picker over retained snapshots, showing what
   differs from disk, with *Restore all* and per-file restore. Reached from
   the Cloud panel and from the workspace's context menu.
@@ -537,6 +537,34 @@ toggle; versions can be named and are then never thinned; *Recently
 deleted* is a row at the foot of the sidebar (Apple Notes' model); the
 workspace timeline is a modal that states what a restore will do
 (Dropbox Rewind's model). `HistoryPanel.tsx` is replaced, not fed.
+
+*As built* (phase 2 — `HistoryRail.tsx`, `VersionPreview.tsx`):
+
+- The rail groups versions **by day**, today and yesterday open and older
+  days collapsed to a row each, so the list is the ladder made visible. Its
+  header carries the trust line ("Every change since 3 Jun") and, when the
+  workspace is connected, where the versions live ("14 here · 212 in the
+  cloud").
+- A file's history is **one row per distinct content**, dated where that
+  content first appeared — a document untouched for a week reads as "last
+  changed a week ago", not as a version at every snapshot since. The one
+  exception is a **named** version: it always keeps its own row, because
+  *Name this version* on a document nothing has changed in must leave a
+  moment behind to have meant anything.
+- The preview is the same `Editor` the user writes in, with `readOnly` on
+  and comments off. There is no write path for the old text at all, which
+  is the whole safety argument for showing it in place.
+- **Restore is one Rust command** — `versions_restore_file` captures the
+  state it is about to leave, writes the old bytes, then captures the state
+  it made with `restoredFrom` set. Two calls from the frontend (a capture,
+  then a `write_file`) would let the cadence capture between them. It
+  answers the pre-restore version, which is what the toast's *Undo*
+  restores in turn; `versions-applied` refreshes the tree and reloads the
+  open document.
+- A version only the cloud still reaches back to can be restored too: its
+  bytes arrive through `cloud_revision` and ride the same command as
+  `text`, so a restore is one command whichever store the content came
+  from. Phase 6 removes that branch with the rest of the read-through.
 
 ---
 
@@ -638,10 +666,12 @@ pnpm test:worker                            # the snapshot routes beside the man
 scripts/versions.sh -w ~/Notes              # what a store holds right now, live
 ```
 
-The store is invisible in the app until the surfaces of phase 2, so
-`scripts/versions.sh` is how anyone watches it work: it derives the store
-key from a folder's path and prints its snapshots, their reasons, whether
-they are pinned and what the store costs on disk.
+`scripts/versions.sh` is how anyone watches the store itself work, from
+outside the app: it derives the store key from a folder's path and prints
+its snapshots, their reasons, whether they are pinned and what the store
+costs on disk. Since phase 2 the rail shows the same history from inside,
+one document at a time, and `verify-harness/drive-versions.mjs` drives it in
+Chromium against a scripted store.
 
 None of that is the same question as *does the promise hold*, which is asked
 by hand, through the app, once the phases are in:
@@ -665,10 +695,16 @@ What each suite must cover:
   reachable.
 - **Restore** — a file restore pushes a new revision and leaves history
   whole; a workspace restore is snapshotted first and is itself undoable.
+  *Built* for a file: the state it leaves and the state it makes are both
+  captured, the second names its source, the pre-restore capture dedupes
+  when nothing was unsaved, the undo is a restore of the pre-restore hash,
+  and no snapshot is ever removed.
 - **Migration** — a v2 manifest's `hist` seeds snapshots once, and a v2
   worker degrades to "no cloud history" rather than an error.
 - **Local-only** — every surface works for a workspace that has never been
-  connected.
+  connected. *Built* for the rail: `drive-versions.mjs` opens it with no
+  cloud status at all, which is the step that would fail the moment history
+  went back behind the Cloud panel.
 
 The one thing a Linux runner cannot do is the real thing: months of real
 editing on a real Mac, and a second Mac reading history the first one wrote.

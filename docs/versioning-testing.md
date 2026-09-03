@@ -61,7 +61,10 @@ Phase 2's history rail.
 - [ ] Open a note's history from the sidebar's file menu, the tab's menu,
       the drafts panel and `⌘⌥H`. All four reach the same rail.
 - [ ] The rail groups by day, shows a time and a device name per row, and
-      says how far back history reaches.
+      says how far back history reaches. Today and yesterday are open; an
+      older day is one row that expands.
+- [ ] A note you have not touched in a week shows its newest version dated
+      **a week ago**, not today — the list is of changes, not of captures.
 - [ ] A brand-new file with no history yet says so plainly instead of
       showing an empty box or an error.
 - [ ] A note in a folder that was **never connected to any cloud** has a
@@ -82,7 +85,11 @@ Phase 2's history rail.
 - [ ] Select a version while the live document has unsaved keystrokes. What
       you typed is in the newest version, not lost, and the preview is the
       old text.
-- [ ] *Show changes* renders the difference against the next-older version.
+- [ ] *Show changes* renders the difference between the version and the one
+      that came **after** it — for the newest version, the document as it
+      stands now. That is the answer to "what would restoring this undo?".
+- [ ] *Show changes* is absent on a revision only the cloud has: its bytes
+      are not in the local store, so there is nothing here to compare.
 - [ ] The same document open in two windows: previewing in one leaves the
       other alone.
 - [ ] A version of a note that is currently open in the split view's mirror

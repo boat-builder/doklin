@@ -55,6 +55,11 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   (or empty space) to move them.
 - **Autosave** — real files save back to the same `.md`; drafts save to app
   storage. Nothing is lost on tab switch or quit.
+- **Version history** — every folder you open keeps its own history, cloud or
+  no cloud: ⌘⌥H (or *Version history…* on a file) opens a rail of versions
+  grouped by day, shows any of them in place, read-only, and restores or
+  copies it out. A restore is itself a version, so it can be undone. Name a
+  version and it is kept for good.
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
   note. The cloud is one Cloudflare Worker and one bucket on your own account,

@@ -1,3 +1,6 @@
+import { useState } from "react";
+import ContextMenu from "./ContextMenu";
+
 type DraftRow = { id: string; path: string; title: string; preview: string };
 
 type Props = {
@@ -7,6 +10,9 @@ type Props = {
   onDiscard: (path: string, id: string) => void;
   onNewDraft: () => void;
   onClose: () => void;
+  // A draft has a history like any document: the drafts folder is a root
+  // with its own store (docs/versioning-plan.md §4.4).
+  onHistory?: (path: string) => void;
 };
 
 export default function DraftsPanel({
@@ -16,7 +22,9 @@ export default function DraftsPanel({
   onDiscard,
   onNewDraft,
   onClose,
+  onHistory,
 }: Props) {
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   return (
     <aside className="drafts-panel" aria-label="Drafts">
       <div className="drafts-header">
@@ -49,7 +57,14 @@ export default function DraftsPanel({
               const active = d.path === activePath;
               return (
                 <li key={d.id}>
-                  <div className={`draft-row ${active ? "is-active" : ""}`}>
+                  <div
+                    className={`draft-row ${active ? "is-active" : ""}`}
+                    onContextMenu={(e) => {
+                      if (!onHistory) return;
+                      e.preventDefault();
+                      setMenu({ x: e.clientX, y: e.clientY, path: d.path });
+                    }}
+                  >
                     <button
                       className="draft-open"
                       onClick={() => onOpen(d.path)}
@@ -75,6 +90,14 @@ export default function DraftsPanel({
           </ul>
         )}
       </div>
+      {menu && onHistory && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[{ label: "Version history…", onClick: () => onHistory(menu.path) }]}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </aside>
   );
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { describeCloud, pageUrl, publishedByPath, type CloudStatus, type PublicPage } from "./cloud";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -120,7 +121,8 @@ type Props = {
   // Open the Cloud panel — the dot beside the workspace name, and "Cloud…"
   // in its menu.
   onOpenCloud?: () => void;
-  // Version history for a document; offered only in a connected workspace.
+  // Version history for a document — the rail, for any workspace: since
+  // docs/versioning.md it is no longer a cloud feature.
   onHistory?: (path: string) => void;
   // Publishing (docs/cloud.md §7.2): the folder dialog for a
   // folder (or the root, for the whole workspace), stopping a page, and
@@ -853,8 +855,8 @@ export default function Sidebar({
       label: "Reveal in Finder",
       onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
     });
-    // A synced document's revisions live with the engine (§6.9).
-    if (target.kind === "file" && cloud && onHistory) {
+    // Every document has a history, connected or not (docs/versioning.md).
+    if (target.kind === "file" && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
     // Publishing: a folder (or the whole workspace) publishes every note in
@@ -1607,69 +1609,6 @@ function NameRow({
         </div>
       )}
     </Wrapper>
-  );
-}
-
-type ContextMenuItem = {
-  label: string;
-  danger?: boolean;
-  // Visible but inert (greyed out) — e.g. Paste with an empty clipboard.
-  disabled?: boolean;
-  onClick: () => void;
-};
-
-// A fixed-position right-click menu. Reuses the sidebar dropdown's visual
-// language; closes on outside click, Esc, or after running an item.
-function ContextMenu({
-  x,
-  y,
-  items,
-  onClose,
-}: {
-  x: number;
-  y: number;
-  items: ContextMenuItem[];
-  onClose: () => void;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  // Keep the menu on-screen when invoked near the bottom/right edges.
-  const estHeight = items.length * 30 + 12;
-  const left = Math.min(x, window.innerWidth - 190);
-  const top = Math.min(y, window.innerHeight - estHeight - 8);
-
-  return (
-    <div ref={menuRef} className="tree-context-menu" role="menu" style={{ left, top }}>
-      {items.map((item) => (
-        <button
-          key={item.label}
-          role="menuitem"
-          className={`sidebar-menu-item ${item.danger ? "is-danger" : ""}`}
-          disabled={item.disabled}
-          onClick={() => {
-            onClose();
-            item.onClick();
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
-    </div>
   );
 }
 

@@ -256,6 +256,12 @@ impl Store {
         self.blob_path(hash).exists()
     }
 
+    /// One version's bytes. None when the blob is gone — a store older than
+    /// the horizon, or a hash from a device whose sweep ran first.
+    pub fn read_blob(&self, hash: &str) -> Option<Vec<u8>> {
+        gunzip(&std::fs::read(self.blob_path(hash)).ok()?).ok()
+    }
+
     /// Write a blob unless it is already there. Answers the bytes written
     /// (0 when the content was already stored).
     pub fn write_blob(&self, hash: &str, bytes: &[u8]) -> Result<u64, String> {

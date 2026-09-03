@@ -18,13 +18,20 @@ import {
   type PublicPage,
 } from "./cloud";
 import CloudPanel from "./CloudPanel";
+import {
+  onVersionsApplied,
+  versionsRestoreFile,
+  type FileVersion,
+  type RestoreOutcome,
+} from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
 import CloudToasts, { type CloudToast } from "./CloudToasts";
 import PublishMenu from "./PublishMenu";
 import PublishFolder from "./PublishFolder";
 import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
-import HistoryPanel from "./HistoryPanel";
+import HistoryRail from "./HistoryRail";
+import VersionPreview, { momentLabel } from "./VersionPreview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
@@ -123,6 +130,7 @@ let sessionWorkspaceRoot: string | null = null;
 let sessionSplit: StoredSplit | null = null;
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const dirname = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
@@ -958,13 +966,23 @@ export default function App() {
   );
   // The cloud surfaces (docs/cloud.md §7.2): the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
-  // worker update card, the history panel for one document, and the
-  // transient notices. The held mass-deletion's paths ride the event that
+  // worker update card, and the transient notices. The held mass-deletion's paths ride the event that
   // announced it; the panel lists them.
   const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
   const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
   const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
-  const [historyPath, setHistoryPath] = useState<string | null>(null);
+  // Version history (docs/versioning-plan.md §5.4): which document's rail is
+  // open, and which of its versions is showing in the document area instead
+  // of the live editor. `historyToken` re-reads the rail after a restore
+  // adds rows to it.
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const [versionPreview, setVersionPreview] = useState<
+    { version: FileVersion; newer: FileVersion | null; root: string } | null
+  >(null);
+  const [historyToken, setHistoryToken] = useState(0);
+  const historyForRef = useRef<string | null>(null);
+  // What ⌘⌥H opens history for: the active tab, unless it is a board.
+  const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
   const [cloudToasts, setCloudToasts] = useState<CloudToast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
   const toastSeq = useRef(0);
@@ -2553,6 +2571,93 @@ export default function App() {
     loadEntityMeta,
     adoptFrontmatter,
   ]);
+
+  /* ---------- Version history (docs/versioning-plan.md §5.4) ---------- */
+
+  // The rail, for a document reached from the sidebar, a tab, the drafts
+  // panel or ⌘⌥H. It always opens on the list: a rail is somewhere to look,
+  // not a jump to a version.
+  const openHistory = useCallback(
+    async (path: string, kind: "file" | "draft" = "file") => {
+      setVersionPreview(null);
+      // A version shows in the document area, so the document has to be the
+      // one standing in it: opening history for a file in the tree opens the
+      // file too.
+      if (historyTargetRef.current?.path !== path) await openTab(path, kind);
+      setHistoryFor(path);
+      setHistoryToken((t) => t + 1);
+    },
+    [openTab],
+  );
+
+  const closeHistory = useCallback(() => {
+    setHistoryFor(null);
+    setVersionPreview(null);
+  }, []);
+
+  // ⌘⌥H, the fourth way in: a toggle for whatever is open.
+  const toggleHistory = useCallback(() => {
+    if (historyForRef.current) {
+      closeHistory();
+      return;
+    }
+    const target = historyTargetRef.current;
+    if (target) void openHistory(target.path, target.kind);
+  }, [closeHistory, openHistory]);
+
+  // Selecting a version shows it where the document is. The live editor's
+  // pending autosave lands FIRST: what has been typed since the last
+  // capture has to be on disk before a restore can promise to bring it back.
+  const previewVersion = useCallback(
+    (version: FileVersion, root: string, newer: FileVersion | null) => {
+      void flushPendingAutosave();
+      setVersionPreview({ version, newer, root });
+    },
+    [flushPendingAutosave],
+  );
+
+  // Undoing a restore is another restore — of the state the first one left
+  // (docs/versioning-plan.md §12.3.8). The timeline is the undo; ⌘Z is not
+  // promised for it.
+  const undoRestore = useCallback(
+    async (docPath: string, root: string, outcome: RestoreOutcome) => {
+      if (outcome.preRestoreHash == null) return;
+      try {
+        await versionsRestoreFile(root, docPath, {
+          ts: outcome.preRestoreTs,
+          hash: outcome.preRestoreHash,
+        });
+        setHistoryToken((t) => t + 1);
+      } catch (e) {
+        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+      }
+    },
+    [pushToast],
+  );
+
+  // One Rust command does all three steps — capture what is here, write the
+  // old bytes, capture what that made — because the cadence must not get
+  // between them.
+  const restoreVersion = useCallback(
+    async (docPath: string, root: string, version: FileVersion, text: string | null) => {
+      try {
+        const outcome = await versionsRestoreFile(root, docPath, {
+          ts: version.ts,
+          hash: version.source === "cloud" ? null : version.hash,
+          text,
+        });
+        setVersionPreview(null);
+        setHistoryToken((t) => t + 1);
+        pushToast(`Restored the version from ${momentLabel(version.ts)}.`, {
+          label: "Undo",
+          run: () => void undoRestore(docPath, root, outcome),
+        });
+      } catch (e) {
+        pushToast(`Couldn't restore that version: ${errText(e)}`);
+      }
+    },
+    [pushToast, undoRestore],
+  );
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
@@ -4551,6 +4656,11 @@ export default function App() {
       } else if (k === "\\") {
         e.preventDefault();
         if (workspaceRoot) setSidebarOpen((v) => !v);
+      } else if (e.code === "KeyH" && e.altKey) {
+        // ⌘⌥H: the version rail for the open document. e.code, not e.key:
+        // on macOS ⌥ remaps e.key (⌥H → "˙").
+        e.preventDefault();
+        toggleHistory();
       } else if (k === "d" && e.shiftKey) {
         e.preventDefault();
         setDraftsOpen((v) => !v);
@@ -4595,6 +4705,7 @@ export default function App() {
   }, [
     handleSave,
     newDraft,
+    toggleHistory,
     closeTab,
     deleteEntry,
     deleteEntries,
@@ -4716,6 +4827,12 @@ export default function App() {
       onCloudApplied((e) => {
         if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
       }),
+      // A restore wrote a document: the tree refreshes like sync's, and the
+      // open editor reloads — the watcher stays quiet for our own writes.
+      onVersionsApplied((e) => {
+        if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
+        if (pathRef.current && e.paths.includes(pathRef.current)) void reloadFromDisk();
+      }),
       onCloudConflict((e) => {
         pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
@@ -4735,7 +4852,21 @@ export default function App() {
     return () => {
       for (const un of uns) void un.then((f) => f()).catch(() => {});
     };
-  }, [openTab, pushToast]);
+  }, [openTab, pushToast, reloadFromDisk]);
+  // The version rail follows the document: switching tabs while it is open
+  // shows the new one's history and drops the old one's preview.
+  useEffect(() => {
+    historyForRef.current = historyFor;
+    historyTargetRef.current =
+      activeTab && activeTab.kind !== "store" ? { path: activeTab.path, kind: activeTab.kind } : null;
+    const open = historyTargetRef.current?.path ?? null;
+    if (historyFor && open && open !== historyFor) {
+      setHistoryFor(open);
+      setVersionPreview(null);
+      setHistoryToken((t) => t + 1);
+    }
+  }, [activeTab, historyFor]);
+
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
@@ -4992,8 +5123,16 @@ export default function App() {
       : doc != null ? doc.kind === "file" && isHtmlPath(doc.path) : activeIsHtmlDoc;
     const paneHasHtml = focused ? hasHtml : doc ? doc.hasHtml : hasHtml;
 
+    // An old version shows in the document area itself, read-only, with the
+    // live editor hidden behind it — so nothing typed here can ever be
+    // autosaved over the newer text (§12.3.1).
+    const previewHere =
+      focused && versionPreview != null && historyFor != null && historyFor === paneTab?.path;
+
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
+          previewHere ? "is-version-preview" : ""
+        } ${
           dictationUi.session !== "idle"
             ? `is-dictating ${dictationUi.gate === "listening" && dictationUi.session === "active" ? "is-listening" : "is-paused"}`
             : ""
@@ -5147,6 +5286,20 @@ export default function App() {
               onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
               // A ```kanban fence in this note becomes a board (kanbanEmbed.ts).
               kanban={kanbanHostFor(paneTab)}
+            />
+          )}
+          {previewHere && historyFor && versionPreview && (
+            <VersionPreview
+              docPath={historyFor}
+              root={versionPreview.root}
+              version={versionPreview.version}
+              newer={versionPreview.newer}
+              onBack={() => setVersionPreview(null)}
+              onRestore={(version, text) =>
+                void restoreVersion(historyFor, versionPreview.root, version, text)
+              }
+              onOpenFile={(path) => void openTab(path, "file")}
+              onError={(message) => pushToast(message)}
             />
           )}
           {showHtmlHere && (
@@ -5320,6 +5473,7 @@ export default function App() {
           onDiscard={(p, id) => void discardDraft(p, id)}
           onNewDraft={() => void newDraft()}
           onClose={() => setDraftsOpen(false)}
+          onHistory={(path) => void openHistory(path, "draft")}
         />
       )}
       <TabBar
@@ -5333,6 +5487,7 @@ export default function App() {
         onDragOut={handleTabDragOut}
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
+        onHistory={(path, kind) => void openHistory(path, kind)}
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
@@ -5433,7 +5588,7 @@ export default function App() {
           onPublishFolder={cloudForRoot ? (dir) => setPublishFolder(dir) : undefined}
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
-          onHistory={setHistoryPath}
+          onHistory={(path) => void openHistory(path)}
         />
       )}
       {conflict && (
@@ -5471,6 +5626,17 @@ export default function App() {
           />
         )}
         {renderPane("right")}
+        {historyFor && (
+          // A right rail beside the document, never over it (§12.3.1).
+          <HistoryRail
+            docPath={historyFor}
+            selected={versionPreview?.version.ts ?? null}
+            onSelect={previewVersion}
+            onClose={closeHistory}
+            reloadToken={historyToken}
+            onError={(message) => pushToast(message)}
+          />
+        )}
         {tabDrop && (
           <div className="split-drop-overlay" aria-hidden>
             <div
@@ -5569,13 +5735,6 @@ export default function App() {
           cloud={cloudForRoot}
           onClose={() => setWorkerUpdateOpen(false)}
           onOpenExternal={openExternal}
-        />
-      )}
-      {historyPath && (
-        <HistoryPanel
-          docPath={historyPath}
-          onClose={() => setHistoryPath(null)}
-          onOpenFile={(p) => void openTab(p, "file")}
         />
       )}
       <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />

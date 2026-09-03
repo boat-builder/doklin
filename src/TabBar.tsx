@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import ContextMenu from "./ContextMenu";
 
 // "store" is a datastore folder shown as a kanban board — a tab whose path
 // is a directory rather than a document (see App.tsx).
@@ -31,6 +32,10 @@ type Props = {
   // Rendered at the bar's right edge, after the tab strip (the app puts the
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
+  // Version history for this tab's document — the tab's right-click menu is
+  // one of the four ways in (docs/versioning-plan.md §12.3.6). A board has
+  // no document to version, so it has no item.
+  onHistory?: (path: string, kind: "draft" | "file") => void;
 };
 
 // A press only becomes a drag after moving this far, so plain clicks (switch
@@ -49,8 +54,12 @@ export default function TabBar({
   onDragOutEnd,
   onDragOutCancel,
   trailing,
+  onHistory,
 }: Props) {
   const activeRef = useRef<HTMLButtonElement>(null);
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; path: string; kind: "draft" | "file" } | null>(
+    null,
+  );
   const stripRef = useRef<HTMLDivElement>(null);
 
   // Keep the active tab in view when switching (e.g. via ⌘N or the sidebar).
@@ -230,6 +239,11 @@ export default function TabBar({
                     onClose(t.id); // middle-click closes
                   }
                 }}
+                onContextMenu={(e) => {
+                  if (!onHistory || t.kind === "store") return;
+                  e.preventDefault();
+                  setTabMenu({ x: e.clientX, y: e.clientY, path: t.path, kind: t.kind });
+                }}
               >
                 <span className="tab-label">{tabLabel(t)}</span>
                 {active && dirty && (
@@ -261,6 +275,14 @@ export default function TabBar({
           <PlusIcon />
         </button>
       </div>
+      {tabMenu && onHistory && (
+        <ContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          items={[{ label: "Version history…", onClick: () => onHistory(tabMenu.path, tabMenu.kind) }]}
+          onClose={() => setTabMenu(null)}
+        />
+      )}
       {overflowing && (
         <div ref={menuWrapRef} className="tab-overflow">
           <button

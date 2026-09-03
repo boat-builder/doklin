@@ -38,7 +38,7 @@ settles the handful of details the spec left open (§2).
 | # | Phase | What ships | Depends on | User sees |
 | --- | --- | --- | --- | --- |
 | 1 ✅ | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
-| 2 | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
+| 2 ✅ | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
 | 3 | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
 | 4 | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
 | 5 | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
@@ -615,8 +615,56 @@ rail (it now exercises the read-through).
   read from the version store with the manifest's `hist` as a fallback until
   phase 6; `README.md` Features: the autosave bullet gains a sentence on
   version history; `SKILL.md` gains `drive-versions.mjs`.
-- [ ] Rust, lint, tsc green; `drive-versions.mjs` and `drive-cloud.mjs` pass.
+- [x] Rust, lint, tsc green; `drive-versions.mjs` and `drive-cloud.mjs` pass.
 - [ ] Manual: history for a file in an unconnected folder; restore; the diff.
+      (Built on a Linux runner, which compiles and tests the crate and drives
+      the real `<App/>` in Chromium but cannot launch the app;
+      [versioning-testing.md](versioning-testing.md) §2–§4 is that walk.)
+
+### 5.7 As built
+
+What phase 2 settled, or decided differently from the sketch above:
+
+1. **A version is dated where its content first appeared.** The walk emits
+   one row per run of equal hashes, keeping the *oldest* of the run — a
+   document untouched for a week reads as "last changed a week ago" rather
+   than as a version at every snapshot since. A **pinned** row is never
+   collapsed into its neighbour: *Name this version* on a document nothing
+   has changed in has to leave a moment behind, which is the whole point of
+   naming one.
+2. **`file_versions` cannot fail**, so it answers a `Vec` rather than a
+   `Result`; a snapshot file that has gone missing is skipped. It takes the
+   index and the versioner's decode cache (32 snapshots) alongside the
+   store, and the file's hash on disk, which is what marks the current row —
+   only the newest match wears the badge, since after a restore an older row
+   holds the same bytes and is still an older row.
+3. **A path missing from the newest snapshots does not end the walk** before
+   it has started: a file created (or restored) since the last capture, and
+   a deleted one, still list what the older snapshots hold. Only a path that
+   vanishes *mid-walk* with no rename to follow ends it — which is what
+   makes a recreated path a new history.
+4. **`FileHistory` carries the store's `root`.** Every other version command
+   is keyed by it, and a caller (a draft's rail especially) has no other way
+   to know which folder a document belongs to.
+5. **`versions_diff(root, path, from, to)`** — either side's hash may be
+   null, meaning the file on disk. That is how the newest version is
+   compared against now, and it keeps one command for every pair.
+6. **`versions_restore_file(root, path, ts, hash, text)`** — `ts` becomes
+   the new snapshot's `restoredFrom`, and `text` names content the local
+   store never saw, so a revision only the cloud still holds restores
+   through the same single command. The versioner takes the write as a
+   closure rather than an `AppHandle`, which keeps Tauri out of it and the
+   restore's three steps testable.
+7. **The rail groups by day only.** Older weeks and months are already one
+   snapshot apiece by the time the ladder has thinned them, so day groups
+   give the shape §5.4 asks for without a second level of nesting.
+8. **The rail follows the document.** Opening history for a file in the tree
+   opens the file first — a version shows in the document area, so the
+   document has to be the one standing in it — and switching tabs while the
+   rail is open re-points it and drops any preview.
+9. **`ContextMenu` moved to `src/ContextMenu.tsx`** out of `Sidebar.tsx`, so
+   the tree, a tab and a draft row raise the same menu and *Version
+   history…* reads identically from all three.
 
 ---
 
