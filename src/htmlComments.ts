@@ -8,7 +8,7 @@
 //
 // The sidecar is JSON Lines: a header line, then ONE line per thread. One
 // thread per line is deliberate — cloud sync merges files with a three-way
-// *text* merge (see src-tauri/src/sync.rs), so two people adding or replying
+// *text* merge (see src-tauri/src/cloud/merge.rs), so two people adding or replying
 // to different threads concurrently merge cleanly line-by-line, where a
 // single pretty-printed JSON document would conflict on every edit.
 //

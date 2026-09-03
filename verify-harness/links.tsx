@@ -57,9 +57,9 @@ ${filler("Below")}
 
 window.__md = DOC;
 window.__opened = [];
-// The plain host behavior — what the published web shell wires up and what the
-// editor falls back to. Exposed so the driver can check which schemes it is
-// willing to hand a browser tab.
+// The plain host behavior — what the editor falls back to without a host.
+// Exposed so the driver can check which schemes it is willing to hand a
+// browser tab.
 window.__openInBrowserTab = openInBrowserTab;
 
 function Harness() {

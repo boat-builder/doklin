@@ -5355,7 +5355,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
 }
 
-/* ---------- Cloud (docs/cloud-redesign.md §7.2) ----------
+/* ---------- Cloud (docs/cloud.md §7.2) ----------
    The panel, the setup wizard, the update card and the history panel share
    the .shared-modal shell; these are the pieces inside it. The .share-*
    form pieces are the ones every dialog's fields use. */
@@ -6000,4 +6000,258 @@ body.tree-dragging.tree-drag-invalid * {
   height: 7px;
   border-radius: 50%;
   background: var(--app-accent);
+}
+
+/* ---- Publishing (docs/cloud.md §7.2): the pill in the tab bar and
+   its popover, the sidebar's published dots, the folder dialog, the list. */
+.publish-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  align-self: center;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.publish-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-bg);
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.publish-pill:hover {
+  color: var(--app-text);
+  background: var(--app-hover);
+}
+
+.publish-pill.is-published {
+  color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--app-accent) 10%, transparent);
+}
+
+.publish-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.publish-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 28;
+  width: 340px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+[data-theme="dark"] .publish-pop {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.5),
+    0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+.publish-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publish-url-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.publish-url {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--app-accent);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.publish-url:hover {
+  text-decoration: underline;
+}
+
+.publish-address {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+  overflow: hidden;
+}
+
+.publish-address:focus-within {
+  border-color: var(--app-accent);
+}
+
+.publish-prefix {
+  padding: 6px 0 6px 8px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  white-space: nowrap;
+}
+
+.publish-address input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px 6px 2px;
+  border: none;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.publish-meta {
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+
+.publish-link {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--app-accent);
+  cursor: pointer;
+}
+
+.publish-link:hover {
+  text-decoration: underline;
+}
+
+/* A row with a page of its own. */
+.tree-published {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  opacity: 0.85;
+}
+
+.published-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.published-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+}
+
+.published-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.published-row-icon {
+  flex-shrink: 0;
+  color: var(--app-text-muted);
+  display: inline-flex;
+}
+
+.published-row-name {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.published-row-name {
+  cursor: pointer;
+}
+
+button.published-row-name:hover {
+  text-decoration: underline;
+}
+
+.published-row-sub {
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.published-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  background: color-mix(in srgb, var(--app-accent) 16%, transparent);
+  color: var(--app-accent);
+}
+
+.published-badge.is-warn {
+  background: rgba(240, 160, 32, 0.16);
+  color: #b7791f;
+}
+
+.published-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }

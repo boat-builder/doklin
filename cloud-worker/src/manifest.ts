@@ -1,5 +1,5 @@
 // The workspace manifest — the one mutable object in the bucket — as the
-// worker sees it: the wire types (docs/cloud-redesign.md §6.6) and the shape
+// worker sees it: the wire types (docs/cloud.md §6.6) and the shape
 // check every PUT goes through. Semantics (revision ordering, merges, which
 // device's entry wins) are the engine's business; corruption and traversal
 // are the worker's. The check is what stops a broken device from publishing
@@ -150,8 +150,8 @@ function validateTombstones(tombstones: unknown): string | null {
  * The public map: slug grammar, reserved words, kinds, well-formed
  * references, at most one root. References are checked for shape, not for
  * existence: an entry deliberately outlives its file (the page 404s while
- * the file is gone and comes back when the file does — docs/cloud-redesign.md
- * §11, decision 7), and a folder entry may cover a folder that is empty now.
+ * the file is gone and comes back when the file does — docs/cloud.md
+ * §9, decision 7), and a folder entry may cover a folder that is empty now.
  */
 function validatePublic(map: unknown): string | null {
   if (map === undefined) return null;

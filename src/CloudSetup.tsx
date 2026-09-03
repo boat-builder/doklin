@@ -1,4 +1,4 @@
-// The setup wizard — docs/cloud-redesign.md §6.8 and §7.2. Two entrances:
+// The setup wizard — docs/cloud.md §6.8 and §7.2. Two entrances:
 //
 //   connect  the open folder goes to a fresh domain: name it, choose where
 //            it lives (a domain of your own or a free workers.dev address),

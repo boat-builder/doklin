@@ -1,4 +1,4 @@
-//! The edit bus (docs/cloud-redesign.md §6.4). Every write the app makes
+//! The edit bus (docs/cloud.md §6.4). Every write the app makes
 //! already goes through a Rust command — `write_file`, `write_frontmatter`,
 //! `write_body`, `create_card`, `create_file`, `create_dir`, `move_path`,
 //! `copy_path`, `trash_file`, `restore_trashed` — and each ends with

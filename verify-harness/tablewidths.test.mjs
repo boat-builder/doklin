@@ -231,7 +231,7 @@ const sizedTable = (headers) =>
 }
 
 /* ---------- the cross-implementation contract ----------
-   A public page's reading view (the cloud worker, docs/cloud-redesign.md
+   A public page's reading view (the cloud worker, docs/cloud.md
    §5.6) re-derives these ids from its markdown renderer's tokens to attach
    widths to server-rendered HTML, so the identity function gets a second
    implementation in a file this one can't import. These literals are the

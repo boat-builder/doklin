@@ -1,134 +1,203 @@
-// The public surface — no auth, GET/HEAD only. Today: the landing page at
-// `/`, the static assets, and a 404 page for everything else. Public pages
-// (a published file rendered from its synced blob, a folder's table of
-// contents) arrive with publishing — docs/cloud-redesign.md §5.6, PR 4 —
-// and slot in ahead of the 404 in index.ts.
+// The public surface — no auth, GET/HEAD only (docs/cloud.md §5.3,
+// §5.6). The static assets and the landing page answer without touching the
+// workspace; everything else is resolved against the manifest's public map
+// and rendered from synced blobs (pages.ts), through a cache keyed by the
+// manifest's etag:
+//
+//   GET /                        the root page when the map names one, else the landing page
+//   GET /<slug>                  a published note (html rendition when it has one; ?v=md the markdown)
+//   GET /<slug>/raw              the html rendition verbatim, sandboxed (what the framed page loads)
+//   GET /<dirSlug>               a published folder: its table of contents
+//   GET /<dirSlug>/<rel/path>    a note inside it (`.md` dropped, segments percent-encoded), its
+//                                rendition at …/raw, or an image / PDF / html file by exact path
+//   GET /og.png · /<slug>/og.png the site's static Open Graph image
+//   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
+//   robots.txt, favicon.ico, apple-touch-icon.png
+//
+// Every page carries <meta name="robots" content="noindex">.
 
-import { WEB_ASSETS } from "./assets";
-import type { WorkspaceRecord } from "./bucket";
-import { APPLE_TOUCH_PNG_B64, FAVICON_ICO_B64 } from "./favicons";
-import { escapeHtml } from "./http";
+import type { Env } from "./env";
+import { validPath } from "./layout";
+import { dirTitle, fileResponse, notePage, rawRendition, tocPage } from "./pages";
+import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
+import {
+  appleTouchIcon,
+  favicon,
+  landingPage,
+  mermaidModule,
+  notFoundPage,
+  ogImage,
+  robotsTxt,
+} from "./static";
+import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
-const DOWNLOAD_URL =
-  "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
-const REPO_URL = "https://github.com/boat-builder/doklin";
+/* ---------- The cache ----------
 
-const decode = (b64: string): Uint8Array => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-const FAVICON_ICO = decode(FAVICON_ICO_B64);
-const APPLE_TOUCH = decode(APPLE_TOUCH_PNG_B64);
+   A render is a handful of R2 reads (a board with forty cards is forty).
+   Rendered responses are kept in the Workers cache under a synthetic key
+   that carries the manifest's etag, so a manifest change gives every URL a
+   new key: a page is never served stale past one `head`, and old entries
+   age out on their own. Steady state per public request: one head, one
+   cache hit. The visitor's browser is told no-cache all the same — the
+   cache's day-long TTL is the worker's business, not the reader's. */
 
-const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
+const CACHE_TTL_S = 86400;
 
-// The page chrome's tokens — the same values the app's reading view uses,
-// so the landing page and a rendered note (later) read as one site.
-const SHELL_CSS = `
-:root { --bg: #ffffff; --text: #37352f; --muted: rgba(55, 53, 47, 0.55); --border: rgba(55, 53, 47, 0.12); --accent: #2383e2; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #191919; --text: #ebebeb; --muted: rgba(255, 255, 255, 0.5); --border: rgba(255, 255, 255, 0.14); --accent: #529cca; }
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); }
-body {
-  min-height: 100dvh; display: flex; flex-direction: column; color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
-  font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
-}
-main { width: 100%; max-width: 640px; margin: auto; padding: 64px 24px; }
-h1 { font-size: 32px; line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 8px; }
-p { margin: 0; padding: 4px 0; }
-.eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
-.muted { color: var(--muted); }
-.actions { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding-top: 20px; }
-.button { display: inline-block; padding: 9px 16px; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
-.quiet { color: var(--muted); text-decoration: none; border-bottom: 1px solid var(--border); }
-.quiet:hover, .button:hover { filter: brightness(1.08); }
-`;
+type CacheLike = {
+  match(key: string): Promise<Response | undefined>;
+  put(key: string, response: Response): Promise<void>;
+};
 
-function shell(title: string, body: string, status = 200): Response {
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-${FAVICON_LINKS}
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>${escapeHtml(title)}</title>
-<style>${SHELL_CSS}</style>
-</head>
-<body>
-<main>
-${body}
-</main>
-</body>
-</html>`;
-  return new Response(html, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
-  });
+/** The Workers cache when the runtime has one (a node harness has not). */
+function cacheStore(): CacheLike | null {
+  const c = (globalThis as { caches?: { default?: CacheLike } }).caches;
+  return c?.default ?? null;
 }
 
-/**
- * `/` when the public map names no root page: the workspace's name and a
- * way to get Doklin. What a visitor who trimmed a link back to the domain
- * needs to know — whose notes these are, and what wrote them.
- */
-export function landingPage(workspace: WorkspaceRecord | null): Response {
-  const name = workspace?.name.trim() ?? "";
-  const heading = name || "Notes";
-  return shell(
-    name ? `${name} · Doklin` : "Doklin",
-    `<p class="eyebrow">Published with Doklin</p>
-<h1>${escapeHtml(heading)}</h1>
-<p class="muted">Notes on this domain are written in Doklin, a free and open-source markdown editor for macOS that keeps your writing on your own machine — and on a domain of your own, like this one.</p>
-<p class="actions"><a class="button" href="${DOWNLOAD_URL}">Download Doklin</a> <a class="quiet" href="${REPO_URL}">Source on GitHub</a></p>`,
-  );
+export const cacheKey = (etag: string, url: URL): string =>
+  `https://cache.doklin/${etag}${url.pathname}${url.search}`;
+
+const cacheable = (res: Response): boolean =>
+  (res.status === 200 || res.status === 404) && !res.headers.has("set-cookie");
+
+function withCacheControl(res: Response, value: string): Response {
+  const headers = new Headers(res.headers);
+  headers.set("cache-control", value);
+  return new Response(res.body, { status: res.status, headers });
 }
 
-export function notFoundPage(): Response {
-  return shell(
-    "Nothing here",
-    `<h1>Nothing here</h1>
-<p class="muted">This page doesn't exist or is no longer published.</p>`,
-    404,
-  );
+/** A GET response, or its headers alone for HEAD. */
+const deliver = (res: Response, method: string): Response =>
+  method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res;
+
+/* ---------- Routing ---------- */
+
+export async function handlePublic(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  url: URL,
+): Promise<Response> {
+  const path = url.pathname;
+  if (path === "/robots.txt") return deliver(robotsTxt(), request.method);
+  if (path === "/favicon.ico") return deliver(favicon(), request.method);
+  if (path === "/apple-touch-icon.png") return deliver(appleTouchIcon(), request.method);
+  if (path === "/og.png" || /^\/[^/]+\/og\.png$/.test(path)) return deliver(ogImage(), request.method);
+  if (/^\/__web\/[a-z0-9]+\/mermaid\.js$/.test(path)) return deliver(mermaidModule(), request.method);
+
+  const ws = await openWorkspace(env);
+  if (!ws) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);
+
+  const cache = cacheStore();
+  const key = cacheKey(ws.etag, url);
+  if (cache) {
+    const hit = await cache.match(key);
+    if (hit) return deliver(withCacheControl(hit, "no-cache"), request.method);
+  }
+  const res = await route(ws, url);
+  if (cache && cacheable(res)) {
+    const put = cache.put(key, withCacheControl(res.clone(), `public, max-age=${CACHE_TTL_S}`));
+    if (ctx) ctx.waitUntil(put);
+    else await put;
+  }
+  return deliver(res, request.method);
 }
 
-export function robotsTxt(): Response {
-  return new Response("User-agent: *\nAllow: /\n", {
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
+/** The path's segments, percent-decoded; null when one is malformed or would create a segment of its own. */
+function decodeSegments(pathname: string): string[] | null {
+  const raw = pathname.split("/").slice(1);
+  if (raw.length > 0 && raw[raw.length - 1] === "") raw.pop(); // a trailing slash
+  const out: string[] = [];
+  for (const seg of raw) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(seg);
+    } catch {
+      return null;
+    }
+    if (decoded === "" || decoded === "." || decoded === ".." || /[/\\\0]/.test(decoded)) return null;
+    out.push(decoded);
+  }
+  return out;
 }
 
-function iconResponse(bytes: Uint8Array, contentType: string): Response {
-  return new Response(bytes, {
-    headers: { "content-type": contentType, "cache-control": "public, max-age=604800, immutable" },
-  });
+async function route(ws: Workspace, url: URL): Promise<Response> {
+  const pub = new PublicMap(ws);
+  const segs = decodeSegments(url.pathname);
+  if (!segs) return notFoundPage();
+  const view = url.searchParams.get("v") === "md" ? "md" : "auto";
+
+  if (segs.length === 0) {
+    // The root page — unless the map names none, or names a file that is
+    // gone: the domain root then falls back to the landing page instead of
+    // 404ing the whole site (the page itself still 404s under its slug).
+    const dangling = pub.root?.entry.kind === "file" && !ws.file(pub.root.entry.file);
+    if (!pub.root || dangling) return landingPage(ws.name);
+    return pageResponse(ws, pub, pub.root, [], url, view, true);
+  }
+  // The root page's own rendition: `/raw` is reserved, so it can't be a slug.
+  if (segs.length === 1 && segs[0] === "raw") {
+    if (!pub.root || pub.root.entry.kind !== "file") return notFoundPage();
+    const loc = ws.file(pub.root.entry.file);
+    return loc ? rawRendition(ws, loc) : notFoundPage();
+  }
+  const page = pub.page(segs[0]);
+  if (!page) return notFoundPage();
+  return pageResponse(ws, pub, page, segs.slice(1), url, view, false);
 }
 
-export const favicon = (): Response => iconResponse(FAVICON_ICO, "image/x-icon");
-export const appleTouchIcon = (): Response => iconResponse(APPLE_TOUCH, "image/png");
+/** A public entry at `/<slug>` (or at `/`, when it is the root page), plus whatever comes after. */
+async function pageResponse(
+  ws: Workspace,
+  pub: PublicMap,
+  page: Page,
+  rest: string[],
+  url: URL,
+  view: "auto" | "md",
+  atRoot: boolean,
+): Promise<Response> {
+  const own = atRoot ? "/" : `/${page.slug}`;
+  if (page.entry.kind === "file") {
+    // The entry outlives its file by design: while the file is gone, so is the page.
+    const loc = ws.file(page.entry.file);
+    if (!loc) return notFoundPage();
+    if (rest.length === 0) {
+      return notePage(ws, pub, loc, {
+        url,
+        pagePath: own,
+        dirSlug: null,
+        crumb: null,
+        title: page.entry.title,
+        desc: page.entry.desc,
+        view,
+      });
+    }
+    if (rest.length === 1 && rest[0] === "raw") return rawRendition(ws, loc);
+    return notFoundPage();
+  }
 
-/**
- * The standalone mermaid module at /__web/<tag>/mermaid.js. Any tag serves
- * the CURRENT build: the immutable cache is content-keyed by the tag a page
- * requested, and a mismatched tag only means an older page, which still gets
- * working code and re-tags on its next load. The build's own tag rides
- * along as the etag.
- */
-export function mermaidModule(): Response {
-  if (!WEB_ASSETS) {
-    return new Response("web assets not bundled — build with scripts/bundle-worker.mjs", {
-      status: 503,
-      headers: { "content-type": "text/plain; charset=utf-8" },
+  const dir: DirPage = { slug: page.slug, entry: page.entry };
+  if (rest.length === 0) return tocPage(ws, dir, { url, pagePath: own });
+
+  // Inside the folder: a note (its extension dropped), its rendition at
+  // …/raw, or a file by its exact path.
+  const wantRaw = rest.length >= 2 && rest[rest.length - 1] === "raw";
+  const inner = wantRaw ? rest.slice(0, -1) : rest;
+  const relPath = inner.join("/");
+  const full = dir.entry.path ? `${dir.entry.path}/${relPath}` : relPath;
+  if (!validPath(full)) return notFoundPage();
+  const note = ws.noteAt(full) ?? (isMarkdownPath(full) ? ws.fileAt(full) : null);
+  if (note) {
+    if (wantRaw) return rawRendition(ws, note);
+    return notePage(ws, pub, note, {
+      url,
+      pagePath: nestedUrl(dir, note.file.path),
+      dirSlug: dir.slug,
+      crumb: { href: atRoot ? "/" : own, label: dirTitle(ws, dir) },
+      view,
     });
   }
-  return new Response(WEB_ASSETS.mermaid, {
-    headers: {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=31536000, immutable",
-      etag: `"${WEB_ASSETS.tag}"`,
-      "x-robots-tag": "noindex",
-    },
-  });
+  if (wantRaw) return notFoundPage();
+  const exact = ws.fileAt(full);
+  return exact ? fileResponse(ws, exact) : notFoundPage();
 }

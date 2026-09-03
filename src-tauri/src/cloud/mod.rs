@@ -1,5 +1,5 @@
 //! The cloud: one domain per workspace, one engine per connected workspace,
-//! the engine as the only writer (docs/cloud-redesign.md). This file is the
+//! the engine as the only writer (docs/cloud.md). This file is the
 //! manager — the engines, their watchers, the edit-bus routes, `cloud.json`
 //! and the folder marker — and the Tauri commands the frontend calls
 //! (§6.7; mirrored in src/cloud.ts). The engine itself is engine.rs; what it

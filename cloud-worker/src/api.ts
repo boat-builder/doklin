@@ -1,5 +1,5 @@
 // The authenticated API — everything the engine says to the worker
-// (docs/cloud-redesign.md §5.3–5.5, §5.7). JSON in, JSON out, a bearer on
+// (docs/cloud.md §5.3–5.5, §5.7). JSON in, JSON out, a bearer on
 // every request; the engine is the only caller, so there is no CORS and no
 // preflight. Every request also carries `x-doklin-device` (attribution for
 // presence and the binding) and `x-doklin-client` (the app version, for

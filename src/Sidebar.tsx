@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { describeCloud, type CloudStatus } from "./cloud";
+import { describeCloud, pageUrl, publishedByPath, type CloudStatus, type PublicPage } from "./cloud";
 import { invoke } from "@tauri-apps/api/core";
 
 export type TreeNode =
@@ -122,6 +122,12 @@ type Props = {
   onOpenCloud?: () => void;
   // Version history for a document; offered only in a connected workspace.
   onHistory?: (path: string) => void;
+  // Publishing (docs/cloud.md §7.2): the folder dialog for a
+  // folder (or the root, for the whole workspace), stopping a page, and
+  // copying a page's public link. Offered only in a connected workspace.
+  onPublishFolder?: (dir: string) => void;
+  onStopPublishing?: (page: PublicPage) => void;
+  onCopyLink?: (url: string) => void;
 };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
@@ -179,6 +185,9 @@ export default function Sidebar({
   onResizeWidth,
   onOpenCloud,
   onHistory,
+  onPublishFolder,
+  onStopPublishing,
+  onCopyLink,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -782,6 +791,13 @@ export default function Sidebar({
     }
     return out;
   }, [cloud, root]);
+  // Rows with a page of their own, by absolute path (the root itself when
+  // the whole workspace is a folder page).
+  const publishedByAbs = useMemo(() => {
+    const out = new Map<string, PublicPage>();
+    for (const [rel, page] of publishedByPath(cloud)) out.set(rel ? `${root}/${rel}` : root, page);
+    return out;
+  }, [cloud, root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
@@ -841,6 +857,37 @@ export default function Sidebar({
     if (target.kind === "file" && cloud && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
+    // Publishing: a folder (or the whole workspace) publishes every note in
+    // it; a note published on its own offers its link and its stop here —
+    // publishing one is the pill's job.
+    if (cloud) {
+      const targetPath = target.kind === "root" ? root : target.path;
+      const page = publishedByAbs.get(targetPath) ?? null;
+      if (target.kind !== "file") {
+        const folderPage = page?.kind === "dir" ? page : null;
+        if (onPublishFolder) {
+          items.push({
+            label: folderPage
+              ? "Edit publishing…"
+              : target.kind === "root"
+                ? "Publish the whole workspace…"
+                : "Publish folder…",
+            onClick: () => onPublishFolder(targetPath),
+          });
+        }
+        if (folderPage && onCopyLink) {
+          items.push({ label: "Copy public link", onClick: () => onCopyLink(pageUrl(cloud, folderPage)) });
+        }
+        if (folderPage && onStopPublishing) {
+          items.push({ label: "Stop publishing", danger: true, onClick: () => onStopPublishing(folderPage) });
+        }
+      } else if (page?.kind === "file") {
+        if (onCopyLink) items.push({ label: "Copy public link", onClick: () => onCopyLink(pageUrl(cloud, page)) });
+        if (onStopPublishing) {
+          items.push({ label: "Stop publishing", danger: true, onClick: () => onStopPublishing(page) });
+        }
+      }
+    }
     // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
     // target, next to a file target, at the root for empty space — and stays
     // visible-but-disabled while the clipboard is empty.
@@ -898,6 +945,10 @@ export default function Sidebar({
     root,
     cloud,
     onHistory,
+    publishedByAbs,
+    onPublishFolder,
+    onStopPublishing,
+    onCopyLink,
   ]);
 
   // Right-edge drag handle: the app owns the width (grid CSS variable);
@@ -998,6 +1049,7 @@ export default function Sidebar({
                 dropDir={dropDir === root ? null : dropDir}
                 dnd={dnd}
                 presence={presenceByPath}
+                published={publishedByAbs}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
                 onOpenBoard={onOpenBoard}
@@ -1231,6 +1283,7 @@ function TreeItem({
   dropDir,
   dnd,
   presence,
+  published,
   onToggle,
   onOpenFile,
   onOpenBoard,
@@ -1259,6 +1312,8 @@ function TreeItem({
   dnd: TreeDnd;
   // Names of the people editing a file right now, by absolute path.
   presence: Map<string, string[]>;
+  // Rows with a public page of their own, by absolute path.
+  published: Map<string, PublicPage>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onOpenBoard: (path: string) => void;
@@ -1302,6 +1357,7 @@ function TreeItem({
     }
     const active = node.path === currentPath;
     const editors = presence.get(node.path);
+    const page = published.get(node.path);
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
@@ -1326,6 +1382,9 @@ function TreeItem({
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
+          {page?.kind === "file" && (
+            <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
+          )}
           {editors && (
             <span
               className="tree-presence"
@@ -1393,6 +1452,13 @@ function TreeItem({
             </span>
           )}
           <span className="tree-label tree-dir-label">{node.name}</span>
+          {published.get(node.path)?.kind === "dir" && (
+            <span
+              className="tree-published"
+              title={`Published folder at /${published.get(node.path)!.slug}`}
+              data-testid="tree-published"
+            />
+          )}
         </button>
       )}
       {!isCollapsed && (
@@ -1423,6 +1489,7 @@ function TreeItem({
               dropDir={dropDir}
               dnd={dnd}
               presence={presence}
+              published={published}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onOpenBoard={onOpenBoard}

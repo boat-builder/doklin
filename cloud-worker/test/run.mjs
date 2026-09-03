@@ -20,6 +20,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { build } from "vite";
+import { FakeCache, FakeR2 } from "./fake-r2.mjs";
+import { PIXEL_PNG, SEED_FILES, SEED_PUBLIC, WIDE_TABLE, fidOf, seedThroughApi } from "./seed.mjs";
 
 /* ---------- The worker under test: compiled from src/, or a bundle ---------- */
 
@@ -46,104 +48,6 @@ if (bundlePath) {
   });
   const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
   ({ default: worker } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`));
-}
-
-/* ---------- Fake R2 binding ---------- */
-
-class FakeR2 {
-  constructor() {
-    this.store = new Map(); // key -> {bytes, etag, httpMetadata, customMetadata, uploaded}
-  }
-
-  #record(key, value, opts = {}) {
-    const bytes =
-      typeof value === "string"
-        ? Buffer.from(value, "utf8")
-        : value instanceof ArrayBuffer
-          ? Buffer.from(new Uint8Array(value))
-          : Buffer.from(value);
-    return {
-      bytes,
-      etag: createHash("md5").update(bytes).update(key).digest("hex"),
-      httpMetadata: opts.httpMetadata ?? {},
-      customMetadata: opts.customMetadata ?? {},
-      uploaded: new Date(),
-    };
-  }
-
-  #object(key, rec) {
-    return {
-      key,
-      etag: rec.etag,
-      httpEtag: `"${rec.etag}"`,
-      size: rec.bytes.length,
-      uploaded: rec.uploaded,
-      httpMetadata: rec.httpMetadata,
-      customMetadata: rec.customMetadata,
-      body: new Uint8Array(rec.bytes),
-      json: async () => JSON.parse(rec.bytes.toString("utf8")),
-      text: async () => rec.bytes.toString("utf8"),
-      arrayBuffer: async () =>
-        rec.bytes.buffer.slice(rec.bytes.byteOffset, rec.bytes.byteOffset + rec.bytes.length),
-    };
-  }
-
-  async put(key, value, opts = {}) {
-    const cond = opts.onlyIf;
-    if (cond?.etagMatches !== undefined) {
-      const existing = this.store.get(key);
-      if (!existing || existing.etag !== cond.etagMatches) return null;
-    }
-    // If-None-Match: "*" — create only when the object is absent.
-    if (cond?.etagDoesNotMatch === "*" && this.store.has(key)) return null;
-    const rec = this.#record(key, value, opts);
-    this.store.set(key, rec);
-    return this.#object(key, rec);
-  }
-
-  async get(key) {
-    const rec = this.store.get(key);
-    return rec ? this.#object(key, rec) : null;
-  }
-
-  async head(key) {
-    const rec = this.store.get(key);
-    if (!rec) return null;
-    const { body, json, text, arrayBuffer, ...meta } = this.#object(key, rec);
-    return meta;
-  }
-
-  async delete(keys) {
-    for (const k of Array.isArray(keys) ? keys : [keys]) this.store.delete(k);
-  }
-
-  async list({ prefix = "", cursor, delimiter, limit = 1000 } = {}) {
-    const keys = [...this.store.keys()].filter((k) => k.startsWith(prefix)).sort();
-    if (delimiter) {
-      const delimitedPrefixes = [];
-      const objects = [];
-      for (const k of keys) {
-        const rest = k.slice(prefix.length);
-        const idx = rest.indexOf(delimiter);
-        if (idx >= 0) {
-          const p = prefix + rest.slice(0, idx + 1);
-          if (!delimitedPrefixes.includes(p)) delimitedPrefixes.push(p);
-        } else {
-          objects.push(this.#object(k, this.store.get(k)));
-        }
-      }
-      return { objects, delimitedPrefixes, truncated: false };
-    }
-    const start = cursor ? Number(cursor) : 0;
-    const page = keys.slice(start, start + limit);
-    const truncated = start + limit < keys.length;
-    return {
-      objects: page.map((k) => this.#object(k, this.store.get(k))),
-      truncated,
-      cursor: truncated ? String(start + limit) : undefined,
-      delimitedPrefixes: [],
-    };
-  }
 }
 
 /* ---------- Harness ---------- */
@@ -255,6 +159,12 @@ await test("unbound: poll, manifest and workspace are 404 until a workspace is b
   }
   const put = await putManifest(manifest(1, {}), "made-up-etag");
   assert.equal(put.status, 404, "a manifest PUT before binding has nothing to update");
+  // The public side of a free domain: the landing page, and nothing else.
+  const landing = await call("/", { device: null });
+  assert.equal(landing.status, 200);
+  assert.ok(landing.text.includes("<h1>Notes</h1>") && landing.text.includes("<title>Doklin</title>"));
+  assert.ok(landing.text.includes("releases/latest/download/Doklin-macos-arm64.dmg"), "the download button");
+  assert.equal((await call("/anything", { device: null })).status, 404);
 });
 
 await test("bind: owner only, once — the second bind is 409 with what the domain holds", async () => {
@@ -574,25 +484,42 @@ await test("presence: the device header names the device; beats upsert, silence 
   assert.ok(leave.json.presence[DEVICE]);
 });
 
-await test(`public: the landing page, robots, icons, the mermaid asset (${bundlePath ? "served from the bundle" : "503 unbundled"}); anything else is a 404 page`, async () => {
-  const root = await call("/", { device: null });
-  assert.equal(root.status, 200);
-  assert.match(root.headers.get("content-type"), /text\/html/);
-  assert.ok(root.text.includes("<h1>Notes</h1>"), "the workspace's name");
-  assert.ok(root.text.includes('<meta name="robots" content="noindex">'));
-  assert.ok(root.text.includes("releases/latest/download/Doklin-macos-arm64.dmg"), "the download button");
-  assert.equal((await call("/", { method: "HEAD", device: null })).status, 200);
+/* ---------- The public surface ---------- */
 
-  const robots = await call("/robots.txt", { device: null });
+const pub = (path, init = {}) => call(path, { device: null, ...init });
+const rawGet = async (path, init = {}) => {
+  const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), env);
+  return { status: res.status, headers: res.headers, bytes: Buffer.from(await res.arrayBuffer()) };
+};
+const between = (text, a, b) => text.indexOf(a) >= 0 && text.indexOf(b) > text.indexOf(a);
+
+await test(`public: the landing page, robots, icons, the OG image, the mermaid asset (${bundlePath ? "served from the bundle" : "503 unbundled"}); an empty folder page; anything else a 404 page`, async () => {
+  // The map the validation test left names a root page whose blob never
+  // arrived: the domain root IS that page, and it is not there yet.
+  const root = await pub("/");
+  assert.equal(root.status, 404);
+  assert.match(root.headers.get("content-type"), /text\/html/);
+  assert.ok(root.text.includes("Nothing here") && root.text.includes('<meta name="robots" content="noindex">'));
+  const head = await rawGet("/", { method: "HEAD" });
+  assert.equal(head.status, 404);
+  assert.equal(head.bytes.length, 0, "HEAD carries no body");
+
+  const robots = await pub("/robots.txt");
   assert.equal(robots.status, 200);
   assert.match(robots.text, /User-agent: \*/);
-  const ico = await call("/favicon.ico", { device: null });
+  const ico = await pub("/favicon.ico");
   assert.equal(ico.status, 200);
   assert.equal(ico.headers.get("content-type"), "image/x-icon");
   assert.match(ico.headers.get("cache-control"), /immutable/);
-  assert.equal((await call("/apple-touch-icon.png", { device: null })).headers.get("content-type"), "image/png");
+  assert.equal((await pub("/apple-touch-icon.png")).headers.get("content-type"), "image/png");
+  const og = await rawGet("/og.png");
+  assert.equal(og.status, 200);
+  assert.equal(og.headers.get("content-type"), "image/png");
+  assert.equal(og.bytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "a PNG");
+  assert.ok(og.bytes.length > 10000, "the real image, not a placeholder");
+  assert.ok((await rawGet("/anything/og.png")).bytes.equals(og.bytes), "one static image for every page");
 
-  const mermaid = await call("/__web/abc123/mermaid.js", { device: null });
+  const mermaid = await pub("/__web/abc123/mermaid.js");
   if (bundlePath) {
     assert.equal(mermaid.status, 200, "the bundle carries the mermaid module");
     assert.match(mermaid.headers.get("content-type"), /javascript/);
@@ -603,20 +530,289 @@ await test(`public: the landing page, robots, icons, the mermaid asset (${bundle
     assert.equal(mermaid.status, 503, "this compile carries no assets; the bundle script splices them in");
   }
 
-  for (const p of ["/k7m2p9qx", "/roadmap", "/roadmap/plan", "/k7m2p9qx/raw", "/nope", "/__web/x/app.js"]) {
-    const res = await call(p, { device: null });
+  // The map the validation test left: a folder page over a folder with
+  // nothing in it, and a note whose blob was never uploaded.
+  const empty = await pub("/roadmap");
+  assert.equal(empty.status, 200);
+  assert.ok(empty.text.includes('<h1 class="toc-title">Roadmap</h1>') && empty.text.includes("Nothing here yet."));
+  for (const p of ["/k7m2p9qx", "/roadmap/plan", "/k7m2p9qx/raw", "/nope", "/__web/x/app.js", "/raw"]) {
+    const res = await pub(p);
     assert.equal(res.status, 404, p);
     assert.ok(res.text.includes("Nothing here"), p);
     assert.ok(res.text.includes('content="noindex"'), p);
   }
-  assert.equal((await call("/", { method: "POST", device: null, body: "x" })).status, 405);
-  assert.equal((await call("/k7m2p9qx", { method: "PUT", device: null, body: "x" })).status, 405);
+  assert.equal((await pub("/", { method: "POST", body: "x" })).status, 405);
+  assert.equal((await pub("/k7m2p9qx", { method: "PUT", body: "x" })).status, 405);
 
   const unknownApi = await call("/api/nope", { token: OWNER });
   assert.equal(unknownApi.status, 404);
   assert.equal(unknownApi.json.error, "not found");
   assert.equal((await call("/api/meta", { method: "POST", token: OWNER, body: {} })).status, 405);
   assert.equal((await call("/api/nope")).status, 401, "auth comes before routing");
+});
+
+let seedEtag;
+await test("public: the seed workspace loads through the API — blobs upload, the manifest lands on the binding", async () => {
+  seedEtag = await seedThroughApi(worker, env, { token: OWNER });
+  assert.equal(await currentEtag(), seedEtag);
+  const stored = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  assert.equal(Object.keys(stored.files).length, Object.keys(SEED_FILES).length);
+  assert.equal(stored.public.home.root, true);
+  assert.equal(stored.files[fidOf("Sizes.md")].path, "Sizes.md");
+});
+
+await test("public: a published note renders from its blob — title, noindex, description, the document; the pill only with a rendition; what isn't published, or is gone, is a 404", async () => {
+  const page = await pub("/sizes");
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.equal(page.headers.get("x-robots-tag"), "noindex");
+  assert.equal(page.headers.get("cache-control"), "no-cache");
+  assert.ok(page.text.includes("<title>Sizes</title>"), "the lead heading names the page");
+  assert.ok(page.text.includes('<meta name="robots" content="noindex">'));
+  assert.ok(page.text.includes('<meta name="description" content="Sizes Name Role Location Ada Engineer London">'), page.text.match(/<meta name="description"[^>]*>/)?.[0]);
+  assert.ok(page.text.includes('<meta property="og:image" content="https://notes.example.com/og.png">'));
+  assert.ok(page.text.includes('<meta property="og:url" content="https://notes.example.com/sizes">'));
+  assert.ok(page.text.includes("<h1>Sizes</h1>") && page.text.includes("<th>Name</th>"), "the document");
+  assert.ok(!page.text.includes('<nav class="view-pill"'), "no rendition, no pill");
+  assert.ok(page.text.includes('published via <a href="/">notes.example.com</a>'));
+  assert.equal((await pub("/sizes/raw")).status, 404, "no rendition to serve");
+  assert.equal((await pub("/sizes/anything")).status, 404);
+  assert.equal((await pub("/scratch")).status, 404, "synced but never published");
+  const ghost = await pub("/ghost");
+  assert.equal(ghost.status, 404, "an entry whose file is gone");
+  assert.ok(ghost.text.includes("Nothing here"));
+  const head = await rawGet("/sizes", { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(head.bytes.length, 0);
+  assert.match(head.headers.get("content-type"), /text\/html/);
+});
+
+await test("public: a note with an html rendition leads with it, framed and sandboxed; ?v=md is the markdown; the pill switches between them", async () => {
+  const framed = await pub("/plan");
+  assert.equal(framed.status, 200);
+  assert.ok(framed.text.includes('<iframe class="raw-frame" src="/plan/raw" sandbox="allow-scripts allow-popups"'), "the rendition is framed");
+  assert.ok(framed.text.includes("<title>The plan</title>"), "the title comes from the markdown's lead heading");
+  assert.ok(framed.text.includes('<a class="view-seg is-active" href="https://notes.example.com/plan">HTML</a>'));
+  assert.ok(framed.text.includes('<a class="view-seg " href="https://notes.example.com/plan?v=md">MD</a>'));
+  assert.ok(!framed.text.includes('<main class="doc">'));
+
+  const md = await pub("/plan?v=md");
+  assert.equal(md.status, 200);
+  assert.ok(md.text.includes('<main class="doc">') && md.text.includes("Ship it by June."));
+  assert.ok(md.text.includes('<a class="view-seg is-active" href="https://notes.example.com/plan?v=md">MD</a>'));
+  assert.ok(!md.text.includes("<iframe"));
+
+  const raw = await pub("/plan/raw");
+  assert.equal(raw.status, 200);
+  assert.equal(raw.text, SEED_FILES["Projects/plan.html"], "byte for byte");
+  assert.match(raw.headers.get("content-type"), /text\/html/);
+  assert.equal(raw.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups", "an opaque origin, framed or not");
+  assert.equal(raw.headers.get("x-robots-tag"), "noindex");
+});
+
+await test("public: a folder page lists every note under it; nested URLs render with the crumb; a picture inside serves by exact path; what isn't a note, or walks out, is a 404", async () => {
+  const toc = await pub("/projects");
+  assert.equal(toc.status, 200);
+  assert.ok(toc.text.includes('<h1 class="toc-title">Projects</h1>'));
+  assert.ok(toc.text.includes('<p class="toc-desc">Everything we&#39;re building</p>'));
+  assert.ok(toc.text.includes("5 pages"), toc.text.match(/toc-meta">[^<]*/)?.[0]);
+  for (const href of [
+    "/projects/plan",
+    "/projects/board",
+    "/projects/Roadmap/Ship%20the%20boat",
+    "/projects/Roadmap/Paint%20it",
+    "/projects/Roadmap/Launch",
+  ]) {
+    assert.ok(toc.text.includes(`href="${href}"`), href);
+  }
+  assert.ok(toc.text.includes('class="toc-tree toc-cards"'), "a handful of pages lists as cards");
+  assert.ok(toc.text.includes('<span class="toc-card-path">Roadmap</span>'), "a card wears its folder");
+  assert.ok(!toc.text.includes("store.jsonl") && !toc.text.includes("pic.png"), "only notes are pages");
+  assert.ok(toc.text.includes('<meta property="og:type" content="website">'));
+
+  const nested = await pub("/projects/plan?v=md");
+  assert.equal(nested.status, 200);
+  assert.ok(nested.text.includes('<a class="home-crumb" href="/projects">'), "the crumb points at the folder");
+  assert.ok(nested.text.includes('<span class="home-crumb-label">Projects</span>'));
+  assert.ok(nested.text.includes('href="https://notes.example.com/projects/plan?v=md"'), "the pill keeps the nested address");
+  assert.ok((await pub("/projects/plan")).text.includes('src="/projects/plan/raw"'), "the framed rendition loads from the nested address");
+  assert.equal((await pub("/projects/plan/raw")).text, SEED_FILES["Projects/plan.html"]);
+  assert.equal((await pub("/projects/PLAN?v=md")).status, 200, "paths match case-insensitively, like the disk they live on");
+  assert.equal((await pub("/projects/plan.md?v=md")).status, 200, "the extension may be spelled out");
+  assert.ok(!(await pub("/plan?v=md")).text.includes('<a class="home-crumb"'), "reached on its own slug, a note has no crumb");
+
+  const card = await pub("/projects/Roadmap/Ship%20the%20boat");
+  assert.equal(card.status, 200);
+  assert.ok(card.text.includes("<title>Ship the boat</title>"), "a card without a heading is named after its file");
+  assert.ok(card.text.includes("The hull is done."));
+
+  const pic = await rawGet("/projects/assets/pic.png");
+  assert.equal(pic.status, 200);
+  assert.equal(pic.headers.get("content-type"), "image/png");
+  assert.ok(pic.bytes.equals(PIXEL_PNG));
+  const rendition = await rawGet("/projects/plan.html");
+  assert.equal(rendition.status, 200, "an html file by its exact path");
+  assert.equal(rendition.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups");
+
+  for (const p of [
+    "/projects/store.jsonl",
+    "/projects/Roadmap/store.jsonl",
+    "/projects/Roadmap",
+    "/projects/nope",
+    "/projects/plan/nope",
+    "/projects/%2e%2e/Home",
+    "/projects/Roadmap%2FLaunch",
+    "/projects//plan",
+    "/projects/plan/raw/raw",
+  ]) {
+    assert.equal((await pub(p)).status, 404, p);
+  }
+});
+
+await test("public: boards and tables derive from the synced datastore; cards link to their pages when they have one; a card page shows its properties", async () => {
+  const page = await pub("/projects/board");
+  assert.equal(page.status, 200);
+  assert.ok(!page.text.includes("language-kanban") && !page.text.includes("language-table"), "the fences became views");
+  assert.ok(!page.text.includes("store: ./Roadmap"), "config text never shows");
+  assert.ok(page.text.includes('<span class="dk-board-kind">Board</span>') && page.text.includes('<span class="dk-board-kind">Table</span>'));
+  assert.ok(page.text.includes('<span class="dk-board-name">Roadmap</span>'));
+  assert.ok(
+    page.text.includes('<span class="dk-col-dot dk-color-blue"></span><span class="dk-col-name">In progress</span><span class="dk-col-count">1</span>'),
+    "a column with its option's colour and its count",
+  );
+  assert.ok(page.text.includes('<span class="dk-col-name">Done</span>'));
+  assert.ok(
+    page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Ship%20the%20boat">Ship the boat</a>'),
+    "a card inside the published folder links to its nested page, not its own slug",
+  );
+  assert.ok(page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Paint%20it">Paint it</a>'));
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-green">Ada</span>'), "a chip takes the option's colour");
+  assert.ok(page.text.includes('<span class="dk-chip dk-color-red">paint</span>'));
+  assert.ok(page.text.includes('<span class="dk-board-sub">3 cards</span>'));
+  assert.ok(page.text.includes('<th class="dk-th">Status</th>') && page.text.includes('<th class="dk-th">Owner</th>'));
+  assert.ok(page.text.includes('<a class="dk-row-title" href="/projects/Roadmap/Launch">Launch</a>'));
+  assert.ok(page.text.includes("Everything after the board is ordinary prose."));
+
+  // The same kind of store from outside any published folder: its cards have no
+  // page, so they are titles, not dead links.
+  const ideas = await pub("/ideas");
+  assert.equal(ideas.status, 200);
+  assert.ok(ideas.text.includes('<span class="dk-card-title">Teleporter</span>'), "not a link");
+  assert.ok(ideas.text.includes('<span class="dk-col-dot dk-color-yellow"></span><span class="dk-col-name">New</span>'));
+  assert.ok(ideas.text.includes('<span class="dk-card-title">Jetpack</span>'), "a note without frontmatter is a card too");
+  assert.ok(!ideas.text.includes('href="/Ideas/'), "no dead links");
+
+  const card = await pub("/ship");
+  assert.equal(card.status, 200);
+  assert.ok(card.text.includes('<div class="dk-props">'));
+  assert.ok(card.text.includes('<div class="dk-prop-label">Status</div><div class="dk-prop-value"><span class="dk-chip dk-color-blue">In progress</span></div>'));
+  assert.ok(card.text.includes('<div class="dk-prop-label">Owner</div><div class="dk-prop-value"><span class="dk-chip dk-color-green">Ada</span></div>'));
+  assert.ok(card.text.includes('<div class="dk-prop-label">Tags</div><div class="dk-prop-value"><span class="dk-chip dk-color-grey">hull</span></div>'));
+  assert.ok(!card.text.includes("rank"), "a card's rank is not a property");
+  assert.ok(!card.text.includes("<hr"), "the frontmatter never reaches marked");
+  assert.ok(between(card.text, '<main class="doc">', '<div class="dk-props">') && between(card.text, '<div class="dk-props">', "<p>The hull is done.</p>"), "properties sit above the body, inside the document");
+  const launch = await pub("/projects/Roadmap/Launch");
+  assert.ok(launch.text.includes('dk-color-green">Done</span>') && !launch.text.includes('dk-prop-label">Owner'), "unset values are left out");
+});
+
+await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the hydrator rides only pages with a diagram", async () => {
+  const sizes = await pub("/sizes");
+  assert.ok(
+    sizes.text.includes('<table class="dk-cols"><colgroup><col style="width:260px"><col><col style="width:140px"></colgroup>'),
+    "the record found its table — the same id the desktop derived (pinned in verify-harness/tablewidths.test.mjs)",
+  );
+  assert.ok(sizes.text.includes('class="dk-table-scroll"'));
+  assert.ok(!sizes.text.includes("mermaid.js"), "no diagram, no script");
+
+  const comments = await pub("/comments");
+  assert.ok(comments.text.includes("A sentence with a highlighted phrase and more after it."), "the highlight unwrapped, the marker gone");
+  assert.ok(!comments.text.includes("{==") && !comments.text.includes("<<}") && !comments.text.includes("c-1"));
+  assert.ok(!comments.text.includes("Say it plainer"), "bodies never leave the sidecar");
+
+  const diagram = await pub("/diagram");
+  assert.ok(diagram.text.includes('<code class="language-mermaid">flowchart LR'), "the source stays a code block for readers without scripts");
+  assert.match(diagram.text, /import\("\/__web\/[a-z0-9]+\/mermaid\.js"\)/, "the hydrator imports the tagged module");
+  if (!bundlePath) assert.ok(diagram.text.includes("/__web/dev/mermaid.js"), "a source compile tags its module dev");
+  assert.ok(diagram.text.includes("themeVariables: mod.mermaidThemeVariables()"), "the page's own palette");
+});
+
+await test("public: links between notes rewrite to public URLs — inside the folder they were reached through first — or fall back to text; pictures inside a published folder resolve; other links stay", async () => {
+  const home = await pub("/home");
+  assert.equal(home.status, 200);
+  assert.ok(home.text.includes('<a href="/plan">the plan</a>'), "a note with its own slug");
+  assert.ok(home.text.includes('<a href="/projects/board">board</a>'), "a note inside a published folder");
+  assert.ok(home.text.includes("or a scratch note;") && !home.text.includes("Scratch.md"), "an unpublished target is plain text");
+  assert.ok(home.text.includes('<a href="https://github.com/boat-builder/doklin">source</a>'), "an external link stays");
+  assert.ok(home.text.includes('<a href="#home">this page</a>'), "an anchor stays");
+  assert.ok(home.text.includes('<img src="/projects/assets/pic.png" alt="a picture">'), "a picture inside a published folder");
+  assert.ok(home.text.includes("a missing picture") && !home.text.includes("none.png"), "a picture nobody can reach is its alt text");
+
+  const board = await pub("/projects/board");
+  assert.ok(board.text.includes('<a href="/projects/plan">the plan</a>'), "from inside the folder, the folder's address wins over the note's own slug");
+  assert.ok(board.text.includes('<a href="/home">home</a>'), "a note outside the folder, on its own slug");
+  const plan = await pub("/plan?v=md");
+  assert.ok(plan.text.includes('<a href="/projects/board">board</a>'), "reached on its own slug, a sibling links into the folder that holds it");
+  assert.ok(plan.text.includes('<a href="/ideas">ideas</a>'), "a link written with ../");
+});
+
+await test("public: the root page serves at /; renders cache under the manifest's etag and re-key when it moves; the landing page when the map names no root", async () => {
+  const root = await pub("/");
+  assert.equal(root.status, 200);
+  assert.ok(root.text.includes("<title>Home</title>") && root.text.includes("<h1>Home</h1>"));
+  assert.ok(root.text.includes('<meta property="og:url" content="https://notes.example.com/">'));
+  assert.equal((await pub("/raw")).status, 404, "Home has no rendition");
+  assert.ok((await pub("/home")).text.includes('<meta property="og:url" content="https://notes.example.com/home">'), "and answers under its slug too");
+
+  // The cache: a fake `caches.default`, the way the runtime provides one.
+  const cache = new FakeCache();
+  globalThis.caches = { default: cache };
+  try {
+    const first = await pub("/sizes");
+    assert.equal(first.headers.get("cache-control"), "no-cache", "the browser is never told to keep a page");
+    assert.deepEqual(cache.puts, [`https://cache.doklin/${seedEtag}/sizes`], "keyed by the manifest's etag and the path");
+    assert.equal(cache.store.get(cache.puts[0]).headers.get("cache-control"), "public, max-age=86400", "the cache keeps it for a day");
+    const again = await pub("/sizes");
+    assert.equal(cache.hits, 1, "the second read is a cache hit");
+    assert.equal(again.text, first.text);
+    assert.equal(again.headers.get("cache-control"), "no-cache");
+    await pub("/sizes?v=md");
+    assert.equal(cache.puts.length, 2, "the query is part of the key");
+    assert.equal((await pub("/nope")).status, 404);
+    assert.equal(cache.puts.length, 3, "a 404 for this manifest is cached too");
+    assert.equal((await pub("/robots.txt")).status, 200);
+    assert.equal(cache.puts.length, 3, "statics never go through the cache");
+
+    // The manifest moves: every URL gets a new key, and nothing stale can be served.
+    const current = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+    const moved = await putManifest({
+      ...current,
+      seq: current.seq + 1,
+      public: { ...current.public, sizes: { ...current.public.sizes, title: "Measurements" } },
+    });
+    assert.equal(moved.status, 200);
+    const renamed = await pub("/sizes");
+    assert.ok(renamed.text.includes("<title>Measurements</title>"), "the new title, not the cached page");
+    assert.equal(cache.puts[cache.puts.length - 1], `https://cache.doklin/${moved.json.etag}/sizes`);
+    assert.equal(cache.hits, 1, "nothing under the old key was served");
+  } finally {
+    delete globalThis.caches;
+  }
+
+  // No root page: the landing page.
+  const current = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const withoutRoot = { ...current.public, home: { ...current.public.home, root: false } };
+  assert.equal((await putManifest({ ...current, seq: current.seq + 1, public: withoutRoot })).status, 200);
+  const landing = await pub("/");
+  assert.ok(landing.text.includes("<h1>Notes</h1>") && landing.text.includes("Download Doklin"));
+  assert.equal((await pub("/home")).status, 200, "the page is still there under its slug");
+
+  // A root page whose file is gone from the manifest: the domain root falls
+  // back to the landing page rather than 404ing the whole site.
+  const now = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const dangling = { ...now.public, home: { ...now.public.home, root: true, file: "f-gone" } };
+  assert.equal((await putManifest({ ...now, seq: now.seq + 1, public: dangling })).status, 200);
+  assert.ok((await pub("/")).text.includes("Download Doklin"), "the landing page");
+  assert.equal((await pub("/home")).status, 404, "the page itself is a 404 until the file is back");
 });
 
 // Destroys all state — keep this last.

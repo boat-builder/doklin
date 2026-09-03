@@ -13,7 +13,9 @@ iframe bridge + `CommentsRail` + the sidecar model), the mermaid diagram
 pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
-`PropertiesHeader` + `CardPeek` + the sidebar's board row).
+`PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
+surfaces over a scripted engine (`drive-cloud.mjs`), and the public pages a
+published workspace serves (`drive-public.mjs`, against the real worker).
 
 ```sh
 pnpm install
@@ -95,7 +97,7 @@ node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 22 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 29 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -109,7 +111,24 @@ node verify-harness/drive-cloud.mjs        # 22 steps: boots the REAL <App/> (cl
                                            # the tree, presence chips, Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
                                            # the teardown prompt, and the join flow opening the
-                                           # downloaded folder
+                                           # downloaded folder — and publishing: the pill's
+                                           # not-connected door, a note published at a random then
+                                           # a chosen address (Copy, a bad slug refused), the
+                                           # sidebar's dots, the folder dialog, a note inside a
+                                           # published folder knowing its nested address, the
+                                           # published list (home page, stop), the sidebar's
+                                           # undoable stop
+node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
+                                           # included, ~1 min) over an in-memory bucket seeded with
+                                           # cloud-worker/test/seed.mjs, on http://localhost:8787
+node verify-harness/drive-public.mjs       # 8 steps against it, in Chromium: a note with stored
+                                           # column widths, the MD/HTML pill and the sandboxed
+                                           # rendition (its script runs), the folder page's cards,
+                                           # the crumb on a nested note, a board with JavaScript
+                                           # OFF (cards linking to their pages, a card's
+                                           # properties), a diagram hydrating in light and dark,
+                                           # the root page's rewritten links and a picture inside
+                                           # the published folder, 404s
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -166,8 +185,19 @@ Gotchas learned the hard way:
   a registry that only ever grows delivers every event twice (two toasts).
 - Playwright auto-dismisses `window.confirm` (it returns false), so a
   destructive action the drive has to reach must confirm inline (the
-  panel's Disconnect) or by typing the name back (the wipe), never with a
-  native dialog.
+  panel's Disconnect, the popover's Stop) or by typing the name back (the
+  wipe), never with a native dialog. The sidebar's Stop publishing avoids
+  the question entirely: it stops at once and the toast's Undo brings the
+  page back.
+- The worker's pages inline their stylesheet, so a test that asserts "no
+  pill" or "no crumb" must look for the markup (`<nav class="view-pill"`),
+  not the class name — the CSS mentions both on every page.
+- The worker only reaches `caches.default` and `ctx.waitUntil` when the
+  runtime has them; a node harness installs `globalThis.caches` itself
+  (test/fake-r2.mjs `FakeCache`) and passes a ctx whose waitUntil swallows.
+- cloud.html's fake engine reports the worker version the drive hands it
+  (`window.__cloud.workerVersion`, parsed from version.ts) — a hardcoded
+  `1` made "Check again" never rest once the real version moved to 2.
 
 Six pure-node unit suites (vite-compiled, no browser):
 
@@ -227,14 +257,24 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 15 cases against an in-memory R2 fake, the
-                                           # sources compiled in-process through vite: auth,
-                                           # meta, bind-once (409), the unbound 404s, manifest
-                                           # CAS (304 / 412 / 428), validation + the public
-                                           # map, 426 on a newer schema, blobs (a re-put is a
-                                           # no-op), history, presence (device header, prune,
-                                           # leave), the landing page / static assets / 404
-                                           # page, wipe freeing the domain for a new bind
+node cloud-worker/test/run.mjs             # 23 cases against an in-memory R2 fake (test/fake-r2.mjs,
+                                           # shared with serve-worker.mjs), the sources compiled
+                                           # in-process through vite: auth, meta, bind-once (409),
+                                           # the unbound 404s + landing page, manifest CAS (304 /
+                                           # 412 / 428), validation + the public map, 426 on a
+                                           # newer schema, blobs (a re-put is a no-op), history,
+                                           # presence (device header, prune, leave), the statics /
+                                           # OG image / an empty folder page / 404s, then the seed
+                                           # workspace loaded through the API and the renderer: a
+                                           # note (title, description, noindex, HEAD), a rendition
+                                           # (framed, ?v=md, /raw sandboxed), a folder page and
+                                           # nested paths (crumb, case-insensitive, exact-path
+                                           # files, traversal 404s), boards / tables / a card's
+                                           # properties from the datastore, column widths under
+                                           # the app's table identity, comment stripping, the
+                                           # mermaid hydrator, link rewriting, the root page, the
+                                           # cache keyed by manifest etag (a fake caches.default),
+                                           # the landing fallback; wipe freeing the domain last
 node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
                                            # mermaid module spliced in; ~40 s); prints raw +
                                            # gzipped size, fails past 3 MB gzipped

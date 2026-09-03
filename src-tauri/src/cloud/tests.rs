@@ -29,7 +29,7 @@ use super::status::*;
 /// inject "another device won the CAS between your fetch and your put";
 /// `reject_schema` plays a worker that predates the app's manifest.
 #[derive(Default)]
-struct FakeBackend {
+struct FakeWorker {
     bound: Option<WorkspaceRecord>,
     manifest: Manifest,
     etag: u64,
@@ -43,26 +43,26 @@ struct FakeBackend {
     put_manifest_calls: u64,
 }
 
-impl FakeBackend {
+impl FakeWorker {
     fn etag_str(&self) -> String {
         format!("e{}", self.etag)
     }
 }
 
-type Backend = Arc<Mutex<FakeBackend>>;
+type SharedWorker = Arc<Mutex<FakeWorker>>;
 
-fn backend() -> Backend {
-    Arc::new(Mutex::new(FakeBackend { worker_version: 1, ..Default::default() }))
+fn fake_worker() -> SharedWorker {
+    Arc::new(Mutex::new(FakeWorker { worker_version: 1, ..Default::default() }))
 }
 
 #[derive(Clone)]
 struct FakeRemote {
-    be: Backend,
+    be: SharedWorker,
     device_id: String,
 }
 
 impl FakeRemote {
-    fn new(be: &Backend, device_id: &str) -> Self {
+    fn new(be: &SharedWorker, device_id: &str) -> Self {
         FakeRemote { be: be.clone(), device_id: device_id.to_string() }
     }
 
@@ -302,13 +302,13 @@ struct Device {
     events: Arc<Collected>,
 }
 
-fn device(name: &str, be: &Backend) -> Device {
+fn device(name: &str, be: &SharedWorker) -> Device {
     let root = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
     device_at(name, be, root, state)
 }
 
-fn device_at(name: &str, be: &Backend, root: tempfile::TempDir, state: tempfile::TempDir) -> Device {
+fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: tempfile::TempDir) -> Device {
     std::fs::create_dir_all(state.path().join("base")).unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
     let events = Arc::new(Collected::default());
@@ -394,11 +394,11 @@ impl Device {
     }
 }
 
-fn manifest_of(be: &Backend) -> Manifest {
+fn manifest_of(be: &SharedWorker) -> Manifest {
     be.lock().unwrap().manifest.clone()
 }
 
-fn public_of(be: &Backend) -> BTreeMap<String, PublicEntry> {
+fn public_of(be: &SharedWorker) -> BTreeMap<String, PublicEntry> {
     manifest_of(be).public
 }
 
@@ -406,7 +406,7 @@ fn public_of(be: &Backend) -> BTreeMap<String, PublicEntry> {
 
 #[tokio::test]
 async fn initial_push_then_second_device_pulls() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("notes/hello.md", "# hello\n");
     a.write("readme.md", "root doc\n");
@@ -431,7 +431,7 @@ async fn initial_push_then_second_device_pulls() {
 
 #[tokio::test]
 async fn edit_propagates_and_builds_history() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "v1 content\n");
@@ -452,7 +452,7 @@ async fn edit_propagates_and_builds_history() {
 
 #[tokio::test]
 async fn concurrent_distinct_files_converge_via_cas_retry() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("a.md", "alpha v1\n");
@@ -502,7 +502,7 @@ async fn concurrent_distinct_files_converge_via_cas_retry() {
 
 #[tokio::test]
 async fn same_file_different_lines_merges_clean() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "line one\nline two\nline three\n");
@@ -524,7 +524,7 @@ async fn same_file_different_lines_merges_clean() {
 
 #[tokio::test]
 async fn same_line_conflict_keeps_both_versions() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "shared line\n");
@@ -553,7 +553,7 @@ async fn same_line_conflict_keeps_both_versions() {
 
 #[tokio::test]
 async fn delete_propagates() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("keep.md", "keeper\n");
@@ -575,7 +575,7 @@ async fn delete_propagates() {
 
 #[tokio::test]
 async fn local_edit_beats_remote_delete() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "original\n");
@@ -595,7 +595,7 @@ async fn local_edit_beats_remote_delete() {
 
 #[tokio::test]
 async fn mass_delete_holds_until_confirmed() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     for i in 0..10 {
         a.write(&format!("doc{}.md", i), &format!("content number {}\n", i));
@@ -623,7 +623,7 @@ async fn mass_delete_holds_until_confirmed() {
 
 #[tokio::test]
 async fn rename_is_metadata_only_and_propagates() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("old-name.md", "stable content that does not change\n");
@@ -649,7 +649,7 @@ async fn rename_is_metadata_only_and_propagates() {
 
 #[tokio::test]
 async fn history_rolls_over_into_archive() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "revision 0 --------\n");
     a.cycle().await;
@@ -676,7 +676,7 @@ async fn history_rolls_over_into_archive() {
 
 #[tokio::test]
 async fn offline_reports_and_recovers() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "important words\n");
     be.lock().unwrap().offline = true;
@@ -693,7 +693,7 @@ async fn offline_reports_and_recovers() {
 
 #[tokio::test]
 async fn quiet_cycles_change_nothing() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "steady state\n");
     a.cycle().await;
@@ -711,7 +711,7 @@ async fn quiet_cycles_change_nothing() {
 
 #[tokio::test]
 async fn raced_same_path_creates_deduped_deterministically() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("ideas.md", "alice ideas\n");
@@ -738,7 +738,7 @@ async fn raced_same_path_creates_deduped_deterministically() {
 
 #[tokio::test]
 async fn publish_mirrors_to_the_other_device() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "# doc\n");
@@ -778,7 +778,7 @@ async fn publish_mirrors_to_the_other_device() {
 
 #[tokio::test]
 async fn page_follows_rename_and_survives_lost_cas() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "# doc\n");
@@ -817,7 +817,7 @@ async fn page_follows_rename_and_survives_lost_cas() {
 
 #[tokio::test]
 async fn publish_only_change_commits_once_then_stays_quiet() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "# doc\n");
     a.cycle().await;
@@ -834,7 +834,7 @@ async fn publish_only_change_commits_once_then_stays_quiet() {
 
 #[tokio::test]
 async fn deleted_file_page_goes_dead_then_rebinds_on_recreate() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "# doc\n");
     a.publish("doc.md", PublicKind::File, Some("page1")).unwrap();
@@ -869,7 +869,7 @@ async fn deleted_file_page_goes_dead_then_rebinds_on_recreate() {
 
 #[tokio::test]
 async fn folder_page_repoints_when_the_folder_moves() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("Projects/Roadmap/a.md", "# a\n");
@@ -908,7 +908,7 @@ async fn folder_page_repoints_when_the_folder_moves() {
 
 #[tokio::test]
 async fn publish_for_missing_file_waits_but_shows_in_effective_view() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "# doc\n");
     a.cycle().await;
@@ -932,7 +932,7 @@ async fn publish_for_missing_file_waits_but_shows_in_effective_view() {
 
 #[tokio::test]
 async fn root_page_is_one_entry_and_clears() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("home.md", "# home\n");
@@ -977,7 +977,7 @@ async fn root_page_is_one_entry_and_clears() {
 
 #[tokio::test]
 async fn unpublish_removes_the_page_everywhere() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "# doc\n");
@@ -997,7 +997,7 @@ async fn unpublish_removes_the_page_everywhere() {
 
 #[tokio::test]
 async fn custom_slug_race_suffixes_the_loser() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("a.md", "# a\n");
@@ -1040,7 +1040,7 @@ async fn custom_slug_race_suffixes_the_loser() {
 
 #[tokio::test]
 async fn bind_refused_when_bound() {
-    let be = backend();
+    let be = fake_worker();
     let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
     let bob = Arc::new(FakeRemote::new(&be, "d-bob"));
     let bound = bind_domain(&alice, "Notes", "Alice's Mac").await.unwrap();
@@ -1069,7 +1069,7 @@ async fn bind_refused_when_bound() {
 
 #[tokio::test]
 async fn join_downloads_what_connect_uploaded() {
-    let be = backend();
+    let be = fake_worker();
     let events: Arc<dyn Events> = Arc::new(Collected::default());
     let a_root = tempfile::tempdir().unwrap();
     let a_state = tempfile::tempdir().unwrap();
@@ -1134,7 +1134,7 @@ async fn join_downloads_what_connect_uploaded() {
 
 #[tokio::test]
 async fn resume_in_place_converges_without_conflict_copies() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("notes/one.md", "# one\n");
     a.write("notes/two.md", "# two\n");
@@ -1173,7 +1173,7 @@ async fn resume_in_place_converges_without_conflict_copies() {
 
 #[tokio::test(start_paused = true)]
 async fn touched_path_settles_faster_than_a_watched_one() {
-    let be = backend();
+    let be = fake_worker();
     let a = device("Alice", &be);
     let root = a.root.path().to_path_buf();
     let statuses = a.statuses.clone();
@@ -1217,7 +1217,7 @@ async fn touched_path_settles_faster_than_a_watched_one() {
 
 #[tokio::test]
 async fn a_426_pauses_with_the_right_phase() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
     be.lock().unwrap().reject_schema = true;
@@ -1258,7 +1258,7 @@ async fn a_426_pauses_with_the_right_phase() {
 /// the moment a newer version answers.
 #[tokio::test]
 async fn a_probe_command_resumes_an_outdated_engine() {
-    let be = backend();
+    let be = fake_worker();
     let a = device("Alice", &be);
     let root = a.root.path().to_path_buf();
     let statuses = a.statuses.clone();
@@ -1305,7 +1305,7 @@ async fn a_probe_command_resumes_an_outdated_engine() {
 
 #[tokio::test]
 async fn presence_reports_the_edited_path_and_the_others() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
     a.write("doc.md", "# doc\n");
@@ -1338,7 +1338,7 @@ async fn presence_reports_the_edited_path_and_the_others() {
 
 #[tokio::test]
 async fn history_lists_every_revision_and_fetches_one() {
-    let be = backend();
+    let be = fake_worker();
     let mut a = device("Alice", &be);
     a.write("doc.md", "v1\n");
     a.cycle().await;

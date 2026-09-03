@@ -30,10 +30,10 @@ type Props = {
   activeId: string | null;
   editing: EditTarget;
   // Who is looking at the rail — the same identity new entries are stamped
-  // with (device name on desktop, visitor name / code label on the web).
+  // with (the Mac's device name).
   // Only entries whose author matches get an Edit affordance: rewording
   // someone else's comment by casually clicking on it was terrible UX in a
-  // rail that web reviewers and other synced Macs share. Display-name
+  // rail that other synced Macs share. Display-name
   // matching, not security — the document format has no identity stronger
   // than a name, and that's fine here.
   selfAuthor: string;

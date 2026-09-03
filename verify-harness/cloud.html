@@ -27,15 +27,44 @@
         ["/docs/notes.md", `# Notes\n\n${para("notes", 6)}\n`],
         ["/docs/other.md", `# Other\n\n${para("other", 6)}\n`],
         ["/docs/third.md", `# Third\n\n${para("third", 6)}\n`],
+        ["/docs/Projects/plan.md", `# Plan\n\n${para("plan", 3)}\n`],
       ]);
+      // The folders the workspace holds (publishing a folder is a folder page).
+      window.__dirs = new Set(["/docs", "/docs/Projects"]);
       window.__mtime = 1000;
       window.__writes = [];
       const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
       const basename = (p) => p.split("/").pop() || p;
       // The tree's file names: the drive adds to this to simulate sync
-      // writing a file, then emits `cloud-applied`.
+      // writing a file, then emits `cloud-applied`. One folder, Projects,
+      // holds plan.md.
       window.__treeFiles = ["notes.md", "other.md", "third.md"];
       window.__treeCalls = 0;
+      const projectsNode = (root) => ({
+        kind: "dir",
+        name: "Projects",
+        path: `${root}/Projects`,
+        children: [{ kind: "file", name: "plan.md", path: `${root}/Projects/plan.md` }],
+      });
+      const treeFor = (path) => {
+        if (path.endsWith("/Projects")) return projectsNode(path.slice(0, -"/Projects".length));
+        return {
+          kind: "dir",
+          name: basename(path),
+          path,
+          children: [
+            projectsNode(path),
+            ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}` })),
+          ],
+        };
+      };
+      const SLUG_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
+      const randomSlug = () =>
+        Array.from({ length: 8 }, () => SLUG_ALPHABET[Math.floor(Math.random() * SLUG_ALPHABET.length)]).join("");
+      const sortPages = (pages) =>
+        [...pages].sort(
+          (a, b) => (a.kind === "dir" ? 0 : 1) - (b.kind === "dir" ? 0 : 1) || a.path.localeCompare(b.path),
+        );
 
       // The fake engine.
       window.__cloud = {
@@ -47,6 +76,9 @@
         // What the folder picker answers.
         pickedDir: "/Users/me/Downloads",
         token: "ab".repeat(32),
+        // What a deployed worker reports; the drive sets it to the version
+        // the app was built against (parsed from cloud-worker/src/version.ts).
+        workerVersion: 1,
         wipeResult: 42,
         history: [
           { rev: 3, hash: "h3", size: 30, timeMs: 1757000000000, by: "Test Mac", current: true },
@@ -72,7 +104,7 @@
         lastSyncMs: Date.now(),
         error: null,
         pendingDeletes: 0,
-        workerVersion: 1,
+        workerVersion: window.__cloud.workerVersion,
         public: [],
         presence: [],
       });
@@ -136,17 +168,11 @@
             }
             case "path_exists":
               return Promise.resolve(
-                args.path === "/docs" || args.path.startsWith("/Users/me/Downloads") || window.__fs.has(args.path),
+                window.__dirs.has(args.path) || args.path.startsWith("/Users/me/Downloads") || window.__fs.has(args.path),
               );
             case "list_md_tree": {
               window.__treeCalls += 1;
-              const root = args.path;
-              return Promise.resolve({
-                kind: "dir",
-                name: basename(root),
-                path: root,
-                children: window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${root}/${f}` })),
-              });
+              return Promise.resolve(treeFor(args.path));
             }
             case "stat_file": {
               const c = window.__fs.get(args.path);
@@ -233,7 +259,7 @@
               patchStatus(args.root, { phase: "idle", pendingDeletes: 0 });
               return Promise.resolve(null);
             case "cloud_check_worker":
-              patchStatus(args.root, { phase: "idle", workerVersion: 1, error: null });
+              patchStatus(args.root, { phase: "idle", workerVersion: window.__cloud.workerVersion, error: null });
               return Promise.resolve(null);
             case "cloud_token": {
               const s = window.__cloud.statuses.find((s) => s.root === args.root);
@@ -247,10 +273,51 @@
               window.__setStatuses(window.__cloud.statuses.filter((s) => s.root !== args.root));
               return Promise.resolve(window.__cloud.wipeResult);
             case "cloud_set_activity":
-            case "cloud_publish":
-            case "cloud_unpublish":
-            case "cloud_set_root":
               return Promise.resolve(null);
+
+            /* ----- the public map, as the engine would keep it ----- */
+            case "cloud_publish": {
+              const s = window.__cloud.statuses.find(
+                (st) => args.path === st.root || args.path.startsWith(`${st.root}/`),
+              );
+              if (!s) return Promise.reject("that path isn't in a connected workspace");
+              const rel = args.path === s.root ? "" : args.path.slice(s.root.length + 1);
+              const kind = window.__dirs.has(args.path) ? "dir" : "file";
+              const existing = s.public.find((p) => p.kind === kind && p.path === rel) ?? null;
+              const slug = args.slug ? args.slug.trim().toLowerCase() : (existing?.slug ?? randomSlug());
+              if (args.slug && !/^[a-z0-9][a-z0-9-]{2,63}$/.test(slug)) {
+                return Promise.reject(
+                  "a slug is 3 to 64 characters: lowercase letters, digits and dashes, starting with a letter or digit",
+                );
+              }
+              const taken = s.public.find((p) => p.slug === slug && p !== existing);
+              if (taken) return Promise.reject(`"${slug}" is already the address of ${taken.path || "the workspace"}`);
+              const entry = {
+                slug,
+                kind,
+                path: rel,
+                title: args.title ?? null,
+                desc: args.desc ?? null,
+                by: "Test Mac",
+                at: Date.now(),
+                alive: true,
+                root: existing?.root ?? false,
+              };
+              patchStatus(s.root, { public: sortPages([...s.public.filter((p) => p !== existing), entry]) });
+              return Promise.resolve(slug);
+            }
+            case "cloud_unpublish": {
+              const s = window.__cloud.statuses.find((st) => st.root === args.root);
+              if (!s || !s.public.some((p) => p.slug === args.slug)) return Promise.reject("that page isn't published");
+              patchStatus(s.root, { public: s.public.filter((p) => p.slug !== args.slug) });
+              return Promise.resolve(null);
+            }
+            case "cloud_set_root": {
+              const s = window.__cloud.statuses.find((st) => st.root === args.root);
+              if (!s) return Promise.reject("that workspace isn't connected");
+              patchStatus(s.root, { public: s.public.map((p) => ({ ...p, root: args.slug != null && p.slug === args.slug })) });
+              return Promise.resolve(null);
+            }
             default:
               return Promise.resolve(null);
           }

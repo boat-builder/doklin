@@ -603,7 +603,7 @@ const eq = (a, b, msg) => {
   eq(texts("~~~kanban\nstore: ./P\n~~~\n"), ["store: ./P"], "tildes fence too");
 
   // The key a fence and its snapshot are matched by; a worker that renders
-  // a published page must normalize the same way (docs/cloud-redesign.md).
+  // a published page must normalize the same way (docs/cloud.md).
   eq(fenceKeyOf("store: ./P"), "store: ./P");
   eq(fenceKeyOf("store: ./P\n\n"), "store: ./P");
   eq(fenceKeyOf("store: ./P\r\n"), "store: ./P");

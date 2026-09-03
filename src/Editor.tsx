@@ -173,16 +173,16 @@ type Props = {
   // Asks the host to flip comments visible (creating a comment while hidden).
   onRequestShowComments?: () => void;
   // True renders the document read-only: typing, slash menu, and toolbar are
-  // off, but selection and the whole comment layer still work (a web
-  // comment-role session comments on a document it can't edit). Comment
-  // mutations still dispatch — they go through the rail and commentSelection,
-  // not through DOM editing.
+  // off, but selection and the whole comment layer still work (a read-only
+  // view can still comment on a document it can't edit). Comment mutations
+  // still dispatch — they go through the rail and commentSelection, not
+  // through DOM editing.
   readOnly?: boolean;
-  // Lets a read-only session still tick task-list checkboxes (taskToggle.ts).
+  // Lets a read-only view still tick task-list checkboxes (taskToggle.ts).
   // Off by default: a read-only view is normally a MIRROR of a document
   // someone else owns (the unfocused split pane), where nothing should move.
-  // The shared page's comment-role visitor is the exception — a checklist is
-  // usually for exactly the people who may comment on it.
+  // A host that shows a document to the person a checklist is for, without
+  // letting them edit it, opts in.
   taskToggle?: boolean;
   // Marker-less markdown threads from the entity meta file (see OrphanOps).
   orphans?: OrphanOps;

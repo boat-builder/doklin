@@ -63,12 +63,12 @@ function forEachTable(doc: Node, fn: (table: Node, pos: number) => void): void {
 export const normalizeHeaderText = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 /** THE definition of a table's identity, expressed as a function of plain
- *  data because it has a second implementation: the share worker's public
- *  reading page re-derives it from marked's table tokens to attach stored
- *  widths to server-rendered HTML (share-worker/src/index.js). The two must
- *  agree — share-worker/test/run.mjs asserts it against this function, so a
- *  change here fails there instead of silently dropping widths from
- *  published pages. Joined by a separator no normalized header text can
+ *  data because it has a second implementation: the cloud worker's public
+ *  page re-derives it from marked's table tokens to attach stored widths to
+ *  server-rendered HTML (cloud-worker/src/render.ts). The two must agree —
+ *  cloud-worker/test/run.mjs asserts it against the ids this function's
+ *  own suite pins, so a change here fails there instead of silently
+ *  dropping widths from published pages. Joined by a separator no normalized header text can
  *  contain, so ["ab","c"] and ["a","bc"] stay distinct. */
 export function tableSignature(colCount: number, headerTexts: string[]): string {
   return [String(colCount), ...headerTexts.map(normalizeHeaderText)].join("\n");

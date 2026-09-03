@@ -1,5 +1,5 @@
 // The cloud worker's versions ride into the binary from their one source,
-// cloud-worker/src/version.ts (docs/cloud-redesign.md §5.7): the engine
+// cloud-worker/src/version.ts (docs/cloud.md §5.7): the engine
 // writes manifests of MANIFEST_VERSION and the app compares a domain's
 // worker against WORKER_VERSION. Parsed here, never mirrored by hand.
 

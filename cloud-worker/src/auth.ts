@@ -1,7 +1,7 @@
 // Who is calling. Every /api route runs through `authenticate`: the bearer is
 // hashed and compared with the owner secret's hash in constant time, then —
 // when that is not it — looked up as auth/tokens/<sha256>.json, the record
-// an invite mints for a member (docs/cloud-redesign.md §5.4, §8.1). No
+// an invite mints for a member (docs/cloud.md §5.4, §8.1). No
 // invite exists yet, so today the lookup finds nothing; it is here so that
 // invites are an addition, not a change. Keying credential objects by their
 // own hash makes resolving a bearer ONE strongly-consistent R2 get and makes

@@ -1,7 +1,7 @@
 // Unit tests for the three agent prompts and the naming rule they share
 // (src/cloudPrompts.ts): the setup, update and teardown prompts the app
 // hands to an agent, and the "no step the agent has to invent" check that
-// docs/cloud-redesign.md PR 3 is done against. Run:
+// docs/cloud.md §7.4 asks for. Run:
 //
 //   node verify-harness/cloudprompts.test.mjs
 //

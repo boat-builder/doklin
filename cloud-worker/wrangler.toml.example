@@ -1,7 +1,7 @@
 # Doklin cloud worker — deployment config template.
 #
 # The app's setup prompt writes the real wrangler.toml for the agent that
-# deploys a domain (docs/cloud-redesign.md §7.4); this copy is for doing it
+# deploys a domain (docs/cloud.md §7.4); this copy is for doing it
 # by hand. Copy it to wrangler.toml (gitignored — it carries your account id
 # and domain), replace the placeholders, then from this directory:
 #

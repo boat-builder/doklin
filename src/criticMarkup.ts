@@ -21,10 +21,11 @@ export type CommentEntry = {
   author: string; // display name; "" = unknown (legacy / hand-written)
   at: number; // epoch ms; 0 = unknown
   body: string;
-  // Web-share provenance, stamped by the share worker when an entry arrives
-  // from a browser session: a stable entry id plus the access code that wrote
-  // it. Absent on desktop-authored entries. Only html-rendition threads carry
-  // these (they travel as JSON); the CriticMarkup serialization below doesn't
+  // Provenance older sidecars carry from the previous cloud's web sessions:
+  // a stable entry id, and the code and label that wrote it. Nothing writes
+  // them any more; they are kept so an old thread still parses, dedupes by
+  // id and re-serializes byte for byte. Only html-rendition threads carry
+  // them (they travel as JSON); the CriticMarkup serialization below doesn't
   // encode them — markdown entries never have them.
   eid?: string;
   codeId?: string;

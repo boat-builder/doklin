@@ -14,7 +14,7 @@ The short version:
 - A card's properties are **YAML-style frontmatter** at the top of its note.
   The note body is the card's page — an ordinary Doklin document with
   everything that already works for notes: the editor, comments, links,
-  search, sync, history, sharing.
+  search, sync, history, publishing.
 - A **view** is how a store is shown: **kanban** (columns of cards) or
   **table** (rows of the same cards). A store opens as its own tab from the
   sidebar, which switches between its saved views, and any view can be
@@ -36,7 +36,7 @@ Goals:
   files.
 - Zero new lock-in: a store must be readable and editable without Doklin.
 - Fit the machinery that exists — sync's three-way text merge, per-file
-  history, the share worker, the entity meta sidecar, the tab/draft model —
+  history, the cloud worker's public pages, the entity meta sidecar, the tab/draft model —
   rather than build a parallel world.
 - One data model that a table, list, or calendar view can be added to later
   without touching the files on disk.
@@ -55,8 +55,8 @@ file, markdown (inline or a separate file) — plus the one the codebase itself
 suggests (JSON Lines, like `<stem>.meta.jsonl`). Four properties of Doklin
 decide it:
 
-1. **Cloud sync merges files as text, line by line.** `sync.rs`'s
-   `merge_texts` runs `diffy::merge(base, ours, theirs)`; anything that isn't
+1. **Cloud sync merges files as text, line by line.** The cloud engine's
+   `merge_texts` (`src-tauri/src/cloud/merge.rs`) runs `diffy::merge(base, ours, theirs)`; anything that isn't
    valid UTF-8 is a conflict on the spot, and a conflicting text file becomes
    a `<stem> (conflict — Alice, Sep 2 14.32).<ext>` copy next to the original.
    Sync tracks *every* non-hidden file under 25 MB, no extension filter.
@@ -81,7 +81,7 @@ decide it:
 
 The folder wins on every axis that matters here, and it wins a fifth one for
 free: a card is a note, so links to it (`[the bug](./Projects/Fix login.md)`),
-workspace search, comment threads, version history, sharing, the Trash, and
+workspace search, comment threads, version history, publishing, the Trash, and
 "Reveal in Finder" all already work.
 
 **Why not the one-JSONL-per-store runner-up.** It is the better shape for a
@@ -307,7 +307,7 @@ offered inside a board; cards are created from the board.
 
 A new **tab kind** `store` (today `TabKind` is `"draft" | "file"`) keyed on
 the folder path renders `<StoreView>` instead of the editor, with the app's
-document machinery (autosave, watcher, comments, share) standing down the
+document machinery (autosave, watcher, comments, publishing) standing down the
 way it does for an html-only document. Session restore treats it like any
 tab; a folder that vanished becomes a ghost tab.
 
@@ -351,9 +351,9 @@ as a link between notes does — so an unsaved draft can't embed a relative
 store and says so in place.
 
 Why a fenced block: it is the one construct every markdown tool agrees to
-leave alone. GitHub, Obsidian, `marked` on a published page all show it as a
-small code block that says what it is; nothing is mangled, nothing pretends
-to be prose. It is also the precedent the app already has — mermaid diagrams
+leave alone. GitHub and Obsidian show it as a small code block that says
+what it is (a published page draws the board — the cloud worker knows the
+fence); nothing is mangled, nothing pretends to be prose. It is also the precedent the app already has — mermaid diagrams
 ride a ` ```mermaid ` fence.
 
 Unlike mermaid it is **not** rendered through Crepe's code-block preview
@@ -466,8 +466,8 @@ flushed yet.
 `src/StoreView.tsx` is the shell (the model, the view strip, the View panel,
 the empty states); `src/KanbanBoard.tsx` and `src/TableView.tsx` draw what is
 under it. Both read the same derivation in `src/store/board.ts`, so what they
-show can never drift apart — and neither can a published page, which freezes
-that same derivation.
+show can never drift apart — and neither can a published page, which the
+cloud worker draws from that same derivation.
 
 ### The kanban view
 
@@ -494,9 +494,8 @@ that same derivation.
   after the last one (only where columns ARE options); column header menu:
   rename, colour, hide in this view, delete (cards keep their value; see
   above).
-- **Read-only** boards (a published page's shell, the unfocused split pane's
-  mirror) render the same DOM with drag and inputs off, like `readOnly` on
-  the editor.
+- **Read-only** boards (the unfocused split pane's mirror) render the same
+  DOM with drag and inputs off, like `readOnly` on the editor.
 - Themed from the `--app-*` tokens in `App.css`, all four themes; option
   colours are a small named palette mapped per theme, never raw hex in the
   files.
@@ -562,12 +561,11 @@ flowchart LR
 - `src/store/storeFile.ts` — `store.jsonl` parse / canonical serialize;
   pure; mirrors `metaFile.ts`.
 - `src/store/rank.ts` — fractional indexing (`between(a, b)`), pure.
-- `src/store/board.ts` — the pure derivation and the frozen picture a
-  published page carries: what a card is, which cards land in which column,
-  a card's chips, a view's filter and sort, and `boardSnapshot`. No Tauri,
-  so the whole thing is unit-tested without a browser.
-- `src/store/publish.ts` — the disk-reading half of that: walk a note's
-  fences, resolve each to a folder, snapshot what is there.
+- `src/store/board.ts` — the pure derivation and the picture a published
+  page is drawn from: what a card is, which cards land in which column, a
+  card's chips, a view's filter and sort, and `boardSnapshot` — which the
+  cloud worker calls over the synced store (`cloud-worker/src/pages.ts`). No
+  Tauri, so the whole thing is unit-tested without a browser.
 - `src/store/csv.ts` — a view as a spreadsheet; pure.
 - `src/store/model.ts` — the `Store` object: `load()`, `cards`, `fields`,
   `views`, mutations (`setCardProp`, `moveCard`, `createCard`, `addField`,
@@ -581,8 +579,7 @@ flowchart LR
   `src/TableView.tsx`, `src/PropertiesHeader.tsx` + `src/PropertyControl.tsx`,
   `src/CardPeek.tsx`, `src/storeChrome.tsx` (the popover, the inline input
   and the card menu every view shares), `src/storeEmbed.ts` +
-  `src/StoreEmbedFrame.tsx`, `src/BoardSnapshot.tsx` (a published view, drawn
-  from a snapshot).
+  `src/StoreEmbedFrame.tsx`.
 - `App.tsx`: the `store` tab kind, the frontmatter boundary in
   `loadActiveContent` / `writeToDisk`, the properties-only branch of the
   external-change handler, the peek (and the rule that a card already in a
@@ -626,63 +623,49 @@ Nothing in the sync engine changes; the design is shaped to it:
   count every card as one file. A thousand-card board is fine; a workspace
   is not the place for a ticketing system's history.
 
-## Sharing and publishing (phase 3)
+## Publishing
 
-A published note that embeds a view of a store shows that view. The worker
-renders markdown with `marked` and knows nothing about the workspace, so the
-store's data **travels with the page**, the way `tcols` do:
+A published note that embeds a view of a store shows that view. Nothing
+travels with the page: the cloud worker renders a public page from the
+synced files on request ([cloud.md](cloud.md) §5.6), and a store is files
+like any other —
 
-- `readShareParts` collects, for each embed fence in the page, a **snapshot**
-  of the view: for a board `{fence, name, columns: [{name, color, cards:
-  [{title, chips, page?}], more?}]}`, for a table `{fence, name, kind:
-  "table", fields, rows: [{title, page?, cells}], more?}`; `pushPage` sends
-  them as one `boards` field beside `tcols`; the worker validates them record
-  by record and stores them on the page. The fences are found by scanning the
-  file's bytes (`storeFences`) — a push has no parsed document — and each
-  snapshot is keyed by the fence's own config text AND its language, so it
-  keeps finding its fence when the document around it moves, and so the same
-  config in two languages stays two different views. A snapshot with no kind
-  is a board: that is what version 23 pushed, and those pages still read.
-- The public page renders the snapshot **server-side as static HTML** in
-  place of the fence (a `marked` `code` renderer override, beside the
-  table-width `table` one) — no JavaScript needed, honest in light and dark,
-  and identical for a visitor with scripting off. Card titles link to their
-  pages when the card is part of the same folder share (`page` is the member
-  page id the share registry already knows), and are plain text otherwise.
-  A fence with no snapshot — an older page, or a board deleted since — keeps
-  the code block it has always been: the fence stays, nothing is rewritten.
-- The app shell (comment / edit roles) gets the same snapshot in its boot
-  payload and draws it with `BoardSnapshot.tsx`, inside the same embed frame
-  the desktop uses. It is deliberately not `<StoreView>` with a flag: the
-  live views are built on the store model and write files, and there is
-  nothing here to write to. Editing a store from the web is out of scope —
-  the web editor can only write the page's own markdown.
-- A shared *card* page renders its properties as a small table above the
-  body — and so does any other shared note that carries frontmatter, which
-  is what its own properties header shows in the app. That needs the frontmatter as its own field, not just a nicer
-  render: `marked` reads a `---` block followed by text as a **setext
-  heading**, so a web edit could round-trip a card's fields into
-  `## status: Done`. The push splits the block off the markdown — exactly as
-  the editor splits it off the document — and sends the readable pairs as
-  `props`, named and coloured by the card's own board. `pullWebEdit` was
-  already putting the block back from disk, so a web edit now returns only a
-  body, which is all it ever saw.
+- The worker finds the note's fences in its raw bytes (`storeFences` — no
+  parsed document needed), resolves each `store:` path against the note's
+  folder, reads that folder's `store.jsonl` and the frontmatter head of
+  every card from the synced blobs (the way `read_store` reads them in the
+  app; at most 40 cards, the rest counted), and derives the board or the
+  table with `boardSnapshot` from `src/store/board.ts` — the same pure
+  derivation the tab and the embed use, so the three can't disagree. The
+  fence's LANGUAGE decides the kind and the config picks the saved view,
+  exactly as in the app.
+- The page renders the view **server-side as static HTML** in place of the
+  fence (a `marked` `code` renderer override, beside the table-width
+  `table` one) — no JavaScript needed, honest in light and dark, and
+  identical for a visitor with scripting off. Card titles link to their
+  pages when the card is inside a published folder (a Notion-style nested
+  address) or published on its own, and are plain text otherwise. A fence
+  whose store isn't there keeps the code block it has always been: the
+  fence stays, nothing is rewritten.
+- A published *card* page renders its properties as a small table above
+  the body — and so does any other published note that carries
+  frontmatter, which is what its own properties header shows in the app.
+  The worker splits the block off with `store/frontmatter.ts`, exactly as
+  the editor splits it off the document (`marked` would otherwise read a
+  `---` block followed by text as a setext heading), and colours the pairs
+  by the card's own board.
+- Freshness is the sync's: a drag on a board is a card file changing, the
+  engine syncs it, the manifest's etag moves, and the next view of any
+  page that embeds the board is drawn from the new state. There is no
+  snapshot to refresh and no fingerprint to compare.
 
-Every autosave of the note re-pushes the page already. A board change that
-doesn't touch the note is caught twice: the store's watcher fires
-`onStoreChanged`, and the registry remembers which pages read which folders
-(`ShareEntry.boardDirs`), so the embedding notes are scheduled without
-scanning anything; and because the snapshot is fingerprinted alongside the
-markdown, reconciliation re-derives it for any page that carried a fence and
-pushes when it differs — which catches a card that arrived by sync while the
-board was closed.
-
-Worth saying plainly: sharing a note that embeds a store **publishes what
-that view says**, whether or not the store's folder is part of any share —
-and a table view says more per card than a board does, since it shows every
-field the view lists rather than a card's chips. That is the point of the
-feature, and it is the same bargain a table written in the note makes; but
-it is worth knowing which view a note embeds before sharing it.
+Worth saying plainly: publishing a note that embeds a store **publishes
+what that view says**, whether or not the store's folder is published —
+and a table view says more per card than a board does, since it shows
+every field the view lists rather than a card's chips. That is the point
+of the feature, and it is the same bargain a table written in the note
+makes; but it is worth knowing which view a note embeds before publishing
+it.
 
 ## Edge cases, decided
 
@@ -732,15 +715,8 @@ it is worth knowing which view a note embeds before sharing it.
   search hit or a link is a tab like any note; the sidebar marks its board
   row.
 - **Html rendition / PDF** → the fence shows as its config text. Out of
-  scope, documented. (A *published* page is different: it draws the board,
-  because the push sends one.)
-- **A shared page** → the shell mounts the same editor with no host behind
-  it, and draws the board or table from the snapshot the page was published
-  with (read-only: there is no folder here to write to). A page published
-  before phase 3, or one whose fence names a store that was already gone,
-  still draws the frame and says the view isn't available. Either way a
-  comment- or edit-role save re-serializes the document and the fence comes
-  back out unchanged.
+  scope, documented. (A *published* page is different: the cloud worker
+  draws the board from the synced store.)
 
 ## Plan
 
@@ -785,11 +761,9 @@ real editor — the fence rendering as a board, a card composed inside it
 never reaching ProseMirror, a drag writing one card and not the note, an
 ordinary edit re-serializing the note with the fence byte-identical, the
 Source chip, ⌫ and undo, the slash menu and its picker, and a split pane's
-board going read-only. `drive-web.mjs` covers the shared page, where the
-frame says the board isn't available and an edit-role save still keeps the
-fence byte for byte.
+board going read-only.
 
-Four things the build settled that the design left implicit:
+Three things the build settled that the design left implicit:
 
 - **The frame's bar is the block's handle.** ProseMirror marks a draggable
   node's DOM `draggable=true`, and a native HTML5 drag started anywhere
@@ -805,69 +779,64 @@ Four things the build settled that the design left implicit:
 - **The embed shows the store's name, not a heading.** A board tab's title is
   an `<h1>` because the board is the page; inside a note the same line is a
   plain `<div>`, so it never joins the document's outline.
-- **A shared page draws the frame and says so.** The web shell mounts the
-  same editor with no host, so the embed renders as a frame naming the store
-  with its config below it. That keeps the one property that matters on the
-  web — a comment- or edit-role save re-serializes the whole document, and
-  the fence has to come back out unchanged.
 
-**Phase 3 — boards on published pages. Built.**
-`store/board.ts` (the pure derivation, split out of `model.ts`, plus the
-snapshot it freezes into) and `store/publish.ts` (reading a workspace to
-build one); `boards` and `props` on `ShareParts` and on the page record;
-the worker's sanitizers, its `code` renderer override and the board's page
-CSS; `BoardSnapshot.tsx` for the shell; `kanbanFences` for finding the
-fences in a file's bytes. Verification: `verify-harness/store.test.mjs`
-covers the fence scan and the snapshot (2178 checks);
-`share-worker/test/run.mjs` covers the wire contract and both renderers (47
-tests); `drive-kanban-embed.mjs` walks the reading half against the stubbed
-filesystem; `drive-web.mjs` drives the shell's board, the static page with
-JavaScript **off**, and a shared card's properties.
+**Phase 3 — boards on published pages. Built, then rebuilt with the cloud.**
+`store/board.ts` (the pure derivation, split out of `model.ts`, and the
+snapshot it produces) and `storeFences` for finding the fences in a file's
+bytes; first with a snapshot the app pushed to the previous cloud's worker,
+now — since the cloud rewrite ([cloud.md](cloud.md) §5.6) — with the cloud
+worker deriving the board itself from the synced store, on request, with
+the same function. Verification: `verify-harness/store.test.mjs` covers the
+fence scan and the snapshot; `cloud-worker/test/run.mjs` renders boards,
+tables and a card's properties from the seed workspace's store;
+`drive-public.mjs` reads a board back in Chromium with JavaScript **off**,
+its cards linking to their pages, and a card's properties on the card's
+page.
 
-Five things the build settled that the design left implicit:
+Four things the build settled that the design left implicit:
 
-- **A snapshot is keyed by the fence's own text, not by its position.** The
-  design said "keyed on the fence's position", which breaks the moment a
-  paragraph is added above. The config text is the natural key: two embeds
-  writing the same config show the same board and share one snapshot, and an
-  embed that narrows the view (`group:`, `hide:`) writes different config
-  and gets its own. Both sides normalize line endings and trailing
-  whitespace before matching (`fenceKeyOf` here, `fenceKey` in the worker).
-- **The push splits frontmatter off the markdown.** The design asked for a
-  properties table on a shared card page; the reason it has to be a separate
-  field rather than a nicer render of the block is that `marked` reads
-  `---` / `status: Done` / `---` as a setext heading — so an edit-role save
-  used to round-trip a card's fields into `## status: Done`. Splitting the
-  block off before the push (exactly as the editor splits it off the
-  document) is what makes that impossible, and `pullWebEdit` already put the
-  block back from disk. The published markdown is the body; the block
-  travels as `props`.
+- **A board is matched to its fence by the fence's own text, not by its
+  position.** The design said "keyed on the fence's position", which breaks
+  the moment a paragraph is added above. The config text is the natural
+  key: two embeds writing the same config show the same board and share
+  one derivation, and an embed that narrows the view (`group:`, `hide:`)
+  writes different config and gets its own. Line endings and trailing
+  whitespace are normalized before matching (`fenceKeyOf`, `snapKeyOf` —
+  the worker imports the same functions).
+- **The frontmatter is split off before the markdown is rendered.** The
+  design asked for a properties table on a published card page; the reason
+  it has to be a separate field rather than a nicer render of the block is
+  that `marked` reads `---` / `status: Done` / `---` as a setext heading.
+  The worker splits the block off with `store/frontmatter.ts`, exactly as
+  the editor splits it off the document, and draws the readable pairs named
+  and coloured by the card's own board. The rendered markdown is the body.
 - **One derivation, in a pure module.** `boardColumns` and `cardChips` moved
   out of `KanbanBoard.tsx` into `store/board.ts`, so the board tab, a note's
-  embed and the published snapshot all read the same columns and a published
-  board can't quietly disagree with the board it was published from. It also
-  puts the whole derivation in the fast unit suite.
+  embed and the published page all read the same columns and a published
+  board can't quietly disagree with the board it was published from. It
+  also puts the whole derivation in the fast unit suite, and lets the
+  worker bundle it without React.
 - **What a published board leaves out.** An empty column that an option
   DECLARES still shows — it is part of the board's shape. An empty "No
   status" column, or an empty column for a value nothing declares, doesn't:
   those exist on the desktop so you can drag into them, and nobody drags on
   a published page. Cards beyond 200 in a column are counted (`+12 more`),
-  never silently dropped; the same goes for 60 columns and 20 boards.
-- **Staleness is caught twice.** The store's watcher tells the app that a
-  board changed (`onStoreChanged`), and the registry remembers which pages
-  read which folders (`ShareEntry.boardDirs`), so a drag in a board tab
-  re-pushes the notes that embed it without scanning anything. That only
-  covers boards this app is watching, so the pushed snapshot is also
-  fingerprinted: reconciliation re-derives it for pages that carried a fence
-  and pushes when it differs, which catches a card that arrived by sync
-  while the board was closed.
+  never silently dropped, and so are 60 columns; on a public page the
+  worker reads at most 40 cards of a store and says how many more it holds.
 
-One thing publishing a note now does that is worth saying out loud: **a
-board embedded in a shared note is published with it.** The card titles and
-chips go out with the page, whether or not the board's own folder is part of
-any share. That is the feature — a note that shows a board should show it —
-but it means "share this note" is also "share what this board says", the
-same way it is for a table in the note.
+What the rebuild removed: the snapshot the app used to push, its
+fingerprints, and the registry that remembered which pages read which
+folders so a drag could re-push them. Nothing is pushed now — the page
+renders from the synced files on request and is cached by the manifest's
+etag, so a card dragged on a board is on the public page as soon as the
+card syncs.
+
+One thing publishing a note does that is worth saying out loud: **a board
+embedded in a published note is published with it.** The card titles and
+chips are drawn from the store whether or not the board's own folder is
+published. That is the feature — a note that shows a board should show it —
+but it means "publish this note" is also "publish what this board says",
+the same way it is for a table in the note.
 
 **Phase 4 — the second view, and properties everywhere. Built.**
 `View` in `storeFile.ts` grows a kind (`kanban` | `table`) and the parts a
@@ -883,17 +852,15 @@ command — the mirror image of `write_frontmatter`; `store/csv.ts` exports
 what a view shows. The ` ```kanban ` fence gains a sibling, ` ```table `,
 and with it `kanbanEmbed.ts` / `KanbanEmbed.tsx` become `storeEmbed.ts` /
 `StoreEmbedFrame.tsx` (one node type, the language as an attribute) and
-`kanbanFences` becomes `storeFences`. Worker version 24 carries table
-snapshots on the same `boards` array.
+`kanbanFences` becomes `storeFences`.
 Verification: `store.test.mjs` covers the view record, the filter and the
 sort, both new groupings, the table snapshot and the CSV (2252 checks);
-`share-worker/test/run.mjs` covers the table wire contract and its renderer
-(49 tests); `drive-kanban.mjs` walks the peek, properties on an ordinary
-note, declaring a field from a card, and the table view end to end (58
-steps); `drive-kanban-embed.mjs` puts a ` ```table ` fence beside a
-` ```kanban ` one in the same note (53 steps); `drive-web.mjs` publishes a
-table and reads it back on the static page with JavaScript off and in the
-shell (42 steps); `cargo test --lib store` covers `write_body`.
+`cloud-worker/test/run.mjs` covers a table drawn from a synced store;
+`drive-kanban.mjs` walks the peek, properties on an ordinary note, declaring
+a field from a card, and the table view end to end (58 steps);
+`drive-kanban-embed.mjs` puts a ` ```table ` fence beside a ` ```kanban `
+one in the same note (44 steps); `cargo test --lib store` covers
+`write_body`.
 
 Six things the build settled that the design left implicit:
 
@@ -912,8 +879,8 @@ Six things the build settled that the design left implicit:
   saved view.** A ` ```table ` naming a kanban view still shows a table: the
   language is what every other markdown tool sees, so it has to be the
   truth. And because the same config in two languages is two different
-  views of one store, the snapshot key carries the language (`snapKeyOf`
-  here, `snapKey` in the worker).
+  views of one store, the snapshot key carries the language (`snapKeyOf`,
+  which the cloud worker imports too).
 - **A field is renamed, not re-keyed.** A field's id is the frontmatter key
   every card carries, so it is slugged once at creation and never changes;
   renaming changes the name people read. Deleting a field deletes no data

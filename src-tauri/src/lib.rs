@@ -16,7 +16,7 @@ mod dictation;
 pub mod pdf_export;
 mod store;
 // The cloud: one engine per connected workspace, the only writer to the
-// workspace's domain — see docs/cloud-redesign.md and src/cloud/mod.rs.
+// workspace's domain — see docs/cloud.md and src/cloud/mod.rs.
 mod cloud;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};

@@ -8,7 +8,7 @@ const host = process.env.TAURI_DEV_HOST;
 
 // The worker's version integer and the runtime date wrangler.toml pins,
 // parsed out of cloud-worker/src/version.ts and served to the app as
-// `virtual:cloud-worker-version` (docs/cloud-redesign.md §7.1). Parsed,
+// `virtual:cloud-worker-version` (docs/cloud.md §7.1). Parsed,
 // never mirrored — the same rule src-tauri/build.rs follows for the Rust
 // side — so the update badge and the setup prompt can't drift from the
 // worker they describe.

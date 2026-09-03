@@ -1,4 +1,4 @@
-// The Cloud panel — docs/cloud-redesign.md §7.2 (gear → Cloud…, and the dot
+// The Cloud panel — docs/cloud.md §7.2 (gear → Cloud…, and the dot
 // beside the workspace name). A view over App-owned live state: the status
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
@@ -60,6 +60,7 @@ export default function CloudPanel({
   onConnect,
   onJoin,
   onUpdateWorker,
+  onOpenPublished,
   onOpenExternal,
 }: {
   /** The open workspace folder, if any. */
@@ -72,6 +73,8 @@ export default function CloudPanel({
   onConnect: () => void;
   onJoin: () => void;
   onUpdateWorker: () => void;
+  /** The list of every published page (PublishedPages.tsx). */
+  onOpenPublished: () => void;
   onOpenExternal: (url: string) => void;
 }) {
   const [view, setView] = useState<View>("main");
@@ -420,11 +423,13 @@ export default function CloudPanel({
             ))}
           </ul>
         )}
-        {pages > 0 && (
-          <p className="cloud-hint">
-            {pages} published page{pages === 1 ? "" : "s"}.
-          </p>
-        )}
+        <div className="cloud-section-label">Public</div>
+        <div className="cloud-actions">
+          <button className="share-btn" data-testid="published-pages" onClick={onOpenPublished}>
+            Published pages{pages > 0 ? ` (${pages})` : ""}…
+          </button>
+          {pages === 0 && <span className="cloud-hint">Nothing is published yet.</span>}
+        </div>
 
         <div className="cloud-section-label">This Mac</div>
         <div className="cloud-actions">

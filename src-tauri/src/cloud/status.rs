@@ -1,4 +1,4 @@
-//! The engine's side of the frontend contract (docs/cloud-redesign.md §6.7):
+//! The engine's side of the frontend contract (docs/cloud.md §6.7):
 //! the status that is the frontend's entire model, the events, and the
 //! small result types the commands answer with. Mirrored in TypeScript by
 //! src/cloud.ts — change both.
