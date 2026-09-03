@@ -493,7 +493,10 @@ reconcile) or a *poll* (etag + presence).
    way, through `scan::rel_for_touch`: a hidden segment or one of the
    engine's own temp files wakes neither.
 2. **The filesystem watcher** (external editors, git, Finder): a recursive
-   `notify` debouncer, settling **5 s**.
+   `notify` debouncer, settling **5 s**. A workspace it cannot attach to —
+   no inotify left, a filesystem without watch support, a root that vanished
+   before it started — keeps syncing on the other three inputs; only an edit
+   made by another program waits for one of them.
 3. **The poll** — every 15 s: `GET /api/poll`; a changed etag triggers a
    cycle; presence rides along, and so does the version probe (§5.7).
 4. **Commands** — `SyncNow`, `Probe`, `Touched`, `SetActivity`, `Pause`,

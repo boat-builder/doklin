@@ -1534,6 +1534,11 @@ impl<R: Remote> Engine<R> {
         let mut fs_dirty_at: Option<Instant> = None;
         let mut touch_dirty_at: Option<Instant> = None;
         let mut next_poll = Instant::now() + POLL_INTERVAL;
+        // False once the watcher channel is closed — either it never started
+        // (`spawn_engine` says so) or it has gone away. The engine carries on
+        // without it; a closed channel would otherwise answer `None` forever
+        // and spin the select.
+        let mut watching = true;
 
         loop {
             let wake = next_wake(next_poll, fs_dirty_at, touch_dirty_at);
@@ -1588,9 +1593,13 @@ impl<R: Remote> Engine<R> {
                         let _ = reply.send(self.revision(&rel, &hash).await);
                     }
                 },
-                ev = fs_events.recv() => {
-                    if ev.is_none() { return; } // watcher died with the manager
-                    fs_dirty_at = Some(Instant::now());
+                ev = fs_events.recv(), if watching => match ev {
+                    // No watcher on this workspace: the edit bus still
+                    // carries everything the app writes, and the poll still
+                    // brings in what other devices do. Only edits made by
+                    // another program go unnoticed until one of those.
+                    None => watching = false,
+                    Some(()) => fs_dirty_at = Some(Instant::now()),
                 },
                 _ = tokio::time::sleep_until(wake) => {}
             }
