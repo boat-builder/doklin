@@ -357,9 +357,6 @@ export function serializeFrontmatter(
   return `${FENCE}\n${[...lines, ...opaque].join("\n")}\n${FENCE}\n`;
 }
 
-/** A whole card file: the block (possibly "") followed by its body. */
-export const composeCard = (head: string, body: string): string => head + body;
-
 /** True when the two property sets are the same to the dialect's eye. */
 export function propsEqual(a: Props, b: Props): boolean {
   const ak = Object.keys(a).sort();

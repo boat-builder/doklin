@@ -18,7 +18,7 @@ import { STORE_FILE, parseStoreDef, type StoreDef } from "../../src/store/storeF
 
 /** What the app opens as a note — the same rule as App.tsx's MD_EXT_RE. */
 export const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
-export const MD_EXTENSIONS = ["md", "markdown", "mdown", "mkd"] as const;
+const MD_EXTENSIONS = ["md", "markdown", "mdown", "mkd"] as const;
 export const isMarkdownPath = (p: string): boolean => MD_EXT_RE.test(p);
 /** A note's stem: its path without the markdown extension. */
 export const stemOf = (p: string): string => p.replace(MD_EXT_RE, "");
@@ -32,7 +32,7 @@ export const dirOf = (p: string): string => {
 };
 
 /** A page is a document, not a dump: past this a blob is not rendered. */
-export const MAX_RENDER_BYTES = 4 * 1024 * 1024;
+const MAX_RENDER_BYTES = 4 * 1024 * 1024;
 /**
  * Cards a board reads — each is one blob read, and a Worker on the free plan
  * may make 50 subrequests per request. Cards past the cap are counted on the

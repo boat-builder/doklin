@@ -42,7 +42,7 @@ export function cleanDomain(raw: string): string | null {
 }
 
 /** A *.workers.dev hostname is Cloudflare's — it can't be a custom domain. */
-export const isWorkersDev = (host: string): boolean => /\.workers\.dev$/i.test(host);
+const isWorkersDev = (host: string): boolean => /\.workers\.dev$/i.test(host);
 
 /** The chosen workers.dev name: letters, digits and dashes; a typed
  *  "doklin-" prefix is dropped because the name gets one anyway. */
@@ -57,8 +57,7 @@ export function cleanWorkersName(raw: string): string | null {
 }
 
 /** The one name the worker and the bucket share: `doklin-` plus the domain
- *  with its dots as dashes, or `doklin-` plus the chosen workers.dev name.
- *  Never `doklin-share-…`, so a new deploy can't land on an old stack. */
+ *  with its dots as dashes, or `doklin-` plus the chosen workers.dev name. */
 export function resourceName(target: CloudTarget): string {
   return target.kind === "domain"
     ? `doklin-${target.domain.replace(/\./g, "-")}`

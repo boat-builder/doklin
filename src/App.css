@@ -1192,15 +1192,6 @@ body,
   font: inherit;
 }
 
-/* ---------- Task-list checkboxes in a read-only document ----------
-   The list-item node view marks its icon `.readonly` whenever the editor
-   isn't editable, which draws a not-allowed cursor over the box. A session
-   the host granted the toggle to (taskToggle.ts puts .dk-task-toggle on the
-   document node) may actually tick it, so it must read as clickable. */
-.milkdown .dk-task-toggle .milkdown-list-item-block li .label-wrapper .readonly {
-  cursor: pointer;
-}
-
 /* ---------- Mermaid diagrams (```mermaid code blocks) ----------
    The SVG itself is colored from the app tokens at render time
    (src/mermaid.ts) — this is layout and framing only. The diagram sits on

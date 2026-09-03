@@ -75,12 +75,9 @@ pub enum RemoteError {
     Forbidden,
     /// Not bound, or the object is gone.
     NotFound,
-    /// Manifest CAS lost; carries the winner's etag (diagnostic — the retry
-    /// path refetches rather than trusting it).
-    Conflict {
-        #[allow(dead_code)]
-        etag: String,
-    },
+    /// Manifest CAS lost: the retry path refetches the manifest rather than
+    /// trusting the etag the worker answers with.
+    Conflict,
     /// `426`: the worker predates this app's manifest schema — update it.
     Outdated(String),
     /// `409` on a bind: the domain already holds this workspace.
@@ -95,7 +92,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::Unauthorized => write!(f, "unauthorized"),
             RemoteError::Forbidden => write!(f, "owner only"),
             RemoteError::NotFound => write!(f, "not found"),
-            RemoteError::Conflict { .. } => write!(f, "manifest conflict"),
+            RemoteError::Conflict => write!(f, "manifest conflict"),
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
             RemoteError::Other(m) => write!(f, "{}", m),
@@ -230,15 +227,7 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
                 None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
             }
         }
-        412 => {
-            let etag = res
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("etag").and_then(|e| e.as_str()).map(String::from))
-                .unwrap_or_default();
-            Err(RemoteError::Conflict { etag })
-        }
+        412 => Err(RemoteError::Conflict),
         426 => {
             let v = res.json::<serde_json::Value>().await.unwrap_or_default();
             Err(RemoteError::Outdated(

@@ -139,9 +139,7 @@ https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-wor
 ### 5.1 Resources and names
 
 One domain = one worker + one bucket + one secret, named from the domain so
-two setups can never collide and a deploy can never land on a stack from
-the previous design (`doklin-share-*`, which keeps serving its old links
-until its owner deletes it):
+two setups can never collide:
 
 | Domain | Worker | Bucket | Endpoint |
 | --- | --- | --- | --- |

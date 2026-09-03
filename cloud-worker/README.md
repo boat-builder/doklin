@@ -174,8 +174,7 @@ nine steps). By hand, the same steps:
 Names derive from the domain — `notes.example.com` → worker and bucket
 `doklin-notes-example-com`; a free `workers.dev` address with the chosen
 name `sherin-notes` → `doklin-sherin-notes` — so two setups can never
-collide and a new deploy can never land on an old `doklin-share-*` stack.
-The secret is `OWNER_TOKEN`, the R2 binding is `DATA`.
+collide. The secret is `OWNER_TOKEN`, the R2 binding is `DATA`.
 
 ```sh
 mkdir doklin-cloud && cd doklin-cloud

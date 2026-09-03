@@ -88,8 +88,6 @@ export const stemOf = (docPath: string) =>
 
 export const metaFileOf = (docPath: string) => stemOf(docPath) + META_SUFFIX;
 
-export const isMetaPath = (p: string) => p.endsWith(META_SUFFIX);
-
 /* ---------- parse / serialize ---------- */
 
 const isEntry = (value: unknown): value is CommentEntry => {
