@@ -22,7 +22,7 @@
 //   - a $nodeSchema for an ATOM block node whose attributes are the fence's
 //     raw config text and its language. An atom has no editable content, so the document's
 //     text and the board's state can never be confused for one another;
-//   - a $view node view mounting the React frame (StoreEmbed.tsx) inside a
+//   - a $view node view mounting the React frame (StoreEmbedFrame.tsx) inside a
 //     contenteditable=false element that answers stopEvent() true for
 //     everything inside it and ignoreMutation() always. ProseMirror then
 //     neither eats the board's pointer events nor tries to re-parse the DOM
@@ -40,7 +40,7 @@ import type { EditorView, NodeView } from "@milkdown/kit/prose/view";
 import { NodeSelection } from "@milkdown/kit/prose/state";
 import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
 import { clearTextInCurrentBlockCommand } from "@milkdown/kit/preset/commonmark";
-import StoreEmbedFrame, { type StoreEmbedHost } from "./StoreEmbed";
+import StoreEmbedFrame, { type StoreEmbedHost } from "./StoreEmbedFrame";
 import type { BoardSnap } from "./store/board";
 import { embedKind, fenceEmbed, KANBAN_LANG } from "./store/embedConfig";
 import type { ViewKind } from "./store/storeFile";
