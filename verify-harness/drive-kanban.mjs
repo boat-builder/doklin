@@ -306,12 +306,12 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   );
   step("the added column is still there",
     (await page.locator(".dk-col-name").allTextContents()).includes("Blocked"));
-  // A board is not a document: no MD/HTML switch, no Share, nothing that
-  // would try to publish or split a folder.
+  // A board is not a document: no MD/HTML switch, no Publish pill, nothing
+  // that would try to publish or split a folder.
   step(
     "a board tab offers no document chrome",
     (await page.locator(".view-toggle").count()) === 0 &&
-      (await page.locator(".share-wrap").count()) === 0,
+      (await page.locator(".publish-wrap").count()) === 0,
   );
   await page.screenshot({ path: SHOTS + "kanban-board-after.png" });
 }

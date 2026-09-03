@@ -207,7 +207,7 @@ step(
     connectCall.args.name === "docs",
   sawProgress ?? "no progress text seen",
 );
-await page.locator(".share-btn", { hasText: "Done" }).click();
+await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Connect a domain").count()) === 0);
 
 /* 8 — the sidebar dot is green and names the domain */
@@ -269,7 +269,7 @@ await poll(async () => (await tid("publish-url").textContent()) === "notes.examp
 await tid("publish-copy").click();
 await poll(async () => (await page.evaluate(() => navigator.clipboard.readText())) === "https://notes.example.com/team-notes");
 await tid("publish-slug").fill("AB");
-await poll(async () => (await tid("publish-pop").locator(".share-error").count()) === 1);
+await poll(async () => (await tid("publish-pop").locator(".modal-error").count()) === 1);
 step(
   "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it",
   (await tid("publish-rename").isDisabled()) && (await calls("cloud_publish")).length === 2,
@@ -398,7 +398,7 @@ await tid("update-worker").click();
 await poll(async () => (await dialog("Update the worker").count()) === 1);
 const updatePrompt = await tid("update-prompt").textContent();
 const versionLine = await page.locator(".cloud-version-line").textContent();
-await page.locator(".share-btn", { hasText: "Check again" }).click();
+await page.locator(".modal-btn", { hasText: "Check again" }).click();
 await poll(async () => (await calls("cloud_check_worker")).length === 1);
 await poll(async () => (await dialog("Update the worker").textContent()).includes("Up to date"));
 step(
@@ -411,7 +411,7 @@ step(
     (await page.locator(".settings-fab-badge").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "cloud-04-update-card.png" });
-await page.locator(".share-btn", { hasText: "Done" }).click();
+await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Update the worker").count()) === 0);
 
 /* 13 — pending deletes: toast → Review… → the panel lists the paths → confirm */
@@ -504,7 +504,7 @@ await poll(async () => (await page.locator(".cloud-history-rev").count()) === 3)
 const revTitles = await page.locator(".cloud-history-rev-title").allTextContents();
 await page.locator(".cloud-history-rev", { hasText: "Revision 1" }).click();
 await poll(async () => (await page.locator(".cloud-history-pre").textContent()).includes("the first revision"));
-await page.locator(".share-btn", { hasText: "Restore this version" }).click();
+await page.locator(".modal-btn", { hasText: "Restore this version" }).click();
 await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe first revision\n");
 step(
   "history: Current / Revision 2 / Revision 1, the preview, Restore writes the revision as the file",
@@ -565,7 +565,7 @@ step(
   boundOk && (await lastCall("cloud_resume")).args.root === "/docs",
 );
 await page.screenshot({ path: SHOTS + "cloud-06-wizard-bound.png" });
-await page.locator(".share-btn", { hasText: "Done" }).click();
+await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await tid("sidebar-cloud-dot").count()) === 1);
 
 /* 21 — the danger zone: erase needs the domain typed, then the teardown prompt */
@@ -589,7 +589,7 @@ step(
     (await tid("sidebar-cloud-dot").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "cloud-07-teardown.png" });
-await page.locator(".share-btn", { hasText: "Done" }).click();
+await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Cloud").count()) === 0);
 
 /* 22 — join: endpoint + token typed, the bound outcome, download into a picked folder, open it */
@@ -606,7 +606,7 @@ const joinOutcome =
 await tid("download-here").click();
 await poll(async () => (await tid("setup-done").count()) === 1);
 const joinCall = await lastCall("cloud_join");
-await page.locator(".share-btn", { hasText: "Open the folder" }).click();
+await page.locator(".modal-btn", { hasText: "Open the folder" }).click();
 await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Notes");
 step(
   "join: the bound outcome without a marker offers only Download; it downloads into the picked folder and opens it",

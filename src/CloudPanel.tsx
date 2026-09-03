@@ -186,11 +186,11 @@ export default function CloudPanel({
         <pre className="cloud-prompt" data-testid="teardown-prompt">
           {prompt}
         </pre>
-        <div className="share-buttons">
-          <button className="share-btn is-primary" onClick={() => void copy("teardown", prompt)}>
+        <div className="modal-buttons">
+          <button className="modal-btn is-primary" onClick={() => void copy("teardown", prompt)}>
             {copied === "teardown" ? "Copied ✓" : "Copy prompt"}
           </button>
-          <button className="share-btn" onClick={onClose}>
+          <button className="modal-btn" onClick={onClose}>
             Done
           </button>
         </div>
@@ -206,14 +206,14 @@ export default function CloudPanel({
         </p>
         <div className="cloud-doors">
           <button
-            className="share-btn is-primary"
+            className="modal-btn is-primary"
             data-testid="connect-domain"
             disabled={!root}
             onClick={onConnect}
           >
             Connect a domain…
           </button>
-          <button className="share-btn" data-testid="open-from-domain" onClick={onJoin}>
+          <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
             Open a workspace from a domain…
           </button>
         </div>
@@ -227,26 +227,26 @@ export default function CloudPanel({
           On the other Mac: the gear → Cloud… → Open a workspace from a domain…, then paste these
           two. It downloads “{cloud.name}” into a folder of its choosing and stays in step.
         </p>
-        <div className="share-field">
-          <div className="share-field-label">Endpoint</div>
+        <div className="modal-field">
+          <div className="modal-field-label">Endpoint</div>
           <div className="cloud-copy-row">
-            <input className="share-field-input" readOnly value={creds?.endpoint ?? cloud.endpoint} data-testid="creds-endpoint" />
-            <button className="share-btn" onClick={() => void copy("endpoint", creds?.endpoint ?? cloud.endpoint)}>
+            <input className="modal-field-input" readOnly value={creds?.endpoint ?? cloud.endpoint} data-testid="creds-endpoint" />
+            <button className="modal-btn" onClick={() => void copy("endpoint", creds?.endpoint ?? cloud.endpoint)}>
               {copied === "endpoint" ? "Copied ✓" : "Copy"}
             </button>
           </div>
         </div>
-        <div className="share-field">
-          <div className="share-field-label">Token</div>
+        <div className="modal-field">
+          <div className="modal-field-label">Token</div>
           <div className="cloud-copy-row">
             <input
-              className="share-field-input share-field-token"
+              className="modal-field-input modal-field-token"
               readOnly
               value={creds?.token ?? ""}
               placeholder="…"
               data-testid="creds-token"
             />
-            <button className="share-btn" disabled={!creds} onClick={() => creds && void copy("token", creds.token)}>
+            <button className="modal-btn" disabled={!creds} onClick={() => creds && void copy("token", creds.token)}>
               {copied === "token" ? "Copied ✓" : "Copy"}
             </button>
           </div>
@@ -255,7 +255,7 @@ export default function CloudPanel({
           The token is the owner credential for {cloud.domain}: whoever holds it can read, write
           and erase everything there. Share it only with Macs you own.
         </p>
-        {error && <div className="share-error">{error}</div>}
+        {error && <div className="modal-error">{error}</div>}
       </>
     );
   } else if (view === "wipe") {
@@ -268,10 +268,10 @@ export default function CloudPanel({
           free for a new workspace afterwards — and the worker and bucket can then be removed from
           Cloudflare with a prompt you get next.
         </p>
-        <div className="share-field">
-          <div className="share-field-label">Type the domain to confirm</div>
+        <div className="modal-field">
+          <div className="modal-field-label">Type the domain to confirm</div>
           <input
-            className="share-field-input"
+            className="modal-field-input"
             data-testid="wipe-confirm-input"
             value={wipeInput}
             placeholder={cloud.domain}
@@ -282,20 +282,20 @@ export default function CloudPanel({
             onChange={(e) => setWipeInput(e.target.value)}
           />
         </div>
-        <div className="share-buttons">
+        <div className="modal-buttons">
           <button
-            className="share-btn is-danger-solid"
+            className="modal-btn is-danger-solid"
             data-testid="wipe-button"
             disabled={wipeInput.trim().toLowerCase() !== cloud.domain || wiping}
             onClick={() => void wipe()}
           >
             {wiping ? "Erasing…" : `Erase ${cloud.domain}`}
           </button>
-          <button className="share-btn" disabled={wiping} onClick={() => setView("main")}>
+          <button className="modal-btn" disabled={wiping} onClick={() => setView("main")}>
             Cancel
           </button>
         </div>
-        {error && <div className="share-error">{error}</div>}
+        {error && <div className="modal-error">{error}</div>}
       </>
     );
   } else {
@@ -319,7 +319,7 @@ export default function CloudPanel({
           </span>
           <div className="cloud-phase-actions">
             <button
-              className="share-btn"
+              className="modal-btn"
               data-testid="sync-now"
               disabled={paused || cloud.phase === "syncing" || cloud.phase === "revoked"}
               onClick={() => void act(() => cloudSyncNow(cloud.root))}
@@ -327,7 +327,7 @@ export default function CloudPanel({
               Sync now
             </button>
             <button
-              className="share-btn"
+              className="modal-btn"
               data-testid="pause-toggle"
               onClick={() => void act(() => cloudPause(cloud.root, !paused))}
             >
@@ -335,7 +335,7 @@ export default function CloudPanel({
             </button>
           </div>
         </div>
-        {cloud.phase === "error" && cloud.error && <div className="share-error">{cloud.error}</div>}
+        {cloud.phase === "error" && cloud.error && <div className="modal-error">{cloud.error}</div>}
         {cloud.phase === "revoked" && (
           <p className="cloud-hint cloud-warn">
             {cloud.domain} rejected this Mac’s token. If the worker was redeployed with a new
@@ -365,9 +365,9 @@ export default function CloudPanel({
                 )}
               </ul>
             )}
-            <div className="share-buttons">
+            <div className="modal-buttons">
               <button
-                className="share-btn is-primary"
+                className="modal-btn is-primary"
                 data-testid="confirm-deletes"
                 onClick={() => void act(() => cloudConfirmDeletes(cloud.root))}
               >
@@ -388,8 +388,8 @@ export default function CloudPanel({
                 ? "This Mac’s changes are waiting on the update."
                 : "Sync still works; the update brings the worker up to what this app expects."}
             </p>
-            <div className="share-buttons">
-              <button className="share-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
+            <div className="modal-buttons">
+              <button className="modal-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
                 Update the worker…
               </button>
             </div>
@@ -398,8 +398,8 @@ export default function CloudPanel({
         {ahead && (
           <div className="cloud-card" data-testid="worker-ahead">
             <div className="cloud-card-title">The worker is newer than this app (v{cloud.workerVersion})</div>
-            <div className="share-buttons">
-              <button className="share-btn" onClick={() => onOpenExternal(RELEASES_PAGE)}>
+            <div className="modal-buttons">
+              <button className="modal-btn" onClick={() => onOpenExternal(RELEASES_PAGE)}>
                 Get the latest Doklin
               </button>
             </div>
@@ -425,7 +425,7 @@ export default function CloudPanel({
         )}
         <div className="cloud-section-label">Public</div>
         <div className="cloud-actions">
-          <button className="share-btn" data-testid="published-pages" onClick={onOpenPublished}>
+          <button className="modal-btn" data-testid="published-pages" onClick={onOpenPublished}>
             Published pages{pages > 0 ? ` (${pages})` : ""}…
           </button>
           {pages === 0 && <span className="cloud-hint">Nothing is published yet.</span>}
@@ -433,11 +433,11 @@ export default function CloudPanel({
 
         <div className="cloud-section-label">This Mac</div>
         <div className="cloud-actions">
-          <button className="share-btn" data-testid="another-mac" onClick={() => setView("another")}>
+          <button className="modal-btn" data-testid="another-mac" onClick={() => setView("another")}>
             Connect another Mac…
           </button>
           {!behind && (
-            <button className="share-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
+            <button className="modal-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
               Update the worker…
             </button>
           )}
@@ -445,28 +445,28 @@ export default function CloudPanel({
             <span className="cloud-inline-confirm" data-testid="disconnect-confirm">
               <span className="cloud-hint">Stop syncing on this Mac? The folder and the cloud stay.</span>
               <button
-                className="share-btn is-primary"
+                className="modal-btn is-primary"
                 data-testid="disconnect-yes"
                 onClick={() => void act(() => cloudDisconnect(cloud.root))}
               >
                 Disconnect
               </button>
-              <button className="share-btn" onClick={() => setConfirmDisconnect(false)}>
+              <button className="modal-btn" onClick={() => setConfirmDisconnect(false)}>
                 Cancel
               </button>
             </span>
           ) : (
-            <button className="share-btn" data-testid="disconnect" onClick={() => setConfirmDisconnect(true)}>
+            <button className="modal-btn" data-testid="disconnect" onClick={() => setConfirmDisconnect(true)}>
               Disconnect this Mac
             </button>
           )}
         </div>
-        {error && <div className="share-error">{error}</div>}
+        {error && <div className="modal-error">{error}</div>}
 
         <div className="cloud-section-label cloud-danger-label">Danger zone</div>
         <div className="cloud-actions">
           <button
-            className="share-btn is-danger-outline"
+            className="modal-btn is-danger-outline"
             data-testid="wipe-open"
             onClick={() => {
               setWipeInput("");
@@ -483,20 +483,20 @@ export default function CloudPanel({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !wiping) onClose();
       }}
     >
-      <div className="shared-modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="shared-modal-header">
+      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header">
           {view !== "main" && view !== "teardown" && (
             <button className="dictation-back" onClick={() => setView("main")} aria-label="Back">
               <BackIcon />
             </button>
           )}
-          <div className="shared-modal-title">{title}</div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close" disabled={wiping}>
+          <div className="modal-title">{title}</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={wiping}>
             <CloseIcon />
           </button>
         </div>
