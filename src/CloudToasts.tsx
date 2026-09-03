@@ -1,4 +1,4 @@
-// Transient notices from the cloud (docs/cloud-redesign.md §7.2): a merge
+// Transient notices from the cloud (docs/cloud.md §7.2): a merge
 // that left a conflict copy ("Open the copy"), a mass deletion the engine is
 // holding ("Review…"). Stacked bottom-right; a notice with an action stays
 // until it is used or dismissed, a plain one fades on its own.

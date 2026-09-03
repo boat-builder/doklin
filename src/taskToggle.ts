@@ -1,13 +1,12 @@
-// Ticking a task-list checkbox in a document you may comment on but not edit.
+// Ticking a task-list checkbox in a document you may act on but not edit.
 //
 // A GFM checklist (`- [ ] item`) is a list item carrying a `checked` attribute,
 // and Milkdown's list-item node view draws the box and flips that attribute
 // when the box is clicked — but only `if (view.editable)`. That gate is right
 // for a read-only MIRROR (the unfocused split pane, a preview); it is wrong for
-// a shared page's comment-role visitor, who is exactly the person a checklist
-// is usually for. Ticking a box is not rewriting the document: the text is
-// untouched, one bit of state moves, and the worker's save guard checks that
-// claim on its own side (`taskToggleOnly` in share-worker/src/index.js).
+// a read-only view shown to the person a checklist is for. Ticking a box is
+// not rewriting the document: the text is untouched, one bit of state moves.
+// No host opts in today; the plugin is kept for the next one that does.
 //
 // So this plugin re-adds the gesture for read-only sessions the host opts in
 // for. It listens in the CAPTURE phase because the node view's own pointerdown

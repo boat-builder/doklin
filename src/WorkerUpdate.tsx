@@ -1,4 +1,4 @@
-// "Update the worker" — docs/cloud-redesign.md §7.2. One card (v1 → v2), one
+// "Update the worker" — docs/cloud.md §7.2. One card (v1 → v2), one
 // agent prompt that carries no secret (the token, the bucket and the domain
 // all survive a same-name redeploy), and "Check again", which asks the
 // engine to probe the domain; the fresh version arrives through the status

@@ -969,7 +969,7 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
-  // The cloud surfaces (docs/cloud-redesign.md §7.2): the panel, the setup
+  // The cloud surfaces (docs/cloud.md §7.2): the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
   // worker update card, the history panel for one document, and the
   // transient notices. The held mass-deletion's paths ride the event that
@@ -989,7 +989,7 @@ export default function App() {
   const dismissToast = useCallback(
     (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
-  );  // Publishing (docs/cloud-redesign.md §7.2): the folder dialog (a folder,
+  );  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
   // or the root for the whole workspace) and the list of every published
   // page. The pill lives in the tab bar (PublishMenu).
   const [publishFolder, setPublishFolder] = useState<string | null>(null);

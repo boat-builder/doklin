@@ -3,7 +3,7 @@
 // browser can check rendering, live re-render on edit, error cards, theme
 // flips, and the read-only (preview-only) presentation. Not part of the app.
 //
-//   ?ro=1        → read-only mount (the WebApp comment-role way)
+//   ?ro=1        → read-only mount (a preview-only host, like a mirror pane)
 //   ?theme=dark  → sets [data-theme] on <html> before mounting (light/sepia/dark)
 //   ?doc=one     → a single small flowchart (for edit-interaction steps)
 //

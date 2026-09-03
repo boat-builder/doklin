@@ -3,21 +3,20 @@
 One Cloudflare Worker in front of one R2 bucket, serving one workspace's
 cloud at one domain: the private sync API the app's engine speaks, and the
 public pages rendered from the synced files.
-The design, the reasoning and the phased plan live in
-[docs/cloud-redesign.md](../docs/cloud-redesign.md); this file is the
-contract as built.
+The whole system — the engine, this worker, the app's surfaces, the
+decisions — is described in [docs/cloud.md](../docs/cloud.md); this file is
+the worker's contract.
 
-**Where things stand.** Version 2: the sync API, the meta probe, the
-owner's wipe (PR 1), and publishing (PR 4) — the public map served as
-pages rendered from synced blobs: a note, its html rendition behind the
-MD/HTML pill, a folder's table of contents with nested addresses, boards and
-tables derived from a datastore, a card's properties, column widths, links
-between public notes, the root page, a static OG image, and a cache keyed
-by the manifest's etag. The engine that drives this API from the app is
-`src-tauri/src/cloud/` (PR 2); the app's setup wizard, update card and
-teardown step (PR 3) write the prompts that deploy, update and remove a
-worker — `src/cloudPrompts.ts` is their one source, and the deploy steps
-below are the same procedure by hand.
+**What it serves.** Version 2: the sync API, the meta probe and the owner's
+wipe, and publishing — the public map served as pages rendered from synced
+blobs: a note, its html rendition behind the MD/HTML pill, a folder's table
+of contents with nested addresses, boards and tables derived from a
+datastore, a card's properties, column widths, links between public notes,
+the root page, a static OG image, and a cache keyed by the manifest's etag.
+The engine that drives this API from the app is `src-tauri/src/cloud/`; the
+app's setup wizard, update card and teardown step write the prompts that
+deploy, update and remove a worker — `src/cloudPrompts.ts` is their one
+source, and the deploy steps below are the same procedure by hand.
 
 ## The rules it keeps
 
@@ -121,7 +120,7 @@ POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everyt
 Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
 `404 {"error":"not bound"}`.
 
-Reserved for invites (plan §8.1), not built: `POST /api/auth/join`,
+Reserved for invites (docs/cloud.md §8.1), not built: `POST /api/auth/join`,
 `GET/POST/DELETE /api/auth/invites`, `GET/DELETE /api/auth/tokens`.
 
 ### Public (no auth, `GET`/`HEAD` only)
@@ -169,7 +168,8 @@ change. Revocation is deleting the object.
 ## Deploying
 
 The app writes the whole procedure into a prompt for an agent
-(plan §7.4). By hand, the same steps:
+(`buildSetupPrompt` in `src/cloudPrompts.ts`; docs/cloud.md §7.4 walks its
+nine steps). By hand, the same steps:
 
 Names derive from the domain — `notes.example.com` → worker and bucket
 `doklin-notes-example-com`; a free `workers.dev` address with the chosen
@@ -197,6 +197,20 @@ the first TLS certificate can take a minute after deploy.
 secret and the bucket stay. **Teardown:** the app's wipe empties the bucket
 (R2 refuses to delete a non-empty one), then `wrangler delete --name …` and
 `wrangler r2 bucket delete …`.
+
+**The prompts** are these steps written for an agent, with the checks a
+person would skip: setup verifies the names are free before it creates
+anything (a same-name deploy silently replaces a worker), pauses for an
+account that has never enabled R2 or whose zone isn't on Cloudflare yet,
+carries the token to `secret put` — it is the one secret the setup prompt
+holds — and ends with one line back, `ENDPOINT: https://…`. Update carries
+no secret, confirms the worker's name before deploying over it (certain for
+a workers.dev address, a convention to verify for a custom domain) and
+verifies with an unauthenticated `/api/meta` (a `401` means the new worker
+is up), ending with `UPDATED:`. Teardown carries no secret either, runs
+only after the app's wipe, refuses to force a non-empty bucket, and ends
+with `TORN DOWN:`. Every prompt closes with the negative scope: no other
+Cloudflare resource is touched, `wrangler.toml` is committed nowhere.
 
 ## Developing
 

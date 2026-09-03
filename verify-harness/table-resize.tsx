@@ -5,8 +5,8 @@
 // "Reopen" button — so the entity-meta round trip (src/tableWidths.ts) can be
 // played out against a real editor: drag a border, read the records the
 // editor emits, remount from those records, see the columns come back.
-// `?ro=1` mounts it read-only, the way comment-role web sessions do (WebApp
-// passes readOnly the same way). Not part of the app.
+// `?ro=1` mounts it read-only, the way a mirror pane is mounted (App passes
+// readOnly the same way). Not part of the app.
 import { StrictMode, useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
@@ -40,8 +40,8 @@ window.__md = DOC;
 window.__tcols = null;
 window.__reopens = 0;
 
-// ?ro=1 → the WebApp comment-role mount: readOnly Editor inside the same
-// wrapper classes the shared page uses. Read-only views can still resize but
+// ?ro=1 → a read-only mount: a readOnly Editor inside the app's own wrapper
+// classes. Read-only views can still resize but
 // don't own the document, so the harness withholds the sink — exactly what
 // App does for a mirror pane.
 const readOnly = new URLSearchParams(location.search).get("ro") === "1";

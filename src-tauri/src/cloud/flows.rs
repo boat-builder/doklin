@@ -1,5 +1,5 @@
 //! The flows that happen before an engine exists — or instead of one
-//! (docs/cloud-redesign.md §6.8): bind a domain and upload a folder
+//! (docs/cloud.md §6.8): bind a domain and upload a folder
 //! (connect), download a workspace into a fresh folder (join), erase a
 //! domain (wipe). Generic over [`Remote`] so the test matrix runs them
 //! against the in-memory worker; mod.rs wraps each in a command that adds

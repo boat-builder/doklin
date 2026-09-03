@@ -13,7 +13,9 @@ iframe bridge + `CommentsRail` + the sidecar model), the mermaid diagram
 pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
-`PropertiesHeader` + `CardPeek` + the sidebar's board row).
+`PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
+surfaces over a scripted engine (`drive-cloud.mjs`), and the public pages a
+published workspace serves (`drive-public.mjs`, against the real worker).
 
 ```sh
 pnpm install
@@ -126,7 +128,7 @@ node verify-harness/drive-public.mjs       # 8 steps against it, in Chromium: a 
                                            # OFF (cards linking to their pages, a card's
                                            # properties), a diagram hydrating in light and dark,
                                            # the root page's rewritten links and a picture inside
-                                           # the folder share, 404s
+                                           # the published folder, 404s
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.

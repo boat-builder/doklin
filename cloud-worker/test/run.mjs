@@ -683,7 +683,7 @@ await test("public: boards and tables derive from the synced datastore; cards li
   assert.ok(page.text.includes('<span class="dk-col-name">Done</span>'));
   assert.ok(
     page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Ship%20the%20boat">Ship the boat</a>'),
-    "a card inside the folder share links to its nested page, not its own slug",
+    "a card inside the published folder links to its nested page, not its own slug",
   );
   assert.ok(page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Paint%20it">Paint it</a>'));
   assert.ok(page.text.includes('<span class="dk-chip dk-color-green">Ada</span>'), "a chip takes the option's colour");
@@ -693,7 +693,7 @@ await test("public: boards and tables derive from the synced datastore; cards li
   assert.ok(page.text.includes('<a class="dk-row-title" href="/projects/Roadmap/Launch">Launch</a>'));
   assert.ok(page.text.includes("Everything after the board is ordinary prose."));
 
-  // The same kind of store from outside any folder share: its cards have no
+  // The same kind of store from outside any published folder: its cards have no
   // page, so they are titles, not dead links.
   const ideas = await pub("/ideas");
   assert.equal(ideas.status, 200);

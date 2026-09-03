@@ -1,4 +1,4 @@
-// The frontend's half of the cloud contract (docs/cloud-redesign.md §6.7):
+// The frontend's half of the cloud contract (docs/cloud.md §6.7):
 // the types the engine's status event and commands carry, one typed wrapper
 // per command, and the listeners. No `fetch` anywhere — the Rust engine is
 // the only code that holds a token or talks to a domain; this file only

@@ -2,8 +2,8 @@
 //
 // The Rust side (src-tauri/src/dictation.rs) hosts the doklin-stt sidecar and
 // forwards its NDJSON output as `dictation:event`. This module owns everything
-// above that: the persisted config (<app_data_dir>/dictation.json, mirroring
-// share.json), the session state machine (hold-Space walkie-talkie gating),
+// above that: the persisted config (<app_data_dir>/dictation.json, beside
+// cloud.json), the session state machine (hold-Space walkie-talkie gating),
 // the chunk pipeline (STT final → LLM polish → ordered commit into the
 // editor), the guards that keep polish from ever making things worse, the
 // HUD's undo-polish control (revert the last utterance to its raw transcript,

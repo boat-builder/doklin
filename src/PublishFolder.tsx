@@ -1,4 +1,4 @@
-// Publish a folder — docs/cloud-redesign.md §7.2, §11 decision 4: publishing
+// Publish a folder — docs/cloud.md §7.2, §9 decision 4: publishing
 // a folder publishes every note in it, at Notion-style nested addresses
 // under one slug; there is no membership list to keep. The dialog says
 // plainly what will be public, takes the slug, a public title and a

@@ -1,4 +1,4 @@
-// The three agent prompts (docs/cloud-redesign.md §7.4) and the naming rule
+// The three agent prompts (docs/cloud.md §7.4) and the naming rule
 // they share, as pure functions: the setup wizard, the update card and the
 // panel's teardown step render them, and verify-harness/cloudprompts.test.mjs
 // checks that no step is left for the agent to invent. Nothing here touches

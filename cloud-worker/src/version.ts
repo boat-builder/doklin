@@ -1,6 +1,6 @@
 // The worker's API version and feature list, in a file of their own so the
 // app's build can read the integer straight out of the source (a virtual
-// module in vite.config.ts — docs/cloud-redesign.md §7.1) without bundling
+// module in vite.config.ts — docs/cloud.md §7.1) without bundling
 // the worker. Keep the declaration on one line in exactly this shape: the
 // bundle script and the app parse it with /^export const WORKER_VERSION = (\d+);$/m.
 //
@@ -31,7 +31,7 @@ export const WORKER_VERSION = 2;
 // landed, not before.
 export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards"];
 
-// The manifest schema this worker understands (docs/cloud-redesign.md §6.6).
+// The manifest schema this worker understands (docs/cloud.md §6.6).
 // A PUT with a lower version is a plain 400 (nothing older exists); one with a
 // higher version comes from a newer app: the worker answers 426 and the
 // engine pauses with phase `worker-outdated` until the worker is updated.

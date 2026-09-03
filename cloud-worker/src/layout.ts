@@ -1,4 +1,4 @@
-// The bucket's layout (docs/cloud-redesign.md §5.2), the grammar of the ids,
+// The bucket's layout (docs/cloud.md §5.2), the grammar of the ids,
 // hashes, slugs and paths that appear in it, and the caps on what the worker
 // stores.
 //

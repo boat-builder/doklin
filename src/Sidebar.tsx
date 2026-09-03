@@ -122,7 +122,7 @@ type Props = {
   onOpenCloud?: () => void;
   // Version history for a document; offered only in a connected workspace.
   onHistory?: (path: string) => void;
-  // Publishing (docs/cloud-redesign.md §7.2): the folder dialog for a
+  // Publishing (docs/cloud.md §7.2): the folder dialog for a
   // folder (or the root, for the whole workspace), stopping a page, and
   // copying a page's public link. Offered only in a connected workspace.
   onPublishFolder?: (dir: string) => void;

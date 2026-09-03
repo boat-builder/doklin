@@ -126,10 +126,10 @@ export const resizableTableView = $view(
 
 // ---------- Read-only views ----------
 // prosemirror-tables gates every columnResizing interaction on view.editable,
-// but the same editor mounts read-only on shared pages (comment-role web
-// sessions) and column widths are a viewing concern: the commit only touches
-// colwidth attrs, which never reach the serialized markdown, so both hosts'
-// "did the markdown change" save guards see nothing. This companion plugin
+// but the same editor mounts read-only too (the unfocused split pane, a
+// mirror) and column widths are a viewing concern: the commit only touches
+// colwidth attrs, which never reach the serialized markdown, so the host's
+// "did the markdown change" save guard sees nothing. This companion plugin
 // replays the stock plugin's mousemove/mousedown/mouseleave behavior when the
 // view is NOT editable, dispatching through the same plugin key so the stock
 // plugin's state, handle decorations, and resize-cursor styling render the

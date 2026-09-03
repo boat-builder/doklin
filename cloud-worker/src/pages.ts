@@ -183,7 +183,7 @@ function relativeTarget(href: string, fromDir: string): { path: string; fragment
 
 /**
  * A relative link in a public page is rewritten to the target's public URL
- * when the target is public — inside this folder share, on its own slug, or
+ * when the target is public — inside this published folder, on its own slug, or
  * inside another — and dropped to plain text otherwise (the same rule a
  * board's card links follow). Anything that isn't a path is left alone.
  */

@@ -14,10 +14,10 @@
 // of that kind.
 //
 // Two things make a fenced code block the right carrier. It is the one
-// construct every markdown tool agrees to leave alone — GitHub, Obsidian and
-// the shared page's `marked` all show it as a small block that says what it
-// is, so a note with a board in it is never mangled by a tool that has never
-// heard of Doklin. And it is the precedent the app already has: a mermaid
+// construct every markdown tool agrees to leave alone — GitHub and Obsidian
+// show it as a small block that says what it is (a published page, which
+// knows the fence, draws the board), so a note with a board in it is never
+// mangled by a tool that has never heard of Doklin. And it is the precedent the app already has: a mermaid
 // diagram rides a ` ```mermaid ` fence.
 //
 // The config grammar is deliberately the SAME one a card's frontmatter uses

@@ -3,7 +3,7 @@
 // stays one self-contained file. There is no canvas in a Worker and the
 // engine pushes nothing that is not a file, so one image serves the whole
 // site — og:title and og:description carry the words that matter
-// (docs/cloud-redesign.md §11, decision 9). Regenerate from
+// (docs/cloud.md §9, decision 9). Regenerate from
 // src-tauri/icons/icon.png with the same box-downscale + composite the
 // favicons were made with.
 

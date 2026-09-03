@@ -1,12 +1,12 @@
 // The public map, resolved against the synced tree: which slug a file
 // answers at, which folder page covers a path, and the one question every
 // link, board card and table-of-contents row asks — "where is this file
-// public?" (docs/cloud-redesign.md §5.6, Slugs and paths).
+// public?" (docs/cloud.md §5.6, Slugs and paths).
 //
 // A note can be public two ways at once: on its own slug and inside a
 // published folder, at a Notion-style nested URL. Both answer; which one a
-// link prefers depends on where the link is (a page inside a folder share
-// keeps its reader inside the folder).
+// link prefers depends on where the link is (a page inside a published
+// folder keeps its reader inside the folder).
 
 import type { PublicEntry } from "./manifest";
 import { isMarkdownPath, stemOf, type Workspace } from "./workspace";

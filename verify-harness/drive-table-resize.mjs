@@ -199,7 +199,7 @@ const roAfter = await poll(async () => {
   return w[0] > roBefore[0] + 60 ? w : null;
 });
 step(
-  "a read-only view still resizes (shared pages, mirror panes)",
+  "a read-only view still resizes (mirror panes)",
   roAfter[0] > roBefore[0] + 60,
   `${roBefore.join("/")} → ${roAfter.join("/")}`,
 );

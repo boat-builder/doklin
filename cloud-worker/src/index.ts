@@ -1,5 +1,5 @@
 // Doklin cloud worker — one Cloudflare Worker in front of one R2 bucket,
-// serving one workspace's cloud at one domain (docs/cloud-redesign.md §5).
+// serving one workspace's cloud at one domain (docs/cloud.md §5).
 //
 // Two surfaces:
 //   /api/*      the engine's — bearer auth, JSON; see api.ts for the routes

@@ -104,10 +104,12 @@ const cardOf = (head: CardHead): Card => {
 /* ---------- "this board changed" ---------- */
 
 // A board can change without any note changing — someone drags a card, or
-// sync lands a new one. Anything that MIRRORS a board (today: a shared page
-// carrying its snapshot) needs to hear about that, and the folder watcher a
-// live model already arms is the only thing that knows. Listeners are told
-// the folder, not the state: the mirror re-reads whatever it needs.
+// sync lands a new one. Anything that MIRRORS a board without holding its
+// model would need to hear about that, and the folder watcher a live model
+// already arms is the only thing that knows. Listeners are told the folder,
+// not the state: the mirror re-reads whatever it needs. (No mirror exists
+// today — a published page is rendered by the worker from the synced files —
+// so nothing subscribes; the hook stays for the next one.)
 const storeWatchers = new Set<(dir: string) => void>();
 
 /** Hear about content changes to any live store. Returns an unsubscribe. */

@@ -131,8 +131,8 @@ step(
 );
 step("…and does not navigate the page", navigations.length === 0 && popups.length === 0);
 
-// The plain host behavior (the published web shell's, and the editor's own
-// fallback) only hands a browser tab the schemes a page link may carry.
+// The plain host behavior (the editor's own host-less fallback) only hands a
+// browser tab the schemes a page link may carry.
 step(
   "openInBrowserTab drops schemes a note has no business running",
   JSON.stringify(

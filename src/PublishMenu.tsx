@@ -1,4 +1,4 @@
-// The Publish pill in the tab bar and its popover — docs/cloud-redesign.md
+// The Publish pill in the tab bar and its popover — docs/cloud.md
 // §7.2, §7.3. Rendered by App only for a file tab inside the open workspace.
 // Everything it shows derives from the workspace's status (the public map as
 // the engine believes it, this Mac's queued edits included): a note is

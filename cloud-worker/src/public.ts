@@ -1,4 +1,4 @@
-// The public surface — no auth, GET/HEAD only (docs/cloud-redesign.md §5.3,
+// The public surface — no auth, GET/HEAD only (docs/cloud.md §5.3,
 // §5.6). The static assets and the landing page answer without touching the
 // workspace; everything else is resolved against the manifest's public map
 // and rendered from synced blobs (pages.ts), through a cache keyed by the

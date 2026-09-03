@@ -1,4 +1,4 @@
-// The worker's view of the synced tree (docs/cloud-redesign.md §5.6): the
+// The worker's view of the synced tree (docs/cloud.md §5.6): the
 // manifest — one `head` per request for its etag, the body only when the
 // etag moved past the isolate's memoized copy — the files it lists by path
 // and by id, their blobs, the notes under a folder, a folder's datastore and

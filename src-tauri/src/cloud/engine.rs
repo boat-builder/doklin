@@ -1,5 +1,5 @@
 //! The engine: one task per connected workspace, the only code that holds a
-//! token or talks to the worker (docs/cloud-redesign.md §6).
+//! token or talks to the worker (docs/cloud.md §6).
 //!
 //! Bidirectional, state-based sync between a local workspace folder and its
 //! domain. Disk stays the source of truth; the remote side is a manifest

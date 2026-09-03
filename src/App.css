@@ -5355,7 +5355,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
 }
 
-/* ---------- Cloud (docs/cloud-redesign.md §7.2) ----------
+/* ---------- Cloud (docs/cloud.md §7.2) ----------
    The panel, the setup wizard, the update card and the history panel share
    the .shared-modal shell; these are the pieces inside it. The .share-*
    form pieces are the ones every dialog's fields use. */
@@ -6002,7 +6002,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: var(--app-accent);
 }
 
-/* ---- Publishing (docs/cloud-redesign.md §7.2): the pill in the tab bar and
+/* ---- Publishing (docs/cloud.md §7.2): the pill in the tab bar and
    its popover, the sidebar's published dots, the folder dialog, the list. */
 .publish-wrap {
   position: relative;

@@ -1,4 +1,4 @@
-// Version history for a synced document (docs/cloud-redesign.md §6.9).
+// Version history for a synced document (docs/cloud.md §6.9).
 //
 // Every won write of a synced file leaves its previous revision behind as
 // an immutable blob; this panel lists them — the manifest's inline tail plus

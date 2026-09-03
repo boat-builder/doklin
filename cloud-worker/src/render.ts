@@ -1,4 +1,4 @@
-// The renderer — today's, ported (docs/cloud-redesign.md §5.6): marked with
+// The renderer — today's, ported (docs/cloud.md §5.6): marked with
 // the app's own reading CSS, light and dark, boards and tables drawn as
 // static HTML from a datastore's snapshot, a note's properties above its
 // body, column widths from the meta sidecar as a <colgroup>, links between

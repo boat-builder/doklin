@@ -55,10 +55,16 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   (or empty space) to move them.
 - **Autosave** — real files save back to the same `.md`; drafts save to app
   storage. Nothing is lost on tab switch or quit.
-- **Cloud** — being rebuilt from scratch. The previous share/sync backend is
-  gone; what replaces it is one domain per workspace, whole-workspace sync,
-  and publishing as a flag on a synced file. The design and the phased plan:
-  [docs/cloud-redesign.md](docs/cloud-redesign.md).
+- **Cloud** — connect a folder to a domain of your own and it is backed up and
+  kept in sync on every Mac that opens it, with version history for every
+  note. The cloud is one Cloudflare Worker and one bucket on your own account,
+  set up by an agent from a prompt the app writes — no dashboard, no
+  terminal, no account with anyone else. Publishing is one click: a note, a
+  folder, or the whole workspace gets an address on your domain, rendered
+  from the synced files — boards, properties, diagrams, table widths and html
+  renditions included — read-only and `noindex`, exactly as fresh as the
+  sync. Stop publishing and the link stops working. How it is built:
+  [docs/cloud.md](docs/cloud.md).
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin path/to/file.md`. A second launch talks to the running app: a
@@ -118,14 +124,17 @@ Deeper docs live in dedicated files to keep this page focused:
   notes and deferred follow-ups for the tabs + drafts system.
 - **[docs/datastores-kanban.md](docs/datastores-kanban.md)** — the design for
   structured data: *datastores* (a folder of markdown cards with frontmatter
-  plus a `store.jsonl` definition), the kanban view as a tab and as a
-  kanban and table views as a tab and as a ` ```kanban ` / ` ```table `
-  embed in notes, how it rides sync / history / publishing, and the phased
+  plus a `store.jsonl` definition), kanban and table views as a tab and as
+  a ` ```kanban ` / ` ```table ` embed in notes, how it rides sync / history
+  / publishing, and the phased
   plan. All four phases are built: a board from a folder, a board embedded
   in a note, the pure snapshot a published page draws from, and the second
   view with properties on any note.
-- **[docs/cloud-redesign.md](docs/cloud-redesign.md)** — the design and
-  phased plan for the cloud rewrite: one domain per workspace, a single
-  Rust engine as the only writer, publishing as a flag in the workspace
-  manifest with pages rendered from synced files, agent + wrangler setup,
-  and what the old share/sync/backend code is replaced by.
+- **[docs/cloud.md](docs/cloud.md)** — the cloud as built: one domain per
+  workspace, a single Rust engine as the only writer, publishing as a flag
+  in the workspace manifest with pages rendered from synced files, the
+  agent + wrangler setup, the room left for invites and locking, and the
+  decisions behind each.
+- **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
+  contract: the bucket, the manifest, the sync API, the public routes, and
+  deploying by hand.

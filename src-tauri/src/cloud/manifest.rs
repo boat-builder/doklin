@@ -1,5 +1,5 @@
 //! The workspace manifest — the one mutable object in the bucket — as the
-//! engine and the worker both see it (docs/cloud-redesign.md §6.6). These
+//! engine and the worker both see it (docs/cloud.md §6.6). These
 //! are the wire types the worker shape-checks on every `PUT`
 //! (cloud-worker/src/manifest.ts); the caps and grammars below mirror
 //! cloud-worker/src/layout.ts so the engine never builds a manifest the

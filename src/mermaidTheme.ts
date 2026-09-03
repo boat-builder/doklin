@@ -5,7 +5,7 @@
 // Written for two consumers with different CSS around them — the editor
 // (App.css --app-* tokens) and a public page's static reading view (its own
 // --bg/--text/--link tokens; the cloud worker picks this up again, see
-// docs/cloud-redesign.md) — so tokens are read through a fallback chain that
+// docs/cloud.md) — so tokens are read through a fallback chain that
 // ends at the body's computed colors: any page with sane text/background
 // gets a sane palette.
 

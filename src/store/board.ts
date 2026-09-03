@@ -299,7 +299,7 @@ export type BoardChip = { text: string; color?: OptionColor };
 export type BoardCardSnap = {
   title: string;
   chips?: BoardChip[];
-  /** The card's own page id, when the card is a member of the same folder share. */
+  /** The card's own public address, when the card is inside a published folder (the worker fills it in). */
   page?: string;
 };
 
@@ -328,7 +328,7 @@ export type TableCellSnap = BoardChip[];
 
 export type TableRowSnap = {
   title: string;
-  /** The card's own page id, when the card is a member of the same folder share. */
+  /** The card's own public address, when the card is inside a published folder (the worker fills it in). */
   page?: string;
   /** One per shown field, in the header's order. */
   cells: TableCellSnap[];
@@ -369,9 +369,9 @@ export const clipText = (s: string) =>
 
 /**
  * How a fence and its snapshot find each other: the fence's own text, with
- * line endings and trailing whitespace normalized away. The share worker
- * normalizes the same way (share-worker/src/index.js, `fenceKey`) — the two
- * must agree or a published board silently falls back to its code block.
+ * line endings and trailing whitespace normalized away. The cloud worker
+ * imports this same function to match a note's fences to the boards it drew
+ * (cloud-worker/src/pages.ts, render.ts), so there is one normalization.
  */
 export const fenceKeyOf = (text: string): string =>
   text.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
@@ -383,7 +383,7 @@ export const snapKind = (snap: BoardSnap): ViewKind =>
 /**
  * The key a fence and its snapshot meet under. The same config in two
  * languages is two different views of the same store, so the language is
- * part of the key — the share worker keys the same way (`snapKey`).
+ * part of the key — the worker keys with this same function.
  */
 export const snapKeyOf = (kind: ViewKind, fence: string): string =>
   `${kind}\u0000${fenceKeyOf(fence)}`;

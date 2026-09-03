@@ -153,7 +153,7 @@ const boardHref = await page.locator("main.doc a", { hasText: "board" }).getAttr
 const scratchLinks = await page.locator("main.doc a", { hasText: "scratch note" }).count();
 const picSrc = await page.locator("main.doc img").first().getAttribute("src");
 step(
-  "the root page: Home at /, links rewritten to public addresses, an unpublished target left as text, a picture inside the folder share resolves",
+  "the root page: Home at /, links rewritten to public addresses, an unpublished target left as text, a picture inside the published folder resolves",
   (await page.locator("main.doc h1").textContent()) === "Home" &&
     planHref === "/plan" &&
     boardHref === "/projects/board" &&

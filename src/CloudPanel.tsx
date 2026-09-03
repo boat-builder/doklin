@@ -1,4 +1,4 @@
-// The Cloud panel — docs/cloud-redesign.md §7.2 (gear → Cloud…, and the dot
+// The Cloud panel — docs/cloud.md §7.2 (gear → Cloud…, and the dot
 // beside the workspace name). A view over App-owned live state: the status
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.

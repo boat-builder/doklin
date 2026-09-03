@@ -1,4 +1,4 @@
-//! The two files that say what is connected (docs/cloud-redesign.md §6.3):
+//! The two files that say what is connected (docs/cloud.md §6.3):
 //!
 //! `<app_data_dir>/cloud.json` — this machine's device identity and, per
 //! connected workspace, the folder, the domain, the endpoint, the workspace

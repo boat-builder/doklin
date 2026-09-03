@@ -17,7 +17,7 @@
 //     getting the caret *into* link text — same as arrowing in.
 //
 // Where a followed link goes is the host's business (the desktop app opens the
-// browser or another tab; the published web shell opens a browser tab), so
+// browser or another tab; a host-less mount opens a browser tab), so
 // this plugin only decides *whether* a click is a follow and hands the raw
 // href out. One exception stays here: an in-document `#anchor` never leaves
 // the editor — it scrolls to its heading, like Notion jumping to a block.

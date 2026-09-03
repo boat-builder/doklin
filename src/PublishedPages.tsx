@@ -1,8 +1,8 @@
-// Every published page of the workspace — docs/cloud-redesign.md §7.2:
+// Every published page of the workspace — docs/cloud.md §7.2:
 // folders above files (the engine's order), path · slug · by / when, copy /
 // open / stop, "Use as home page", and a "file missing" flag on an entry
 // whose file is gone (the page 404s until the file returns or the entry is
-// stopped — stopping is explicit, §11 decision 7). Reached from the Cloud
+// stopped — stopping is explicit, §9 decision 7). Reached from the Cloud
 // panel and from the Publish popover.
 
 import { useCallback, useEffect, useState } from "react";
