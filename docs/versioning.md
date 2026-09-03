@@ -311,53 +311,72 @@ Past its horizon a store drops the rest of the ladder. Nothing else about
 retention is configurable — the ladder's shape is a design decision, not a
 preference.
 
-The thinner runs where `gc_blobs` runs, every twentieth cycle
-(`GC_EVERY_N_CYCLES`), and it replaces that function's reachability
-predicate: from *referenced by the current hash, the inline hist or the
-archive* to *referenced by any retained snapshot*. That is the one-line
-heart of the change.
+The thinner is one pure function — *which snapshots survive at this
+instant* — followed by a sweep that deletes the dropped snapshot files and
+then every blob no retained snapshot references (with an hour's grace, so a
+capture in flight is never collected). It runs against the local store on
+its own clock and against the cloud store through the engine (§6.3). The
+sync's own blob store and its `gc_blobs` are not touched: the version store
+is a separate thing with a separate reachability rule, which is what keeps
+a device on an older build from ever deleting a blob a snapshot needs.
+
+*As planned* ([versioning-plan.md](versioning-plan.md) §2, decisions 3–4):
+the sync GC keeps its predicate; the version store has its own.
 
 ### 6.3 The stores
 
 Local, per workspace, outside the folder:
 
 ```
-<app_data>/versions/<wsId>/
-  blobs/<hash>              zstd-compressed content, keyed by sha256 (global dedupe)
-  snapshots/<ts>.json.zst   a retained manifest
-  index.json                the retained set, horizons, thinner bookkeeping
+<app_data>/versions/<key>/
+  blobs/<hh>/<hash>.gz      gzip of the content, keyed by its full sha256 (global dedupe)
+  snapshots/<ts>.json.gz    a retained snapshot: path → {hash, size, mtime}
+  index.json                the retained set, the horizon, sweep bookkeeping
 ```
 
-Cloud, in the existing bucket, alongside what is already there:
+`key` is derived from the folder's path (a prefix of the sha256 of its
+canonical path), so no marker is written into a folder that is not
+connected; the drafts directory is a root of its own under the key
+`drafts`. A snapshot is keyed by *path*, not by the sync's file ids — it is
+produced by scanning the disk, which is what lets it exist for a folder no
+engine has ever seen. Renames are followed by content: a path that vanished
+and a path that appeared with the same hash between two snapshots is one
+file, the rule the engine's own scan already uses.
+
+Cloud, in the existing bucket, under a prefix of its own:
 
 ```
-blobs/<fileId>/<hash>       unchanged — already immutable and content-addressed
-snapshots/<ts>.json         a retained manifest
-snapshots/index.json        the retained set and the cloud horizon
+versions/index.json                          the retained set and the cloud horizon — CAS by etag
+versions/snapshots/<ts>-<deviceId>.json.gz   a snapshot, bytes as the device wrote it
+versions/blobs/<hash>                        gzip of the content, keyed by its full sha256
 ```
 
-The local store keys blobs by hash alone, which dedupes across files (copies,
-templates, cards from one board) and needs no per-file API. The cloud keeps
-`blobs/<fid>/<hash>` exactly as it is, so `list_blobs`, `delete_blob` and the
-GC pass keep working unchanged. A snapshot entry carries both fid and hash,
-so it resolves against either layout.
+The cloud store is a mirror of the local one, byte for byte, written by the
+engine (the only code that holds a token) after each cycle and hourly. It
+does **not** point at the sync's `blobs/<fileId>/<hash>`: that would let a
+device still running an older build — whose `gc_blobs` knows nothing about
+snapshots — delete a blob a snapshot references. The second copy of the
+current content costs a few megabytes (§7) and buys freedom from every
+mixed-version hazard. Several devices mirror into the same prefix; the
+index is CAS'd like the manifest, snapshot ids carry the device, and a
+snapshot whose content another device already captured is skipped by
+digest.
 
-Two worker routes are needed, in the shape of the ones beside them:
-`GET/PUT /api/snapshots/<ts>` and `GET/PUT /api/snapshots/index`, owner and
-member, with the same size caps and validation discipline as the manifest
-route. Both are additions, so `WORKER_VERSION` goes to 3 and the feature
-name `versions` joins `WORKER_FEATURES` once the behaviour exists — an old
-worker keeps syncing and simply has no cloud history, which the app reports
-rather than treating as an error.
+The routes are `GET/PUT /api/versions/index`, `GET/PUT/DELETE
+/api/versions/snapshots/<id>`, `GET/PUT/DELETE /api/versions/blobs/<hash>`
+and a paged blob listing, owner and member, with the same caps and
+validation discipline as the manifest route. All additions, so
+`WORKER_VERSION` goes to 3 and `versions` joins `WORKER_FEATURES` once the
+behaviour exists — an old worker keeps syncing and simply has no cloud
+history, which the app reports (the existing update badge) rather than
+treating as an error.
 
-**Workspace identity without a cloud.** The local store is keyed by `wsId`,
-which today is minted at bind and recorded in `<root>/.doklin/cloud.json`
-([cloud.md](cloud.md) §6.3). For local-first history the marker has to become
-the folder's identity whether or not it is connected: mint a `wsId` at first
-capture, write the marker with `{wsId}` and no domain, and let `cloud_connect`
-adopt the existing id rather than mint a new one. This also means a folder
-moved or restored from a backup finds its local history again, and it is the
-same mechanism that already makes *resume in place* work.
+*As planned* ([versioning-plan.md](versioning-plan.md) §2, decisions 1, 2,
+4, 5, 7): the store key is the path, not a `wsId`; snapshots carry no fids;
+the cloud prefix is independent; gzip rather than zstd, because `flate2` is
+already in the build and zstd is not; a moved folder starts a fresh store
+and the old one is listed as orphaned in Settings. Adopting a connected
+folder's marker `wsId` as the key is a later refinement.
 
 ### 6.4 What history is, once snapshots exist
 
@@ -365,8 +384,8 @@ Every surface is a read over the retained snapshots — no new records, no
 second index to keep agreeing with the first.
 
 - **A file's versions** — walk snapshots newest-first, emit an entry each
-  time this fid's hash differs from the next-older one. Renames come along
-  free, because the fid is stable across a path change.
+  time the path's hash differs from the next-older one, following a rename
+  backwards where a vanished path and an appeared path share a hash.
 - **A diff between two versions** — two blobs and `diffy`, which the engine
   already depends on for the three-way merge.
 - **The workspace as it was** — one snapshot, diffed against the current
@@ -393,9 +412,14 @@ second index to keep agreeing with the first.
 - `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX`, `MAX_HISTORY_ENTRIES` and
   `MAX_HISTORY_BYTES` all retire.
 
-`MANIFEST_VERSION` goes to 3. The migration is one-way and needs no
-conversion: an old manifest's `hist` is read once to seed the first
-snapshots (so nothing already recorded is lost), and thereafter ignored.
+`MANIFEST_VERSION` does not move: an empty `hist` is a valid v2 manifest
+to every worker and app that exists, so the change is invisible on the
+wire and forces no worker update. Nothing is seeded from the old `hist`
+either — it is retired last ([versioning-plan.md](versioning-plan.md)
+phase 6), by which time the snapshots reach far past the hours it ever
+held; until then the History panel keeps reading it beside the store.
+
+*As planned* (plan §2, decision 8).
 
 ---
 
@@ -453,20 +477,14 @@ today, the frontend's entire model.
 
 ## 9. Build order
 
-1. **The local store, capture and the thinner.** Snapshots, the cadence rule,
-   the ladder, blob dedupe, the `wsId` marker change. History works locally
-   with no cloud and no worker change. This step alone takes the reach from
-   "an afternoon, if connected" to "90 days, always".
-2. **`hist` out of the manifest.** Seed the first snapshots from the existing
-   `hist`, retire the archive, bump `MANIFEST_VERSION`. Shrinks the hot path.
-3. **Cloud replication.** The two worker routes, `WORKER_VERSION` 3, the
-   cloud horizon, append-only GC against retained snapshots.
-4. **The surfaces.** Ungate the file panel, then workspace history, deleted
-   files, and diffs.
-5. **Export.**
-
-Steps 1 and 2 are the substance; 3 extends the horizon past what a laptop
-should hold; 4 and 5 are where the promise becomes visible to the user.
+Six phases, each releasable on its own, specified for hand-over in
+[versioning-plan.md](versioning-plan.md): the local store, capture and the
+thinner (history starts accruing, no UI); file history ungated; the cloud
+mirror; workspace history and deleted files; settings and export; and,
+last, retiring the manifest's `hist`. Phase 1 alone takes the reach from
+"an afternoon, if connected" to "90 days, always"; the cloud mirror extends
+it past what a laptop should hold; the surfaces are where the promise
+becomes visible.
 
 ---
 
