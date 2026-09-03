@@ -121,6 +121,11 @@ The spec's §5 invariants, restated as things a reviewer can check in a diff:
   `<app_data>/versions/<key>/` and nothing else.
 - A restore is an ordinary write through the existing commands, so the edit
   bus, the watcher, the open tabs and the cloud engine all see it as an edit.
+- A restore never branches. It captures the state it is leaving
+  (`pre-restore`) before it writes, writes through the ordinary path, then
+  captures the state it made (`restore`, naming its source in
+  `restoredFrom`). The timeline stays a sequence of states; the only way to
+  fork is *Make a copy*, which is a second file.
 
 ---
 
@@ -185,7 +190,7 @@ records the display path either way.
   "lastSweepMs": 1757000000000,
   "snapshots": [
     { "ts": 1757000000000, "reason": "seed", "files": 512, "bytes": 2100000,
-      "digest": "<sha256 hex>", "pinned": false, "label": null }
+      "digest": "<sha256 hex>", "pinned": false, "label": null, "restoredFrom": null }
   ]
 }
 ```
@@ -206,13 +211,20 @@ A snapshot file, before gzip:
 {
   "version": 1,
   "ts": 1757000000000,
-  "reason": "interval" | "closing" | "seed" | "restore" | "manual",
+  "reason": "interval" | "closing" | "seed" | "pre-restore" | "restore" | "manual",
+  "restoredFrom": null,
   "by": "Sherin's MacBook Pro",
   "files": {
     "Projects/plan.md": { "h": "<sha256 hex>", "s": 4310, "m": 1757000000000 }
   }
 }
 ```
+
+`pre-restore` is the state a restore is about to leave; `restore` the state
+it made, with `restoredFrom` the `ts` of the snapshot the content came from
+(§5.4, §7.1). Both are forced captures — they bypass the cadence — and the
+first is digest-deduped like any other, so a restore from a fully captured
+state adds one row, not two.
 
 `by` is the device name from `cloud.json` (`cloud::device_display_name`
 through the cloud manager's `DeviceIdentity`; the versions manager reads
@@ -348,6 +360,7 @@ export type VersionsStatus = {
 };
 export type SnapshotMeta = {
   ts: number; reason: string; files: number; bytes: number; pinned: boolean; label: string | null;
+  restoredFrom: number | null;
 };
 // event "versions-status": VersionsStatus[]  (the whole model, on every change)
 ```
@@ -453,7 +466,7 @@ the hash differs from the last emitted:
 ```ts
 export type FileVersion = {
   ts: number; hash: string; size: number; by: string; reason: string;
-  label: string | null; pinned: boolean;
+  label: string | null; pinned: boolean; restoredFrom: number | null;
   path: string;        // the path as of that snapshot (differs across renames)
   source: "local" | "cloud";
   current: boolean;    // equals the file on disk right now
@@ -515,10 +528,30 @@ The design and its reasons are §12; this is what phase 2 builds of it.
   for `versions_diff` against the next-newer version (or the current file
   for the newest), rendered as a line diff with `+`/`-` classes. A rendered
   block-level diff inside the editor is the §12 refinement, not this phase.
-- **Restore** and **Make a copy** — both remain plain `write_file`s (the
-  existing `restore` / `saveAsNew` logic moves out of `HistoryPanel.tsx`
-  unchanged). A restore leaves the preview and reloads the live document;
-  the rail shows the restore as the newest row.
+- **Restore** — `versions_restore_file(root, path, hash)`, a Rust command
+  that does three things in order: capture `pre-restore` (forced, bypassing
+  the cadence, digest-deduped — the preview already flushed autosave, so
+  this is the user's latest text), write the blob's bytes through a shared
+  `fn write_workspace_file(app, path, bytes)` that does what `write_file`
+  does (stat, write, refresh the watcher store, `edits::touched`), then
+  capture `restore` with `restoredFrom` set to the source version's `ts`.
+  It answers `{preRestoreTs, preRestoreHash}` and emits `versions-applied
+  {root, paths}`, which `App.tsx` handles like `cloud-applied` (refresh the
+  tree, reload open tabs). The preview closes, the live document reloads,
+  and the rail's newest row reads "restored from Mon 1 Sep 09:10". A toast
+  says "Restored the version from 1 Sep — *Undo*", and Undo is
+  `versions_restore_file(root, path, preRestoreHash)` — the same command,
+  so undoing a restore is itself a restore (the app's undo-toast pattern
+  from stop-publishing). ⌘Z is not promised for a restore; the timeline is
+  the undo. Never two calls from the frontend (a capture, then a
+  `write_file`) — the cadence could capture between them.
+- **Make a copy** — a plain `write_file` of the version's text to
+  `<stem> (version 1 Sep 09.10)<ext>` beside the original (the naming of
+  `merge.rs`'s conflict copies: a dot in the time, never a colon), the
+  numbered-suffix loop from `HistoryPanel.tsx` kept for collisions, then
+  `onOpenFile`. The copy's own history begins at its creation; the
+  original's is untouched. This is the only way a history forks, and it
+  forks into a second file, never a branch.
 - **Entry points** — the sidebar's file menu (`Version history…`, no cloud
   condition), the tab's context menu, the drafts panel's row menu (the
   draft's root is the drafts store), and `⌘⌥H`, which toggles the rail for
@@ -529,7 +562,12 @@ The design and its reasons are §12; this is what phase 2 builds of it.
 Rust (`history.rs`): `versions_follow_a_rename_backwards`,
 `a_recreated_path_starts_a_new_history`, `equal_hashes_collapse_to_one_entry`,
 `current_marks_the_version_on_disk`, `diff_is_unified_and_capped`,
-`cloud_prefix_matches_dedupe_against_local`.
+`cloud_prefix_matches_dedupe_against_local`; and for the restore:
+`restore_captures_the_state_it_leaves_then_the_state_it_made`,
+`restore_names_its_source`,
+`restore_with_nothing_unsaved_dedupes_the_pre_restore_capture`,
+`undo_of_a_restore_is_a_restore_of_the_pre_restore_hash`,
+`restore_never_removes_a_snapshot`.
 
 Harness: a new `verify-harness/drive-versions.mjs` over `cloud.html` (it
 already boots the real `<App/>` with a `/docs` workspace). Extend the IPC
@@ -539,8 +577,10 @@ present with **no** cloud status; the rail's day groups and an expanded
 older day; selecting a version swaps the document area for a read-only
 preview with the banner (and the live editor's text is untouched
 afterwards); `Esc` returns to now; *Show changes* renders a `+` line;
-*Restore* issues `write_file` with the version's text and the rail gains a
-row; *Make a copy* opens a tab; *Name this version* calls
+*Restore* calls `versions_restore_file`, the rail gains a row reading
+"restored from …", and the toast's *Undo* calls it again with the
+pre-restore hash; *Make a copy* opens a tab named with the version's date;
+*Name this version* calls
 `versions_capture_now` with the label and the row shows it; the tab menu
 and `⌘⌥H` open the rail; a draft's history opens; with a cloud status set, a
 cloud-only revision appears with its badge and reads through
@@ -682,22 +722,23 @@ are reads plus ordinary writes.
 versions_snapshot_diff(root, ts)  -> { changed: [{path, thenHash, nowHash}], added: [path], missing: [path] }
                                      "added" is on disk now and not then; "missing" the reverse
 versions_restore_snapshot(root, ts, paths: string[] | null)
-                                  -> { written: number, trashed: number, snapshotTs: number }
+                                  -> { written: number, trashed: number, preRestoreTs: number }
 versions_deleted(root)            -> [{ path, lastSeenMs, hash, size }]
-versions_restore_file(root, path, hash) -> void
+versions_restore_file             phase 2's command, reused for a deleted file (it recreates
+                                  the parent directories)
 ```
 
-`versions_restore_snapshot` first captures a `restore` snapshot (forced,
-bypassing the cadence, digest-deduped as usual) so the restore is itself
-undoable; then, for each path in scope, writes the blob's bytes through the
-same code `write_file` runs (a shared `fn write_workspace_file(app, path,
-bytes)` that stats, writes, refreshes the watcher store and calls
-`edits::touched`), creating parent directories; trashes files that are on
-disk now and were not then through `trash_path_impl` (`macOS-only`, as it
-is); then emits `versions-applied {root, paths}`. `App.tsx` handles
-`versions-applied` with the same handler as `cloud-applied` (refresh the
-tree, reload open tabs). The cloud engine's mass-delete valve still applies
-to a restore that trashes many files — that is correct and stays.
+`versions_restore_snapshot` is the file restore's shape at workspace scale:
+capture `pre-restore` first (forced, digest-deduped) so the restore is
+itself undoable; then, for each path in scope, write the blob's bytes
+through phase 2's `write_workspace_file`, creating parent directories;
+trash files that are on disk now and were not then through
+`trash_path_impl` (`macOS-only`, as it is); then capture `restore` with
+`restoredFrom` = the chosen snapshot's `ts`, and emit `versions-applied
+{root, paths}`. The timeline then shows both rows, and the toast's *Undo*
+is `versions_restore_snapshot(root, preRestoreTs, the same paths)`. The
+cloud engine's mass-delete valve still applies to a restore that trashes
+many files — that is correct and stays.
 
 `versions_deleted` walks retained snapshots newest → oldest and reports paths
 present in some snapshot, absent from the newest, and not on disk;
@@ -888,7 +929,7 @@ versions_diff(root, fromHash, toHash)                -> string
 versions_snapshot_diff(root, ts)                     -> SnapshotDiff
 versions_restore_snapshot(root, ts, paths | null)    -> RestoreReport
 versions_deleted(root)                               -> DeletedFile[]
-versions_restore_file(root, path, hash)
+versions_restore_file(root, path, hash)              -> {preRestoreTs, preRestoreHash}
 versions_set_horizon(root, days | null)
 versions_set_cloud_horizon(root, days | null)
 versions_stores()                                    -> StoreInfo[]
@@ -998,6 +1039,19 @@ rejects.
    ("Every change since 3 Jun"), and the Cloud panel says where it lives.
    The promise the user asked for — *you cannot lose this* — is a sentence
    they can read, not a feature they have to find.
+8. **A restore never branches.** The timeline is a sequence of states, not
+   a graph of edits: an old version cannot be edited in place (the preview
+   is read-only), so restoring it writes it as the *new* current state and
+   everything between stays as older rows — after Monday is restored on
+   Thursday, Tuesday and Wednesday are not on an abandoned branch; they are
+   just older. Both the state being left and the state being made are
+   captured, the second naming its source, and the toast's *Undo* is
+   another restore. The only fork is *Make a copy*, and it forks into a
+   second file. This is what every mainstream product does, for the same
+   reason: people ask "what did this look like on Tuesday", never "which
+   branch". One consequence to say out loud: the state a restore leaves
+   follows the ladder like any other row, so *Name this version* is how a
+   moment is kept forever, and the restore confirm says so in a line.
 
 ### 12.4 What was rejected
 

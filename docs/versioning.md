@@ -213,6 +213,11 @@ These are the invariants. If a change breaks one, the change is wrong.
    History is never edited, reordered or truncated by a restore — and a
    snapshot is captured immediately *before* any restore, so the restore
    itself is undoable.
+   *As planned* ([versioning-plan.md](versioning-plan.md) §12.3, item 8): a
+   second snapshot is captured after the write, naming its source
+   (`restoredFrom`), so the timeline reads "restored from 1 Sep"; the
+   toast's *Undo* is itself a restore; the timeline is a sequence of states,
+   never a graph — the only fork is *Make a copy*, a second file.
 4. **History does not require the cloud.** The local store is the primary;
    the cloud store is replication with a longer horizon. Every history
    surface works with no domain connected.
