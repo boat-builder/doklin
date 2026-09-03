@@ -1,4 +1,4 @@
-// The renderer — today's, ported (docs/cloud.md §5.6): marked with
+// The renderer (docs/cloud.md §5.6): marked with
 // the app's own reading CSS, light and dark, boards and tables drawn as
 // static HTML from a datastore's snapshot, a note's properties above its
 // body, column widths from the meta sidecar as a <colgroup>, links between
@@ -81,7 +81,7 @@ const boardFoot = (unread: number): string =>
     : "";
 
 /** One board, as the page shows it — class for class the app's own markup, with nothing interactive. */
-export function boardHtml(board: KanbanSnap, unread = 0): string {
+function boardHtml(board: KanbanSnap, unread = 0): string {
   const total = board.columns.reduce((n, c) => n + c.cards.length + (c.more ?? 0), 0) + unread;
   const cols = board.columns
     .map((col) => {
@@ -113,7 +113,7 @@ export function boardHtml(board: KanbanSnap, unread = 0): string {
 }
 
 /** One table, as the page shows it. Its own classes, not a markdown table's: a picture of a store, not a table someone wrote. */
-export function tableHtml(board: TableSnap, unread = 0): string {
+function tableHtml(board: TableSnap, unread = 0): string {
   const total = board.rows.length + (board.more ?? 0) + unread;
   const head = `<tr><th class="dk-th is-title">Title</th>${board.fields
     .map((f) => `<th class="dk-th">${escapeHtml(f)}</th>`)
@@ -290,7 +290,7 @@ export type PageMeta = {
 const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
 
-export function headHtml(m: PageMeta): string {
+function headHtml(m: PageMeta): string {
   const origin = new URL(m.pageUrl).origin;
   return `<meta charset="utf-8">
 ${FAVICON_LINKS}
@@ -313,7 +313,7 @@ ${FAVICON_LINKS}
 export type Crumb = { href: string; label: string };
 
 /** "← Folder", pinned top-left on a note reached through a published folder. */
-export const crumbHtml = (crumb: Crumb | null): string =>
+const crumbHtml = (crumb: Crumb | null): string =>
   crumb
     ? `<a class="home-crumb" href="${escapeHtml(crumb.href)}"><span class="home-crumb-arrow">←</span><span class="home-crumb-label">${escapeHtml(crumb.label)}</span></a>`
     : "";
@@ -323,7 +323,7 @@ export const crumbHtml = (crumb: Crumb | null): string =>
  * default (the polished, human-facing document) at the page's own URL, the
  * markdown at ?v=md.
  */
-export function pillHtml(pageUrl: string, active: "md" | "html"): string {
+function pillHtml(pageUrl: string, active: "md" | "html"): string {
   const md = `${pageUrl}${pageUrl.includes("?") ? "&" : "?"}v=md`;
   return `<div class="page-top"><nav class="view-pill" aria-label="Document version">
 <a class="view-seg ${active === "md" ? "is-active" : ""}" href="${escapeHtml(md)}">MD</a>
@@ -391,7 +391,7 @@ export type TocItem = { title: string; path: string; href: string };
 type TocNode = { dirs: Map<string, TocNode>; files: TocItem[] };
 
 /** Pages per folder before the table of contents becomes a tree instead of cards. */
-export const TOC_CARDS_MAX = 8;
+const TOC_CARDS_MAX = 8;
 
 function buildTree(items: TocItem[]): TocNode {
   const root: TocNode = { dirs: new Map(), files: [] };
@@ -515,7 +515,7 @@ ${footerHtml(p.meta.hostname)}
  * A source that doesn't parse keeps its plain code block, and without
  * JavaScript the page still shows every source.
  */
-export function mermaidHydrator(tag: string): string {
+function mermaidHydrator(tag: string): string {
   const moduleUrl = `/__web/${tag}/mermaid.js`;
   return `<script type="module">
 (async () => {
@@ -562,7 +562,7 @@ export function mermaidHydrator(tag: string): string {
 // The reading page. The same tokens the app's reading view uses, so a
 // published note and the note in the app read as one document; light and
 // dark from the visitor's own preference.
-export const PAGE_CSS = `
+const PAGE_CSS = `
 :root {
   --bg: #ffffff;
   --text: #37352f;
@@ -1085,7 +1085,7 @@ main.toc { max-width: 680px; }
 `;
 
 /* The framed rendition: it owns the whole viewport; only the pill and the crumb float above it. */
-export const FRAME_CSS = `
+const FRAME_CSS = `
 html, body { height: 100%; overflow: hidden; }
 .raw-frame {
   position: fixed;

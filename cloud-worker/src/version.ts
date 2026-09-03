@@ -7,9 +7,8 @@
 // Bump it when the API grows. GET /api/meta reports it, the engine compares
 // it with the integer the app was built with, and a worker that is behind
 // becomes an "update the worker" state rather than an error. The counter
-// restarted at 1 with the one-domain-per-workspace design: nothing older
-// speaks this API (new resource names, a new secret name, a new binding), so
-// no version below 1 can ever show up.
+// starts at 1: nothing older speaks this API, so no version below 1 can
+// ever show up.
 //
 //   1 = the sync API — a workspace bound once per domain, the v2 manifest
 //       (files, tombstones, the public map) updated by compare-and-swap,

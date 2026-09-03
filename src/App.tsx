@@ -53,12 +53,7 @@ import {
 } from "./dictation";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
-import {
-  commentsSidecarOf,
-  mergeHtmlThreads,
-  parseHtmlComments,
-  type HtmlThread,
-} from "./htmlComments";
+import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
 import { sanitizeAuthor, sanitizeBody } from "./criticMarkup";
 import {
   metaFileOf,
@@ -70,7 +65,6 @@ import {
   extractMarkdown,
   markerIds,
   migrateEntity,
-  unionThreads,
   type EntityMeta,
   type MdThread,
   type ForeignRecord,
@@ -145,16 +139,12 @@ const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html
 const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
 
 // The companion files the document watcher rides along with a tab: the
-// entity meta file (thread bodies for both renditions), the html rendition
-// (when the tab is its markdown side), and — transition window — the legacy
-// comments sidecar an old app version may still write. watch_file skips
-// paths that don't exist, so companions are always offered.
+// entity meta file (thread bodies for both renditions) and the html
+// rendition (when the tab is its markdown side). watch_file skips paths
+// that don't exist, so companions are always offered.
 const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] => {
   const extras = [metaFileOf(tabPath)];
-  if (htmlPath !== null) {
-    if (htmlPath !== tabPath) extras.push(htmlPath);
-    extras.push(commentsSidecarOf(htmlPath));
-  }
+  if (htmlPath !== null && htmlPath !== tabPath) extras.push(htmlPath);
   return extras;
 };
 
@@ -782,9 +772,6 @@ export default function App() {
     setCardOrder(fm.order);
     return fm;
   }, []);
-  // Legacy <stem>.html.comments.jsonl seen for the active entity (transition
-  // window: old app versions still write it; we fold, never write back).
-  const legacySidecarPathRef = useRef<string | null>(null);
   // Remembered view per document path (session-scoped): a tab you left on HTML
   // comes back on HTML; an html file opened explicitly starts on HTML.
   const viewPrefsRef = useRef<Map<string, DocView>>(new Map());
@@ -1385,13 +1372,14 @@ export default function App() {
     return writeToDisk(target, snapshot);
   }, [writeToDisk]);
 
-  /* ---------- HTML rendition comments: sidecar load/save ----------
-     The rendition's threads live in a sidecar file next to the html (see
-     htmlComments.ts) and follow the autosave pattern: HtmlView hands the app
-     a new thread list, the app debounces a write. Writes are unconditional
-     (last write wins) — the sidecar is append-mostly and low-stakes, and the
-     watcher covers concurrent external edits by reloading whenever the file
-     changes under us with no local write pending. */
+  /* ---------- HTML rendition comments: meta load/save ----------
+     The rendition's threads live in the entity meta file beside the document
+     (hthread records — see htmlComments.ts and metaFile.ts) and follow the
+     autosave pattern: HtmlView hands the app a new thread list, the app
+     debounces a write. Writes are unconditional (last write wins) — the meta
+     is append-mostly and low-stakes, and the watcher covers concurrent
+     external edits by reloading whenever the file changes under us with no
+     local write pending. */
 
   const applyHtmlThreads = useCallback((threads: HtmlThread[]) => {
     htmlThreadsRef.current = threads;
@@ -1406,21 +1394,17 @@ export default function App() {
     setTableWidths(cols);
   }, []);
 
-  // Read the active rendition's sidecar (missing file = no comments yet).
-  // Read an entity's meta from disk WITHOUT touching the active-doc refs: the
-  // meta file first, then — transition window — a legacy html comments
-  // sidecar an old app version may have (re)written, folded in by thread id.
-  // Never writes; migration (and ordinary saves) normalize later.
+  // Read an entity's meta from disk WITHOUT touching the active-doc refs
+  // (missing file = no comments yet). Never writes; migration (and ordinary
+  // saves) normalize later.
   const readEntityMeta = useCallback(
     async (
       docPath: string,
-      htmlPath: string | null,
     ): Promise<{
       meta: EntityMeta;
       metaExists: boolean;
-      legacyExists: boolean;
-      // The meta FILE's bytes before the legacy fold — what a migration
-      // write-back must diff against to know the disk needs updating.
+      // The meta FILE's bytes — what a migration write-back must diff
+      // against to know the disk needs updating.
       diskRaw: string | null;
     }> => {
       let meta = emptyMeta();
@@ -1434,22 +1418,7 @@ export default function App() {
       } catch {
         // no meta file yet
       }
-      let legacyExists = false;
-      if (htmlPath) {
-        try {
-          const r = await invoke<ReadFileResult>("read_file", {
-            path: commentsSidecarOf(htmlPath),
-          });
-          meta = {
-            ...meta,
-            hthreads: unionThreads(meta.hthreads, parseHtmlComments(r.contents)),
-          };
-          legacyExists = true;
-        } catch {
-          // no legacy sidecar
-        }
-      }
-      return { meta, metaExists, legacyExists, diskRaw };
+      return { meta, metaExists, diskRaw };
     },
     [],
   );
@@ -1461,7 +1430,6 @@ export default function App() {
   const loadEntityMeta = useCallback(
     async (
       docPath: string | null,
-      htmlPath: string | null,
       md: string | null,
     ): Promise<{ meta: EntityMeta; diskRaw: string | null }> => {
       if (!docPath) {
@@ -1472,15 +1440,13 @@ export default function App() {
         setMdOrphans([]);
         adoptTableWidths([]);
         metaForeignRef.current = [];
-        legacySidecarPathRef.current = null;
         return { meta: emptyMeta(), diskRaw: null };
       }
-      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath, htmlPath);
+      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath);
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
       adoptTableWidths(meta.tcols);
       metaForeignRef.current = meta.foreign;
-      legacySidecarPathRef.current = htmlPath ? commentsSidecarOf(htmlPath) : null;
       if (md !== null) {
         const ids = markerIds(md);
         mdThreadsRef.current = meta.mthreads.filter((t) => ids.has(t.id));
@@ -1592,19 +1558,15 @@ export default function App() {
 
   /* ---------- The one-time layout migration ----------
      Normalize an entity's files to the hybrid layout: full inline threads in
-     the markdown move to meta records (bare markers stay), a legacy html
-     comments sidecar's threads fold into the meta. Pure logic in
+     the markdown move to meta records (bare markers stay). Pure logic in
      metaFile.migrateEntity; this wrapper does the guarded IO. Idempotent and
      conflict-safe: markdown writes are conditional on the snapshot the
      content was read at, so racing a concurrent edit (or another device's
      migration — byte-identical by construction) just skips; the next open
-     retries. The legacy sidecar is left in place for the transition window —
-     old app versions still read it; removal ships with the version that
-     drops old-format support. */
+     retries. */
   const migrateEntityOnDisk = useCallback(
     async (
       docPath: string,
-      htmlPath: string | null,
       known?: { md: string; snapshot: FileSnapshot; meta: EntityMeta; diskRaw: string | null },
     ): Promise<void> => {
       const htmlOnly = isHtmlPath(docPath);
@@ -1627,11 +1589,11 @@ export default function App() {
             return; // unreadable right now; nothing to migrate
           }
         }
-        const read = await readEntityMeta(docPath, htmlPath);
+        const read = await readEntityMeta(docPath);
         meta = read.meta;
         diskRaw = read.diskRaw;
       }
-      const result = migrateEntity({ diskMd: md, meta, legacyHtmlThreads: null });
+      const result = migrateEntity({ diskMd: md, meta });
       if (result.mdChanged && result.md !== null) {
         try {
           const newSnap = await invoke<FileSnapshot>("write_file", {
@@ -1923,10 +1885,10 @@ export default function App() {
               .then((r) => r.contents)
               .catch(() => null);
       }
-      // The pane's threads and thread bodies come from the entity meta
-      // (legacy sidecar folded); the pane editor gets EXPANDED markdown —
-      // same read boundary as the active document.
-      const { meta, metaExists } = await readEntityMeta(tab.path, htmlPath);
+      // The pane's threads and thread bodies come from the entity meta; the
+      // pane editor gets EXPANDED markdown — same read boundary as the
+      // active document.
+      const { meta, metaExists } = await readEntityMeta(tab.path);
       // The frontmatter boundary again: this pane's editor is handed the body,
       // and the block rides along in the record.
       const fm = parseFrontmatter(htmlOnly ? "" : contents);
@@ -2015,7 +1977,7 @@ export default function App() {
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
-      await loadEntityMeta(null, null, null);
+      await loadEntityMeta(null, null);
       applyDocView("md");
       setLoadKey((k) => k + 1);
       await refreshWatchSet(); // nothing of the board's is watched as a file
@@ -2053,15 +2015,15 @@ export default function App() {
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
-      await loadEntityMeta(null, null, null);
+      await loadEntityMeta(null, null);
       applyDocView("md");
       await refreshWatchSet(); // nothing active to watch (a split pane may remain)
       return;
     }
     setTabMissing(tab.id, false); // the file is back (or was never gone)
 
-    // Resolve the document's html rendition first — the entity meta load
-    // folds a legacy comments sidecar, which is named after the rendition.
+    // Resolve the document's html rendition: the MD/HTML toggle and the
+    // watcher's companion set both need it.
     let htmlPath: string | null = null;
     if (htmlOnly) {
       htmlPath = tab.path;
@@ -2077,11 +2039,7 @@ export default function App() {
     // baseline — works on the BODY alone, so prose edits can never rewrite
     // properties and property edits never touch the prose.
     const body = adoptFrontmatter(htmlOnly ? "" : contents).body;
-    const { meta, diskRaw } = await loadEntityMeta(
-      tab.path,
-      htmlPath,
-      htmlOnly ? null : body,
-    );
+    const { meta, diskRaw } = await loadEntityMeta(tab.path, htmlOnly ? null : body);
     // The editor speaks full CriticMarkup; the disk keeps the hybrid form
     // (markers only). Expand thread bodies from the meta records here, at the
     // read boundary — see metaFile.ts.
@@ -2097,12 +2055,12 @@ export default function App() {
     setConflict(null);
     htmlPathRef.current = htmlPath;
     setHasHtml(htmlPath != null);
-    // Old-layout content (full threads inline, or a legacy sidecar's threads
-    // not yet in the meta) normalizes on open — fire-and-forget; conditional
-    // writes make racing edits safe. Drafts migrate through their own saves.
+    // Old-layout content (full threads inline) normalizes on open —
+    // fire-and-forget; conditional writes make racing edits safe. Drafts
+    // migrate through their own saves.
     if (tab.kind === "file" && snapshot) {
       const snap = snapshot;
-      void migrateEntityOnDisk(tab.path, htmlPath, {
+      void migrateEntityOnDisk(tab.path, {
         md: contents,
         snapshot: snap,
         meta,
@@ -2199,7 +2157,7 @@ export default function App() {
     htmlPathRef.current = null;
     setHtmlContent(null);
     setHasHtml(false);
-    await loadEntityMeta(null, null, null);
+    await loadEntityMeta(null, null);
     applyDocView("md");
     await refreshWatchSet(); // drops the active set; keeps a split pane's watch alive
   }, [adoptFrontmatter, applyDocView, flushSidecarWrite, loadEntityMeta, refreshWatchSet]);
@@ -2566,7 +2524,7 @@ export default function App() {
       // The disk holds hybrid markdown; refresh the meta alongside it and
       // hand the editor the expanded form (same boundary as the first load).
       const body = adoptFrontmatter(result.contents).body;
-      const { meta } = await loadEntityMeta(target, htmlPathRef.current, body);
+      const { meta } = await loadEntityMeta(target, body);
       const full = expandMarkdown(body, meta.mthreads).md;
       baselineCapturedRef.current = false;
       setInitialMarkdown(full);
@@ -2640,7 +2598,6 @@ export default function App() {
           await flushSidecarWrite();
           await loadEntityMeta(
             pathRef.current ?? htmlPath,
-            htmlPath,
             pathRef.current ? currentMarkdownRef.current : null,
           );
           setHtmlContent(contents);
@@ -2689,7 +2646,6 @@ export default function App() {
         await flushSidecarWrite();
         await loadEntityMeta(
           pathRef.current ?? htmlPath,
-          htmlPath,
           pathRef.current ? currentMarkdownRef.current : null,
         );
         setHtmlContent(contents);
@@ -2782,9 +2738,6 @@ export default function App() {
       // records — the widths on screen are already the ones it mounted with.
       adoptTableWidths(incoming.tcols);
       metaForeignRef.current = incoming.metaForeign;
-      legacySidecarPathRef.current = incoming.htmlPath
-        ? commentsSidecarOf(incoming.htmlPath)
-        : null;
       setConflict(incoming.conflict);
       applyDocView(incomingView);
       setCommentCount(0); // the promoted editor re-reports on its readOnly flip
@@ -3373,8 +3326,8 @@ export default function App() {
       }
       const files = [{ path: target, trashPath }];
       // A document's companions are trashed with it — the html rendition (for
-      // a markdown file) and the rendition's comments sidecar are one
-      // document with it. Best-effort: the primary is already in the Trash.
+      // a markdown file) and the entity meta are one document with it.
+      // Best-effort: the primary is already in the Trash.
       const trashCompanion = async (path: string, label: string) => {
         const exists = await invoke<boolean>("path_exists", { path }).catch(() => false);
         if (!exists) return;
@@ -3392,7 +3345,6 @@ export default function App() {
         const sibling = htmlSiblingOf(target);
         await trashCompanion(sibling, "HTML version");
         await trashCompanion(metaFileOf(target), "comments");
-        await trashCompanion(commentsSidecarOf(sibling), "comments");
       } else if (kind === "file" && HTML_EXT_RE.test(target)) {
         // A standalone html document owns the entity meta; a rendition of a
         // live pair doesn't — there, only its own (hthread) records die with
@@ -3418,7 +3370,6 @@ export default function App() {
             // no meta (or it moved underneath) — nothing to scrub
           }
         }
-        await trashCompanion(commentsSidecarOf(target), "comments");
       }
       const record: DeletedRecord = {
         files,
@@ -3491,9 +3442,9 @@ export default function App() {
         return String(e);
       }
       // A document's companions move/rename with it — the markdown, its html
-      // rendition, and the rendition's comments sidecar are one document, and
-      // leaving one behind would silently split it. Best-effort: the primary
-      // file has already moved.
+      // rendition and the entity meta are one document, and leaving one
+      // behind would silently split it. Best-effort: the primary file has
+      // already moved.
       const moveCompanion = async (cFrom: string, cTo: string, label: string) => {
         const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
           () => false,
@@ -3510,11 +3461,6 @@ export default function App() {
         const toHtml = htmlSiblingOf(to);
         await moveCompanion(fromHtml, toHtml, "HTML version");
         await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
-        await moveCompanion(
-          commentsSidecarOf(fromHtml),
-          commentsSidecarOf(toHtml),
-          "comments",
-        );
       } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
         // A standalone html document carries the entity meta; a rendition of
         // a pair leaves it with the markdown side.
@@ -3522,7 +3468,6 @@ export default function App() {
           path: mdSiblingOf(from),
         }).catch(() => false);
         if (!mdExists) await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
-        await moveCompanion(commentsSidecarOf(from), commentsSidecarOf(to), "comments");
       }
       const remap = (p: string) =>
         p === from
@@ -3699,7 +3644,7 @@ export default function App() {
           }
           copiedAny = true;
           // The document's companions ride along, mirroring delete/move: the
-          // html rendition and its comments sidecar are one document with it.
+          // html rendition and the entity meta are one document with it.
           const copyCompanion = async (cFrom: string, cTo: string, label: string) => {
             const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
               () => false,
@@ -3716,11 +3661,6 @@ export default function App() {
             const toHtml = htmlSiblingOf(to);
             await copyCompanion(fromHtml, toHtml, "HTML version");
             await copyCompanion(metaFileOf(item.path), metaFileOf(to), "comments");
-            await copyCompanion(
-              commentsSidecarOf(fromHtml),
-              commentsSidecarOf(toHtml),
-              "comments",
-            );
           } else if (item.kind === "file" && HTML_EXT_RE.test(item.path)) {
             // A standalone html document owns the entity meta; a rendition of
             // a pair leaves it with the markdown side (same rule as move).
@@ -3730,7 +3670,6 @@ export default function App() {
               path: mdSiblingOf(item.path),
             }).catch(() => false);
             if (!mdExists) await copyCompanion(metaFileOf(item.path), metaFileOf(to), "comments");
-            await copyCompanion(commentsSidecarOf(item.path), commentsSidecarOf(to), "comments");
           }
           pasted.push({ path: to, kind: item.kind });
         }
@@ -3920,7 +3859,7 @@ export default function App() {
               companionMdRef.current = { md: "", baseline: "", baselined: false };
               bumpEditorSeq(cur.tabId);
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
-              const { meta } = await readEntityMeta(sd.path, cur.doc.htmlPath);
+              const { meta } = await readEntityMeta(sd.path);
               const fm = parseFrontmatter(htmlOnly ? "" : r.contents);
               const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
               setSplitState({
@@ -3967,7 +3906,7 @@ export default function App() {
         if (e.payload.path === metaFileOf(sd.path)) {
           void (async () => {
             try {
-              const { meta, metaExists } = await readEntityMeta(sd.path, sd.htmlPath);
+              const { meta, metaExists } = await readEntityMeta(sd.path);
               const cur = splitRef.current;
               if (!cur?.doc || cur.doc.path !== sd.path) return;
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
@@ -3995,24 +3934,6 @@ export default function App() {
                   mdOrphans: meta.mthreads.filter((t) => !ids.has(t.id)),
                   metaForeign: meta.foreign,
                 },
-              });
-            } catch {
-              // mid-rewrite; the next event covers it
-            }
-          })();
-          return;
-        }
-        // A legacy sidecar write (an old app version, via sync): fold it into
-        // the pane's thread set; the meta on disk normalizes on next touch.
-        if (sd.htmlPath && e.payload.path === commentsSidecarOf(sd.htmlPath)) {
-          void (async () => {
-            try {
-              const { meta, metaExists } = await readEntityMeta(sd.path, sd.htmlPath);
-              const cur = splitRef.current;
-              if (!cur?.doc || cur.doc.htmlPath !== sd.htmlPath) return;
-              setSplitState({
-                ...cur,
-                doc: { ...cur.doc, threads: meta.hthreads, sidecarExists: metaExists },
               });
             } catch {
               // mid-rewrite; the next event covers it
@@ -4062,23 +3983,6 @@ export default function App() {
               mdOrphansRef.current = meta.mthreads;
               setMdOrphans([]);
             }
-          } catch {
-            // mid-rewrite; the next event covers it
-          }
-        })();
-        return;
-      }
-      // A legacy sidecar write for the ACTIVE entity: fold the old device's
-      // threads into the rail and persist the union to the meta.
-      const legacy = htmlPathRef.current ? commentsSidecarOf(htmlPathRef.current) : null;
-      if (legacy !== null && e.payload.path === legacy) {
-        void (async () => {
-          try {
-            const r = await invoke<ReadFileResult>("read_file", { path: legacy });
-            applyHtmlThreads(
-              unionThreads(htmlThreadsRef.current, parseHtmlComments(r.contents)),
-            );
-            await writeSidecarNowRef.current();
           } catch {
             // mid-rewrite; the next event covers it
           }
@@ -4145,7 +4049,7 @@ export default function App() {
 
   // The one-time layout migration, workspace-wide: every entity the tree
   // knows normalizes to the hybrid layout (inline thread bodies → meta
-  // records; legacy html-comments sidecars fold in). Runs once per
+  // records). Runs once per
   // workspace root in the main window; open tabs are skipped — they
   // migrate through their own load/save path. Interrupted or failed runs
   // leave the flag unset and retry on the next launch; re-running is safe
@@ -4167,25 +4071,20 @@ export default function App() {
       } catch {
         return; // workspace unreadable right now; retried next launch
       }
-      const files: { path: string; paired: boolean }[] = [];
+      const files: string[] = [];
       const walk = (n: TreeNode) => {
-        if (n.kind === "file") files.push({ path: n.path, paired: n.paired === true });
+        if (n.kind === "file") files.push(n.path);
         else for (const c of n.children) walk(c);
       };
       walk(tree);
       const open = new Set(tabsRef.current.map((t) => t.path));
       for (const f of files) {
         if (cancelled) return;
-        if (open.has(f.path)) continue;
-        const htmlPath = isHtmlPath(f.path)
-          ? f.path
-          : f.paired
-            ? htmlSiblingOf(f.path)
-            : null;
+        if (open.has(f)) continue;
         try {
-          await migrateEntityOnDisk(f.path, htmlPath);
+          await migrateEntityOnDisk(f);
         } catch (e) {
-          console.error("meta migration failed", f.path, e);
+          console.error("meta migration failed", f, e);
           return; // flag stays unset; the next launch retries
         }
         // Yield between entities so a large workspace never janks the UI.
@@ -4322,11 +4221,7 @@ export default function App() {
     const siblingExists0 = await invoke<boolean>("path_exists", { path: sibling0 }).catch(
       () => false,
     );
-    await loadEntityMeta(
-      chosen,
-      siblingExists0 ? sibling0 : null,
-      currentMarkdownRef.current,
-    );
+    await loadEntityMeta(chosen, currentMarkdownRef.current);
     if (draftOrphans.length > 0) {
       const have = new Set(mdOrphansRef.current.map((t) => t.id));
       const merged = [

@@ -107,25 +107,32 @@ struct AppReady(AtomicBool);
 struct QuitFlush(Mutex<Option<HashSet<String>>>);
 
 /// Menu id of the custom Quit item that replaces the predefined one (macOS-only).
+#[cfg(target_os = "macos")]
 const QUIT_MENU_ID: &str = "doklin-quit-flush";
 /// Menu id of the custom Close Window item that replaces the predefined ⌘W ones
 /// so ⌘W is free for the renderer's close-tab handler (macOS-only). See
 /// `build_app_menu`.
+#[cfg(target_os = "macos")]
 const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
 /// Menu id of the "Open Recent Workspace" submenu anchored under File
 /// (macOS-only). Its children are (re)built from the renderer's recents list via
 /// the `set_recent_workspaces` command.
+#[cfg(target_os = "macos")]
 const RECENT_SUBMENU_ID: &str = "doklin-recent-submenu";
 /// Id prefix for each recent-workspace item; the folder path is the remainder
 /// (`doklin-recent::<path>`), so a menu click resolves straight to its folder
 /// without a side table.
+#[cfg(target_os = "macos")]
 const RECENT_ITEM_PREFIX: &str = "doklin-recent::";
 /// Menu id of the disabled placeholder shown when there are no recents.
+#[cfg(target_os = "macos")]
 const RECENT_EMPTY_ID: &str = "doklin-recent-empty";
 /// Menu id of the "Clear Menu" item at the foot of the recent submenu.
+#[cfg(target_os = "macos")]
 const RECENT_CLEAR_ID: &str = "doklin-recent-clear";
 /// How long a quit waits for window acks before exiting anyway — the escape
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
+#[cfg(target_os = "macos")]
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
 
 /// Initial content for spawned windows, keyed by window label. Populated by
@@ -528,18 +535,16 @@ fn meta_file_of(doc_path: &str) -> String {
 }
 
 /// True for the files Doklin writes beside a document to store what the editor
-/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads), the
-/// legacy html comments sidecar (`<name>.html.comments.jsonl`), and a
-/// datastore's definition file (`store.jsonl`, whose fields and columns reach
-/// the user as the board itself). They're part of the document, not content of
-/// the user's own — so even "show every file" leaves them out.
+/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads and
+/// table widths) and a datastore's definition file (`store.jsonl`, whose
+/// fields and columns reach the user as the board itself). They're part of
+/// the document, not content of the user's own — so even "show every file"
+/// leaves them out.
 pub(crate) fn is_app_sidecar(path: &Path) -> bool {
     match path.file_name().and_then(|n| n.to_str()) {
         Some(name) => {
             let lower = name.to_ascii_lowercase();
-            lower.ends_with(".meta.jsonl")
-                || lower.ends_with(".comments.jsonl")
-                || lower == store::STORE_FILE
+            lower.ends_with(".meta.jsonl") || lower == store::STORE_FILE
         }
         None => false,
     }
@@ -1528,6 +1533,7 @@ fn set_recent_workspaces(app: AppHandle, folders: Vec<String>) {
 /// regardless, so a wedged window can only delay quit, never block it. Runs on
 /// the main thread (menu event), so it must not wait in place — the acks arrive
 /// over IPC that is itself pumped by the main run loop.
+#[cfg(target_os = "macos")]
 fn begin_quit_flush(app: &AppHandle) {
     let windows: Vec<String> = app.webview_windows().into_keys().collect();
     {
@@ -2137,9 +2143,9 @@ mod tree_tests {
 
     /// Documents-only listing skips other files; "show all" adds them as
     /// unsupported rows, in one alphabetical run with the documents, and the
-    /// md+html fold is unchanged either way. The app's own comment sidecars
-    /// stay out of both — their content reaches the user as threads in the
-    /// editor, not as files.
+    /// md+html fold is unchanged either way. The app's own entity meta stays
+    /// out of both — its content reaches the user as threads in the editor,
+    /// not as a file.
     #[test]
     fn all_mode_adds_unsupported_rows() {
         let dir = std::env::temp_dir().join(format!("doklin-tree-{}", std::process::id()));
@@ -2152,7 +2158,6 @@ mod tree_tests {
             "c.png",
             "d.txt",
             "a.meta.jsonl",
-            "b.html.comments.jsonl",
         ] {
             std::fs::write(dir.join(name), "x").unwrap();
         }

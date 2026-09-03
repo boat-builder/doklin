@@ -67,10 +67,6 @@ eq(cleanWorkersName(""), null);
 
 eq(resourceName({ kind: "domain", domain: "notes.example.com" }), "doklin-notes-example-com");
 eq(resourceName({ kind: "workers-dev", name: "sherin-notes" }), "doklin-sherin-notes");
-ok(
-  !resourceName({ kind: "domain", domain: "notes.example.com" }).startsWith("doklin-share"),
-  "never the old stack's prefix",
-);
 eq(targetProblem({ kind: "domain", domain: "notes.example.com" }), null);
 ok(
   /workers\.dev/.test(targetProblem({ kind: "domain", domain: "x.y.workers.dev" }) ?? ""),

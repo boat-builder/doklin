@@ -42,8 +42,7 @@ node verify-harness/drive-links.mjs        # 25 steps: click-to-follow for links
 node verify-harness/drive-meta.mjs         # 8 steps: boots the REAL <App/> (meta.html seeds
                                            # OLD-layout docs) and walks the entity-meta layout
                                            # (src/metaFile.ts) — lazy migration on open (inline
-                                           # thread bodies → <stem>.meta.jsonl, legacy html
-                                           # sidecar folded in and left in place), the workspace
+                                           # thread bodies → <stem>.meta.jsonl), the workspace
                                            # sweep migrating unopened docs, expansion feeding the
                                            # editor full CriticMarkup, a reply saving meta-only
                                            # (markdown byte-identical), reload persistence,
@@ -304,8 +303,8 @@ marker), the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists
-and what it leaves out). Menu-constant dead-code warnings on Linux are
-pre-existing (macOS-only paths).
+and what it leaves out). The build is warning-free on Linux: the macOS-only
+menu items are cfg-gated.
 
 Two steps of `drive-links.mjs` (Crepe's hover tooltip) fail on this runner and
 did before any of this — don't chase them.

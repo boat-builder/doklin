@@ -1,5 +1,5 @@
 // Dictation settings modal (Settings → "Dictation settings…"). A compact
-// preferences card in the shared-modal shell: grouped rows with the control
+// preferences card in the modal shell: grouped rows with the control
 // on the right, macOS-settings style. This modal only holds what you set
 // rarely — which models, which language, the polish instructions, and the
 // debug inspector.
@@ -132,18 +132,18 @@ export default function DictationSetup({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className={`shared-modal dictation-setup${view === "prompt" ? " dictation-setup--wide" : ""}`}
+        className={`modal dictation-setup${view === "prompt" ? " dictation-setup--wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="Dictation settings"
       >
-        <div className="shared-modal-header">
+        <div className="modal-header">
           {view === "prompt" && (
             <button className="dictation-back" onClick={() => setView("main")} aria-label="Back to dictation settings">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -151,10 +151,10 @@ export default function DictationSetup({
               </svg>
             </button>
           )}
-          <div className="shared-modal-title">
+          <div className="modal-title">
             {view === "prompt" ? "Polish instructions" : "Dictation"}
           </div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close">
+          <button className="modal-close" onClick={onClose} aria-label="Close">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
@@ -245,7 +245,7 @@ export default function DictationSetup({
               as ghost text; the ✦ pill in the recording bar skips the wait.
             </p>
 
-            {error && <div className="share-error">{error}</div>}
+            {error && <div className="modal-error">{error}</div>}
           </div>
         ) : (
           <div className="dictation-setup-body">
@@ -295,13 +295,13 @@ export default function DictationSetup({
               </div>
             </div>
 
-            {error && <div className="share-error">{error}</div>}
+            {error && <div className="modal-error">{error}</div>}
           </div>
         )}
 
         <div className="dictation-footer">
-          <button className="share-btn" onClick={onClose}>Cancel</button>
-          <button className="share-btn is-primary" onClick={() => void save()} disabled={busy}>
+          <button className="modal-btn" onClick={onClose}>Cancel</button>
+          <button className="modal-btn is-primary" onClick={() => void save()} disabled={busy}>
             {busy ? "Saving…" : "Save"}
           </button>
         </div>

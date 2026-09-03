@@ -143,27 +143,27 @@ export default function HistoryPanel({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className="shared-modal cloud-modal cloud-history-modal"
+        className="modal cloud-modal cloud-history-modal"
         role="dialog"
         aria-modal="true"
         aria-label="Version history"
       >
-        <div className="shared-modal-header">
-          <div className="shared-modal-title">History — {basename(docPath)}</div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close">
+        <div className="modal-header">
+          <div className="modal-title">History — {basename(docPath)}</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
         </div>
 
         <div className="cloud-body">
           {loading && <div className="cloud-hint">Fetching revisions…</div>}
-          {error && <div className="share-error">{error}</div>}
+          {error && <div className="modal-error">{error}</div>}
           {!loading && !error && (
             <div className="cloud-history-layout">
               <ul className="cloud-history-list" role="listbox" aria-label="Revisions">
@@ -188,16 +188,16 @@ export default function HistoryPanel({
                   <>
                     <pre className="cloud-history-pre">{preview == null ? "Loading…" : preview}</pre>
                     {!selected.current && (
-                      <div className="share-buttons">
+                      <div className="modal-buttons">
                         <button
-                          className="share-btn is-primary"
+                          className="modal-btn is-primary"
                           disabled={busy != null || preview == null}
                           onClick={() => void restore()}
                         >
                           {busy === "restore" ? "Restoring…" : "Restore this version"}
                         </button>
                         <button
-                          className="share-btn"
+                          className="modal-btn"
                           disabled={busy != null || preview == null}
                           onClick={() => void saveAsNew()}
                         >

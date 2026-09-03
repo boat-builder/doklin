@@ -54,7 +54,7 @@ function cacheStore(): CacheLike | null {
   return c?.default ?? null;
 }
 
-export const cacheKey = (etag: string, url: URL): string =>
+const cacheKey = (etag: string, url: URL): string =>
   `https://cache.doklin/${etag}${url.pathname}${url.search}`;
 
 const cacheable = (res: Response): boolean =>

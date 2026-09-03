@@ -109,15 +109,15 @@ export default function PublishFolder({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div className="shared-modal cloud-modal" role="dialog" aria-modal="true" aria-label={existing ? "Published folder" : "Publish folder"}>
-        <div className="shared-modal-header">
-          <div className="shared-modal-title">{existing ? "Published folder" : "Publish folder"}</div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close" disabled={busy}>
+      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={existing ? "Published folder" : "Publish folder"}>
+        <div className="modal-header">
+          <div className="modal-title">{existing ? "Published folder" : "Publish folder"}</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>
             <CloseIcon />
           </button>
         </div>
@@ -128,8 +128,8 @@ export default function PublishFolder({
             {existing ? " is public" : " will be public"}, every note in it, at addresses under one slug. Notes
             added later are public the moment they sync; a note can still be published on its own too.
           </p>
-          <div className="share-field">
-            <div className="share-field-label">Address</div>
+          <div className="modal-field">
+            <div className="modal-field-label">Address</div>
             <div className="publish-address">
               <span className="publish-prefix">{cloud.domain}/</span>
               <input
@@ -142,22 +142,22 @@ export default function PublishFolder({
                 onChange={(e) => setSlug(e.target.value)}
               />
             </div>
-            {problem && <div className="share-error">{problem}</div>}
+            {problem && <div className="modal-error">{problem}</div>}
           </div>
-          <div className="share-field">
-            <div className="share-field-label">Title</div>
+          <div className="modal-field">
+            <div className="modal-field-label">Title</div>
             <input
-              className="share-field-input"
+              className="modal-field-input"
               data-testid="folder-title"
               value={title}
               disabled={busy}
               onChange={(e) => setTitle(e.target.value)}
             />
           </div>
-          <div className="share-field">
-            <div className="share-field-label">Description</div>
+          <div className="modal-field">
+            <div className="modal-field-label">Description</div>
             <input
-              className="share-field-input"
+              className="modal-field-input"
               data-testid="folder-desc"
               value={desc}
               placeholder="A line under the title, optional"
@@ -168,9 +168,9 @@ export default function PublishFolder({
           <p className="publish-meta" data-testid="folder-preview">
             The folder at {cloud.domain}/{previewSlug} · a note at {cloud.domain}/{previewSlug}/Some-folder/A-note
           </p>
-          <div className="share-buttons">
+          <div className="modal-buttons">
             <button
-              className="share-btn is-primary"
+              className="modal-btn is-primary"
               data-testid="folder-publish"
               disabled={!canSave}
               onClick={() =>
@@ -180,34 +180,34 @@ export default function PublishFolder({
               {busy ? "Working…" : existing ? "Save changes" : "Publish folder"}
             </button>
             {existing && (
-              <button className="share-btn" onClick={() => onOpenExternal(`${cloud.endpoint}/${existing.slug}`)}>
+              <button className="modal-btn" onClick={() => onOpenExternal(`${cloud.endpoint}/${existing.slug}`)}>
                 Open
               </button>
             )}
-            <button className="share-btn" disabled={busy} onClick={onClose}>
+            <button className="modal-btn" disabled={busy} onClick={onClose}>
               Cancel
             </button>
           </div>
           {existing && (
-            <div className="share-buttons">
+            <div className="modal-buttons">
               {confirmStop ? (
                 <>
                   <span className="cloud-hint">Stop publishing the folder? Every address under it stops working.</span>
                   <button
-                    className="share-btn is-danger-solid"
+                    className="modal-btn is-danger-solid"
                     data-testid="folder-stop-yes"
                     disabled={busy}
                     onClick={() => void run(() => cloudUnpublish(cloud.root, existing.slug))}
                   >
                     Stop
                   </button>
-                  <button className="share-btn" onClick={() => setConfirmStop(false)}>
+                  <button className="modal-btn" onClick={() => setConfirmStop(false)}>
                     Cancel
                   </button>
                 </>
               ) : (
                 <button
-                  className="share-btn is-danger-outline"
+                  className="modal-btn is-danger-outline"
                   data-testid="folder-stop"
                   disabled={busy}
                   onClick={() => setConfirmStop(true)}
@@ -217,7 +217,7 @@ export default function PublishFolder({
               )}
             </div>
           )}
-          {error && <div className="share-error">{error}</div>}
+          {error && <div className="modal-error">{error}</div>}
         </div>
       </div>
     </div>

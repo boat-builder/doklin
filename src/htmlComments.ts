@@ -1,16 +1,12 @@
 // Comment threads on a document's HTML rendition — the data model.
 //
 // The rendition is generated markup Doklin never writes (an AI tool owns it),
-// so unlike markdown comments — which live inline as CriticMarkup — HTML
-// threads live in a sidecar next to the rendition:
-//
-//   notes.html  →  notes.html.comments.jsonl
-//
-// The sidecar is JSON Lines: a header line, then ONE line per thread. One
-// thread per line is deliberate — cloud sync merges files with a three-way
-// *text* merge (see src-tauri/src/cloud/merge.rs), so two people adding or replying
-// to different threads concurrently merge cleanly line-by-line, where a
-// single pretty-printed JSON document would conflict on every edit.
+// so unlike markdown comments — whose anchors live inline as CriticMarkup —
+// HTML threads live entirely in the entity meta file beside the document,
+// one `hthread` record per thread (metaFile.ts). One record per line is
+// deliberate: cloud sync merges files with a three-way *text* merge
+// (src-tauri/src/cloud/merge.rs), so two people adding or replying to
+// different threads concurrently merge cleanly line by line.
 //
 // A thread anchors to an ELEMENT of the rendition (markdown comments anchor
 // to text ranges; the html view is component-level by design): a structural
@@ -19,10 +15,6 @@
 // whose anchor no longer resolves are "orphaned" — kept, shown at the top of
 // the rail, never silently dropped. Entries reuse the markdown side's
 // CommentEntry shape, so the rail renders both sides identically.
-//
-// The sidecar is plumbing, not a document: the sidebar tree lists only
-// markdown/html documents, and workspace search scans markdown. It leaves
-// the user's machine with workspace sync, riding the text merge above.
 
 import {
   newThreadId,
@@ -48,73 +40,6 @@ export type HtmlThread = {
   anchor: HtmlAnchor;
   comments: CommentEntry[];
 };
-
-const HEADER = `{"doklin":"html-comments","v":1}`;
-
-export const commentsSidecarOf = (htmlPath: string) => htmlPath + ".comments.jsonl";
-
-function isEntry(value: unknown): value is CommentEntry {
-  const e = value as CommentEntry;
-  return (
-    !!e &&
-    typeof e === "object" &&
-    typeof e.author === "string" &&
-    typeof e.at === "number" &&
-    typeof e.body === "string"
-  );
-}
-
-function isAnchor(value: unknown): value is HtmlAnchor {
-  const a = value as HtmlAnchor;
-  return (
-    !!a &&
-    typeof a === "object" &&
-    typeof a.path === "string" &&
-    typeof a.tag === "string" &&
-    typeof a.text === "string"
-  );
-}
-
-// Tolerant parse: skip the header, skip malformed lines (a sync conflict
-// marker or hand edit must never take every thread down with it), fold
-// duplicate ids (first wins — matches the markdown side's "first run wins").
-export function parseHtmlComments(raw: string): HtmlThread[] {
-  const out: HtmlThread[] = [];
-  const seen = new Set<string>();
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    const t = obj as HtmlThread & { doklin?: string };
-    if (t.doklin) continue; // header line
-    if (
-      typeof t.id !== "string" ||
-      t.id === "" ||
-      seen.has(t.id) ||
-      !isAnchor(t.anchor) ||
-      !Array.isArray(t.comments) ||
-      !t.comments.every(isEntry)
-    ) {
-      continue;
-    }
-    seen.add(t.id);
-    out.push({ id: t.id, anchor: t.anchor, comments: t.comments });
-  }
-  return out;
-}
-
-export function serializeHtmlComments(threads: HtmlThread[]): string {
-  const lines = [HEADER];
-  for (const t of threads) {
-    lines.push(JSON.stringify({ id: t.id, anchor: t.anchor, comments: t.comments }));
-  }
-  return lines.join("\n") + "\n";
-}
 
 /* ---------- Pure mutations (the html-side createThread/addReply/…) ----------
    Same semantics as criticMark.ts's transaction wrappers, over a plain array:

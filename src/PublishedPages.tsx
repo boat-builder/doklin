@@ -97,15 +97,15 @@ export default function PublishedPages({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="shared-modal cloud-modal" role="dialog" aria-modal="true" aria-label="Published pages">
-        <div className="shared-modal-header">
-          <div className="shared-modal-title">Published pages · {cloud.domain}</div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close">
+      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label="Published pages">
+        <div className="modal-header">
+          <div className="modal-title">Published pages · {cloud.domain}</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
         </div>
@@ -143,19 +143,19 @@ export default function PublishedPages({
                       {page.path || "the whole workspace"} · /{page.slug} · {page.by || "someone"} · {timeAgo(page.at, now)}
                     </div>
                     <div className="published-row-actions">
-                      <button className="share-btn" onClick={() => void copy(page.slug, url)}>
+                      <button className="modal-btn" onClick={() => void copy(page.slug, url)}>
                         {copied === page.slug ? "Copied ✓" : "Copy link"}
                       </button>
-                      <button className="share-btn" onClick={() => onOpenExternal(url)}>
+                      <button className="modal-btn" onClick={() => onOpenExternal(url)}>
                         Open
                       </button>
                       {page.kind === "dir" && (
-                        <button className="share-btn" data-testid="published-edit" onClick={() => onEditFolder(abs(page))}>
+                        <button className="modal-btn" data-testid="published-edit" onClick={() => onEditFolder(abs(page))}>
                           Edit…
                         </button>
                       )}
                       <button
-                        className="share-btn"
+                        className="modal-btn"
                         data-testid="published-home"
                         onClick={() => void act(() => cloudSetRoot(cloud.root, page.root ? null : page.slug))}
                       >
@@ -164,19 +164,19 @@ export default function PublishedPages({
                       {stopping === page.slug ? (
                         <>
                           <button
-                            className="share-btn is-danger-solid"
+                            className="modal-btn is-danger-solid"
                             data-testid="published-stop-yes"
                             onClick={() => void act(() => cloudUnpublish(cloud.root, page.slug)).then(() => setStopping(null))}
                           >
                             Stop
                           </button>
-                          <button className="share-btn" onClick={() => setStopping(null)}>
+                          <button className="modal-btn" onClick={() => setStopping(null)}>
                             Cancel
                           </button>
                         </>
                       ) : (
                         <button
-                          className="share-btn is-danger-outline"
+                          className="modal-btn is-danger-outline"
                           data-testid="published-stop"
                           onClick={() => setStopping(page.slug)}
                         >
@@ -189,7 +189,7 @@ export default function PublishedPages({
               })}
             </ul>
           )}
-          {error && <div className="share-error">{error}</div>}
+          {error && <div className="modal-error">{error}</div>}
         </div>
       </div>
     </div>

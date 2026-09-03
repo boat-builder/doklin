@@ -10,10 +10,10 @@
   <body>
     <script>
       // Same IPC stub as split.html, seeded for the entity-meta drive: one
-      // OPEN document in the OLD layout (full CriticMarkup thread inline +
-      // a legacy html comments sidecar) to prove lazy migration and
-      // expansion, and one UNOPENED old-layout document to prove the
-      // workspace sweep. The in-memory fs round-trips through
+      // OPEN document in the OLD layout (full CriticMarkup thread inline) to
+      // prove lazy migration and expansion, and one UNOPENED old-layout
+      // document to prove the workspace sweep. The in-memory fs round-trips
+      // through
       // sessionStorage so a reload behaves like an app relaunch over the
       // same disk.
       const htmlDoc = (title, n) =>
@@ -33,11 +33,6 @@
             `A closing paragraph.\n`,
         ],
         ["/docs/notes.html", htmlDoc("Notes rendition", 6)],
-        [
-          "/docs/notes.html.comments.jsonl",
-          `{"doklin":"html-comments","v":1}\n` +
-            `{"id":"lh1meta","anchor":{"path":"body:nth-of-type(1) > main:nth-of-type(1) > p:nth-of-type(1)","tag":"p","text":"Rendition block 1 for Notes rendition."},"comments":[{"author":"Old Mac","at":5,"body":"legacy html note"}]}\n`,
-        ],
         ["/docs/other.md", `# Other\n\nNothing to migrate here.\n`],
         [
           "/docs/third.md",

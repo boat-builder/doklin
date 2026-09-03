@@ -9,8 +9,8 @@
 // is what makes it true.
 //
 // One instance per folder path, shared by everything showing that store in
-// this window (a board tab today, an embed later), so two views of one board
-// never disagree and one watcher covers both.
+// this window (a board tab, an embed), so two views of one board never
+// disagree and one watcher covers both.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -101,53 +101,6 @@ const cardOf = (head: CardHead): Card => {
   };
 };
 
-/* ---------- "this board changed" ---------- */
-
-// A board can change without any note changing — someone drags a card, or
-// sync lands a new one. Anything that MIRRORS a board without holding its
-// model would need to hear about that, and the folder watcher a live model
-// already arms is the only thing that knows. Listeners are told the folder,
-// not the state: the mirror re-reads whatever it needs. (No mirror exists
-// today — a published page is rendered by the worker from the synced files —
-// so nothing subscribes; the hook stays for the next one.)
-const storeWatchers = new Set<(dir: string) => void>();
-
-/** Hear about content changes to any live store. Returns an unsubscribe. */
-export function onStoreChanged(fn: (dir: string) => void): () => void {
-  storeWatchers.add(fn);
-  return () => storeWatchers.delete(fn);
-}
-
-// What a board LOOKS like to anything downstream: the definition plus each
-// card's identity and frontmatter head. A rescan that produces the same
-// signature changed nothing worth telling anyone about — which matters
-// because every write this model makes triggers one.
-const storeSignature = (read: StoreRead): string =>
-  [
-    read.def ?? "",
-    ...read.cards.map((c) => `${c.path}\t${c.snapshot.size}\t${c.head}`),
-  ].join("\n\u0000");
-
-/**
- * Read a store folder ONCE — no model, no watcher, no refcount. What a
- * share push needs: it mirrors a board it isn't showing, and arming a
- * watcher on every published note's board would be a steep price for a read
- * that happens on a save.
- */
-export async function readStoreOnce(
-  dir: string,
-): Promise<{ def: StoreDef; cards: Card[] } | null> {
-  try {
-    const read = await invoke<StoreRead>("read_store", { path: dir });
-    if (read.def === null) return null;
-    const def = parseStoreDef(read.def);
-    if (!def) return null;
-    return { def, cards: read.cards.map(cardOf) };
-  } catch {
-    return null; // not a store, or unreadable right now
-  }
-}
-
 type WriteErrorShape = { kind: "io" | "conflict"; message?: string; current?: FileSnapshot };
 const isWriteError = (e: unknown): e is WriteErrorShape =>
   typeof e === "object" && e !== null && "kind" in e;
@@ -158,8 +111,6 @@ export class StoreModel {
   readonly dir: string;
   private state: StoreState;
   private defSnapshot: FileSnapshot | null = null;
-  /** The last rescan's content signature — see storeSignature. */
-  private contentSig: string | null = null;
   private listeners = new Set<(s: StoreState) => void>();
   private pendingWrites = 0;
   private reloadTimer: number | null = null;
@@ -234,13 +185,6 @@ export class StoreModel {
         loading: false,
         error: null,
       });
-      // The FIRST read only establishes the baseline: opening a board is not
-      // a change to it.
-      const sig = storeSignature(read);
-      if (this.contentSig !== null && sig !== this.contentSig) {
-        for (const fn of storeWatchers) fn(this.dir);
-      }
-      this.contentSig = sig;
     } catch (e) {
       if (this.disposed) return;
       this.emit({ loading: false, error: e instanceof Error ? e.message : String(e) });

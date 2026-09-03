@@ -298,7 +298,6 @@ impl<R: Remote> Engine<R> {
         }
     }
 
-
     fn root_key(&self) -> String {
         self.cfg.root.to_string_lossy().to_string()
     }
@@ -513,7 +512,7 @@ impl<R: Remote> Engine<R> {
         }
         match result {
             Ok(_) => Ok(()),
-            Err(RemoteError::Conflict { .. }) | Err(RemoteError::Outdated(_)) => Ok(()),
+            Err(RemoteError::Conflict) | Err(RemoteError::Outdated(_)) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -579,7 +578,7 @@ impl<R: Remote> Engine<R> {
                     self.roll_archives(rollover).await;
                     return Ok(changed_paths);
                 }
-                Err(RemoteError::Conflict { .. }) if attempt + 1 < CAS_ATTEMPTS => {
+                Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => {
                     // Someone else landed first — reconcile again from their
                     // reality. Uploaded blobs stay valid either way.
                     continue;

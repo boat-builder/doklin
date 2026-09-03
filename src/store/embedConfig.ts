@@ -58,13 +58,6 @@ export type EmbedConfig = {
   hide: string[];
 };
 
-export const emptyEmbedConfig = (): EmbedConfig => ({
-  store: null,
-  view: null,
-  group: null,
-  hide: [],
-});
-
 /**
  * Read a fence body. Never throws and never rejects: a config the dialect
  * can't read is a config with nothing set, which the embed reports in place

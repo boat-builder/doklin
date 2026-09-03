@@ -23,14 +23,14 @@ export type Auth = {
   deviceId: string | null;
 };
 
-export async function sha256Hex(input: string | Uint8Array): Promise<string> {
+async function sha256Hex(input: string | Uint8Array): Promise<string> {
   const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
   const digest = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** Equality that takes the same time whichever character differs. */
-export function timingEq(a: string, b: string): boolean {
+function timingEq(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
@@ -44,7 +44,7 @@ export function randomHex(bytes: number): string {
 }
 
 /** The device a request speaks for (`x-doklin-device`), or null. Attribution only — never authority. */
-export function deviceIdOf(request: Request): string | null {
+function deviceIdOf(request: Request): string | null {
   const id = request.headers.get("x-doklin-device")?.trim() ?? "";
   return ID_RE.test(id) ? id : null;
 }

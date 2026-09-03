@@ -1,11 +1,11 @@
 // Verification harness: mounts the REAL HtmlView (bridge, comment-mode
-// overlay, sidecar model — no reimplementation) the way App.tsx does, with
-// in-memory state in place of the sidecar file. Driven by Playwright; not
-// part of the app.
+// overlay, thread model — no reimplementation) the way App.tsx does, with
+// in-memory state in place of the entity meta file. Driven by Playwright;
+// not part of the app.
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import HtmlView from "../src/HtmlView";
-import { serializeHtmlComments, type HtmlThread } from "../src/htmlComments";
+import type { HtmlThread } from "../src/htmlComments";
 import "../src/App.css";
 
 const PAGE_V1 = `<!doctype html>
@@ -59,8 +59,10 @@ function Harness() {
   useEffect(() => {
     window.__setHtml = (v) => setHtml(v === "v2" ? PAGE_V2 : PAGE_V1);
     window.__threads = () => threads;
-    document.getElementById("sidecar-dump")!.textContent =
-      serializeHtmlComments(threads);
+    // One JSON line per thread — what the drive counts and greps.
+    document.getElementById("thread-dump")!.textContent = threads
+      .map((t) => JSON.stringify(t))
+      .join("\n");
   }, [threads]);
 
   useEffect(() => {

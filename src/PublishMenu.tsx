@@ -131,9 +131,9 @@ export default function PublishMenu({
           Notes publish from a folder that is connected to a domain of your own. Connect this one,
           and any note in it is public with one click — as fresh as the sync, never fresher.
         </p>
-        <div className="share-buttons">
+        <div className="modal-buttons">
           <button
-            className="share-btn is-primary"
+            className="modal-btn is-primary"
             data-testid="publish-connect"
             onClick={() => {
               setOpen(false);
@@ -170,7 +170,7 @@ export default function PublishMenu({
             }}
           />
         </div>
-        {typedProblem && <div className="share-error">{typedProblem}</div>}
+        {typedProblem && <div className="modal-error">{typedProblem}</div>}
         {nested.map((p) => (
           <p className="publish-meta" key={p.page.slug} data-testid="publish-nested">
             Already public inside “{p.page.title || basename(p.page.path) || cloud.name}”:{" "}
@@ -179,9 +179,9 @@ export default function PublishMenu({
             </button>
           </p>
         ))}
-        <div className="share-buttons">
+        <div className="modal-buttons">
           <button
-            className="share-btn is-primary"
+            className="modal-btn is-primary"
             data-testid="publish-go"
             disabled={busy || typedProblem !== null}
             onClick={() => void run(() => cloudPublish(absPath, typed ? { slug: typed } : {}))}
@@ -189,7 +189,7 @@ export default function PublishMenu({
             {busy ? "Publishing…" : "Publish"}
           </button>
         </div>
-        {error && <div className="share-error">{error}</div>}
+        {error && <div className="modal-error">{error}</div>}
       </>
     );
   } else {
@@ -203,10 +203,10 @@ export default function PublishMenu({
           <button className="publish-url" data-testid="publish-url" title={url} onClick={() => onOpenExternal(url)}>
             {url.replace(/^https?:\/\//, "")}
           </button>
-          <button className="share-btn" data-testid="publish-copy" onClick={() => void copy(url)}>
+          <button className="modal-btn" data-testid="publish-copy" onClick={() => void copy(url)}>
             {copied ? "Copied ✓" : "Copy"}
           </button>
-          <button className="share-btn" onClick={() => onOpenExternal(url)}>
+          <button className="modal-btn" onClick={() => onOpenExternal(url)}>
             Open
           </button>
         </div>
@@ -237,7 +237,7 @@ export default function PublishMenu({
             }}
           />
           <button
-            className="share-btn"
+            className="modal-btn"
             data-testid="publish-rename"
             disabled={busy || !typed || typed === page.slug || typedProblem !== null}
             onClick={() => void run(() => cloudPublish(absPath, { slug: typed }))}
@@ -245,7 +245,7 @@ export default function PublishMenu({
             Change
           </button>
         </div>
-        {typedProblem && <div className="share-error">{typedProblem}</div>}
+        {typedProblem && <div className="modal-error">{typedProblem}</div>}
         {nested.map((p) => (
           <p className="publish-meta" key={p.page.slug} data-testid="publish-nested">
             Also inside “{p.page.title || basename(p.page.path) || cloud.name}”:{" "}
@@ -254,25 +254,25 @@ export default function PublishMenu({
             </button>
           </p>
         ))}
-        <div className="share-buttons">
+        <div className="modal-buttons">
           {confirmStop ? (
             <>
               <span className="cloud-hint">Stop publishing? The link stops working.</span>
               <button
-                className="share-btn is-danger-solid"
+                className="modal-btn is-danger-solid"
                 data-testid="publish-stop-yes"
                 disabled={busy}
                 onClick={() => void run(() => cloudUnpublish(cloud.root, page.slug))}
               >
                 Stop
               </button>
-              <button className="share-btn" onClick={() => setConfirmStop(false)}>
+              <button className="modal-btn" onClick={() => setConfirmStop(false)}>
                 Cancel
               </button>
             </>
           ) : (
             <button
-              className="share-btn is-danger-outline"
+              className="modal-btn is-danger-outline"
               data-testid="publish-stop"
               disabled={busy}
               onClick={() => setConfirmStop(true)}
@@ -281,7 +281,7 @@ export default function PublishMenu({
             </button>
           )}
         </div>
-        {error && <div className="share-error">{error}</div>}
+        {error && <div className="modal-error">{error}</div>}
         <button
           className="publish-link"
           data-testid="publish-all"

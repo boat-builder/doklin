@@ -11,7 +11,6 @@
 import type { PublicEntry } from "./manifest";
 import { isMarkdownPath, stemOf, type Workspace } from "./workspace";
 
-export type FileEntry = Extract<PublicEntry, { kind: "file" }>;
 export type DirEntry = Extract<PublicEntry, { kind: "dir" }>;
 export type Page = { slug: string; entry: PublicEntry };
 export type DirPage = { slug: string; entry: DirEntry };

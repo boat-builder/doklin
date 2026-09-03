@@ -12,8 +12,7 @@
 #   npx -y wrangler@4 deploy
 #
 # Every name derives from the domain (dots → dashes, prefixed "doklin-") so
-# two setups can never collide and a new deploy can never land on an old
-# doklin-share-* stack. See README.md.
+# two setups can never collide. See README.md.
 
 name = "doklin-notes-example-com"
 main = "doklin-cloud-worker.js"

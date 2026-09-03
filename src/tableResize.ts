@@ -16,8 +16,8 @@
 //         Push, not pull: the host never has to ask an editor that may have
 //         been unmounted since.
 //
-// Both are optional; a host that passes neither (the shared-page shell) gets
-// the session-only behavior this file started with.
+// Both are optional; a host that passes neither gets the session-only
+// behavior this file started with.
 //
 // Two pieces make prosemirror-tables' columnResizing plugin work under Crepe:
 //

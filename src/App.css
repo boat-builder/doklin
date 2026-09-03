@@ -154,11 +154,11 @@ body,
 
 /* Modal bodies scroll without showing a bar: their content is short and the
    card already telegraphs its own bounds. */
-.shared-overlay * {
+.modal-overlay * {
   scrollbar-width: none;
 }
 
-.shared-overlay ::-webkit-scrollbar {
+.modal-overlay ::-webkit-scrollbar {
   display: none;
 }
 
@@ -1190,15 +1190,6 @@ body,
      code element too — reclaim the pre's metrics or lines land at 20px
      instead of CM's 22.4px. */
   font: inherit;
-}
-
-/* ---------- Task-list checkboxes in a read-only document ----------
-   The list-item node view marks its icon `.readonly` whenever the editor
-   isn't editable, which draws a not-allowed cursor over the box. A session
-   the host granted the toggle to (taskToggle.ts puts .dk-task-toggle on the
-   document node) may actually tick it, so it must read as clickable. */
-.milkdown .dk-task-toggle .milkdown-list-item-block li .label-wrapper .readonly {
-  cursor: pointer;
 }
 
 /* ---------- Mermaid diagrams (```mermaid code blocks) ----------
@@ -3433,7 +3424,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 /* ---------- Modal chrome and buttons (shared by the dialogs) ---------- */
 
-.share-btn {
+.modal-btn {
   padding: 5px 10px;
   font: inherit;
   font-size: 12px;
@@ -3445,38 +3436,33 @@ body.tree-dragging.tree-drag-invalid * {
   transition: background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s;
 }
 
-.share-btn:hover:not(:disabled) {
+.modal-btn:hover:not(:disabled) {
   background: var(--app-hover);
 }
 
-.share-btn:disabled {
+.modal-btn:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
-.share-btn.is-primary {
+.modal-btn.is-primary {
   background: var(--app-text);
   color: var(--app-bg);
   border-color: var(--app-text);
 }
 
-.share-btn.is-primary:hover:not(:disabled) {
+.modal-btn.is-primary:hover:not(:disabled) {
   background: var(--app-text);
   opacity: 0.9;
 }
 
-.share-btn.is-danger {
-  color: var(--crepe-color-error, #b91c1c);
-  margin-left: auto;
-}
-
-.share-error {
+.modal-error {
   margin-top: 8px;
   font-size: 12px;
   color: var(--crepe-color-error, #b91c1c);
 }
 
-.shared-overlay {
+.modal-overlay {
   position: fixed;
   inset: 0;
   display: flex;
@@ -3487,7 +3473,7 @@ body.tree-dragging.tree-drag-invalid * {
   z-index: 30;
 }
 
-.shared-modal {
+.modal {
   width: 100%;
   max-width: 520px;
   max-height: 70vh;
@@ -3503,35 +3489,35 @@ body.tree-dragging.tree-drag-invalid * {
   animation: settings-popover-in 0.1s ease-out;
 }
 
-[data-theme="dark"] .shared-modal {
+[data-theme="dark"] .modal {
   box-shadow:
     0 4px 12px rgba(0, 0, 0, 0.5),
     0 12px 32px rgba(0, 0, 0, 0.6);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .shared-modal,
-  [data-theme="system"] .shared-modal {
+  :root:not([data-theme]) .modal,
+  [data-theme="system"] .modal {
     box-shadow:
       0 4px 12px rgba(0, 0, 0, 0.5),
       0 12px 32px rgba(0, 0, 0, 0.6);
   }
 }
 
-.shared-modal-header {
+.modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 2px 10px;
 }
 
-.shared-modal-title {
+.modal-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--app-text);
 }
 
-.shared-modal-close {
+.modal-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3545,7 +3531,7 @@ body.tree-dragging.tree-drag-invalid * {
   cursor: pointer;
 }
 
-.shared-modal-close:hover {
+.modal-close:hover {
   background: var(--app-hover);
   color: var(--app-text);
 }
@@ -3733,7 +3719,7 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text);
 }
 
-/* Dictation settings modal — a compact preferences card in the shared-modal
+/* Dictation settings modal — a compact preferences card in the modal
    shell: grouped rows, control on the right, macOS-settings style. Long-form
    settings (the polish instructions) drill into a subview that widens the
    card; the header grows a back arrow. */
@@ -3746,7 +3732,7 @@ body.tree-dragging.tree-drag-invalid * {
   max-width: 600px;
 }
 
-.dictation-setup .shared-modal-title {
+.dictation-setup .modal-title {
   flex: 1;
 }
 
@@ -5357,21 +5343,21 @@ body.tree-dragging.tree-drag-invalid * {
 
 /* ---------- Cloud (docs/cloud.md §7.2) ----------
    The panel, the setup wizard, the update card and the history panel share
-   the .shared-modal shell; these are the pieces inside it. The .share-*
+   the .modal shell; these are the pieces inside it. The .modal-*
    form pieces are the ones every dialog's fields use. */
 
-.share-buttons {
+.modal-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
 }
 
-.share-field {
+.modal-field {
   margin-top: 8px;
 }
 
-.share-field-label {
+.modal-field-label {
   margin-bottom: 4px;
   font-size: 10.5px;
   font-weight: 600;
@@ -5380,7 +5366,7 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
-.share-field-input {
+.modal-field-input {
   width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--app-border);
@@ -5392,16 +5378,16 @@ body.tree-dragging.tree-drag-invalid * {
   outline: none;
 }
 
-.share-field-input:focus {
+.modal-field-input:focus {
   border-color: var(--app-accent);
 }
 
-.share-field-input:disabled,
-.share-field-input[readonly] {
+.modal-field-input:disabled,
+.modal-field-input[readonly] {
   color: var(--app-text-muted);
 }
 
-.share-field-token {
+.modal-field-token {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
 }
@@ -5415,7 +5401,7 @@ body.tree-dragging.tree-drag-invalid * {
   max-width: 760px;
 }
 
-.cloud-modal .shared-modal-title {
+.cloud-modal .modal-title {
   flex: 1;
 }
 
@@ -5587,7 +5573,7 @@ body.tree-dragging.tree-drag-invalid * {
   margin-top: 3px;
 }
 
-.cloud-card .share-buttons {
+.cloud-card .modal-buttons {
   margin-top: 8px;
 }
 
@@ -5641,17 +5627,17 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
 }
 
-.cloud-copy-row .share-field-input {
+.cloud-copy-row .modal-field-input {
   flex: 1;
   min-width: 0;
 }
 
-.share-btn.is-danger-outline {
+.modal-btn.is-danger-outline {
   color: #e5484d;
   border-color: rgba(229, 72, 77, 0.5);
 }
 
-.share-btn.is-danger-solid {
+.modal-btn.is-danger-solid {
   background: #e5484d;
   border-color: #e5484d;
   color: #fff;

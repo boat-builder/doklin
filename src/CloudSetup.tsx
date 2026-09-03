@@ -287,19 +287,19 @@ export default function CloudSetup({
           )}
         </div>
       ) : (
-        <div className="share-buttons">
+        <div className="modal-buttons">
           {!workspace && mode === "connect" && root && (
-            <button className="share-btn is-primary" onClick={connect} data-testid="connect-upload">
+            <button className="modal-btn is-primary" onClick={connect} data-testid="connect-upload">
               Connect &amp; upload
             </button>
           )}
           {workspace && (
-            <button className="share-btn is-primary" onClick={() => void download()} data-testid="download-here">
+            <button className="modal-btn is-primary" onClick={() => void download()} data-testid="download-here">
               Download it here…
             </button>
           )}
           {workspace && markerMatches && (
-            <button className="share-btn" onClick={resume} data-testid="resume-folder">
+            <button className="modal-btn" onClick={resume} data-testid="resume-folder">
               Resume syncing this folder
             </button>
           )}
@@ -318,8 +318,8 @@ export default function CloudSetup({
         now on. The dot beside the workspace name shows the sync at a glance; the gear’s Cloud…
         item has the rest.
       </p>
-      <div className="share-buttons">
-        <button className="share-btn is-primary" onClick={() => onConnected(done.root, done.how)}>
+      <div className="modal-buttons">
+        <button className="modal-btn is-primary" onClick={() => onConnected(done.root, done.how)}>
           {done.how === "join" ? "Open the folder" : "Done"}
         </button>
       </div>
@@ -328,10 +328,10 @@ export default function CloudSetup({
 
   const endpointStep = (
     <>
-      <div className="share-field">
-        <div className="share-field-label">Endpoint</div>
+      <div className="modal-field">
+        <div className="modal-field-label">Endpoint</div>
         <input
-          className="share-field-input"
+          className="modal-field-input"
           data-testid="endpoint-input"
           value={endpoint}
           placeholder={targetKind === "domain" && mode === "connect" ? "https://notes.example.com" : "https://doklin-notes.example.workers.dev"}
@@ -349,10 +349,10 @@ export default function CloudSetup({
         />
       </div>
       {mode === "join" && (
-        <div className="share-field">
-          <div className="share-field-label">Token</div>
+        <div className="modal-field">
+          <div className="modal-field-label">Token</div>
           <input
-            className="share-field-input share-field-token"
+            className="modal-field-input modal-field-token"
             data-testid="token-input"
             value={token}
             placeholder="64 hex characters, from the other Mac"
@@ -366,9 +366,9 @@ export default function CloudSetup({
           />
         </div>
       )}
-      <div className="share-buttons">
+      <div className="modal-buttons">
         <button
-          className={`share-btn ${probed ? "" : "is-primary"}`}
+          className={`modal-btn ${probed ? "" : "is-primary"}`}
           data-testid="probe-button"
           disabled={!endpoint || !token || probing || !!work}
           onClick={() => void probe()}
@@ -376,28 +376,28 @@ export default function CloudSetup({
           {probing ? "Checking…" : "Check"}
         </button>
       </div>
-      {error && <div className="share-error" data-testid="setup-error">{error}</div>}
+      {error && <div className="modal-error" data-testid="setup-error">{error}</div>}
     </>
   );
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !work) onClose();
       }}
     >
       <div
-        className="shared-modal cloud-modal cloud-modal--wide"
+        className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"
         aria-label={mode === "connect" ? "Connect a domain" : "Open a workspace from a domain"}
       >
-        <div className="shared-modal-header">
-          <div className="shared-modal-title">
+        <div className="modal-header">
+          <div className="modal-title">
             {mode === "connect" ? "Connect a domain" : "Open a workspace from a domain"}
           </div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close" disabled={!!work}>
+          <button className="modal-close" onClick={onClose} aria-label="Close" disabled={!!work}>
             <CloseIcon />
           </button>
         </div>
@@ -411,10 +411,10 @@ export default function CloudSetup({
                   worker answers — a subdomain of one you already use with Cloudflare, or a free
                   address Cloudflare hands out.
                 </div>
-                <div className="share-field">
-                  <div className="share-field-label">Workspace name</div>
+                <div className="modal-field">
+                  <div className="modal-field-label">Workspace name</div>
                   <input
-                    className="share-field-input"
+                    className="modal-field-input"
                     data-testid="name-input"
                     value={name}
                     maxLength={80}
@@ -442,10 +442,10 @@ export default function CloudSetup({
                   </button>
                 </div>
                 {targetKind === "domain" ? (
-                  <div className="share-field">
-                    <div className="share-field-label">Domain</div>
+                  <div className="modal-field">
+                    <div className="modal-field-label">Domain</div>
                     <input
-                      className="share-field-input"
+                      className="modal-field-input"
                       data-testid="domain-input"
                       value={domainInput}
                       placeholder="notes.example.com"
@@ -459,10 +459,10 @@ export default function CloudSetup({
                     />
                   </div>
                 ) : (
-                  <div className="share-field">
-                    <div className="share-field-label">Name</div>
+                  <div className="modal-field">
+                    <div className="modal-field-label">Name</div>
                     <input
-                      className="share-field-input"
+                      className="modal-field-input"
                       data-testid="workers-name-input"
                       value={nameInput}
                       placeholder="sherin-notes"
@@ -481,8 +481,8 @@ export default function CloudSetup({
                     Worker and bucket: <code>{resourceName(target)}</code>
                   </div>
                 )}
-                {targetError && <div className="share-error">{targetError}</div>}
-                {tokenError && <div className="share-error">{tokenError}</div>}
+                {targetError && <div className="modal-error">{targetError}</div>}
+                {tokenError && <div className="modal-error">{tokenError}</div>}
               </li>
 
               <li className={`cloud-step ${prompt ? "" : "is-waiting"}`}>
@@ -499,8 +499,8 @@ export default function CloudSetup({
                     <pre className="cloud-prompt" data-testid="setup-prompt">
                       {prompt}
                     </pre>
-                    <div className="share-buttons">
-                      <button className="share-btn is-primary" onClick={() => void copyPrompt()}>
+                    <div className="modal-buttons">
+                      <button className="modal-btn is-primary" onClick={() => void copyPrompt()}>
                         {copied ? "Copied ✓" : "Copy prompt"}
                       </button>
                     </div>

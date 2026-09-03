@@ -69,8 +69,11 @@ async function scrimAlphaAt(frame, x, y) {
   }, { x, y });
 }
 
-const sidecarLines = async (page) =>
-  (await page.locator("#sidecar-dump").textContent()).trim().split("\n").length;
+// The harness dumps one JSON line per thread.
+const threadLines = async (page) => {
+  const text = (await page.locator("#thread-dump").textContent()).trim();
+  return text ? text.split("\n").length : 0;
+};
 
 const browser = await chromium.launch(
   existsSync("/opt/pw-browsers/chromium")
@@ -137,9 +140,9 @@ step("bubble click opens a floating draft card at the element", nearAnchor,
 await page.keyboard.type("This intro reads odd");
 await page.keyboard.press("Enter");
 await poll(async () =>
-  (await page.locator("#sidecar-dump").textContent()).includes("This intro reads odd"),
+  (await page.locator("#thread-dump").textContent()).includes("This intro reads odd"),
 );
-const dump1 = await page.locator("#sidecar-dump").textContent();
+const dump1 = await page.locator("#thread-dump").textContent();
 const hasAnchor = dump1.includes('"tag":"p"') && dump1.includes("intro paragraph");
 step("comment persists to sidecar (JSONL line with element anchor)", hasAnchor);
 await poll(async () => (await frame.locator("#intro[data-dk-t]").count()) === 1);
@@ -151,9 +154,9 @@ await page.locator(".comment-reply-composer textarea").click();
 await page.keyboard.type("agree, let's rephrase");
 await page.keyboard.press("Enter");
 await poll(async () =>
-  (await page.locator("#sidecar-dump").textContent()).includes("agree, let's rephrase"),
+  (await page.locator("#thread-dump").textContent()).includes("agree, let's rephrase"),
 );
-const oneLine = (await sidecarLines(page)) === 2; // header + one thread line carrying both entries
+const oneLine = (await threadLines(page)) === 1; // one thread line carrying both entries
 step("reply lands in the same thread (one JSONL line, two entries)", oneLine);
 await page.screenshot({ path: `${SHOTS}/04-reply.png` });
 
@@ -175,21 +178,21 @@ await poll(async () => page.locator(".comment-entry .comment-input").isVisible()
 await page.keyboard.type(" — reworded");
 await page.keyboard.press("Enter");
 await poll(async () =>
-  (await page.locator("#sidecar-dump").textContent()).includes(
+  (await page.locator("#thread-dump").textContent()).includes(
     "This intro reads odd — reworded",
   ),
 );
-step("own entries edit via the explicit pencil (sidecar updated)", true);
+step("own entries edit via the explicit pencil (threads updated)", true);
 
 // 7. Click pass-through: the rendition's own button still works, no comment
 //    is created, and clicking a non-commented spot closes the open card.
 await frame.locator("#counter").click();
 const counterText = await frame.locator("#counter").textContent();
-const threadsAfterClick = await sidecarLines(page);
+const threadsAfterClick = await threadLines(page);
 await poll(async () => (await page.locator(".html-comment-pop").count()) === 0);
 step(
   "page's own interactivity untouched; clicking elsewhere closes the card",
-  counterText.includes("clicked 1x") && threadsAfterClick === 2,
+  counterText.includes("clicked 1x") && threadsAfterClick === 1,
   `button: "${counterText}"`,
 );
 
@@ -228,7 +231,7 @@ await waitCommentInputFocused(page);
 await page.keyboard.type("Metrics need a source note");
 await page.keyboard.press("Enter");
 await poll(async () =>
-  (await page.locator("#sidecar-dump").textContent()).includes("Metrics need a source"),
+  (await page.locator("#thread-dump").textContent()).includes("Metrics need a source"),
 );
 step("second thread on another component", true);
 await page.screenshot({ path: `${SHOTS}/06-two-threads.png` });
@@ -265,7 +268,7 @@ await poll(async () => page.locator(".html-comment-pop .comment-card textarea").
 await waitCommentInputFocused(page);
 await page.keyboard.press("Escape");
 await settle(300);
-step("abandoned draft (Esc without typing) is discarded", (await sidecarLines(page)) === 3);
+step("abandoned draft (Esc without typing) is discarded", (await threadLines(page)) === 2);
 
 // 15. Leaving mode with an unwritten draft open also discards it.
 await clickBubbleFor(frame, "#tail");
@@ -273,7 +276,7 @@ await poll(async () => page.locator(".html-comment-pop .comment-card textarea").
 await waitCommentInputFocused(page);
 await page.locator(".html-comment-btn").click(); // "Done" while the draft is open
 await settle(300);
-const draftSwept = (await sidecarLines(page)) === 3;
+const draftSwept = (await threadLines(page)) === 2;
 step("leaving mode discards an unwritten draft", draftSwept);
 await page.locator(".html-comment-btn").click(); // back into mode for the rest
 await poll(async () => frame.locator("#dk-scrim.dk-on").isVisible());
@@ -285,7 +288,7 @@ await waitCommentInputFocused(page);
 await page.keyboard.type("Subtitle wording?");
 await page.keyboard.press("Enter");
 await poll(async () =>
-  (await page.locator("#sidecar-dump").textContent()).includes("Subtitle wording?"),
+  (await page.locator("#thread-dump").textContent()).includes("Subtitle wording?"),
 );
 
 // 17. Regenerate the rendition (structure reshuffled, intro/tail text kept,
@@ -322,11 +325,11 @@ const orphanCard = page
 await orphanCard.locator(".comment-entry").first().hover();
 await orphanCard.locator(".comment-entry-delete").first().click();
 await poll(async () =>
-  !(await page.locator("#sidecar-dump").textContent()).includes("Subtitle wording?"),
+  !(await page.locator("#thread-dump").textContent()).includes("Subtitle wording?"),
 );
 step("deleting a thread removes its sidecar line", true);
 
-console.log("\nFinal sidecar dump:\n" + (await page.locator("#sidecar-dump").textContent()));
+console.log("\nFinal thread dump:\n" + (await page.locator("#thread-dump").textContent()));
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} steps passed`);
 await browser.close();

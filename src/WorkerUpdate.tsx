@@ -100,20 +100,20 @@ export default function WorkerUpdate({
 
   return (
     <div
-      className="shared-overlay"
+      className="modal-overlay"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className="shared-modal cloud-modal cloud-modal--wide"
+        className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"
         aria-label="Update the worker"
       >
-        <div className="shared-modal-header">
-          <div className="shared-modal-title">Update the worker</div>
-          <button className="shared-modal-close" onClick={onClose} aria-label="Close">
+        <div className="modal-header">
+          <div className="modal-title">Update the worker</div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
         </div>
@@ -142,26 +142,26 @@ export default function WorkerUpdate({
               <pre className="cloud-prompt" data-testid="update-prompt">
                 {prompt}
               </pre>
-              <div className="share-buttons">
-                <button className="share-btn is-primary" onClick={() => void copy()}>
+              <div className="modal-buttons">
+                <button className="modal-btn is-primary" onClick={() => void copy()}>
                   {copied ? "Copied ✓" : "Copy prompt"}
                 </button>
-                <button className="share-btn" disabled={checking} onClick={() => void check()}>
+                <button className="modal-btn" disabled={checking} onClick={() => void check()}>
                   {checking ? "Checking…" : "Check again"}
                 </button>
               </div>
             </>
           )}
           {ahead && (
-            <div className="share-buttons">
-              <button className="share-btn is-primary" onClick={() => onOpenExternal(RELEASES_PAGE)}>
+            <div className="modal-buttons">
+              <button className="modal-btn is-primary" onClick={() => onOpenExternal(RELEASES_PAGE)}>
                 Get the latest Doklin
               </button>
             </div>
           )}
           {!behind && !ahead && (
-            <div className="share-buttons">
-              <button className="share-btn is-primary" onClick={onClose}>
+            <div className="modal-buttons">
+              <button className="modal-btn is-primary" onClick={onClose}>
                 Done
               </button>
             </div>

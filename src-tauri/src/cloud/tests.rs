@@ -160,7 +160,7 @@ impl Remote for FakeRemote {
                 b.etag += 1;
             }
             if base != b.etag_str() {
-                return Err(RemoteError::Conflict { etag: b.etag_str() });
+                return Err(RemoteError::Conflict);
             }
             b.manifest = manifest;
             b.etag += 1;
