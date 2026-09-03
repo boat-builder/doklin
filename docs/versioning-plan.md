@@ -33,11 +33,11 @@ settles the handful of details the spec left open (§2).
 | # | Phase | What ships | Depends on | User sees |
 | --- | --- | --- | --- | --- |
 | 1 | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
-| 2 | File history, ungated | the History panel on the local store, a diff, drafts | 1 | version history for every workspace, cloud or not |
+| 2 | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
 | 3 | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
-| 4 | Workspace history, deleted files | snapshot browser, restore-all, recently deleted | 1, 2 | "as it was on Tuesday"; a deleted note back |
+| 4 | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
 | 5 | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
-| 6 | Retire the manifest history | `hist` stops being written; the old commands go | 3 | nothing — a smaller manifest |
+| 6 | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
 
 Phases 3, 4 and 5 are independent of one another and may ship in any order
 after 2. Phase 6 needs 3 to have shipped (and, in practice, to have run for a
@@ -185,7 +185,7 @@ records the display path either way.
   "lastSweepMs": 1757000000000,
   "snapshots": [
     { "ts": 1757000000000, "reason": "seed", "files": 512, "bytes": 2100000,
-      "digest": "<sha256 hex>", "pinned": false }
+      "digest": "<sha256 hex>", "pinned": false, "label": null }
   ]
 }
 ```
@@ -193,8 +193,12 @@ records the display path either way.
 Sorted by `ts` ascending; `ts` is unique (a capture in the same millisecond
 as the last takes `last + 1`). `digest` is sha256 over the lines
 `<path>\0<hash>\n` in path order — two snapshots with equal digests hold the
-same workspace. `pinned` exists now so a later "save a version" button needs
-no format change; nothing sets it in this phase.
+same workspace. `pinned` and `label` exist now so phase 2's *Name this
+version* needs no format change: a `manual` capture sets both, and the
+ladder never drops a pinned snapshot. In this phase only
+`versions_capture_now` with `reason: "manual"` sets them — and when the
+digest equals the newest snapshot's, it labels and pins *that* snapshot
+instead of writing a duplicate.
 
 A snapshot file, before gzip:
 
@@ -342,7 +346,9 @@ export type VersionsStatus = {
   bytes: { blobs: number; snapshots: number };
   horizonDays: number | null;   // null = forever
 };
-export type SnapshotMeta = { ts: number; reason: string; files: number; bytes: number; pinned: boolean };
+export type SnapshotMeta = {
+  ts: number; reason: string; files: number; bytes: number; pinned: boolean; label: string | null;
+};
 // event "versions-status": VersionsStatus[]  (the whole model, on every change)
 ```
 
@@ -351,7 +357,9 @@ Commands (phase 1 — the minimum that makes the store observable):
 ```
 versions_status()                          -> VersionsStatus[]
 versions_snapshots(root)                   -> SnapshotMeta[]      newest first
-versions_capture_now(root, reason?)        -> SnapshotMeta | null (null: nothing changed)
+versions_capture_now(root, reason?, label?) -> SnapshotMeta | null (null: nothing changed; "manual"
+                                              pins and labels — the newest snapshot when nothing changed)
+versions_set_pinned(root, ts, pinned, label?) -> void
 versions_set_enabled(enabled)              -> void
 ```
 
@@ -417,11 +425,14 @@ write path as it is.
 
 ### 5.1 Files
 
-Add `src-tauri/src/versions/history.rs` (derivations over snapshots).
-Modify: `versions/mod.rs` (commands), `versions/status.rs` + `src/versions.ts`
-(types), `src/HistoryPanel.tsx`, `src/Sidebar.tsx:857` (drop the `cloud &&`),
-`src/App.tsx` (the history entry for drafts — see 5.4), `src/App.css`
-(the diff view).
+Add `src-tauri/src/versions/history.rs` (derivations over snapshots),
+`src/HistoryRail.tsx` (the version list) and `src/VersionPreview.tsx` (the
+document area while a version is shown). Modify: `versions/mod.rs`
+(commands), `versions/status.rs` + `src/versions.ts` (types),
+`src/Sidebar.tsx:857` (drop the `cloud &&`), `src/TabBar.tsx` and
+`src/DraftsPanel.tsx` (entry points), `src/App.tsx` (the rail's open state,
+the preview swap, the shortcut), `src/App.css`. Delete `src/HistoryPanel.tsx`
+once the rail covers its two exits — the modal is what §12 argues against.
 
 ### 5.2 Derivations
 
@@ -442,6 +453,7 @@ the hash differs from the last emitted:
 ```ts
 export type FileVersion = {
   ts: number; hash: string; size: number; by: string; reason: string;
+  label: string | null; pinned: boolean;
   path: string;        // the path as of that snapshot (differs across renames)
   source: "local" | "cloud";
   current: boolean;    // equals the file on disk right now
@@ -475,18 +487,42 @@ removes this branch.
 
 ### 5.4 The surfaces
 
-- **`HistoryPanel.tsx`**: `versionsHistory` / `versionsRead` instead of the
-  cloud wrappers; rows labelled by time and `by` (the existing `revLabel`),
-  with a small reason word (`end of session`, `while editing`, `first seen`,
-  `before a restore`); a *Changes* toggle showing `versions_diff` against
-  the next-newer version (or the current file); *Restore* and *Save as new
-  doc* unchanged — both remain plain `write_file`s.
-- **Sidebar**: `Version history…` for every file; no cloud condition.
-- **Drafts**: the drafts panel's row menu gets `Version history…`, opening
-  the same panel on the draft's path (its root is the drafts store).
-- The panel's title says which store answered when the workspace is
-  connected: "3 versions here · 12 in the cloud" — a one-line summary, no
-  new surface.
+The design and its reasons are §12; this is what phase 2 builds of it.
+
+- **The history rail** (`HistoryRail.tsx`) — a right rail in the place the
+  comments rail takes (`.comments-rail` in `App.css` is the pattern), listing
+  the document's versions newest first, **grouped by day** with the ladder
+  visible: today's and yesterday's rows show every retained version with a
+  time; older days show as one row per day that expands to the versions it
+  holds; older weeks and months the same. Each row: the time, `by`, a small
+  reason word (`end of session`, `while editing`, `first seen`, `before a
+  restore`), and the label in bold when there is one. A pinned row keeps a
+  pin glyph. The header says how far back history reaches ("Every change
+  since 3 Jun") and, when the workspace is connected, where it lives ("14
+  here · 212 in the cloud"). Top of the rail: **Name this version** — a
+  one-line input that calls `versions_capture_now(root, "manual", label)`.
+- **The preview** (`VersionPreview.tsx`) — selecting a row shows that
+  version **in the document area, in place, read-only**: the live editor's
+  pending autosave is flushed (`flushPendingAutosave`), the live editor is
+  hidden, and a read-only `Editor` (`readOnly`, which Crepe already
+  supports — `Editor.tsx:180`) mounts with the version's text under a
+  banner: "Viewing the version from Tue 2 Sep, 14:32 · *Restore this
+  version* · *Make a copy* · *Back to now*". Read-only means no autosave
+  path exists for the old text, which is the whole safety argument for the
+  swap. *Back to now* (and `Esc`, and closing the rail) unmounts the preview
+  and shows the live editor again.
+- **Show changes** — a toggle in the banner that swaps the rendered preview
+  for `versions_diff` against the next-newer version (or the current file
+  for the newest), rendered as a line diff with `+`/`-` classes. A rendered
+  block-level diff inside the editor is the §12 refinement, not this phase.
+- **Restore** and **Make a copy** — both remain plain `write_file`s (the
+  existing `restore` / `saveAsNew` logic moves out of `HistoryPanel.tsx`
+  unchanged). A restore leaves the preview and reloads the live document;
+  the rail shows the restore as the newest row.
+- **Entry points** — the sidebar's file menu (`Version history…`, no cloud
+  condition), the tab's context menu, the drafts panel's row menu (the
+  draft's root is the drafts store), and `⌘⌥H`, which toggles the rail for
+  the active document. Nothing is behind the Cloud panel.
 
 ### 5.5 Tests and the harness
 
@@ -499,12 +535,17 @@ Harness: a new `verify-harness/drive-versions.mjs` over `cloud.html` (it
 already boots the real `<App/>` with a `/docs` workspace). Extend the IPC
 stub with `versions_*` answering from a scripted `window.__versions` (the
 pattern of `window.__cloud`, including `calls`), and walk: *Version history…*
-present with **no** cloud status; the list; selecting a version previews it;
-*Changes* shows a diff with a `+` line; *Restore* issues `write_file` with the
-version's text; *Save as new doc* opens a tab; with a cloud status set, a
+present with **no** cloud status; the rail's day groups and an expanded
+older day; selecting a version swaps the document area for a read-only
+preview with the banner (and the live editor's text is untouched
+afterwards); `Esc` returns to now; *Show changes* renders a `+` line;
+*Restore* issues `write_file` with the version's text and the rail gains a
+row; *Make a copy* opens a tab; *Name this version* calls
+`versions_capture_now` with the label and the row shows it; the tab menu
+and `⌘⌥H` open the rail; a draft's history opens; with a cloud status set, a
 cloud-only revision appears with its badge and reads through
-`cloud_revision`; a draft's history opens. `drive-cloud.mjs`'s existing
-history step keeps passing (it now exercises the read-through).
+`cloud_revision`. `drive-cloud.mjs`'s history step is rewritten for the
+rail (it now exercises the read-through).
 
 ### 5.6 Docs and done
 
@@ -549,6 +590,7 @@ GET    /api/versions/blobs?cursor=…        {blobs: [{hash, size, uploaded}], c
 GET    /api/versions/blobs/<hash>          bytes; 404
 PUT    /api/versions/blobs/<hash>          create-only; 413 past 25 MB
 DELETE /api/versions/blobs/<hash>
+DELETE /api/history/<fid>                  new beside the old GET/PUT: phase 6 deletes the archives
 ```
 
 Id grammar: `^\d{13}-[a-z0-9][a-z0-9_-]{2,63}$`; hash `^[a-f0-9]{64}$`. The
@@ -557,7 +599,8 @@ and, per entry, `id` and `device`. `version.ts`: `WORKER_VERSION = 3`,
 `"versions"` in `WORKER_FEATURES`, a comment line for 3. `README.md` (the
 worker's) and `cloud.md` §5.2–5.3 gain the routes. `run.mjs`: auth on the
 routes, create-only on snapshot and blob, index CAS (428/412/"*"), caps, the
-listing's paging, and that wipe leaves no `versions/` key.
+listing's paging, `DELETE /api/history/<fid>` (204 on a missing one too),
+and that wipe leaves no `versions/` key.
 
 ### 6.2 The engine
 
@@ -662,16 +705,30 @@ present in some snapshot, absent from the newest, and not on disk;
 
 ### 7.2 Surfaces
 
-- **`WorkspaceHistory.tsx`** — a modal: retained snapshots grouped by day
-  (newest first), each row's file count; selecting one shows `changed`,
-  `added`, `missing` with per-file *Restore* and *Restore all*; a confirm
-  inline (never `window.confirm` — the harness auto-dismisses it). Reached
-  from the sidebar root's context menu (*Workspace history…*) and the Cloud
-  panel.
-- **`RecentlyDeleted.tsx`** — a list of deleted paths with when last seen
-  and *Restore* (to the old path; a name collision appends ` (restored)`).
-  Reached from the sidebar root's context menu and the Cloud panel.
-- Both use the `cloud-modal` chrome and `data-testid`s.
+Per §12: the workspace timeline is a modal (a workspace-level act, not an
+in-document one); deleted files are a sidebar row, because deletion is the
+moment nobody goes looking for a menu.
+
+- **`WorkspaceHistory.tsx`** — a modal in the `cloud-modal` chrome: the
+  retained snapshots as a timeline grouped by day (newest first), each row
+  carrying its delta against the previous snapshot ("+2 −1 ~5", from two
+  adjacent snapshots' maps) and its label when it has one; selecting a row
+  shows *what restoring it would do* — `changed`, `added` (on disk now, not
+  then: these would be trashed) and `missing` (then, not now: these come
+  back) — with per-file checkboxes, *Restore selected* and *Restore all*,
+  and an inline confirm that says the counts ("Write 5 files, bring back 1,
+  move 2 to the Trash?") — never `window.confirm`, which the harness
+  auto-dismisses. A note under the list: "A snapshot of now is taken first,
+  so this can be undone." Reached from the sidebar root's context menu
+  (*Workspace history…*) and the Cloud panel.
+- **Recently deleted** — a dimmed row at the bottom of the workspace
+  sidebar, shown only when `versions_deleted` is non-empty, with the count
+  ("Recently deleted · 3"). It opens `RecentlyDeleted.tsx` in the sidebar's
+  own column (the search mode is the pattern): each file's name, its old
+  folder, when it was last seen, *Restore* (to the old path; a collision
+  appends ` (restored)`) and *Open* (the last content, read-only, in the
+  preview from phase 2). Also in the root's context menu.
+- `data-testid`s on every control both drives use.
 
 ### 7.3 Tests, docs, done
 
@@ -747,6 +804,26 @@ empty `hist` is a valid v2 manifest to every worker and app that exists;
 `MANIFEST_VERSION` does not move (decision 8). Ship it only after phase 3 has
 been out long enough that every device the user runs has mirrored its store.
 
+### 9.0 The old system, piece by piece
+
+So the clean-up can be checked as complete rather than assumed:
+
+| Piece | Where | What happens to it | Phase |
+| --- | --- | --- | --- |
+| `hist` on each manifest file entry | `engine.rs` `build_manifest`, `manifest.rs` `HistEntry` | no longer written; the field stays (an empty array is valid v2) | 6 |
+| The archive rollover | `engine.rs` `roll_archives`, `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX` | deleted | 6 |
+| `history/<fid>.json` objects in the bucket | R2 | deleted once, lazily (below) | 6 |
+| Sync blobs referenced only by `hist` / the archive | R2 `blobs/<fid>/` | collected by a one-time full inventory sweep (below) | 6 |
+| `gc_candidates` (fids that rolled history) | `engine.rs` | replaced by "every fid pushed since the last GC" | 6 |
+| `EngineCmd::History` / `Revision`, `Engine::history` / `revision` | `engine.rs` | deleted | 6 |
+| `cloud_history` / `cloud_revision` commands | `cloud/mod.rs` | deleted | 6 |
+| `Revision` | `cloud/status.rs` | deleted | 6 |
+| `cloudHistory` / `cloudRevision` / `CloudRevision` | `src/cloud.ts` | deleted | 6 |
+| The read-through branch | `HistoryRail.tsx` | deleted | 6 |
+| `HistoryPanel.tsx` (the modal) | `src/` | replaced by the rail and the preview | 2 |
+| `GET/PUT /api/history/<fid>`, `MAX_INLINE_HIST`, `MAX_HISTORY_*`, `validHistoryArchive` | the worker | **kept**, marked deprecated — older apps still send them; the API only grows | 6 (docs only) |
+| The engine tests that pin history | `cloud/tests.rs` | replaced (below) | 6 |
+
 ### 9.1 Changes
 
 - `engine.rs`: `build_manifest` no longer inserts the previous revision into
@@ -756,8 +833,19 @@ been out long enough that every device the user runs has mirrored its store.
   the last run and keeps only the current hash (still behind `GC_MIN_AGE_MS`,
   still every 20th cycle); delete `history`, `revision`,
   `EngineCmd::History` / `Revision`; `status.rs` drops `Revision`.
+- **A one-time clean-up of the bucket**, driven from the engine's poll so it
+  costs nothing on the hot path and survives restarts: `WorkspaceState`
+  gains `legacy_cleanup: {archives_done: bool, inventory_cursor: Option<String>}`.
+  While `archives_done` is false, each poll deletes the archive of up to 50
+  fids (`DELETE /api/history/<fid>`, phase 3's route; a `404` counts as
+  done) and advances; then, while `inventory_cursor` is set, each poll
+  lists the blobs of up to 50 fids and deletes every hash that is not the
+  file's current one and is older than `GC_MIN_AGE_MS`. A workspace of 5000
+  files finishes both passes in about an hour of polling. A worker without
+  the DELETE route (older than 3) leaves `archives_done` false and the pass
+  waits — never an error.
 - `mod.rs`: delete `cloud_history` / `cloud_revision`; `src/cloud.ts` drops
-  their wrappers and `CloudRevision`; `HistoryPanel.tsx` drops the
+  their wrappers and `CloudRevision`; `HistoryRail.tsx` drops the
   read-through branch.
 - The worker keeps accepting `hist` and keeps `/api/history/<fid>` — old apps
   still send both; mark them *deprecated* in the README and cloud.md rather
@@ -772,6 +860,9 @@ been out long enough that every device the user runs has mirrored its store.
 - [ ] `cargo test --lib cloud` green with the tests above.
 - [ ] `manifest_wire_shape_matches_the_worker` still passes against
       `hist: []`.
+- [ ] `legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls` and
+      `legacy_cleanup_waits_on_a_worker_without_the_route` pass; after the
+      sweep the fake bucket holds one blob per file and no `history/` key.
 - [ ] `cloud.md` §6.6 (the manifest), §6.9 (history) and §5.3 (the
       deprecated route) updated; `versioning.md` §6.5 *as built*.
 - [ ] Manual: two devices, one on the previous release, editing the same
@@ -788,7 +879,8 @@ adding to this rather than inventing beside it.
 ```
 versions_status()                                    -> VersionsStatus[]
 versions_snapshots(root)                             -> SnapshotMeta[]
-versions_capture_now(root, reason?)                  -> SnapshotMeta | null
+versions_capture_now(root, reason?, label?)          -> SnapshotMeta | null
+versions_set_pinned(root, ts, pinned, label?)
 versions_set_enabled(enabled)
 versions_history(path)                               -> FileHistory
 versions_read(root, hash)                            -> string
@@ -821,3 +913,107 @@ events: versions-status, versions-applied, versions-progress
 | snapshot cap | 4 MB | `cloud-worker/src/layout.ts` | 3 |
 | index cap | 1 MB | `cloud-worker/src/layout.ts` | 3 |
 | `WORKER_VERSION` | 3 | `cloud-worker/src/version.ts` | 3 |
+
+## 12. The surfaces — the UX, decided
+
+The phases above build these; this section is why they look the way they
+do, so the reasoning is not re-litigated one PR at a time. It is an honest
+comparison of what exists, against what Doklin already is.
+
+### 12.1 What the field does
+
+- **Notion** — *Page history* is a full-window overlay: the page rendered
+  read-only in the middle, a list of versions down the right grouped by
+  date with times and avatars, *Restore*. Recently a diff highlight on
+  changed blocks. No names, no comparison between two arbitrary versions,
+  no workspace-level view. Trash is a separate sidebar item with its own
+  clock; deleted pages never appear in history.
+- **Google Docs** — *Version history* is the reference everyone else
+  measures against: a right rail listing versions grouped by day, each day
+  expandable to the finer versions inside it (the retention shape is
+  visible in the list itself); the document stays in place and shows the
+  selected version with changes highlighted (additions coloured, deletions
+  struck through); *Show changes* toggles the highlighting; *Name this
+  version*; *Restore*; *Make a copy*. Whole-document only.
+- **Obsidian** — *File recovery* and Sync's history are a modal with a list
+  of timestamps and a raw diff. Functional, joyless, out of context.
+- **Dropbox Rewind** — the reference for whole-folder restore: a timeline
+  of activity, pick a moment, a summary of what restoring it would do
+  ("12 files change, 3 deletions undone"), confirm; itself undoable.
+- **Apple Notes / Photos** — *Recently Deleted* is a folder in the sidebar,
+  always where the user already is. It needs no discovering, which is the
+  entire point at the moment of a panic.
+- **macOS Time Machine** — the cascade is beautiful, whole-screen and
+  heavy; a 3D metaphor for a list. Not for a notes app.
+
+### 12.2 What Doklin already is
+
+A document in the middle, a sidebar of files, tabs; a **right rail** that
+already exists for comments (`CommentsRail`); an `Editor` that already
+renders **read-only** (the split view's mirror pane uses it); a peek panel
+beside a board; modals for cloud administration. The history UI should be
+made of those parts, not of a new kind of surface.
+
+### 12.3 The decision
+
+**Google Docs' model for a document, Apple's for deletion, Dropbox's for
+the workspace.** Notion's is not chosen on its merits, not on taste: the
+overlay takes the user out of their document, offers no way to see what
+changed until recently and no way to name a moment, and its deletion story
+lives in a second system with a second clock — the exact shape the spec
+rejects.
+
+1. **A document's history is a rail, and a version shows in place.** The
+   rail lists versions grouped by day, older days collapsed to one row each,
+   so the list *is* the ladder: dense for today, one line per day for the
+   month, one per week for the year. Selecting a version shows it in the
+   document area, rendered by the same editor the user writes in, read-only,
+   under a banner with the three exits. The user never leaves the page, and
+   the old version can never be autosaved over the new one because the
+   preview has no write path at all.
+2. **Changes are a toggle, not a mode.** *Show changes* on the banner. A
+   line diff first (phase 2: `diffy`, coloured `+`/`-`), because it is
+   correct for a markdown tool and cheap; a rendered block-level diff in the
+   editor (added blocks tinted, removed blocks shown struck) is the
+   refinement once the rail exists — a decoration plugin over the
+   ProseMirror document, computed from a block-sequence diff of the two
+   markdown texts. Worth doing; not worth blocking phase 2 on.
+3. **Named versions.** One input at the top of the rail. The store pins a
+   named snapshot so the ladder never thins it, and *Name this version* on
+   a moment nothing changed since simply names that moment. This is the
+   thing Notion lacks that people ask for most, and it costs a text field.
+4. **Deleted files are a sidebar row.** *Recently deleted · 3* at the foot
+   of the tree, only when there is something in it, opening in the sidebar's
+   own column. Also on the root's menu, but the row is the point.
+5. **The workspace is a timeline in a modal.** Choosing a moment for the
+   whole folder is a deliberate, occasional act; a modal with a confirm that
+   states the counts is right for it, and a snapshot of *now* is taken first
+   so the restore itself appears in the timeline and can be undone from it.
+   Browsing the tree *as of* a moment inside the sidebar is the elegant
+   version of this and is a later refinement, not the first cut.
+6. **Reachable from where the document is.** The sidebar's file menu, the
+   tab's menu, the drafts panel and `⌘⌥H` — never only behind the Cloud
+   panel, because history is no longer a cloud feature.
+7. **The trust line.** The rail's header says how far back history goes
+   ("Every change since 3 Jun"), and the Cloud panel says where it lives.
+   The promise the user asked for — *you cannot lose this* — is a sentence
+   they can read, not a feature they have to find.
+
+### 12.4 What was rejected
+
+- **A modal for a document's history** (what exists today, and Obsidian's
+  shape) — out of context, no comparison with the live text, and a `<pre>`
+  of raw markdown for a WYSIWYG editor.
+- **A split pane for the preview** — the split view is real and would give
+  synchronised scrolling between now and then for free, but it couples the
+  history UI to the most intricate state in `App.tsx`. Kept as an option
+  for later ("Open in split" on the banner); not the first cut.
+- **A slider or timeline scrubber** — appealing for a demo, poor for
+  finding "the version before I rewrote the intro"; a list with day groups
+  answers that in one glance.
+- **Auto-showing a diff on every selection** — noisy on a version that
+  differs by a paragraph; a toggle that remembers its state is calmer.
+- **A first-run toast announcing history** — tempting for discoverability,
+  but an announcement is not a surface. The sidebar row and the tab menu
+  are where the user already looks; the trust line in the rail does the
+  telling.

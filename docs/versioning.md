@@ -473,6 +473,14 @@ The status event gains what the surfaces need — the local and cloud horizons,
 the retained snapshot count, the bytes each store holds — and stays, as
 today, the frontend's entire model.
 
+*As planned* ([versioning-plan.md](versioning-plan.md) §12): a document's
+history is a right rail with the version shown **in place**, read-only, in
+the editor itself (Google Docs' model, not a modal); *Show changes* is a
+toggle; versions can be named and are then never thinned; *Recently
+deleted* is a row at the foot of the sidebar (Apple Notes' model); the
+workspace timeline is a modal that states what a restore will do
+(Dropbox Rewind's model). `HistoryPanel.tsx` is replaced, not fed.
+
 ---
 
 ## 9. Build order
