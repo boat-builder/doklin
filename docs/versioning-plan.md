@@ -424,7 +424,8 @@ cadence, the way `touched_path_settles_faster_than_a_watched_one` does it.
       pass; `cargo check` is warning-free for the new module.
 - [x] `pnpm lint`, `pnpm exec tsc --noEmit` pass (`src/versions.ts` compiles
       even though nothing imports it yet).
-- [ ] A manual pass on macOS (`pnpm tauri dev`): open a folder, see
+- [ ] A manual pass on macOS (`pnpm tauri dev`), with
+      `scripts/versions.sh -w <folder>` open beside it: open a folder, see
       `<app_data>/versions/<key>/` appear with a `seed` snapshot; edit for a
       minute, stop, see a `closing` snapshot two minutes later; quit mid-edit
       and see a `closing` snapshot from the flush; the drafts store exists.

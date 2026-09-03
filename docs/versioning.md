@@ -635,7 +635,13 @@ both pure functions of time and are the two things most worth pinning.
 cd src-tauri && cargo test --lib versions   # capture cadence, the ladder, dedupe, restore
 cd src-tauri && cargo test --lib cloud      # the existing matrix, with hist gone from the manifest
 pnpm test:worker                            # the snapshot routes beside the manifest route
+scripts/versions.sh -w ~/Notes              # what a store holds right now, live
 ```
+
+The store is invisible in the app until the surfaces of phase 2, so
+`scripts/versions.sh` is how anyone watches it work: it derives the store
+key from a folder's path and prints its snapshots, their reasons, whether
+they are pinned and what the store costs on disk.
 
 What each suite must cover:
 
