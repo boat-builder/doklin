@@ -107,25 +107,32 @@ struct AppReady(AtomicBool);
 struct QuitFlush(Mutex<Option<HashSet<String>>>);
 
 /// Menu id of the custom Quit item that replaces the predefined one (macOS-only).
+#[cfg(target_os = "macos")]
 const QUIT_MENU_ID: &str = "doklin-quit-flush";
 /// Menu id of the custom Close Window item that replaces the predefined ⌘W ones
 /// so ⌘W is free for the renderer's close-tab handler (macOS-only). See
 /// `build_app_menu`.
+#[cfg(target_os = "macos")]
 const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
 /// Menu id of the "Open Recent Workspace" submenu anchored under File
 /// (macOS-only). Its children are (re)built from the renderer's recents list via
 /// the `set_recent_workspaces` command.
+#[cfg(target_os = "macos")]
 const RECENT_SUBMENU_ID: &str = "doklin-recent-submenu";
 /// Id prefix for each recent-workspace item; the folder path is the remainder
 /// (`doklin-recent::<path>`), so a menu click resolves straight to its folder
 /// without a side table.
+#[cfg(target_os = "macos")]
 const RECENT_ITEM_PREFIX: &str = "doklin-recent::";
 /// Menu id of the disabled placeholder shown when there are no recents.
+#[cfg(target_os = "macos")]
 const RECENT_EMPTY_ID: &str = "doklin-recent-empty";
 /// Menu id of the "Clear Menu" item at the foot of the recent submenu.
+#[cfg(target_os = "macos")]
 const RECENT_CLEAR_ID: &str = "doklin-recent-clear";
 /// How long a quit waits for window acks before exiting anyway — the escape
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
+#[cfg(target_os = "macos")]
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
 
 /// Initial content for spawned windows, keyed by window label. Populated by
@@ -1526,6 +1533,7 @@ fn set_recent_workspaces(app: AppHandle, folders: Vec<String>) {
 /// regardless, so a wedged window can only delay quit, never block it. Runs on
 /// the main thread (menu event), so it must not wait in place — the acks arrive
 /// over IPC that is itself pumped by the main run loop.
+#[cfg(target_os = "macos")]
 fn begin_quit_flush(app: &AppHandle) {
     let windows: Vec<String> = app.webview_windows().into_keys().collect();
     {

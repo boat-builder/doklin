@@ -303,8 +303,8 @@ marker), the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists
-and what it leaves out). Menu-constant dead-code warnings on Linux are
-pre-existing (macOS-only paths).
+and what it leaves out). The build is warning-free on Linux: the macOS-only
+menu items are cfg-gated.
 
 Two steps of `drive-links.mjs` (Crepe's hover tooltip) fail on this runner and
 did before any of this — don't chase them.
