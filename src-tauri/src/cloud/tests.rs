@@ -15,7 +15,7 @@ use super::config::{
     normalize_endpoint, read_cloud_file, read_marker, write_cloud_file, write_marker, CloudFile, Marker,
     WorkspaceEntry,
 };
-use super::engine::{next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, MANIFEST_HIST_MAX};
+use super::engine::{next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, MANIFEST_HIST_MAX, POLL_INTERVAL};
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::manifest::*;
 use super::remote::*;
@@ -1212,6 +1212,50 @@ async fn touched_path_settles_faster_than_a_watched_one() {
     cmd_tx.send(EngineCmd::Shutdown).unwrap();
     task.await.unwrap();
     assert!(be.lock().unwrap().presence.get("d-alice").is_none());
+    drop(root_dir);
+}
+
+/// A workspace `notify` can't attach to — no inotify left, a filesystem
+/// without watch support, a root that vanished between the config being read
+/// and the watcher starting — must still sync. `spawn_engine` drops the
+/// debouncer in that case, and the sender it holds with it, so the engine
+/// sees a closed channel from its very first turn.
+#[tokio::test(start_paused = true)]
+async fn an_engine_whose_watcher_never_started_still_syncs() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let root = a.root.path().to_path_buf();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    drop(fs_tx);
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+
+    // Let the first contact finish.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    // The edit bus still carries everything the app itself writes.
+    std::fs::write(root.join("typed.md"), "typed in the app\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert!(
+        manifest_of(&be).files.values().any(|f| f.path == "typed.md"),
+        "a workspace with no watcher still syncs on the bus"
+    );
+
+    // A second one, well past the poll: the engine is still running, not
+    // spinning on a channel that answers None forever.
+    tokio::time::sleep(POLL_INTERVAL * 2).await;
+    std::fs::write(root.join("later.md"), "and again\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("later.md".into())).unwrap();
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "later.md"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    assert!(be.lock().unwrap().presence.get("d-alice").is_none(), "and it leaves properly");
     drop(root_dir);
 }
 

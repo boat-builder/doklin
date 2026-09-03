@@ -214,7 +214,7 @@ pub(crate) fn write_frontmatter(
     expected: Option<FileSnapshot>,
 ) -> Result<FileSnapshot, WriteError> {
     let snapshot = splice_frontmatter(path.clone(), head, expected)?;
-    crate::cloud::touched(&app, &path);
+    crate::edits::touched(&app, &path);
     Ok(snapshot)
 }
 
@@ -271,7 +271,7 @@ pub(crate) fn write_body(
     expected: Option<FileSnapshot>,
 ) -> Result<FileSnapshot, WriteError> {
     let snapshot = splice_body(path.clone(), body, expected)?;
-    crate::cloud::touched(&app, &path);
+    crate::edits::touched(&app, &path);
     Ok(snapshot)
 }
 
@@ -332,7 +332,7 @@ pub(crate) fn create_card(app: AppHandle, path: String, head: String) -> Result<
         }
         Err(e) => return Err(format!("create {}: {}", path, e)),
     }
-    crate::cloud::touched(&app, &path);
+    crate::edits::touched(&app, &path);
     stat_snapshot(&path_buf).map_err(|e| format!("stat {}: {}", path, e))
 }
 

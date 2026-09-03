@@ -17,7 +17,7 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::engine::EngineCmd;
-use super::scan::rel_path;
+use super::scan::rel_for_touch;
 
 struct Route {
     root: PathBuf,
@@ -58,14 +58,7 @@ impl EditBus {
         else {
             return false;
         };
-        let Some(rel) = rel_path(&route.root, path) else { return false };
-        if rel.is_empty()
-            || rel
-                .split('/')
-                .any(|seg| crate::is_hidden_or_ignored(seg) || seg.ends_with(super::scan::TMP_SUFFIX))
-        {
-            return false;
-        }
+        let Some(rel) = rel_for_touch(&route.root, path) else { return false };
         route.tx.send(EngineCmd::Touched(rel)).is_ok()
     }
 }

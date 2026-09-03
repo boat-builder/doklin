@@ -18,6 +18,11 @@ mod store;
 // The cloud: one engine per connected workspace, the only writer to the
 // workspace's domain — see docs/cloud.md and src/cloud/mod.rs.
 mod cloud;
+// Versioning: one local snapshot store per open folder — see
+// docs/versioning.md and src/versions/mod.rs.
+mod versions;
+// The one call every write command ends with; it feeds both of the above.
+mod edits;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
@@ -134,6 +139,10 @@ const RECENT_CLEAR_ID: &str = "doklin-recent-clear";
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
 #[cfg(target_os = "macos")]
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
+/// How long the exit then waits for every versioner to capture what the
+/// windows just flushed (docs/versioning.md §6.1). A capture with nothing
+/// to do answers at once; this only bounds the worst case.
+const VERSIONS_FLUSH_TIMEOUT_MS: u64 = 2000;
 
 /// Initial content for spawned windows, keyed by window label. Populated by
 /// `spawn_window` before the window is built and drained by the renderer via
@@ -793,8 +802,9 @@ fn write_file(
     }
 
     // The edit bus: the cloud engine (if this path is in a connected
-    // workspace) hears about the write now, not when its watcher settles.
-    cloud::touched(&app, &path);
+    // workspace) and the folder's versioner hear about the write now, not
+    // when their watchers settle.
+    edits::touched(&app, &path);
     Ok(new_snapshot)
 }
 
@@ -888,7 +898,7 @@ fn create_file(app: AppHandle, path: String) -> Result<(), String> {
         .open(&path_buf)
     {
         Ok(_) => {
-            cloud::touched(&app, &path);
+            edits::touched(&app, &path);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -909,7 +919,7 @@ fn create_dir(app: AppHandle, path: String) -> Result<(), String> {
         .unwrap_or_else(|| path.clone());
     match std::fs::create_dir(&path_buf) {
         Ok(()) => {
-            cloud::touched(&app, &path);
+            edits::touched(&app, &path);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -958,8 +968,8 @@ fn move_path(app: AppHandle, from: String, to: String) -> Result<(), String> {
         })
         .map_err(|e| format!("move {}: {}", from, e))?;
     // Both ends: a move can cross from one connected workspace to another.
-    cloud::touched(&app, &from);
-    cloud::touched(&app, &to);
+    edits::touched(&app, &from);
+    edits::touched(&app, &to);
     Ok(())
 }
 
@@ -1009,7 +1019,7 @@ fn copy_path(app: AppHandle, from: String, to: String) -> Result<(), String> {
         ));
     }
     copy_recursive(&from_buf, &to_buf).map_err(|e| format!("copy {}: {}", from, e))?;
-    cloud::touched(&app, &to);
+    edits::touched(&app, &to);
     Ok(())
 }
 
@@ -1314,6 +1324,9 @@ fn register_window_content(
     }
     ready.0.store(true, Ordering::SeqCst);
     persist_session(&app);
+    // Which folders are open is the versioner's cue to start or stop; the
+    // registry above is the only place that knows.
+    versions::reconcile(&app);
 }
 
 /// Tells a freshly-mounted window what it is and what to open. The label is the
@@ -1728,7 +1741,7 @@ fn trash_file(app: AppHandle, path: String, store: State<'_, WatcherStore>) -> R
     }
 
     let trashed = trash_path_impl(&path)?;
-    cloud::touched(&app, &path);
+    edits::touched(&app, &path);
     Ok(trashed)
 }
 
@@ -1746,7 +1759,7 @@ fn trash_file(_app: AppHandle, _path: String, _store: State<'_, WatcherStore>) -
 fn restore_trashed(app: AppHandle, trash_path: String, original_path: String) -> Result<(), String> {
     std::fs::rename(&trash_path, &original_path)
         .map_err(|e| format!("restore {} -> {}: {}", trash_path, original_path, e))?;
-    cloud::touched(&app, &original_path);
+    edits::touched(&app, &original_path);
     Ok(())
 }
 
@@ -1918,6 +1931,8 @@ pub fn run() {
         .manage(FileClipboard::default())
         .manage(cloud::CloudManager::default())
         .manage(cloud::EditBus::default())
+        .manage(versions::VersionsManager::default())
+        .manage(versions::VersionBus::default())
         .invoke_handler(tauri::generate_handler![
             dictation::dictation_init,
             dictation::dictation_cmd,
@@ -1980,13 +1995,21 @@ pub fn run() {
             cloud::cloud_set_root,
             cloud::cloud_history,
             cloud::cloud_revision,
-            cloud::cloud_wipe
+            cloud::cloud_wipe,
+            versions::versions_status,
+            versions::versions_snapshots,
+            versions::versions_capture_now,
+            versions::versions_set_pinned,
+            versions::versions_set_enabled
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             // The cloud engines start with the app: one per connected
             // workspace, from cloud.json.
             cloud::init(&handle);
+            // The versioners start with it too: one per open folder, plus
+            // drafts. `reconcile` starts the rest as windows report in.
+            versions::init(&handle);
             let saved = read_persisted_session(&handle);
             let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
             let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());
@@ -2090,8 +2113,14 @@ pub fn run() {
             // only `Exit` (never ExitRequested). The double persist on the
             // former path is harmless.
             RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-                app.state::<Quitting>().0.store(true, Ordering::SeqCst);
+                let first = !app.state::<Quitting>().0.swap(true, Ordering::SeqCst);
                 persist_session(app);
+                // Quitting mid-edit still ends in a snapshot. Only on the
+                // first of the two exit events, and bounded — a wedged
+                // versioner can delay the quit, never block it.
+                if first {
+                    versions::flush_all_blocking(app, Duration::from_millis(VERSIONS_FLUSH_TIMEOUT_MS));
+                }
             }
             RunEvent::WindowEvent {
                 label,
@@ -2115,6 +2144,9 @@ pub fn run() {
                         }
                     }
                     persist_session(app);
+                    // The last window on a folder closing ends its session:
+                    // the versioner captures on the way out.
+                    versions::reconcile(app);
                 }
             }
             _ => {}

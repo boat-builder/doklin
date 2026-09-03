@@ -291,15 +291,29 @@ node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 creating dummy gitignored resources the build script expects:
 `binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
 `binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
+Versioning also has a by-hand pass — `docs/versioning-testing.md`, run
+through the app once its phases are in, because "no data is lost" is not a
+thing a suite can answer. `scripts/versions.sh <folder>` prints what a
+folder's version store holds.
+
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 38 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 39 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
-resumes it, presence, history, the edit bus routing, cloud.json and the
-marker), the sidebar tree walk including the
+resumes it, an engine whose watcher never started still syncing on the bus,
+presence, history, the edit bus routing, cloud.json and the marker), the versioning store (`--lib versions` — 24 tests: the cadence
+rule's consequences on a simulated clock (a burst inside one interval, a
+steady hour, a quiet hour, a session's end, a write loop), the seed capture,
+the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
+the too-large and disabled states, the retention ladder over two synthetic
+years with its per-band counts and its idempotence, the sweep with and
+without the blob grace period, the edit bus routing, the index/snapshot
+round trip through gzip, and the task itself — a session captured on the way
+out and a quit-time flush that answers only once the snapshot is on disk),
+the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists
