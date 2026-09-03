@@ -13,8 +13,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import StoreView from "./StoreView";
-import BoardSnapshot from "./BoardSnapshot";
-import type { BoardSnap } from "./store/board";
 import type { ViewKind } from "./store/storeFile";
 import { linkTargetPath, relativeLinkPath } from "./docLinks";
 import {
@@ -27,9 +25,9 @@ import {
 export type StoreChoice = { path: string; name: string };
 
 /**
- * What the embed needs from the app around it. The web shell has none of
- * this (its pages carry no workspace), so a host is optional everywhere and
- * its absence is a state the frame draws rather than a crash.
+ * What the embed needs from the app around it. A host is optional
+ * everywhere, and its absence is a state the frame draws rather than a
+ * crash.
  */
 export type StoreEmbedHost = {
   /** The note this editor is showing — what a relative `store:` resolves against. */
@@ -60,13 +58,6 @@ type Props = {
    * of the node view, so callbacks always reach the current app.
    */
   getHost: () => StoreEmbedHost | null;
-  /**
-   * The board as a PUBLISHED page carries it — a picture, not a folder. Set
-   * only where there is no host to read a real one from (the app shell); a
-   * fence the page carries no snapshot for still says so rather than
-   * pretending.
-   */
-  getSnapshot?: (kind: ViewKind, config: string) => BoardSnap | null;
   readOnly: boolean;
   /** The node is selected in the document (⌫ would delete it). */
   selected: boolean;
@@ -78,13 +69,11 @@ export default function StoreEmbedFrame({
   config,
   kind,
   getHost,
-  getSnapshot,
   readOnly,
   selected,
   onConfigChange,
 }: Props) {
   const host = getHost();
-  const snapshot = host ? null : (getSnapshot?.(kind, config) ?? null);
   const noun = kind === "table" ? "table" : "board";
   const cfg = useMemo(() => parseEmbedConfig(config), [config]);
   const [editingSource, setEditingSource] = useState(false);
@@ -130,15 +119,8 @@ export default function StoreEmbedFrame({
           }}
           onCancel={() => setEditingSource(false)}
         />
-      ) : snapshot ? (
-        // A shared page: no workspace behind us, but the page was published
-        // with a picture of this board. Read-only by construction — there is
-        // no folder here to write to.
-        <BoardSnapshot snap={snapshot} />
       ) : !host ? (
-        // No workspace and no snapshot — an older page, or a fence whose
-        // board had already been deleted when the page was published. The
-        // fence still says what it is.
+        // No workspace behind this editor: the fence still says what it is.
         <div className="dk-embed-note">
           <p>This {noun} isn’t available on this page.</p>
           {config.trim() !== "" && <pre className="dk-embed-src">{config}</pre>}

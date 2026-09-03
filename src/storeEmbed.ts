@@ -41,7 +41,6 @@ import { NodeSelection } from "@milkdown/kit/prose/state";
 import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
 import { clearTextInCurrentBlockCommand } from "@milkdown/kit/preset/commonmark";
 import StoreEmbedFrame, { type StoreEmbedHost } from "./StoreEmbed";
-import type { BoardSnap } from "./store/board";
 import { embedKind, fenceEmbed, KANBAN_LANG } from "./store/embedConfig";
 import type { ViewKind } from "./store/storeFile";
 
@@ -161,7 +160,6 @@ class StoreEmbedNodeView implements NodeView {
   private view: EditorView;
   private getPos: () => number | undefined;
   private host: () => StoreEmbedHost | null;
-  private snapshot: (kind: ViewKind, config: string) => BoardSnap | null;
   private readOnly: () => boolean;
   private selected = false;
 
@@ -170,14 +168,12 @@ class StoreEmbedNodeView implements NodeView {
     view: EditorView,
     getPos: () => number | undefined,
     host: () => StoreEmbedHost | null,
-    snapshot: (kind: ViewKind, config: string) => BoardSnap | null,
     readOnly: () => boolean,
   ) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
     this.host = host;
-    this.snapshot = snapshot;
     this.readOnly = readOnly;
     this.dom = document.createElement("div");
     this.dom.className = "dk-embed";
@@ -212,7 +208,6 @@ class StoreEmbedNodeView implements NodeView {
         config: String(this.node.attrs.config ?? ""),
         kind: asKind(this.node.attrs.kind),
         getHost: this.host,
-        getSnapshot: this.snapshot,
         readOnly: this.readOnly() || !this.view.editable,
         selected: this.selected,
         onConfigChange: (next: string) => this.writeConfig(next),
@@ -282,19 +277,15 @@ class StoreEmbedNodeView implements NodeView {
  * The node view, bound to its host. Every argument is a getter so a pane
  * that is promoted from read-only to live picks it up without remounting the
  * editor (see refreshStoreEmbeds).
- *
- * `snapshot` is the other way a board can be shown: a published page has no
- * host, but it does carry a picture of each board it embeds.
  */
 export function storeEmbedView(
   host: () => StoreEmbedHost | null,
-  snapshot: (kind: ViewKind, config: string) => BoardSnap | null = () => null,
   readOnly: () => boolean = () => false,
 ) {
   return $view(
     storeEmbedSchema.node,
     () => (node: ProseNode, view: EditorView, getPos: () => number | undefined) =>
-      new StoreEmbedNodeView(node, view, getPos, host, snapshot, readOnly),
+      new StoreEmbedNodeView(node, view, getPos, host, readOnly),
   );
 }
 

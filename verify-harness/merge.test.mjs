@@ -1,13 +1,14 @@
-// Unit test for the desktop⇄web comment-thread three-way merge
-// (src/htmlComments.ts mergeHtmlThreads) — the correctness core of pool sync,
-// exercised here against the interleavings that make it subtle: deletions
-// must stick (not resurrect), and an entry whose worker-stamped `eid` arrives
-// on one side but not the other must dedupe to a single copy. Run:
+// Unit test for the comment-thread three-way merge (src/htmlComments.ts
+// mergeHtmlThreads) — how the live rail and a meta file changed from outside
+// (another device's edit landing) fold together — exercised here against the
+// interleavings that make it subtle: deletions must stick (not resurrect),
+// and an entry whose stamped `eid` arrives on one side but not the other
+// must dedupe to a single copy. Run:
 //
 //   node verify-harness/merge.test.mjs
 //
 // (Compiles the pure module through vite — a declared dependency — so no
-// separate frontend test runner is needed, mirroring scripts/bundle-worker.)
+// separate frontend test runner is needed.)
 import { build } from "vite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";

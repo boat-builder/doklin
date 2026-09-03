@@ -797,14 +797,14 @@ Neither feature is built now; both are shaped for.
 | `web/` (the app shell for comment/edit sessions) and `scripts/build-web.mjs` | no web sessions; the mermaid module build moves into `scripts/bundle-worker.mjs` |
 | `src/share.ts`, `src/sync.ts` | replaced by `src/cloud.ts` (no HTTP) |
 | `src/Backends.tsx`, `src/ConnectBackend.tsx`, `src/AccessCodes.tsx`, `src/BackendTeardown.tsx`, `src/CloudSync.tsx`, `src/ShareSetup.tsx`, `src/ShareMenu.tsx`, `src/ShareFolder.tsx`, `src/SharedPages.tsx` | replaced by the surfaces in §7.2 |
-| `src/store/publish.ts` and `SnapshotProperties` in `src/BoardSnapshot.tsx` | the worker derives boards; `BoardSnapshot` itself stays (the desktop's read-only embed uses it) |
-| `mergeHtmlThreads` / `entryKeyOf` in `src/htmlComments.ts` | the web comment pool is gone; the html-comment model above them stays |
+| `src/store/publish.ts`, `src/BoardSnapshot.tsx`, and the `boards` snapshot path through `Editor` / `storeEmbed` / `StoreEmbed` | the worker derives boards server-side from `store/board.ts`; nothing on the desktop ever fed the React snapshot — only the web shell did |
+| `entryKeyOf` in `src/htmlComments.ts` | the web comment pool is gone; `mergeHtmlThreads` stays — the desktop folds an externally changed meta file into the live rail with it |
 | `src-tauri/src/sync.rs`, `delete_share_config` in `lib.rs` | ported into `src-tauri/src/cloud/` |
 | `virtual:share-worker-code`, `BUNDLED_WORKER_VERSION` parsing in `App.tsx` | `virtual:cloud-worker-version` |
 | `App.tsx` regions: the reconcile pass, the mirror effect, `readShareParts` / `pushSharedNow` / `scheduleSharePush`, the unshare queue, `tryAdoptRename`, `shareNeedsPush`, `pullWebEdit`, `syncShareThreads`, the version and role probes, the share/collection CRUD, `resolveWebConflict` / `checkForWebChanges`, and the inserts inside `writeToDisk`, `movePath`, `deleteEntry`, `undoDelete`, `closeTab`, `discardDraft`, `promoteDraftTo`, `reloadFromDisk` (the `push` option), the watcher | ≈ 3 200 lines; the registry's absolute-path keying is what put them there |
 | `localStorage`: `doklin:shares`, `doklin:collections`, `doklin:share-connection-by-root`, `doklin:pending-unshares`, `doklin:access-codes` | the manifest is the registry |
 | `<app_data_dir>/share.json`, `sync.json`, `sync/`, `doklin-worker-update.sh` | `cloud.json`, `cloud/` |
-| `verify-harness/merge.test.mjs`, `drive-web.mjs`, `drive-mermaid-web.mjs`'s shell steps | with the pool and the shell |
+| `verify-harness/drive-web.mjs`, `drive-mermaid-web.mjs`, `serve-worker.mjs` | with the pool and the shell (`merge.test.mjs` stays with the merge) |
 | `docs/self-hosted-backend-flow.md` | replaced by `docs/cloud.md` (this document, settled) and `cloud-worker/README.md`. `docs/share-pdf-download.md` (a *proposed* spec) stays but must be re-shaped: its push-a-PDF-artifact model no longer fits; a public page's PDF would be a synced file beside the note |
 
 ### Rewritten
@@ -835,16 +835,19 @@ depends on the cloud) and each later PR adds one layer.
 ### PR 0 — Demolition
 
 Remove everything in §9's *Deleted* table except the Rust engine (which PR 2
-ports), delete the frontend cloud UI wholesale, and cut the ~3 200 lines
-out of `App.tsx`. The Share pill, the Cloud menu items, the sidebar's share
+ports; it stays compiling and tested, wired to nothing), delete the frontend
+cloud UI wholesale — `WorkerUpdate.tsx` and `HistoryPanel.tsx` included, since
+neither compiles without `share.ts`; they return rewritten in PR 3 and PR 2 —
+and cut the ~3 200 lines out of `App.tsx`. The comment author, which came
+from the engine's device identity, comes from a `device_name` command instead. The Share pill, the Cloud menu items, the sidebar's share
 items and the History item disappear; boards, comments, html renditions,
 drafts, tabs, dictation and PDF export are untouched.
 
 - Verify: `pnpm lint`, `pnpm exec tsc --noEmit`, `cargo test --lib`;
   `node verify-harness/{metafile,tablewidths,doclinks,store}.test.mjs`;
   `drive.mjs`, `drive-kanban.mjs`, `drive-kanban-embed.mjs` (minus its
-  publish block), `drive-split.mjs` (its IPC stub loses `sync_status` /
-  `sync_device`), `drive-meta.mjs`.
+  publish block), `drive-split.mjs` (its IPC stub answers `device_name`
+  instead of `sync_status` / `sync_device`), `drive-meta.mjs`.
 - Done when: no `fetch` to a worker anywhere in `src/`; no localStorage key
   above survives; `grep -ri "backend\|share" src` finds only prose and the
   html-comment model.

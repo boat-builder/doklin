@@ -8,12 +8,8 @@
 // everything mermaid:
 //
 //   - loading: mermaid is heavy (~1 MB gz), so it loads on demand, once, the
-//     first time a document actually contains a diagram. The desktop app
-//     imports the npm package (a lazy vite chunk); the web shell loads the
-//     worker-served standalone bundle instead (window.__DK_MERMAID_URL, set by
-//     the shell page) so the shell's own bundle stays lean — the
-//     import("mermaid") branch is compiled out of the web build entirely
-//     (import.meta.env.DK_WEB, see scripts/build-web.mjs).
+//     first time a document actually contains a diagram — the npm package as
+//     a lazy vite chunk.
 //   - theming: no stock mermaid theme — the palette is derived at render time
 //     from the app's own tokens (mermaidTheme.ts), so diagrams read as part
 //     of the document in all four themes. A theme flip re-renders every live
@@ -38,31 +34,15 @@ import { bodyFontStack, mermaidThemeVariables } from "./mermaidTheme";
 
 type Mermaid = typeof import("mermaid").default;
 
-declare global {
-  interface Window {
-    // Set by the share worker's shell page: the URL of the standalone mermaid
-    // bundle it serves (see share-worker/src/index.js).
-    __DK_MERMAID_URL?: string;
-  }
-}
-
 /* ---------- Loading ---------- */
 
 let mermaidPromise: Promise<Mermaid> | null = null;
 
 function loadMermaid(): Promise<Mermaid> {
   if (!mermaidPromise) {
-    const url = typeof window !== "undefined" ? window.__DK_MERMAID_URL : undefined;
-    // The web build compiles the import("mermaid") arm away (DK_WEB is
-    // defined true there) so the npm package never lands in the shell
-    // bundle; the worker serves it as its own cached asset instead.
-    mermaidPromise = (
-      import.meta.env.DK_WEB || url
-        ? import(/* @vite-ignore */ url ?? "mermaid")
-        : import("mermaid")
-    ).then((mod: { default: Mermaid }) => mod.default);
-    // On the web the module arrives over the network — don't let one failed
-    // fetch pin every future render to a rejected promise.
+    mermaidPromise = import("mermaid").then((mod: { default: Mermaid }) => mod.default);
+    // A chunk that fails to load (a torn-down dev server, a corrupt install)
+    // mustn't pin every future render to a rejected promise.
     mermaidPromise.catch(() => {
       mermaidPromise = null;
       initializedEpoch = -1;
@@ -285,8 +265,8 @@ function ensureDomHooks() {
     attributes: true,
     attributeFilter: ["data-theme"],
   });
-  // "system" theme (and the web shell, which sets no data-theme) follows the
-  // OS — a live OS appearance change moves the palette without touching DOM.
+  // The "system" theme follows the OS — a live OS appearance change moves
+  // the palette without touching DOM.
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", onThemeChange);
 
   /* The diagram ⇄ source switch (see queueMermaidPreview). Delegated: the

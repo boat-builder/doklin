@@ -602,8 +602,8 @@ const eq = (a, b, msg) => {
   eq(texts("```kanban\r\nstore: ./P\r\n```\r\n"), ["store: ./P"], "CRLF");
   eq(texts("~~~kanban\nstore: ./P\n~~~\n"), ["store: ./P"], "tildes fence too");
 
-  // The key a fence and its snapshot are matched by; the worker's fenceKey
-  // and snapKey must normalize identically (share-worker/src/index.js).
+  // The key a fence and its snapshot are matched by; a worker that renders
+  // a published page must normalize the same way (docs/cloud-redesign.md).
   eq(fenceKeyOf("store: ./P"), "store: ./P");
   eq(fenceKeyOf("store: ./P\n\n"), "store: ./P");
   eq(fenceKeyOf("store: ./P\r\n"), "store: ./P");

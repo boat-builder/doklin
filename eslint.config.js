@@ -5,11 +5,9 @@ import tsParser from "@typescript-eslint/parser";
 import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
-  // Build outputs (the compiled web shell lands in share-worker/dist and
-  // carries its dependencies' inline eslint pragmas).
-  { ignores: ["dist/**", "share-worker/dist/**"] },
+  { ignores: ["dist/**"] },
   {
-    files: ["src/**/*.ts", "src/**/*.tsx", "web/**/*.ts", "web/**/*.tsx"],
+    files: ["src/**/*.ts", "src/**/*.tsx"],
     languageOptions: {
       parser: tsParser,
       ecmaVersion: "latest",

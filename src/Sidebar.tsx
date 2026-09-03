@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { CollectionEntry, ShareEntry } from "./share";
 
 export type TreeNode =
   // `paired` marks a markdown row that also has an html rendition folded into
@@ -84,11 +83,6 @@ type Props = {
   // The shared file clipboard (null/empty = nothing to paste).
   clipboard: FileClipboardPayload | null;
   refreshToken: number;
-  // The share registries, for row badges and the context menu's share items:
-  // a shared file/folder gets a quiet dot; folders offer share/manage, files
-  // inside a shared folder offer include/remove.
-  shares: Record<string, ShareEntry>;
-  collections: Record<string, CollectionEntry>;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
   // Open a datastore folder as a board tab.
@@ -108,17 +102,6 @@ type Props = {
   // Move/rename `from` to `to` on disk and repoint app state (tabs, watcher…).
   // Resolves to an error message to surface, or null on success.
   onMovePath: (from: string, to: string, kind: "file" | "dir") => Promise<string | null>;
-  // Open the folder-share dialog for a directory (create or manage).
-  onShareFolder: (dirPath: string) => void;
-  // Share a file: opens the document and pops the share dialog (the address
-  // picker lives there).
-  onShareFile: (path: string) => void;
-  // Stop sharing a file's page (deletes the remote copy).
-  onStopSharingFile: (path: string) => void;
-  // Copy the public link for a share id (file page or folder).
-  onCopyShareLink: (id: string) => void;
-  // Include/remove a file in the folder share rooted at `dirPath`.
-  onToggleMembership: (path: string, dirPath: string, include: boolean) => void;
   onSwitchToSearch: () => void;
   // Dragging a FILE row past the tree and over the editor area (the app
   // shows its split drop zones): stream pointer positions, commit the drop,
@@ -130,13 +113,6 @@ type Props = {
   // Drag-resize of the sidebar itself (right-edge handle); the app owns the
   // width (a CSS variable on the grid) and persists it.
   onResizeWidth?: (w: number) => void;
-  // Cloud sync (all absent/null when the workspace isn't synced): other
-  // people's presence keyed by absolute path ("Alice" is editing this doc),
-  // the engine phase for the header indicator, and the version-history opener
-  // for file rows.
-  presence?: Record<string, string>;
-  syncPhase?: string | null;
-  onFileHistory?: ((path: string) => void) | null;
 };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
@@ -175,8 +151,6 @@ export default function Sidebar({
   selection,
   clipboard,
   refreshToken,
-  shares,
-  collections,
   onSelect,
   onOpenFile,
   onOpenBoard,
@@ -188,19 +162,11 @@ export default function Sidebar({
   onCopyEntries,
   onPasteEntries,
   onMovePath,
-  onShareFolder,
-  onShareFile,
-  onStopSharingFile,
-  onCopyShareLink,
-  onToggleMembership,
   onSwitchToSearch,
   onDragFileToEditor,
   onDropFileToEditor,
   onDragFileCancel,
   onResizeWidth,
-  presence = {},
-  syncPhase = null,
-  onFileHistory = null,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -795,32 +761,12 @@ export default function Sidebar({
   const rootName = useMemo(() => basename(root), [root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
 
-  // The shared-row badge sets: any shared file, and any folder with a live
-  // collection page (the workspace root's badge lives on the header instead).
-  const sharedFilePaths = useMemo(() => new Set(Object.keys(shares)), [shares]);
-  const sharedDirPaths = useMemo(() => new Set(Object.keys(collections)), [collections]);
-
-  // The innermost folder share containing `path` — what a file's
-  // include/remove context item binds to.
-  const nearestCollectionFor = useCallback(
-    (path: string): CollectionEntry | null => {
-      let best: CollectionEntry | null = null;
-      for (const c of Object.values(collections)) {
-        if (path.startsWith(c.path + "/") && (!best || c.path.length > best.path.length)) {
-          best = c;
-        }
-      }
-      return best;
-    },
-    [collections],
-  );
-
   const ctxItems: ContextMenuItem[] = useMemo(() => {
     if (!ctxMenu) return [];
     const { target } = ctxMenu;
     // A right-click on a row that's part of a multi-selection acts on the
     // whole set, with only the operations that make sense for many rows at
-    // once (per-document items like Share and Rename need a single target).
+    // once (per-document items like Rename need a single target).
     if (
       target.kind !== "root" &&
       selection.length > 1 &&
@@ -890,56 +836,6 @@ export default function Sidebar({
               : dirname(target.path),
         ),
     });
-    let sharedFileEntry: ShareEntry | null = null;
-    // Sharing publishes a rendered document, so it's offered only for files
-    // the app can actually open; the rest get plain filesystem operations.
-    if (target.kind === "file") {
-      if (target.openable !== false) {
-        sharedFileEntry = shares[target.path] ?? null;
-        if (sharedFileEntry) {
-          items.push({
-            label: "Copy share link",
-            onClick: () => onCopyShareLink(sharedFileEntry!.id),
-          });
-        } else {
-          items.push({ label: "Share…", onClick: () => onShareFile(target.path) });
-        }
-        const col = nearestCollectionFor(target.path);
-        if (col) {
-          const included = col.members.includes(target.path);
-          items.push({
-            label: included ? `Remove from “${col.title}”` : `Include in “${col.title}”`,
-            onClick: () => onToggleMembership(target.path, col.path, !included),
-          });
-        }
-      }
-    } else {
-      const dirPath = target.kind === "root" ? root : target.path;
-      const isWorkspace = dirPath === root;
-      const sharedDir = collections[dirPath] ?? null;
-      if (sharedDir) {
-        items.push({
-          label: "Copy share link",
-          onClick: () => onCopyShareLink(sharedDir.id),
-        });
-      }
-      items.push({
-        label: sharedDir
-          ? isWorkspace
-            ? "Manage workspace share…"
-            : "Manage folder share…"
-          : isWorkspace
-            ? "Share workspace…"
-            : "Share folder…",
-        onClick: () => onShareFolder(dirPath),
-      });
-    }
-    if (target.kind === "file" && target.openable !== false && onFileHistory) {
-      items.push({
-        label: "Version history…",
-        onClick: () => onFileHistory(target.path),
-      });
-    }
     if (target.kind !== "root") {
       items.push({
         label: "Rename…",
@@ -950,13 +846,6 @@ export default function Sidebar({
             openable: target.openable,
           }),
       });
-      if (sharedFileEntry) {
-        items.push({
-          label: "Stop sharing",
-          danger: true,
-          onClick: () => onStopSharingFile(target.path),
-        });
-      }
       items.push({
         label: "Delete",
         danger: true,
@@ -979,15 +868,6 @@ export default function Sidebar({
     onDelete,
     onCopyEntries,
     onPasteEntries,
-    onShareFolder,
-    onShareFile,
-    onStopSharingFile,
-    onCopyShareLink,
-    onToggleMembership,
-    onFileHistory,
-    nearestCollectionFor,
-    shares,
-    collections,
     root,
   ]);
 
@@ -1026,12 +906,9 @@ export default function Sidebar({
         name={rootName}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
-        workspaceShared={sharedDirPaths.has(root)}
-        syncPhase={syncPhase}
         onOpenFolder={onOpenFolder}
         onOpenFile={onOpenFilePicker}
         onRevealInFinder={() => onRevealInFinder(root)}
-        onShareWorkspace={() => onShareFolder(root)}
         onRefresh={() => void refresh()}
         showAll={showAll}
         onToggleShowAll={toggleShowAll}
@@ -1089,9 +966,6 @@ export default function Sidebar({
                 dragPaths={dragPaths}
                 dropDir={dropDir === root ? null : dropDir}
                 dnd={dnd}
-                sharedFilePaths={sharedFilePaths}
-                sharedDirPaths={sharedDirPaths}
-                presence={presence}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
                 onOpenBoard={onOpenBoard}
@@ -1146,12 +1020,9 @@ function SidebarHeader({
   name,
   menuOpen,
   setMenuOpen,
-  workspaceShared,
-  syncPhase,
   onOpenFolder,
   onOpenFile,
   onRevealInFinder,
-  onShareWorkspace,
   onRefresh,
   showAll,
   onToggleShowAll,
@@ -1162,14 +1033,9 @@ function SidebarHeader({
   name: string;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
-  workspaceShared: boolean;
-  // Engine phase when this workspace syncs (null = not synced): drives the
-  // quiet cloud indicator next to the workspace name.
-  syncPhase: string | null;
   onOpenFolder: () => void;
   onOpenFile: () => void;
   onRevealInFinder: () => void;
-  onShareWorkspace: () => void;
   onRefresh: () => void;
   // Whether the tree lists every file (non-documents greyed out) or documents
   // only, and the toggle for it.
@@ -1209,21 +1075,6 @@ function SidebarHeader({
         title="Workspace menu"
       >
         <span className="sidebar-header-name">{name}</span>
-        {syncPhase && (
-          <span
-            className={`sync-dot sidebar-sync-dot ${
-              syncPhase === "idle"
-                ? "is-ok"
-                : syncPhase === "syncing"
-                  ? "is-busy"
-                  : syncPhase === "paused" || syncPhase === "offline"
-                    ? "is-warn"
-                    : "is-bad"
-            }`}
-            title={`Cloud sync: ${syncPhase}`}
-            aria-label={`Cloud sync: ${syncPhase}`}
-          />
-        )}
         <ChevronDownIcon />
       </button>
       <button
@@ -1302,17 +1153,6 @@ function SidebarHeader({
             <span>Show all files</span>
             {showAll && <MenuCheckIcon />}
           </button>
-          <button
-            role="menuitem"
-            className="sidebar-menu-item"
-            onClick={() => {
-              setMenuOpen(false);
-              onShareWorkspace();
-            }}
-          >
-            {workspaceShared ? "Manage workspace share…" : "Share workspace…"}
-            {workspaceShared && <span className="tree-share-dot" aria-hidden />}
-          </button>
         </div>
       )}
     </div>
@@ -1332,9 +1172,6 @@ function TreeItem({
   dragPaths,
   dropDir,
   dnd,
-  sharedFilePaths,
-  sharedDirPaths,
-  presence,
   onToggle,
   onOpenFile,
   onOpenBoard,
@@ -1361,11 +1198,6 @@ function TreeItem({
   dragPaths: Set<string>;
   dropDir: string | null;
   dnd: TreeDnd;
-  // Rows in these sets carry the quiet "live share" dot.
-  sharedFilePaths: Set<string>;
-  sharedDirPaths: Set<string>;
-  // Absolute path -> the name of the person editing it right now.
-  presence: Record<string, string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onOpenBoard: (path: string) => void;
@@ -1432,17 +1264,6 @@ function TreeItem({
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
-          {presence[node.path] && (
-            <span
-              className="tree-presence"
-              title={`${presence[node.path]} is editing this document right now`}
-            >
-              {presence[node.path]}
-            </span>
-          )}
-          {sharedFilePaths.has(node.path) && (
-            <span className="tree-share-dot" title="Shared" aria-hidden />
-          )}
         </button>
       </li>
     );
@@ -1501,9 +1322,6 @@ function TreeItem({
             </span>
           )}
           <span className="tree-label tree-dir-label">{node.name}</span>
-          {sharedDirPaths.has(node.path) && (
-            <span className="tree-share-dot" title="Folder is shared" aria-hidden />
-          )}
         </button>
       )}
       {!isCollapsed && (
@@ -1533,9 +1351,6 @@ function TreeItem({
               dragPaths={dragPaths}
               dropDir={dropDir}
               dnd={dnd}
-              sharedFilePaths={sharedFilePaths}
-              sharedDirPaths={sharedDirPaths}
-              presence={presence}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onOpenBoard={onOpenBoard}

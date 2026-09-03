@@ -30,12 +30,10 @@ flowchart TD
   TB --> V[verify: codesign / stapler / entitlements / lipo]
   V --> D[notarize + staple the .dmg<br/>version'd name + stable alias + SHA256SUMS]
   V --> U[updater artifacts: .app.tar.gz + latest.json]
-  V --> W[bundle backend worker js]
   D --> P[GitHub Release, make_latest]
   U --> P
-  W --> P
   P -->|releases/latest/download/latest.json| A[Installed apps poll,<br/>one-click self-update]
-  P -->|releases/latest/download/*.dmg| L[Landing page download button]
+  P -->|releases/latest/download/*.dmg| L[Stable download link]
 ```
 
 Two workflows, no more:
@@ -62,27 +60,25 @@ The "storage" for built artifacts is the **GitHub Release for the tag**, marked
 `releases/latest/download/…`, which is what everything downstream points at —
 no S3/R2 bucket, no CDN config, no credentials for consumers.
 
-Every release carries six assets, staged in `release-assets/` (never `dist/` —
+Every release carries five assets, staged in `release-assets/` (never `dist/` —
 that's Vite's frontend output, and publishing `dist/*` would sweep `index.html`
 and the web assets into the release; see commit `4d8f2e8`):
 
 | Asset | Purpose | Consumer |
 | --- | --- | --- |
 | `Doklin-<version>-macos-arm64.dmg` | The versioned installer, notarized + stapled | Humans, archival |
-| `Doklin-macos-arm64.dmg` | Byte-identical alias, copied **after** stapling | `releases/latest/download/…` — the landing page's download button (`DEFAULT_DOWNLOAD_URL` in `share-worker/src/index.js`) |
+| `Doklin-macos-arm64.dmg` | Byte-identical alias, copied **after** stapling | `releases/latest/download/…` — the stable download link (the README, a public page's footer) |
 | `SHA256SUMS` | Checksums for both DMGs | Verification |
 | `Doklin.app.tar.gz` | The signed bundle the updater swaps in | `tauri-plugin-updater` |
 | `latest.json` | Update manifest: version, notes, pub_date, per-platform `{signature, url}` | The updater endpoint in `tauri.conf.json` |
-| `doklin-worker.js` | One-file backend worker build (`scripts/bundle-worker.mjs`) | Setup/update instructions — an agent or person deploys a backend without cloning or building |
 
 Note the `.sig` file is **not** published: its contents are inlined into
 `latest.json` as the `signature` field.
 
-Because the alias names are version-less, the share worker's landing page and
-the app's own setup instructions hardcode `releases/latest/download/…` and never
-need updating per release. The flip side: **renaming an alias breaks the
-deployed worker until it's redeployed** (this bit us when
-`Doklin-macos-universal.dmg` became `Doklin-macos-arm64.dmg`).
+Because the alias names are version-less, anything that links to
+`releases/latest/download/…` never needs updating per release. The flip side:
+**renaming an alias breaks every deployed link until it's updated** (this bit
+us when `Doklin-macos-universal.dmg` became `Doklin-macos-arm64.dmg`).
 
 ---
 
@@ -332,7 +328,7 @@ multi-day hold (6h ceiling); recovery is re-running the failed job.
 | `stapler validate` fails but build was green | Tauri skipped notarization (unrecognized env var) | Check env var names — Tauri wants `APPLE_CERTIFICATE`, not `MACOS_CERTIFICATE` |
 | Release contains `index.html` and JS assets | Something staged into `dist/` | Stage only into `release-assets/` |
 | Users see "app is damaged" / Gatekeeper prompt | Unsigned or unstapled artifact | Verify locally: `spctl -a -vvv -t install Doklin.app` |
-| Landing-page download 404s | Alias filename changed | Redeploy the share worker (`DEFAULT_DOWNLOAD_URL`) |
+| A download link 404s | Alias filename changed | Fix every link that hardcodes the alias |
 | Sidecar can't reach the mic in the release build only | Entitlement missing under hardened runtime | The `codesign -d --entitlements` assertion should have caught it — check it still names the right binary |
 
 Build, signing and publishing symptoms only. When the release itself looks
@@ -366,7 +362,6 @@ Copy `.github/workflows/release.yml` and `ci.yml` verbatim, then change:
 - [ ] The `.app` path (`target/<triple>/release/bundle/…`)
 - [ ] Drop the **Build dictation sidecar**, **Xcode/Swift cache**, and
       **entitlements assertion** steps if there's no sidecar
-- [ ] Drop the **Bundle backend worker** step if there's no worker
 - [ ] Keep: secret guard, `codesign --verify`, `stapler validate`, `lipo` arch
       check, DMG notarize+staple, alias copy, `SHA256SUMS`, `latest.json`
 

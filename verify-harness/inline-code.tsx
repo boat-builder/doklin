@@ -9,7 +9,7 @@ import { StrictMode, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
 import "../src/App.css";
-import "../web/web.css";
+import "./harness.css";
 
 declare global {
   interface Window {
@@ -38,7 +38,7 @@ function Harness() {
     window.__md = md;
   }, []);
   return (
-    <div className="editor-wrap web-editor-wrap" style={{ height: "100vh" }}>
+    <div className="editor-wrap harness-editor-wrap" style={{ height: "100vh" }}>
       <Editor initialMarkdown={DOC} onChange={onChange} />
     </div>
   );

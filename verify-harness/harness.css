@@ -1,0 +1,25 @@
+/* The little the harness pages need AROUND the desktop components they
+   mount. Everything inside .editor-wrap (canvas, rail, cards, highlights) is
+   styled by src/App.css, imported wholesale so the harness renders from the
+   app's own stylesheet. */
+
+html,
+body,
+#dk-root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+}
+
+/* Read-only markdown still shows a text cursor, not an insert caret. */
+.harness-editor-wrap.is-readonly .ProseMirror {
+  caret-color: transparent;
+  cursor: text;
+}

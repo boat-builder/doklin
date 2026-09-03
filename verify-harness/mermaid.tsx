@@ -13,7 +13,7 @@ import { StrictMode, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
 import "../src/App.css";
-import "../web/web.css";
+import "./harness.css";
 
 declare global {
   interface Window {
@@ -127,7 +127,7 @@ function Harness() {
   }, []);
   return (
     <div
-      className={`editor-wrap web-editor-wrap ${readOnly ? "is-readonly" : ""}`}
+      className={`editor-wrap harness-editor-wrap ${readOnly ? "is-readonly" : ""}`}
       style={{ height: "100vh" }}
     >
       <Editor initialMarkdown={DOC} onChange={onChange} readOnly={readOnly} />

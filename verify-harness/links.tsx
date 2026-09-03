@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
 import { openInBrowserTab } from "../src/linkOpen";
 import "../src/App.css";
-import "../web/web.css";
+import "./harness.css";
 
 declare global {
   interface Window {
@@ -84,7 +84,7 @@ function Harness() {
   }, [readOnly]);
 
   return (
-    <div className="editor-wrap web-editor-wrap" style={{ height: "90vh" }}>
+    <div className="editor-wrap harness-editor-wrap" style={{ height: "90vh" }}>
       <Editor
         initialMarkdown={DOC}
         onChange={onChange}

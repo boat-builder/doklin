@@ -10,7 +10,7 @@ import { StrictMode, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
 import "../src/App.css";
-import "../web/web.css";
+import "./harness.css";
 
 declare global {
   interface Window {

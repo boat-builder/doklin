@@ -15,6 +15,11 @@ mod dictation;
 // pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
 pub mod pdf_export;
 mod store;
+// The v1 cloud sync engine, kept compiling (with its two-device merge /
+// conflict / CAS test matrix) as the reference implementation the cloud
+// rewrite ports into src/cloud/ — see docs/cloud-redesign.md. Nothing wires
+// it up any more: no manager, no commands, no engine at boot.
+#[allow(dead_code, unused_macros, unused_imports)]
 mod sync;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -735,13 +740,6 @@ fn handle_debounced_events(store: &Arc<Mutex<Option<WatcherState>>>, app: &AppHa
     for payload in changed {
         let _ = app.emit("file-externally-changed", payload);
     }
-}
-
-/// Lightweight stat for the share-reconciliation pass: lets the app ask "did
-/// this file change since the last push?" without reading its contents.
-#[tauri::command]
-fn stat_file(path: String) -> Result<FileSnapshot, String> {
-    stat_snapshot(Path::new(&path)).map_err(|e| format!("stat {}: {}", path, e))
 }
 
 #[tauri::command]
@@ -1748,24 +1746,33 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     }
 }
 
-/// Removes <app_data_dir>/share.json — the stored sharing endpoint + token —
-/// from disk. A missing file counts as success so the UI action is idempotent.
+/// This Mac's user-facing name (System Settings → General → About), the
+/// hostname as a fallback: the author stamped on comments written here.
 #[tauri::command]
-fn delete_share_config(app: AppHandle) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {}", e))?
-        .join("share.json");
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("delete {}: {}", path.display(), e)),
-    }
+fn device_name() -> String {
+    // macOS-only: `scutil --get ComputerName`; the hostname elsewhere.
+    let pretty = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    pretty
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "This Mac".to_string())
 }
 
-/// Opens a URL with the system handler: http(s) in the default browser (share
-/// links, links followed inside a note) and mailto: in the mail client. Every
+/// Opens a URL with the system handler: http(s) in the default browser (links
+/// followed inside a note, the releases page) and mailto: in the mail client. Every
 /// other scheme is refused — `open` would happily launch a local app for a
 /// custom scheme, and nothing in the app has a reason to ask for that.
 /// macOS-only, like `reveal_in_finder`; a cross-platform port would use
@@ -1901,7 +1908,6 @@ pub fn run() {
         .manage(PendingWindowOpen::default())
         .manage(Quitting::default())
         .manage(dictation::Dictation::default())
-        .manage(sync::SyncManager::default())
         .manage(pdf_export::PdfExportLock::default())
         .manage(FileClipboard::default())
         .invoke_handler(tauri::generate_handler![
@@ -1910,20 +1916,8 @@ pub fn run() {
             dictation::dictation_request,
             dictation::dictation_running,
             dictation::dictation_shutdown,
-            sync::sync_enable,
-            sync::sync_connect,
-            sync::sync_disable,
-            sync::sync_status,
-            sync::sync_now,
-            sync::sync_pause,
-            sync::sync_set_activity,
-            sync::sync_confirm_deletes,
-            sync::sync_set_shares,
-            sync::sync_device,
-            sync::sync_reload_connections,
             pdf_export::export_pdf,
             read_file,
-            stat_file,
             write_file,
             watch_file,
             unwatch_file,
@@ -1957,13 +1951,11 @@ pub fn run() {
             restore_trashed,
             reveal_in_finder,
             open_external,
-            delete_share_config,
+            device_name,
             quit_flush_ack
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            // Cloud sync: one background engine per configured workspace.
-            sync::init(&handle);
             let saved = read_persisted_session(&handle);
             let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
             let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());

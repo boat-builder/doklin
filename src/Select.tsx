@@ -34,7 +34,6 @@ export default function Select({
   value,
   options,
   onChange,
-  variant = "field",
   className,
   id,
   ariaLabel,
@@ -43,9 +42,6 @@ export default function Select({
   value: string;
   options: SelectOption[];
   onChange: (value: string) => void;
-  /** "field": bordered button (settings rows). "inline": text-like trigger
-      that sits inside composed rows such as the share-address bar. */
-  variant?: "field" | "inline";
   className?: string;
   id?: string;
   ariaLabel?: string;
@@ -204,7 +200,7 @@ export default function Select({
         ref={triggerRef}
         type="button"
         id={id}
-        className={`select-trigger select-trigger--${variant}${className ? ` ${className}` : ""}`}
+        className={`select-trigger select-trigger--field${className ? ` ${className}` : ""}`}
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
