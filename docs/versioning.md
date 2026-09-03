@@ -643,6 +643,10 @@ The store is invisible in the app until the surfaces of phase 2, so
 key from a folder's path and prints its snapshots, their reasons, whether
 they are pinned and what the store costs on disk.
 
+None of that is the same question as *does the promise hold*, which is asked
+by hand, through the app, once the phases are in:
+[versioning-testing.md](versioning-testing.md) is that pass.
+
 What each suite must cover:
 
 - **Cadence** — a burst of edits inside one interval yields one snapshot; a

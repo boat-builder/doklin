@@ -12,6 +12,11 @@ settles the handful of details the spec left open (§2).
 
 - **One phase per branch and pull request.** A phase's *Done when* list is
   the merge gate. Do not start the next phase's work in the same branch.
+- **The end is a different question.** *Done when* says the phase is
+  correct; [versioning-testing.md](versioning-testing.md) is the pass, run
+  through the app by hand, that says the promise holds. Run its sections as
+  the phases that build them land, and the whole list before calling
+  versioning done.
 - **Every push to `main` cuts a release** ([release-pipeline.md](release-pipeline.md)),
   so "releasable" is literal: what merges, ships.
 - Before touching code, read: [versioning.md](versioning.md) (the design),
@@ -41,7 +46,10 @@ settles the handful of details the spec left open (§2).
 
 Phases 3, 4 and 5 are independent of one another and may ship in any order
 after 2. Phase 6 needs 3 to have shipped (and, in practice, to have run for a
-while on every device the user has).
+while on every device the user has). The acceptance pass
+([versioning-testing.md](versioning-testing.md)) is organised the same way:
+one section per phase, then the crossings and the promises no single phase
+owns.
 
 ## 2. Decisions this plan makes
 

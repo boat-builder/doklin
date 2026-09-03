@@ -292,6 +292,11 @@ node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 creating dummy gitignored resources the build script expects:
 `binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
 `binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
+Versioning also has a by-hand pass — `docs/versioning-testing.md`, run
+through the app once its phases are in, because "no data is lost" is not a
+thing a suite can answer. `scripts/versions.sh <folder>` prints what a
+folder's version store holds.
+
 `cargo test --lib` runs every Rust test: the cloud engine against an
 in-memory worker (`--lib cloud` — 39 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
