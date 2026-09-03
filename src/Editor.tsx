@@ -521,7 +521,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
             });
             // "/board" → a ```kanban embed, "/table" → a ```table one. Both
             // start with no store named: the frame asks which one, in place
-            // (see StoreEmbed.tsx).
+            // (see StoreEmbedFrame.tsx).
             builder.getGroup("advanced").addItem("kanban", {
               label: "Board",
               icon: boardIcon,

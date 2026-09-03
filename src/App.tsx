@@ -119,7 +119,7 @@ import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
 import StoreView from "./StoreView";
 import CardPeek from "./CardPeek";
-import type { StoreEmbedHost, StoreChoice } from "./StoreEmbed";
+import type { StoreEmbedHost, StoreChoice } from "./StoreEmbedFrame";
 import PropertiesHeader from "./PropertiesHeader";
 import {
   parseFrontmatter,
