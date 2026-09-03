@@ -581,7 +581,7 @@ flowchart LR
   `src/TableView.tsx`, `src/PropertiesHeader.tsx` + `src/PropertyControl.tsx`,
   `src/CardPeek.tsx`, `src/storeChrome.tsx` (the popover, the inline input
   and the card menu every view shares), `src/storeEmbed.ts` +
-  `src/StoreEmbed.tsx`, `src/BoardSnapshot.tsx` (a published view, drawn
+  `src/StoreEmbedFrame.tsx`, `src/BoardSnapshot.tsx` (a published view, drawn
   from a snapshot).
 - `App.tsx`: the `store` tab kind, the frontmatter boundary in
   `loadActiveContent` / `writeToDisk`, the properties-only branch of the
@@ -882,7 +882,7 @@ beside the board instead of in a tab, on the back of a new `write_body`
 command — the mirror image of `write_frontmatter`; `store/csv.ts` exports
 what a view shows. The ` ```kanban ` fence gains a sibling, ` ```table `,
 and with it `kanbanEmbed.ts` / `KanbanEmbed.tsx` become `storeEmbed.ts` /
-`StoreEmbed.tsx` (one node type, the language as an attribute) and
+`StoreEmbedFrame.tsx` (one node type, the language as an attribute) and
 `kanbanFences` becomes `storeFences`. Worker version 24 carries table
 snapshots on the same `boards` array.
 Verification: `store.test.mjs` covers the view record, the filter and the
