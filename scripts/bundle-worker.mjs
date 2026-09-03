@@ -21,7 +21,7 @@
 // build past the cap rather than letting the deploy be the first to notice.
 
 import { build } from "vite";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import zlib from "node:zlib";
@@ -29,10 +29,6 @@ import { createHash } from "node:crypto";
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workerDir = path.join(repoRoot, "cloud-worker");
-const args = process.argv.slice(2);
-const withMermaid = !args.includes("--no-mermaid");
-const outArg = args.find((a) => !a.startsWith("--"));
-const dest = path.resolve(outArg ?? path.join(workerDir, "dist", "doklin-cloud-worker.js"));
 
 const GZIP_CEILING = 3 * 1024 * 1024;
 
@@ -89,27 +85,41 @@ export function assetsInjector(mermaid) {
   };
 }
 
-const mermaid = withMermaid ? await buildMermaidModule() : null;
-const code = await bundle(
-  path.join(workerDir, "src", "index.ts"),
-  "doklin-cloud-worker",
-  mermaid === null ? [] : [assetsInjector(mermaid)],
-);
-
-fs.mkdirSync(path.dirname(dest), { recursive: true });
-fs.writeFileSync(dest, code);
-
-const version = code.match(/^const WORKER_VERSION = (\d+);$/m)?.[1];
-if (!version) throw new Error("WORKER_VERSION did not survive bundling in a parseable shape");
-const gz = zlib.gzipSync(Buffer.from(code)).length;
-const kb = (n) => (n / 1024).toFixed(0);
-console.log(
-  `wrote ${dest} (${kb(code.length)} KB, ${kb(gz)} KB gzipped, WORKER_VERSION ${version}` +
-    `${mermaid === null ? ", no mermaid module" : `, mermaid ${kb(mermaid.length)} KB`})`,
-);
-if (gz > GZIP_CEILING) {
-  console.error(
-    `::error::the worker is ${kb(gz)} KB gzipped — over the ${kb(GZIP_CEILING)} KB free-plan ceiling`,
+/** The whole worker as one ES module string — with the mermaid module spliced in unless told not to. */
+export async function bundleWorker({ mermaid = true } = {}) {
+  const module = mermaid ? await buildMermaidModule() : null;
+  const code = await bundle(
+    path.join(workerDir, "src", "index.ts"),
+    "doklin-cloud-worker",
+    module === null ? [] : [assetsInjector(module)],
   );
-  process.exit(1);
+  return { code, mermaid: module };
+}
+
+// The command line: bundle, write, measure. Guarded so the harness can
+// import bundleWorker without running a build at import time.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const args = process.argv.slice(2);
+  const withMermaid = !args.includes("--no-mermaid");
+  const outArg = args.find((a) => !a.startsWith("--"));
+  const dest = path.resolve(outArg ?? path.join(workerDir, "dist", "doklin-cloud-worker.js"));
+
+  const { code, mermaid } = await bundleWorker({ mermaid: withMermaid });
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, code);
+
+  const version = code.match(/^const WORKER_VERSION = (\d+);$/m)?.[1];
+  if (!version) throw new Error("WORKER_VERSION did not survive bundling in a parseable shape");
+  const gz = zlib.gzipSync(Buffer.from(code)).length;
+  const kb = (n) => (n / 1024).toFixed(0);
+  console.log(
+    `wrote ${dest} (${kb(code.length)} KB, ${kb(gz)} KB gzipped, WORKER_VERSION ${version}` +
+      `${mermaid === null ? ", no mermaid module" : `, mermaid ${kb(mermaid.length)} KB`})`,
+  );
+  if (gz > GZIP_CEILING) {
+    console.error(
+      `::error::the worker is ${kb(gz)} KB gzipped — over the ${kb(GZIP_CEILING)} KB free-plan ceiling`,
+    );
+    process.exit(1);
+  }
 }

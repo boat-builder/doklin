@@ -7,7 +7,10 @@
 // `cloud-applied` refreshing the tree, presence chips, the worker update
 // card and its badge, the history panel restoring a revision, "Connect
 // another Mac", disconnect, the wipe → teardown prompt, and the join flow
-// opening the downloaded folder.
+// opening the downloaded folder — and publishing: the pill's not-connected
+// door, publishing a note at a random then a chosen address, the sidebar's
+// dots, the folder dialog, the published list (home page, stop), and the
+// sidebar's undoable stop.
 import { chromium } from "playwright";
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -54,6 +57,10 @@ const page = await context.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
 await page.goto("http://localhost:1420/verify-harness/cloud.html");
+// The fake engine's worker answers with the version this app was built for.
+await page.evaluate((v) => {
+  window.__cloud.workerVersion = v;
+}, WORKER_VERSION);
 
 const calls = (cmd) => page.evaluate((c) => window.__cloud.calls.filter((x) => x.cmd === c), cmd);
 const lastCall = async (cmd) => (await calls(cmd)).at(-1) ?? null;
@@ -86,6 +93,20 @@ const openPanelFromGear = async () => {
 /* 1 — boot: a plain workspace, no dot, the gear's Cloud… item without a badge */
 await poll(async () => (await page.locator(".milkdown .ProseMirror").count()) === 1);
 await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
+/* 1b — the pill on a note of an unconnected workspace: Publish, and the door to the wizard */
+await poll(async () => (await tid("publish-pill").count()) === 1);
+const pillBefore = await tid("publish-pill").textContent();
+await tid("publish-pill").click();
+await poll(async () => (await tid("publish-pop").count()) === 1);
+step(
+  "pill (not connected): reads Publish, its popover explains and offers Connect a domain…",
+  pillBefore === "Publish" &&
+    (await tid("publish-connect").count()) === 1 &&
+    (await tid("publish-pop").textContent()).includes("connected to a domain"),
+  pillBefore,
+);
+await page.keyboard.press("Escape");
+await poll(async () => (await tid("publish-pop").count()) === 0);
 await page.locator(".settings-fab").click();
 await poll(async () => (await tid("settings-cloud").count()) === 1);
 step(
@@ -218,6 +239,128 @@ step(
   phaseText,
 );
 await page.screenshot({ path: SHOTS + "cloud-03-panel-connected.png" });
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+
+/* 9a — publish the open note at a random address */
+await tid("publish-pill").click();
+await poll(async () => (await tid("publish-go").count()) === 1);
+await tid("publish-go").click();
+await poll(async () => (await calls("cloud_publish")).length === 1);
+await poll(async () => (await tid("publish-pill").textContent()) === "Published");
+const firstPublish = await lastCall("cloud_publish");
+const publishedUrl = await tid("publish-url").textContent();
+step(
+  "pill: Publish sends the note's path with no slug; the pill reads Published, the link is a random address, the sidebar row gets a dot",
+  firstPublish.args.path === "/docs/notes.md" &&
+    firstPublish.args.slug === null &&
+    /^notes\.example\.com\/[a-z0-9]{8}$/.test(publishedUrl) &&
+    (await tid("publish-by").textContent()).includes("by this Mac") &&
+    (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1,
+  publishedUrl,
+);
+await page.screenshot({ path: SHOTS + "cloud-09-published.png" });
+
+/* 9b — a chosen address, and Copy */
+await tid("publish-slug").fill("team-notes");
+await tid("publish-rename").click();
+await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-notes");
+await poll(async () => (await tid("publish-url").textContent()) === "notes.example.com/team-notes");
+await tid("publish-copy").click();
+await poll(async () => (await page.evaluate(() => navigator.clipboard.readText())) === "https://notes.example.com/team-notes");
+await tid("publish-slug").fill("AB");
+await poll(async () => (await tid("publish-pop").locator(".share-error").count()) === 1);
+step(
+  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it",
+  (await tid("publish-rename").isDisabled()) && (await calls("cloud_publish")).length === 2,
+);
+await page.keyboard.press("Escape");
+await poll(async () => (await tid("publish-pop").count()) === 0);
+
+/* 9c — the folder dialog from the sidebar */
+await page.locator('[data-tree-path="/docs/Projects"]').click({ button: "right" });
+await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Publish folder…" }).count()) === 1);
+await page.locator(".sidebar-menu-item", { hasText: "Publish folder…" }).click();
+await poll(async () => (await dialog("Publish folder").count()) === 1);
+const suggested = await tid("folder-slug").inputValue();
+const folderCount = await tid("folder-count").textContent();
+await tid("folder-title").fill("Projects");
+await tid("folder-desc").fill("What we're building");
+await tid("folder-publish").click();
+await poll(async () => (await dialog("Publish folder").count()) === 0);
+const folderCall = await lastCall("cloud_publish");
+await poll(async () => (await page.locator('[data-tree-path="/docs/Projects"] [data-testid="tree-published"]').count()) === 1);
+step(
+  "folder dialog: a slug suggested from the folder's name, the note count, title and description; Publish sends the folder's path; the folder row gets a dot",
+  suggested === "projects" &&
+    folderCount.includes("1 note") &&
+    folderCall.args.path === "/docs/Projects" &&
+    folderCall.args.slug === "projects" &&
+    folderCall.args.title === "Projects" &&
+    folderCall.args.desc === "What we're building",
+  `${suggested} · ${folderCount}`,
+);
+
+/* 9d — a note inside the published folder: the pill knows its nested address */
+await page.locator('[data-tree-path="/docs/Projects/plan.md"]').click();
+await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Plan"));
+await poll(async () => (await tid("publish-pill").textContent()) === "Publish");
+await tid("publish-pill").click();
+await poll(async () => (await tid("publish-nested").count()) === 1);
+step(
+  "pill (inside a published folder): not published on its own, but 'Already public inside Projects' at the nested address",
+  (await tid("publish-nested").textContent()).includes("notes.example.com/projects/plan"),
+);
+await page.keyboard.press("Escape");
+await poll(async () => (await tid("publish-pop").count()) === 0);
+await page.screenshot({ path: SHOTS + "cloud-10-folder-published.png" });
+
+/* 9e — the published list: folders first, home page, stop */
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await tid("published-pages").count()) === 1);
+const doorText = await tid("published-pages").textContent();
+await tid("published-pages").click();
+await poll(async () => (await dialog("Published pages").count()) === 1);
+await poll(async () => (await tid("published-row").count()) === 2);
+const rowSlugs = await page.locator('[data-testid="published-row"]').evaluateAll((els) => els.map((e) => e.dataset.slug));
+const notesRow = page.locator('[data-testid="published-row"][data-slug="team-notes"]');
+await notesRow.locator('[data-testid="published-home"]').click();
+await poll(async () => (await lastCall("cloud_set_root")).args.slug === "team-notes");
+await poll(async () => (await notesRow.locator(".published-badge", { hasText: "Home page" }).count()) === 1);
+const projectsRow = page.locator('[data-testid="published-row"][data-slug="projects"]');
+await projectsRow.locator('[data-testid="published-stop"]').click();
+await projectsRow.locator('[data-testid="published-stop-yes"]').click();
+await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "projects");
+await poll(async () => (await tid("published-row").count()) === 1);
+step(
+  "published list: the panel's door counts 2, folders sort first, Use as home page sets the root, Stop asks then removes the folder",
+  doorText === "Published pages (2)…" && rowSlugs.join(",") === "projects,team-notes",
+  `${doorText} · ${rowSlugs.join(",")}`,
+);
+await page.screenshot({ path: SHOTS + "cloud-11-published-list.png" });
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Published pages").count()) === 0);
+
+/* 9f — the sidebar's Stop publishing is immediate and undoable */
+await page.locator('[data-tree-path="/docs/notes.md"]').click({ button: "right" });
+await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).count()) === 1);
+await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).click();
+await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "team-notes");
+await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
+const stopToast = await page.locator(".cloud-toast").textContent();
+await page.locator(".cloud-toast-btn", { hasText: "Undo" }).click();
+await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-notes");
+await poll(async () => (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1);
+step(
+  "sidebar: Stop publishing stops at once and the toast's Undo brings the page back under the same slug",
+  stopToast.includes("Stopped publishing notes.md") &&
+    (await page.locator('[data-tree-path="/docs/Projects"] [data-testid="tree-published"]').count()) === 0,
+  stopToast,
+);
+await page.locator('[data-tree-path="/docs/notes.md"]').click();
+await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Notes"));
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await dialog("Cloud").count()) === 1);
 
 /* 10 — every phase reaches the phase line and the dot */
 const phases = [

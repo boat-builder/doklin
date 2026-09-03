@@ -988,6 +988,50 @@ the Publish pill and its gating.
   page follows; rename → the URL still works; delete → 404, restore →
   back.
 
+As built: the worker's public side is `workspace.ts` (the reader — one
+`head` per request, the manifest body only when its etag moved past the
+isolate's memoized copy; files by path, case-insensitively like the disk
+they live on, and by id; blobs; the notes under a folder; a folder's
+datastore read the way `read_store` reads it; the meta sidecar),
+`publicMap.ts` (which slug a file answers at, which folder page covers a
+path, and `urlFor`: inside the folder a page was reached through first,
+then the file's own slug, then the closest folder), `pages.ts` (a note from
+its blob — comments stripped, the frontmatter as a properties table
+coloured by its store, boards derived with `boardSnapshot` from the stores
+its fences name, widths from the sidecar, relative links rewritten or
+dropped to their text, the html rendition framed by default and served at
+`…/raw` under `Content-Security-Policy: sandbox`; a folder's table of
+contents; images, PDFs and html files inside a published folder by exact
+path), `render.ts` (the ported renderer and stylesheet) and `public.ts`
+(routing and the cache: `caches.default` under
+`https://cache.doklin/<etag><path><search>`, a day for the cache and
+`no-cache` for the browser, 200s and 404s alike). A board reads at most 40
+cards — a Worker on the free plan may make 50 subrequests per request — and
+says how many more it holds. The domain root falls back to the landing page
+when the root entry's file is gone, rather than 404ing the site.
+`WORKER_VERSION` is 2, `WORKER_FEATURES` gained `publish` and `boards`, and
+the static OG image (`og.ts`) is the app icon on the reading page's ground.
+In the app, `PublishMenu.tsx` is the pill and its popover (the door to the
+wizard when the folder isn't connected; publish at a random or chosen
+address; the link, copy / open, rename the address — the engine re-keys the
+page — who published it and when, a quiet line while edits are still on
+their way, stop), `PublishFolder.tsx` the folder dialog (a slug suggested
+from the folder's name, the note count, title and description, edit and
+stop; the workspace root publishes the whole workspace), `PublishedPages.tsx`
+the list (folders first, home page, `file missing`, stop with an inline
+confirm); the sidebar marks rows with a page of their own and offers
+*Publish folder…* / *Edit publishing…* / *Copy public link* / *Stop
+publishing* (stopping from the sidebar is immediate, and the toast's Undo
+re-publishes under the same slug); the Cloud panel's *Published pages…*
+opens the list. `src/cloud.ts` carries the slug grammar and the URL
+derivations. `cloud-worker/test/run.mjs` grew a seed workspace
+(`test/seed.mjs`, loaded through the API) and nine renderer cases (23 in
+all, source and bundle); `verify-harness/serve-worker.mjs` serves that seed
+over node http — the worker bundled in-process, mermaid included — for
+`drive-public.mjs` (8 steps in Chromium, JavaScript off for the board, dark
+for the diagram), and `drive-cloud.mjs` walks the app's publishing surfaces
+(29 steps).
+
 ### PR 5 — Docs and the last sweep
 
 README (features, install unchanged), `docs/development.md` (architecture

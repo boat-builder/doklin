@@ -243,3 +243,98 @@ export function workerAhead(s: CloudStatus): boolean {
 /** Whether the gear's badge should light for the cloud: some connected
  *  workspace's worker is behind. */
 export const cloudNeedsAttention = (statuses: CloudStatus[]): boolean => statuses.some(workerBehind);
+
+/* ---------- Publishing ---------- */
+
+/** A slug's grammar — the same rule the engine and the worker check. */
+export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
+/** Slugs the worker's own routes speak for. */
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
+  "api",
+  "__web",
+  "raw",
+  "og.png",
+  "robots.txt",
+  "favicon.ico",
+  "apple-touch-icon.png",
+  "join",
+]);
+
+/** Why a typed slug can't be one, or null when it can. The engine says the same things. */
+export function slugProblem(raw: string): string | null {
+  const s = raw.trim().toLowerCase();
+  if (!SLUG_RE.test(s)) {
+    return "3 to 64 characters: lowercase letters, digits and dashes, starting with a letter or digit";
+  }
+  if (RESERVED_SLUGS.has(s)) return `"${s}" is taken by the site itself`;
+  return null;
+}
+
+const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+
+/** A path inside the workspace, relative to its root ("" is the root itself); null when it lies outside. */
+export function relPathIn(root: string, abs: string): string | null {
+  if (abs === root) return "";
+  return abs.startsWith(`${root}/`) ? abs.slice(root.length + 1) : null;
+}
+
+/** The address of a public page: its slug under the domain. */
+export const pageUrl = (s: CloudStatus, page: PublicPage): string => `${s.endpoint}/${page.slug}`;
+
+/**
+ * The address of a note inside a published folder — Notion-style: the
+ * folder's slug, then the path relative to the folder with the markdown
+ * extension dropped and every segment percent-encoded.
+ */
+export function nestedUrl(s: CloudStatus, dir: PublicPage, rel: string): string {
+  const inner = dir.path ? rel.slice(dir.path.length + 1) : rel;
+  const shown = inner.replace(MD_EXT_RE, "");
+  return `${s.endpoint}/${dir.slug}/${shown.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+const covers = (dir: PublicPage, rel: string): boolean =>
+  dir.kind === "dir" && (dir.path === "" || rel.startsWith(`${dir.path}/`));
+
+/** The page published for exactly this path, of this kind, if any. */
+export function pageForPath(s: CloudStatus, rel: string, kind: PublicKind): PublicPage | null {
+  return s.public.find((p) => p.kind === kind && p.path === rel) ?? null;
+}
+
+/** The closest published folder covering a path (a folder counts as covering itself only through its own page). */
+export function folderCovering(s: CloudStatus, rel: string): PublicPage | null {
+  const dirs = s.public.filter((p) => covers(p, rel)).sort((a, b) => b.path.length - a.path.length);
+  return dirs[0] ?? null;
+}
+
+/** One way a file is reachable: its own page, or a folder page's nested address. */
+export type PublicPlace = { page: PublicPage; url: string; nested: boolean };
+
+/** Everywhere a file is public, its own page first. */
+export function placesOf(s: CloudStatus, rel: string): PublicPlace[] {
+  const out: PublicPlace[] = [];
+  const own = pageForPath(s, rel, "file");
+  if (own) out.push({ page: own, url: pageUrl(s, own), nested: false });
+  for (const dir of s.public.filter((p) => covers(p, rel)).sort((a, b) => b.path.length - a.path.length)) {
+    out.push({ page: dir, url: nestedUrl(s, dir, rel), nested: true });
+  }
+  return out;
+}
+
+/** The pages with a page of their own, by workspace-relative path — the sidebar's dots. */
+export function publishedByPath(s: CloudStatus | null): Map<string, PublicPage> {
+  const out = new Map<string, PublicPage>();
+  for (const p of s?.public ?? []) if (!out.has(p.path)) out.set(p.path, p);
+  return out;
+}
+
+/** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows. */
+export function suggestSlug(name: string): string {
+  const base = name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  const padded = base.length >= 3 ? base : `${base}${base ? "-" : ""}notes`;
+  return RESERVED_SLUGS.has(padded) ? `${padded}-notes` : padded;
+}

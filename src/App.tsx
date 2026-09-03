@@ -4,18 +4,25 @@ import { listen } from "@tauri-apps/api/event";
 import {
   cloudForWorkspace,
   cloudNeedsAttention,
+  cloudPublish,
   cloudSetActivity,
   cloudStatus,
+  cloudUnpublish,
   onCloudApplied,
   onCloudConflict,
   onCloudPendingDeletes,
   onCloudStatus,
+  relPathIn,
   type CloudPendingDeletesEvent,
   type CloudStatus,
+  type PublicPage,
 } from "./cloud";
 import CloudPanel from "./CloudPanel";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
 import CloudToasts, { type CloudToast } from "./CloudToasts";
+import PublishMenu from "./PublishMenu";
+import PublishFolder from "./PublishFolder";
+import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
 import HistoryPanel from "./HistoryPanel";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -982,7 +989,35 @@ export default function App() {
   const dismissToast = useCallback(
     (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
+  );  // Publishing (docs/cloud-redesign.md §7.2): the folder dialog (a folder,
+  // or the root for the whole workspace) and the list of every published
+  // page. The pill lives in the tab bar (PublishMenu).
+  const [publishFolder, setPublishFolder] = useState<string | null>(null);
+  const [publishedOpen, setPublishedOpen] = useState(false);
+  // Stopping from the sidebar is immediate and undoable: the toast's Undo
+  // publishes the same path again under the same slug.
+  const stopPublishing = useCallback(
+    (page: PublicPage) => {
+      const root = workspaceRoot;
+      if (!root) return;
+      const abs = page.path ? `${root}/${page.path}` : root;
+      void cloudUnpublish(root, page.slug)
+        .then(() =>
+          pushToast(`Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
+            label: "Undo",
+            run: () =>
+              void cloudPublish(abs, {
+                slug: page.slug,
+                title: page.title ?? undefined,
+                desc: page.desc ?? undefined,
+              }).catch((e) => pushToast(`Couldn't publish again: ${String(e)}`)),
+          }),
+        )
+        .catch((e) => pushToast(`Couldn't stop publishing: ${String(e)}`));
+    },
+    [workspaceRoot, pushToast],
   );
+
 
   // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
   // when closed. Set by the `dk-mermaid-expand` event a diagram's expand chip
@@ -5406,6 +5441,22 @@ export default function App() {
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
+              {/* Publishing: a file inside the open workspace only — not a
+                  draft, not a board, not a file from outside (§7.3). */}
+              {activeTab.kind === "file" &&
+                workspaceRoot &&
+                relPathIn(workspaceRoot, activeTab.path) !== null && (
+                  <PublishMenu
+                    cloud={cloudForRoot}
+                    absPath={activeTab.path}
+                    rel={relPathIn(workspaceRoot, activeTab.path) ?? ""}
+                    deviceName={deviceName}
+                    dirty={dirty}
+                    onConnect={() => setCloudSetup("connect")}
+                    onOpenExternal={openExternal}
+                    onOpenPublished={() => setPublishedOpen(true)}
+                  />
+                )}
               {/* Markdown only: an html view docks its own comment-mode
                   toggle (and PDF export) into the slot below instead —
                   comment mode itself lives inside HtmlView. */}
@@ -5484,6 +5535,9 @@ export default function App() {
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
+          onPublishFolder={cloudForRoot ? (dir) => setPublishFolder(dir) : undefined}
+          onStopPublishing={cloudForRoot ? stopPublishing : undefined}
+          onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onHistory={setHistoryPath}
         />
       )}
@@ -5574,7 +5628,34 @@ export default function App() {
             setCloudPanelOpen(false);
             setWorkerUpdateOpen(true);
           }}
+          onOpenPublished={() => {
+            setCloudPanelOpen(false);
+            setPublishedOpen(true);
+          }}
           onOpenExternal={openExternal}
+        />
+      )}
+      {publishFolder && cloudForRoot && (
+        <PublishFolder
+          cloud={cloudForRoot}
+          dir={publishFolder}
+          onClose={() => setPublishFolder(null)}
+          onOpenExternal={openExternal}
+        />
+      )}
+      {publishedOpen && cloudForRoot && (
+        <PublishedPages
+          cloud={cloudForRoot}
+          onClose={() => setPublishedOpen(false)}
+          onOpenExternal={openExternal}
+          onOpenFile={(p) => {
+            setPublishedOpen(false);
+            void openTab(p, "file");
+          }}
+          onEditFolder={(dir) => {
+            setPublishedOpen(false);
+            setPublishFolder(dir);
+          }}
         />
       )}
       {cloudSetup && (

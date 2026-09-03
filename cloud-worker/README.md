@@ -1,21 +1,23 @@
 # Doklin cloud worker
 
 One Cloudflare Worker in front of one R2 bucket, serving one workspace's
-cloud at one domain: the private sync API the app's engine speaks, and —
-once publishing lands — the public pages rendered from the synced files.
+cloud at one domain: the private sync API the app's engine speaks, and the
+public pages rendered from the synced files.
 The design, the reasoning and the phased plan live in
 [docs/cloud-redesign.md](../docs/cloud-redesign.md); this file is the
 contract as built.
 
-**Where things stand.** This is the worker of the plan's PR 1: the sync
-API, the meta probe, the owner's wipe, a landing page at `/` and the static
-assets. Every other public path is a 404 page — the renderer (a published
-note, a folder's table of contents, boards and tables from a datastore,
-column widths, html renditions) arrives with publishing (PR 4). The engine
-that drives this API from the app is `src-tauri/src/cloud/` (PR 2); the
-app's setup wizard, update card and teardown step (PR 3) write the prompts
-that deploy, update and remove a worker — `src/cloudPrompts.ts` is their
-one source, and the deploy steps below are the same procedure by hand.
+**Where things stand.** Version 2: the sync API, the meta probe, the
+owner's wipe (PR 1), and publishing (PR 4) — the public map served as
+pages rendered from synced blobs: a note, its html rendition behind the
+MD/HTML pill, a folder's table of contents with nested addresses, boards and
+tables derived from a datastore, a card's properties, column widths, links
+between public notes, the root page, a static OG image, and a cache keyed
+by the manifest's etag. The engine that drives this API from the app is
+`src-tauri/src/cloud/` (PR 2); the app's setup wizard, update card and
+teardown step (PR 3) write the prompts that deploy, update and remove a
+worker — `src/cloudPrompts.ts` is their one source, and the deploy steps
+below are the same procedure by hand.
 
 ## The rules it keeps
 
@@ -125,14 +127,34 @@ Reserved for invites (plan §8.1), not built: `POST /api/auth/join`,
 ### Public (no auth, `GET`/`HEAD` only)
 
 ```
-GET /                          the landing page (the workspace's name, "Download Doklin");
-                               the root page once publishing lands and the map names one
+GET /                          the root page when the map names one (and its file exists),
+                               else the landing page (the workspace's name, "Download Doklin")
+GET /<slug>                    a published note: its html rendition, framed, when the workspace
+                               holds <stem>.html beside it; the markdown otherwise
+GET /<slug>?v=md               the markdown rendering explicitly (the MD/HTML pill)
+GET /<slug>/raw                the html rendition verbatim, under Content-Security-Policy: sandbox
+GET /<dirSlug>                 a published folder: every note under it, as a table of contents
+GET /<dirSlug>/<rel/path>      a note inside it (markdown extension dropped, segments
+                               percent-encoded, case-insensitive), its rendition at …/raw, or an
+                               image / PDF / html file by its exact path (anything else 404s)
+GET /og.png · /<slug>/og.png   the site's static Open Graph image
 GET /robots.txt · /favicon.ico · /apple-touch-icon.png
 GET /__web/<tag>/mermaid.js    the standalone mermaid module (immutable, content-tagged)
-everything else                a 404 page, until PR 4 renders published files here
+everything else                a 404 page — an unpublished path, a slug whose file is gone
 ```
 
-Every page carries `<meta name="robots" content="noindex">`.
+Every page carries `<meta name="robots" content="noindex">` (and the
+`x-robots-tag` header). A note renders from its blob with comment markers
+stripped (`src/criticMarkup.ts`), its frontmatter as a properties table
+coloured by the folder's `store.jsonl`, each ` ```kanban ` / ` ```table `
+fence drawn from the store it names (`src/store/board.ts` — the app's own
+derivation; at most 40 cards read, the rest counted), table column widths
+from `<stem>.meta.jsonl`, and relative links rewritten to public addresses
+— inside the folder the page was reached through first, then the target's
+own slug, then the closest published folder — or dropped to their text.
+Renders are cached in `caches.default` under
+`https://cache.doklin/<manifestEtag><path><search>`: a manifest change
+gives every URL a new key, so a page is never stale past one `head`.
 
 ## Auth
 
@@ -165,7 +187,7 @@ npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # before deploy �
 npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
 npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
-# → {"version":1,"features":[…],"workspace":null}
+# → {"version":2,"features":["sync","wipe","publish","boards"],"workspace":null}
 ```
 
 A custom domain needs its zone active on the same Cloudflare account, and
@@ -180,13 +202,19 @@ secret and the bucket stay. **Teardown:** the app's wipe empties the bucket
 
 ```sh
 pnpm typecheck:worker      # tsc against the Workers runtime types (no DOM)
-pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2, every route
+pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2, every route,
+                           # the renderer over test/seed.mjs (a workspace with a bit of everything)
 pnpm bundle:worker         # → cloud-worker/dist/doklin-cloud-worker.js, size printed
 node scripts/bundle-worker.mjs --no-mermaid    # a quick bundle without the mermaid module
+node verify-harness/serve-worker.mjs           # the bundled worker over the seed, on :8787 —
+                                               # open it in a browser, or run drive-public.mjs
 ```
 
-The sources are TypeScript (`src/`); `scripts/bundle-worker.mjs` flattens
-them with vite into one readable file — people are asked to trust-deploy it
+The sources are TypeScript (`src/`), and the renderer imports the app's own
+pure modules (`src/store/`, `src/metaFile.ts`, `src/criticMarkup.ts`,
+`src/docLinks.ts`) so a published board can't disagree with the board in
+the app; `scripts/bundle-worker.mjs` flattens them with vite into one
+readable file — people are asked to trust-deploy it
 — with the standalone mermaid module (`web/mermaid-entry.ts`) spliced into
 `src/assets.ts` as a string. The checked-in `assets.ts` is empty so the
 tests compile the worker without building mermaid. The bundle prints its
