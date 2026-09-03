@@ -301,6 +301,13 @@ sentence this note replaces assumed snapshots would point at the sync's,
 which they deliberately no longer do. A capture that finds the workspace
 byte-for-byte what the newest snapshot holds writes nothing at all.
 
+The end of a session is captured three ways: two minutes of quiet, the last
+window on a folder closing, and the quit. The quit hook is the app's
+`RunEvent::ExitRequested`/`Exit` arm rather than `begin_quit_flush` — that
+one is the ⌘Q menu path only, and a Dock-icon Quit never reaches it, while
+the run-event arm is on every path and runs after the windows have flushed
+their autosaves. It waits two seconds at most.
+
 ### 6.2 Retention — the ladder
 
 The thinner keeps, per store:

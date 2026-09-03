@@ -302,10 +302,15 @@ what makes "opened it, deleted half of it by accident" recoverable).
 
 **Shutdown.** `VersionerCmd::Shutdown` captures `closing` if dirty, then
 exits. The manager sends it when a root's last window closes (decision 6).
-On quit, the existing quit flush (`QuitFlush` / `begin_quit_flush` in
-`lib.rs` — the path that ends in `exit` once every window acked or timed
-out) calls `versions::flush_all_blocking(&app, Duration::from_secs(2))`
-first: each dirty versioner captures synchronously, bounded by the deadline.
+On quit, `versions::flush_all_blocking(&app, Duration::from_secs(2))`
+captures what is pending: each dirty versioner captures synchronously,
+bounded by the deadline. *As built*: the hook is the
+`RunEvent::ExitRequested { .. } | RunEvent::Exit` arm in `lib.rs`, not
+`begin_quit_flush`. `begin_quit_flush` is the ⌘Q menu path alone — a
+Dock-icon Quit goes straight to `RunEvent::Exit` and never reaches it —
+whereas the run-event arm is on every path and fires after the windows have
+acked their autosaves, which is exactly the state worth capturing. It runs
+once, guarded by the `Quitting` flag's swap.
 
 ### 4.4 Retention — the ladder and the sweep
 
