@@ -202,10 +202,12 @@
             case "unwatch_file":
               window.__watched = [];
               return Promise.resolve(null);
-            case "sync_status":
+            case "cloud_status":
               return Promise.resolve([]);
-            case "sync_device":
-              return Promise.resolve({ name: "Test Mac" });
+            case "cloud_set_activity":
+              return Promise.resolve(null);
+            case "device_name":
+              return Promise.resolve("Test Mac");
             case "list_drafts":
               return Promise.resolve([]);
             case "open_external":

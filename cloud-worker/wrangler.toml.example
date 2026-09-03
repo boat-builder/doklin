@@ -1,0 +1,36 @@
+# Doklin cloud worker — deployment config template.
+#
+# The app's setup prompt writes the real wrangler.toml for the agent that
+# deploys a domain (docs/cloud-redesign.md §7.4); this copy is for doing it
+# by hand. Copy it to wrangler.toml (gitignored — it carries your account id
+# and domain), replace the placeholders, then from this directory:
+#
+#   curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js \
+#        -o doklin-cloud-worker.js                            # or: node scripts/bundle-worker.mjs
+#   npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # the bucket must exist BEFORE deploy
+#   npx -y wrangler@4 secret put OWNER_TOKEN                     # 32 random bytes, hex — the app mints it
+#   npx -y wrangler@4 deploy
+#
+# Every name derives from the domain (dots → dashes, prefixed "doklin-") so
+# two setups can never collide and a new deploy can never land on an old
+# doklin-share-* stack. See README.md.
+
+name = "doklin-notes-example-com"
+main = "doklin-cloud-worker.js"
+compatibility_date = "2025-05-05"   # cloud-worker/src/version.ts COMPATIBILITY_DATE
+
+# Your Cloudflare account id (`npx -y wrangler@4 whoami`).
+account_id = "<your-cloudflare-account-id>"
+
+# A domain of your own: the zone must already be active on this account.
+workers_dev = false
+routes = [{ pattern = "notes.example.com", custom_domain = true }]
+
+# The free workers.dev address instead — the worker then answers at
+# https://doklin-<name>.<your-subdomain>.workers.dev (wrangler prints it):
+#   workers_dev = true
+#   (and no `routes` line)
+
+[[r2_buckets]]
+binding = "DATA"                          # the worker reads env.DATA — leave as is
+bucket_name = "doklin-notes-example-com"

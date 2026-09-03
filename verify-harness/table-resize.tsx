@@ -12,7 +12,7 @@ import { createRoot } from "react-dom/client";
 import Editor from "../src/Editor";
 import type { TableCols } from "../src/tableWidths";
 import "../src/App.css";
-import "../web/web.css";
+import "./harness.css";
 
 declare global {
   interface Window {
@@ -73,7 +73,7 @@ function Harness() {
         Reopen
       </button>
       <div
-        className={`editor-wrap web-editor-wrap ${readOnly ? "is-readonly" : ""}`}
+        className={`editor-wrap harness-editor-wrap ${readOnly ? "is-readonly" : ""}`}
         style={{ height: "90vh" }}
       >
         <Editor

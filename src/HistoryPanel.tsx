@@ -1,21 +1,17 @@
-// Version history for a synced document.
+// Version history for a synced document (docs/cloud-redesign.md §6.9).
 //
-// Every push of a synced file leaves its previous revision behind as an
-// immutable blob; this panel lists them (manifest inline tail + the deep
-// archive) and offers the two calm exits from a bad merge:
+// Every won write of a synced file leaves its previous revision behind as
+// an immutable blob; this panel lists them — the manifest's inline tail plus
+// the deep archive, fetched by the engine — and offers the two calm exits
+// from a bad merge:
 //   Restore — the old content becomes the document's NEW current revision
-//             (write the file; the engine pushes it — nothing is rewritten),
+//             (a plain write; the engine pushes it — nothing is rewritten),
 //   Save as new doc — materialize the revision beside the original and keep
 //             working from there.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ShareConnection } from "./share";
-import {
-  fetchFileHistory,
-  fetchRevisionContent,
-  type HistoryRevision,
-} from "./sync";
+import { cloudHistory, cloudRevision, type CloudRevision } from "./cloud";
 
 function CloseIcon() {
   return (
@@ -26,15 +22,12 @@ function CloseIcon() {
   );
 }
 
-function revLabel(r: HistoryRevision): string {
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+function revLabel(r: CloudRevision): string {
   const when = r.timeMs ? new Date(r.timeMs) : null;
   const time = when
-    ? when.toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      })
+    ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : "";
   return [time, r.by].filter(Boolean).join(" · ");
 }
@@ -43,27 +36,28 @@ const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
 export default function HistoryPanel({
   docPath,
-  relPath,
-  wsId,
-  connection,
   onClose,
   onOpenFile,
 }: {
-  docPath: string; // absolute
-  relPath: string; // workspace-relative
-  wsId: string;
-  connection: ShareConnection;
+  docPath: string; // absolute, inside a connected workspace
   onClose: () => void;
   onOpenFile: (path: string) => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [fileId, setFileId] = useState<string | null>(null);
-  const [revisions, setRevisions] = useState<HistoryRevision[]>([]);
-  const [selected, setSelected] = useState<HistoryRevision | null>(null);
+  const [revisions, setRevisions] = useState<CloudRevision[]>([]);
+  const [selected, setSelected] = useState<CloudRevision | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [busy, setBusy] = useState<"restore" | "copy" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,17 +65,12 @@ export default function HistoryPanel({
       setLoading(true);
       setError(null);
       try {
-        const result = await fetchFileHistory(connection, wsId, relPath);
+        const revs = await cloudHistory(docPath);
         if (cancelled) return;
-        if (!result) {
-          setError("This document hasn't synced yet — history appears after its first sync.");
-        } else {
-          setFileId(result.fileId);
-          setRevisions(result.revisions);
-          setSelected(result.revisions[0] ?? null);
-        }
+        setRevisions(revs);
+        setSelected(revs[0] ?? null);
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setError(errText(e));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -89,42 +78,42 @@ export default function HistoryPanel({
     return () => {
       cancelled = true;
     };
-  }, [connection, wsId, relPath]);
+  }, [docPath]);
 
   useEffect(() => {
-    if (!selected || !fileId) {
+    if (!selected) {
       setPreview(null);
       return;
     }
     let cancelled = false;
     setPreview(null);
-    void fetchRevisionContent(connection, wsId, fileId, selected.hash)
+    void cloudRevision(docPath, selected.hash)
       .then((text) => {
         if (!cancelled) setPreview(text);
       })
       .catch((e) => {
-        if (!cancelled) setPreview(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+        if (!cancelled) setPreview(`⚠ ${errText(e)}`);
       });
     return () => {
       cancelled = true;
     };
-  }, [selected, fileId, connection, wsId]);
+  }, [selected, docPath]);
 
   const restore = useCallback(async () => {
-    if (!selected || !fileId || preview == null) return;
+    if (!selected || preview == null) return;
     setBusy("restore");
     setNotice(null);
     try {
-      // Plain write: the editor reloads through the file watcher, the engine
-      // pushes it as a fresh revision — today's content stays in history.
+      // A plain write: the open editor reloads through the file watcher, the
+      // engine pushes it as a fresh revision — today's content stays in history.
       await invoke("write_file", { path: docPath, contents: preview, expected: null });
       setNotice(`Restored revision ${selected.rev} — the previous state stays in history.`);
     } catch (e) {
-      setNotice(`Restore failed: ${e instanceof Error ? e.message : String(e)}`);
+      setNotice(`Restore failed: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
-  }, [selected, fileId, preview, docPath]);
+  }, [selected, preview, docPath]);
 
   const saveAsNew = useCallback(async () => {
     if (!selected || preview == null) return;
@@ -132,8 +121,10 @@ export default function HistoryPanel({
     setNotice(null);
     try {
       const dot = docPath.lastIndexOf(".");
-      const stem = dot > 0 ? docPath.slice(0, dot) : docPath;
-      const ext = dot > 0 ? docPath.slice(dot) : "";
+      const slash = Math.max(docPath.lastIndexOf("/"), docPath.lastIndexOf("\\"));
+      const hasExt = dot > slash + 1;
+      const stem = hasExt ? docPath.slice(0, dot) : docPath;
+      const ext = hasExt ? docPath.slice(dot) : "";
       let target = `${stem} (rev ${selected.rev})${ext}`;
       for (let n = 2; n < 50; n += 1) {
         const exists = await invoke<boolean>("path_exists", { path: target });
@@ -144,7 +135,7 @@ export default function HistoryPanel({
       setNotice(`Saved as ${basename(target)}.`);
       onOpenFile(target);
     } catch (e) {
-      setNotice(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`);
+      setNotice(`Couldn't save: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -158,7 +149,7 @@ export default function HistoryPanel({
       }}
     >
       <div
-        className="shared-modal sync-modal sync-history-modal"
+        className="shared-modal cloud-modal cloud-history-modal"
         role="dialog"
         aria-modal="true"
         aria-label="Version history"
@@ -170,34 +161,32 @@ export default function HistoryPanel({
           </button>
         </div>
 
-        <div className="sync-body">
-          {loading && <div className="sync-hint">Fetching revisions…</div>}
-          {error && <div className="sync-error">{error}</div>}
+        <div className="cloud-body">
+          {loading && <div className="cloud-hint">Fetching revisions…</div>}
+          {error && <div className="share-error">{error}</div>}
           {!loading && !error && (
-            <div className="sync-history-layout">
-              <ul className="sync-history-list" role="listbox" aria-label="Revisions">
+            <div className="cloud-history-layout">
+              <ul className="cloud-history-list" role="listbox" aria-label="Revisions">
                 {revisions.map((r) => (
                   <li key={r.rev}>
                     <button
                       role="option"
                       aria-selected={selected?.rev === r.rev}
-                      className={`sync-history-rev ${selected?.rev === r.rev ? "is-active" : ""}`}
+                      className={`cloud-history-rev ${selected?.rev === r.rev ? "is-active" : ""}`}
                       onClick={() => setSelected(r)}
                     >
-                      <span className="sync-history-rev-title">
+                      <span className="cloud-history-rev-title">
                         {r.current ? "Current" : `Revision ${r.rev}`}
                       </span>
-                      <span className="sync-history-rev-meta">{revLabel(r)}</span>
+                      <span className="cloud-history-rev-meta">{revLabel(r)}</span>
                     </button>
                   </li>
                 ))}
               </ul>
-              <div className="sync-history-preview">
+              <div className="cloud-history-preview">
                 {selected && (
                   <>
-                    <pre className="sync-history-pre">
-                      {preview == null ? "Loading…" : preview}
-                    </pre>
+                    <pre className="cloud-history-pre">{preview == null ? "Loading…" : preview}</pre>
                     {!selected.current && (
                       <div className="share-buttons">
                         <button
@@ -216,7 +205,7 @@ export default function HistoryPanel({
                         </button>
                       </div>
                     )}
-                    {notice && <div className="sync-hint">{notice}</div>}
+                    {notice && <div className="cloud-hint">{notice}</div>}
                   </>
                 )}
               </div>

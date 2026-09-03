@@ -208,6 +208,17 @@ fn is_store_conflict_name(name: &str) -> bool {
 /// it without touching the editor (see the frontmatter boundary in App.tsx).
 #[tauri::command]
 pub(crate) fn write_frontmatter(
+    app: AppHandle,
+    path: String,
+    head: String,
+    expected: Option<FileSnapshot>,
+) -> Result<FileSnapshot, WriteError> {
+    let snapshot = splice_frontmatter(path.clone(), head, expected)?;
+    crate::cloud::touched(&app, &path);
+    Ok(snapshot)
+}
+
+pub(crate) fn splice_frontmatter(
     path: String,
     head: String,
     expected: Option<FileSnapshot>,
@@ -254,6 +265,17 @@ pub(crate) fn write_frontmatter(
 /// the same note, and they should hear about it.
 #[tauri::command]
 pub(crate) fn write_body(
+    app: AppHandle,
+    path: String,
+    body: String,
+    expected: Option<FileSnapshot>,
+) -> Result<FileSnapshot, WriteError> {
+    let snapshot = splice_body(path.clone(), body, expected)?;
+    crate::cloud::touched(&app, &path);
+    Ok(snapshot)
+}
+
+pub(crate) fn splice_body(
     path: String,
     body: String,
     expected: Option<FileSnapshot>,
@@ -289,7 +311,7 @@ pub(crate) fn write_body(
 /// A new card: a file holding only its frontmatter block. Refuses to clobber
 /// anything that already exists, like `create_file`.
 #[tauri::command]
-pub(crate) fn create_card(path: String, head: String) -> Result<FileSnapshot, String> {
+pub(crate) fn create_card(app: AppHandle, path: String, head: String) -> Result<FileSnapshot, String> {
     let path_buf = PathBuf::from(&path);
     let name = path_buf
         .file_name()
@@ -310,6 +332,7 @@ pub(crate) fn create_card(path: String, head: String) -> Result<FileSnapshot, St
         }
         Err(e) => return Err(format!("create {}: {}", path, e)),
     }
+    crate::cloud::touched(&app, &path);
     stat_snapshot(&path_buf).map_err(|e| format!("stat {}: {}", path, e))
 }
 
@@ -432,7 +455,7 @@ mod tests {
 
         // Insert a block into a note that had none.
         std::fs::write(&card, "Body with ---\nand more\n").unwrap();
-        write_frontmatter(
+        splice_frontmatter(
             card.to_string_lossy().to_string(),
             "---\nstatus: Done\n---\n".into(),
             None,
@@ -444,7 +467,7 @@ mod tests {
         );
 
         // Replace it; the body is untouched.
-        write_frontmatter(
+        splice_frontmatter(
             card.to_string_lossy().to_string(),
             "---\nstatus: Backlog\nrank: a0\n---\n".into(),
             None,
@@ -456,7 +479,7 @@ mod tests {
         );
 
         // Remove it: the note is plain prose again.
-        write_frontmatter(card.to_string_lossy().to_string(), String::new(), None).unwrap();
+        splice_frontmatter(card.to_string_lossy().to_string(), String::new(), None).unwrap();
         assert_eq!(
             std::fs::read_to_string(&card).unwrap(),
             "Body with ---\nand more\n"
@@ -467,7 +490,7 @@ mod tests {
             mtime_ms: 1,
             size: 1,
         };
-        let err = write_frontmatter(
+        let err = splice_frontmatter(
             card.to_string_lossy().to_string(),
             "---\nx: 1\n---\n".into(),
             Some(stale),
@@ -487,7 +510,7 @@ mod tests {
 
         // The mirror image of write_frontmatter: the block stays, the body goes.
         std::fs::write(&card, "---\nstatus: Done\nrank: a0\n---\nOld body\n").unwrap();
-        write_body(
+        splice_body(
             card.to_string_lossy().to_string(),
             "New body\nwith --- inside\n".into(),
             None,
@@ -500,7 +523,7 @@ mod tests {
 
         // A note with no block never grows one.
         std::fs::write(&card, "Just prose\n").unwrap();
-        write_body(card.to_string_lossy().to_string(), "Other prose\n".into(), None).unwrap();
+        splice_body(card.to_string_lossy().to_string(), "Other prose\n".into(), None).unwrap();
         assert_eq!(std::fs::read_to_string(&card).unwrap(), "Other prose\n");
 
         // The snapshot guard rejects a stale writer, exactly as it does for
@@ -509,7 +532,7 @@ mod tests {
             mtime_ms: 1,
             size: 1,
         };
-        let err = write_body(card.to_string_lossy().to_string(), "x".into(), Some(stale))
+        let err = splice_body(card.to_string_lossy().to_string(), "x".into(), Some(stale))
             .unwrap_err();
         assert!(matches!(err, WriteError::Conflict { .. }));
 

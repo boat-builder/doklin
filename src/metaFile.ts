@@ -36,9 +36,8 @@
 //   anything else                          — preserved verbatim (a newer
 //       app version's records must survive a rewrite by this one).
 //
-// The DISK markdown is the hybrid form (markers only); the EDITOR — and
-// the share worker's web sessions, whose comment layer is built from
-// CriticMarkup — keep speaking the full inline form. expandMarkdown /
+// The DISK markdown is the hybrid form (markers only); the EDITOR keeps
+// speaking the full inline form. expandMarkdown /
 // extractMarkdown convert at the IO boundary, and expand∘extract is the
 // identity on a migrated file, which is what makes the one-time migration
 // safe to re-run anywhere, any number of times.
@@ -232,9 +231,9 @@ export const metaIsEmpty = (meta: EntityMeta): boolean =>
 
 /* ---------- entry / thread union (fold-ins) ---------- */
 
-// An entry's identity for folding two copies of a thread: the worker's eid
-// when stamped, else author+time (stable across body edits — see
-// htmlComments.entryKeyOf, same rule). First side wins the body.
+// An entry's identity for folding two copies of a thread: the eid when one
+// was stamped, else author+time (stable across body edits). First side wins
+// the body.
 const entryFoldKey = (e: CommentEntry): string => e.eid ?? `${e.author}|${e.at}`;
 
 function unionEntries(a: CommentEntry[], b: CommentEntry[]): CommentEntry[] {

@@ -235,10 +235,7 @@ check` on error (with the full error as the `title` tooltip), `v0.1.59 · Up to
 date` otherwise.
 
 The gear's badge dot lights on `phase === "available"` and the `aria-label`
-becomes `Settings — update available`. (In Doklin the same dot is also shared
-with an unrelated "your self-hosted share backend is out of date" signal — see
-[share-worker/README.md](../share-worker/README.md#updating-a-deployed-worker).
-Nothing in this document depends on that; the dot is a plain boolean.)
+becomes `Settings — update available`.
 
 ### Configuration
 

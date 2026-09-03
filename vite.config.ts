@@ -1,63 +1,53 @@
-import { defineConfig, build as viteBuild, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
+// @ts-expect-error node builtins have no types in this project (this file sits outside the app's tsconfig)
+import { readFileSync } from "node:fs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
-// Bundles the share worker (share-worker/src + its vendored marked + the
-// compiled app shell the worker serves to comment/edit sessions) into a
-// single ES-module string the app imports as `virtual:share-worker-code`.
-// This is what makes the setup guide's "Copy worker code" button possible:
-// installed-app users paste it into the Cloudflare dashboard editor and never
-// touch the repo. Bundled with vite's own programmatic builds (nested,
-// in-memory) so no extra dependency is needed.
-function shareWorkerCode(): Plugin {
-  const virtualId = "virtual:share-worker-code";
-  const resolvedId = `\0${virtualId}`;
-  const entry = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "share-worker/src/index.js",
-  );
+// The worker's version integer and the runtime date wrangler.toml pins,
+// parsed out of cloud-worker/src/version.ts and served to the app as
+// `virtual:cloud-worker-version` (docs/cloud-redesign.md §7.1). Parsed,
+// never mirrored — the same rule src-tauri/build.rs follows for the Rust
+// side — so the update badge and the setup prompt can't drift from the
+// worker they describe.
+const VERSION_FILE = new URL("./cloud-worker/src/version.ts", import.meta.url);
+const VIRTUAL_ID = "virtual:cloud-worker-version";
+const RESOLVED_ID = "\0" + VIRTUAL_ID;
+
+function cloudWorkerVersion() {
+  const constant = (src: string, name: string, kind: "int" | "string"): string => {
+    const re =
+      kind === "int"
+        ? new RegExp(`^export const ${name} = (\\d+);$`, "m")
+        : new RegExp(`^export const ${name} = "([^"]+)";$`, "m");
+    const m = src.match(re);
+    if (!m) throw new Error(`cloud-worker/src/version.ts has no \`export const ${name} = …;\` line`);
+    return kind === "int" ? m[1] : JSON.stringify(m[1]);
+  };
   return {
-    name: "share-worker-code",
-    resolveId(id) {
-      return id === virtualId ? resolvedId : undefined;
+    name: "doklin:cloud-worker-version",
+    resolveId(id: string) {
+      return id === VIRTUAL_ID ? RESOLVED_ID : null;
     },
-    async load(id) {
-      if (id !== resolvedId) return undefined;
-      // Plain node module (shared with scripts/bundle-worker.mjs) — no types.
-      const { buildWebAssets, webAssetsInjector } = (await import(
-        "./scripts/build-web.mjs"
-      )) as {
-        buildWebAssets: () => Promise<{ js: string; css: string }>;
-        webAssetsInjector: (web: { js: string; css: string }) => Plugin;
-      };
-      const web = await buildWebAssets();
-      const out = await viteBuild({
-        configFile: false,
-        logLevel: "warn",
-        plugins: [webAssetsInjector(web)],
-        build: {
-          write: false,
-          minify: false, // stay readable — users are asked to trust-paste this
-          target: "es2022",
-          lib: { entry, formats: ["es"], fileName: "share-worker" },
-        },
-      });
-      const result = Array.isArray(out) ? out[0] : out;
-      if (!("output" in result)) throw new Error("unexpected watcher from worker build");
-      const chunk = result.output.find((o) => o.type === "chunk");
-      if (!chunk) throw new Error("share worker bundle produced no chunk");
-      return `export default ${JSON.stringify(chunk.code)};\n`;
+    load(id: string) {
+      if (id !== RESOLVED_ID) return null;
+      this.addWatchFile(decodeURIComponent(VERSION_FILE.pathname));
+      const src = readFileSync(VERSION_FILE, "utf8");
+      return [
+        `export const WORKER_VERSION = ${constant(src, "WORKER_VERSION", "int")};`,
+        `export const MANIFEST_VERSION = ${constant(src, "MANIFEST_VERSION", "int")};`,
+        `export const COMPATIBILITY_DATE = ${constant(src, "COMPATIBILITY_DATE", "string")};`,
+        "",
+      ].join("\n");
     },
   };
 }
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), shareWorkerCode()],
+  plugins: [react(), cloudWorkerVersion()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

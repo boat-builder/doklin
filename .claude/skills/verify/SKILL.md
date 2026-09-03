@@ -67,7 +67,7 @@ node verify-harness/drive-kanban.mjs       # 58 steps: boots the REAL <App/> (ka
                                           # the invariant the design rests on: a card's BODY
                                           # bytes never move when its properties do (and a note
                                           # with no frontmatter never grows one)
-node verify-harness/drive-kanban-embed.mjs # 53 steps over the SAME harness page: a ```kanban
+node verify-harness/drive-kanban-embed.mjs # 44 steps over the SAME harness page: a ```kanban
                                           # fence in a note (kanban.html seeds /docs/Embed.md
                                           # and /docs/Broken.md) rendering as a live board —
                                           # a card composed in the embed never reaching
@@ -81,14 +81,10 @@ node verify-harness/drive-kanban-embed.mjs # 53 steps over the SAME harness page
                                           # note (both round-tripping through one ordinary
                                           # edit), an embed pointing at a folder that isn't a
                                           # board, and a split pane's board going read-only
-                                          # until promoted.
-                                          # The last block drives what a SHARE would publish
-                                          # (src/store/publish.ts) straight against the stubbed
-                                          # fs — the one seam store.test.mjs can't reach, since
-                                          # it goes through the backend's read_store
+                                          # until promoted
 node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
-                                           # window init, sync probes) and walks the split view —
+                                           # window init, the device name) and walks the split view —
                                            # same-doc duplicate split (read-only mirror tracking
                                            # autosaves), per-pane MD/HTML picks with live-editor
                                            # normalization, two-doc split + promotion by click /
@@ -99,6 +95,21 @@ node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
+node verify-harness/drive-cloud.mjs        # 22 steps: boots the REAL <App/> (cloud.html stubs the
+                                           # ENGINE: every cloud_* command answers from a scripted
+                                           # fake, window.__emit injects the engine's events) and
+                                           # walks the cloud surfaces — the not-connected panel, the
+                                           # wizard's fresh / bound / marker outcomes (the setup
+                                           # prompt carrying the token, the derived names, the
+                                           # route, the runtime date read from version.ts), the
+                                           # panel's phases on both dots, the gear badge, the worker
+                                           # update card (a prompt with no secret, Check again), a
+                                           # held mass-deletion's toast → panel → confirm, a conflict
+                                           # copy's toast opening the copy, cloud-applied refreshing
+                                           # the tree, presence chips, Connect another Mac, the
+                                           # history panel restoring a revision, disconnect, wipe →
+                                           # the teardown prompt, and the join flow opening the
+                                           # downloaded folder
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -127,13 +138,8 @@ Gotchas learned the hard way:
   ctx is gone. Pre-existing (a note ending in `---` does it with every kanban
   plugin unregistered) and harmless; drive-kanban-embed.mjs filters it by
   name so it isn't mistaken for a defect.
-- A published board is drawn TWICE from one snapshot: as HTML strings in
-  `share-worker/src/index.js` (the static reading view) and as React in
-  `src/BoardSnapshot.tsx` (the app shell). Same class names, same palette,
-  two stylesheets — change one and change the other, and check both in
-  `drive-web.mjs`. Inside either, use a `<div>` rather than a `<p>` for
-  board chrome: `.doc p` and the editor's own paragraph styling will claim
-  a paragraph.
+- Inside board chrome, use a `<div>` rather than a `<p>`: `.doc p` and the
+  editor's own paragraph styling will claim a paragraph.
 - Clicking a card on a board PEEKS it (`CardPeek`), it does not open a tab —
   unless the card is already open in a tab, in which case the click goes to
   the tab. A driver that expects an editor after a card click has to click
@@ -151,76 +157,38 @@ Gotchas learned the hard way:
 - split.html seeds localStorage ONCE per browser context (guarded by
   `doklin:harness-seeded`) — a reload must keep what the app persisted, or
   the session/split restore steps can't be tested. Its IPC stub must answer
-  `sync_status` with `[]` and `sync_device` with `{name}` (App `.then`s the
-  shapes straight into state), and stub
-  `__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener` or StrictMode's
-  unmount pass throws on every `listen()` cleanup.
+  `device_name` with a string (App `.then`s it straight into the comment
+  author), and stub `__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener` or
+  StrictMode's unmount pass throws on every `listen()` cleanup.
+- A harness that DELIVERS events (cloud.html) has to honour unlisten:
+  `plugin:event|listen` hands back an id, and both `plugin:event|unlisten`
+  and `unregisterListener` must drop that id — StrictMode mounts twice, so
+  a registry that only ever grows delivers every event twice (two toasts).
+- Playwright auto-dismisses `window.confirm` (it returns false), so a
+  destructive action the drive has to reach must confirm inline (the
+  panel's Disconnect) or by typing the name back (the wipe), never with a
+  native dialog.
 
-## Public web pages (worker served locally)
-
-`verify-harness/serve-worker.mjs` runs the real share worker over node http
-with an in-memory R2 fake (state resets on restart), so a browser can walk
-the actual public flows. Since worker v10, comment/edit sessions get the APP
-SHELL (the desktop's own editor + comment rail compiled for the browser), so
-the drive exercises the real Milkdown editor and the real rail end to end:
-
-```sh
-node scripts/build-web.mjs               # compiles web/main.tsx → share-worker/dist/web
-                                         # (rerun after ANY src/ editor change)
-node verify-harness/serve-worker.mjs &   # http://localhost:8787, owner token "owner-secret"
-node verify-harness/drive-web.mjs        # 42 steps: gate → comment-mode html comment →
-                                         # reply → read-only md + selection comment
-                                         # (CriticMarkup save) → view-role stripping →
-                                         # edit-role autosave → desktop-pushed thread pins
-                                         # → desktop-pushed table column widths on BOTH
-                                         # reading paths (static-page colgroup, shell editor)
-                                         # → a ```kanban embed, three ways: with no snapshot
-                                         # the shell draws the frame and says the board isn't
-                                         # available; WITH one it draws the board (columns,
-                                         # colours, chips, +n more, a card linking to its own
-                                         # page) and an edit-role save still returns the fence
-                                         # byte for byte; and the static reading view renders
-                                         # the same board server-side with JAVASCRIPT OFF,
-                                         # plus a shared card's properties table; then the
-                                         # SAME store as a ```table fence, drawn server-side
-                                         # and in the shell, with an edit-role save still
-                                         # returning the table fence byte for byte
-node verify-harness/drive-mermaid-web.mjs  # 7 steps: static-page diagram hydration (light +
-                                           # dark), broken-source fallback, shell renders via
-                                           # the worker-served /__web mermaid module
-```
-
-serve-worker serves `/__web/*` from `share-worker/dist/web` (the plain-node
-import leaves the embedded-assets stub empty — that's expected; deployable
-bundles embed them via scripts/bundle-worker.mjs).
-
-Also: `node share-worker/test/run.mjs` is the pure-node e2e suite for every
-worker route (no browser needed) — run it for any worker change. It covers
-the `boards` / `props` wire contract too: what a published page does with a
-board snapshot, what it does with a fence that has none, and that junk
-inside one degrades record by record while a wrong TYPE is a 400. It bakes in
-the table-identity ids that `verify-harness/tablewidths.test.mjs` also pins:
-the worker re-derives them from marked's tokens, so a change to
-`src/tableWidths.ts` fails BOTH suites instead of silently dropping column
-widths from published pages. Re-pin in both places, never one.
-
-The desktop⇄web comment-thread three-way merge (the correctness core of pool
-sync) has its own fast unit test — run it for any change to
-`src/htmlComments.ts` merge logic or the sync flow:
+Six pure-node unit suites (vite-compiled, no browser):
 
 ```sh
-node verify-harness/merge.test.mjs   # deletions stick, eid dedupe, concurrent replies
-```
-
-Four more pure-node unit suites (vite-compiled, no browser):
-
-```sh
+node verify-harness/merge.test.mjs         # the comment-thread three-way merge
+                                           # (src/htmlComments.ts): deletions stick, eid
+                                           # dedupe, concurrent replies
 node verify-harness/metafile.test.mjs      # the entity meta file: expand/extract round trip,
                                            # tolerant parse, deterministic serialization,
                                            # the idempotent migration step
 node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidths.ts): what
                                            # keeps a column width and what deliberately drops
                                            # it, colspan/rowspan, junk records
+node verify-harness/cloudprompts.test.mjs  # the three agent prompts (src/cloudPrompts.ts) —
+                                           # setup with the token, update and teardown without
+                                           # — and the naming rule they share: numbered steps,
+                                           # login, verify-before-mutate, the config verbatim,
+                                           # the failure named, one line back, the negative
+                                           # scope; a workers.dev name is certain, a custom
+                                           # domain's is a convention the prompt says to verify
+                                           # (112 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
@@ -243,14 +211,39 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # plus an embed's config (the same dialect without a
                                            # block around it) and its fence, which grows past
                                            # any backtick run in the config; the scan that finds
-                                           # fences in raw bytes (storeFences — a share push has
-                                           # no parsed document); the board and table derivation
+                                           # fences in raw bytes (storeFences — no parsed
+                                           # document needed); the board and table derivation
                                            # and snapshot (src/store/board.ts) that a tab, an
                                            # embed and a published page all share, so they can't
                                            # disagree — filters, sorts, multi_select and date
                                            # grouping included; and the CSV a view exports
                                            # (2252 checks)
 ```
+
+## Cloud worker (`cloud-worker/`)
+
+The Cloudflare Worker behind a connected domain — TypeScript, its own
+tsconfig (Workers runtime types, no DOM), tested without deploying:
+
+```sh
+pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
+node cloud-worker/test/run.mjs             # 15 cases against an in-memory R2 fake, the
+                                           # sources compiled in-process through vite: auth,
+                                           # meta, bind-once (409), the unbound 404s, manifest
+                                           # CAS (304 / 412 / 428), validation + the public
+                                           # map, 426 on a newer schema, blobs (a re-put is a
+                                           # no-op), history, presence (device header, prune,
+                                           # leave), the landing page / static assets / 404
+                                           # page, wipe freeing the domain for a new bind
+node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
+                                           # mermaid module spliced in; ~40 s); prints raw +
+                                           # gzipped size, fails past 3 MB gzipped
+node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
+                                           # the same suite against the bundle — the mermaid
+                                           # asset then serves instead of 503
+```
+
+`--no-mermaid` gives a quick bundle for shape checks (the /__web asset 503s).
 
 ## Rust side
 
@@ -259,8 +252,15 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
 creating dummy gitignored resources the build script expects:
 `binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
 `binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
-`cargo test --lib` runs every Rust test: the sync engine's two-device
-merge/conflict/CAS matrix (`--lib sync`), the sidebar tree walk including the
+`cargo test --lib` runs every Rust test: the cloud engine against an
+in-memory worker (`--lib cloud` — 38 tests: the two-device merge / conflict /
+tombstone / rename / history / CAS-race matrix, the public map (mirroring,
+rename-follow, re-bind, a folder page following its folder, the custom-slug
+race, the root page), bind-once and the upload / download / resume flows, a
+touched path settling in 1.5 s against a watched one's 5 s under tokio's
+paused clock, the 426 → worker-outdated state and the Probe command that
+resumes it, presence, history, the edit bus routing, cloud.json and the
+marker), the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists

@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "lint": "eslint src",
+    "typecheck:worker": "tsc -p cloud-worker/tsconfig.json --noEmit",
+    "test:worker": "node cloud-worker/test/run.mjs",
+    "bundle:worker": "node scripts/bundle-worker.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -24,6 +27,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260903.1",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

@@ -1,54 +1,115 @@
 #!/usr/bin/env node
-// Bundle the backend worker (share-worker/src + its vendored marked) into ONE
-// deployable JavaScript file — the same transform the app build applies for
-// its virtual:share-worker-code module (vite.config.ts), just written to disk.
+// Bundle the cloud worker (cloud-worker/src, TypeScript) into ONE deployable
+// JavaScript file, readable — people are asked to trust-deploy it — with the
+// standalone mermaid module spliced in as data (cloud-worker/src/assets.ts).
 //
 // The release workflow attaches the output to every GitHub release as
-// `doklin-worker.js`, giving setup/update instructions a stable URL:
+// `doklin-cloud-worker.js`, giving the app's setup and update prompts a
+// stable URL:
 //
-//   https://github.com/boat-builder/doklin/releases/latest/download/doklin-worker.js
+//   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js
 //
-// so an agent (or a person) can deploy or update a backend with a single
-// download — no clone, no build step.
+// so an agent (or a person) deploys or updates a domain with one download —
+// no clone, no build step.
 //
-//   node scripts/bundle-worker.mjs [outfile]     (default: share-worker/dist/doklin-worker.js)
+//   node scripts/bundle-worker.mjs [outfile]   (default: cloud-worker/dist/doklin-cloud-worker.js)
+//   node scripts/bundle-worker.mjs --no-mermaid   a quick local bundle without the
+//                                                 mermaid module (the /__web asset 503s)
+//
+// Prints the size raw and gzipped — Cloudflare's free plan caps a worker at
+// 3 MB compressed, and mermaid is most of what this carries — and fails the
+// build past the cap rather than letting the deploy be the first to notice.
 
 import { build } from "vite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
-import { buildWebAssets, webAssetsInjector } from "./build-web.mjs";
+import zlib from "node:zlib";
+import { createHash } from "node:crypto";
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const entry = path.join(repoRoot, "share-worker", "src", "index.js");
-const dest = path.resolve(
-  process.argv[2] ?? path.join(repoRoot, "share-worker", "dist", "doklin-worker.js"),
+const workerDir = path.join(repoRoot, "cloud-worker");
+const args = process.argv.slice(2);
+const withMermaid = !args.includes("--no-mermaid");
+const outArg = args.find((a) => !a.startsWith("--"));
+const dest = path.resolve(outArg ?? path.join(workerDir, "dist", "doklin-cloud-worker.js"));
+
+const GZIP_CEILING = 3 * 1024 * 1024;
+
+/** One lib-mode vite build, returned as the code of its single chunk. */
+async function bundle(entry, fileName, plugins = []) {
+  const out = await build({
+    configFile: false,
+    logLevel: "warn",
+    plugins,
+    define: { "process.env.NODE_ENV": JSON.stringify("production") },
+    build: {
+      write: false,
+      minify: false,
+      target: "es2022",
+      lib: { entry, formats: ["es"], fileName },
+      rollupOptions: { output: { inlineDynamicImports: true } },
+    },
+  });
+  const result = Array.isArray(out) ? out[0] : out;
+  if (!("output" in result)) throw new Error(`unexpected watcher from the ${fileName} build`);
+  const chunk = result.output.find((o) => o.type === "chunk");
+  if (!chunk) throw new Error(`the ${fileName} build produced no chunk`);
+  const strays = result.output.filter((o) => o !== chunk);
+  if (strays.length > 0) {
+    throw new Error(
+      `the ${fileName} build emitted extra files: ${strays.map((s) => s.fileName).join(", ")}`,
+    );
+  }
+  return chunk.code;
+}
+
+// The standalone mermaid module (cloud-worker/web/mermaid-entry.ts): the npm
+// package plus the app's palette derivation, flattened to one ES file.
+export async function buildMermaidModule() {
+  return bundle(path.join(workerDir, "web", "mermaid-entry.ts"), "mermaid");
+}
+
+// A rollup plugin that splices the built assets into cloud-worker/src/assets.ts
+// — how the checked-in empty stub becomes the real thing. The tag is a short
+// content hash of the module: the worker keys the immutable asset URL on it,
+// so a redeploy that changes mermaid busts the browser cache even without a
+// WORKER_VERSION bump.
+export function assetsInjector(mermaid) {
+  const tag = createHash("sha256").update(mermaid).digest("hex").slice(0, 12);
+  return {
+    name: "doklin-inject-web-assets",
+    transform(_code, id) {
+      if (!id.replace(/\\/g, "/").endsWith("cloud-worker/src/assets.ts")) return undefined;
+      return {
+        code: `export const WEB_ASSETS = { tag: ${JSON.stringify(tag)}, mermaid: ${JSON.stringify(mermaid)} };\n`,
+        map: null,
+      };
+    },
+  };
+}
+
+const mermaid = withMermaid ? await buildMermaidModule() : null;
+const code = await bundle(
+  path.join(workerDir, "src", "index.ts"),
+  "doklin-cloud-worker",
+  mermaid === null ? [] : [assetsInjector(mermaid)],
 );
 
-// The worker carries its own frontend (the app shell comment/edit sessions
-// load — see share-worker/src/webAssets.js): build it first, splice it in.
-const web = await buildWebAssets();
-
-const out = await build({
-  configFile: false,
-  logLevel: "warn",
-  plugins: [webAssetsInjector(web)],
-  build: {
-    write: false,
-    minify: false, // stay readable — people are asked to trust-deploy this
-    // (the embedded frontend is minified: it's the same app build the
-    // desktop ships, injected as data)
-    target: "es2022",
-    lib: { entry, formats: ["es"], fileName: "doklin-worker" },
-  },
-});
-const result = Array.isArray(out) ? out[0] : out;
-if (!("output" in result)) throw new Error("unexpected watcher from worker build");
-const chunk = result.output.find((o) => o.type === "chunk");
-if (!chunk) throw new Error("worker bundle produced no chunk");
-
 fs.mkdirSync(path.dirname(dest), { recursive: true });
-fs.writeFileSync(dest, chunk.code);
+fs.writeFileSync(dest, code);
 
-const version = chunk.code.match(/^const WORKER_VERSION = (\d+);$/m)?.[1] ?? "?";
-console.log(`wrote ${dest} (${(chunk.code.length / 1024).toFixed(0)} KB, WORKER_VERSION ${version})`);
+const version = code.match(/^const WORKER_VERSION = (\d+);$/m)?.[1];
+if (!version) throw new Error("WORKER_VERSION did not survive bundling in a parseable shape");
+const gz = zlib.gzipSync(Buffer.from(code)).length;
+const kb = (n) => (n / 1024).toFixed(0);
+console.log(
+  `wrote ${dest} (${kb(code.length)} KB, ${kb(gz)} KB gzipped, WORKER_VERSION ${version}` +
+    `${mermaid === null ? ", no mermaid module" : `, mermaid ${kb(mermaid.length)} KB`})`,
+);
+if (gz > GZIP_CEILING) {
+  console.error(
+    `::error::the worker is ${kb(gz)} KB gzipped — over the ${kb(GZIP_CEILING)} KB free-plan ceiling`,
+  );
+  process.exit(1);
+}

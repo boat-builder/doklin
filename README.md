@@ -18,9 +18,8 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   rendered diagram, not the code: flowcharts, sequence/state/class diagrams,
   pies, gantts, … A *Source* chip (or just arrowing the caret in) flips the
   block to its code; leaving it flips back to the diagram. Diagrams are drawn
-  in the app's own palette (all four themes), the document stays plain
-  markdown, and shared pages render them too — the reading view, the web
-  editor, everywhere.
+  in the app's own palette (all four themes), and the document stays plain
+  markdown.
 - **Links that go somewhere** — click a link to follow it, the way you would in
   Notion: a web address opens in your browser, an address next door
   (`[the plan](./plan.md)`) opens that note in a tab, and a `#heading` jumps
@@ -43,10 +42,7 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   ` ```kanban ` block (or `/board` → *Board as a table* for a ` ```table ` one)
   that names a folder, and the note shows that view in the middle of the prose
   — live, not a picture. Every other markdown tool shows the block as three
-  lines of config and leaves it alone. Publish that note and the view goes with
-  it: the shared page draws the columns and cards, or the rows, as plain HTML
-  with no JavaScript, and a card links to its own page when it is part of the
-  same folder share.
+  lines of config and leaves it alone.
 - **Properties on any note** — every document has a quiet properties header
   above it. On a card the rows are its board's fields; on any other note they
   are the frontmatter keys the file already carries, including ones written by
@@ -59,26 +55,10 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   (or empty space) to move them.
 - **Autosave** — real files save back to the same `.md`; drafts save to app
   storage. Nothing is lost on tab switch or quit.
-- **Publish & share** — one click publishes a document as a public web page,
-  backed by a self-hostable backend. Any page or shared folder can be put
-  behind named access codes — one code per person or group, individually
-  revocable; visitors enter it once per browser, no accounts involved. Each
-  code also carries a role: view only (the default — every public page stays
-  read-only unless you say otherwise), comment (a comments section right on
-  the page — and checklists a commenter can tick off, without being able to
-  change a word of the text), or edit (a web markdown editor). Web edits flow
-  back into the local file; if both sides changed, the app asks before either
-  version wins.
-- **Cloud sync** — sync a workspace to that same backend (your own Cloudflare
-  worker + R2 bucket): it backs up automatically, follows you to another Mac,
-  and can be shared with people you invite — they install Doklin, paste a
-  one-time invite link, and the workspace syncs to their machine with edits
-  flowing both ways. Concurrent edits merge; overlapping ones become a
-  conflict copy; every revision stays restorable from per-file version
-  history. No accounts — invites mint per-device tokens the owner can revoke.
-  Public shares sync too: everyone in the workspace sees what's published
-  (no accidental duplicate pages), and whoever edits a shared document keeps
-  its public page fresh — the original sharer doesn't have to be online.
+- **Cloud** — being rebuilt from scratch. The previous share/sync backend is
+  gone; what replaces it is one domain per workspace, whole-workspace sync,
+  and publishing as a flag on a synced file. The design and the phased plan:
+  [docs/cloud-redesign.md](docs/cloud-redesign.md).
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin path/to/file.md`. A second launch talks to the running app: a
@@ -126,16 +106,6 @@ Deeper docs live in dedicated files to keep this page focused:
   architecture (frontend/backend, Tauri commands, file association, CLI shim),
   saving/autosave internals, the macOS-only porting convention, and the full
   keyboard / UI / theme reference. **Start here for any code change.**
-- **[share-worker/README.md](share-worker/README.md)** — the share backend: how
-  publishing works, the storage layout, the API contract, and
-  **[step-by-step setup of your own backend](share-worker/README.md#set-up-your-own-backend)**
-  (Cloudflare Worker + R2; a compatible backend on any other stack also works).
-- **[docs/self-hosted-backend-flow.md](docs/self-hosted-backend-flow.md)** — the
-  *flow* around that backend rather than its contract: how a user deploys their
-  own instance in three ways, how the app detects a deployment running older
-  worker code and guides the redeploy, the naming/ownership hazards, and a
-  **portable checklist for giving another app the same user-deployed backend
-  flow**.
 - **[docs/release-pipeline.md](docs/release-pipeline.md)** — the *producer* side:
   how a push to `main` becomes a signed, notarized DMG on GitHub Releases —
   the CI/CD jobs, Apple signing + notarization, the auto-update manifest, the
@@ -150,7 +120,12 @@ Deeper docs live in dedicated files to keep this page focused:
   structured data: *datastores* (a folder of markdown cards with frontmatter
   plus a `store.jsonl` definition), the kanban view as a tab and as a
   kanban and table views as a tab and as a ` ```kanban ` / ` ```table `
-  embed in notes, how it rides sync / history / sharing, and the phased
+  embed in notes, how it rides sync / history / publishing, and the phased
   plan. All four phases are built: a board from a folder, a board embedded
-  in a note, boards on published pages, and the second view with properties
-  on any note.
+  in a note, the pure snapshot a published page draws from, and the second
+  view with properties on any note.
+- **[docs/cloud-redesign.md](docs/cloud-redesign.md)** — the design and
+  phased plan for the cloud rewrite: one domain per workspace, a single
+  Rust engine as the only writer, publishing as a flag in the workspace
+  manifest with pages rendered from synced files, agent + wrangler setup,
+  and what the old share/sync/backend code is replaced by.

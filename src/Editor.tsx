@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -65,7 +64,6 @@ import {
   refreshStoreEmbeds,
   type StoreEmbedHost,
 } from "./storeEmbed";
-import { snapKeyOf, snapKind, type BoardSnap } from "./store/board";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
 
 import "@milkdown/crepe/theme/common/style.css";
@@ -200,23 +198,17 @@ type Props = {
   onTableWidths?: (records: TableCols[]) => void;
   // A link the reader followed (clicked), href verbatim from the markdown —
   // see linkOpen.ts for which clicks count. Hosts route it: the desktop app
-  // sends external URLs to the system browser and in-workspace paths to a tab,
-  // the web shell opens a browser tab. In-document `#anchors` never arrive
+  // sends external URLs to the system browser and in-workspace paths to a tab;
+  // a host without one opens a browser tab. In-document `#anchors` never arrive
   // here; the editor scrolls to them itself. Read-only views follow links too
   // — a published page is exactly where links matter most.
   onOpenLink?: (href: string) => void;
   // What an embed in this document can reach: which note it is
   // written in (a relative `store:` resolves against it), the workspace's
-  // boards, and how to open a card. Omitted by hosts with no workspace
-  // behind them — the shared-page shell — where the embed says so in place
-  // instead of drawing a board it can't read.
+  // boards, and how to open a card. A host with no workspace behind it
+  // (null) makes the embed say so in place instead of drawing a board it
+  // can't read.
   kanban?: StoreEmbedHost | null;
-  // Boards as a PUBLISHED page carries them: a picture per embed
-  // fence, sent with the markdown because the page has no workspace to read
-  // one from (src/store/publish.ts). The shared-page shell passes these; the
-  // desktop passes a host instead, and a host always wins — a real board
-  // beats a photograph of one.
-  boards?: BoardSnap[];
 };
 
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
@@ -341,7 +333,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     onTableWidths,
     onOpenLink,
     kanban,
-    boards,
   },
   ref,
 ) {
@@ -402,14 +393,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onOpenLinkRef.current = onOpenLink;
   const kanbanRef = useRef(kanban);
   kanbanRef.current = kanban;
-  // Keyed by the fence's own text, normalized the way the worker normalizes
-  // it, so a stray trailing newline can't lose a board.
-  const boardsRef = useRef<Map<string, BoardSnap>>(new Map());
-  const boardsByFence = useMemo(
-    () => new Map((boards ?? []).map((b) => [snapKeyOf(snapKind(b), b.fence), b])),
-    [boards],
-  );
-  boardsRef.current = boardsByFence;
 
   const report = () => {
     const view = viewRef.current;
@@ -568,7 +551,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(
       storeEmbedView(
         () => kanbanRef.current ?? null,
-        (kind, config) => boardsRef.current.get(snapKeyOf(kind, config)) ?? null,
         () => readOnlyRef.current === true,
       ),
     );
@@ -695,7 +677,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const kanbanDoc = kanban?.docPath ?? null;
   useEffect(() => {
     refreshStoreEmbeds();
-  }, [readOnly, kanbanDoc, boardsByFence]);
+  }, [readOnly, kanbanDoc]);
 
   // Show/hide the comment layer. Hiding clears the selection (no invisible
   // active highlight) and drops the gutter; the marks themselves are

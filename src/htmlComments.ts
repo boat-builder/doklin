@@ -22,10 +22,7 @@
 //
 // The sidecar is plumbing, not a document: the sidebar tree lists only
 // markdown/html documents, and workspace search scans markdown. It leaves
-// the user's machines two ways — workspace sync (the text merge above), and,
-// for SHARED documents, the share worker's per-page thread pool, which
-// comment/edit-role browser sessions read and write and which the app
-// reconciles against with a three-way merge (mergeHtmlThreads below).
+// the user's machine with workspace sync, riding the text merge above.
 
 import {
   newThreadId,
@@ -191,27 +188,20 @@ export function deleteHtmlThread(threads: HtmlThread[], id: string): HtmlThread[
   return threads.filter((t) => t.id !== id);
 }
 
-/* ---------- Sharing: three-way merge with the worker's pool ----------
+/* ---------- Three-way merge of two copies of a thread list ----------
 
-   A shared document's threads live in two places: this sidecar (the owner's
-   machines) and the share worker's per-page pool (what comment/edit-role
-   browser sessions read and write). The app reconciles them with an ordinary
-   three-way merge — `base` is the state both sides last agreed on (kept on
-   the ShareEntry), `mine` is the sidecar, `theirs` is the pool — so an
-   addition on either side lands on both, and a deletion on either side
-   sticks instead of resurrecting on the next push. */
+   A document's threads can change in two places at once: the live rail in
+   this window, and the meta file on disk when another device's edit lands
+   (cloud sync, or another window). `base` is the state both sides last
+   agreed on, `mine` is the rail, `theirs` is what arrived — so an addition
+   on either side lands on both, and a deletion on either side sticks
+   instead of resurrecting on the next write. */
 
-// An entry's identity across copies: the worker-stamped eid when it has one,
-// else author + creation time (stable across body edits — editing keeps
-// `at`; only filling an empty draft freshens it, and drafts are local).
-// The worker and the web client key entries the same way.
-export const entryKeyOf = (e: CommentEntry): string => e.eid ?? `${e.author}|${e.at}`;
-
-// The merge's looser twin: one copy of an entry may predate its worker stamp
-// (a sync interrupted between the push and recording it) or carry a
-// freshened draft timestamp — so two entries are the same when their eids
-// match, or by author+time when either side hasn't been stamped yet. Two
-// distinct stamped entries are never conflated, whatever their timestamps.
+// Entry identity: two entries are the same when their eids match, or by
+// author+time when either side carries no eid (stable across body edits —
+// editing keeps `at`; only filling an empty draft freshens it, and drafts
+// are local). Two distinct stamped entries are never conflated, whatever
+// their timestamps.
 const sameEntry = (a: CommentEntry, b: CommentEntry): boolean =>
   a.eid && b.eid ? a.eid === b.eid : a.author === b.author && a.at === b.at;
 
@@ -226,14 +216,14 @@ function mergeEntries(
     const b = inBase(e);
     const t = theirs.find((x) => sameEntry(x, e));
     if (t) {
-      // Both sides have it: the pool's copy carries the provenance stamps;
-      // the body follows whoever actually changed it (local edit wins a
+      // Both sides have it: their copy carries any provenance stamps; the
+      // body follows whoever actually changed it (local edit wins a
       // simultaneous rewrite — comment edits are rare and low-stakes).
       out.push({ ...t, body: b && e.body === b.body ? t.body : e.body });
     } else if (!b) {
       out.push(e); // my addition, not pushed yet
     }
-    // b && !t → deleted on the web; the deletion sticks.
+    // b && !t → deleted on their side; the deletion sticks.
   }
   for (const e of theirs) {
     if (!mine.some((m) => sameEntry(m, e)) && !inBase(e)) out.push(e); // their addition
@@ -258,7 +248,7 @@ export function mergeHtmlThreads(
       const comments = mergeEntries(b?.comments ?? [], t.comments, other.comments);
       if (comments.length > 0) {
         // Anchors only change when a side re-anchored deliberately — same
-        // rule as bodies: local movement wins, otherwise follow the pool.
+        // rule as bodies: local movement wins, otherwise follow theirs.
         const anchor =
           b && JSON.stringify(t.anchor) === JSON.stringify(b.anchor) ? other.anchor : t.anchor;
         out.push({ ...t, anchor, comments });
@@ -266,7 +256,7 @@ export function mergeHtmlThreads(
     } else if (!b) {
       out.push(t); // my new thread
     }
-    // b && !other → the whole thread was deleted on the web.
+    // b && !other → the whole thread was deleted on their side.
   }
   for (const t of theirs) {
     if (!mineBy.has(t.id) && !baseBy.has(t.id)) out.push(t); // their new thread

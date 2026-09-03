@@ -11,7 +11,7 @@
     <script>
       // Tauri IPC stub broad enough to boot the REAL <App/>: an in-memory
       // file system behind read/write/stat/watch, window-init answers for a
-      // bare no-workspace launch, and sane shapes for the sync probes. The
+      // bare no-workspace launch, and a device name for the comment author. The
       // updater plugin rejects (its caller catches into the "error" phase).
       // Everything else resolves null — every remaining caller either
       // ignores the result or catches.
@@ -107,10 +107,12 @@
             case "unwatch_file":
               window.__watched = [];
               return Promise.resolve(null);
-            case "sync_status":
+            case "cloud_status":
               return Promise.resolve([]);
-            case "sync_device":
-              return Promise.resolve({ name: "Test Mac" });
+            case "cloud_set_activity":
+              return Promise.resolve(null);
+            case "device_name":
+              return Promise.resolve("Test Mac");
             case "list_drafts":
               return Promise.resolve([]);
             case "open_external":

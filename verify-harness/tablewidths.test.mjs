@@ -231,13 +231,14 @@ const sizedTable = (headers) =>
 }
 
 /* ---------- the cross-implementation contract ----------
-   The share worker's public reading page re-derives these ids from marked's
-   tokens to attach widths to server-rendered HTML, so the identity function
-   has a second implementation in a file this one can't import. These
-   literals are the contract: share-worker/test/run.mjs publishes pages whose
-   records carry exactly these ids and asserts the worker finds the right
-   tables. Change the hash or the signature and BOTH suites fail — which is
-   the alarm. Never "fix" a literal here without re-pinning it there. */
+   A public page's reading view (the cloud worker, docs/cloud-redesign.md
+   §5.6) re-derives these ids from its markdown renderer's tokens to attach
+   widths to server-rendered HTML, so the identity function gets a second
+   implementation in a file this one can't import. These literals are the
+   contract: the worker's own suite must publish pages whose records carry
+   exactly these ids and assert it finds the right tables. Change the hash or
+   the signature and BOTH suites fail — which is the alarm. Never "fix" a
+   literal here without re-pinning it there. */
 {
   const id = (cols, headers, nth = 0) => deriveId(tableSignature(cols, headers), nth);
   assert.equal(id(3, ["Name", "Role", "Location"]), "yh4epk11");

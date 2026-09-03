@@ -25,9 +25,9 @@ url = "2"
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 notify = "6"
 notify-debouncer-full = "0.3"
-# Cloud sync engine (src/sync.rs): HTTP to the user's share worker, content
-# hashing, three-way merge for concurrent edits, random ids, and local-time
-# labels on conflict copies.
+# The cloud engine (src/cloud/): HTTPS to the workspace's worker, content
+# hashing, three-way merge for concurrent edits, random ids and tokens, and
+# local-time labels on conflict copies.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
 diffy = "0.4"
@@ -48,6 +48,8 @@ png = "0.18.1"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused virtual time for the engine's settle-timing tests (src/cloud/tests.rs).
+tokio = { version = "1", features = ["test-util"] }
 
 # In-app auto-updater (desktop only, per Tauri's plugin guidance).
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

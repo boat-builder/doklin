@@ -2,14 +2,12 @@
 // mermaid themeVariables set, so diagrams read as part of the document rather
 // than wearing a stock mermaid theme.
 //
-// Shared by two consumers with different CSS around them:
-//   - the editor (desktop + web shell): App.css --app-* tokens
-//   - the worker's static read-only pages: PAGE_CSS --bg/--text/--link tokens
-// so tokens are read through a fallback chain that ends at the body's
-// computed colors — any page with sane text/background gets a sane palette.
-// (This module is also re-exported by the standalone mermaid asset the worker
-// serves — web/mermaid-entry.ts — which is how static pages theme diagrams
-// without duplicating any of this.)
+// Written for two consumers with different CSS around them — the editor
+// (App.css --app-* tokens) and a public page's static reading view (its own
+// --bg/--text/--link tokens; the cloud worker picks this up again, see
+// docs/cloud-redesign.md) — so tokens are read through a fallback chain that
+// ends at the body's computed colors: any page with sane text/background
+// gets a sane palette.
 
 type Rgb = { r: number; g: number; b: number };
 

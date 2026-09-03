@@ -1,6 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  cloudForWorkspace,
+  cloudNeedsAttention,
+  cloudSetActivity,
+  cloudStatus,
+  onCloudApplied,
+  onCloudConflict,
+  onCloudPendingDeletes,
+  onCloudStatus,
+  type CloudPendingDeletesEvent,
+  type CloudStatus,
+} from "./cloud";
+import CloudPanel from "./CloudPanel";
+import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
+import CloudToasts, { type CloudToast } from "./CloudToasts";
+import WorkerUpdate from "./WorkerUpdate";
+import HistoryPanel from "./HistoryPanel";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
@@ -15,29 +32,7 @@ import TabBar from "./TabBar";
 import DraftsPanel from "./DraftsPanel";
 import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
-import ShareMenu from "./ShareMenu";
-import SharedPages from "./SharedPages";
-import ShareSetup from "./ShareSetup";
-import ShareFolder from "./ShareFolder";
-import WorkerUpdate, { type OutdatedWorker } from "./WorkerUpdate";
-import CloudSync from "./CloudSync";
-import ConnectBackend from "./ConnectBackend";
 import MermaidModal from "./MermaidModal";
-import Backends from "./Backends";
-import BackendTeardown from "./BackendTeardown";
-import HistoryPanel from "./HistoryPanel";
-import {
-  reportSyncActivity,
-  syncDevice,
-  syncDisable,
-  syncReloadConnections,
-  syncSetShares,
-  syncStatus,
-  whoami,
-  type SyncPresenceEvent,
-  type SyncWorkspaceStatus,
-} from "./sync";
-import workerCode from "virtual:share-worker-code";
 import DictationHud from "./DictationHud";
 import DictationInspector from "./DictationInspector";
 import DictationSetup from "./DictationSetup";
@@ -49,47 +44,6 @@ import {
   type DictationUiState,
   type InspectorEntry,
 } from "./dictation";
-import {
-  collectionManifestHash,
-  contentHash,
-  deletePage,
-  deriveDocTitle,
-  enqueuePendingUnshares,
-  fetchPageContent,
-  fetchPageThreads,
-  fetchWorkerVersion,
-  forgetAccessCodes,
-  generateShareId,
-  getConnections,
-  listRemotePages,
-  pushPageThreads,
-  pageExists,
-  parseWorkerVersion,
-  pushCollection,
-  pushOgImage,
-  pushPage,
-  readCollections,
-  readPendingUnshares,
-  readShares,
-  removePendingUnshares,
-  tryDeletePage,
-  readWorkspaceConnectionMap,
-  resolveConnection,
-  saveConnections,
-  SharePushConflictError,
-  ShareWorkerOutdatedError,
-  shareUrl,
-  writeCollections,
-  writeShares,
-  writeWorkspaceConnectionMap,
-  type CollectionEntry,
-  type CollectionItem,
-  type PushedFingerprint,
-  type ShareConnection,
-  type ShareConnectionsState,
-  type ShareEntry,
-  type ShareParts,
-} from "./share";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import {
@@ -128,8 +82,7 @@ import {
   type PropValue,
 } from "./store/frontmatter";
 import { cardKeyOrder, RANK_KEY, STORE_FILE } from "./store/storeFile";
-import { createStoreFile, onStoreChanged } from "./store/model";
-import { cardProperties, collectBoardSnapshots } from "./store/publish";
+import { createStoreFile } from "./store/model";
 import { useStore } from "./store/useStore";
 
 type FileSnapshot = { mtime_ms: number; size: number };
@@ -167,10 +120,6 @@ let sessionWorkspaceRoot: string | null = null;
 // The current split (descriptor only), mirrored module-level for the same
 // reason: every writeStoredSession call site persists it without threading.
 let sessionSplit: StoredSplit | null = null;
-
-// The worker version this app build ships (parsed from the bundled worker
-// source, so it can't drift from the code the setup/update flows hand out).
-const BUNDLED_WORKER_VERSION = parseWorkerVersion(workerCode);
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const dirname = (p: string) => {
@@ -244,24 +193,11 @@ const uniquePastePath = async (
   }
 };
 
-// The leading frontmatter block a file currently carries. A rewrite that
-// replaces a document's WHOLE text (pulling a web edit over it) must put the
-// block back: the web editor only ever saw the body.
-async function headOnDisk(path: string): Promise<string> {
-  try {
-    const r = await invoke<ReadFileResult>("read_file", { path });
-    const fm = parseFrontmatter(r.contents);
-    return r.contents.slice(0, r.contents.length - fm.body.length);
-  } catch {
-    return "";
-  }
-}
-
 type DocView = "md" | "html";
 
 /* ---------- Split view ----------
    The editor area can split into two side-by-side panes. The app's whole
-   document machinery (autosave, watcher, conflicts, comments, share,
+   document machinery (autosave, watcher, conflicts, comments,
    dictation, find) stays bound to ONE document — the FOCUSED pane's — and
    `SplitPane` describes the other pane:
 
@@ -437,7 +373,7 @@ type RecentEntry = { path: string; kind: "file" | "folder" };
 // there, so disk — not memory — is the source of truth across tabs.
 // "store" is a DATASTORE folder shown as a kanban board — a tab whose path is
 // a directory, not a document. The app's document machinery (autosave,
-// watcher, comments, share, dictation, find) stands down for one, the way it
+// watcher, comments, dictation, find) stands down for one, the way it
 // does for an html-only document: the board owns its own reads and writes.
 type TabKind = "draft" | "file" | "store";
 // `missing` marks a file tab whose path failed to read (drive unmounted, file
@@ -456,85 +392,18 @@ const uuid = () =>
     ? crypto.randomUUID()
     : `id-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
 const tabTitle = (t: Tab) => (t.kind === "draft" ? t.title ?? "Untitled" : basename(t.path));
-// Title used on the public share page / OG image: the tab title, minus the
-// document extension for real files ("notes.md" shares as "notes").
-const docShareTitle = (t: Tab) =>
+// A document's display title, for pane headers: the tab title, minus the
+// document extension for real files ("notes.md" reads as "notes").
+const docDisplayTitle = (t: Tab) =>
   t.kind === "draft"
     ? t.title ?? "Untitled"
     : basename(t.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
-// Same, for a path with no open tab to derive it from (background pushes,
-// folder-share manifests): the filename minus the document extension.
-const pathShareTitle = (p: string) =>
-  basename(p).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
-
-// The innermost folder share containing `path`, if any — the collection a
-// file's include/remove toggle binds to. With nested folder shares, the
-// nearest one wins; a file belongs to at most one collection.
-function nearestCollection(
-  collections: Record<string, CollectionEntry>,
-  path: string,
-): CollectionEntry | null {
-  let best: CollectionEntry | null = null;
-  for (const c of Object.values(collections)) {
-    if (path.startsWith(c.path + "/") && (!best || c.path.length > best.path.length)) {
-      best = c;
-    }
-  }
-  return best;
-}
-const SHARE_PUSH_DEBOUNCE_MS = 1500;
-// Reconciliation (disk vs last-pushed fingerprints) runs at launch and on
-// window focus, but at most this often — focus events come in bursts.
-const SHARE_RECONCILE_MIN_MS = 15_000;
-// How long a share's file must stay missing (across reconcile passes) before
-// the share is stopped for it. Long enough to ride out delete+recreate
-// windows external tools move files through; short enough that a deleted
-// document's public page doesn't outlive it by much.
-const SHARE_MISSING_GRACE_MS = 30_000;
-
-// What a push reads from disk: each rendition's content plus the snapshot of
-// the file it came from, so the stored fingerprint describes exactly the bytes
-// that were published.
-type SharePartsOnDisk = ShareParts & {
-  mdSnap: FileSnapshot | null;
-  htmlSnap: FileSnapshot | null;
-  /** The store folders this page's boards were read from — see ShareEntry.boardDirs. */
-  boardDirs: string[];
-};
 
 // One in-app delete, as undo needs to see it — see deletedStackRef.
 type DeletedRecord = {
   files: { path: string; trashPath: string }[];
   openPaths: string[];
-  memberships: { dir: string; member: string }[];
-  shares: ShareEntry[];
-  collections: CollectionEntry[];
 };
-
-// Fingerprint freshly-pushed parts — what reconciliation later compares the
-// disk against.
-async function fingerprintParts(parts: SharePartsOnDisk): Promise<{
-  md: PushedFingerprint | null;
-  html: PushedFingerprint | null;
-  boards: string | null;
-}> {
-  return {
-    md:
-      parts.markdown === null
-        ? null
-        : { snap: parts.mdSnap, hash: await contentHash(parts.markdown) },
-    html:
-      parts.html === null
-        ? null
-        : { snap: parts.htmlSnap, hash: await contentHash(parts.html) },
-    // A board changes without its note changing — a card dragged in another
-    // window, a card synced from another Mac. Neither file stat moves, so the
-    // published copy would go stale silently; hashing the snapshot is what
-    // makes reconciliation see it. Null (no fence in this document) is also
-    // the signal to stop checking.
-    boards: parts.boards === null ? null : await contentHash(JSON.stringify(parts.boards)),
-  };
-}
 const THEME_LABEL: Record<Theme, string> = {
   system: "System",
   light: "Light",
@@ -807,12 +676,7 @@ export default function App() {
   // Undo stack for trashed entries. `files` is everything one delete moved to
   // the Trash (a markdown file's html rendition rides along); `openPaths` are
   // the file tabs the delete closed (the entry itself for a file, everything
-  // under it for a folder) so ⌘Z can reopen them after restoring;
-  // `memberships` are the folder-share listings the delete removed, so undo
-  // can put the pages back on their TOC. Deleting unshares (the remote
-  // mirrors the disk), so `shares`/`collections` keep the dropped registry
-  // entries — undo cancels their queued page deletions and republishes them
-  // at the same addresses.
+  // under it for a folder) so ⌘Z can reopen them after restoring.
   const deletedStackRef = useRef<DeletedRecord[]>([]);
   const currentMarkdownRef = useRef<string>("");
   const lastSavedRef = useRef<string>("");
@@ -822,13 +686,6 @@ export default function App() {
   const autosaveTimerRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const conflictRef = useRef<Conflict | null>(null);
-  // Reload-from-disk lives far below (it needs the autosave/scroll machinery),
-  // but the web-edit pull up here has to call it to refresh the open editor
-  // when a fast-forward lands. This ref bridges the ordering (same pattern as
-  // syncShareThreadsRef) and always points at the latest closure.
-  const reloadFromDiskRef = useRef<(opts?: { push?: boolean }) => Promise<void>>(
-    () => Promise.resolve(),
-  );
   // Imperative mirrors of the tab list + active id, so async operations read the
   // latest value without stale closures (same pattern as pathRef/dirtyRef).
   const tabsRef = useRef<Tab[]>([]);
@@ -846,7 +703,7 @@ export default function App() {
   // rendition exists on disk; `docView` = which version the editor area shows;
   // `htmlContent` = the rendition's markup (fed to a sandboxed iframe).
   // htmlPathRef mirrors the rendition path for async readers (watcher events,
-  // share pushes). The markdown editor stays mounted (hidden) in html view so
+  // debounced writes). The markdown editor stays mounted (hidden) in html view so
   // toggling back keeps cursor, undo history, and unsaved state.
   const [docView, setDocViewState] = useState<DocView>("md");
   const docViewRef = useRef<DocView>("md");
@@ -871,8 +728,8 @@ export default function App() {
   // rooted by a marker in the doc; orphans = marker gone, kept + railed),
   // plus records a newer app version owns (carried through rewrites). The
   // markdown on DISK is the hybrid form — markers only; expandMarkdown /
-  // extractMarkdown convert at every read/write, so the editor (and the web
-  // share, whose comment layer parses CriticMarkup) always see full form.
+  // extractMarkdown convert at every read/write, so the editor (whose
+  // comment layer parses CriticMarkup) always sees the full form.
   const mdThreadsRef = useRef<MdThread[]>([]);
   const [mdOrphans, setMdOrphans] = useState<MdThread[]>([]);
   const mdOrphansRef = useRef<MdThread[]>([]);
@@ -1073,71 +930,64 @@ export default function App() {
   // install from the Settings menu. See updater.ts.
   const update = useUpdateCheck();
 
-  // Public sharing: `shares` maps a document's absolute path to its live
-  // share (see share.ts). Every successful disk write of a shared doc schedules
-  // a debounced push of the same content to the remote page.
-  const [shares, setShares] = useState<Record<string, ShareEntry>>(() => readShares());
-  const sharesRef = useRef<Record<string, ShareEntry>>(shares);
-  // Ambient "someone touched this on the web" marker, keyed by document path.
-  // A fast-forward pull (a web comment/edit that landed silently) sets it; the
-  // share pill shows a dot until the popover is opened, which clears it. Purely
-  // a notice — the content itself already reloaded into the editor/rail.
-  const [webActivity, setWebActivity] = useState<Record<string, { by: string; at: number }>>(
-    {},
-  );
-  const markWebActivity = useCallback((target: string, by: string) => {
-    setWebActivity((prev) => ({ ...prev, [target]: { by, at: Date.now() } }));
+  // The name comments written on this Mac are signed with (device_name in
+  // lib.rs: the Mac's own name). Seeded once; the fallback holds until then.
+  const [deviceName, setDeviceName] = useState("This Mac");
+  useEffect(() => {
+    void invoke<string>("device_name")
+      .then(setDeviceName)
+      .catch(() => {});
   }, []);
-  // The configured share backends. State mirrors share.ts's session cache for
-  // rendering; callbacks read the cache directly (`await getConnections()`).
-  const [shareConns, setShareConns] = useState<ShareConnectionsState>({
-    connections: [],
-    defaultId: null,
-  });
-  const [sharedPagesOpen, setSharedPagesOpen] = useState(false);
-  const [shareSetupOpen, setShareSetupOpen] = useState(false);
-  const sharePushTimersRef = useRef<Map<string, number>>(new Map());
 
-  // Deployed-worker versions, probed via /api/meta once per connection set
-  // (plus "Check again" in the update dialog). Drives the "update your share
-  // worker" indication — the app carries the latest worker code but can't
-  // deploy it itself (it holds only the share token, never Cloudflare account
-  // credentials), so the dialog guides the redeploy instead. A failed probe
-  // stays unknown: offline must not read as outdated.
-  const [workerVersions, setWorkerVersions] = useState<Record<string, number>>({});
-  // This device's role on each backend (owner vs member), from /api/auth/whoami.
-  // Only an owner can redeploy — a member holds no Cloudflare credentials — so
-  // the update dialog shows redeploy steps to owners and a "nudge the owner"
-  // note to members. An unresolved probe (offline / revoked) leaves the entry
-  // absent, which the dialog reads as owner: better to show the steps to an
-  // actual owner than hide them.
-  const [workerRoles, setWorkerRoles] = useState<Record<string, "owner" | "member">>({});
-  // Connections whose role has been probed already (whether it resolved or is
-  // in flight), so the outdated-role effect fires whoami at most once each.
-  const roleProbedRef = useRef<Set<string>>(new Set());
-  // The outdated list captured when the dialog opens, so a card can flip to
-  // "Updated ✓" instead of vanishing the moment its recheck succeeds.
-  const [workerUpdateList, setWorkerUpdateList] = useState<OutdatedWorker[] | null>(null);
-  // Cloud sync: engine statuses (seeded once, then live via "sync-status"
-  // events), other people's presence per workspace, and the dialogs. The
-  // engines are app-wide (one per synced workspace, in the Rust process);
-  // every window renders the same truth.
-  const [syncStatuses, setSyncStatuses] = useState<SyncWorkspaceStatus[]>([]);
-  const [syncPresence, setSyncPresence] = useState<
-    Record<string, SyncPresenceEvent["devices"]>
-  >({});
-  const [syncDeviceName, setSyncDeviceName] = useState("This Mac");
-  const [cloudSyncOpen, setCloudSyncOpen] = useState(false);
-  const [connectBackendOpen, setConnectBackendOpen] = useState(false);
-  const [backendsOpen, setBackendsOpen] = useState(false);
+  // The cloud: every connected workspace's status, as the engine reports it
+  // — one array, replaced whole on every `cloud-status` event (src/cloud.ts).
+  // Everything cloud-shaped in the UI derives from this and nothing else.
+  const [cloudStatuses, setCloudStatuses] = useState<CloudStatus[]>([]);
+  useEffect(() => {
+    let live = true;
+    void cloudStatus()
+      .then((s) => {
+        if (live) setCloudStatuses(s);
+      })
+      .catch(() => {});
+    const un = onCloudStatus((s) => {
+      if (live) setCloudStatuses(s);
+    });
+    return () => {
+      live = false;
+      void un.then((f) => f()).catch(() => {});
+    };
+  }, []);
+  const cloudForRoot = useMemo(
+    () => cloudForWorkspace(cloudStatuses, workspaceRoot),
+    [cloudStatuses, workspaceRoot],
+  );
+  // The cloud surfaces (docs/cloud-redesign.md §7.2): the panel, the setup
+  // wizard (connect this folder, or open a workspace from a domain), the
+  // worker update card, the history panel for one document, and the
+  // transient notices. The held mass-deletion's paths ride the event that
+  // announced it; the panel lists them.
+  const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
+  const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
+  const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
+  const [historyPath, setHistoryPath] = useState<string | null>(null);
+  const [cloudToasts, setCloudToasts] = useState<CloudToast[]>([]);
+  const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
+  const toastSeq = useRef(0);
+  const pushToast = useCallback((text: string, action?: CloudToast["action"]) => {
+    toastSeq.current += 1;
+    const id = toastSeq.current;
+    setCloudToasts((ts) => [...ts.slice(-3), { id, text, action }]);
+  }, []);
+  const dismissToast = useCallback(
+    (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
+    [],
+  );
+
   // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
   // when closed. Set by the `dk-mermaid-expand` event a diagram's expand chip
   // fires (src/mermaid.ts).
   const [zoomDiagramSvg, setZoomDiagramSvg] = useState<string | null>(null);
-  // The connection whose guided teardown (erase + delete worker) is open.
-  const [teardownConn, setTeardownConn] = useState<ShareConnection | null>(null);
-  // Absolute path of the doc whose version history is open. null = closed.
-  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
   // A rendered mermaid diagram's expand chip (src/mermaid.ts) fires this with
   // the diagram's SVG; open the zoom/pan canvas on it.
@@ -1149,426 +999,6 @@ export default function App() {
     window.addEventListener("dk-mermaid-expand", onExpand);
     return () => window.removeEventListener("dk-mermaid-expand", onExpand);
   }, []);
-
-  useEffect(() => {
-    if (BUNDLED_WORKER_VERSION <= 0) return;
-    let cancelled = false;
-    for (const conn of shareConns.connections) {
-      void fetchWorkerVersion(conn)
-        .then((version) => {
-          if (cancelled) return;
-          setWorkerVersions((prev) =>
-            prev[conn.id] === version ? prev : { ...prev, [conn.id]: version },
-          );
-        })
-        .catch(() => {});
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [shareConns.connections]);
-
-  const recheckWorkerVersion = useCallback(async (conn: ShareConnection) => {
-    const version = await fetchWorkerVersion(conn);
-    setWorkerVersions((prev) =>
-      prev[conn.id] === version ? prev : { ...prev, [conn.id]: version },
-    );
-    return version;
-  }, []);
-
-  const outdatedWorkers = useMemo<OutdatedWorker[]>(
-    () =>
-      BUNDLED_WORKER_VERSION > 0
-        ? shareConns.connections.flatMap((conn) => {
-            const version = workerVersions[conn.id];
-            return typeof version === "number" && version < BUNDLED_WORKER_VERSION
-              ? [{ conn, version, role: workerRoles[conn.id] }]
-              : [];
-          })
-        : [],
-    [shareConns.connections, workerVersions, workerRoles],
-  );
-
-  // Role (owner vs member) is only consumed by the update dialog, which only
-  // opens for an outdated worker — so resolve it lazily, per outdated backend,
-  // once each. In the steady state (every worker current) this makes no calls
-  // at all; whoami costs one worker request (plus one R2 read for a member,
-  // none for the owner), so even outdated it's negligible against the free
-  // tier. The ref dedupes so a re-render doesn't re-probe; a failed probe is
-  // dropped from it, letting a later outdated-set change retry.
-  useEffect(() => {
-    for (const { conn } of outdatedWorkers) {
-      if (roleProbedRef.current.has(conn.id)) continue;
-      roleProbedRef.current.add(conn.id);
-      void whoami(conn)
-        .then((me) =>
-          setWorkerRoles((prev) =>
-            prev[conn.id] === me.role ? prev : { ...prev, [conn.id]: me.role },
-          ),
-        )
-        .catch(() => roleProbedRef.current.delete(conn.id));
-    }
-  }, [outdatedWorkers]);
-
-  // The ref is the writable source of truth and updates synchronously (a React
-  // state updater only runs at render time — too late for code that reads the
-  // registry right after mutating it); state/localStorage follow.
-  const updateShares = useCallback(
-    (mut: (prev: Record<string, ShareEntry>) => Record<string, ShareEntry>) => {
-      const next = mut(sharesRef.current);
-      sharesRef.current = next;
-      writeShares(next);
-      setShares(next);
-    },
-    [],
-  );
-
-  // Folder shares: `collections` maps a directory's absolute path to its
-  // published collection page (see share.ts). Members are ordinary entries in
-  // `shares`; the collection carries only the membership list and pushes a
-  // manifest — the public table of contents — whenever it changes.
-  const [collections, setCollections] = useState<Record<string, CollectionEntry>>(() =>
-    readCollections(),
-  );
-  const collectionsRef = useRef<Record<string, CollectionEntry>>(collections);
-  const collectionPushTimersRef = useRef<Map<string, number>>(new Map());
-  // shareFolderTarget = the directory whose share dialog (create or manage) is
-  // open; null = closed.
-  const [shareFolderTarget, setShareFolderTarget] = useState<string | null>(null);
-  // A context-menu "Share…" on a tree file: the document opens first, then the
-  // share popover pops once the ShareMenu for that path is mounted (it's keyed
-  // by the active path, so this outlives the remount).
-  const [pendingSharePopover, setPendingSharePopover] = useState<string | null>(null);
-
-  // A pending popover request only survives while its document is the active
-  // tab — navigating away (or a failed open) cancels it instead of leaving a
-  // surprise popover for the next visit.
-  useEffect(() => {
-    if (!pendingSharePopover) return;
-    const active = tabs.find((t) => t.id === activeId);
-    if (!active || active.kind !== "file" || active.path !== pendingSharePopover) {
-      setPendingSharePopover(null);
-    }
-  }, [pendingSharePopover, tabs, activeId]);
-
-  const updateCollections = useCallback(
-    (mut: (prev: Record<string, CollectionEntry>) => Record<string, CollectionEntry>) => {
-      const next = mut(collectionsRef.current);
-      collectionsRef.current = next;
-      writeCollections(next);
-      setCollections(next);
-    },
-    [],
-  );
-
-  /* ---------- Synced-workspace share mirroring, outbound half ----------
-     For documents under a cloud-synced root, the workspace manifest is the
-     shared truth of what's published where (everyone on the backend reads
-     it, so nobody double-publishes and whoever edits a shared file keeps
-     its public page fresh). Every local share mutation queues a matching
-     manifest op here; the inbound half — the mirror effect further down —
-     applies everyone else's ops to this device's registry. Shares published
-     to a DIFFERENT backend than the workspace syncs to stay machine-local,
-     exactly as before. */
-
-  const syncStatusesRef = useRef<SyncWorkspaceStatus[]>([]);
-  const syncDeviceNameRef = useRef("This Mac");
-
-  // The synced workspace whose root contains `path`, if any.
-  const syncWsForPath = useCallback(
-    (path: string): SyncWorkspaceStatus | null =>
-      syncStatusesRef.current.find(
-        (s) => path === s.root || path.startsWith(s.root + "/"),
-      ) ?? null,
-    [],
-  );
-
-  // Queue the manifest op mirroring the CURRENT registry state of `absPath`:
-  // share present → publish/update its record, absent → forget it. The
-  // engine persists ops and carries them on its next won CAS, so this is
-  // fire-and-forget even offline.
-  const queueShareOp = useCallback(
-    (absPath: string) => {
-      const ws = syncWsForPath(absPath);
-      if (!ws || absPath === ws.root) return;
-      const rel = absPath.slice(ws.root.length + 1);
-      const entry = sharesRef.current[absPath];
-      if (entry && (entry.connectionId !== ws.connectionId || entry.kind !== "file")) return;
-      void syncSetShares(ws.wsId, {
-        [rel]: entry
-          ? {
-              id: entry.id,
-              path: rel,
-              cid: entry.collectionId ?? null,
-              title: entry.title,
-              by: syncDeviceNameRef.current,
-              at: Date.now(),
-            }
-          : null,
-      }).catch(() => {});
-    },
-    [syncWsForPath],
-  );
-
-  // Same, for folder shares. Pass `removedId` when the collection entry has
-  // already been dropped from the registry (a stop) — the id can't be read
-  // back then.
-  const queueCollectionOp = useCallback(
-    (dirPath: string, removedId?: string) => {
-      const ws = syncWsForPath(dirPath);
-      if (!ws) return;
-      if (removedId) {
-        void syncSetShares(ws.wsId, {}, { [removedId]: null }).catch(() => {});
-        return;
-      }
-      const entry = collectionsRef.current[dirPath];
-      if (!entry || entry.connectionId !== ws.connectionId) return;
-      const rel = dirPath === ws.root ? "" : dirPath.slice(ws.root.length + 1);
-      void syncSetShares(
-        ws.wsId,
-        {},
-        {
-          [entry.id]: {
-            path: rel,
-            title: entry.title,
-            desc: entry.description ?? null,
-            by: syncDeviceNameRef.current,
-            at: Date.now(),
-          },
-        },
-      ).catch(() => {});
-    },
-    [syncWsForPath],
-  );
-
-  // The workspace id a push should stamp its page with: set exactly when the
-  // document lives in a synced workspace published to the SAME backend — the
-  // worker then lets every member of the workspace manage the page.
-  const wsStampFor = useCallback(
-    (absPath: string, connectionId: string): string | null => {
-      const ws = syncWsForPath(absPath);
-      return ws && ws.connectionId === connectionId ? ws.wsId : null;
-    },
-    [syncWsForPath],
-  );
-
-  // Load the configured connections into render state.
-  useEffect(() => {
-    void getConnections().then(setShareConns);
-  }, []);
-
-  // Persist a connections change and refresh both the session cache and the
-  // rendered state.
-  const changeConnections = useCallback(
-    async (mut: (prev: ShareConnectionsState) => ShareConnectionsState) => {
-      const next = await saveConnections(mut(await getConnections()));
-      setShareConns(next);
-      return next;
-    },
-    [],
-  );
-
-  // Which connection an entry belongs to (share.ts's resolveConnection, fed
-  // from the session cache). null = that connection has been removed; pushes
-  // skip, stops forget locally.
-  const connectionForEntry = useCallback(
-    async (entry: { connectionId: string }): Promise<ShareConnection | null> =>
-      resolveConnection(await getConnections(), entry),
-    [],
-  );
-
-  // Per-workspace default connection: consulted before the global default
-  // when a new share is created, written from the share popover's picker.
-  const [workspaceConnMap, setWorkspaceConnMap] = useState<Record<string, string>>(() =>
-    readWorkspaceConnectionMap(),
-  );
-
-  // Render-time mirror of connectionForEntry, driven by state instead of the
-  // session cache so the UI re-resolves when connections change.
-  const connectionForEntrySync = useCallback(
-    (entry: { connectionId: string } | null): ShareConnection | null =>
-      resolveConnection(shareConns, entry),
-    [shareConns],
-  );
-
-  // Where a NEW share goes: the workspace's remembered connection if it still
-  // exists, the global default otherwise.
-  const workspaceKey = workspaceRoot ?? "";
-  const mappedConn = workspaceConnMap[workspaceKey];
-  const defaultConnectionId =
-    mappedConn && shareConns.connections.some((c) => c.id === mappedConn)
-      ? mappedConn
-      : shareConns.defaultId;
-
-  const rememberWorkspaceConnection = useCallback(
-    (connectionId: string) => {
-      setWorkspaceConnMap((prev) => {
-        const next = { ...prev, [workspaceKey]: connectionId };
-        writeWorkspaceConnectionMap(next);
-        return next;
-      });
-    },
-    [workspaceKey],
-  );
-
-  // Add or update a connection. An endpoint that matches an existing
-  // connection updates it in place (same id — entries keep resolving), which
-  // is what re-running the setup guide or rotating a token should do.
-  const saveConnection = useCallback(
-    async (conn: ShareConnection) => {
-      await changeConnections((prev) => {
-        const existing =
-          prev.connections.find((c) => c.id === conn.id) ??
-          prev.connections.find((c) => c.endpoint === conn.endpoint);
-        const connections = existing
-          ? prev.connections.map((c) =>
-              c.id === existing.id ? { ...conn, id: existing.id } : c,
-            )
-          : [...prev.connections, conn];
-        return { connections, defaultId: prev.defaultId ?? conn.id };
-      });
-      // Sync engines resolve their token from share.json at spawn — a rotated
-      // or re-saved token needs them respawned to pick it up.
-      void syncReloadConnections().catch(() => {});
-    },
-    [changeConnections],
-  );
-
-  // Stop this Mac's sync engines for every workspace on a connection. Local
-  // folders stay; the backend keeps its copies. Used before removing a
-  // connection (an engine whose connection vanished would respawn straight
-  // into a dead "connection not found" error state) and before a teardown's
-  // erase (an engine mustn't watch its workspace 404 out from under it).
-  const disableSyncForConnection = useCallback(async (id: string) => {
-    for (const s of syncStatusesRef.current.filter((s) => s.connectionId === id)) {
-      await syncDisable(s.wsId).catch((e) => console.error("sync disable failed", e));
-    }
-  }, []);
-
-  const removeConnection = useCallback(
-    async (id: string) => {
-      await disableSyncForConnection(id);
-      await changeConnections((prev) => ({
-        connections: prev.connections.filter((c) => c.id !== id),
-        defaultId: prev.defaultId === id ? null : prev.defaultId,
-      }));
-      setWorkspaceConnMap((prev) => {
-        const next = Object.fromEntries(
-          Object.entries(prev).filter(([, v]) => v !== id),
-        );
-        writeWorkspaceConnectionMap(next);
-        return next;
-      });
-      void syncReloadConnections().catch(() => {});
-    },
-    [changeConnections, disableSyncForConnection],
-  );
-
-  const makeDefaultConnection = useCallback(
-    async (id: string) => {
-      await changeConnections((prev) => ({ ...prev, defaultId: id }));
-    },
-    [changeConnections],
-  );
-
-  // How many local entries (pages + folder shares) live on a connection —
-  // shown before removing one, since those pages stay live but lose their
-  // update path from this Mac.
-  const shareCountFor = useCallback(
-    (connectionId: string) => {
-      const owns = (e: { connectionId: string }) => e.connectionId === connectionId;
-      return (
-        Object.values(shares).filter(owns).length +
-        Object.values(collections).filter(owns).length
-      );
-    },
-    [shares, collections],
-  );
-
-  // What a manifest push carries: each member's page id, display title (the
-  // share's title — the document's lead H1 when it has one, the filename
-  // otherwise — so the TOC names pages the way the pages name themselves),
-  // and folder-relative path (how the TOC groups into directories). Members
-  // whose share is gone or that no longer live under the folder are simply
-  // not listed.
-  const collectionItemsFor = useCallback((entry: CollectionEntry): CollectionItem[] => {
-    const items: CollectionItem[] = [];
-    for (const m of entry.members) {
-      const share = sharesRef.current[m];
-      if (!share || !m.startsWith(entry.path + "/")) continue;
-      items.push({
-        id: share.id,
-        title: share.title || pathShareTitle(m),
-        path: m.slice(entry.path.length + 1),
-      });
-    }
-    items.sort((a, b) => a.path.localeCompare(b.path));
-    return items;
-  }, []);
-
-  // Push a folder share's manifest if it differs from what's live (hash-
-  // guarded, so redundant schedules collapse to nothing). A title change also
-  // re-renders the OG image, same as pages.
-  const pushCollectionNow = useCallback(
-    async (dirPath: string) => {
-      const entry = collectionsRef.current[dirPath];
-      if (!entry) return;
-      const config = await connectionForEntry(entry);
-      if (!config) return;
-      const items = collectionItemsFor(entry);
-      const hash = await collectionManifestHash(entry.title, items, entry.description);
-      if (hash === entry.pushedHash && entry.title === entry.pushedTitle) return;
-      try {
-        if (hash !== entry.pushedHash) {
-          await pushCollection(
-            config,
-            entry.id,
-            entry.title,
-            items,
-            entry.description,
-            wsStampFor(entry.path, entry.connectionId),
-          );
-        }
-        if (entry.title !== entry.pushedTitle) {
-          await pushOgImage(config, entry.id, entry.title);
-        }
-        updateCollections((prev) =>
-          prev[dirPath]
-            ? {
-                ...prev,
-                [dirPath]: {
-                  ...prev[dirPath],
-                  updatedAt: Date.now(),
-                  pushedHash: hash,
-                  pushedTitle: entry.title,
-                },
-              }
-            : prev,
-        );
-      } catch (e) {
-        // Offline or the worker hiccuped; reconciliation retries via the hash.
-        console.error("collection push failed", dirPath, e);
-      }
-    },
-    [collectionItemsFor, updateCollections, connectionForEntry, wsStampFor],
-  );
-
-  const scheduleCollectionPush = useCallback(
-    (dirPath: string) => {
-      if (!collectionsRef.current[dirPath]) return;
-      const timers = collectionPushTimersRef.current;
-      const existing = timers.get(dirPath);
-      if (existing != null) window.clearTimeout(existing);
-      timers.set(
-        dirPath,
-        window.setTimeout(() => {
-          timers.delete(dirPath);
-          void pushCollectionNow(dirPath);
-        }, SHARE_PUSH_DEBOUNCE_MS),
-      );
-    },
-    [pushCollectionNow],
-  );
 
   // Land a markdown save's thread bodies in the entity meta of a document
   // that is NOT the active one (a background flush after a focus swap, a
@@ -1608,913 +1038,6 @@ export default function App() {
     [],
   );
 
-  // Assemble what a share push carries: the markdown document and/or its html
-  // rendition, always read fresh from DISK — the disk is what a share mirrors
-  // (in-editor keystrokes reach it through autosave, which schedules its own
-  // push). Reading and fingerprinting the same bytes keeps reconciliation
-  // honest. Returns null when the primary file is unreadable (source gone; the
-  // share stays until stopped explicitly).
-  const readShareParts = useCallback(
-    async (target: string, collectionId: string | null): Promise<SharePartsOnDisk | null> => {
-      if (isHtmlPath(target)) {
-        try {
-          const r = await invoke<ReadFileResult>("read_file", { path: target });
-          return {
-            markdown: null,
-            mdSnap: null,
-            html: r.contents,
-            htmlSnap: r.snapshot,
-            tcols: [], // an html-only share has no markdown tables to size
-            boards: null,
-            boardDirs: [],
-            props: null,
-          };
-        } catch {
-          return null;
-        }
-      }
-      let contents: string;
-      let mdSnap: FileSnapshot;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: target });
-        contents = r.contents;
-        mdSnap = r.snapshot;
-      } catch {
-        return null;
-      }
-      // The frontmatter boundary, again (see the editor's above): what
-      // travels is the BODY. The block goes as `props` instead — rendered as
-      // a properties table on the page, and out of reach of a web edit,
-      // which would otherwise serialize `---` + `status: Done` + `---` back
-      // as a setext heading and quietly eat a card's fields.
-      const fm = parseFrontmatter(contents);
-      let markdown = fm.body;
-      // The disk keeps the hybrid form; the web page's comment layer is
-      // built from CriticMarkup in the markdown it receives — push (and
-      // fingerprint) the EXPANDED document, thread bodies re-inlined. Table
-      // widths come out of the same read, but they can't be inlined into
-      // markdown: they travel beside it as their own field.
-      let tcols: TableCols[] = [];
-      try {
-        const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
-        const meta = parseEntityMeta(m.contents);
-        markdown = expandMarkdown(markdown, meta.mthreads).md;
-        tcols = meta.tcols;
-      } catch {
-        // no meta — nothing to expand, no widths to carry
-      }
-      // A board the note embeds, frozen. Card titles link to their own pages
-      // only within one folder share — that is the only membership whose
-      // pages are guaranteed to live on this same backend.
-      const pageIdFor = (cardPath: string): string | undefined => {
-        if (!collectionId) return undefined;
-        const card = sharesRef.current[cardPath];
-        return card && card.collectionId === collectionId ? card.id : undefined;
-      };
-      // Scanned on the file's own body, not on the expanded copy: the
-      // fences are the same either way, and reconciliation re-derives from
-      // the body too (shareNeedsPush) — one text, one answer.
-      const snapped = await collectBoardSnapshots(fm.body, target, pageIdFor).catch(
-        () => null,
-      );
-      const props = await cardProperties(target, fm.props, fm.order).catch(() => null);
-      let html: string | null = null;
-      let htmlSnap: FileSnapshot | null = null;
-      try {
-        const sibling = htmlSiblingOf(target);
-        if (await invoke<boolean>("path_exists", { path: sibling })) {
-          const r = await invoke<ReadFileResult>("read_file", { path: sibling });
-          html = r.contents;
-          htmlSnap = r.snapshot;
-        }
-      } catch {
-        // rendition unreadable right now; share the markdown alone
-      }
-      return {
-        markdown,
-        mdSnap,
-        html,
-        htmlSnap,
-        tcols,
-        boards: snapped?.boards ?? null,
-        boardDirs: snapped?.dirs ?? [],
-        props,
-      };
-    },
-    [],
-  );
-
-  // Push the current content of a shared doc to its remote page. Both
-  // renditions travel together (see readShareParts), and so does the folder-
-  // share back-reference (the public page's "back to the folder" crumb). A
-  // title change (rename / draft promoted) also refreshes the OG image.
-  //
-  // Pushes claim the last revision this Mac pushed or pulled (baseRev), so a
-  // web edit the app hasn't folded in yet becomes a visible conflict on the
-  // entry instead of being silently overwritten. `force` drops that claim —
-  // the explicit "keep mine" resolution.
-  const pushSharedNow = useCallback(
-    async (target: string, opts?: { force?: boolean; og?: boolean }) => {
-      const entry = sharesRef.current[target];
-      if (!entry) return;
-      const config = await connectionForEntry(entry);
-      if (!config) return;
-      const tab = tabsRef.current.find((t) => t.path === target);
-      const collection = entry.collectionId
-        ? (Object.values(collectionsRef.current).find((c) => c.id === entry.collectionId) ?? null)
-        : null;
-      const parts = await readShareParts(target, entry.collectionId ?? null);
-      if (!parts) return; // source is gone; reconcile's disk-truth pass stops the share
-      // The document names itself when it opens with an H1 (html-only pages:
-      // their <title>); only untitled documents fall back to the file name.
-      const title =
-        deriveDocTitle(parts) ??
-        (tab ? docShareTitle(tab) : entry.kind === "file" ? pathShareTitle(target) : entry.title);
-      try {
-        const { rev } = await pushPage(
-          config,
-          entry.id,
-          title,
-          parts,
-          collection ? { id: collection.id, title: collection.title } : null,
-          wsStampFor(target, entry.connectionId),
-          opts?.force ? null : entry.pushedRev,
-        );
-        // `og` forces the image (an undo republishing a deleted page — the
-        // remote OG died with it); otherwise only a title change re-renders.
-        if (opts?.og || title !== entry.title) await pushOgImage(config, entry.id, title);
-        const pushed = await fingerprintParts(parts);
-        updateShares((prev) =>
-          prev[target]
-            ? {
-                ...prev,
-                [target]: {
-                  ...prev[target],
-                  title,
-                  updatedAt: Date.now(),
-                  pushed,
-                  boardDirs: parts.boardDirs,
-                  ...(rev != null ? { pushedRev: rev } : {}),
-                  webConflict: undefined,
-                },
-              }
-            : prev,
-        );
-        // The folder TOC names this page by its share title — retitling the
-        // document renames its row there too.
-        if (title !== entry.title && collection) scheduleCollectionPush(collection.path);
-      } catch (e) {
-        if (e instanceof SharePushConflictError) {
-          // Someone edited the page on the web AND this document changed
-          // locally — surface it in the share popover; pushes stay paused
-          // (each retry lands here) until the owner picks a side.
-          const conflict = { rev: e.rev, by: e.webEdit?.by ?? "", at: e.webEdit?.at ?? null };
-          updateShares((prev) =>
-            prev[target]
-              ? { ...prev, [target]: { ...prev[target], webConflict: conflict } }
-              : prev,
-          );
-          return;
-        }
-        // Offline or the worker hiccuped; the next save retries.
-        console.error("share push failed", target, e);
-      }
-    },
-    [updateShares, readShareParts, connectionForEntry, scheduleCollectionPush, wsStampFor],
-  );
-
-  const scheduleSharePush = useCallback(
-    (target: string) => {
-      if (!sharesRef.current[target]) return;
-      const timers = sharePushTimersRef.current;
-      const existing = timers.get(target);
-      if (existing != null) window.clearTimeout(existing);
-      timers.set(
-        target,
-        window.setTimeout(() => {
-          timers.delete(target);
-          void pushSharedNow(target);
-        }, SHARE_PUSH_DEBOUNCE_MS),
-      );
-    },
-    [pushSharedNow],
-  );
-
-  /* ---------- Delete-driven unshares ----------
-     Deleting a document (or losing it to an external tool) stops its share:
-     the registry forgets the entry NOW — every badge, TOC and count agrees
-     immediately — and the remote page deletion is parked on a durable queue
-     (share.ts) that reconciliation drains, so being offline at delete time
-     changes nothing. Explicit Stop sharing keeps its await-and-surface path
-     in stopSharing below. */
-
-  // Drain the pending-unshare queue: one DELETE per parked page, item
-  // removed on "done" (gone, or permanently untouchable), kept on "retry".
-  // Re-reads the queue before each attempt so an undo that just rescued a
-  // page (removePendingUnshares) wins over an in-flight flush.
-  const pendingUnshareBusyRef = useRef(false);
-  const flushPendingUnshares = useCallback(async () => {
-    if (pendingUnshareBusyRef.current) return;
-    pendingUnshareBusyRef.current = true;
-    try {
-      const items = readPendingUnshares();
-      if (items.length === 0) return;
-      const st = await getConnections();
-      for (const it of items) {
-        const still = readPendingUnshares().some(
-          (p) => p.pageId === it.pageId && p.connectionId === it.connectionId,
-        );
-        if (!still) continue;
-        const config = st.connections.find((c) => c.id === it.connectionId);
-        if (!config) {
-          // Connection removed: the page is out of reach forever — drop the
-          // item rather than wedging the queue (same call stopSharing makes).
-          removePendingUnshares([it]);
-          continue;
-        }
-        if ((await tryDeletePage(config, it.pageId)) === "done") {
-          removePendingUnshares([it]);
-        }
-      }
-    } finally {
-      pendingUnshareBusyRef.current = false;
-    }
-  }, []);
-
-  // Stop a share because its file is gone: queue the remote deletion, forget
-  // the entry, delist it from every surviving folder TOC, and tell a synced
-  // workspace. `record` collects what an undo must restore (in-app deletes);
-  // reconciliation passes none — there's nothing to undo to.
-  const dropShareEntry = useCallback(
-    (target: string, record?: DeletedRecord) => {
-      const entry = sharesRef.current[target];
-      if (!entry) return;
-      enqueuePendingUnshares([{ connectionId: entry.connectionId, pageId: entry.id }]);
-      const timers = sharePushTimersRef.current;
-      const pending = timers.get(target);
-      if (pending != null) {
-        window.clearTimeout(pending);
-        timers.delete(target);
-      }
-      // The page (and its access section) is going away — the cached
-      // plaintext codes are dead weight now.
-      forgetAccessCodes(entry.connectionId, entry.id);
-      record?.shares.push(entry);
-      updateShares((prev) => {
-        const { [target]: _gone, ...rest } = prev;
-        return rest;
-      });
-      for (const c of Object.values(collectionsRef.current)) {
-        if (!c.members.includes(target)) continue;
-        record?.memberships.push({ dir: c.path, member: target });
-        updateCollections((prev) =>
-          prev[c.path]
-            ? {
-                ...prev,
-                [c.path]: {
-                  ...prev[c.path],
-                  members: prev[c.path].members.filter((m) => m !== target),
-                },
-              }
-            : prev,
-        );
-        scheduleCollectionPush(c.path);
-      }
-      // In a synced workspace: the entry is gone, so this queues a "forget".
-      queueShareOp(target);
-    },
-    [updateShares, updateCollections, scheduleCollectionPush, queueShareOp],
-  );
-
-  // The folder-share counterpart: queue the collection page's deletion and
-  // forget the entry. Member pages are NOT touched here — the caller decides
-  // (an in-app folder delete drops them too, since their files died with the
-  // folder; reconciliation reaches them through their own missing files).
-  const dropCollectionEntry = useCallback(
-    (dirPath: string, record?: DeletedRecord) => {
-      const entry = collectionsRef.current[dirPath];
-      if (!entry) return;
-      enqueuePendingUnshares([{ connectionId: entry.connectionId, pageId: entry.id }]);
-      const timers = collectionPushTimersRef.current;
-      const pending = timers.get(dirPath);
-      if (pending != null) {
-        window.clearTimeout(pending);
-        timers.delete(dirPath);
-      }
-      forgetAccessCodes(entry.connectionId, entry.id);
-      record?.collections.push(entry);
-      updateCollections((prev) => {
-        const { [dirPath]: _gone, ...rest } = prev;
-        return rest;
-      });
-      // In a synced workspace: forget the collection everywhere.
-      queueCollectionOp(dirPath, entry.id);
-    },
-    [updateCollections, queueCollectionOp],
-  );
-
-  // A share's file vanished — but a rename done outside the app (an agent,
-  // Finder, `mv`) looks exactly like that, and killing the page over it
-  // would burn the address for nothing. A true rename preserves content
-  // byte-for-byte and the entry's fingerprint remembers exactly what was
-  // pushed, so: scan the file's own directory for an unshared document of
-  // the same kind whose raw size matches the fingerprint's snapshot and
-  // whose (expanded, for markdown) hash matches its hash, and re-key the
-  // share onto it — same page id, same URL, folder membership follows.
-  // Anything less certain returns false and falls through to the grace
-  // path: an edited-then-renamed file reads as delete + new document.
-  const tryAdoptRename = useCallback(
-    async (entry: ShareEntry): Promise<boolean> => {
-      if (entry.kind !== "file") return false;
-      const isMd = MD_EXT_RE.test(entry.path);
-      const fp = isMd ? entry.pushed?.md : entry.pushed?.html;
-      if (!fp?.snap || !fp.hash) return false;
-      let tree: TreeNode;
-      try {
-        tree = await invoke<TreeNode>("list_md_tree", {
-          path: dirname(entry.path),
-          all: false,
-        });
-      } catch {
-        return false; // parent directory gone too — nothing to adopt from
-      }
-      const candidates: string[] = [];
-      const collect = (n: TreeNode) => {
-        if (n.kind === "file") candidates.push(n.path);
-        else for (const c of n.children) collect(c);
-      };
-      collect(tree);
-      for (const cand of candidates) {
-        if (cand === entry.path) continue;
-        if (MD_EXT_RE.test(cand) !== isMd) continue; // same document kind only
-        if (sharesRef.current[cand]) continue; // already its own share
-        const snap = await invoke<FileSnapshot>("stat_file", { path: cand }).catch(
-          () => null,
-        );
-        if (!snap || snap.size !== fp.snap.size) continue;
-        let hash: string;
-        try {
-          const r = await invoke<ReadFileResult>("read_file", { path: cand });
-          let content = r.contents;
-          if (isMd) {
-            // The fingerprint hashes the EXPANDED document (thread bodies
-            // re-inlined from the meta) — mirror that. A renamed file whose
-            // meta rode along expands identically; one whose meta was left
-            // behind expands to itself, which still matches a share that
-            // never had threads.
-            let mthreads: MdThread[] = [];
-            try {
-              const m = await invoke<ReadFileResult>("read_file", {
-                path: metaFileOf(cand),
-              });
-              mthreads = parseEntityMeta(m.contents).mthreads;
-            } catch {
-              // no meta file
-            }
-            content = expandMarkdown(content, mthreads).md;
-          }
-          hash = await contentHash(content);
-        } catch {
-          continue;
-        }
-        if (hash !== fp.hash) continue;
-        // The scans above awaited; make sure the entry is still ours to move
-        // (not re-keyed or replaced underneath) before committing.
-        if (sharesRef.current[entry.path]?.id !== entry.id) return false;
-        // Adopt: re-key the entry, keep everything else (id, fingerprints,
-        // comment state — the content is bit-identical).
-        const { missingSince: _clear, ...rest } = entry;
-        const adopted: ShareEntry = { ...rest, path: cand };
-        updateShares((prev) => {
-          const { [entry.path]: _gone, ...others } = prev;
-          return { ...others, [cand]: adopted };
-        });
-        // Folder membership follows the rename while the file stays under
-        // the shared folder; a move OUT of it delists (the page share lives
-        // on, its crumb clears with the next push) — same rules as movePath.
-        for (const c of Object.values(collectionsRef.current)) {
-          if (!c.members.includes(entry.path)) continue;
-          const keep = cand.startsWith(c.path + "/");
-          updateCollections((prev) =>
-            prev[c.path]
-              ? {
-                  ...prev,
-                  [c.path]: {
-                    ...prev[c.path],
-                    members: keep
-                      ? prev[c.path].members.map((m) => (m === entry.path ? cand : m))
-                      : prev[c.path].members.filter((m) => m !== entry.path),
-                  },
-                }
-              : prev,
-          );
-          scheduleCollectionPush(c.path);
-          if (!keep) {
-            updateShares((prev) => {
-              const cur = prev[cand];
-              if (!cur?.collectionId) return prev;
-              const { collectionId: _c, ...restCur } = cur;
-              return { ...prev, [cand]: restCur };
-            });
-          }
-        }
-        // A filename-derived title (and the folder crumb) may have changed;
-        // one push refreshes both, and the OG image follows a title change.
-        scheduleSharePush(cand);
-        queueShareOp(cand);
-        return true;
-      }
-      return false;
-    },
-    [
-      updateShares,
-      updateCollections,
-      scheduleCollectionPush,
-      scheduleSharePush,
-      queueShareOp,
-    ],
-  );
-
-  // Does `entry`'s local disk content differ from what was last pushed?
-  // Stat-first: a matching snapshot rules a file unchanged without reading it;
-  // otherwise read + hash decides (so a touched-but-identical file doesn't
-  // push). A missing fingerprint (entry from before reconciliation existed)
-  // counts as changed — one establishing push and it never re-fires.
-  const shareNeedsPush = useCallback(async (entry: ShareEntry): Promise<boolean> => {
-    const fp = entry.pushed;
-    if (!fp) return true;
-    const changed = async (
-      path: string,
-      pushed: PushedFingerprint | null,
-    ): Promise<boolean> => {
-      const snap = await invoke<FileSnapshot>("stat_file", { path }).catch(() => null);
-      if (!snap) return pushed !== null; // gone locally; the published copy is stale
-      if (!pushed) return true; // appeared since the last push
-      if (
-        pushed.snap &&
-        pushed.snap.mtime_ms === snap.mtime_ms &&
-        pushed.snap.size === snap.size
-      ) {
-        return false;
-      }
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path });
-        return (await contentHash(r.contents)) !== pushed.hash;
-      } catch {
-        return true; // vanished mid-check; the push path sorts it out
-      }
-    };
-    // The markdown side compares the EXPANDED document (pushes carry thread
-    // bodies re-inlined from the meta, and the stored hash describes that) —
-    // so a body-only comment edit, which leaves the markdown file untouched,
-    // still registers as a needed push. The stat shortcut holds only while
-    // the entity has no meta file to expand from.
-    const mdChanged = async (path: string, pushed: PushedFingerprint | null) => {
-      const snap = await invoke<FileSnapshot>("stat_file", { path }).catch(() => null);
-      if (!snap) return pushed !== null; // gone locally; the published copy is stale
-      if (!pushed) return true; // appeared since the last push
-      const mdSnapMatches =
-        pushed.snap != null &&
-        pushed.snap.mtime_ms === snap.mtime_ms &&
-        pushed.snap.size === snap.size;
-      let mthreads: MdThread[] = [];
-      let hasMeta = false;
-      try {
-        const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(path) });
-        mthreads = parseEntityMeta(m.contents).mthreads;
-        hasMeta = true;
-      } catch {
-        // no meta file
-      }
-      if (mdSnapMatches && !hasMeta) return false;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path });
-        const expanded = expandMarkdown(parseFrontmatter(r.contents).body, mthreads).md;
-        return (await contentHash(expanded)) !== pushed.hash;
-      } catch {
-        return true; // vanished mid-check; the push path sorts it out
-      }
-    };
-    // Re-derive this page's board snapshots and compare. Only pages that
-    // carried a fence at their last push pay for this (`pushed.boards` is
-    // null otherwise), and a page whose note changed has already answered
-    // yes above.
-    const boardsChanged = async (): Promise<boolean> => {
-      const was = fp.boards;
-      if (was === null || was === undefined) return false;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: entry.path });
-        const pageIdFor = (cardPath: string): string | undefined => {
-          if (!entry.collectionId) return undefined;
-          const card = sharesRef.current[cardPath];
-          return card && card.collectionId === entry.collectionId ? card.id : undefined;
-        };
-        const snapped = await collectBoardSnapshots(
-          parseFrontmatter(r.contents).body,
-          entry.path,
-          pageIdFor,
-        );
-        const now = snapped === null ? null : await contentHash(JSON.stringify(snapped.boards));
-        return now !== was;
-      } catch {
-        return false; // unreadable right now; the next pass tries again
-      }
-    };
-    if (isHtmlPath(entry.path)) return changed(entry.path, fp.html);
-    if (await mdChanged(entry.path, fp.md)) return true;
-    if (await changed(htmlSiblingOf(entry.path), fp.html)) return true;
-    return boardsChanged();
-  }, []);
-
-  // Fold a web edit (a restricted visitor with an "edit" code saved through
-  // the page's web editor) back into this Mac. Fast-forward when the local
-  // markdown is untouched since the last push: the remote markdown lands in
-  // the file (the active document's watcher picks it up like any external
-  // edit). Anything less clear-cut — local changes too, a draft, an html-only
-  // share — parks a webConflict on the entry for the share popover to resolve.
-  const pullWebEdit = useCallback(
-    async (target: string) => {
-      const entry = sharesRef.current[target];
-      if (!entry) return;
-      const config = await connectionForEntry(entry);
-      if (!config) return;
-      const content = await fetchPageContent(config, entry.id);
-      if (!content.webEdit || content.markdown === null) return; // raced an app push
-      if (entry.pushedRev != null && content.rev <= entry.pushedRev) return; // already folded in
-      const markConflict = () =>
-        updateShares((prev) => {
-          const cur = prev[target];
-          if (!cur) return prev;
-          if (cur.webConflict?.rev === content.rev) return prev; // already surfaced
-          return {
-            ...prev,
-            [target]: {
-              ...cur,
-              webConflict: {
-                rev: content.rev,
-                by: content.webEdit?.by ?? "",
-                at: content.webEdit?.at ?? null,
-              },
-            },
-          };
-        });
-
-      // Drafts have no file watcher — an open draft tab would silently
-      // clobber the pulled content on its next autosave. Same for html-only
-      // shares (there's no local markdown to write). Both go through the
-      // explicit resolution in the popover.
-      const fp = entry.pushed?.md ?? null;
-      if (entry.kind !== "file" || isHtmlPath(entry.path) || !fp) {
-        markConflict();
-        return;
-      }
-      // "Unchanged since the last push" compares the EXPANDED document (the
-      // stored hash describes the pushed expansion) — so a local body-only
-      // comment edit, invisible in the markdown file, still counts as a
-      // local change and parks a conflict instead of being overwritten.
-      let snap: FileSnapshot | null = null;
-      let unchanged = false;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: target });
-        snap = r.snapshot;
-        let mthreads: MdThread[] = [];
-        try {
-          const m = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
-          mthreads = parseEntityMeta(m.contents).mthreads;
-        } catch {
-          // no meta file
-        }
-        const expanded = expandMarkdown(parseFrontmatter(r.contents).body, mthreads).md;
-        unchanged = (await contentHash(expanded)) === fp.hash;
-      } catch {
-        unchanged = false;
-      }
-      if (!unchanged || !snap) {
-        markConflict();
-        return;
-      }
-      // The disk matches the last push, but the OPEN editor may hold unsaved
-      // keystrokes the autosave hasn't flushed yet (disk lags the rail). That
-      // is a genuine two-sided edit — treat it as a conflict rather than
-      // fast-forwarding over the in-flight typing.
-      if (pathRef.current === target && dirtyRef.current) {
-        markConflict();
-        return;
-      }
-      // Local copy is exactly what we last pushed — the web edit fast-forwards
-      // it, split back into the hybrid layout: markers to the markdown file
-      // (a web visitor's comments arrive inline), bodies to the meta. The
-      // conditional write keeps a keystroke that lands mid-pull safe (it
-      // fails; the next reconcile pass sees a diverged file instead).
-      const pulled = extractMarkdown(content.markdown);
-      const head = await headOnDisk(target);
-      let newSnap: FileSnapshot;
-      try {
-        newSnap = await invoke<FileSnapshot>("write_file", {
-          path: target,
-          contents: head + pulled.md,
-          expected: snap,
-        });
-      } catch {
-        markConflict();
-        return;
-      }
-      await writeMdThreadsToMeta(target, pulled.md, pulled.mthreads);
-      const hash = await contentHash(content.markdown);
-      updateShares((prev) =>
-        prev[target]
-          ? {
-              ...prev,
-              [target]: {
-                ...prev[target],
-                title: content.title || prev[target].title,
-                updatedAt: Date.now(),
-                pushed: {
-                  md: { snap: newSnap, hash },
-                  html: prev[target].pushed?.html ?? null,
-                  // Carried, not recomputed: if the web edit added or removed
-                  // a fence, the stale hash is exactly what makes the next
-                  // reconcile pass push a fresh snapshot.
-                  boards: prev[target].pushed?.boards ?? null,
-                },
-                pushedRev: content.rev,
-                webConflict: undefined,
-              },
-            }
-          : prev,
-      );
-      // The change is on disk now; make it visible. If this is the open
-      // document, reload the editor so the web comment/edit appears live (like
-      // a collaborator's edit would) — the write suppressed the file watcher,
-      // so nothing else would. Skip the push-back: disk already equals the web
-      // version. A quiet marker lights the share pill either way.
-      markWebActivity(target, content.webEdit?.by ?? "");
-      if (pathRef.current === target && !dirtyRef.current) {
-        await reloadFromDiskRef.current({ push: false });
-      }
-    },
-    [connectionForEntry, updateShares, markWebActivity, writeMdThreadsToMeta],
-  );
-
-  // Html-rendition comment threads sync bidirectionally with the worker's
-  // per-page pool (web sessions comment there; the desktop comments in the
-  // sidecar). The real functions live after the sidecar helpers they need —
-  // these refs let earlier code (the reconcile pass, the file watcher) reach
-  // them without a use-before-declaration cycle, always calling the latest.
-  const syncShareThreadsRef = useRef<(target: string) => Promise<void>>(() =>
-    Promise.resolve(),
-  );
-  const scheduleShareThreadsSyncRef = useRef<(target: string) => void>(() => {});
-
-  // Catch up every share with edits made outside the app — a sync cycle
-  // landing another device's changes is the common case now, an html
-  // rendition regenerated by an AI tool or an externally rewritten markdown
-  // the older ones. Event-driven pushes cover the active document; this pass
-  // covers background tabs, unopened files, and changes made while the app
-  // was closed. Runs in the main window only (one registry, one reconciler)
-  // and at most once per SHARE_RECONCILE_MIN_MS — but a call inside the
-  // window DEFERS to its end instead of dropping, so an edit that arrives
-  // right after a pass (sync applying mid-throttle) still reaches the public
-  // page without waiting for the next focus.
-  const lastReconcileRef = useRef(0);
-  const reconcileTimerRef = useRef<number | null>(null);
-  // Armed when a pass leaves something in its missing-file grace window, so
-  // the confirming pass arrives on its own instead of waiting for the next
-  // focus.
-  const missingRecheckTimerRef = useRef<number | null>(null);
-  const reconcileShares = useCallback(async () => {
-    if (!isMainWindow) return;
-    const entries = Object.values(sharesRef.current);
-    const colEntries = Object.values(collectionsRef.current);
-    if (
-      entries.length === 0 &&
-      colEntries.length === 0 &&
-      readPendingUnshares().length === 0
-    ) {
-      return;
-    }
-    const now = Date.now();
-    const wait = SHARE_RECONCILE_MIN_MS - (now - lastReconcileRef.current);
-    if (wait > 0) {
-      if (reconcileTimerRef.current == null) {
-        reconcileTimerRef.current = window.setTimeout(() => {
-          reconcileTimerRef.current = null;
-          void reconcileShares();
-        }, wait);
-      }
-      return;
-    }
-    lastReconcileRef.current = now;
-    const st = await getConnections();
-    // Remote page deletions parked by delete-driven unshares drain here —
-    // before the connections guard, since the flush is also what drops items
-    // whose connection no longer exists.
-    await flushPendingUnshares();
-    if (st.connections.length === 0) return;
-    // ---- Disk truth first. A share whose file is GONE isn't stale — it's
-    // over: deleting a document unshares it. An external rename is adopted
-    // (same bytes, new path, same page) before anything drastic; a genuine
-    // disappearance gets one grace window (missingSince) so the
-    // delete+recreate churn external tools produce can't kill a page, then
-    // the share stops and the page deletion joins the durable queue.
-    // Entries under a synced root delegate the verdict to the workspace
-    // manifest instead — local absence may just be a download that hasn't
-    // landed yet — and stop only when the manifest says the file is dead
-    // (alive:false) while the engine is settled (a mid-sync snapshot isn't
-    // evidence).
-    const skip = new Set<string>();
-    let inGrace = false;
-    let dropped = false;
-    for (const entry of entries) {
-      const ws = syncStatusesRef.current.find(
-        (w) =>
-          w.phase !== "removed" &&
-          w.connectionId === entry.connectionId &&
-          (entry.path === w.root || entry.path.startsWith(w.root + "/")),
-      );
-      const stripMissing = () => {
-        updateShares((prev) => {
-          const cur = prev[entry.path];
-          if (!cur || cur.missingSince === undefined) return prev;
-          const { missingSince: _m, ...rest } = cur;
-          return { ...prev, [entry.path]: rest };
-        });
-      };
-      if (ws) {
-        const eff = ws.shares.find((s) => s.id === entry.id);
-        const settled = ws.phase === "idle" || ws.phase === "pending-deletes";
-        if (eff && !eff.alive && settled) {
-          dropShareEntry(entry.path);
-          skip.add(entry.path);
-          dropped = true;
-        } else if (entry.missingSince !== undefined) {
-          stripMissing();
-        }
-        continue;
-      }
-      const snap = await invoke<FileSnapshot>("stat_file", { path: entry.path }).catch(
-        () => null,
-      );
-      if (snap) {
-        if (entry.missingSince !== undefined) stripMissing();
-        continue;
-      }
-      skip.add(entry.path);
-      try {
-        if (await tryAdoptRename(entry)) continue;
-      } catch (e) {
-        console.error("rename adoption failed", entry.path, e);
-      }
-      if (entry.missingSince === undefined) {
-        updateShares((prev) =>
-          prev[entry.path]
-            ? { ...prev, [entry.path]: { ...prev[entry.path], missingSince: now } }
-            : prev,
-        );
-        inGrace = true;
-      } else if (now - entry.missingSince >= SHARE_MISSING_GRACE_MS) {
-        dropShareEntry(entry.path);
-        dropped = true;
-      } else {
-        inGrace = true;
-      }
-    }
-    for (const entry of entries) {
-      if (skip.has(entry.path)) continue;
-      try {
-        if (await shareNeedsPush(entry)) scheduleSharePush(entry.path);
-      } catch (e) {
-        console.error("share reconcile failed", entry.path, e);
-      }
-    }
-    // Web edits flow the other way: one listing per backend says which pages
-    // the web edited (v8 workers; older ones just don't send the stamp), and
-    // each stamped page is pulled — into the file when it fast-forwards, into
-    // a popover conflict when it doesn't.
-    const byConn = new Map<string, ShareEntry[]>();
-    for (const entry of entries) {
-      if (skip.has(entry.path)) continue; // missing or just unshared
-      const list = byConn.get(entry.connectionId);
-      if (list) list.push(entry);
-      else byConn.set(entry.connectionId, [entry]);
-    }
-    for (const [connId, connEntries] of byConn) {
-      const config = st.connections.find((c) => c.id === connId);
-      if (!config) continue;
-      let remote;
-      try {
-        remote = await listRemotePages(config);
-      } catch {
-        continue; // offline; the next pass retries
-      }
-      const rows = new Map(remote.map((p) => [p.id, p]));
-      for (const entry of connEntries) {
-        const row = rows.get(entry.id);
-        if (row?.webEdit) {
-          if (!(row.rev != null && entry.pushedRev != null && row.rev <= entry.pushedRev)) {
-            try {
-              await pullWebEdit(entry.path);
-            } catch (e) {
-              console.error("web edit pull failed", entry.path, e);
-            }
-          }
-        }
-        // Comment threads flow both ways through their own pool. Sync when
-        // the pool's revision moved past what this Mac last agreed with (web
-        // comments to pull), on a never-synced entry with a pool, or whenever
-        // a local change is still owed to the pool (commentsDirty — set on
-        // every local edit, cleared only on a landed sync, so an offline or
-        // failed push is retried here, across restarts too).
-        const poolRev = row?.commentsRev ?? null;
-        const poolMoved =
-          poolRev !== null && (entry.commentsRev === undefined || poolRev !== entry.commentsRev);
-        if (poolMoved || entry.commentsDirty) {
-          try {
-            await syncShareThreadsRef.current(entry.path);
-          } catch (e) {
-            console.error("web comments sync failed", entry.path, e);
-          }
-        }
-      }
-    }
-    // A folder share's manifest is derived state (member ids, names, relative
-    // paths); recompute it and re-push when it drifts from what's live — this
-    // also catches a push that failed offline (the stored hash never updated).
-    // Disk truth applies to the folder itself first (non-synced roots only:
-    // a synced collection's directory may simply not have materialized on
-    // this machine yet — and an empty-but-wanted folder never will — so the
-    // manifest owns those verdicts).
-    for (const c of colEntries) {
-      const ws = syncStatusesRef.current.find(
-        (w) =>
-          w.phase !== "removed" &&
-          w.connectionId === c.connectionId &&
-          (c.path === w.root || c.path.startsWith(w.root + "/")),
-      );
-      if (!ws) {
-        const exists = await invoke<boolean>("path_exists", { path: c.path }).catch(
-          () => true,
-        );
-        if (!exists) {
-          if (c.missingSince === undefined) {
-            updateCollections((prev) =>
-              prev[c.path]
-                ? { ...prev, [c.path]: { ...prev[c.path], missingSince: now } }
-                : prev,
-            );
-            inGrace = true;
-          } else if (now - c.missingSince >= SHARE_MISSING_GRACE_MS) {
-            // Members died with the directory; their own missing files run
-            // the file pass above, so only the collection page stops here.
-            dropCollectionEntry(c.path);
-            dropped = true;
-          } else {
-            inGrace = true;
-          }
-          continue;
-        }
-        if (c.missingSince !== undefined) {
-          updateCollections((prev) => {
-            const cur = prev[c.path];
-            if (!cur || cur.missingSince === undefined) return prev;
-            const { missingSince: _m, ...rest } = cur;
-            return { ...prev, [c.path]: rest };
-          });
-        }
-      }
-      try {
-        const hash = await collectionManifestHash(c.title, collectionItemsFor(c), c.description);
-        if (hash !== c.pushedHash || c.title !== c.pushedTitle) {
-          scheduleCollectionPush(c.path);
-        }
-      } catch (e) {
-        console.error("collection reconcile failed", c.path, e);
-      }
-    }
-    // Shares stopped this pass parked page deletions after the flush above
-    // already ran — send them now rather than waiting for the next focus.
-    if (dropped) void flushPendingUnshares();
-    // Something is mid-grace: make sure the confirming pass happens even if
-    // no focus event brings one.
-    if (inGrace && missingRecheckTimerRef.current == null) {
-      missingRecheckTimerRef.current = window.setTimeout(() => {
-        missingRecheckTimerRef.current = null;
-        void reconcileShares();
-      }, SHARE_MISSING_GRACE_MS + 1_000);
-    }
-  }, [
-    shareNeedsPush,
-    scheduleSharePush,
-    pullWebEdit,
-    collectionItemsFor,
-    scheduleCollectionPush,
-    flushPendingUnshares,
-    dropShareEntry,
-    dropCollectionEntry,
-    tryAdoptRename,
-    updateShares,
-    updateCollections,
-  ]);
 
   // In-file find (⌘F): a bar over the editor that drives the ProseMirror search
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
@@ -2725,13 +1248,6 @@ export default function App() {
           expected: snapshotRef.current,
         });
       }
-      // The remote mirror follows every successful disk write of a shared doc —
-      // even one that resolves after switching tabs. Body-only edits count:
-      // the published page renders the expanded threads.
-      scheduleSharePush(target);
-      // Presence: an autosave landing is the definition of "actively editing"
-      // — the sync engine heartbeats it to other members of the workspace.
-      reportSyncActivity(target);
       // Same for the drafts panel: its previews come from disk, so re-list once
       // a draft's write has landed (including a flush resolving after a switch).
       if (tabsRef.current.some((t) => t.kind === "draft" && t.path === target)) {
@@ -2803,7 +1319,7 @@ export default function App() {
         console.error("autosave failed", e);
       }
     }
-  }, [scheduleSharePush, setSplitState, refreshMirror, writeMdThreadsToMeta]);
+  }, [setSplitState, refreshMirror, writeMdThreadsToMeta]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -3121,254 +1637,14 @@ export default function App() {
     [readEntityMeta],
   );
 
-  /* ---------- Shared docs: sidecar ⇄ worker thread pool ----------
-     A shared page's rendition threads also live in the worker's per-page
-     pool, where comment/edit-role browser sessions read and write them. This
-     reconciles the two with a three-way merge — base is the state both sides
-     last agreed on (ShareEntry.commentsBase) — so web comments land in the
-     sidecar (and the desktop rail), local ones land on the web, and a
-     deletion on either side sticks instead of resurrecting. */
 
-  const countEntries = (threads: HtmlThread[]) =>
-    threads.reduce((n, t) => n + t.comments.length, 0);
-
-  const syncShareThreads = useCallback(
-    async (target: string) => {
-      const entry = sharesRef.current[target];
-      if (!entry || entry.kind !== "file") return;
-      const htmlPath = isHtmlPath(entry.path) ? entry.path : htmlSiblingOf(entry.path);
-      const metaPath = metaFileOf(entry.path);
-      const config = await connectionForEntry(entry);
-      if (!config) return;
-
-      // The local truth for this doc: the live rail when it's the active
-      // document (which may be ahead of disk — flush it down first), else the
-      // entity meta on disk (legacy sidecar folded in, so an old device's
-      // comments reach the pool too). Captured with the meta file's snapshot
-      // so the write-back can detect an external change (cloud sync) that
-      // landed during the round-trip.
-      const activeAtStart = htmlPathRef.current === htmlPath;
-      if (activeAtStart) await flushSidecarWrite();
-      let local: HtmlThread[] = [];
-      let localSnap: FileSnapshot | null = null;
-      let sidecarExists = false;
-      // Non-hthread sections of the background doc's meta, preserved
-      // verbatim by the write-back below.
-      let bgMeta: EntityMeta = emptyMeta();
-      if (activeAtStart) {
-        local = htmlThreadsRef.current;
-        sidecarExists = htmlSidecarExistsRef.current;
-      } else {
-        try {
-          const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
-          bgMeta = parseEntityMeta(r.contents);
-          localSnap = r.snapshot;
-          sidecarExists = true;
-        } catch {
-          // no meta file yet
-        }
-        local = bgMeta.hthreads;
-        try {
-          const r = await invoke<ReadFileResult>("read_file", {
-            path: commentsSidecarOf(htmlPath),
-          });
-          local = unionThreads(local, parseHtmlComments(r.contents));
-        } catch {
-          // no legacy sidecar
-        }
-      }
-      const base = entry.commentsBase ?? [];
-
-      const commit = (rev: number, agreed: HtmlThread[], dirty: boolean) =>
-        updateShares((prev) =>
-          prev[target]
-            ? {
-                ...prev,
-                [target]: {
-                  ...prev[target],
-                  commentsRev: rev,
-                  commentsBase: agreed,
-                  commentsDirty: dirty,
-                },
-              }
-            : prev,
-        );
-
-      // Land threads in the entity meta while preserving its other sections
-      // (markdown thread bodies, foreign records). Background docs get a
-      // guarded read-modify-write; `fresh` re-reads when the captured base
-      // is unusable (the doc was active at start but got switched away).
-      const writeBgThreads = async (
-        threads: HtmlThread[],
-        mode: { fresh: true } | { fresh: false; expected: FileSnapshot | null },
-      ) => {
-        let baseMeta = bgMeta;
-        let expected: FileSnapshot | null = mode.fresh ? null : mode.expected;
-        if (mode.fresh) {
-          try {
-            const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
-            baseMeta = parseEntityMeta(r.contents);
-            expected = r.snapshot;
-          } catch {
-            baseMeta = emptyMeta();
-            expected = null;
-          }
-        }
-        const out: EntityMeta = {
-          hthreads: threads,
-          mthreads: baseMeta.mthreads,
-          tcols: baseMeta.tcols,
-          foreign: baseMeta.foreign,
-        };
-        if (metaIsEmpty(out) && !sidecarExists) return true;
-        try {
-          await invoke<FileSnapshot>("write_file", {
-            path: metaPath,
-            contents: serializeEntityMeta(out),
-            expected,
-          });
-        } catch {
-          // A conditional write lost to a concurrent external change; the
-          // caller re-syncs against the fresh local.
-          return false;
-        }
-        sidecarExists = true;
-        return true;
-      };
-
-      // Land the reconciled threads on disk and (only if this doc is still the
-      // active one) on the live rail — folding in any comment the user typed
-      // into the rail while the network round-trip was in flight, so their
-      // edit is never silently reverted and never lands on the wrong doc.
-      // `poolAgreed` is what both sides now agree on (the merge BASE going
-      // forward); `result` is what to store locally (may carry local-only
-      // overflow when the pool truncated at its cap). Returns the dirty flag.
-      const applyResult = async (result: HtmlThread[], poolAgreed: HtmlThread[], rev: number) => {
-        const nowActive = htmlPathRef.current === htmlPath;
-        if (nowActive) {
-          const live = htmlThreadsRef.current;
-          if (JSON.stringify(live) !== JSON.stringify(local)) {
-            // The rail moved under us (a mid-flight comment): fold that edit
-            // onto the reconciled result instead of clobbering it. `local` is
-            // the pre-edit rail (base of this mini-merge), `live` is the
-            // user's edit (mine), `result` is the reconciled pool state.
-            const folded = mergeHtmlThreads(local, live, result);
-            applyHtmlThreads(folded);
-            await writeSidecarNow();
-            commit(rev, poolAgreed, true); // the folded-in edit still owes the pool
-            scheduleShareThreadsSyncRef.current(target);
-            return;
-          }
-          applyHtmlThreads(result);
-          await writeSidecarNow();
-          // Any pool-cap overflow (result > poolAgreed) is accepted as
-          // local-only, so we don't keep the entry dirty and loop on it.
-          commit(rev, poolAgreed, false);
-          return;
-        }
-        // A background doc: write its meta (guarded against a concurrent
-        // external change) but never touch the rail — it shows another doc.
-        const ok = await writeBgThreads(
-          result,
-          activeAtStart ? { fresh: true } : { fresh: false, expected: localSnap },
-        );
-        if (!ok) {
-          scheduleShareThreadsSyncRef.current(target);
-          return;
-        }
-        commit(rev, poolAgreed, false);
-      };
-
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        let remote;
-        try {
-          remote = await fetchPageThreads(config, entry.id);
-        } catch (e) {
-          if (e instanceof ShareWorkerOutdatedError) return; // pre-v10 backend; nothing to sync
-          throw e;
-        }
-        if (remote.rev === 0 && local.length === 0 && base.length === 0) {
-          if (entry.commentsRev !== 0 || entry.commentsDirty) commit(0, [], false);
-          return;
-        }
-        const merged = mergeHtmlThreads(base, local, remote.threads);
-        if (JSON.stringify(merged) === JSON.stringify(remote.threads)) {
-          // The pool already agrees — only the sidecar/rail may need the merge.
-          if (JSON.stringify(merged) !== JSON.stringify(local)) {
-            await applyResult(merged, merged, remote.rev);
-          } else {
-            commit(remote.rev, merged, false);
-          }
-          return;
-        }
-        const pushed = await pushPageThreads(config, entry.id, remote.rev, merged);
-        if (pushed.kind === "ok") {
-          // Adopt the worker's canonical copy (it stamps ids + provenance).
-          // If the pool truncated at its cap, keep the fuller local set on
-          // disk rather than adopting the shortened echo — no local data is
-          // lost; the overflow simply can't reach the web.
-          const truncated = countEntries(pushed.threads) < countEntries(merged);
-          if (truncated) {
-            console.warn("web comments: pool at capacity, overflow stays local", target);
-          }
-          const result = truncated ? merged : pushed.threads;
-          await applyResult(result, pushed.threads, pushed.rev);
-          return;
-        }
-        // Lost the swap race — re-fetch and re-merge (base + the SAME local:
-        // the rail hasn't been touched yet this attempt).
-      }
-      console.error("web comments sync gave up after races", target);
-      // Leave dirty set (if it was) so the reconcile pass retries later.
-    },
-    [
-      connectionForEntry,
-      updateShares,
-      flushSidecarWrite,
-      writeSidecarNow,
-      applyHtmlThreads,
-    ],
-  );
-  syncShareThreadsRef.current = syncShareThreads;
-
-  // Local thread edits on a SHARED doc reach the pool shortly after they
-  // reach the sidecar. Timers are per-target so commenting on one shared doc
-  // never cancels a pending sync for another.
-  const threadsSyncTimersRef = useRef<Map<string, number>>(new Map());
-  const scheduleShareThreadsSync = useCallback((target: string) => {
-    if (!sharesRef.current[target]) return;
-    const timers = threadsSyncTimersRef.current;
-    const existing = timers.get(target);
-    if (existing != null) window.clearTimeout(existing);
-    // Persist a dirty mark so a push that never lands (offline, a crash) is
-    // retried by the reconcile pass — across restarts, too.
-    if (!sharesRef.current[target].commentsDirty) {
-      updateShares((prev) =>
-        prev[target] ? { ...prev, [target]: { ...prev[target], commentsDirty: true } } : prev,
-      );
-    }
-    timers.set(
-      target,
-      window.setTimeout(() => {
-        timers.delete(target);
-        syncShareThreadsRef.current(target).catch((e) =>
-          console.error("web comments sync failed", target, e),
-        );
-      }, 1200),
-    );
-  }, [updateShares]);
-  scheduleShareThreadsSyncRef.current = scheduleShareThreadsSync;
-
-  // HtmlView reports every thread mutation here; disk follows (and the
-  // share pool follows the disk).
+  // HtmlView reports every thread mutation here; disk follows.
   const onHtmlThreadsChange = useCallback(
     (next: HtmlThread[]) => {
       applyHtmlThreads(next);
       scheduleSidecarWrite();
-      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-      if (active?.kind === "file") scheduleShareThreadsSync(active.path);
     },
-    [applyHtmlThreads, scheduleSidecarWrite, scheduleShareThreadsSync],
+    [applyHtmlThreads, scheduleSidecarWrite],
   );
 
   // Orphaned markdown threads (meta records whose marker left the document)
@@ -3823,8 +2099,8 @@ export default function App() {
     setLoadKey((k) => k + 1);
 
     // Watch the document set: the markdown for the edit/conflict flow, the
-    // rendition so external regeneration re-renders (and re-pushes a share)
-    // live, the entity meta so sync-delivered threads pop in — plus the
+    // rendition so external regeneration re-renders live, the entity meta so
+    // threads delivered from outside pop in — plus the
     // split pane's set. Drafts aren't externally watched.
     await refreshWatchSet();
   }, [
@@ -4239,418 +2515,8 @@ export default function App() {
     [openExternal, openTab],
   );
 
-  // Publish the active document at <endpoint>/<id> on the given connection
-  // and record the share. Throws on failure so the share popover can surface
-  // the error.
-  const shareActiveDoc = useCallback(
-    async (id: string, connectionId: string) => {
-      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-      if (!active) throw new Error("No document open.");
-      // Publishing a board is phase 3 (a page carries a snapshot of the view);
-      // for now a board tab simply isn't a document to share.
-      if (active.kind === "store") throw new Error("A board can't be shared yet.");
-      // Narrowed here rather than at the use site: the registry write below
-      // is a closure, and TypeScript doesn't carry property narrowing into one.
-      const shareKind: "draft" | "file" = active.kind;
-      const st = await getConnections();
-      const config = st.connections.find((c) => c.id === connectionId);
-      if (!config) throw new Error("Sharing is not configured.");
-      // Pushes read the disk; land any keystrokes still inside the autosave
-      // debounce so the first published copy is what the user is looking at.
-      await flushPendingAutosave();
-      const parts = await readShareParts(active.path, null);
-      if (!parts) throw new Error("Could not read the document.");
-      // Lead H1 (html-only: <title>) over file name — same rule as re-pushes.
-      const title = deriveDocTitle(parts) ?? docShareTitle(active);
-      const { rev } = await pushPage(
-        config,
-        id,
-        title,
-        parts,
-        null,
-        wsStampFor(active.path, config.id),
-      );
-      try {
-        await pushOgImage(config, id, title);
-      } catch (e) {
-        // The page is live either way; the link preview just won't have an image.
-        console.error("og image upload failed", e);
-      }
-      const pushed = await fingerprintParts(parts);
-      const now = Date.now();
-      updateShares((prev) => ({
-        ...prev,
-        [active.path]: {
-          id,
-          path: active.path,
-          kind: shareKind,
-          title,
-          sharedAt: now,
-          updatedAt: now,
-          pushed,
-          boardDirs: parts.boardDirs,
-          ...(rev != null ? { pushedRev: rev } : {}),
-          connectionId: config.id,
-        },
-      }));
-      // In a synced workspace: tell everyone else this document is published.
-      queueShareOp(active.path);
-      // Any existing rendition threads belong on the page from day one.
-      scheduleShareThreadsSync(active.path);
-    },
-    [
-      updateShares,
-      readShareParts,
-      flushPendingAutosave,
-      wsStampFor,
-      queueShareOp,
-      scheduleShareThreadsSync,
-    ],
-  );
 
-  // Delete the remote page and forget the share (the local file is untouched).
-  // A page that was included in a folder share also drops off that TOC. If the
-  // connection it was published on has since been removed, the remote copy is
-  // out of reach — forget the entry locally rather than trapping it forever.
-  const stopSharing = useCallback(
-    async (target: string) => {
-      const entry = sharesRef.current[target];
-      if (!entry) return;
-      const config = await connectionForEntry(entry);
-      if (config) {
-        await deletePage(config, entry.id);
-      } else {
-        console.warn("share connection removed; forgetting entry locally", target);
-      }
-      const timers = sharePushTimersRef.current;
-      const pending = timers.get(target);
-      if (pending != null) {
-        window.clearTimeout(pending);
-        timers.delete(target);
-      }
-      // The page (and its access section) is gone remotely — the cached
-      // plaintext codes are dead weight now.
-      forgetAccessCodes(entry.connectionId, entry.id);
-      updateShares((prev) => {
-        const { [target]: _gone, ...rest } = prev;
-        return rest;
-      });
-      for (const c of Object.values(collectionsRef.current)) {
-        if (!c.members.includes(target)) continue;
-        updateCollections((prev) =>
-          prev[c.path]
-            ? {
-                ...prev,
-                [c.path]: {
-                  ...prev[c.path],
-                  members: prev[c.path].members.filter((m) => m !== target),
-                },
-              }
-            : prev,
-        );
-        scheduleCollectionPush(c.path);
-      }
-      // In a synced workspace: the entry is gone, so this queues a "forget".
-      queueShareOp(target);
-    },
-    [updateShares, updateCollections, scheduleCollectionPush, connectionForEntry, queueShareOp],
-  );
-
-  // Publish a folder (or the whole workspace) as a collection page at
-  // <endpoint>/<id> on the given connection. Nothing inside is shared by that
-  // act alone — membership is explicit, so the TOC starts empty. Throws so
-  // the dialog can surface the error (including the "worker needs
-  // redeploying" case).
-  const shareFolder = useCallback(
-    async (dirPath: string, id: string, connectionId: string) => {
-      const st = await getConnections();
-      const config = st.connections.find((c) => c.id === connectionId);
-      if (!config) throw new Error("Sharing is not configured.");
-      const title = basename(dirPath);
-      await pushCollection(config, id, title, [], null, wsStampFor(dirPath, config.id));
-      try {
-        await pushOgImage(config, id, title);
-      } catch (e) {
-        // The page is live either way; the link preview just won't have an image.
-        console.error("og image upload failed", e);
-      }
-      const hash = await collectionManifestHash(title, [], null);
-      const now = Date.now();
-      updateCollections((prev) => ({
-        ...prev,
-        [dirPath]: {
-          id,
-          path: dirPath,
-          title,
-          members: [],
-          sharedAt: now,
-          updatedAt: now,
-          pushedHash: hash,
-          pushedTitle: title,
-          connectionId: config.id,
-        },
-      }));
-      queueCollectionOp(dirPath);
-    },
-    [updateCollections, wsStampFor, queueCollectionOp],
-  );
-
-  // Delete the collection page and forget the folder share. Member pages
-  // either stay live as standalone shares (their public crumb disappears on
-  // the next push) or stop too — the dialog asks which. A removed connection
-  // forgets locally, like stopSharing.
-  const stopSharingFolder = useCallback(
-    async (dirPath: string, alsoStopPages: boolean) => {
-      const entry = collectionsRef.current[dirPath];
-      if (!entry) return;
-      const config = await connectionForEntry(entry);
-      if (config) {
-        await deletePage(config, entry.id);
-      } else {
-        console.warn("share connection removed; forgetting folder share locally", dirPath);
-      }
-      const timers = collectionPushTimersRef.current;
-      const pending = timers.get(dirPath);
-      if (pending != null) {
-        window.clearTimeout(pending);
-        timers.delete(dirPath);
-      }
-      forgetAccessCodes(entry.connectionId, entry.id);
-      const members = entry.members;
-      updateCollections((prev) => {
-        const { [dirPath]: _gone, ...rest } = prev;
-        return rest;
-      });
-      // In a synced workspace: forget the collection everywhere. The engine
-      // also releases every member share's listing bit manifest-side, so the
-      // per-member ops below are only needed where the entry itself changes.
-      queueCollectionOp(dirPath, entry.id);
-      for (const m of members) {
-        const share = sharesRef.current[m];
-        if (!share || share.collectionId !== entry.id) continue;
-        if (alsoStopPages) {
-          try {
-            await stopSharing(m);
-          } catch (e) {
-            console.error("stop sharing member failed", m, e);
-          }
-        } else {
-          updateShares((prev) => {
-            const cur = prev[m];
-            if (!cur) return prev;
-            const { collectionId: _c, ...rest } = cur;
-            return { ...prev, [m]: rest };
-          });
-          scheduleSharePush(m);
-        }
-      }
-    },
-    [
-      stopSharing,
-      updateCollections,
-      updateShares,
-      scheduleSharePush,
-      connectionForEntry,
-      queueCollectionOp,
-    ],
-  );
-
-  // Retitle a folder share and/or set the description shown under its public
-  // TOC's title. A cleared title falls back to the folder name (and resumes
-  // following renames, since it matches again). A title change also re-pushes
-  // every member page — their "back to the folder" crumbs carry the title.
-  const setCollectionMeta = useCallback(
-    (dirPath: string, title: string, description: string) => {
-      const entry = collectionsRef.current[dirPath];
-      if (!entry) return;
-      const nextTitle = title.trim().slice(0, 256) || basename(dirPath);
-      const nextDesc = description.trim().slice(0, 500);
-      if (nextTitle === entry.title && nextDesc === (entry.description ?? "")) return;
-      updateCollections((prev) => {
-        const cur = prev[dirPath];
-        if (!cur) return prev;
-        const { description: _gone, ...rest } = cur;
-        return {
-          ...prev,
-          [dirPath]: {
-            ...rest,
-            title: nextTitle,
-            ...(nextDesc ? { description: nextDesc } : {}),
-          },
-        };
-      });
-      scheduleCollectionPush(dirPath);
-      queueCollectionOp(dirPath);
-      if (nextTitle !== entry.title) {
-        for (const m of entry.members) {
-          if (sharesRef.current[m]?.collectionId === entry.id) scheduleSharePush(m);
-        }
-      }
-    },
-    [updateCollections, scheduleCollectionPush, scheduleSharePush, queueCollectionOp],
-  );
-
-  // Include a file in (or remove it from) a folder share. Including a not-yet-
-  // shared file publishes it first — an ordinary page share with a generated
-  // address — then lists it; including an already-shared page just lists it.
-  // Removing only delists: the page share survives with its URL intact.
-  const setCollectionMembership = useCallback(
-    async (filePath: string, dirPath: string, include: boolean) => {
-      const collection = collectionsRef.current[dirPath];
-      if (!collection) return;
-      // Members live on the collection's connection — the TOC links stay on
-      // one domain.
-      const config = await connectionForEntry(collection);
-      if (!config) throw new Error("Sharing is not configured.");
-      if (include) {
-        if (!filePath.startsWith(collection.path + "/")) return;
-        const existing = sharesRef.current[filePath];
-        if (existing && existing.connectionId !== config.id) {
-          throw new Error(
-            "This page is shared on a different domain. A folder share can only list pages on its own domain — stop sharing the page first.",
-          );
-        }
-        if (!existing) {
-          // Land any in-flight keystrokes if this is the open document, so the
-          // first published copy matches the screen.
-          await flushPendingAutosave();
-          const parts = await readShareParts(filePath, collection.id);
-          if (!parts) throw new Error("Could not read the document.");
-          // Random ids virtually never collide, but a stale page under a
-          // recycled id would be silently overwritten — probe once.
-          let id = generateShareId();
-          if (await pageExists(config, id).catch(() => false)) id = generateShareId();
-          const title = deriveDocTitle(parts) ?? pathShareTitle(filePath);
-          const { rev } = await pushPage(
-            config,
-            id,
-            title,
-            parts,
-            { id: collection.id, title: collection.title },
-            wsStampFor(filePath, config.id),
-          );
-          try {
-            await pushOgImage(config, id, title);
-          } catch (e) {
-            console.error("og image upload failed", e);
-          }
-          const pushed = await fingerprintParts(parts);
-          const now = Date.now();
-          const created: ShareEntry = {
-            id,
-            path: filePath,
-            kind: "file",
-            title,
-            sharedAt: now,
-            updatedAt: now,
-            pushed,
-            boardDirs: parts.boardDirs,
-            ...(rev != null ? { pushedRev: rev } : {}),
-            collectionId: collection.id,
-            connectionId: config.id,
-          };
-          updateShares((prev) => ({ ...prev, [filePath]: created }));
-        } else {
-          updateShares((prev) =>
-            prev[filePath]
-              ? {
-                  ...prev,
-                  [filePath]: { ...prev[filePath], collectionId: collection.id },
-                }
-              : prev,
-          );
-          // Re-push so the public page gains its folder crumb.
-          scheduleSharePush(filePath);
-        }
-        // A page belongs to at most one folder share; moving it here delists
-        // it from any other collection that still claims it.
-        for (const other of Object.values(collectionsRef.current)) {
-          if (other.path === dirPath || !other.members.includes(filePath)) continue;
-          updateCollections((prev) =>
-            prev[other.path]
-              ? {
-                  ...prev,
-                  [other.path]: {
-                    ...prev[other.path],
-                    members: prev[other.path].members.filter((m) => m !== filePath),
-                  },
-                }
-              : prev,
-          );
-          scheduleCollectionPush(other.path);
-        }
-        updateCollections((prev) => {
-          const cur = prev[dirPath];
-          if (!cur || cur.members.includes(filePath)) return prev;
-          return { ...prev, [dirPath]: { ...cur, members: [...cur.members, filePath] } };
-        });
-      } else {
-        updateCollections((prev) => {
-          const cur = prev[dirPath];
-          if (!cur || !cur.members.includes(filePath)) return prev;
-          return {
-            ...prev,
-            [dirPath]: { ...cur, members: cur.members.filter((m) => m !== filePath) },
-          };
-        });
-        if (sharesRef.current[filePath]?.collectionId === collection.id) {
-          updateShares((prev) => {
-            const cur = prev[filePath];
-            if (!cur) return prev;
-            const { collectionId: _c, ...rest } = cur;
-            return { ...prev, [filePath]: rest };
-          });
-          // Re-push so the public page loses its folder crumb.
-          scheduleSharePush(filePath);
-        }
-      }
-      scheduleCollectionPush(dirPath);
-      // In a synced workspace: the entry (and its listing bit) changed.
-      queueShareOp(filePath);
-    },
-    [
-      flushPendingAutosave,
-      readShareParts,
-      updateShares,
-      updateCollections,
-      scheduleSharePush,
-      scheduleCollectionPush,
-      connectionForEntry,
-      wsStampFor,
-      queueShareOp,
-    ],
-  );
-
-  // "Share…" from the tree's context menu: sharing needs the user to pick an
-  // address, and that form lives in the ShareMenu popover — so open the
-  // document and pop the dialog rather than inventing a second share form.
-  const shareFileFromTree = useCallback(
-    async (target: string) => {
-      await openTab(target, "file");
-      setPendingSharePopover(target);
-    },
-    [openTab],
-  );
-
-  // Copy a share link from the tree without opening anything. The id belongs
-  // to some registry entry; the link must use THAT entry's connection.
-  const copyShareLink = useCallback(
-    async (id: string) => {
-      try {
-        const entry =
-          Object.values(sharesRef.current).find((e) => e.id === id) ??
-          Object.values(collectionsRef.current).find((c) => c.id === id);
-        const conn = entry ? await connectionForEntry(entry) : null;
-        if (!conn) return;
-        await navigator.clipboard.writeText(shareUrl(conn, id));
-      } catch (e) {
-        console.error("copy link failed", e);
-      }
-    },
-    [connectionForEntry],
-  );
-
-  const reloadFromDisk = useCallback(async (opts?: { push?: boolean }) => {
+  const reloadFromDisk = useCallback(async () => {
     const target = pathRef.current;
     if (!target) return;
     if (autosaveTimerRef.current != null) {
@@ -4684,23 +2550,16 @@ export default function App() {
           refreshMirror(full);
         }
       }
-      // The document just adopted outside edits; a live share follows them
-      // (covers both the watcher's auto-reload and the conflict banner's
-      // "Reload from disk"). A web-edit pull skips this: the content on disk
-      // IS the web version, so pushing it straight back only churns the rev.
-      if (opts?.push !== false && sharesRef.current[target]) scheduleSharePush(target);
     } catch (e) {
       console.error("reload failed", e);
     }
   }, [
     captureActiveScroll,
-    scheduleSharePush,
     bumpEditorSeq,
     refreshMirror,
     loadEntityMeta,
     adoptFrontmatter,
   ]);
-  reloadFromDiskRef.current = reloadFromDisk;
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
@@ -4711,95 +2570,6 @@ export default function App() {
     }
   }, [scheduleAutosave]);
 
-  // Settle a web-edit conflict from the share popover. "pull" replaces the
-  // local document with the web version (and reloads the open editor if this
-  // is the active document); "keepMine" republishes the local copy over the
-  // web edit. Either way the entry leaves its conflict state — the next push
-  // claims the fresh revision.
-  const resolveWebConflict = useCallback(
-    async (target: string, mode: "pull" | "keepMine") => {
-      const entry = sharesRef.current[target];
-      if (!entry) return;
-      if (mode === "keepMine") {
-        await pushSharedNow(target, { force: true });
-        if (sharesRef.current[target]?.webConflict) {
-          throw new Error("Could not republish — check the connection and try again.");
-        }
-        return;
-      }
-      const config = await connectionForEntry(entry);
-      if (!config) throw new Error("Sharing is not configured.");
-      const content = await fetchPageContent(config, entry.id);
-      if (content.markdown === null) throw new Error("The web version has no markdown.");
-      // The user chose the web side explicitly — last write wins on disk,
-      // split back into the hybrid layout (markers in the markdown, bodies
-      // in the entity meta).
-      const pulled = extractMarkdown(content.markdown);
-      const head = await headOnDisk(target);
-      const newSnap = await invoke<FileSnapshot>("write_file", {
-        path: target,
-        contents: head + pulled.md,
-        expected: null,
-      });
-      await writeMdThreadsToMeta(target, pulled.md, pulled.mthreads);
-      const hash = await contentHash(content.markdown);
-      updateShares((prev) =>
-        prev[target]
-          ? {
-              ...prev,
-              [target]: {
-                ...prev[target],
-                title: content.title || prev[target].title,
-                updatedAt: Date.now(),
-                pushed: {
-                  md: { snap: newSnap, hash },
-                  html: prev[target].pushed?.html ?? null,
-                  // Carried, not recomputed: if the web edit added or removed
-                  // a fence, the stale hash is exactly what makes the next
-                  // reconcile pass push a fresh snapshot.
-                  boards: prev[target].pushed?.boards ?? null,
-                },
-                pushedRev: content.rev,
-                webConflict: undefined,
-              },
-            }
-          : prev,
-      );
-      // The open editor adopts the web version right away (files would get
-      // this from the watcher; drafts aren't watched, so do it for both). No
-      // push-back: disk already equals the web copy we just pulled.
-      if (pathRef.current === target) await reloadFromDisk({ push: false });
-    },
-    [pushSharedNow, connectionForEntry, updateShares, reloadFromDisk, writeMdThreadsToMeta],
-  );
-
-  // The share popover's manual "Check for web changes": pull this one page's
-  // web edit and comment threads right now instead of waiting for the next
-  // window-focus reconcile. Reuses the same pull paths, so a fast-forward
-  // reloads the open editor and a divergence parks a conflict — this only
-  // changes WHEN, not HOW. Reports whether anything actually landed so the
-  // popover can say "up to date" vs "pulled in new changes".
-  const checkForWebChanges = useCallback(
-    async (target: string): Promise<{ updated: boolean }> => {
-      const before = sharesRef.current[target];
-      if (!before) return { updated: false };
-      const sig = (e: ShareEntry | undefined) =>
-        e ? `${e.pushedRev ?? ""}|${e.commentsRev ?? ""}|${e.webConflict?.rev ?? ""}` : "";
-      const beforeSig = sig(before);
-      try {
-        await pullWebEdit(target);
-      } catch (e) {
-        console.error("web edit check failed", target, e);
-      }
-      try {
-        await syncShareThreadsRef.current(target);
-      } catch (e) {
-        console.error("web comments check failed", target, e);
-      }
-      return { updated: sig(sharesRef.current[target]) !== beforeSig };
-    },
-    [pullWebEdit],
-  );
 
   // The MD/HTML view toggle for the active document. Switching to HTML
   // re-reads the rendition (freshest copy) and hides — not unmounts — the
@@ -5476,11 +3246,6 @@ export default function App() {
           } catch (e) {
             console.error("delete_draft failed", e);
           }
-          // A shared draft dies with its file — deleting unshares.
-          if (sharesRef.current[tab.path]) {
-            dropShareEntry(tab.path);
-            void flushPendingUnshares();
-          }
           const { [tab.id]: _removed, ...rest } = draftsMetaRef.current;
           draftsMetaRef.current = rest;
           writeDraftsMeta(rest);
@@ -5515,8 +3280,6 @@ export default function App() {
       loadActiveContent,
       swapFocus,
       closeSplit,
-      dropShareEntry,
-      flushPendingUnshares,
     ],
   );
 
@@ -5533,18 +3296,13 @@ export default function App() {
         } catch (e) {
           console.error("delete_draft failed", e);
         }
-        // A shared draft dies with its file — deleting unshares.
-        if (sharesRef.current[p]) {
-          dropShareEntry(p);
-          void flushPendingUnshares();
-        }
         const { [id]: _removed, ...rest } = draftsMetaRef.current;
         draftsMetaRef.current = rest;
         writeDraftsMeta(rest);
       }
       await refreshDraftsPanel();
     },
-    [closeTab, refreshDraftsPanel, dropShareEntry, flushPendingUnshares],
+    [closeTab, refreshDraftsPanel],
   );
 
   // Keep the drafts panel in sync: refresh when it opens, whenever the open
@@ -5558,8 +3316,7 @@ export default function App() {
   // menu). The backend returns where the entry landed inside the Trash so
   // undoDelete can pull it straight back out — a true restore that leaves no
   // stale copy. Any tabs on the entry (or inside it, for a folder) are closed
-  // first. Shares on (or under) the target stop with it — deleting unshares —
-  // and undo brings them back at the same addresses.
+  // first.
   const deleteEntry = useCallback(
     async (target: string, kind: "file" | "dir") => {
       // Close affected tabs first (flushing their content while the files still
@@ -5628,48 +3385,10 @@ export default function App() {
         }
         await trashCompanion(commentsSidecarOf(target), "comments");
       }
-      // Deleting unshares — the remote mirrors the disk. Folder shares
-      // rooted at (or under) the target stop first (captured whole, members
-      // intact, so undo can restore them verbatim), then every shared file
-      // at (or under) it: page deletions are queued durably, the registry
-      // forgets the entries, and surviving folder TOCs delist them. Undo
-      // reverses all of it — same page ids, so the links come back.
       const record: DeletedRecord = {
         files,
         openPaths: affected.map((t) => t.path),
-        memberships: [],
-        shares: [],
-        collections: [],
       };
-      const under = (p: string) =>
-        p === target || (kind === "dir" && p.startsWith(target + "/"));
-      for (const p of Object.keys(collectionsRef.current).filter(under)) {
-        dropCollectionEntry(p, record);
-      }
-      for (const p of Object.keys(sharesRef.current).filter(under)) {
-        dropShareEntry(p, record);
-      }
-      // Belt over braces: delist any member path under the target that had
-      // no share entry of its own (a registry that drifted shouldn't leave
-      // phantom TOC rows behind).
-      for (const c of Object.values(collectionsRef.current)) {
-        const gone = c.members.filter(under);
-        if (gone.length === 0) continue;
-        for (const m of gone) record.memberships.push({ dir: c.path, member: m });
-        updateCollections((prev) =>
-          prev[c.path]
-            ? {
-                ...prev,
-                [c.path]: {
-                  ...prev[c.path],
-                  members: prev[c.path].members.filter((m) => !gone.includes(m)),
-                },
-              }
-            : prev,
-        );
-        scheduleCollectionPush(c.path);
-      }
-      void flushPendingUnshares();
       deletedStackRef.current.push(record);
       const sels = sidebarSelectionRef.current;
       const kept = sels.filter(
@@ -5678,21 +3397,12 @@ export default function App() {
       if (kept.length !== sels.length) selectSidebarEntries(kept);
       setTreeRefreshToken((t) => t + 1);
     },
-    [
-      closeTab,
-      selectSidebarEntries,
-      updateCollections,
-      scheduleCollectionPush,
-      dropShareEntry,
-      dropCollectionEntry,
-      flushPendingUnshares,
-    ],
+    [closeTab, selectSidebarEntries],
   );
 
   // Undo the most recent trash (⌘Z outside the editor): move the entry (and
   // any rendition trashed with it) back out of the Trash to its original
-  // path, revive the shares the delete stopped, and reopen the tabs it
-  // closed.
+  // path, and reopen the tabs it closed.
   const undoDelete = useCallback(async () => {
     const entry = deletedStackRef.current.pop();
     if (!entry) return;
@@ -5711,60 +3421,6 @@ export default function App() {
     }
     if (!restoredAny) return;
     setTreeRefreshToken((t) => t + 1);
-    // Rescue the queued page deletions FIRST — a flush racing this undo
-    // re-checks the queue before each DELETE, so pages pulled back here
-    // survive. (A deletion already in flight loses to the republish below,
-    // which lands after it.)
-    removePendingUnshares([
-      ...entry.shares.map((s) => ({ connectionId: s.connectionId, pageId: s.id })),
-      ...entry.collections.map((c) => ({ connectionId: c.connectionId, pageId: c.id })),
-    ]);
-    // Folder shares come back whole (members intact). The remote page may
-    // already be gone, so drop the pushed markers: the absent hash forces an
-    // establishing manifest push, the absent title a fresh OG image.
-    for (const c of entry.collections) {
-      const { pushedHash: _h, pushedTitle: _t, missingSince: _m, ...rest } = c;
-      updateCollections((prev) => ({ ...prev, [c.path]: rest }));
-      scheduleCollectionPush(c.path);
-      queueCollectionOp(c.path);
-    }
-    // Page shares republish at their old ids — but as a fresh page: the
-    // deletion took the revision counter, comment pool, OG image and access
-    // codes with it, so every marker describing remote state is dropped
-    // (fingerprints force the establishing push; commentsDirty re-seeds the
-    // pool from the local sidecar when there was one to lose; protection is
-    // gone and its cached plaintexts were already forgotten).
-    for (const s of entry.shares) {
-      const {
-        pushed: _p,
-        pushedRev: _r,
-        webConflict: _w,
-        commentsRev: _cr,
-        commentsBase: _cb,
-        protected: _sec,
-        missingSince: _m,
-        ...rest
-      } = s;
-      const revived: ShareEntry = {
-        ...rest,
-        ...(s.commentsRev !== undefined || s.commentsDirty ? { commentsDirty: true } : {}),
-      };
-      updateShares((prev) => ({ ...prev, [s.path]: revived }));
-      queueShareOp(s.path);
-      void pushSharedNow(s.path, { og: true });
-    }
-    // Restored members return to the folder shares that listed them (when
-    // those shares still exist).
-    const tocDirs = new Set<string>();
-    for (const { dir, member } of entry.memberships) {
-      updateCollections((prev) =>
-        prev[dir] && !prev[dir].members.includes(member)
-          ? { ...prev, [dir]: { ...prev[dir], members: [...prev[dir].members, member] } }
-          : prev,
-      );
-      if (collectionsRef.current[dir]) tocDirs.add(dir);
-    }
-    for (const d of tocDirs) scheduleCollectionPush(d);
     for (const p of entry.openPaths) {
       // A restored path is a document or a board folder; ask disk which.
       const isBoard = await invoke<boolean>("path_exists", {
@@ -5772,21 +3428,13 @@ export default function App() {
       }).catch(() => false);
       await openTab(p, isBoard ? "store" : "file");
     }
-  }, [
-    openTab,
-    updateCollections,
-    updateShares,
-    scheduleCollectionPush,
-    queueCollectionOp,
-    queueShareOp,
-    pushSharedNow,
-  ]);
+  }, [openTab]);
 
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint every piece of state that keys
   // off the old path: open tabs (including everything inside a moved folder),
-  // the active document's autosave target and watcher, recents, shares, and
-  // the sidebar selection. Returns an error message for the caller to surface
+  // the active document's autosave target and watcher, recents, and the
+  // sidebar selection. Returns an error message for the caller to surface
   // (inline under the rename input, alert for a drop), or null on success.
   const movePath = useCallback(
     async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
@@ -5922,81 +3570,6 @@ export default function App() {
         return next;
       });
 
-      // Shares are keyed by absolute path; re-key so a moved doc keeps
-      // pushing, and re-push each renamed doc so the public page picks up its
-      // new title (and, for folder-share members, a fresh crumb).
-      const renamedShares: string[] = [];
-      updateShares((prev) => {
-        let changed = false;
-        const next: Record<string, ShareEntry> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const nk = remap(k);
-          if (nk !== k) {
-            changed = true;
-            renamedShares.push(nk);
-          }
-          next[nk] = nk === k ? v : { ...v, path: nk };
-        }
-        return changed ? next : prev;
-      });
-
-      // Folder shares are keyed by directory path too: re-key a renamed/moved
-      // collection (its title follows the folder name while it still matches),
-      // re-key member paths, and delist members that moved OUT of their folder
-      // — their page shares stay live, they just leave the TOC. Anything that
-      // changed re-pushes its manifest.
-      {
-        const prev = collectionsRef.current;
-        const next: Record<string, CollectionEntry> = {};
-        const tocPushes: string[] = [];
-        const delisted: string[] = [];
-        let changed = false;
-        for (const [k, v] of Object.entries(prev)) {
-          const nk = remap(k);
-          let entry = nk === k ? v : { ...v, path: nk, title: v.title === basename(k) ? basename(nk) : v.title };
-          const moved = entry.members.map(remap);
-          const kept = moved.filter((m) => m.startsWith(entry.path + "/"));
-          for (const m of moved) {
-            if (!m.startsWith(entry.path + "/")) delisted.push(m);
-          }
-          const membersChanged =
-            kept.length !== entry.members.length ||
-            kept.some((m, i) => m !== entry.members[i]);
-          if (membersChanged) entry = { ...entry, members: kept };
-          if (nk !== k || membersChanged) {
-            changed = true;
-            tocPushes.push(nk);
-          }
-          next[nk] = entry;
-        }
-        if (changed) {
-          updateCollections(() => next);
-          for (const m of delisted) {
-            if (!sharesRef.current[m]?.collectionId) continue;
-            updateShares((p) => {
-              const cur = p[m];
-              if (!cur) return p;
-              const { collectionId: _c, ...rest } = cur;
-              return { ...p, [m]: rest };
-            });
-            if (!renamedShares.includes(m)) renamedShares.push(m); // drop the crumb
-          }
-          for (const d of tocPushes) {
-            scheduleCollectionPush(d);
-            // Synced workspaces track folder shares by directory path, and
-            // directories aren't files — a moved folder needs telling.
-            queueCollectionOp(d);
-          }
-        }
-      }
-      // File shares need no rename ops (the engine follows moves by file
-      // identity), but a delisted member's entry changed — and re-sending a
-      // renamed one is a harmless refresh.
-      for (const p of renamedShares) {
-        scheduleSharePush(p);
-        queueShareOp(p);
-      }
-
       const sels = sidebarSelectionRef.current;
       const remapped = sels.map((s) => {
         const np = remap(s.path);
@@ -6010,13 +3583,7 @@ export default function App() {
     [
       flushPendingAutosave,
       flushSidecarWrite,
-      updateShares,
-      updateCollections,
-      scheduleSharePush,
-      scheduleCollectionPush,
       selectSidebarEntries,
-      queueShareOp,
-      queueCollectionOp,
       refreshWatchSet,
       setSplitState,
     ],
@@ -6054,7 +3621,7 @@ export default function App() {
 
   // Paste into `destDir`: copy → duplicate on disk (companions ride along,
   // like delete/move); cut → a real move through movePath, which repoints
-  // tabs, watchers, and shares. Collisions get a fresh "name copy.md"-style
+  // tabs and watchers. Collisions get a fresh "name copy.md"-style
   // target instead of a prompt, so paste never clobbers.
   const pasteEntries = useCallback(
     async (destDir: string) => {
@@ -6460,12 +4027,6 @@ export default function App() {
               mdOrphansRef.current = meta.mthreads;
               setMdOrphans([]);
             }
-            // If this doc is shared, an externally-delivered thread change
-            // (cloud sync) may owe the web pool a push — reconcile the two.
-            const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-            if (active?.kind === "file" && sharesRef.current[active.path]) {
-              scheduleShareThreadsSyncRef.current(active.path);
-            }
           } catch {
             // mid-rewrite; the next event covers it
           }
@@ -6483,10 +4044,6 @@ export default function App() {
               unionThreads(htmlThreadsRef.current, parseHtmlComments(r.contents)),
             );
             await writeSidecarNowRef.current();
-            const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-            if (active?.kind === "file" && sharesRef.current[active.path]) {
-              scheduleShareThreadsSyncRef.current(active.path);
-            }
           } catch {
             // mid-rewrite; the next event covers it
           }
@@ -6494,18 +4051,16 @@ export default function App() {
         return;
       }
       // The active document's html rendition changed (e.g. regenerated by an
-      // AI tool): re-render it and mirror a live share. The markdown editor —
-      // and its dirty/conflict flow — is untouched.
+      // AI tool): re-render it. The markdown editor — and its dirty/conflict
+      // flow — is untouched.
       if (e.payload.path === htmlPathRef.current) {
         void (async () => {
           try {
             const r = await invoke<ReadFileResult>("read_file", { path: e.payload.path });
             setHtmlContent(r.contents);
           } catch {
-            return; // mid-rewrite; the next event covers it
+            // mid-rewrite; the next event covers it
           }
-          const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-          if (active && sharesRef.current[active.path]) scheduleSharePush(active.path);
         })();
         return;
       }
@@ -6543,7 +4098,6 @@ export default function App() {
     };
   }, [
     reloadFromDisk,
-    scheduleSharePush,
     applyHtmlThreads,
     adoptTableWidths,
     captureCompanionScroll,
@@ -6553,31 +4107,6 @@ export default function App() {
     adoptFrontmatter,
   ]);
 
-  // A board changed and no note did — a card dragged in a board tab, a card
-  // arriving from another Mac. A page that embeds that board is stale now,
-  // and nothing else in the app would notice: the note's bytes are exactly
-  // what was published. The registry remembers which pages read which
-  // folders, so this is a lookup rather than a scan of every share.
-  useEffect(() => {
-    if (!isMainWindow) return;
-    return onStoreChanged((dir) => {
-      for (const entry of Object.values(sharesRef.current)) {
-        if (entry.boardDirs?.includes(dir)) scheduleSharePush(entry.path);
-      }
-    });
-  }, [scheduleSharePush]);
-
-  // Reconcile shares with edits made outside the app at the moments staleness
-  // becomes observable: once after launch/restore, then whenever the window
-  // regains focus (throttled inside reconcileShares). The watcher covers the
-  // active document in real time; this covers everything else.
-  useEffect(() => {
-    if (!ready) return;
-    void reconcileShares();
-    const onFocus = () => void reconcileShares();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [ready, reconcileShares]);
 
   // The one-time layout migration, workspace-wide: every entity the tree
   // knows normalizes to the hybrid layout (inline thread bodies → meta
@@ -6705,324 +4234,6 @@ export default function App() {
     };
   }, []);
 
-  // Cloud sync wiring: seed the engine statuses once, then track events.
-  useEffect(() => {
-    void syncStatus()
-      .then(setSyncStatuses)
-      .catch(() => {}); // engine not ready yet — the first event seeds it
-    void syncDevice()
-      .then((d) => {
-        setSyncDeviceName(d.name);
-        syncDeviceNameRef.current = d.name;
-      })
-      .catch(() => {});
-    const unStatus = listen<SyncWorkspaceStatus>("sync-status", (e) => {
-      const s = e.payload;
-      setSyncStatuses((prev) => {
-        const rest = prev.filter((x) => x.wsId !== s.wsId);
-        return s.phase === "removed"
-          ? rest
-          : [...rest, s].sort((a, b) => a.name.localeCompare(b.name));
-      });
-    });
-    const unPresence = listen<SyncPresenceEvent>("sync-presence", (e) => {
-      setSyncPresence((prev) => ({ ...prev, [e.payload.wsId]: e.payload.devices }));
-    });
-    return () => {
-      void unStatus.then((f) => f());
-      void unPresence.then((f) => f());
-    };
-  }, []);
-
-  // Sync wrote/moved/removed workspace files: re-list the tree, and re-push
-  // any public pages those files back — this machine holds the share
-  // registry, so an edit arriving FROM another device reaches the public
-  // copy through here, focus or not. (The open document itself reloads
-  // through the existing file watcher.)
-  useEffect(() => {
-    const un = listen("sync-applied", () => {
-      setTreeRefreshToken((t) => t + 1);
-      void reconcileShares();
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, [reconcileShares]);
-
-  // Callbacks (share hooks, the mirror below) read statuses through the ref;
-  // render-time consumers use the state. Keep them in lockstep.
-  useEffect(() => {
-    syncStatusesRef.current = syncStatuses;
-  }, [syncStatuses]);
-
-  // The current workspace's sync status (null = not a synced workspace), and
-  // other people's presence keyed by absolute path for the sidebar.
-  const syncedWorkspace = useMemo(
-    () => syncStatuses.find((s) => workspaceRoot != null && s.root === workspaceRoot) ?? null,
-    [syncStatuses, workspaceRoot],
-  );
-  const presenceByPath = useMemo(() => {
-    if (!syncedWorkspace || !workspaceRoot) return {};
-    const out: Record<string, string> = {};
-    for (const d of syncPresence[syncedWorkspace.wsId] ?? []) {
-      if (d.path) out[`${workspaceRoot}/${d.path}`] = d.name;
-    }
-    return out;
-  }, [syncPresence, syncedWorkspace, workspaceRoot]);
-
-  /* ---------- Synced-workspace share mirroring, inbound half ----------
-     The workspace manifest carries the share registry for documents under a
-     synced root (the outbound helpers near updateShares put it there). This
-     applies it: entries appear, re-point, and vanish here as people share,
-     move, and stop things on other machines — which is what makes the whole
-     feature: the sidebar badge and ShareMenu show "already shared" instead
-     of minting a duplicate page, and mirrored entries land WITHOUT push
-     fingerprints, so the ordinary reconcile pass establishes each with one
-     push. That last part is the freshness guarantee — whoever edits a
-     shared file re-publishes it from their own machine, no waiting for the
-     original sharer to come online.
-
-     Disambiguation rules, per entry, matched by page id:
-       in the manifest            → mirror its fields, mark wsSynced
-       absent + wsSynced          → someone unshared it remotely: drop the
-                                    entry (only while the engine is settled —
-                                    a mid-sync snapshot isn't evidence)
-       absent + never wsSynced    → predates sync here: publish it (backfill)
-     Path disagreements are arbitrated by the disk: local file still present
-     means our rename hasn't pushed yet (keep), gone means theirs applied
-     (adopt). Entries shared to a DIFFERENT backend than the workspace's are
-     out of scope entirely and stay machine-local. */
-  const mirrorBusyRef = useRef(false);
-  // Backfills already queued this session (wsId + "\n" + path). Ops are
-  // idempotent, but the fingerprint strip that rides along must fire once —
-  // a share sync can never carry (an over-cap file, say) would otherwise
-  // strip-and-republish on every status event.
-  const backfilledRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!isMainWindow || syncStatuses.length === 0) return;
-    if (mirrorBusyRef.current) return; // the next status event re-runs us
-    let cancelled = false;
-    mirrorBusyRef.current = true;
-    (async () => {
-      let touched = false;
-      for (const ws of syncStatuses) {
-        if (ws.phase === "removed") continue;
-        const inRoot = (p: string) => p.startsWith(ws.root + "/");
-        const absOf = (rel: string) => (rel === "" ? ws.root : `${ws.root}/${rel}`);
-        const settled = ws.phase === "idle" || ws.phase === "pending-deletes";
-
-        const effShares = new Map(ws.shares.map((s) => [s.id, s]));
-        const effCols = new Map(ws.collections.map((c) => [c.id, c]));
-        const localShares = Object.values(sharesRef.current).filter(
-          (e) => e.kind === "file" && inRoot(e.path) && e.connectionId === ws.connectionId,
-        );
-        const localCols = Object.values(collectionsRef.current).filter(
-          (e) => (e.path === ws.root || inRoot(e.path)) && e.connectionId === ws.connectionId,
-        );
-
-        // Probe the disk once per path disagreement, before the sync pass.
-        const gone = new Map<string, boolean>();
-        const probe = async (abs: string) => {
-          if (!gone.has(abs)) {
-            const exists = await invoke<boolean>("path_exists", { path: abs }).catch(
-              () => true,
-            );
-            gone.set(abs, !exists);
-          }
-        };
-        for (const e of localShares) {
-          const eff = effShares.get(e.id);
-          if (eff && absOf(eff.path) !== e.path) await probe(e.path);
-        }
-        for (const c of localCols) {
-          const eff = effCols.get(c.id);
-          if (eff && absOf(eff.path) !== c.path) await probe(c.path);
-        }
-        if (cancelled) return;
-
-        // Registry deltas, assembled synchronously against fresh refs.
-        const nextShares: Record<string, ShareEntry> = { ...sharesRef.current };
-        let sharesChanged = false;
-        const backfillShares: string[] = [];
-        const seenIds = new Set<string>();
-        for (const e of localShares) {
-          const cur = nextShares[e.path];
-          if (!cur || cur.id !== e.id) continue; // mutated underneath us — next pass
-          seenIds.add(e.id);
-          const eff = effShares.get(e.id);
-          if (!eff) {
-            if (cur.wsSynced && settled) {
-              delete nextShares[e.path];
-              sharesChanged = true;
-            } else if (!cur.wsSynced && !backfilledRef.current.has(`${ws.wsId}\n${e.path}`)) {
-              backfilledRef.current.add(`${ws.wsId}\n${e.path}`);
-              backfillShares.push(e.path);
-              // A page published before this folder was synced carries no
-              // workspace stamp on the worker yet — only a push applies it.
-              // Strip the fingerprints so reconciliation re-establishes the
-              // page (one push, now stamped) from this device, the one that
-              // can already touch it.
-              if (cur.pushed) {
-                const { pushed: _establish, ...rest } = cur;
-                nextShares[e.path] = rest;
-                sharesChanged = true;
-              }
-            }
-            continue;
-          }
-          let entry = cur;
-          const effAbs = absOf(eff.path);
-          if (effAbs !== entry.path && gone.get(entry.path)) {
-            delete nextShares[entry.path];
-            entry = { ...entry, path: effAbs };
-          }
-          const cid = eff.cid ?? undefined;
-          if (entry.collectionId !== cid || !entry.wsSynced) {
-            entry = { ...entry, wsSynced: true };
-            if (cid) entry.collectionId = cid;
-            else delete entry.collectionId;
-          }
-          if (entry !== cur) {
-            nextShares[entry.path] = entry;
-            sharesChanged = true;
-          }
-        }
-        for (const eff of ws.shares) {
-          // Dead shares (file deleted workspace-wide) grow no new entries;
-          // machines that still list one stop it through the reconcile
-          // pass's alive:false check — deleting unshares everywhere.
-          if (!eff.alive || seenIds.has(eff.id)) continue;
-          const abs = absOf(eff.path);
-          if (nextShares[abs]) continue; // occupied by another share — local wins
-          const at = eff.at || Date.now();
-          nextShares[abs] = {
-            id: eff.id,
-            path: abs,
-            kind: "file",
-            title: eff.title || pathShareTitle(abs),
-            sharedAt: at,
-            updatedAt: at,
-            ...(eff.cid ? { collectionId: eff.cid } : {}),
-            connectionId: ws.connectionId,
-            ...(eff.by ? { sharedBy: eff.by } : {}),
-            wsSynced: true,
-          };
-          sharesChanged = true;
-        }
-
-        // Collections second: their membership derives from the share
-        // entries as just mirrored (cid pointers), so the lists can't drift.
-        const membersFor = (cid: string) =>
-          Object.values(nextShares)
-            .filter(
-              (e) =>
-                e.collectionId === cid &&
-                inRoot(e.path) &&
-                e.connectionId === ws.connectionId &&
-                effShares.get(e.id)?.alive !== false,
-            )
-            .map((e) => e.path)
-            .sort();
-        const nextCols: Record<string, CollectionEntry> = { ...collectionsRef.current };
-        let colsChanged = false;
-        const backfillCols: string[] = [];
-        const seenColIds = new Set<string>();
-        for (const c of localCols) {
-          const cur = nextCols[c.path];
-          if (!cur || cur.id !== c.id) continue;
-          seenColIds.add(c.id);
-          const eff = effCols.get(c.id);
-          if (!eff) {
-            if (cur.wsSynced && settled) {
-              delete nextCols[c.path];
-              colsChanged = true;
-            } else if (!cur.wsSynced && !backfilledRef.current.has(`${ws.wsId}\n${c.path}`)) {
-              backfilledRef.current.add(`${ws.wsId}\n${c.path}`);
-              backfillCols.push(c.path);
-              // Same stamping story as file shares above; pushedTitle stays,
-              // so the establishing push skips the redundant OG render.
-              if (cur.pushedHash != null) {
-                const { pushedHash: _establish, ...rest } = cur;
-                nextCols[c.path] = rest;
-                colsChanged = true;
-              }
-            }
-            continue;
-          }
-          let entry = cur;
-          const effAbs = absOf(eff.path);
-          if (effAbs !== entry.path && gone.get(entry.path)) {
-            delete nextCols[entry.path];
-            entry = { ...entry, path: effAbs };
-          }
-          const desc = eff.desc ?? undefined;
-          const members = membersFor(c.id);
-          const sameMembers =
-            members.length === entry.members.length &&
-            members.every((m, i) => m === entry.members[i]);
-          if (
-            entry.title !== eff.title ||
-            (entry.description ?? undefined) !== desc ||
-            !sameMembers ||
-            !entry.wsSynced
-          ) {
-            entry = { ...entry, title: eff.title || entry.title, members, wsSynced: true };
-            if (desc) entry.description = desc;
-            else delete entry.description;
-          }
-          if (entry !== cur) {
-            nextCols[entry.path] = entry;
-            colsChanged = true;
-          }
-        }
-        for (const eff of ws.collections) {
-          if (seenColIds.has(eff.id)) continue;
-          const abs = absOf(eff.path);
-          if (nextCols[abs]) continue;
-          const at = eff.at || Date.now();
-          const title = eff.title || basename(abs);
-          nextCols[abs] = {
-            id: eff.id,
-            path: abs,
-            title,
-            ...(eff.desc ? { description: eff.desc } : {}),
-            members: membersFor(eff.id),
-            sharedAt: at,
-            updatedAt: at,
-            // Skip the redundant OG render (the sharer made one for this
-            // title); the absent pushedHash still gives the TOC its one
-            // establishing push.
-            pushedTitle: title,
-            connectionId: ws.connectionId,
-            ...(eff.by ? { sharedBy: eff.by } : {}),
-            wsSynced: true,
-          };
-          colsChanged = true;
-        }
-
-        if (sharesChanged) updateShares(() => nextShares);
-        if (colsChanged) updateCollections(() => nextCols);
-        touched = touched || sharesChanged || colsChanged;
-        for (const p of backfillShares) queueShareOp(p);
-        for (const p of backfillCols) queueCollectionOp(p);
-      }
-      // New mirror entries carry no fingerprints; let reconciliation
-      // establish (and thereby freshness-check) them now, not on next focus.
-      if (!cancelled && touched) void reconcileShares();
-    })().finally(() => {
-      mirrorBusyRef.current = false;
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    syncStatuses,
-    updateShares,
-    updateCollections,
-    queueShareOp,
-    queueCollectionOp,
-    reconcileShares,
-  ]);
 
   const onMarkdownChange = useCallback(
     (md: string) => {
@@ -7057,7 +4268,7 @@ export default function App() {
   );
 
   // Move the active draft's content into the real file `chosen`: write it,
-  // flip the tab in place, re-key any share, start watching the file, and
+  // flip the tab in place, start watching the file, and
   // delete the draft. The final step of every Save As path — the in-app prompt
   // (workspace open) and the native dialog (no workspace) both end here.
   const promoteDraftTo = useCallback(async (active: Tab, chosen: string) => {
@@ -7112,20 +4323,6 @@ export default function App() {
     tabsRef.current = nextTabs;
     setTabs(nextTabs);
     writeStoredSession(nextTabs, activeIdRef.current);
-    // A shared draft keeps its share across promotion: re-key the entry to the
-    // new path and republish (the title likely changed with the filename).
-    if (sharesRef.current[draftPath]) {
-      updateShares((prev) => {
-        const { [draftPath]: moved, ...rest } = prev;
-        return moved
-          ? { ...rest, [chosen]: { ...moved, path: chosen, kind: "file" as const } }
-          : prev;
-      });
-      scheduleSharePush(chosen);
-      // The draft may have landed inside a synced workspace: publish the
-      // share record there too.
-      queueShareOp(chosen);
-    }
     // The rendition (probed before the write — its meta was adopted there)
     // enables the view toggle and joins the watch set.
     htmlPathRef.current = siblingExists0 ? sibling0 : null;
@@ -7146,9 +4343,6 @@ export default function App() {
   }, [
     writeToDisk,
     addRecent,
-    updateShares,
-    scheduleSharePush,
-    queueShareOp,
     loadEntityMeta,
     adoptTableWidths,
     refreshWatchSet,
@@ -7577,6 +4771,41 @@ export default function App() {
   const activeMissing = activeTab?.missing === true;
   const showSidebar = workspaceRoot != null && sidebarOpen;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
+  // Presence: tell the engines which document this window is editing (a
+  // file, or nothing) so other devices see "editing Projects/plan.md". The
+  // Rust side decides which connected workspace, if any, it concerns.
+  useEffect(() => {
+    void cloudSetActivity(activeFilePath).catch(() => {});
+  }, [activeFilePath]);
+  // Sync wrote files: the tree refreshes (open tabs already reload through
+  // the file watcher). A merge that left a conflict copy, or a mass
+  // deletion the engine is holding, becomes a notice carrying the one
+  // action that matters.
+  useEffect(() => {
+    const uns = [
+      onCloudApplied((e) => {
+        if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
+      }),
+      onCloudConflict((e) => {
+        pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
+          label: "Open the copy",
+          run: () => void openTab(e.conflictPath, "file"),
+        });
+      }),
+      onCloudPendingDeletes((e) => {
+        setPendingDeletes(e);
+        if (e.count > 0) {
+          pushToast(
+            `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
+            { label: "Review…", run: () => setCloudPanelOpen(true) },
+          );
+        }
+      }),
+    ];
+    return () => {
+      for (const un of uns) void un.then((f) => f()).catch(() => {});
+    };
+  }, [openTab, pushToast]);
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
@@ -7608,18 +4837,6 @@ export default function App() {
   // A board owns the whole pane: it has no second rendition to show beside
   // itself, and none of the split's document machinery applies to it.
   const canSplit = activeTab != null && !activeMissing && !activeIsStore;
-  // The folder share the active document's include/remove toggle binds to
-  // (drafts have no directory, so never a collection).
-  const activeShareCollection = activeFilePath
-    ? nearestCollection(collections, activeFilePath)
-    : null;
-
-  // Presence truth-telling: which document this window has focused. Autosaves
-  // renew it (writeToDisk); switching away (or to a draft) clears it.
-  useEffect(() => {
-    reportSyncActivity(activeFilePath);
-  }, [activeFilePath]);
-
   // The store the active note belongs to, if it belongs to one. A note in an
   // ordinary folder costs a single `path_exists` — the model checks for a
   // definition file before it reads anything else — so this is cheap to ask
@@ -7877,7 +5094,7 @@ export default function App() {
       >
         {effectiveSplit && paneTab && (
           <PaneHeader
-            title={docShareTitle(paneTab)}
+            title={docDisplayTitle(paneTab)}
             focused={focused}
             missing={paneMissing}
             view={paneView}
@@ -7983,7 +5200,7 @@ export default function App() {
               }
               onSearchState={focused ? setFindInfo : undefined}
               onReady={focused ? restoreActiveScroll : restoreCompanionScroll}
-              commentAuthor={syncDeviceName}
+              commentAuthor={deviceName}
               commentsVisible={commentsVisible && !isMirror}
               onCommentsCount={focused ? setCommentCount : undefined}
               onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
@@ -8016,10 +5233,10 @@ export default function App() {
               htmlContent={paneHtmlContent!}
               threads={focused || !doc ? htmlThreads : doc.threads}
               onThreadsChange={focused || !doc ? onHtmlThreadsChange : noopThreadsChange}
-              commentAuthor={syncDeviceName}
+              commentAuthor={deviceName}
               commentsEnabled={focused || !doc}
-              // Desktop-only validated PDF export (the web share host omits
-              // the prop, hiding the button). Panes showing the ACTIVE
+              // Validated PDF export (a host that omits the prop hides the
+              // button). Panes showing the ACTIVE
               // document get it; a two-document split's unfocused pane has
               // its comment layer disabled anyway.
               pdfExportPath={focused || !doc ? activeHtmlPath : undefined}
@@ -8146,241 +5363,6 @@ export default function App() {
           </button>
         )}
       </div>
-      {activeTab && !activeMissing && !activeIsStore && (
-        <ShareMenu
-          key={activeTab.path}
-          docTitle={docShareTitle(activeTab)}
-          entry={shares[activeTab.path] ?? null}
-          entryConnection={connectionForEntrySync(shares[activeTab.path] ?? null)}
-          connections={shareConns.connections}
-          defaultConnectionId={defaultConnectionId}
-          globalDefaultId={shareConns.defaultId}
-          shareCountFor={shareCountFor}
-          collection={
-            activeShareCollection && activeFilePath
-              ? {
-                  entry: activeShareCollection,
-                  included: activeShareCollection.members.includes(activeFilePath),
-                  connection: connectionForEntrySync(activeShareCollection),
-                }
-              : null
-          }
-          autoOpen={pendingSharePopover === activeTab.path}
-          onAutoOpenConsumed={() => setPendingSharePopover(null)}
-          onShare={shareActiveDoc}
-          onStopSharing={() => stopSharing(activeTab.path)}
-          onToggleCollection={(include) =>
-            activeShareCollection && activeFilePath
-              ? setCollectionMembership(activeFilePath, activeShareCollection.path, include)
-              : Promise.resolve()
-          }
-          onOpenSharedPages={() => setSharedPagesOpen(true)}
-          onOpenSetupGuide={() => setShareSetupOpen(true)}
-          onOpenExternal={openExternal}
-          onSaveConnection={saveConnection}
-          onRemoveConnection={removeConnection}
-          onMakeDefault={makeDefaultConnection}
-          onRememberWorkspaceConnection={
-            workspaceRoot ? rememberWorkspaceConnection : null
-          }
-          onProtectedChanged={(isProtected) => {
-            const path = activeTab.path;
-            updateShares((prev) =>
-              prev[path] && !!prev[path].protected !== isProtected
-                ? { ...prev, [path]: { ...prev[path], protected: isProtected } }
-                : prev,
-            );
-          }}
-          onOpenWorkerUpdate={
-            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
-          }
-          onResolveWebConflict={(mode) => resolveWebConflict(activeTab.path, mode)}
-          webActivityBy={webActivity[activeTab.path]?.by ?? null}
-          onWebActivitySeen={() =>
-            setWebActivity((prev) => {
-              if (!(activeTab.path in prev)) return prev;
-              const next = { ...prev };
-              delete next[activeTab.path];
-              return next;
-            })
-          }
-          onCheckForWebChanges={() => checkForWebChanges(activeTab.path)}
-        />
-      )}
-      {sharedPagesOpen && (
-        <SharedPages
-          shares={Object.values(shares).sort((a, b) => b.sharedAt - a.sharedAt)}
-          collections={Object.values(collections).sort((a, b) => b.sharedAt - a.sharedAt)}
-          connections={shareConns.connections}
-          connectionFor={connectionForEntrySync}
-          onClose={() => setSharedPagesOpen(false)}
-          onOpenDoc={(entry) => {
-            setSharedPagesOpen(false);
-            void openTab(entry.path, entry.kind);
-          }}
-          onManageCollection={(entry) => {
-            setSharedPagesOpen(false);
-            setShareFolderTarget(entry.path);
-          }}
-          onOpenExternal={openExternal}
-          onOpenSetup={() => setShareSetupOpen(true)}
-          onOpenWorkerUpdate={
-            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
-          }
-          onStopSharing={(entry) => stopSharing(entry.path)}
-        />
-      )}
-      {shareFolderTarget && (
-        <ShareFolder
-          dirPath={shareFolderTarget}
-          collection={collections[shareFolderTarget] ?? null}
-          collectionConnection={connectionForEntrySync(
-            collections[shareFolderTarget] ?? null,
-          )}
-          shares={shares}
-          connections={shareConns.connections}
-          defaultConnectionId={defaultConnectionId}
-          onShare={(id, connectionId) =>
-            shareFolder(shareFolderTarget, id, connectionId)
-          }
-          onStopSharing={async (alsoStopPages) => {
-            // Close only once the stop went through, so a failure (offline,
-            // bad token) surfaces in the still-open dialog.
-            await stopSharingFolder(shareFolderTarget, alsoStopPages);
-            setShareFolderTarget(null);
-          }}
-          onToggleMember={(path, include) =>
-            setCollectionMembership(path, shareFolderTarget, include)
-          }
-          onUpdateMeta={(title, description) =>
-            setCollectionMeta(shareFolderTarget, title, description)
-          }
-          onProtectedChanged={(isProtected) => {
-            updateCollections((prev) =>
-              prev[shareFolderTarget] &&
-              !!prev[shareFolderTarget].protected !== isProtected
-                ? {
-                    ...prev,
-                    [shareFolderTarget]: {
-                      ...prev[shareFolderTarget],
-                      protected: isProtected,
-                    },
-                  }
-                : prev,
-            );
-          }}
-          onOpenWorkerUpdate={
-            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
-          }
-          onClose={() => setShareFolderTarget(null)}
-          onOpenExternal={openExternal}
-          onOpenSetup={() => {
-            setShareFolderTarget(null);
-            setShareSetupOpen(true);
-          }}
-        />
-      )}
-      {shareSetupOpen && (
-        <ShareSetup
-          isAddingAnother={shareConns.connections.length > 0}
-          onClose={() => setShareSetupOpen(false)}
-          onOpenExternal={openExternal}
-          onConnectionSaved={saveConnection}
-        />
-      )}
-      {workerUpdateList && workerUpdateList.length > 0 && (
-        <WorkerUpdate
-          outdated={workerUpdateList}
-          latestVersion={BUNDLED_WORKER_VERSION}
-          onRecheck={recheckWorkerVersion}
-          onOpenExternal={openExternal}
-          onClose={() => setWorkerUpdateList(null)}
-        />
-      )}
-      {cloudSyncOpen && (
-        <CloudSync
-          workspaceRoot={workspaceRoot}
-          workspaceName={workspaceRoot ? basename(workspaceRoot) : null}
-          connections={shareConns.connections}
-          defaultConnectionId={defaultConnectionId}
-          statuses={syncStatuses}
-          deviceName={syncDeviceName}
-          onClose={() => setCloudSyncOpen(false)}
-          onOpenShareSetup={() => {
-            setCloudSyncOpen(false);
-            setShareSetupOpen(true);
-          }}
-          onOpenWorkerUpdate={
-            outdatedWorkers.length > 0
-              ? () => {
-                  setCloudSyncOpen(false);
-                  setWorkerUpdateList(outdatedWorkers);
-                }
-              : null
-          }
-          onOpenConnectBackend={() => {
-            setCloudSyncOpen(false);
-            setConnectBackendOpen(true);
-          }}
-          onOpenBackends={() => {
-            setCloudSyncOpen(false);
-            setBackendsOpen(true);
-          }}
-        />
-      )}
-      {backendsOpen && (
-        <Backends
-          connections={shareConns.connections}
-          defaultId={shareConns.defaultId}
-          statuses={syncStatuses}
-          shareCountFor={shareCountFor}
-          outdatedIds={outdatedWorkers.map((w) => w.conn.id)}
-          onClose={() => setBackendsOpen(false)}
-          onOpenExternal={openExternal}
-          onOpenSetup={() => setShareSetupOpen(true)}
-          onOpenConnectBackend={() => setConnectBackendOpen(true)}
-          onOpenWorkerUpdate={
-            outdatedWorkers.length > 0 ? () => setWorkerUpdateList(outdatedWorkers) : null
-          }
-          onOpenCloudSync={() => setCloudSyncOpen(true)}
-          onOpenSharedPages={() => setSharedPagesOpen(true)}
-          onSaveConnection={saveConnection}
-          onMakeDefault={makeDefaultConnection}
-          onDisconnect={removeConnection}
-          onTeardown={(conn) => {
-            setBackendsOpen(false);
-            setTeardownConn(conn);
-          }}
-        />
-      )}
-      {teardownConn && (
-        <BackendTeardown
-          conn={teardownConn}
-          onDisableLocalSync={() => disableSyncForConnection(teardownConn.id)}
-          onOpenExternal={openExternal}
-          onOpenWorkerUpdate={
-            outdatedWorkers.some((w) => w.conn.id === teardownConn.id)
-              ? () => {
-                  setTeardownConn(null);
-                  setWorkerUpdateList(outdatedWorkers);
-                }
-              : null
-          }
-          onDisconnect={async () => {
-            await removeConnection(teardownConn.id);
-            setTeardownConn(null);
-          }}
-          onClose={() => setTeardownConn(null)}
-        />
-      )}
-      {connectBackendOpen && (
-        <ConnectBackend
-          deviceName={syncDeviceName}
-          onSaveConnection={saveConnection}
-          onOpenWorkspace={(root) => void openWorkspace(root)}
-          onClose={() => setConnectBackendOpen(false)}
-        />
-      )}
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
@@ -8400,26 +5382,6 @@ export default function App() {
           onWriteThreads={writeMdThreadsToMeta}
         />
       )}
-      {historyTarget &&
-        syncedWorkspace &&
-        workspaceRoot &&
-        (() => {
-          const connection =
-            shareConns.connections.find((c) => c.id === syncedWorkspace.connectionId) ?? null;
-          const rel = historyTarget.startsWith(`${workspaceRoot}/`)
-            ? historyTarget.slice(workspaceRoot.length + 1)
-            : null;
-          return connection && rel ? (
-            <HistoryPanel
-              docPath={historyTarget}
-              relPath={rel}
-              wsId={syncedWorkspace.wsId}
-              connection={connection}
-              onClose={() => setHistoryTarget(null)}
-              onOpenFile={(p) => void openTab(p, "file")}
-            />
-          ) : null;
-        })()}
       {draftsOpen && (
         <DraftsPanel
           drafts={draftRows}
@@ -8497,12 +5459,11 @@ export default function App() {
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
         <Sidebar
           root={workspaceRoot}
+          cloud={cloudForRoot}
           currentPath={sidebarCurrentPath}
           selection={sidebarSelection}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
-          shares={shares}
-          collections={collections}
           onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p, "file")}
           onOpenBoard={openBoard}
@@ -8514,21 +5475,6 @@ export default function App() {
           onMovePath={movePath}
           onCopyEntries={(entries, cut) => void copyEntries(entries, cut)}
           onPasteEntries={(dir) => void pasteEntries(dir)}
-          onShareFolder={(dir) => setShareFolderTarget(dir)}
-          onShareFile={(p) => void shareFileFromTree(p)}
-          onStopSharingFile={(p) =>
-            void stopSharing(p).catch((e) => {
-              console.error("stop sharing failed", e);
-              window.alert(e instanceof Error ? e.message : String(e));
-            })
-          }
-          onCopyShareLink={(id) => void copyShareLink(id)}
-          onToggleMembership={(path, dir, include) =>
-            void setCollectionMembership(path, dir, include).catch((e) => {
-              console.error("membership toggle failed", e);
-              window.alert(e instanceof Error ? e.message : String(e));
-            })
-          }
           onSwitchToSearch={() => {
             setSidebarMode("search");
             setWsFocusToken((t) => t + 1);
@@ -8537,9 +5483,8 @@ export default function App() {
           onDropFileToEditor={handleTreeDropToEditor}
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
-          presence={presenceByPath}
-          syncPhase={syncedWorkspace?.phase ?? null}
-          onFileHistory={syncedWorkspace ? (p) => setHistoryTarget(p) : null}
+          onOpenCloud={() => setCloudPanelOpen(true)}
+          onHistory={setHistoryPath}
         />
       )}
       {conflict && (
@@ -8609,6 +5554,55 @@ export default function App() {
           }}
         />
       )}
+      {cloudPanelOpen && (
+        <CloudPanel
+          root={workspaceRoot}
+          cloud={cloudForRoot}
+          pendingDeletePaths={
+            pendingDeletes && pendingDeletes.root === workspaceRoot ? pendingDeletes.paths : []
+          }
+          onClose={() => setCloudPanelOpen(false)}
+          onConnect={() => {
+            setCloudPanelOpen(false);
+            setCloudSetup("connect");
+          }}
+          onJoin={() => {
+            setCloudPanelOpen(false);
+            setCloudSetup("join");
+          }}
+          onUpdateWorker={() => {
+            setCloudPanelOpen(false);
+            setWorkerUpdateOpen(true);
+          }}
+          onOpenExternal={openExternal}
+        />
+      )}
+      {cloudSetup && (
+        <CloudSetup
+          mode={cloudSetup}
+          root={workspaceRoot}
+          onClose={() => setCloudSetup(null)}
+          onConnected={(root, how) => {
+            setCloudSetup(null);
+            if (how === "join") void openWorkspace(root);
+          }}
+        />
+      )}
+      {workerUpdateOpen && cloudForRoot && (
+        <WorkerUpdate
+          cloud={cloudForRoot}
+          onClose={() => setWorkerUpdateOpen(false)}
+          onOpenExternal={openExternal}
+        />
+      )}
+      {historyPath && (
+        <HistoryPanel
+          docPath={historyPath}
+          onClose={() => setHistoryPath(null)}
+          onOpenFile={(p) => void openTab(p, "file")}
+        />
+      )}
+      <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
       <Settings
         theme={theme}
         onChange={setTheme}
@@ -8621,17 +5615,11 @@ export default function App() {
         onOpenRecent={openRecent}
         canCopyWithComments={activeTab != null}
         onCopyWithComments={() => void copyWithComments()}
-        onOpenSharedPages={() => setSharedPagesOpen(true)}
-        onOpenCloudSync={() => setCloudSyncOpen(true)}
-        onOpenBackends={() => setBackendsOpen(true)}
-        syncAttention={syncStatuses.some(
-          (s) => s.phase === "pending-deletes" || s.phase === "revoked" || s.phase === "error",
-        )}
         onOpenDictationSetup={() => setDictationSetupOpen(true)}
         update={update}
-        workerUpdateCount={outdatedWorkers.length}
-        onOpenWorkerUpdate={() => setWorkerUpdateList(outdatedWorkers)}
         onOpenExternal={openExternal}
+        onOpenCloud={() => setCloudPanelOpen(true)}
+        cloudAttention={cloudNeedsAttention(cloudStatuses)}
       />
     </div>
   );
@@ -8687,7 +5675,7 @@ function ViewToggle({
 
 // Slim header atop each pane in split mode: the document name, its MD/HTML
 // switcher, and a close-pane ✕. The focused pane is tinted — that's where
-// typing, find, dictation, and the share menu act.
+// typing, find, and dictation act.
 function PaneHeader({
   title,
   focused,
@@ -9043,15 +6031,11 @@ function Settings({
   onOpenRecent,
   canCopyWithComments,
   onCopyWithComments,
-  onOpenSharedPages,
-  onOpenCloudSync,
-  onOpenBackends,
-  syncAttention,
   onOpenDictationSetup,
   update,
-  workerUpdateCount,
-  onOpenWorkerUpdate,
   onOpenExternal,
+  onOpenCloud,
+  cloudAttention,
 }: {
   theme: Theme;
   onChange: (t: Theme) => void;
@@ -9064,21 +6048,13 @@ function Settings({
   onOpenRecent: (r: RecentEntry) => void;
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
-  onOpenSharedPages: () => void;
-  onOpenCloudSync: () => void;
-  // Opens the Backends dialog — the home for connecting, listing, and
-  // disconnecting backends (it routes to setup / invite flows itself).
-  onOpenBackends: () => void;
-  // True when a synced workspace needs a decision (held deletions, revoked
-  // access, an error) — dots the Cloud sync item.
-  syncAttention: boolean;
   onOpenDictationSetup: () => void;
   update: UpdateController;
-  // How many configured share backends run an older worker than this build
-  // ships; > 0 lights the badge and shows the update item under Sharing.
-  workerUpdateCount: number;
-  onOpenWorkerUpdate: () => void;
   onOpenExternal: (url: string) => void;
+  // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
+  // when a connected domain's worker is behind this app.
+  onOpenCloud: () => void;
+  cloudAttention: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -9125,6 +6101,13 @@ function Settings({
     default:
       updateStatusText = ver ? `${ver} · Up to date` : "";
   }
+
+  // One badge, two reasons: an app update, or a cloud worker behind it.
+  const fabLabel = updateAvailable
+    ? "Settings — update available"
+    : cloudAttention
+      ? "Settings — the cloud worker needs an update"
+      : "Settings";
 
   return (
     <div ref={wrapRef} className="settings-wrap">
@@ -9210,61 +6193,6 @@ function Settings({
             </>
           )}
           <div className="settings-divider" />
-          <div className="settings-section-label">Cloud</div>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenCloudSync();
-            }}
-          >
-            <span className="settings-option-check">
-              {syncAttention && <span className="sync-attention-dot" aria-hidden />}
-            </span>
-            <span className="settings-option-label">Cloud sync…</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenSharedPages();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Shared pages…</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenBackends();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Backends…</span>
-          </button>
-          {workerUpdateCount > 0 && (
-            <button
-              role="menuitem"
-              className="settings-option settings-option--update"
-              title="A newer backend worker is available for your domain — a quick redeploy picks it up"
-              onClick={() => {
-                setOpen(false);
-                onOpenWorkerUpdate();
-              }}
-            >
-              <span className="settings-option-check">
-                <DownloadIcon />
-              </span>
-              <span className="settings-option-label">
-                Update backend worker{workerUpdateCount > 1 ? `s (${workerUpdateCount})` : "…"}
-              </span>
-            </button>
-          )}
-          <div className="settings-divider" />
           <div className="settings-section-label">Voice</div>
           <button
             role="menuitem"
@@ -9276,6 +6204,22 @@ function Settings({
           >
             <span className="settings-option-check" />
             <span className="settings-option-label">Dictation settings…</span>
+          </button>
+          <div className="settings-divider" />
+          <div className="settings-section-label">Cloud</div>
+          <button
+            role="menuitem"
+            className="settings-option"
+            data-testid="settings-cloud"
+            onClick={() => {
+              setOpen(false);
+              onOpenCloud();
+            }}
+          >
+            <span className="settings-option-check">
+              {cloudAttention ? <span className="settings-option-dot" aria-hidden /> : null}
+            </span>
+            <span className="settings-option-label">Cloud…</span>
           </button>
           {recents.length > 0 && (
             <>
@@ -9394,16 +6338,12 @@ function Settings({
       <button
         className="settings-fab"
         onClick={() => setOpen((o) => !o)}
-        aria-label={
-          updateAvailable || workerUpdateCount > 0 ? "Settings — update available" : "Settings"
-        }
+        aria-label={fabLabel}
         aria-expanded={open}
-        title={
-          updateAvailable || workerUpdateCount > 0 ? "Settings — update available" : "Settings"
-        }
+        title={fabLabel}
       >
         <GearIcon />
-        {(updateAvailable || workerUpdateCount > 0) && (
+        {(updateAvailable || cloudAttention) && (
           <span className="settings-fab-badge" aria-hidden />
         )}
       </button>
