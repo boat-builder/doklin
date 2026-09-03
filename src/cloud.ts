@@ -6,6 +6,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { COMPATIBILITY_DATE, WORKER_VERSION } from "virtual:cloud-worker-version";
+
+/** The worker version this app was built for — parsed out of the worker's
+ *  source at build time (vite.config.ts), never typed here. A domain whose
+ *  worker reports less is "behind" and gets the update badge. */
+export const BUNDLED_WORKER_VERSION: number = WORKER_VERSION;
+/** The Workers runtime date the setup prompt writes into wrangler.toml. */
+export const WORKER_COMPATIBILITY_DATE: string = COMPATIBILITY_DATE;
 
 export type CloudPhase =
   | "idle"
@@ -86,6 +94,13 @@ export type CloudRevision = {
   current: boolean;
 };
 
+/** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
+export type CloudMarker = { domain: string; wsId: string };
+
+/** What a second Mac needs to download a workspace: shown behind
+ *  "Connect another Mac…", never part of a status. */
+export type CloudCredentials = { endpoint: string; token: string };
+
 export type CloudAppliedEvent = { root: string; paths: string[] };
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
@@ -105,6 +120,16 @@ export const cloudMintToken = () => invoke<string>("cloud_mint_token");
 
 export const cloudProbe = (endpoint: string, token: string) =>
   invoke<CloudProbe>("cloud_probe", { endpoint, token });
+
+/** The marker a folder carries, or null — the wizard's "resume" outcome. */
+export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_marker", { root });
+
+/** The endpoint and owner token of a connected workspace. */
+export const cloudToken = (root: string) => invoke<CloudCredentials>("cloud_token", { root });
+
+/** Ask the domain's worker what it is again ("Check again" after an update);
+ *  the fresh version arrives in the next status. */
+export const cloudCheckWorker = (root: string) => invoke<void>("cloud_check_worker", { root });
 
 /** Bind a fresh domain to `root` and upload everything; resolves to the workspace id. */
 export const cloudConnect = (root: string, endpoint: string, token: string, name: string) =>
@@ -164,38 +189,57 @@ export function cloudForWorkspace(statuses: CloudStatus[], root: string | null):
   return statuses.find((s) => s.root === root) ?? null;
 }
 
+/** "just now", "2 min ago", "3 h ago", "12 d ago". */
+export function timeAgo(ms: number, now = Date.now()): string {
+  const secs = Math.max(0, Math.round((now - ms) / 1000));
+  if (secs < 45) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
+/** The phase in words, lowercase: "synced 2 min ago", "paused", "offline — synced 3 h ago". */
+export function phaseLine(s: CloudStatus, now = Date.now()): string {
+  const synced = s.lastSyncMs == null ? "not synced yet" : `synced ${timeAgo(s.lastSyncMs, now)}`;
+  switch (s.phase) {
+    case "idle":
+      return synced;
+    case "syncing":
+      return "syncing…";
+    case "offline":
+      return `offline — ${synced}`;
+    case "paused":
+      return "paused";
+    case "pending-deletes":
+      return `${s.pendingDeletes} deletion${s.pendingDeletes === 1 ? "" : "s"} waiting for your go`;
+    case "revoked":
+      return "access revoked";
+    case "worker-outdated":
+      return "waiting on a worker update";
+    case "error":
+      return s.error ?? "error";
+  }
+}
+
 /** One line for the phase: "Synced 2 min ago · notes.example.com". */
 export function describeCloud(s: CloudStatus, now = Date.now()): string {
-  const ago = (ms: number | null) => {
-    if (ms == null) return "not synced yet";
-    const secs = Math.max(0, Math.round((now - ms) / 1000));
-    if (secs < 45) return "synced just now";
-    const mins = Math.round(secs / 60);
-    if (mins < 60) return `synced ${mins} min ago`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return `synced ${hours} h ago`;
-    return `synced ${Math.round(hours / 24)} d ago`;
-  };
-  const phase: string = (() => {
-    switch (s.phase) {
-      case "idle":
-        return ago(s.lastSyncMs);
-      case "syncing":
-        return "syncing…";
-      case "offline":
-        return `offline — ${ago(s.lastSyncMs)}`;
-      case "paused":
-        return "paused";
-      case "pending-deletes":
-        return `${s.pendingDeletes} deletions waiting for your go`;
-      case "revoked":
-        return "access revoked";
-      case "worker-outdated":
-        return "waiting on a worker update";
-      case "error":
-        return s.error ?? "error";
-    }
-  })();
-  const line = phase.charAt(0).toUpperCase() + phase.slice(1);
-  return `${line} · ${s.domain}`;
+  const phase = phaseLine(s, now);
+  return `${phase.charAt(0).toUpperCase() + phase.slice(1)} · ${s.domain}`;
 }
+
+/** The domain's worker is behind the version this app was built for — the
+ *  update badge. A 426 pause counts even before the version is known. */
+export function workerBehind(s: CloudStatus): boolean {
+  return s.phase === "worker-outdated" || (s.workerVersion != null && s.workerVersion < BUNDLED_WORKER_VERSION);
+}
+
+/** The domain's worker is newer than this app: Doklin is what needs updating. */
+export function workerAhead(s: CloudStatus): boolean {
+  return s.workerVersion != null && s.workerVersion > BUNDLED_WORKER_VERSION;
+}
+
+/** Whether the gear's badge should light for the cloud: some connected
+ *  workspace's worker is behind. */
+export const cloudNeedsAttention = (statuses: CloudStatus[]): boolean => statuses.some(workerBehind);

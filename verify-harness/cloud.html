@@ -1,0 +1,287 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cloud verification harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Tauri IPC stub broad enough to boot the REAL <App/> with a /docs
+      // workspace (the split harness's in-memory file system), plus a
+      // scripted fake of the cloud engine: every cloud_* command answers
+      // from window.__cloud, records itself in __cloud.calls, and moves the
+      // status array the way the engine would — then emits `cloud-status`
+      // through the same listener registry the app's `listen()` calls land
+      // in, so a drive can also inject the other events by hand
+      // (window.__emit). Nothing here reaches a network.
+      const para = (seed, n) =>
+        Array.from(
+          { length: n },
+          (_, i) => `Paragraph ${i + 1} of ${seed}. The quick brown fox jumps over the lazy dog.`,
+        ).join("\n\n");
+
+      window.__fs = new Map([
+        ["/docs/notes.md", `# Notes\n\n${para("notes", 6)}\n`],
+        ["/docs/other.md", `# Other\n\n${para("other", 6)}\n`],
+        ["/docs/third.md", `# Third\n\n${para("third", 6)}\n`],
+      ]);
+      window.__mtime = 1000;
+      window.__writes = [];
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+      const basename = (p) => p.split("/").pop() || p;
+      // The tree's file names: the drive adds to this to simulate sync
+      // writing a file, then emits `cloud-applied`.
+      window.__treeFiles = ["notes.md", "other.md", "third.md"];
+      window.__treeCalls = 0;
+
+      // The fake engine.
+      window.__cloud = {
+        statuses: [],
+        // What cloud_probe answers: a CloudProbe, or a string to reject with.
+        probe: null,
+        // What cloud_marker answers for any root.
+        marker: null,
+        // What the folder picker answers.
+        pickedDir: "/Users/me/Downloads",
+        token: "ab".repeat(32),
+        wipeResult: 42,
+        history: [
+          { rev: 3, hash: "h3", size: 30, timeMs: 1757000000000, by: "Test Mac", current: true },
+          { rev: 2, hash: "h2", size: 20, timeMs: 1756900000000, by: "Bob", current: false },
+          { rev: 1, hash: "h1", size: 10, timeMs: 1756800000000, by: "Test Mac", current: false },
+        ],
+        revisions: {
+          h3: "# Other\n\nthe current text\n",
+          h2: "# Other\n\nbob's revision\n",
+          h1: "# Other\n\nthe first revision\n",
+        },
+        calls: [],
+      };
+      const record = (cmd, args) => window.__cloud.calls.push({ cmd, args });
+      const hostOf = (endpoint) => endpoint.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      const statusFor = (root, endpoint, name, wsId) => ({
+        root,
+        domain: hostOf(endpoint),
+        endpoint,
+        wsId,
+        name,
+        phase: "idle",
+        lastSyncMs: Date.now(),
+        error: null,
+        pendingDeletes: 0,
+        workerVersion: 1,
+        public: [],
+        presence: [],
+      });
+
+      // The listener registry the app's listen() lands in (see the
+      // plugin:event|listen case) and the emitter a drive uses.
+      window.__listeners = new Map(); // event → [{ id, handler }]
+      let nextListenerId = 1;
+      window.__emit = (event, payload) => {
+        for (const { id, handler } of window.__listeners.get(event) ?? []) {
+          handler({ event, id, payload });
+        }
+      };
+      window.__setStatuses = (statuses) => {
+        window.__cloud.statuses = statuses;
+        window.__emit("cloud-status", statuses);
+      };
+      const patchStatus = (root, patch) =>
+        window.__setStatuses(
+          window.__cloud.statuses.map((s) => (s.root === root ? { ...s, ...patch } : s)),
+        );
+      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+      const progress = async (root, kind, total) => {
+        for (let done = 1; done <= total; done += 1) {
+          await delay(120);
+          window.__emit("cloud-progress", { root, kind, done, total });
+        }
+      };
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          if (cmd.startsWith("cloud_")) record(cmd, args);
+          switch (cmd) {
+            case "take_window_init":
+              return Promise.resolve({
+                isMain: true,
+                folder: null,
+                file: null,
+                files: [],
+                activeFile: null,
+                restored: false,
+              });
+            case "take_pending_folder":
+            case "migrate_scratch":
+              return Promise.resolve(null);
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject(`no such file: ${args.path}`)
+                : Promise.resolve({ contents: c, snapshot: snap(c) });
+            }
+            case "write_file": {
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.contents));
+            }
+            case "path_exists":
+              return Promise.resolve(
+                args.path === "/docs" || args.path.startsWith("/Users/me/Downloads") || window.__fs.has(args.path),
+              );
+            case "list_md_tree": {
+              window.__treeCalls += 1;
+              const root = args.path;
+              return Promise.resolve({
+                kind: "dir",
+                name: basename(root),
+                path: root,
+                children: window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${root}/${f}` })),
+              });
+            }
+            case "stat_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined ? Promise.reject("missing") : Promise.resolve(snap(c));
+            }
+            case "watch_file": {
+              const c = window.__fs.get(args.path) ?? "";
+              return Promise.resolve(snap(c));
+            }
+            case "unwatch_file":
+              return Promise.resolve(null);
+            case "device_name":
+              return Promise.resolve("Test Mac");
+            case "list_drafts":
+              return Promise.resolve([]);
+            case "open_external":
+              (window.__opened ??= []).push(args.url);
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:dialog|open":
+              return Promise.resolve(window.__cloud.pickedDir);
+            case "plugin:event|listen": {
+              const id = nextListenerId++;
+              const list = window.__listeners.get(args.event) ?? [];
+              list.push({ id, handler: args.handler });
+              window.__listeners.set(args.event, list);
+              return Promise.resolve(id);
+            }
+            case "plugin:event|unlisten": {
+              const list = (window.__listeners.get(args.event) ?? []).filter((l) => l.id !== args.eventId);
+              window.__listeners.set(args.event, list);
+              return Promise.resolve(null);
+            }
+
+            /* ----- the fake engine ----- */
+            case "cloud_status":
+              return Promise.resolve(window.__cloud.statuses);
+            case "cloud_mint_token":
+              return Promise.resolve(window.__cloud.token);
+            case "cloud_probe":
+              return typeof window.__cloud.probe === "string"
+                ? Promise.reject(window.__cloud.probe)
+                : Promise.resolve(window.__cloud.probe);
+            case "cloud_marker":
+              return Promise.resolve(window.__cloud.marker);
+            case "cloud_connect":
+              return (async () => {
+                await progress(args.root, "upload", 3);
+                window.__setStatuses([
+                  ...window.__cloud.statuses,
+                  statusFor(args.root, args.endpoint, args.name, "w-new"),
+                ]);
+                return "w-new";
+              })();
+            case "cloud_join":
+              return (async () => {
+                const ws = window.__cloud.probe?.workspace;
+                const dest = `${args.destParent}/${ws?.name ?? "Notes"}`;
+                await progress(dest, "download", 3);
+                window.__setStatuses([
+                  ...window.__cloud.statuses,
+                  statusFor(dest, args.endpoint, ws?.name ?? "Notes", ws?.id ?? "w-1"),
+                ]);
+                return dest;
+              })();
+            case "cloud_resume": {
+              const ws = window.__cloud.probe?.workspace;
+              window.__setStatuses([
+                ...window.__cloud.statuses,
+                statusFor(args.root, args.endpoint, ws?.name ?? "Notes", ws?.id ?? "w-1"),
+              ]);
+              return Promise.resolve(ws?.id ?? "w-1");
+            }
+            case "cloud_disconnect":
+              window.__setStatuses(window.__cloud.statuses.filter((s) => s.root !== args.root));
+              return Promise.resolve(null);
+            case "cloud_sync_now":
+              return Promise.resolve(null);
+            case "cloud_pause":
+              patchStatus(args.root, { phase: args.paused ? "paused" : "idle" });
+              return Promise.resolve(null);
+            case "cloud_confirm_deletes":
+              patchStatus(args.root, { phase: "idle", pendingDeletes: 0 });
+              return Promise.resolve(null);
+            case "cloud_check_worker":
+              patchStatus(args.root, { phase: "idle", workerVersion: 1, error: null });
+              return Promise.resolve(null);
+            case "cloud_token": {
+              const s = window.__cloud.statuses.find((s) => s.root === args.root);
+              return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });
+            }
+            case "cloud_history":
+              return Promise.resolve(window.__cloud.history);
+            case "cloud_revision":
+              return Promise.resolve(window.__cloud.revisions[args.hash] ?? "");
+            case "cloud_wipe":
+              window.__setStatuses(window.__cloud.statuses.filter((s) => s.root !== args.root));
+              return Promise.resolve(window.__cloud.wipeResult);
+            case "cloud_set_activity":
+            case "cloud_publish":
+            case "cloud_unpublish":
+            case "cloud_set_root":
+              return Promise.resolve(null);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+
+      // The API's unlisten path dereferences this global.
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: (event, id) => {
+          const list = (window.__listeners.get(event) ?? []).filter((l) => l.id !== id);
+          window.__listeners.set(event, list);
+        },
+      };
+
+      // A restorable /docs workspace session so the sidebar renders.
+      localStorage.clear();
+      localStorage.setItem(
+        "doklin:session",
+        JSON.stringify({
+          version: 2,
+          lastRoot: "/docs",
+          sessions: {
+            "/docs": {
+              tabs: [{ id: "t-notes", kind: "file", path: "/docs/notes.md" }],
+              activeId: "t-notes",
+            },
+          },
+        }),
+      );
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./cloud.tsx"></script>
+  </body>
+</html>

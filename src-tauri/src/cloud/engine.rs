@@ -160,6 +160,9 @@ pub struct PublishRequest {
 
 pub enum EngineCmd {
     SyncNow,
+    /// Ask the worker what it is again — "Check again" after an update.
+    /// A 426 pause resumes on its own the moment a newer version answers.
+    Probe,
     /// The edit bus: a workspace-relative path the app just wrote.
     Touched(String),
     /// The absolute path the user is editing, or nothing.
@@ -1544,6 +1547,15 @@ impl<R: Remote> Engine<R> {
                         return;
                     }
                     Some(EngineCmd::SyncNow) => cycle_now = true,
+                    Some(EngineCmd::Probe) => {
+                        let was_outdated = self.outdated.is_some();
+                        self.probe_worker().await;
+                        if was_outdated && self.outdated.is_none() {
+                            cycle_now = true;
+                        } else {
+                            self.refresh_status();
+                        }
+                    }
                     Some(EngineCmd::Touched(rel)) => {
                         self.dirty.insert(rel);
                         touch_dirty_at = Some(Instant::now());

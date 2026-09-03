@@ -95,6 +95,21 @@ node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
+node verify-harness/drive-cloud.mjs        # 22 steps: boots the REAL <App/> (cloud.html stubs the
+                                           # ENGINE: every cloud_* command answers from a scripted
+                                           # fake, window.__emit injects the engine's events) and
+                                           # walks the cloud surfaces — the not-connected panel, the
+                                           # wizard's fresh / bound / marker outcomes (the setup
+                                           # prompt carrying the token, the derived names, the
+                                           # route, the runtime date read from version.ts), the
+                                           # panel's phases on both dots, the gear badge, the worker
+                                           # update card (a prompt with no secret, Check again), a
+                                           # held mass-deletion's toast → panel → confirm, a conflict
+                                           # copy's toast opening the copy, cloud-applied refreshing
+                                           # the tree, presence chips, Connect another Mac, the
+                                           # history panel restoring a revision, disconnect, wipe →
+                                           # the teardown prompt, and the join flow opening the
+                                           # downloaded folder
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.
@@ -145,8 +160,16 @@ Gotchas learned the hard way:
   `device_name` with a string (App `.then`s it straight into the comment
   author), and stub `__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener` or
   StrictMode's unmount pass throws on every `listen()` cleanup.
+- A harness that DELIVERS events (cloud.html) has to honour unlisten:
+  `plugin:event|listen` hands back an id, and both `plugin:event|unlisten`
+  and `unregisterListener` must drop that id — StrictMode mounts twice, so
+  a registry that only ever grows delivers every event twice (two toasts).
+- Playwright auto-dismisses `window.confirm` (it returns false), so a
+  destructive action the drive has to reach must confirm inline (the
+  panel's Disconnect) or by typing the name back (the wipe), never with a
+  native dialog.
 
-Five pure-node unit suites (vite-compiled, no browser):
+Six pure-node unit suites (vite-compiled, no browser):
 
 ```sh
 node verify-harness/merge.test.mjs         # the comment-thread three-way merge
@@ -158,6 +181,14 @@ node verify-harness/metafile.test.mjs      # the entity meta file: expand/extrac
 node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidths.ts): what
                                            # keeps a column width and what deliberately drops
                                            # it, colspan/rowspan, junk records
+node verify-harness/cloudprompts.test.mjs  # the three agent prompts (src/cloudPrompts.ts) —
+                                           # setup with the token, update and teardown without
+                                           # — and the naming rule they share: numbered steps,
+                                           # login, verify-before-mutate, the config verbatim,
+                                           # the failure named, one line back, the negative
+                                           # scope; a workers.dev name is certain, a custom
+                                           # domain's is a convention the prompt says to verify
+                                           # (112 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
@@ -222,13 +253,14 @@ creating dummy gitignored resources the build script expects:
 `binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
 `binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 37 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 38 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
-paused clock, the 426 → worker-outdated state, presence, history, the edit
-bus routing, cloud.json and the marker), the sidebar tree walk including the
+paused clock, the 426 → worker-outdated state and the Probe command that
+resumes it, presence, history, the edit bus routing, cloud.json and the
+marker), the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists

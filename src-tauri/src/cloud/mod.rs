@@ -52,7 +52,7 @@ use engine::{Engine, EngineCmd, EngineConfig, PublishRequest};
 use manifest::{clean_name, PublicKind};
 use remote::HttpRemote;
 use scan::{rel_path, write_json};
-use status::{emit_statuses, snapshot, AppEvents, CloudStatus, Events, Probe, Revision, StatusTable};
+use status::{emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Probe, Revision, StatusTable};
 
 /// The worker version this app was built against, parsed out of
 /// cloud-worker/src/version.ts by build.rs — the number the update badge
@@ -295,6 +295,37 @@ pub(crate) async fn cloud_probe(app: AppHandle, endpoint: String, token: String)
         bundled_version: BUNDLED_WORKER_VERSION,
         features: meta.features,
         workspace: meta.workspace,
+    })
+}
+
+/// The marker a folder carries, if any — what the setup wizard reads to
+/// offer "resume syncing this folder" when a domain already holds the
+/// workspace the folder is.
+#[tauri::command]
+pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
+    read_marker(Path::new(&root))
+}
+
+/// The endpoint and the owner token of a connected workspace — what a
+/// second Mac needs to download it ("Connect another Mac…" in the panel).
+#[tauri::command]
+pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, String> {
+    with_inner(&app, |inner| {
+        let file = read_cloud_file(&inner.data_dir);
+        let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
+        Ok(Credentials { endpoint: entry.endpoint.clone(), token: entry.token.clone() })
+    })
+}
+
+/// Ask the engine to probe the worker again — "Check again" after an
+/// update. The fresh version lands in the next `cloud-status`.
+#[tauri::command]
+pub(crate) fn cloud_check_worker(app: AppHandle, root: String) -> Result<(), String> {
+    with_inner(&app, |inner| {
+        if let Some(h) = inner.engines.get(&root) {
+            let _ = h.tx.send(EngineCmd::Probe);
+        }
+        Ok(())
     })
 }
 

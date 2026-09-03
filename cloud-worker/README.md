@@ -12,7 +12,10 @@ API, the meta probe, the owner's wipe, a landing page at `/` and the static
 assets. Every other public path is a 404 page — the renderer (a published
 note, a folder's table of contents, boards and tables from a datastore,
 column widths, html renditions) arrives with publishing (PR 4). The engine
-that drives this API from the app is `src-tauri/src/cloud/` (PR 2).
+that drives this API from the app is `src-tauri/src/cloud/` (PR 2); the
+app's setup wizard, update card and teardown step (PR 3) write the prompts
+that deploy, update and remove a worker — `src/cloudPrompts.ts` is their
+one source, and the deploy steps below are the same procedure by hand.
 
 ## The rules it keeps
 

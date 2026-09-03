@@ -96,6 +96,15 @@ pub struct Probe {
     pub workspace: Option<WorkspaceRecord>,
 }
 
+/// What a second Mac needs to download a workspace: shown in the Cloud
+/// panel behind "Connect another Mac…", never carried by a status.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Credentials {
+    pub endpoint: String,
+    pub token: String,
+}
+
 /// One revision of a file for the History panel.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

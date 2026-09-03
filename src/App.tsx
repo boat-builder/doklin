@@ -3,11 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   cloudForWorkspace,
+  cloudNeedsAttention,
   cloudSetActivity,
   cloudStatus,
+  onCloudApplied,
+  onCloudConflict,
+  onCloudPendingDeletes,
   onCloudStatus,
+  type CloudPendingDeletesEvent,
   type CloudStatus,
 } from "./cloud";
+import CloudPanel from "./CloudPanel";
+import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
+import CloudToasts, { type CloudToast } from "./CloudToasts";
+import WorkerUpdate from "./WorkerUpdate";
+import HistoryPanel from "./HistoryPanel";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
@@ -951,6 +961,27 @@ export default function App() {
   const cloudForRoot = useMemo(
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
+  );
+  // The cloud surfaces (docs/cloud-redesign.md §7.2): the panel, the setup
+  // wizard (connect this folder, or open a workspace from a domain), the
+  // worker update card, the history panel for one document, and the
+  // transient notices. The held mass-deletion's paths ride the event that
+  // announced it; the panel lists them.
+  const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
+  const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
+  const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
+  const [historyPath, setHistoryPath] = useState<string | null>(null);
+  const [cloudToasts, setCloudToasts] = useState<CloudToast[]>([]);
+  const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
+  const toastSeq = useRef(0);
+  const pushToast = useCallback((text: string, action?: CloudToast["action"]) => {
+    toastSeq.current += 1;
+    const id = toastSeq.current;
+    setCloudToasts((ts) => [...ts.slice(-3), { id, text, action }]);
+  }, []);
+  const dismissToast = useCallback(
+    (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
+    [],
   );
 
   // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
@@ -4746,6 +4777,35 @@ export default function App() {
   useEffect(() => {
     void cloudSetActivity(activeFilePath).catch(() => {});
   }, [activeFilePath]);
+  // Sync wrote files: the tree refreshes (open tabs already reload through
+  // the file watcher). A merge that left a conflict copy, or a mass
+  // deletion the engine is holding, becomes a notice carrying the one
+  // action that matters.
+  useEffect(() => {
+    const uns = [
+      onCloudApplied((e) => {
+        if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
+      }),
+      onCloudConflict((e) => {
+        pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
+          label: "Open the copy",
+          run: () => void openTab(e.conflictPath, "file"),
+        });
+      }),
+      onCloudPendingDeletes((e) => {
+        setPendingDeletes(e);
+        if (e.count > 0) {
+          pushToast(
+            `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
+            { label: "Review…", run: () => setCloudPanelOpen(true) },
+          );
+        }
+      }),
+    ];
+    return () => {
+      for (const un of uns) void un.then((f) => f()).catch(() => {});
+    };
+  }, [openTab, pushToast]);
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
@@ -5423,6 +5483,8 @@ export default function App() {
           onDropFileToEditor={handleTreeDropToEditor}
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
+          onOpenCloud={() => setCloudPanelOpen(true)}
+          onHistory={setHistoryPath}
         />
       )}
       {conflict && (
@@ -5492,6 +5554,55 @@ export default function App() {
           }}
         />
       )}
+      {cloudPanelOpen && (
+        <CloudPanel
+          root={workspaceRoot}
+          cloud={cloudForRoot}
+          pendingDeletePaths={
+            pendingDeletes && pendingDeletes.root === workspaceRoot ? pendingDeletes.paths : []
+          }
+          onClose={() => setCloudPanelOpen(false)}
+          onConnect={() => {
+            setCloudPanelOpen(false);
+            setCloudSetup("connect");
+          }}
+          onJoin={() => {
+            setCloudPanelOpen(false);
+            setCloudSetup("join");
+          }}
+          onUpdateWorker={() => {
+            setCloudPanelOpen(false);
+            setWorkerUpdateOpen(true);
+          }}
+          onOpenExternal={openExternal}
+        />
+      )}
+      {cloudSetup && (
+        <CloudSetup
+          mode={cloudSetup}
+          root={workspaceRoot}
+          onClose={() => setCloudSetup(null)}
+          onConnected={(root, how) => {
+            setCloudSetup(null);
+            if (how === "join") void openWorkspace(root);
+          }}
+        />
+      )}
+      {workerUpdateOpen && cloudForRoot && (
+        <WorkerUpdate
+          cloud={cloudForRoot}
+          onClose={() => setWorkerUpdateOpen(false)}
+          onOpenExternal={openExternal}
+        />
+      )}
+      {historyPath && (
+        <HistoryPanel
+          docPath={historyPath}
+          onClose={() => setHistoryPath(null)}
+          onOpenFile={(p) => void openTab(p, "file")}
+        />
+      )}
+      <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
       <Settings
         theme={theme}
         onChange={setTheme}
@@ -5507,6 +5618,8 @@ export default function App() {
         onOpenDictationSetup={() => setDictationSetupOpen(true)}
         update={update}
         onOpenExternal={openExternal}
+        onOpenCloud={() => setCloudPanelOpen(true)}
+        cloudAttention={cloudNeedsAttention(cloudStatuses)}
       />
     </div>
   );
@@ -5921,6 +6034,8 @@ function Settings({
   onOpenDictationSetup,
   update,
   onOpenExternal,
+  onOpenCloud,
+  cloudAttention,
 }: {
   theme: Theme;
   onChange: (t: Theme) => void;
@@ -5936,6 +6051,10 @@ function Settings({
   onOpenDictationSetup: () => void;
   update: UpdateController;
   onOpenExternal: (url: string) => void;
+  // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
+  // when a connected domain's worker is behind this app.
+  onOpenCloud: () => void;
+  cloudAttention: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -5982,6 +6101,13 @@ function Settings({
     default:
       updateStatusText = ver ? `${ver} · Up to date` : "";
   }
+
+  // One badge, two reasons: an app update, or a cloud worker behind it.
+  const fabLabel = updateAvailable
+    ? "Settings — update available"
+    : cloudAttention
+      ? "Settings — the cloud worker needs an update"
+      : "Settings";
 
   return (
     <div ref={wrapRef} className="settings-wrap">
@@ -6078,6 +6204,22 @@ function Settings({
           >
             <span className="settings-option-check" />
             <span className="settings-option-label">Dictation settings…</span>
+          </button>
+          <div className="settings-divider" />
+          <div className="settings-section-label">Cloud</div>
+          <button
+            role="menuitem"
+            className="settings-option"
+            data-testid="settings-cloud"
+            onClick={() => {
+              setOpen(false);
+              onOpenCloud();
+            }}
+          >
+            <span className="settings-option-check">
+              {cloudAttention ? <span className="settings-option-dot" aria-hidden /> : null}
+            </span>
+            <span className="settings-option-label">Cloud…</span>
           </button>
           {recents.length > 0 && (
             <>
@@ -6196,16 +6338,12 @@ function Settings({
       <button
         className="settings-fab"
         onClick={() => setOpen((o) => !o)}
-        aria-label={
-          updateAvailable ? "Settings — update available" : "Settings"
-        }
+        aria-label={fabLabel}
         aria-expanded={open}
-        title={
-          updateAvailable ? "Settings — update available" : "Settings"
-        }
+        title={fabLabel}
       >
         <GearIcon />
-        {updateAvailable && (
+        {(updateAvailable || cloudAttention) && (
           <span className="settings-fab-badge" aria-hidden />
         )}
       </button>

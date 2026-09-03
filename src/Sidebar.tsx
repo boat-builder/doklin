@@ -117,6 +117,11 @@ type Props = {
   // Drag-resize of the sidebar itself (right-edge handle); the app owns the
   // width (a CSS variable on the grid) and persists it.
   onResizeWidth?: (w: number) => void;
+  // Open the Cloud panel — the dot beside the workspace name, and "Cloud…"
+  // in its menu.
+  onOpenCloud?: () => void;
+  // Version history for a document; offered only in a connected workspace.
+  onHistory?: (path: string) => void;
 };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
@@ -172,6 +177,8 @@ export default function Sidebar({
   onDropFileToEditor,
   onDragFileCancel,
   onResizeWidth,
+  onOpenCloud,
+  onHistory,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -764,6 +771,17 @@ export default function Sidebar({
   );
 
   const rootName = useMemo(() => basename(root), [root]);
+
+  // Who else is editing what, by absolute path — the chip on a file's row.
+  const presenceByPath = useMemo(() => {
+    const out = new Map<string, string[]>();
+    for (const p of cloud?.presence ?? []) {
+      if (!p.path) continue;
+      const abs = `${root}/${p.path}`;
+      out.set(abs, [...(out.get(abs) ?? []), p.name]);
+    }
+    return out;
+  }, [cloud, root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
@@ -819,6 +837,10 @@ export default function Sidebar({
       label: "Reveal in Finder",
       onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
     });
+    // A synced document's revisions live with the engine (§6.9).
+    if (target.kind === "file" && cloud && onHistory) {
+      items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
+    }
     // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
     // target, next to a file target, at the root for empty space — and stays
     // visible-but-disabled while the clipboard is empty.
@@ -874,6 +896,8 @@ export default function Sidebar({
     onCopyEntries,
     onPasteEntries,
     root,
+    cloud,
+    onHistory,
   ]);
 
   // Right-edge drag handle: the app owns the width (grid CSS variable);
@@ -921,6 +945,7 @@ export default function Sidebar({
         onSwitchToSearch={onSwitchToSearch}
         onNewFile={() => startCreate("file", createDirFor(primarySelection))}
         onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
+        onOpenCloud={onOpenCloud}
       />
       <div
         ref={bodyRef}
@@ -972,6 +997,7 @@ export default function Sidebar({
                 dragPaths={dragPaths}
                 dropDir={dropDir === root ? null : dropDir}
                 dnd={dnd}
+                presence={presenceByPath}
                 onToggle={toggleCollapsed}
                 onOpenFile={onOpenFile}
                 onOpenBoard={onOpenBoard}
@@ -1036,6 +1062,7 @@ function SidebarHeader({
   onSwitchToSearch,
   onNewFile,
   onNewFolder,
+  onOpenCloud,
 }: {
   name: string;
   cloud: CloudStatus | null;
@@ -1052,6 +1079,7 @@ function SidebarHeader({
   onSwitchToSearch: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
+  onOpenCloud?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -1083,16 +1111,19 @@ function SidebarHeader({
         title="Workspace menu"
       >
         <span className="sidebar-header-name">{name}</span>
-        {cloud && (
-          <span
-            className={`sidebar-cloud-dot phase-${cloud.phase}`}
-            role="img"
-            aria-label={describeCloud(cloud)}
-            title={describeCloud(cloud)}
-          />
-        )}
         <ChevronDownIcon />
       </button>
+      {cloud && (
+        <button
+          className="sidebar-cloud-btn"
+          onClick={onOpenCloud}
+          title={describeCloud(cloud)}
+          aria-label={describeCloud(cloud)}
+          data-testid="sidebar-cloud-dot"
+        >
+          <span className={`sidebar-cloud-dot phase-${cloud.phase}`} />
+        </button>
+      )}
       <button
         className="sidebar-header-refresh"
         onClick={onNewFile}
@@ -1158,6 +1189,17 @@ function SidebarHeader({
             Reveal in Finder
           </button>
           <button
+            role="menuitem"
+            className="sidebar-menu-item"
+            data-testid="sidebar-menu-cloud"
+            onClick={() => {
+              setMenuOpen(false);
+              onOpenCloud?.();
+            }}
+          >
+            Cloud…
+          </button>
+          <button
             role="menuitemcheckbox"
             aria-checked={showAll}
             className="sidebar-menu-item sidebar-menu-item-check"
@@ -1188,6 +1230,7 @@ function TreeItem({
   dragPaths,
   dropDir,
   dnd,
+  presence,
   onToggle,
   onOpenFile,
   onOpenBoard,
@@ -1214,6 +1257,8 @@ function TreeItem({
   dragPaths: Set<string>;
   dropDir: string | null;
   dnd: TreeDnd;
+  // Names of the people editing a file right now, by absolute path.
+  presence: Map<string, string[]>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onOpenBoard: (path: string) => void;
@@ -1256,6 +1301,7 @@ function TreeItem({
       );
     }
     const active = node.path === currentPath;
+    const editors = presence.get(node.path);
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
@@ -1280,6 +1326,15 @@ function TreeItem({
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
+          {editors && (
+            <span
+              className="tree-presence"
+              title={`${editors.join(", ")} — editing now`}
+              data-testid="tree-presence"
+            >
+              {editors.length > 1 ? `${editors[0]} +${editors.length - 1}` : editors[0]}
+            </span>
+          )}
         </button>
       </li>
     );
@@ -1367,6 +1422,7 @@ function TreeItem({
               dragPaths={dragPaths}
               dropDir={dropDir}
               dnd={dnd}
+              presence={presence}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onOpenBoard={onOpenBoard}

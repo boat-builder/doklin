@@ -941,6 +941,32 @@ pending-deletes prompt, conflict toasts, `cloud-applied` → tree refresh;
 - Done when: setup ends with the folder syncing and the prompt contains no
   step the agent has to invent.
 
+As built: the surfaces are `CloudPanel.tsx`, `CloudSetup.tsx`,
+`WorkerUpdate.tsx`, `HistoryPanel.tsx` and `CloudToasts.tsx`; the three
+prompts are pure functions in `src/cloudPrompts.ts` (unit-tested by
+`verify-harness/cloudprompts.test.mjs` for the seven-part skeleton and
+"nothing left for the agent to invent"), built from the worker version and
+the compatibility date that `vite.config.ts` parses out of
+`cloud-worker/src/version.ts` into `virtual:cloud-worker-version` (§7.1).
+Three small commands joined §6.7: `cloud_marker(root)` (the wizard's
+*Resume* outcome reads the folder's marker), `cloud_token(root)` (the
+panel's *Connect another Mac…* shows the endpoint and the owner token — the
+status never carries it) and `cloud_check_worker(root)` (*Check again*
+sends the engine an `EngineCmd::Probe`; a 426 pause resumes on it). The
+wizard has two entrances — *Connect a domain…* for the open folder, *Open a
+workspace from a domain…* for a second Mac — and one probe step that
+decides between *Connect & upload*, *Download it here* and *Resume syncing
+this folder*; a workers.dev address is chosen by name (`doklin-<name>`) and
+its endpoint pasted from the agent's output, since only wrangler knows the
+account's subdomain. The update prompt verifies with an unauthenticated
+`/api/meta` (a `401` means the new worker is up; the app checks the
+version itself), because it carries no token by design. Disconnect asks
+inline; wipe asks for the domain typed back, then shows the teardown prompt
+in place since the status is gone by then. The gear's badge lights for an
+app update or a worker behind the bundled version, and the *Cloud…* item
+carries a dot for the same reason. `verify-harness/drive-cloud.mjs` walks
+all of it (22 steps) over a scripted fake of the engine in `cloud.html`.
+
 ### PR 4 — Publishing
 
 The public map end to end: engine ops (already in PR 2's tests) exposed as

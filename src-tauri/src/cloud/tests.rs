@@ -1253,6 +1253,56 @@ async fn a_426_pauses_with_the_right_phase() {
     assert_eq!(manifest_of(&be).files.len(), 2);
 }
 
+/// "Check again" in the update card: a Probe command re-asks the worker, and
+/// an engine parked on a 426 resumes — with the cycle it had been holding —
+/// the moment a newer version answers.
+#[tokio::test]
+async fn a_probe_command_resumes_an_outdated_engine() {
+    let be = backend();
+    let a = device("Alice", &be);
+    let root = a.root.path().to_path_buf();
+    let statuses = a.statuses.clone();
+    let key = root.to_string_lossy().to_string();
+    std::fs::write(root.join("doc.md"), "# doc\n").unwrap();
+    be.lock().unwrap().reject_schema = true;
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    let phase = |statuses: &StatusTable| statuses.lock().unwrap()[&key].phase;
+    let settle = || async {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    };
+
+    settle().await;
+    assert_eq!(phase(&statuses), Phase::WorkerOutdated);
+    assert!(manifest_of(&be).files.is_empty());
+
+    // The same worker answering again: still waiting, status re-emitted.
+    cmd_tx.send(EngineCmd::Probe).unwrap();
+    settle().await;
+    assert_eq!(phase(&statuses), Phase::WorkerOutdated);
+    assert_eq!(statuses.lock().unwrap()[&key].worker_version, Some(1));
+
+    // The updated worker: the probe clears the pause and the cycle runs.
+    {
+        let mut be2 = be.lock().unwrap();
+        be2.reject_schema = false;
+        be2.worker_version = 2;
+    }
+    cmd_tx.send(EngineCmd::Probe).unwrap();
+    settle().await;
+    assert_eq!(phase(&statuses), Phase::Idle);
+    assert_eq!(statuses.lock().unwrap()[&key].worker_version, Some(2));
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "doc.md"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
 #[tokio::test]
 async fn presence_reports_the_edited_path_and_the_others() {
     let be = backend();
