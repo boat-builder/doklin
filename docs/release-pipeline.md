@@ -20,7 +20,7 @@ the Settings UI, the app-side plugin wiring — is
 
 ```mermaid
 flowchart TD
-  PR[Pull request] -->|ci.yml: eslint + tsc| M[Merge to main]
+  PR[Pull request] -->|ci.yml: eslint + tsc + worker tests| M[Merge to main]
   M --> B[job: bump<br/>ubuntu]
   B -->|stamp version in 4 files<br/>commit + tag vX.Y.Z<br/>push| T[(tag vX.Y.Z)]
   B --> R[job: build-release<br/>macos-15]
@@ -30,17 +30,20 @@ flowchart TD
   TB --> V[verify: codesign / stapler / entitlements / lipo]
   V --> D[notarize + staple the .dmg<br/>version'd name + stable alias + SHA256SUMS]
   V --> U[updater artifacts: .app.tar.gz + latest.json]
+  V --> W[bundle the cloud worker<br/>doklin-cloud-worker.js]
   D --> P[GitHub Release, make_latest]
   U --> P
+  W --> P
   P -->|releases/latest/download/latest.json| A[Installed apps poll,<br/>one-click self-update]
   P -->|releases/latest/download/*.dmg| L[Stable download link]
+  P -->|releases/latest/download/doklin-cloud-worker.js| C[An agent deploys or updates<br/>a domain with wrangler]
 ```
 
 Two workflows, no more:
 
 | Workflow | Trigger | Runner | Job |
 | --- | --- | --- | --- |
-| [`ci.yml`](../.github/workflows/ci.yml) | `pull_request` | `ubuntu-latest`, 10 min | `pnpm lint` (eslint `react-hooks/rules-of-hooks`) + `pnpm exec tsc --noEmit` |
+| [`ci.yml`](../.github/workflows/ci.yml) | `pull_request` | `ubuntu-latest`, 10 min | `pnpm lint` (eslint `react-hooks/rules-of-hooks`) + `pnpm exec tsc --noEmit`, then the cloud worker: its typecheck, `node cloud-worker/test/run.mjs`, the bundle (size printed, fails past 3 MB gzipped) and the suite again against the bundle |
 | [`release.yml`](../.github/workflows/release.yml) | push to `main`, or `workflow_dispatch` | `ubuntu-latest` → `macos-15`, 360 min | `bump` then `build-release` |
 
 Rust is deliberately **not** built in the PR gate — it would dominate CI time
@@ -60,7 +63,7 @@ The "storage" for built artifacts is the **GitHub Release for the tag**, marked
 `releases/latest/download/…`, which is what everything downstream points at —
 no S3/R2 bucket, no CDN config, no credentials for consumers.
 
-Every release carries five assets, staged in `release-assets/` (never `dist/` —
+Every release carries six assets, staged in `release-assets/` (never `dist/` —
 that's Vite's frontend output, and publishing `dist/*` would sweep `index.html`
 and the web assets into the release; see commit `4d8f2e8`):
 
@@ -71,6 +74,7 @@ and the web assets into the release; see commit `4d8f2e8`):
 | `SHA256SUMS` | Checksums for both DMGs | Verification |
 | `Doklin.app.tar.gz` | The signed bundle the updater swaps in | `tauri-plugin-updater` |
 | `latest.json` | Update manifest: version, notes, pub_date, per-platform `{signature, url}` | The updater endpoint in `tauri.conf.json` |
+| `doklin-cloud-worker.js` | The cloud worker, bundled to one file (`scripts/bundle-worker.mjs`, the mermaid module spliced in) | `releases/latest/download/…` — what the app's setup and update prompts tell the agent running wrangler to fetch |
 
 Note the `.sig` file is **not** published: its contents are inlined into
 `latest.json` as the `signature` field.
@@ -253,7 +257,22 @@ The manifest's shape, its field-by-field semantics, and what an absent platform
 key does to installs are in
 [auto-update.md § Manifest format](auto-update.md#manifest-format-tauri-v2-static).
 
-### 4.8 Publish
+### 4.8 The cloud worker asset
+
+```yaml
+- name: Bundle cloud worker (release asset)
+  run: node scripts/bundle-worker.mjs release-assets/doklin-cloud-worker.js
+```
+
+`cloud-worker/src` (TypeScript) flattened by vite into one readable file with
+the standalone mermaid module spliced in as a string — the same script CI
+runs on every pull request, where it also prints the size and fails past
+Cloudflare's 3 MB compressed ceiling. Staged beside the DMGs so the release
+carries it under a stable name: the app's setup and update prompts point the
+agent at `releases/latest/download/doklin-cloud-worker.js`, and nobody
+clones or builds anything to deploy a domain.
+
+### 4.9 Publish
 
 ```yaml
 uses: softprops/action-gh-release@v2

@@ -44,3 +44,6 @@ coverage
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Cloud worker: the real deployment config carries an account id and a domain
+cloud-worker/wrangler.toml

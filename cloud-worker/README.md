@@ -1,0 +1,196 @@
+# Doklin cloud worker
+
+One Cloudflare Worker in front of one R2 bucket, serving one workspace's
+cloud at one domain: the private sync API the app's engine speaks, and —
+once publishing lands — the public pages rendered from the synced files.
+The design, the reasoning and the phased plan live in
+[docs/cloud-redesign.md](../docs/cloud-redesign.md); this file is the
+contract as built.
+
+**Where things stand.** This is the worker of the plan's PR 1: the sync
+API, the meta probe, the owner's wipe, a landing page at `/` and the static
+assets. Every other public path is a 404 page — the renderer (a published
+note, a folder's table of contents, boards and tables from a datastore,
+column widths, html renditions) arrives with publishing (PR 4), and the
+engine that drives this API from the app is PR 2.
+
+## The rules it keeps
+
+- **One domain ⇄ one workspace.** `workspace.json` is written with R2's
+  create-only put; a second bind answers `409` with what the domain holds
+  and never overwrites. A domain is bound iff that object exists, and the
+  only thing that removes it is the owner's wipe.
+- **The engine is the only caller.** Bearer auth on every `/api` route, no
+  CORS, no preflight, no cookies, no sessions. The visitor's surface is
+  URLs, `GET`/`HEAD`, and nothing to unlock.
+- **Nothing public is stored.** The bucket is the synced workspace — a
+  manifest and content-addressed blobs. A public page is a rendering of
+  those files, so it can never be staler than the sync, or fresher.
+- **The API only grows; an old worker fails legibly.** One version integer
+  (`src/version.ts`), reported by `/api/meta`, compared by the app with the
+  integer it was built against. A manifest whose schema this worker
+  predates gets `426`, which the engine turns into "update the worker".
+
+## The bucket
+
+```
+workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceName}}
+                            — the binding. Written once, create-only.
+manifest.json               the workspace manifest (v2, below) — CAS by etag
+blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
+history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
+presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
+auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
+auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
+```
+
+### The manifest (v2)
+
+```json
+{
+  "version": 2,
+  "name": "Notes",
+  "seq": 812,
+  "files": {
+    "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
+                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro",
+                  "hist": [ { "r": 6, "h": "…", "s": 4211, "t": 1756900000000, "b": "…" } ] }
+  },
+  "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "…" } },
+  "public": {
+    "k7m2p9qx": { "kind": "file", "file": "f-3kq8x1", "path": "Projects/plan.md", "by": "…", "at": 1757000000000 },
+    "roadmap":  { "kind": "dir",  "path": "Projects/Roadmap", "title": "Roadmap", "desc": "…", "by": "…", "at": 1757000000000 },
+    "home":     { "kind": "file", "file": "f-77a1b2", "path": "Home.md", "root": true, "by": "…", "at": 1757000000000 }
+  }
+}
+```
+
+`public` is the public map, keyed by slug (`^[a-z0-9][a-z0-9-]{2,63}$`, not
+one of `api`, `__web`, `raw`, `og.png`, `robots.txt`, `favicon.ico`,
+`apple-touch-icon.png`, `join`). A file entry references the file id — a
+rename carries the page — and snapshots the path, so a file deleted and
+recreated at the same path can be re-bound; a folder entry (`""` is the
+workspace root) exposes every note under it. `root: true` on at most one
+entry makes it the page at `/`.
+
+Every `PUT` is shape-checked (`src/manifest.ts`): ids, hashes, relative
+paths with no traversal, one path per file (case-insensitive), revision
+and size ranges, the inline history cap, slug grammar and reserved words,
+well-formed references, one root. References are **not** checked for
+existence: a public entry outlives its file on purpose (the page 404s while
+the file is gone and comes back when the file does — stopping is explicit),
+and a folder entry may cover a folder that is empty right now. Semantics
+(which revision wins, merges, what to do with a tombstone) are the engine's.
+
+## The API
+
+All `/api/*` routes require `Authorization: Bearer <token>` and answer JSON.
+The engine also sends `x-doklin-device: <deviceId>` (attribution: presence,
+the binding's `createdBy`) and `x-doklin-client: <app version>` (for the
+logs; nothing reads it).
+
+```
+GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null}
+                                 — liveness, the credential and "is this domain bound" in one call
+POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
+                                 createdBy, manifestEtag}; 409 {workspace} when already bound
+GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
+GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
+PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
+                                 on a lost race; 400 on garbage; 426 on a newer schema; 413 past 4 MB
+GET    /api/blobs/<fid>          {blobs: [{hash, size, uploaded}]} — the inventory GC diffs
+GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
+PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
+                                 {existed: true}); 413 past 25 MB
+DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
+GET    /api/history/<fid>        {version: 1, entries: [{r, h, s, t, b?}]}; 404 when there is none
+PUT    /api/history/<fid>        replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
+PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
+                                 (path absent or null: here, idle); needs x-doklin-device
+DELETE /api/presence             this device left
+POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
+                                 repeat until remaining:false. Frees the domain for a new binding.
+```
+
+Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
+`404 {"error":"not bound"}`.
+
+Reserved for invites (plan §8.1), not built: `POST /api/auth/join`,
+`GET/POST/DELETE /api/auth/invites`, `GET/DELETE /api/auth/tokens`.
+
+### Public (no auth, `GET`/`HEAD` only)
+
+```
+GET /                          the landing page (the workspace's name, "Download Doklin");
+                               the root page once publishing lands and the map names one
+GET /robots.txt · /favicon.ico · /apple-touch-icon.png
+GET /__web/<tag>/mermaid.js    the standalone mermaid module (immutable, content-tagged)
+everything else                a 404 page, until PR 4 renders published files here
+```
+
+Every page carries `<meta name="robots" content="noindex">`.
+
+## Auth
+
+`OWNER_TOKEN` (the worker secret; 32 random bytes hex, minted by the app at
+setup) is compared by SHA-256 in constant time — role `owner`. Any other
+bearer is looked up as `auth/tokens/<sha256(token)>.json`, the record an
+invite will mint for a member: role `member`, may sync and publish; only
+the owner may bind, wipe, invite or revoke. No invite exists yet, so the
+lookup finds nothing today — it is there so invites are an addition, not a
+change. Revocation is deleting the object.
+
+## Deploying
+
+The app writes the whole procedure into a prompt for an agent
+(plan §7.4). By hand, the same steps:
+
+Names derive from the domain — `notes.example.com` → worker and bucket
+`doklin-notes-example-com`; a free `workers.dev` address with the chosen
+name `sherin-notes` → `doklin-sherin-notes` — so two setups can never
+collide and a new deploy can never land on an old `doklin-share-*` stack.
+The secret is `OWNER_TOKEN`, the R2 binding is `DATA`.
+
+```sh
+mkdir doklin-cloud && cd doklin-cloud
+curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js \
+     -o doklin-cloud-worker.js        # or: node scripts/bundle-worker.mjs in this repo
+npx -y wrangler@4 whoami              # `wrangler login` first if it asks
+# wrangler.toml: copy wrangler.toml.example, fill in the account id, domain, names
+npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # before deploy — it must exist
+npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
+npx -y wrangler@4 deploy
+curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
+# → {"version":1,"features":[…],"workspace":null}
+```
+
+A custom domain needs its zone active on the same Cloudflare account, and
+the first TLS certificate can take a minute after deploy.
+
+**Update:** fetch the new bundle, `wrangler deploy` over the same name; the
+secret and the bucket stay. **Teardown:** the app's wipe empties the bucket
+(R2 refuses to delete a non-empty one), then `wrangler delete --name …` and
+`wrangler r2 bucket delete …`.
+
+## Developing
+
+```sh
+pnpm typecheck:worker      # tsc against the Workers runtime types (no DOM)
+pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2, every route
+pnpm bundle:worker         # → cloud-worker/dist/doklin-cloud-worker.js, size printed
+node scripts/bundle-worker.mjs --no-mermaid    # a quick bundle without the mermaid module
+```
+
+The sources are TypeScript (`src/`); `scripts/bundle-worker.mjs` flattens
+them with vite into one readable file — people are asked to trust-deploy it
+— with the standalone mermaid module (`web/mermaid-entry.ts`) spliced into
+`src/assets.ts` as a string. The checked-in `assets.ts` is empty so the
+tests compile the worker without building mermaid. The bundle prints its
+size raw and gzipped and fails past Cloudflare's 3 MB compressed ceiling;
+mermaid is most of what it carries. CI runs all three; the release workflow
+attaches the bundle to every GitHub release.
+
+`src/version.ts` is the one place the version lives. Bump `WORKER_VERSION`
+when the API grows, keep the declaration on its own line in the shape the
+regex expects, and add the feature name to `WORKER_FEATURES`.

@@ -189,6 +189,31 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # (2252 checks)
 ```
 
+## Cloud worker (`cloud-worker/`)
+
+The Cloudflare Worker behind a connected domain — TypeScript, its own
+tsconfig (Workers runtime types, no DOM), tested without deploying:
+
+```sh
+pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
+node cloud-worker/test/run.mjs             # 15 cases against an in-memory R2 fake, the
+                                           # sources compiled in-process through vite: auth,
+                                           # meta, bind-once (409), the unbound 404s, manifest
+                                           # CAS (304 / 412 / 428), validation + the public
+                                           # map, 426 on a newer schema, blobs (a re-put is a
+                                           # no-op), history, presence (device header, prune,
+                                           # leave), the landing page / static assets / 404
+                                           # page, wipe freeing the domain for a new bind
+node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
+                                           # mermaid module spliced in; ~40 s); prints raw +
+                                           # gzipped size, fails past 3 MB gzipped
+node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
+                                           # the same suite against the bundle — the mermaid
+                                           # asset then serves instead of 503
+```
+
+`--no-mermaid` gives a quick bundle for shape checks (the /__web asset 503s).
+
 ## Rust side
 
 `cd src-tauri && cargo check` works on Linux after

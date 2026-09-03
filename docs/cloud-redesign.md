@@ -209,7 +209,8 @@ presence/`by`) and `x-doklin-client: <app version>` (diagnostics).
 ```
 GET    /api/meta                     {version, features, workspace: {id, name, createdAt, createdBy} | null}
                                      — liveness + credential + "is this domain bound" in one call
-POST   /api/workspace                bind: body {name} → 201 {id, name, manifestEtag}
+POST   /api/workspace                bind: body {name, deviceName?} → 201 {id, name, createdAt, createdBy,
+                                     manifestEtag}
                                      409 {workspace} when already bound (never overwrites)
 GET    /api/workspace                {id, name, createdAt, createdBy, files, bytes}
 GET    /api/poll                     {manifestEtag, presence} — the cheap 15 s poll
@@ -222,7 +223,8 @@ PUT    /api/blobs/<fid>/<hash>       store bytes (immutable; a re-PUT of the sam
 DELETE /api/blobs/<fid>/<hash>       garbage-collect an unreferenced revision
 GET    /api/history/<fid>            {version, entries}
 PUT    /api/history/<fid>            replace the archive (advisory, size-capped)
-PUT    /api/presence                 body {name?, path|null}
+PUT    /api/presence                 body {name?, path?} — here, editing path (no path: here, idle)
+DELETE /api/presence                 this device left
 POST   /api/admin/wipe               owner; body {"confirm":"wipe"} — erase everything, batched;
                                      repeat until remaining:false. Frees the domain for a new binding.
 ```
@@ -334,7 +336,9 @@ text otherwise — the same rule today's board card links follow.
 - `const WORKER_VERSION = 1;` restarts the counter in
   `cloud-worker/src/version.ts` — a separate file so the app's build can read
   the integer without bundling the worker (§7.1). `WORKER_FEATURES` starts
-  as `["sync", "publish", "boards", "wipe"]`.
+  as `["sync", "wipe"]`; `"publish"` and `"boards"` join it when the
+  renderer lands (PR 4) — a feature name is a promise about behaviour, so it
+  is not listed before the behaviour exists.
 - The engine probes `/api/meta` on start and after every reconnect and
   reports `workerVersion` in its status; the frontend compares with the
   bundled integer and shows the update badge. A worker that receives a
@@ -531,8 +535,11 @@ sections become the public map, and status reporting is keyed by root.
   resolve like path dedupe: the loser's entry gets a suffix and its device
   is told.
 - The worker validates the map on `PUT` (slug grammar, reserved words,
-  references resolve to a file or a directory prefix present in `files`, at
-  most one root) so a corrupted device can never publish garbage.
+  well-formed references — a file id and a relative path — and at most one
+  root) so a corrupted device can never publish garbage. References are
+  checked for shape, not existence: an entry outlives its file by design
+  (the bullet above), and a folder entry may cover a folder that is empty
+  right now.
 
 ### 6.7 Commands and events — the frontend contract
 
@@ -864,6 +871,17 @@ workflow attaching it. Public routes answer 404 for now (the renderer is PR
 - Verify: `node cloud-worker/test/run.mjs`; the bundle size printed in CI.
 - Done when: a fresh domain binds once, a second bind is 409, a CAS race
   loses with 412, wipe frees the domain.
+
+As built: `WORKER_FEATURES` is `["sync", "wipe"]` until PR 4 (§5.7). The bind
+writes the empty manifest first and `workspace.json` second, both create-only,
+so a bind that dies between its two writes leaves a *free* domain with an
+empty manifest for the next bind to adopt — never a bound domain with no
+manifest. Presence gained `DELETE /api/presence` (a device leaving) and a
+beat without a path means "here, idle". The public map's references are
+shape-checked, not existence-checked (§6.6). No CORS: the engine is the only
+caller. Runtime types come from `@cloudflare/workers-types` under the
+worker's own `tsconfig.json`; `cloud-worker/test/run.mjs` also runs against
+the bundle (`--bundle`), where the mermaid asset serves instead of 503.
 
 ### PR 2 — The engine
 

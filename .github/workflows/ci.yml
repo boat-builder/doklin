@@ -5,6 +5,10 @@ name: ci
 #     one shipped in v0.1.24 and made the app unbootable for four releases)
 #   - the same tsc typecheck `pnpm build` runs, but before merge instead of
 #     failing the release job on main
+#   - the cloud worker (cloud-worker/): its own typecheck (Workers runtime
+#     types, no DOM), its tests against an in-memory R2 — once compiled from
+#     source, once against the bundle — and the bundle itself, which prints
+#     the size and fails past Cloudflare's 3 MB free-plan ceiling
 # Rust is deliberately not built here — it would dominate the runtime and the
 # release build covers it.
 
@@ -35,3 +39,15 @@ jobs:
 
       - name: Typecheck
         run: pnpm exec tsc --noEmit
+
+      - name: Typecheck the cloud worker
+        run: pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
+
+      - name: Cloud worker tests
+        run: node cloud-worker/test/run.mjs
+
+      - name: Bundle the cloud worker (size check)
+        run: node scripts/bundle-worker.mjs
+
+      - name: Cloud worker tests against the bundle
+        run: node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js

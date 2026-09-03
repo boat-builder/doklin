@@ -20,6 +20,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "cloud-worker/web"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
