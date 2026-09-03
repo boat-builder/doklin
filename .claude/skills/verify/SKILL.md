@@ -14,7 +14,8 @@ pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
 `PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
-surfaces over a scripted engine (`drive-cloud.mjs`), and the public pages a
+surfaces over a scripted engine (`drive-cloud.mjs`), a document's version history
+(`drive-versions.mjs`), and the public pages a
 published workspace serves (`drive-public.mjs`, against the real worker).
 
 ```sh
@@ -83,7 +84,7 @@ node verify-harness/drive-kanban-embed.mjs # 44 steps over the SAME harness page
                                           # edit), an embed pointing at a folder that isn't a
                                           # board, and a split pane's board going read-only
                                           # until promoted
-node verify-harness/drive-split.mjs        # 18 steps: boots the REAL <App/> (split.html stubs
+node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, the device name) and walks the split view —
                                            # same-doc duplicate split (read-only mirror tracking
@@ -116,7 +117,27 @@ node verify-harness/drive-cloud.mjs        # 29 steps: boots the REAL <App/> (cl
                                            # sidebar's dots, the folder dialog, a note inside a
                                            # published folder knowing its nested address, the
                                            # published list (home page, stop), the sidebar's
-                                           # undoable stop
+                                           # undoable stop, and the version rail carrying a
+                                           # cloud-only revision (read through cloud_revision,
+                                           # restored by handing its text to the version store)
+node verify-harness/drive-versions.mjs      # 18 steps over the SAME harness page (cloud.html's IPC
+                                           # stub answers versions_* from a scripted store whose
+                                           # restore really writes the file and emits
+                                           # `versions-applied`): the version rail from the sidebar
+                                           # with NO cloud connected, its day groups (Today and
+                                           # Yesterday open, an older day collapsed to a row that
+                                           # expands), the trust line, a named version keeping its
+                                           # own row, a version rendered IN the document area
+                                           # read-only under its banner — and the live editor's
+                                           # text intact after Esc — Show changes as a unified
+                                           # diff, Make a copy writing `<stem> (version …)` beside
+                                           # the original and opening it, Restore as ONE command
+                                           # (hash + ts, no text) with the toast's Undo restoring
+                                           # the pre-restore hash, the rail gaining a row that says
+                                           # what it was restored from, Name this version, the tab
+                                           # menu and ⌘⌥H, a draft's history from the drafts
+                                           # store, and a revision only the cloud has — badged,
+                                           # read through cloud_revision, with Show changes absent
 node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
                                            # included, ~1 min) over an in-memory bucket seeded with
                                            # cloud-worker/test/seed.mjs, on http://localhost:8787
@@ -297,14 +318,14 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 39 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 40 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, history, the edit bus routing, cloud.json and the marker), the versioning store (`--lib versions` — 24 tests: the cadence
+presence, history, the edit bus routing, cloud.json and the marker), the versioning store (`--lib versions` — 37 tests: the cadence
 rule's consequences on a simulated clock (a burst inside one interval, a
 steady hour, a quiet hour, a session's end, a write loop), the seed capture,
 the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
@@ -313,6 +334,14 @@ years with its per-band counts and its idempotence, the sweep with and
 without the blob grace period, the edit bus routing, the index/snapshot
 round trip through gzip, and the task itself — a session captured on the way
 out and a quit-time flush that answers only once the snapshot is on disk),
+and one file's history read back out of those snapshots (a rename followed
+backwards, a recreated path starting over, a deleted path still reachable,
+equal contents collapsing to the row where the content appeared while a
+NAMED version keeps its own, `current` marking what is on disk, the unified
+diff and its cap, the cloud's 16-character hashes deduping against the
+local ones, and the restore — the state it leaves then the state it made,
+naming its source, deduping when nothing was unsaved, undone by restoring
+the pre-restore hash, and never removing a snapshot),
 the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
@@ -320,5 +349,5 @@ in with the body byte-identical, the snapshot guard, what `read_store` lists
 and what it leaves out). The build is warning-free on Linux: the macOS-only
 menu items are cfg-gated.
 
-Two steps of `drive-links.mjs` (Crepe's hover tooltip) fail on this runner and
-did before any of this — don't chase them.
+Every browser suite above passes on this runner; `drive-links.mjs`'s two
+hover-tooltip steps, long flaky here, now pass too.

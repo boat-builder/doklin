@@ -762,13 +762,46 @@ fn read_file(path: String) -> Result<ReadFileResult, String> {
     Ok(ReadFileResult { contents, snapshot })
 }
 
+/// Put a workspace file down the way the app does everywhere else: write,
+/// re-stat, tell the watcher store the new snapshot so our own write is not
+/// reported back as an external change, then ring the edit bus.
+///
+/// Shared with the versioner's restore, which cannot be two calls from the
+/// frontend (a capture, then a write): the cadence could capture between
+/// them and the state being left would go unrecorded.
+pub(crate) fn write_workspace_file(
+    app: &AppHandle,
+    path: &Path,
+    contents: &str,
+) -> Result<FileSnapshot, String> {
+    std::fs::write(path, contents).map_err(|e| format!("write {}: {}", path.display(), e))?;
+    let new_snapshot = stat_snapshot(path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
+
+    if let Some(store) = app.try_state::<WatcherStore>() {
+        if let Ok(mut guard) = store.0.lock() {
+            if let Some(state) = guard.as_mut() {
+                for (watched, last_snapshot) in state.files.iter_mut() {
+                    if watched == path {
+                        *last_snapshot = new_snapshot.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    // The edit bus: the cloud engine (if this path is in a connected
+    // workspace) and the folder's versioner hear about the write now, not
+    // when their watchers settle.
+    edits::touched(app, &path.to_string_lossy());
+    Ok(new_snapshot)
+}
+
 #[tauri::command]
 fn write_file(
     app: AppHandle,
     path: String,
     contents: String,
     expected: Option<FileSnapshot>,
-    store: State<'_, WatcherStore>,
 ) -> Result<FileSnapshot, WriteError> {
     let path_buf = PathBuf::from(&path);
 
@@ -783,29 +816,7 @@ fn write_file(
         }
     }
 
-    std::fs::write(&path_buf, contents).map_err(|e| WriteError::Io {
-        message: format!("write {}: {}", path, e),
-    })?;
-
-    let new_snapshot = stat_snapshot(&path_buf).map_err(|e| WriteError::Io {
-        message: format!("stat {}: {}", path, e),
-    })?;
-
-    if let Ok(mut guard) = store.0.lock() {
-        if let Some(state) = guard.as_mut() {
-            for (watched, last_snapshot) in state.files.iter_mut() {
-                if *watched == path_buf {
-                    *last_snapshot = new_snapshot.clone();
-                }
-            }
-        }
-    }
-
-    // The edit bus: the cloud engine (if this path is in a connected
-    // workspace) and the folder's versioner hear about the write now, not
-    // when their watchers settle.
-    edits::touched(&app, &path);
-    Ok(new_snapshot)
+    write_workspace_file(&app, &path_buf, &contents).map_err(|message| WriteError::Io { message })
 }
 
 #[tauri::command]
@@ -2000,7 +2011,11 @@ pub fn run() {
             versions::versions_snapshots,
             versions::versions_capture_now,
             versions::versions_set_pinned,
-            versions::versions_set_enabled
+            versions::versions_set_enabled,
+            versions::versions_history,
+            versions::versions_read,
+            versions::versions_diff,
+            versions::versions_restore_file
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -5,7 +5,8 @@
 // carries that workspace's marker), the panel's phases, sync now / pause,
 // the held mass-deletion (toast → panel → confirm), a conflict copy's toast,
 // `cloud-applied` refreshing the tree, presence chips, the worker update
-// card and its badge, the history panel restoring a revision, "Connect
+// card and its badge, the version rail reading a cloud-only revision
+// through the manifest and restoring it, "Connect
 // another Mac", disconnect, the wipe → teardown prompt, and the join flow
 // opening the downloaded folder — and publishing: the pill's not-connected
 // door, publishing a note at a random then a chosen address, the sidebar's
@@ -67,6 +68,9 @@ const lastCall = async (cmd) => (await calls(cmd)).at(-1) ?? null;
 const emit = (event, payload) => page.evaluate(([e, p]) => window.__emit(e, p), [event, payload]);
 const setStatuses = (statuses) => page.evaluate((s) => window.__setStatuses(s), statuses);
 const setCloud = (patch) => page.evaluate((p) => Object.assign(window.__cloud, p), patch);
+const versionCalls = (cmd) =>
+  page.evaluate((c) => window.__versions.calls.filter((x) => x.cmd === c), cmd);
+const lastVersionCall = async (cmd) => (await versionCalls(cmd)).at(-1) ?? null;
 const dialog = (label) => page.locator(`[role="dialog"][aria-label="${label}"]`);
 const tid = (id) => page.locator(`[data-testid="${id}"]`);
 const status = (over = {}) => ({
@@ -495,26 +499,73 @@ await poll(async () => (await dialog("Cloud").count()) === 1);
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 
-/* 18 — history: the context menu, the revisions, restore writes the file */
+/* 18 — history: the rail, and the CLOUD's own revisions inside it. On the
+   day the rail ships the local store is hours old and the manifest's `hist`
+   is not, so a revision only the cloud reaches back to is merged in behind
+   the local ones, read through cloud_revision, and restored as the new
+   current state (docs/versioning-plan.md §5.3). drive-versions.mjs walks
+   the rail itself; this is the part only a connected workspace has. */
+await page.evaluate(() => {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  window.__versions.histories["/docs/other.md"] = {
+    root: "/docs",
+    currentHash: "a".repeat(64),
+    versions: [
+      {
+        ts: midnight.getTime() + 9 * 3600000,
+        hash: "a".repeat(64),
+        size: 30,
+        by: "Test Mac",
+        reason: "closing",
+        label: null,
+        pinned: false,
+        restoredFrom: null,
+        path: "other.md",
+        source: "local",
+        current: true,
+      },
+      {
+        ts: midnight.getTime() - 86400000 + 15 * 3600000,
+        hash: "h2",
+        size: 20,
+        by: "Bob",
+        reason: "",
+        label: null,
+        pinned: false,
+        restoredFrom: null,
+        path: "other.md",
+        source: "cloud",
+        current: false,
+      },
+    ],
+  };
+});
 await page.locator('[data-tree-path="/docs/other.md"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Version history" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Version history" }).click();
-await poll(async () => (await dialog("Version history").count()) === 1);
-await poll(async () => (await page.locator(".cloud-history-rev").count()) === 3);
-const revTitles = await page.locator(".cloud-history-rev-title").allTextContents();
-await page.locator(".cloud-history-rev", { hasText: "Revision 1" }).click();
-await poll(async () => (await page.locator(".cloud-history-pre").textContent()).includes("the first revision"));
-await page.locator(".modal-btn", { hasText: "Restore this version" }).click();
-await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe first revision\n");
+await poll(async () => (await tid("history-rail").count()) === 1);
+await poll(async () => (await page.locator('[data-source="cloud"]').count()) === 1);
+const whereHistoryLives = await tid("history-trust").textContent();
+await page.locator('[data-source="cloud"]').click();
+await poll(async () => (await tid("version-preview").innerText()).includes("bob's revision"));
+await tid("restore-version").click();
+await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nbob's revision\n");
+const cloudRestore = await lastVersionCall("versions_restore_file");
 step(
-  "history: Current / Revision 2 / Revision 1, the preview, Restore writes the revision as the file",
-  revTitles.join("|") === "Current|Revision 2|Revision 1" &&
-    (await lastCall("cloud_history")).args.path === "/docs/other.md" &&
-    (await lastCall("cloud_revision")).args.hash === "h1",
+  "history: the cloud's revisions ride the rail, read through the cloud and restored through the store",
+  // The merge itself happens in Rust (versions_history calls cloud_history
+  // there), so what the frontend can be held to is the row and how it reads.
+  whereHistoryLives.includes("1 here · 1 in the cloud") &&
+    (await lastCall("cloud_revision")).args.hash === "h2" &&
+    // Restored by TEXT, not by a hash: the local store never saw those bytes.
+    cloudRestore.args.hash === null &&
+    cloudRestore.args.text === "# Other\n\nbob's revision\n",
+  whereHistoryLives,
 );
 await page.screenshot({ path: SHOTS + "cloud-05-history.png" });
-await page.keyboard.press("Escape");
-await poll(async () => (await dialog("Version history").count()) === 0);
+await page.locator(".history-rail-close").click();
+await poll(async () => (await tid("history-rail").count()) === 0);
 
 /* 19 — disconnect: inline confirm, then the panel is back to its two doors, no dot */
 await tid("sidebar-cloud-dot").click();

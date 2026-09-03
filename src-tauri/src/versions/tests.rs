@@ -14,27 +14,40 @@ use tempfile::TempDir;
 use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::MAX_SYNC_ENTRIES;
-use crate::cloud::status::Events;
+use crate::cloud::status::{Events, Revision};
 
 use super::capture::{capture, Cadence, Captured, CAPTURE_MIN_INTERVAL, SESSION_IDLE};
+use super::history::{self, FileVersion, MAX_DIFF_BYTES};
 use super::retain::{retain, sweep, GC_GRACE};
 use super::settings::Settings;
-use super::status::Phase;
-use super::store::{gunzip, Index, Reason, SnapshotRow, Store};
+use super::status::{Phase, RestoreOutcome, EV_APPLIED};
+use super::store::{gunzip, hash_full, Index, Reason, SnapshotRow, Store};
 use super::{Clock, VersionBus, Versioner, VersionerCmd};
 
 /* ---------- The fixture ---------- */
 
-struct Silent;
+/// Every event the versioner emitted, in order — so a test can hold the
+/// frontend contract to its word without a window in sight.
+#[derive(Default)]
+struct Recorder(Mutex<Vec<(String, serde_json::Value)>>);
 
-impl Events for Silent {
-    fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+impl Events for Recorder {
+    fn emit_json(&self, event: &str, payload: serde_json::Value) {
+        self.0.lock().unwrap().push((event.to_string(), payload));
+    }
+}
+
+impl Recorder {
+    fn last(&self, event: &str) -> Option<serde_json::Value> {
+        self.0.lock().unwrap().iter().rev().find(|(name, _)| name == event).map(|(_, v)| v.clone())
+    }
 }
 
 struct Fixture {
     root: TempDir,
     data: TempDir,
     clock: Arc<AtomicU64>,
+    events: Arc<Recorder>,
     versioner: Versioner,
 }
 
@@ -48,15 +61,16 @@ fn fixture_with(now_ms: u64, settings: Settings) -> Fixture {
     let data = TempDir::new().unwrap();
     let clock = Arc::new(AtomicU64::new(now_ms));
     let ticker = clock.clone();
+    let events = Arc::new(Recorder::default());
     let versioner = Versioner::new(
         Store::open(data.path(), "r-test", root.path()),
         "Test Mac".to_string(),
         &settings,
         Arc::new(Mutex::new(Default::default())),
-        Arc::new(Silent),
+        events.clone(),
         Clock(Arc::new(move || ticker.load(Ordering::SeqCst))),
     );
-    Fixture { root, data, clock, versioner }
+    Fixture { root, data, clock, events, versioner }
 }
 
 impl Fixture {
@@ -95,6 +109,24 @@ impl Fixture {
 
     fn blob(&self, hash: &str) -> Vec<u8> {
         gunzip(&std::fs::read(self.store().blob_path(hash)).unwrap()).unwrap()
+    }
+
+    /// One document's versions, newest first, as the rail asks for them.
+    fn history(&mut self, rel: &str) -> Vec<FileVersion> {
+        let current = history::hash_on_disk(&self.root.path().join(rel));
+        let v = &mut self.versioner;
+        history::file_versions(&v.store, &v.index, &mut v.cache, rel, current.as_deref())
+    }
+
+    /// A restore, with the write the app would do standing in for the one
+    /// the versioner asks its caller for.
+    fn restore(&mut self, rel: &str, ts: Option<u64>, hash: Option<String>) -> RestoreOutcome {
+        let path = self.root.path().join(rel);
+        self.versioner
+            .restore_file(&path, ts, hash, None, &|path, contents| {
+                std::fs::write(path, contents).map_err(|e| e.to_string())
+            })
+            .expect("restore")
     }
 
     /// Hand the versioner to the task that drives it, keeping the temp
@@ -565,4 +597,327 @@ fn an_index_survives_a_store_that_was_never_written() {
     let index: Index = Store::open(data.path(), "r-nothing", root.path()).read_index();
     assert!(index.snapshots.is_empty());
     assert_eq!(index.root, root.path().to_string_lossy());
+}
+
+/* ---------- One file's history ---------- */
+
+#[test]
+fn equal_hashes_collapse_to_one_entry() {
+    // Two snapshots either side of an edit to a DIFFERENT file: the
+    // document itself has one version, dated when its content appeared —
+    // "last changed on Tuesday", not "changed at every capture since".
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.write("other.md", "x\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("other.md", "x and more\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("a.md");
+    assert_eq!(versions.len(), 1, "one content, one row");
+    assert_eq!(versions[0].ts, T0, "dated where the content first appeared");
+    assert_eq!(versions[0].reason, "seed");
+    assert_eq!(versions[0].by, "Test Mac");
+    assert!(versions[0].current, "and it is what is on disk");
+}
+
+#[test]
+fn a_named_version_is_never_collapsed_away() {
+    // *Name this version* on a document nothing changed in has to leave a
+    // row behind — that is the whole promise of naming a moment.
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.write("other.md", "x\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("other.md", "x and more\n");
+    f.capture(Reason::Interval);
+    f.versioner.set_pinned(T0 + 60_000, true, Some("Before the rewrite".to_string())).unwrap();
+
+    let versions = f.history("a.md");
+    assert_eq!(versions.len(), 2, "the named moment stands on its own");
+    assert_eq!(versions[0].ts, T0 + 60_000);
+    assert_eq!(versions[0].label.as_deref(), Some("Before the rewrite"));
+    assert!(versions[0].pinned);
+    assert_eq!(versions[1].ts, T0);
+    assert_eq!(versions[0].hash, versions[1].hash, "same bytes, two moments");
+}
+
+#[test]
+fn versions_follow_a_rename_backwards() {
+    let mut f = fixture(T0);
+    f.write("plan.md", "alpha\n");
+    f.capture(Reason::Seed);
+
+    f.at(T0 + 60_000);
+    f.remove("plan.md");
+    f.write("roadmap.md", "alpha\n");
+    f.capture(Reason::Interval);
+
+    f.at(T0 + 120_000);
+    f.write("roadmap.md", "alpha and beta\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("roadmap.md");
+    assert_eq!(versions.len(), 2, "the history did not start over at the rename");
+    assert_eq!(versions[0].path, "roadmap.md");
+    assert_eq!(versions[1].path, "plan.md", "and it remembers what the file used to be called");
+    assert_eq!(versions[1].ts, T0);
+}
+
+#[test]
+fn a_recreated_path_starts_a_new_history() {
+    let mut f = fixture(T0);
+    f.write("keep.md", "k\n");
+    f.write("note.md", "first\n");
+    f.capture(Reason::Seed);
+
+    f.at(T0 + 60_000);
+    f.remove("note.md");
+    f.capture(Reason::Interval);
+
+    f.at(T0 + 120_000);
+    f.write("note.md", "a different note\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("note.md");
+    assert_eq!(versions.len(), 1, "a new file at an old name is a new file");
+    assert_eq!(versions[0].ts, T0 + 120_000);
+}
+
+#[test]
+fn a_deleted_paths_history_is_still_reachable() {
+    let mut f = fixture(T0);
+    f.write("keep.md", "k\n");
+    f.write("note.md", "first\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("note.md", "first and second\n");
+    f.capture(Reason::Interval);
+    f.at(T0 + 120_000);
+    f.remove("note.md");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("note.md");
+    assert_eq!(versions.len(), 2, "the newest snapshots lost it; the older ones did not");
+    assert!(!versions.iter().any(|v| v.current), "nothing on disk to be current");
+    assert!(history::hash_on_disk(&f.root.path().join("note.md")).is_none());
+}
+
+#[test]
+fn current_marks_the_version_on_disk() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two and two\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("a.md");
+    assert_eq!(versions.len(), 2);
+    assert!(versions[0].current, "the newest is what is on disk");
+    assert!(!versions[1].current);
+
+    // Typed since the last capture: no version is the document any more.
+    f.write("a.md", "three, three and three\n");
+    assert!(!f.history("a.md").iter().any(|v| v.current));
+}
+
+/* ---------- Reading and comparing ---------- */
+
+#[test]
+fn diff_is_unified_and_capped() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two and two\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history("a.md");
+    let (new, old) = (versions[0].hash.clone(), versions[1].hash.clone());
+
+    let patch = history::diff(f.store(), None, Some(&old), Some(&new)).unwrap();
+    assert!(patch.contains("--- original"), "a unified patch: {}", patch);
+    assert!(patch.contains("-one"), "{}", patch);
+    assert!(patch.contains("+two and two"), "{}", patch);
+
+    // The other side may be the file on disk — how the newest version is
+    // compared against now.
+    f.write("a.md", "three and three\n");
+    let path = f.root.path().join("a.md");
+    let against_now = history::diff(f.store(), Some(&path), Some(&new), None).unwrap();
+    assert!(against_now.contains("+three and three"), "{}", against_now);
+
+    let big = vec![b'a'; MAX_DIFF_BYTES + 1];
+    let big_hash = hash_full(&big);
+    f.store().write_blob(&big_hash, &big).unwrap();
+    let refused = history::diff(f.store(), None, Some(&old), Some(&big_hash)).unwrap_err();
+    assert!(refused.contains("too large to compare"), "{}", refused);
+
+    let gone = history::read_version(f.store(), "0".repeat(64).as_str()).unwrap_err();
+    assert!(gone.contains("no longer in this folder's history"), "{}", gone);
+}
+
+#[test]
+fn cloud_prefix_matches_dedupe_against_local() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two and two\n");
+    f.capture(Reason::Interval);
+    // Typed since: the file on disk is a state no snapshot holds.
+    f.write("a.md", "three and three and three\n");
+    let disk = history::hash_on_disk(&f.root.path().join("a.md")).unwrap();
+
+    let local = f.history("a.md");
+    assert_eq!(local.len(), 2);
+
+    let revision = |hash: &str, time_ms: u64| Revision {
+        rev: 1,
+        hash: hash[..16].to_string(),
+        size: 4,
+        time_ms,
+        by: "Other Mac".to_string(),
+        current: false,
+    };
+    let cloud = vec![
+        revision(&local[1].hash, T0),                       // the same bytes, shorter name
+        revision(&disk, T0 + 120_000),                      // what is on disk, uncaptured here
+        revision(&"f".repeat(64), T0 + 30_000),             // only the cloud reaches this one
+    ];
+
+    let merged = history::merge_cloud(local, &cloud, Some(&disk), "a.md");
+    assert_eq!(merged.len(), 3, "two were already known: {:?}", merged);
+    assert_eq!(merged[0].ts, T0 + 60_000, "newest first");
+    assert_eq!(merged[1].ts, T0 + 30_000);
+    assert_eq!(merged[1].source, "cloud");
+    assert_eq!(merged[1].by, "Other Mac");
+    assert_eq!(merged[1].path, "a.md");
+    assert_eq!(merged[2].ts, T0);
+    assert!(merged.iter().filter(|v| v.source == "local").count() == 2);
+}
+
+/* ---------- Restore ---------- */
+
+/// One document with two captured versions and a third state on disk that
+/// no snapshot holds — what a restore actually finds in the wild.
+fn with_unsaved_work() -> Fixture {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two and two\n");
+    f.capture(Reason::Interval);
+    f.at(T0 + 120_000);
+    f.write("a.md", "three, three and three\n");
+    f
+}
+
+#[test]
+fn restore_captures_the_state_it_leaves_then_the_state_it_made() {
+    let mut f = with_unsaved_work();
+    let oldest = f.history("a.md").pop().unwrap();
+    let outcome = f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+
+    assert_eq!(std::fs::read_to_string(f.root.path().join("a.md")).unwrap(), "one\n");
+    let rows: Vec<(u64, Reason)> = f.rows().iter().map(|r| (r.ts, r.reason)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            (T0, Reason::Seed),
+            (T0 + 60_000, Reason::Interval),
+            (T0 + 120_000, Reason::PreRestore),
+            (T0 + 120_001, Reason::Restore),
+        ],
+    );
+
+    let left = f.store().read_snapshot(T0 + 120_000).unwrap();
+    assert_eq!(f.blob(&left.files["a.md"].h), b"three, three and three\n", "the typing is kept");
+    let made = f.store().read_snapshot(T0 + 120_001).unwrap();
+    assert_eq!(f.blob(&made.files["a.md"].h), b"one\n");
+
+    assert_eq!(outcome.pre_restore_ts, Some(T0 + 120_000));
+    assert_eq!(outcome.pre_restore_hash, Some(hash_full(b"three, three and three\n")));
+    assert_eq!(outcome.ts, Some(T0 + 120_001));
+
+    let applied = f.events.last(EV_APPLIED).expect("a restore tells the app what to reload");
+    assert_eq!(applied["root"], f.root.path().to_string_lossy().to_string());
+    assert_eq!(applied["paths"][0], f.root.path().join("a.md").to_string_lossy().to_string());
+}
+
+#[test]
+fn restore_names_its_source() {
+    let mut f = with_unsaved_work();
+    let oldest = f.history("a.md").pop().unwrap();
+    f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+
+    let newest = f.rows().last().unwrap();
+    assert_eq!(newest.reason, Reason::Restore);
+    assert_eq!(newest.restored_from, Some(T0), "the rail can say where it came from");
+    assert_eq!(f.history("a.md")[0].restored_from, Some(T0));
+}
+
+#[test]
+fn restore_with_nothing_unsaved_dedupes_the_pre_restore_capture() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two and two\n");
+    f.capture(Reason::Interval);
+
+    let oldest = f.history("a.md").pop().unwrap();
+    let outcome = f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+
+    let rows: Vec<(u64, Reason)> = f.rows().iter().map(|r| (r.ts, r.reason)).collect();
+    assert_eq!(
+        rows,
+        vec![(T0, Reason::Seed), (T0 + 60_000, Reason::Interval), (T0 + 60_001, Reason::Restore)],
+        "nothing had changed, so nothing was written twice",
+    );
+    assert_eq!(outcome.pre_restore_ts, Some(T0 + 60_000), "the state it left is the snapshot already there");
+    assert_eq!(outcome.pre_restore_hash, Some(hash_full(b"two and two\n")));
+}
+
+#[test]
+fn undo_of_a_restore_is_a_restore_of_the_pre_restore_hash() {
+    let mut f = with_unsaved_work();
+    let oldest = f.history("a.md").pop().unwrap();
+    let outcome = f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+    assert_eq!(std::fs::read_to_string(f.root.path().join("a.md")).unwrap(), "one\n");
+
+    // The toast's Undo: the same command, pointed at what the restore left.
+    let undone = f.restore("a.md", outcome.pre_restore_ts, outcome.pre_restore_hash.clone());
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join("a.md")).unwrap(),
+        "three, three and three\n",
+        "the typing is back",
+    );
+    assert_eq!(f.rows().last().unwrap().reason, Reason::Restore);
+    assert_eq!(f.rows().last().unwrap().restored_from, outcome.pre_restore_ts);
+    assert_eq!(undone.pre_restore_hash, Some(hash_full(b"one\n")), "and the undo is itself undoable");
+}
+
+#[test]
+fn restore_never_removes_a_snapshot() {
+    let mut f = with_unsaved_work();
+    let before: Vec<u64> = f.rows().iter().map(|r| r.ts).collect();
+    let oldest = f.history("a.md").pop().unwrap();
+    f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+    f.restore("a.md", Some(T0 + 60_000), Some(hash_full(b"two and two\n")));
+
+    let after: Vec<u64> = f.rows().iter().map(|r| r.ts).collect();
+    for ts in &before {
+        assert!(after.contains(ts), "{} went missing — a restore only ever appends", ts);
+        assert!(f.store().snapshot_path(*ts).exists(), "and its snapshot file is still there");
+    }
+    assert!(after.len() > before.len());
+    // Every state between the restored version and now is still an older
+    // row, not an abandoned branch (docs/versioning-plan.md §12.3).
+    let versions = f.history("a.md");
+    assert!(versions.iter().any(|v| v.hash == hash_full(b"three, three and three\n")));
+    assert!(versions.iter().any(|v| v.hash == hash_full(b"one\n")));
 }

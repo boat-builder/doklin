@@ -9,6 +9,7 @@
 //! mod.rs        the manager, the versioner task, the commands, init at boot
 //! store.rs      the store on disk: the index, snapshot files, blobs, gzip
 //! capture.rs    the cadence state machine and the scan that takes a snapshot
+//! history.rs    one file's versions, read out of the snapshots; the diff
 //! retain.rs     the ladder (pure) and the sweep
 //! status.rs     the status/event contract
 //! settings.rs   <app_data>/versions/settings.json
@@ -23,6 +24,7 @@
 //! a workspace contains.
 
 mod capture;
+mod history;
 mod retain;
 mod settings;
 mod status;
@@ -44,9 +46,10 @@ use crate::cloud::scan::{rel_for_touch, MAX_SYNC_ENTRIES};
 use crate::cloud::status::{AppEvents, Events};
 
 use capture::{Cadence, CaptureError};
+use history::{FileHistory, SnapshotCache};
 use retain::SWEEP_EVERY;
 use settings::{read_settings, write_settings, Settings};
-use status::{emit_statuses, Phase, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus};
+use status::{emit_statuses, Phase, RestoreOutcome, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus, EV_APPLIED};
 use store::{store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
 
 /// The folder holding drafts is a root like any workspace, under a fixed
@@ -80,6 +83,8 @@ struct Versioner {
     index: Index,
     /// The newest snapshot's file map — the stat cache.
     last: BTreeMap<String, FileEntry>,
+    /// Decoded snapshots, for the rail's walk back through them.
+    cache: SnapshotCache,
     by: String,
     enabled: bool,
     horizon_days: Option<u32>,
@@ -106,6 +111,7 @@ impl Versioner {
             store,
             index,
             last: BTreeMap::new(),
+            cache: SnapshotCache::default(),
             by,
             enabled: settings.enabled,
             horizon_days: settings.horizon_days,
@@ -190,6 +196,10 @@ impl Versioner {
         let mut index = std::mem::take(&mut self.index);
         let report = retain::sweep(&self.store, &mut index, now, self.horizon_days);
         self.index = index;
+        if report.snapshots_dropped > 0 {
+            // Decoded copies of snapshots that are no longer there.
+            self.cache.clear();
+        }
         if report.snapshots_dropped > 0 || report.blobs_dropped > 0 {
             eprintln!(
                 "versions: {} thinned {} snapshot(s) and {} blob(s), {} KB",
@@ -247,6 +257,72 @@ impl Versioner {
         Ok(())
     }
 
+    /// One document's versions, and what is on disk right now.
+    fn history(&mut self, rel: &str) -> FileHistory {
+        let current_hash = history::hash_on_disk(&self.store.root.join(rel));
+        let versions =
+            history::file_versions(&self.store, &self.index, &mut self.cache, rel, current_hash.as_deref());
+        FileHistory { root: self.store.root.to_string_lossy().to_string(), current_hash, versions }
+    }
+
+    /// A restore, whole: the state it is about to leave, the write, then the
+    /// state it made — three steps the cadence must not get between, which
+    /// is why this is one command and not a capture plus a `write_file` from
+    /// the frontend.
+    ///
+    /// It never removes anything. The versions between the one being
+    /// restored and now stay exactly where they are; the restored content
+    /// simply becomes the newest (docs/versioning-plan.md §12.3).
+    fn restore_file(
+        &mut self,
+        path: &Path,
+        from_ts: Option<u64>,
+        hash: Option<String>,
+        text: Option<String>,
+        write: &dyn Fn(&Path, &str) -> Result<(), String>,
+    ) -> Result<RestoreOutcome, String> {
+        if !self.enabled {
+            return Err("versions are turned off on this Mac — turn them back on to restore".to_string());
+        }
+        let rel = rel_for_touch(&self.store.root, path)
+            .ok_or_else(|| "that file isn't in a folder with version history".to_string())?;
+        // A revision only the cloud still holds arrives as text; everything
+        // else is a blob in this store.
+        let contents = match (text, hash) {
+            (Some(text), _) => text,
+            (None, Some(hash)) => history::read_version(&self.store, &hash)?,
+            (None, None) => return Err("there's no version to restore".to_string()),
+        };
+
+        let pre = self.capture(Reason::PreRestore, None);
+        if pre.is_none() {
+            if let Some(message) = self.error.clone() {
+                return Err(message);
+            }
+        }
+        // Taken before the write, from the stat cache the capture just
+        // refreshed: this is the document as the user last had it.
+        let pre_restore_ts = pre.map(|row| row.ts).or_else(|| self.index.newest().map(|n| n.ts));
+        let pre_restore_hash = self.last.get(&rel).map(|entry| entry.h.clone());
+
+        write(path, &contents)?;
+
+        let made = self.capture(Reason::Restore, from_ts);
+        if made.is_none() {
+            if let Some(message) = self.error.clone() {
+                return Err(message);
+            }
+        }
+        self.events.emit_json(
+            EV_APPLIED,
+            serde_json::json!({
+                "root": self.store.root.to_string_lossy(),
+                "paths": [path.to_string_lossy()],
+            }),
+        );
+        Ok(RestoreOutcome { pre_restore_ts, pre_restore_hash, ts: made.map(|row| row.ts) })
+    }
+
     fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         self.phase = if enabled { Phase::Idle } else { Phase::Disabled };
@@ -301,6 +377,18 @@ enum VersionerCmd {
     },
     Snapshots {
         reply: oneshot::Sender<Vec<SnapshotMeta>>,
+    },
+    History {
+        rel: String,
+        reply: oneshot::Sender<FileHistory>,
+    },
+    RestoreFile {
+        app: AppHandle,
+        path: PathBuf,
+        from_ts: Option<u64>,
+        hash: Option<String>,
+        text: Option<String>,
+        reply: oneshot::Sender<Result<RestoreOutcome, String>>,
     },
     SetEnabled(bool),
     /// Capture what is pending and answer — the quit flush.
@@ -374,6 +462,21 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                 Some(VersionerCmd::Snapshots { reply }) => {
                     let answer = blocking(&state, |v| v.snapshots()).await;
                     let _ = reply.send(answer.unwrap_or_default());
+                }
+                Some(VersionerCmd::History { rel, reply }) => {
+                    if let Some(history) = blocking(&state, move |v| v.history(&rel)).await {
+                        let _ = reply.send(history);
+                    }
+                }
+                Some(VersionerCmd::RestoreFile { app, path, from_ts, hash, text, reply }) => {
+                    let answer = blocking(&state, move |v| {
+                        v.restore_file(&path, from_ts, hash, text, &|path, contents| {
+                            crate::write_workspace_file(&app, path, contents).map(|_| ())
+                        })
+                    })
+                    .await;
+                    cadence.captured(Instant::now());
+                    let _ = reply.send(answer.unwrap_or_else(|| Err("that restore didn't finish".to_string())));
                 }
                 Some(VersionerCmd::Flush { reply }) => {
                     if cadence.is_dirty() {
@@ -640,6 +743,35 @@ fn sender_for(app: &AppHandle, root: &str) -> Result<mpsc::UnboundedSender<Versi
     })
 }
 
+/// The versioner whose root holds `path` — the deepest, should roots ever
+/// nest — with its display root and the path inside it.
+fn route(app: &AppHandle, path: &str) -> Result<(mpsc::UnboundedSender<VersionerCmd>, String, String), String> {
+    let abs = PathBuf::from(path);
+    with_inner(app, move |inner| {
+        let (display, handle) = inner
+            .versioners
+            .iter()
+            .filter(|(_, handle)| abs.starts_with(&handle.root))
+            .max_by_key(|(_, handle)| handle.root.as_os_str().len())
+            .ok_or_else(|| "that file isn't in a folder with version history".to_string())?;
+        let rel = rel_for_touch(&handle.root, &abs)
+            .ok_or_else(|| "this folder doesn't keep versions of that file".to_string())?;
+        Ok((handle.tx.clone(), display.clone(), rel))
+    })
+}
+
+/// A store to read from without going through its versioner: reads are pure
+/// filesystem and have no business queueing behind a capture.
+fn store_for(app: &AppHandle, root: &str) -> Result<Store, String> {
+    with_inner(app, |inner| {
+        let handle = inner
+            .versioners
+            .get(root)
+            .ok_or_else(|| "that folder has no version store yet".to_string())?;
+        Ok(Store::open(&inner.data_dir, &handle.key, &handle.root))
+    })
+}
+
 /// Ask a versioner something and wait for its answer.
 async fn ask<T>(
     tx: mpsc::UnboundedSender<VersionerCmd>,
@@ -731,4 +863,73 @@ pub(crate) fn versions_set_enabled(app: AppHandle, enabled: bool) -> Result<(), 
         }
         Ok(())
     })
+}
+
+/// Every version of one document, newest first — the rail's whole model.
+/// Where the workspace is connected, the manifest's own revisions are folded
+/// in behind the local ones, so what history shows today does not shrink on
+/// the day this ships (docs/versioning-plan.md §5.3). Phase 6 removes that.
+#[tauri::command]
+pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<FileHistory, String> {
+    let (tx, _root, rel) = route(&app, &path)?;
+    let asked = rel.clone();
+    let mut history = ask(tx, move |reply| VersionerCmd::History { rel: asked, reply }).await?;
+    if let Ok(revisions) = crate::cloud::cloud_history(app, path).await {
+        let local = std::mem::take(&mut history.versions);
+        history.versions = history::merge_cloud(local, &revisions, history.current_hash.as_deref(), &rel);
+    }
+    Ok(history)
+}
+
+/// One version's text, for the preview.
+#[tauri::command]
+pub(crate) async fn versions_read(app: AppHandle, root: String, hash: String) -> Result<String, String> {
+    let store = store_for(&app, &root)?;
+    tokio::task::spawn_blocking(move || history::read_version(&store, &hash))
+        .await
+        .map_err(|_| "that version couldn't be read".to_string())?
+}
+
+/// A unified diff between two versions. A null hash means the file on disk,
+/// which is how the newest version is compared against now.
+#[tauri::command]
+pub(crate) async fn versions_diff(
+    app: AppHandle,
+    root: String,
+    path: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<String, String> {
+    let store = store_for(&app, &root)?;
+    tokio::task::spawn_blocking(move || {
+        history::diff(&store, path.as_deref().map(Path::new), from.as_deref(), to.as_deref())
+    })
+    .await
+    .map_err(|_| "that comparison didn't finish".to_string())?
+}
+
+/// Put an earlier version back. The content is named either by `hash` (a
+/// version in this store) or by `text` (one only the cloud still holds);
+/// `ts` is the version's own, and the snapshot this makes records it as
+/// where the content came from.
+#[tauri::command]
+pub(crate) async fn versions_restore_file(
+    app: AppHandle,
+    root: String,
+    path: String,
+    ts: Option<u64>,
+    hash: Option<String>,
+    text: Option<String>,
+) -> Result<RestoreOutcome, String> {
+    let tx = sender_for(&app, &root)?;
+    let handle = app.clone();
+    ask(tx, move |reply| VersionerCmd::RestoreFile {
+        app: handle,
+        path: PathBuf::from(path),
+        from_ts: ts,
+        hash,
+        text,
+        reply,
+    })
+    .await?
 }

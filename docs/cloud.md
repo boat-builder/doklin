@@ -699,8 +699,19 @@ OWNER_TOKEN` via a prompt, then the new token pasted into the Cloud panel.
 `cloud_history(path)` and `cloud_revision(path, hash)` read the manifest's
 inline tail, the archive and the blob from inside the engine (it already
 holds the manifest; the archive and the blob are one request each).
-`HistoryPanel.tsx` lists the revisions and has two exits: restore in place,
-or save as a new document.
+
+**Since [versioning.md](versioning.md) phase 2, history is no longer a cloud
+feature.** The surface is the version rail (`HistoryRail.tsx`), and it reads
+the local version store, which every open folder has whether or not it is
+connected. `versions_history` calls `cloud_history` behind it and folds the
+manifest's revisions in behind the local ones — a cloud revision is named by
+the first 16 characters of the same sha256 the store uses, so one that
+prefixes a local version is the same bytes under a shorter name and is
+dropped. What survives is what only the cloud still reaches back to, read
+through `cloud_revision` and restored by handing its text to
+`versions_restore_file`. That read-through is a bridge: on the day the rail
+ships the local store is hours old and `hist` is not. Phase 6 stops writing
+`hist` and removes this branch.
 
 ---
 
@@ -735,8 +746,8 @@ or save as a new document.
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
-| **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Version history…*; *Copy public link*, *Stop publishing* (immediate, undoable from the toast) |
-| **History panel** (`HistoryPanel.tsx`) | the sidebar's file menu | The revisions from the engine; restore in place, or save as a new document |
+| **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item |
+| **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the manifest's own revisions folded in behind them (§6.9); the selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
 | **Toasts** (`CloudToasts.tsx`) | anywhere | `cloud-conflict` → *Open the copy*; `cloud-pending-deletes` → *Review…* (the panel); `cloud-applied` → the tree refreshes (open tabs reload through the file watcher) |
 
 ### 7.3 Gating
@@ -746,7 +757,9 @@ or save as a new document.
   outside the workspace. When the workspace is not connected, the pill
   opens a one-line explanation with *Connect a domain…*.
 - *Publish folder…* and *Stop publishing* appear only in a connected
-  workspace; so does *Version history…*.
+  workspace. *Version history…* no longer does: since
+  [versioning.md](versioning.md) it is offered for every document in every
+  folder, connected or not.
 - The gear's badge lights for an app update or a worker behind the bundled
   version — one signal — and the *Cloud…* item carries a dot for the same
   reason.

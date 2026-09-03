@@ -14,6 +14,11 @@ use super::store::SnapshotRow;
 /// `VersionsStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "versions-status";
 
+/// `{root, paths}` — a restore landed on disk. Deliberately the same shape
+/// as `cloud-applied`, and App.tsx handles it the same way: refresh the
+/// tree, reload the open document.
+pub const EV_APPLIED: &str = "versions-applied";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
@@ -76,6 +81,21 @@ impl From<&SnapshotRow> for SnapshotMeta {
             restored_from: row.restored_from,
         }
     }
+}
+
+/// What `versions_restore_file` answers. The state a restore leaves is a
+/// version like any other, and this is how the toast's *Undo* names it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreOutcome {
+    /// The snapshot holding the document as it was a moment ago: the one
+    /// the pre-restore capture made, or the newest already there when
+    /// nothing had changed since.
+    pub pre_restore_ts: Option<u64>,
+    /// That document's content hash — what *Undo* restores.
+    pub pre_restore_hash: Option<String>,
+    /// The snapshot the restore itself made.
+    pub ts: Option<u64>,
 }
 
 /// Every store's status, keyed by root — shared by the versioners (each
