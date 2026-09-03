@@ -15,12 +15,9 @@ mod dictation;
 // pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
 pub mod pdf_export;
 mod store;
-// The v1 cloud sync engine, kept compiling (with its two-device merge /
-// conflict / CAS test matrix) as the reference implementation the cloud
-// rewrite ports into src/cloud/ — see docs/cloud-redesign.md. Nothing wires
-// it up any more: no manager, no commands, no engine at boot.
-#[allow(dead_code, unused_macros, unused_imports)]
-mod sync;
+// The cloud: one engine per connected workspace, the only writer to the
+// workspace's domain — see docs/cloud-redesign.md and src/cloud/mod.rs.
+mod cloud;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
@@ -753,6 +750,7 @@ fn read_file(path: String) -> Result<ReadFileResult, String> {
 
 #[tauri::command]
 fn write_file(
+    app: AppHandle,
     path: String,
     contents: String,
     expected: Option<FileSnapshot>,
@@ -789,6 +787,9 @@ fn write_file(
         }
     }
 
+    // The edit bus: the cloud engine (if this path is in a connected
+    // workspace) hears about the write now, not when its watcher settles.
+    cloud::touched(&app, &path);
     Ok(new_snapshot)
 }
 
@@ -870,7 +871,7 @@ fn unwatch_file(store: State<'_, WatcherStore>) {
 /// input). The parent directory must already exist — creation targets always
 /// come from the visible tree.
 #[tauri::command]
-fn create_file(path: String) -> Result<(), String> {
+fn create_file(app: AppHandle, path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     let name = path_buf
         .file_name()
@@ -881,7 +882,10 @@ fn create_file(path: String) -> Result<(), String> {
         .create_new(true)
         .open(&path_buf)
     {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            cloud::touched(&app, &path);
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(format!("A file or folder named \"{}\" already exists", name))
         }
@@ -892,14 +896,17 @@ fn create_file(path: String) -> Result<(), String> {
 /// Creates a new directory at `path`. Same contract as `create_file`: fails if
 /// the name is taken, parent must exist.
 #[tauri::command]
-fn create_dir(path: String) -> Result<(), String> {
+fn create_dir(app: AppHandle, path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     let name = path_buf
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
     match std::fs::create_dir(&path_buf) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            cloud::touched(&app, &path);
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(format!("A file or folder named \"{}\" already exists", name))
         }
@@ -915,7 +922,7 @@ fn create_dir(path: String) -> Result<(), String> {
 /// A cut pasted into another workspace can cross volumes, where `rename` fails
 /// with EXDEV — that one error falls back to copy + delete.
 #[tauri::command]
-fn move_path(from: String, to: String) -> Result<(), String> {
+fn move_path(app: AppHandle, from: String, to: String) -> Result<(), String> {
     let from_buf = PathBuf::from(&from);
     let to_buf = PathBuf::from(&to);
     if !from_buf.exists() {
@@ -944,7 +951,11 @@ fn move_path(from: String, to: String) -> Result<(), String> {
                 std::fs::remove_file(&from_buf)
             }
         })
-        .map_err(|e| format!("move {}: {}", from, e))
+        .map_err(|e| format!("move {}: {}", from, e))?;
+    // Both ends: a move can cross from one connected workspace to another.
+    cloud::touched(&app, &from);
+    cloud::touched(&app, &to);
+    Ok(())
 }
 
 /// Recursively copies `from` into `to`. `to` must not exist yet (the caller
@@ -969,7 +980,7 @@ fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 /// `move_path` this is volume-agnostic, so paste works between any two
 /// workspaces.
 #[tauri::command]
-fn copy_path(from: String, to: String) -> Result<(), String> {
+fn copy_path(app: AppHandle, from: String, to: String) -> Result<(), String> {
     let from_buf = PathBuf::from(&from);
     let to_buf = PathBuf::from(&to);
     if !from_buf.exists() {
@@ -992,7 +1003,9 @@ fn copy_path(from: String, to: String) -> Result<(), String> {
             name(&from_buf, &from)
         ));
     }
-    copy_recursive(&from_buf, &to_buf).map_err(|e| format!("copy {}: {}", from, e))
+    copy_recursive(&from_buf, &to_buf).map_err(|e| format!("copy {}: {}", from, e))?;
+    cloud::touched(&app, &to);
+    Ok(())
 }
 
 /// The app-wide file clipboard behind the sidebar's Cut/Copy/Paste. It lives
@@ -1692,7 +1705,7 @@ pub(crate) fn trash_path_impl(path: &str) -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, String> {
+fn trash_file(app: AppHandle, path: String, store: State<'_, WatcherStore>) -> Result<String, String> {
     let path_buf = PathBuf::from(&path);
     // Stop watching first so the impending removal doesn't surface as an
     // external-change conflict for the file we're deleting. Matching either
@@ -1708,12 +1721,14 @@ fn trash_file(path: String, store: State<'_, WatcherStore>) -> Result<String, St
         }
     }
 
-    trash_path_impl(&path)
+    let trashed = trash_path_impl(&path)?;
+    cloud::touched(&app, &path);
+    Ok(trashed)
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn trash_file(_path: String, _store: State<'_, WatcherStore>) -> Result<String, String> {
+fn trash_file(_app: AppHandle, _path: String, _store: State<'_, WatcherStore>) -> Result<String, String> {
     // macOS-only: see the macOS implementation above for a cross-platform port.
     Err("trash_file is only supported on macOS".to_string())
 }
@@ -1722,9 +1737,11 @@ fn trash_file(_path: String, _store: State<'_, WatcherStore>) -> Result<String, 
 /// `trash_file`) back to its original path. `rename` itself is portable, but the
 /// Trash path it operates on is produced by the macOS-only `trash_file`.
 #[tauri::command]
-fn restore_trashed(trash_path: String, original_path: String) -> Result<(), String> {
+fn restore_trashed(app: AppHandle, trash_path: String, original_path: String) -> Result<(), String> {
     std::fs::rename(&trash_path, &original_path)
-        .map_err(|e| format!("restore {} -> {}: {}", trash_path, original_path, e))
+        .map_err(|e| format!("restore {} -> {}: {}", trash_path, original_path, e))?;
+    cloud::touched(&app, &original_path);
+    Ok(())
 }
 
 /// macOS-only: reveals `path` in Finder via `open -R`. The non-macOS arm just
@@ -1747,28 +1764,11 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 }
 
 /// This Mac's user-facing name (System Settings → General → About), the
-/// hostname as a fallback: the author stamped on comments written here.
+/// hostname as a fallback: the author stamped on comments written here. The
+/// same name the cloud engine attributes revisions and presence to.
 #[tauri::command]
 fn device_name() -> String {
-    // macOS-only: `scutil --get ComputerName`; the hostname elsewhere.
-    let pretty = std::process::Command::new("scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    pretty
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "This Mac".to_string())
+    cloud::device_display_name()
 }
 
 /// Opens a URL with the system handler: http(s) in the default browser (links
@@ -1910,6 +1910,8 @@ pub fn run() {
         .manage(dictation::Dictation::default())
         .manage(pdf_export::PdfExportLock::default())
         .manage(FileClipboard::default())
+        .manage(cloud::CloudManager::default())
+        .manage(cloud::EditBus::default())
         .invoke_handler(tauri::generate_handler![
             dictation::dictation_init,
             dictation::dictation_cmd,
@@ -1952,10 +1954,30 @@ pub fn run() {
             reveal_in_finder,
             open_external,
             device_name,
-            quit_flush_ack
+            quit_flush_ack,
+            cloud::cloud_status,
+            cloud::cloud_mint_token,
+            cloud::cloud_probe,
+            cloud::cloud_connect,
+            cloud::cloud_join,
+            cloud::cloud_resume,
+            cloud::cloud_disconnect,
+            cloud::cloud_sync_now,
+            cloud::cloud_pause,
+            cloud::cloud_confirm_deletes,
+            cloud::cloud_set_activity,
+            cloud::cloud_publish,
+            cloud::cloud_unpublish,
+            cloud::cloud_set_root,
+            cloud::cloud_history,
+            cloud::cloud_revision,
+            cloud::cloud_wipe
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // The cloud engines start with the app: one per connected
+            // workspace, from cloud.json.
+            cloud::init(&handle);
             let saved = read_persisted_session(&handle);
             let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
             let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());

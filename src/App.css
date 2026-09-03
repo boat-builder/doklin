@@ -2408,6 +2408,53 @@ body.sidebar-resizing {
   white-space: nowrap;
 }
 
+/* The cloud dot beside the workspace name: the engine's phase at a glance
+   (the tooltip is src/cloud.ts describeCloud). Grey = paused/offline, green =
+   in sync, blue pulse = syncing, amber = waiting on the user or the worker,
+   red = revoked or an error. */
+.sidebar-cloud-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: var(--app-text-muted);
+  opacity: 0.6;
+}
+
+.sidebar-cloud-dot.phase-idle {
+  background: #34c759;
+  opacity: 1;
+}
+
+.sidebar-cloud-dot.phase-syncing {
+  background: var(--app-accent);
+  opacity: 1;
+  animation: sidebar-cloud-pulse 1.2s ease-in-out infinite;
+}
+
+.sidebar-cloud-dot.phase-pending-deletes,
+.sidebar-cloud-dot.phase-worker-outdated {
+  background: #f0a020;
+  opacity: 1;
+}
+
+.sidebar-cloud-dot.phase-revoked,
+.sidebar-cloud-dot.phase-error {
+  background: #e5484d;
+  opacity: 1;
+}
+
+@keyframes sidebar-cloud-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .sidebar-header-refresh {
   display: inline-flex;
   align-items: center;

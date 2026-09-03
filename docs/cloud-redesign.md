@@ -902,6 +902,29 @@ flows, the `426 → worker-outdated` state.
   worker, edits reach the bucket within ~2 s, a second Mac joins and both
   converge; but nothing is *shown* yet beyond a status dot.
 
+As built: `src-tauri/src/cloud/` has three files beyond §6.2's list —
+`config.rs` (cloud.json, the marker, the endpoint and name rules),
+`status.rs` (the status/event contract) and `flows.rs` (bind + upload,
+download, wipe — generic over `Remote`, so the matrix tests them). The
+`cloud-status` event carries `CloudStatus[]`, the whole model, so a
+disconnect is just an array without that workspace. `cloud_unpublish` and
+`cloud_set_root` take the workspace root first (slugs are per domain, and a
+Mac can hold several). `cloud_wipe` disconnects the workspace, marker
+included, once the bucket is empty, so no engine can re-upload into the freed
+domain; the teardown prompt follows in the UI. Presence beats every 25 s —
+the edited path, or idle — and leaves with `DELETE /api/presence` on
+shutdown. A `426` records the worker version it happened at; the engine
+re-probes `/api/meta` on every poll and resumes the moment a newer version
+answers. Identical bytes on both sides are adopted as synced, never merged,
+which is what makes resume-in-place clean. The worker's version integers are
+parsed out of `cloud-worker/src/version.ts` by `build.rs`
+(`DOKLIN_WORKER_VERSION`, `DOKLIN_MANIFEST_VERSION`). The frontend gets
+`src/cloud.ts` (the contract's TypeScript side), the `cloud-status`
+listener, presence reporting and the sidebar dot now, so the flows can be
+driven from the devtools console until PR 3's wizard. `cargo test --lib
+cloud` runs 37 tests; the touch-vs-watch timing runs under tokio's paused
+clock.
+
 ### PR 3 — Connect, update, tear down
 
 `src/cloud.ts`, `CloudPanel.tsx`, `CloudSetup.tsx` (the wizard and the

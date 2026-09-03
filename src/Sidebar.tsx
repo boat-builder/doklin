@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { describeCloud, type CloudStatus } from "./cloud";
 import { invoke } from "@tauri-apps/api/core";
 
 export type TreeNode =
@@ -78,6 +79,9 @@ type TreeDnd = {
 
 type Props = {
   root: string;
+  // The workspace's cloud status when it is connected (the dot beside its
+  // name); null or absent when it is purely local.
+  cloud?: CloudStatus | null;
   currentPath: string | null;
   selection: SidebarSelection[];
   // The shared file clipboard (null/empty = nothing to paste).
@@ -147,6 +151,7 @@ const readShowAll = () => {
 
 export default function Sidebar({
   root,
+  cloud = null,
   currentPath,
   selection,
   clipboard,
@@ -904,6 +909,7 @@ export default function Sidebar({
       )}
       <SidebarHeader
         name={rootName}
+        cloud={cloud}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         onOpenFolder={onOpenFolder}
@@ -1018,6 +1024,7 @@ export default function Sidebar({
 
 function SidebarHeader({
   name,
+  cloud,
   menuOpen,
   setMenuOpen,
   onOpenFolder,
@@ -1031,6 +1038,7 @@ function SidebarHeader({
   onNewFolder,
 }: {
   name: string;
+  cloud: CloudStatus | null;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
   onOpenFolder: () => void;
@@ -1075,6 +1083,14 @@ function SidebarHeader({
         title="Workspace menu"
       >
         <span className="sidebar-header-name">{name}</span>
+        {cloud && (
+          <span
+            className={`sidebar-cloud-dot phase-${cloud.phase}`}
+            role="img"
+            aria-label={describeCloud(cloud)}
+            title={describeCloud(cloud)}
+          />
+        )}
         <ChevronDownIcon />
       </button>
       <button

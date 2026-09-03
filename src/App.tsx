@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  cloudForWorkspace,
+  cloudSetActivity,
+  cloudStatus,
+  onCloudStatus,
+  type CloudStatus,
+} from "./cloud";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
@@ -921,6 +928,30 @@ export default function App() {
       .then(setDeviceName)
       .catch(() => {});
   }, []);
+
+  // The cloud: every connected workspace's status, as the engine reports it
+  // — one array, replaced whole on every `cloud-status` event (src/cloud.ts).
+  // Everything cloud-shaped in the UI derives from this and nothing else.
+  const [cloudStatuses, setCloudStatuses] = useState<CloudStatus[]>([]);
+  useEffect(() => {
+    let live = true;
+    void cloudStatus()
+      .then((s) => {
+        if (live) setCloudStatuses(s);
+      })
+      .catch(() => {});
+    const un = onCloudStatus((s) => {
+      if (live) setCloudStatuses(s);
+    });
+    return () => {
+      live = false;
+      void un.then((f) => f()).catch(() => {});
+    };
+  }, []);
+  const cloudForRoot = useMemo(
+    () => cloudForWorkspace(cloudStatuses, workspaceRoot),
+    [cloudStatuses, workspaceRoot],
+  );
 
   // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
   // when closed. Set by the `dk-mermaid-expand` event a diagram's expand chip
@@ -4709,6 +4740,12 @@ export default function App() {
   const activeMissing = activeTab?.missing === true;
   const showSidebar = workspaceRoot != null && sidebarOpen;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
+  // Presence: tell the engines which document this window is editing (a
+  // file, or nothing) so other devices see "editing Projects/plan.md". The
+  // Rust side decides which connected workspace, if any, it concerns.
+  useEffect(() => {
+    void cloudSetActivity(activeFilePath).catch(() => {});
+  }, [activeFilePath]);
   const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
@@ -5362,6 +5399,7 @@ export default function App() {
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
         <Sidebar
           root={workspaceRoot}
+          cloud={cloudForRoot}
           currentPath={sidebarCurrentPath}
           selection={sidebarSelection}
           clipboard={fileClipboard}
