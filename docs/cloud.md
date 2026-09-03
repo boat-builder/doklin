@@ -484,11 +484,14 @@ reconcile) or a *poll* (etag + presence).
 1. **The edit bus.** Every write the app makes goes through a Rust command —
    `write_file`, `write_frontmatter`, `write_body`, `create_card`,
    `create_file`, `create_dir`, `move_path`, `copy_path`, `trash_file`,
-   `restore_trashed` — and each ends with `cloud::touched(&app, &path)`: an
-   unbounded channel to the manager, routed to the engine whose root
-   contains the path. The engine keeps a dirty set and settles **1.5 s**
-   after the last touch (autosave is already debounced 600 ms upstream), so
-   an edit reaches the cloud about two seconds after the keystroke.
+   `restore_trashed` — and each ends with `edits::touched(&app, &path)`,
+   which fans the hint out to the engine whose root contains the path and to
+   that root's versioner ([versioning.md](versioning.md) §6.1). The engine
+   keeps a dirty set and settles **1.5 s** after the last touch (autosave is
+   already debounced 600 ms upstream), so an edit reaches the cloud about
+   two seconds after the keystroke. Both halves filter the path the same
+   way, through `scan::rel_for_touch`: a hidden segment or one of the
+   engine's own temp files wakes neither.
 2. **The filesystem watcher** (external editors, git, Finder): a recursive
    `notify` debouncer, settling **5 s**.
 3. **The poll** — every 15 s: `GET /api/poll`; a changed etag triggers a

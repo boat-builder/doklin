@@ -33,6 +33,10 @@ sha2 = "0.10"
 diffy = "0.4"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Versioning (src/versions/): the snapshot store gzips its blobs and its
+# snapshot files. flate2 is pure Rust (miniz_oxide) and was already in the
+# lockfile as a transitive dependency — no new C build on any platform.
+flate2 = "1"
 # PDF export (src/pdf_export.rs): a hand-rolled CDP client over websocket
 # drives the pinned headless-Chromium engine, and the validation gate reads
 # the emitted PDF (structure via lopdf — default features off, its `time`

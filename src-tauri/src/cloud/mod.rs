@@ -27,8 +27,10 @@ mod flows;
 mod manifest;
 mod merge;
 mod remote;
-mod scan;
-mod status;
+// The versioner reuses the local walk, the hashing and the atomic write
+// (scan) and the event sink (status) — see src/versions/.
+pub(crate) mod scan;
+pub(crate) mod status;
 #[cfg(test)]
 mod tests;
 
@@ -73,6 +75,18 @@ pub(crate) const fn parse_u32(s: &str) -> u32 {
         i += 1;
     }
     n
+}
+
+/// The name this Mac signs work with: the cloud identity's when there is
+/// one (so a device that renamed itself keeps signing as it always has),
+/// else the Mac's display name. The versions store's `by` comes from here
+/// too — a snapshot is attributed the same way a revision is.
+pub(crate) fn device_name(data_dir: &Path) -> String {
+    read_cloud_file(data_dir)
+        .device
+        .map(|d| d.name)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(device_display_name)
 }
 
 /* ---------- The manager ---------- */

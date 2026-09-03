@@ -97,6 +97,25 @@ fn scan_dir(
     Ok(())
 }
 
+/// The edit bus's filter: `abs` as a workspace-relative path, or None when
+/// it is not a file the scan would ever see — outside the root, the root
+/// itself, a hidden or ignored segment, one of our own temp files. The
+/// cloud's bus and the versioner's share it so they can't drift.
+pub fn rel_for_touch(root: &Path, abs: &Path) -> Option<String> {
+    let rel = rel_path(root, abs)?;
+    if rel.is_empty() {
+        return None;
+    }
+    let bad = rel
+        .split('/')
+        .any(|seg| crate::is_hidden_or_ignored(seg) || seg.ends_with(TMP_SUFFIX));
+    if bad {
+        None
+    } else {
+        Some(rel)
+    }
+}
+
 /// `abs` relative to `root` with forward slashes, or None when it lies
 /// outside the root.
 pub fn rel_path(root: &Path, abs: &Path) -> Option<String> {

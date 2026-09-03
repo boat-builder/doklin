@@ -300,7 +300,16 @@ race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, presence, history, the edit bus routing, cloud.json and the
-marker), the sidebar tree walk including the
+marker), the versioning store (`--lib versions` — 24 tests: the cadence
+rule's consequences on a simulated clock (a burst inside one interval, a
+steady hour, a quiet hour, a session's end, a write loop), the seed capture,
+the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
+the too-large and disabled states, the retention ladder over two synthetic
+years with its per-band counts and its idempotence, the sweep with and
+without the blob grace period, the edit bus routing, the index/snapshot
+round trip through gzip, and the task itself — a session captured on the way
+out and a quit-time flush that answers only once the snapshot is on disk),
+the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one
 in with the body byte-identical, the snapshot guard, what `read_store` lists

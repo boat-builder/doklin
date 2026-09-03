@@ -32,7 +32,7 @@ settles the handful of details the spec left open (§2).
 
 | # | Phase | What ships | Depends on | User sees |
 | --- | --- | --- | --- | --- |
-| 1 | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
+| 1 ✅ | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
 | 2 | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
 | 3 | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
 | 4 | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
@@ -415,16 +415,24 @@ cadence, the way `touched_path_settles_faster_than_a_watched_one` does it.
 
 ### 4.8 Done when
 
-- [ ] `cargo test --lib versions` and `cargo test --lib cloud` pass; `cargo
-      check` is warning-free for the new module.
-- [ ] `pnpm lint`, `pnpm exec tsc --noEmit` pass (`src/versions.ts` compiles
+- [x] `cargo test --lib versions` (24 tests) and `cargo test --lib cloud`
+      pass; `cargo check` is warning-free for the new module.
+- [x] `pnpm lint`, `pnpm exec tsc --noEmit` pass (`src/versions.ts` compiles
       even though nothing imports it yet).
 - [ ] A manual pass on macOS (`pnpm tauri dev`): open a folder, see
       `<app_data>/versions/<key>/` appear with a `seed` snapshot; edit for a
       minute, stop, see a `closing` snapshot two minutes later; quit mid-edit
       and see a `closing` snapshot from the flush; the drafts store exists.
-- [ ] `settings.json` with `enabled: false` stops capture.
-- [ ] Docs updated as in 4.7.
+      **Not run** — this branch was built on a Linux runner, which can
+      compile and test the crate but cannot launch the app. The seed, the
+      closing capture and the quit flush each have a test standing in for
+      them (`a_versioner_captures_the_session_on_the_way_out`,
+      `a_flush_captures_what_is_pending_and_answers`); what only the manual
+      pass can show is the wiring in `lib.rs` — the window registry starting
+      and stopping versioners, and the exit event reaching the flush.
+- [x] `settings.json` with `enabled: false` stops capture
+      (`disabled_captures_nothing_and_reports_phase`).
+- [x] Docs updated as in 4.7.
 
 ---
 

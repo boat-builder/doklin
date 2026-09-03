@@ -287,9 +287,19 @@ Two properties worth having explicitly:
   produces one snapshot per ten minutes, not thousands. The current design
   has no such bound.
 
-A snapshot costs one small object plus the blobs for content that changed —
-and those blobs are already being uploaded by the cycle. Capture adds no
-blob writes at all; it adds one object.
+A snapshot costs one small object plus the blobs for content that changed.
+
+*As built* (phase 1): the cadence lives in `versions/capture.rs` as
+`Cadence`, a pure state machine over "when did an edit last arrive" and
+"when was the last capture" — so every consequence above is a test that
+needs no filesystem and no clock. It is driven by a versioner task per open
+root, with its own recursive watcher and its own scan, **not** by the cloud
+cycle: a folder connected to nothing keeps exactly the same history as one
+that is (plan §2, decision 3). The corollary of the independent cloud
+prefix (decision 4) is that capture does write blobs of its own — the
+sentence this note replaces assumed snapshots would point at the sync's,
+which they deliberately no longer do. A capture that finds the workspace
+byte-for-byte what the newest snapshot holds writes nothing at all.
 
 ### 6.2 Retention — the ladder
 
@@ -327,6 +337,17 @@ a device on an older build from ever deleting a blob a snapshot needs.
 
 *As planned* ([versioning-plan.md](versioning-plan.md) §2, decisions 3–4):
 the sync GC keeps its predicate; the version store has its own.
+
+*As built* (phase 1): `retain()` and `sweep()` in `versions/retain.rs`.
+Measured rather than estimated — two years of hourly snapshots (17,520 of
+them) thin to **116**: the newest, 23 hourly, 30 daily, 49 weekly and 13
+monthly. The bands are bucketed by the calendar in UTC (`chrono`), so a
+29-day window touches 30 UTC days. A blob is spared for an hour after it is
+written (`GC_GRACE`), a running versioner sweeps at start and then every six
+hours (`SWEEP_EVERY`), counted from the last sweep and checked both after a
+capture and on the versioner's idle tick — so a folder nobody is editing
+still ages past its horizon. The local horizon defaults to 90 days in
+`<app_data>/versions/settings.json`.
 
 ### 6.3 The stores
 
@@ -382,6 +403,30 @@ the cloud prefix is independent; gzip rather than zstd, because `flate2` is
 already in the build and zstd is not; a moved folder starts a fresh store
 and the old one is listed as orphaned in Settings. Adopting a connected
 folder's marker `wsId` as the key is a later refinement.
+
+*As built* (phase 1 — the local store only; the cloud half is phase 3):
+
+```
+<app_data>/versions/
+  settings.json                  {version, enabled, horizonDays}
+  <key>/
+    index.json                   {version, root, createdMs, lastCaptureMs, lastSweepMs, snapshots[]}
+    snapshots/<ts>.json.gz       <ts> zero-padded to 13 digits
+    blobs/<hh>/<hash>.gz
+```
+
+`key` is `r-` and the first 16 hex of the sha256 of the folder's canonical
+path; the drafts directory is `drafts`. An index row is `{ts, reason, files,
+bytes, digest, pinned, label, restoredFrom}`, where `digest` is the sha256
+over `<path>\0<hash>\n` in path order — equal digests mean the same
+workspace, which is how a capture with nothing to record writes nothing. A
+snapshot file is `{version, ts, reason, restoredFrom, by, files}` with
+`files` a map of path to `{h, s, m}`; `h` is the **full** sha256 (the sync's
+`hash16` is its first 16 characters) and the other two are the stat cache,
+so an untouched file is never re-read. `by` is the same device name the
+cloud attributes a revision to. Everything is written atomically, blobs
+first, then the snapshot, then the index — a crash leaves bytes the sweep
+collects, never a row whose content is missing.
 
 ### 6.4 What history is, once snapshots exist
 
@@ -499,6 +544,11 @@ last, retiring the manifest's `hist`. Phase 1 alone takes the reach from
 it past what a laptop should hold; the surfaces are where the promise
 becomes visible.
 
+**Phase 1 is built** — `src-tauri/src/versions/`, invisible by design: one
+versioner per open folder plus drafts, capturing on the cadence, thinning on
+the ladder, reporting a status no surface reads yet. History starts accruing
+from that release; phase 2 is what lets anyone see it.
+
 ---
 
 ## 10. Decisions, and what was rejected
@@ -584,12 +634,18 @@ What each suite must cover:
 
 - **Cadence** — a burst of edits inside one interval yields one snapshot; a
   quiet hour yields none; a session's last state is always captured; a write
-  loop yields one snapshot per interval and no more.
+  loop yields one snapshot per interval and no more. *Built*: five tests
+  over the pure `Cadence`, driven by a per-second script of "did an edit
+  land in this second".
 - **The ladder** — a synthetic two-year edit history thins to the expected
   count per band; a thinned run is idempotent; blobs go exactly when their
-  last referencing snapshot does, and never while one remains.
+  last referencing snapshot does, and never while one remains. *Built*: the
+  counts are pinned exactly (§6.2), and the sweep is tested with and without
+  the grace period.
 - **Append-only** — deleting a file, trashing a folder and confirming a
-  mass-delete each leave every snapshot and blob intact.
+  mass-delete each leave every snapshot and blob intact. *Built* for the
+  first of the three; the other two arrive with the surfaces that make them
+  reachable.
 - **Restore** — a file restore pushes a new revision and leaves history
   whole; a workspace restore is snapshotted first and is itself undoable.
 - **Migration** — a v2 manifest's `hist` seeds snapshots once, and a v2
