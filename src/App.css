@@ -6467,3 +6467,170 @@ button.published-row-name:hover {
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* ---------- The workspace timeline (docs/versioning-plan.md §7.2) --------- */
+
+/* Two columns: the moments on the left, what restoring one would do on the
+   right. The day groups reuse the rail's own rows, so a timeline of the
+   folder reads like a timeline of a document. */
+.cloud-body.ws-history {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 14px;
+  align-items: start;
+  min-height: 320px;
+}
+
+.ws-history-times {
+  min-width: 0;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 4px;
+  border-right: 1px solid var(--app-border);
+}
+
+.ws-history-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-height: 52vh;
+}
+
+/* "+2 −1 ~5" — what the moment changed, beside the time it happened. */
+.ws-delta {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-text-muted);
+}
+
+.ws-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.ws-file-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 2px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ws-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-file-kind {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  background: var(--app-hover);
+  color: var(--app-text-muted);
+}
+
+/* Green for what comes back, red for what goes — the diff's own colours. */
+.ws-file-kind.is-missing {
+  background: rgba(34, 139, 84, 0.14);
+  color: #1f7a4c;
+}
+
+.ws-file-kind.is-added {
+  background: rgba(200, 60, 60, 0.14);
+  color: #b3261e;
+}
+
+.ws-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ws-confirm-text {
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ---------- Recently deleted (docs/versioning-plan.md §12.3.4) ----------- */
+
+/* Dimmed, at the foot of the tree, and only when there is something in it. */
+.sidebar-deleted-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: 0;
+  border-top: 1px solid var(--app-border);
+  background: none;
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-deleted-row:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.sidebar-deleted-label {
+  flex: 1 1 auto;
+}
+
+.sidebar-deleted-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-deleted-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px;
+}
+
+.ws-deleted-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 8px 10px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.ws-deleted-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-deleted-sub {
+  font-size: 11px;
+  color: var(--app-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-deleted-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+}

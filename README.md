@@ -62,6 +62,15 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   version and it is kept for good. Connect the folder and that history is
   mirrored to your own domain, so it outlives the laptop and every Mac sees
   what the others wrote.
+- **The folder as it was** — *Workspace history…* on the sidebar's root is a
+  timeline of the whole folder: pick a moment and it says exactly what
+  restoring it would change, bring back and move to the Trash, file by file,
+  before anything happens. A snapshot of now is taken first, so it can be
+  undone. Delete a note and *Recently deleted* appears at the foot of the
+  sidebar — with its old folder, when it was last seen, a read-only look at
+  what it held, and one click to put it back, history and all. It works
+  after the Trash has been emptied, and for a note deleted on another Mac:
+  the store is not the Trash.
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
   note. The cloud is one Cloudflare Worker and one bucket on your own account,

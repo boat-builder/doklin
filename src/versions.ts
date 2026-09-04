@@ -76,8 +76,52 @@ export type RestoreOutcome = {
   ts: number | null;
 };
 
+/** One file a retained snapshot and the folder disagree about. Mirrored by
+ *  src-tauri/src/versions/workspace.rs — change both. */
+export type ChangedFile = {
+  path: string;
+  /** The content the snapshot holds — what a restore would write. */
+  thenHash: string;
+  /** The content on disk now. */
+  nowHash: string;
+};
+
+/** The whole of what restoring one snapshot would do, before anything
+ *  happens. A file the snapshot and the folder agree on is in none of the
+ *  three lists. */
+export type SnapshotDiff = {
+  changed: ChangedFile[];
+  /** On disk now and not in the snapshot: a restore moves these to the Trash. */
+  added: string[];
+  /** In the snapshot and not on disk: a restore brings these back. */
+  missing: string[];
+};
+
+/** One file that was here and is not — a row of *Recently deleted*. */
+export type DeletedFile = {
+  /** Workspace-relative, as the snapshot held it. */
+  path: string;
+  /** The newest snapshot that still had it. */
+  lastSeenMs: number;
+  /** Its content then, for the preview and the restore. */
+  hash: string;
+  size: number;
+};
+
+/** What a workspace restore did. *Undo* is a restore of `preRestoreTs` with
+ *  the same paths. */
+export type RestoreReport = {
+  written: number;
+  trashed: number;
+  preRestoreTs: number | null;
+};
+
 /** A restore landed on disk — the same shape as `cloud-applied`. */
 export type VersionsAppliedEvent = { root: string; paths: string[] };
+
+/** What one snapshot changed against the one before it — the "+2 −1 ~5" a
+ *  row of the workspace timeline wears. */
+export type SnapshotDelta = { added: number; removed: number; changed: number };
 
 /** One retained snapshot, as the history surfaces list it. */
 export type SnapshotMeta = {
@@ -90,6 +134,9 @@ export type SnapshotMeta = {
   label: string | null;
   /** For a `restore`: the ts of the snapshot its content came from. */
   restoredFrom: number | null;
+  /** Only `versionsSnapshots` fills this in — it reads both file maps to
+   *  work it out. Null for the oldest row and for a capture's answer. */
+  delta: SnapshotDelta | null;
 };
 
 /* ---------- Commands ---------- */
@@ -163,6 +210,25 @@ export const versionsRestoreFile = (
     hash: opts.hash ?? null,
     text: opts.text ?? null,
   });
+
+/** What restoring one snapshot would do to the folder as it is now — the
+ *  three lists the workspace timeline shows before anything happens. */
+export const versionsSnapshotDiff = (root: string, ts: number) =>
+  invoke<SnapshotDiff>("versions_snapshot_diff", { root, ts });
+
+/** Every file this folder's history holds and the folder itself does not,
+ *  most recently seen first. */
+export async function versionsDeleted(root: string): Promise<DeletedFile[]> {
+  const r = await invoke<unknown>("versions_deleted", { root });
+  return Array.isArray(r) ? (r as DeletedFile[]) : [];
+}
+
+/** Put a whole moment back — or, with `paths`, the part of it the user
+ *  ticked. Like the file restore it captures the state it leaves first, so
+ *  the whole thing is undone by restoring `preRestoreTs` with the same
+ *  paths. */
+export const versionsRestoreSnapshot = (root: string, ts: number, paths?: string[] | null) =>
+  invoke<RestoreReport>("versions_restore_snapshot", { root, ts, paths: paths ?? null });
 
 /* ---------- Events ---------- */
 

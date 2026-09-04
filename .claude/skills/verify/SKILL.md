@@ -14,7 +14,8 @@ pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
 `PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
-surfaces over a scripted engine (`drive-cloud.mjs`), a document's version history
+surfaces over a scripted engine (`drive-cloud.mjs`), version history — a
+document's rail, the workspace timeline and the deleted files
 (`drive-versions.mjs`), and the public pages a
 published workspace serves (`drive-public.mjs`, against the real worker).
 
@@ -124,7 +125,7 @@ node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cl
                                            # MIRRORED (read through versions_read, comparable) and
                                            # a sync-manifest revision (read through cloud_revision,
                                            # not comparable, restored by handing over its text)
-node verify-harness/drive-versions.mjs      # 19 steps over the SAME harness page (cloud.html's IPC
+node verify-harness/drive-versions.mjs      # 26 steps over the SAME harness page (cloud.html's IPC
                                            # stub answers versions_* from a scripted store whose
                                            # restore really writes the file and emits
                                            # `versions-applied`): the version rail from the sidebar
@@ -143,7 +144,20 @@ node verify-harness/drive-versions.mjs      # 19 steps over the SAME harness pag
                                            # store, a revision only the sync manifest has (read
                                            # through cloud_revision, with Show changes absent),
                                            # and a version another Mac mirrored — its device, its
-                                           # reason, read through the version store, comparable
+                                           # reason, read through the version store, comparable;
+                                           # then the WHOLE FOLDER: Workspace history… on the
+                                           # sidebar root (no cloud connected), the timeline's day
+                                           # groups with each moment's "+2 −1 ~5", a moment's three
+                                           # lists (changed / comes back / to the Trash), a partial
+                                           # restore whose inline confirm states the real counts
+                                           # and which touches only the ticked path, Restore all
+                                           # doing all three and refreshing the tree off
+                                           # `versions-applied` with an Undo toast, and Recently
+                                           # deleted — the dimmed row with its count at the foot of
+                                           # the sidebar, its column (old folder, last seen), Open
+                                           # showing the last content read-only, and Restore
+                                           # putting the file back at its old path and beside it
+                                           # (`<stem> (restored)`) when that path is taken
 node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
                                            # included, ~1 min) over an in-memory bucket seeded with
                                            # cloud-worker/test/seed.mjs, on http://localhost:8787
@@ -339,7 +353,7 @@ ladder thinning on its own clock with what it thinned never put back, a blob
 younger than the grace period spared, a worker without the `versions`
 feature written to not at all and reported as a null status until the hourly
 pass finds it updated, and another Mac's snapshot downloaded once and
-answered from the cache after), the versioning store (`--lib versions` — 39 tests: the cadence
+answered from the cache after), the versioning store (`--lib versions` — 44 tests: the cadence
 rule's consequences on a simulated clock (a burst inside one interval, a
 steady hour, a quiet hour, a session's end, a write loop), the seed capture,
 the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
@@ -358,7 +372,14 @@ against the local ones, versions another Mac mirrored joining the SAME walk
 one moment on both sides listed once), and the restore — the state it leaves
 then the state it made, naming its source, deduping when nothing was
 unsaved, undone by restoring the pre-restore hash, and never removing a
-snapshot),
+snapshot), the whole folder (a snapshot's diff against disk classifying
+changed / added / missing while leaving what both sides agree on out of all
+three, a workspace restore capturing first then writing what changed,
+bringing back what was gone — parent folders and all — and trashing what was
+never there, with a blob kept for the trashed file so the undo is real, a
+subset restore touching only the ticked paths, the deleted list naming the
+newest snapshot that still held a file and the content it had then, and a
+deleted file restored keeping the history it had),
 the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one

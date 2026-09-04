@@ -145,7 +145,11 @@ Where a history has to follow a document, or admit it cannot.
 
 ## 6. Deleted files come back
 
-Phase 4.
+Phase 4. `drive-versions.mjs` walks the surface itself in Chromium — the
+dimmed row appearing with its count, the column's old folder and last-seen
+line, *Open* reading the last content, and *Restore* landing at the old path
+and beside it when that path is taken. What only a Mac can answer is below:
+the real Trash, a real second Mac, and a folder deleted whole.
 
 - [ ] Delete a note. *Recently deleted* appears at the foot of the sidebar
       with the right count.
@@ -162,7 +166,11 @@ Phase 4.
 
 ## 7. The workspace as it was
 
-Phase 4's timeline.
+Phase 4's timeline. `drive-versions.mjs` proves the shape — the day groups
+with each moment's delta, the three lists, the inline confirm's counts, a
+partial restore touching only what was ticked, and *Restore all* with its
+Undo — against a scripted store. What is below is the same walk against a
+real folder, where the Trash and the file sizes are real.
 
 - [ ] Open *Workspace history…* from the sidebar root. The timeline lists
       snapshots by day, each with what changed in it.

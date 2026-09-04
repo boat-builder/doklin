@@ -124,6 +124,13 @@ type Props = {
   // Version history for a document — the rail, for any workspace: since
   // docs/versioning.md it is no longer a cloud feature.
   onHistory?: (path: string) => void;
+  // The workspace's own timeline, a modal (docs/versioning-plan.md §7.2).
+  onWorkspaceHistory?: () => void;
+  // Files this folder's history holds and the folder does not: the count
+  // for the row at the foot of the tree, and the switch into its column.
+  // The row is the point — the root's menu is the second way in.
+  deletedCount?: number;
+  onRecentlyDeleted?: () => void;
   // Publishing (docs/cloud.md §7.2): the folder dialog for a
   // folder (or the root, for the whole workspace), stopping a page, and
   // copying a page's public link. Offered only in a connected workspace.
@@ -187,6 +194,9 @@ export default function Sidebar({
   onResizeWidth,
   onOpenCloud,
   onHistory,
+  onWorkspaceHistory,
+  deletedCount = 0,
+  onRecentlyDeleted,
   onPublishFolder,
   onStopPublishing,
   onCopyLink,
@@ -859,6 +869,14 @@ export default function Sidebar({
     if (target.kind === "file" && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
+    // The whole folder's, on the root — where "put it back to Tuesday" is
+    // asked from.
+    if (target.kind === "root" && onWorkspaceHistory) {
+      items.push({ label: "Workspace history…", onClick: onWorkspaceHistory });
+    }
+    if (target.kind === "root" && onRecentlyDeleted && deletedCount > 0) {
+      items.push({ label: `Recently deleted (${deletedCount})`, onClick: onRecentlyDeleted });
+    }
     // Publishing: a folder (or the whole workspace) publishes every note in
     // it; a note published on its own offers its link and its stop here —
     // publishing one is the pill's job.
@@ -947,6 +965,9 @@ export default function Sidebar({
     root,
     cloud,
     onHistory,
+    onWorkspaceHistory,
+    onRecentlyDeleted,
+    deletedCount,
     publishedByAbs,
     onPublishFolder,
     onStopPublishing,
@@ -1066,6 +1087,21 @@ export default function Sidebar({
           </ul>
         )}
       </div>
+      {/* Deleted files are a row, not a menu (docs/versioning-plan.md
+          §12.3.4): deletion is the moment nobody goes looking for one. It
+          is here only when there is something in it. */}
+      {deletedCount > 0 && onRecentlyDeleted && (
+        <button
+          className="sidebar-deleted-row"
+          data-testid="recently-deleted-row"
+          onClick={onRecentlyDeleted}
+          title="Files this folder's history still holds"
+        >
+          <TrashIcon />
+          <span className="sidebar-deleted-label">Recently deleted</span>
+          <span className="sidebar-deleted-count">{deletedCount}</span>
+        </button>
+      )}
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}
@@ -1099,6 +1135,27 @@ export default function Sidebar({
         </div>
       )}
     </aside>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
   );
 }
 

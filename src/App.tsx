@@ -20,9 +20,13 @@ import {
 import CloudPanel from "./CloudPanel";
 import {
   onVersionsApplied,
+  versionsDeleted,
   versionsRestoreFile,
+  versionsRestoreSnapshot,
+  type DeletedFile,
   type FileVersion,
   type RestoreOutcome,
+  type RestoreReport,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
 import CloudToasts, { type CloudToast } from "./CloudToasts";
@@ -32,6 +36,8 @@ import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
 import HistoryRail from "./HistoryRail";
 import VersionPreview, { momentLabel } from "./VersionPreview";
+import WorkspaceHistory from "./WorkspaceHistory";
+import RecentlyDeleted from "./RecentlyDeleted";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
@@ -976,10 +982,19 @@ export default function App() {
   // of the live editor. `historyToken` re-reads the rail after a restore
   // adds rows to it.
   const [historyFor, setHistoryFor] = useState<string | null>(null);
+  // `docPath` is the document the version belongs to — normally the one the
+  // rail is open on, but *Recently deleted* previews a file that has no tab
+  // to stand in, and that one is `detached`: it shows over whatever pane is
+  // focused, because there is nowhere else for it to be.
   const [versionPreview, setVersionPreview] = useState<
-    { version: FileVersion; newer: FileVersion | null; root: string } | null
+    { version: FileVersion; newer: FileVersion | null; root: string; docPath: string; detached?: boolean } | null
   >(null);
   const [historyToken, setHistoryToken] = useState(0);
+  // The workspace timeline (a modal) and the deleted files (a sidebar
+  // column). The app owns the deleted list: the sidebar's row needs the
+  // same count, and reading it costs a walk of the retained snapshots.
+  const [workspaceHistoryOpen, setWorkspaceHistoryOpen] = useState(false);
+  const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([]);
   const historyForRef = useRef<string | null>(null);
   // What ⌘⌥H opens history for: the active tab, unless it is a board.
   const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
@@ -1199,7 +1214,7 @@ export default function App() {
 
   // Workspace search (⌘⇧F): the left sidebar toggles between the file tree
   // ("files") and a folder-wide search view ("search").
-  const [sidebarMode, setSidebarMode] = useState<"files" | "search">("files");
+  const [sidebarMode, setSidebarMode] = useState<"files" | "search" | "deleted">("files");
   const [wsQuery, setWsQuery] = useState("");
   const [wsCase, setWsCase] = useState(false);
   const [wsFocusToken, setWsFocusToken] = useState(0);
@@ -2611,7 +2626,9 @@ export default function App() {
   const previewVersion = useCallback(
     (version: FileVersion, root: string, newer: FileVersion | null) => {
       void flushPendingAutosave();
-      setVersionPreview({ version, newer, root });
+      const docPath = historyForRef.current;
+      if (!docPath) return;
+      setVersionPreview({ version, newer, root, docPath });
     },
     [flushPendingAutosave],
   );
@@ -2659,6 +2676,87 @@ export default function App() {
       }
     },
     [pushToast, undoRestore],
+  );
+
+  /* ---------- The workspace, as it was (docs/versioning-plan.md §7) ------ */
+
+  // Read once, for both surfaces: the sidebar's row wants the count and the
+  // column wants the list, and working it out is a walk of the retained
+  // snapshots. Re-read whenever the tree does — a restore, a delete and a
+  // sync all bump that token.
+  useEffect(() => {
+    if (!workspaceRoot) {
+      setDeletedFiles([]);
+      return;
+    }
+    let cancelled = false;
+    void versionsDeleted(workspaceRoot)
+      .then((files) => {
+        if (!cancelled) setDeletedFiles(files);
+      })
+      // A folder whose versioner hasn't started yet simply has no row.
+      .catch(() => {
+        if (!cancelled) setDeletedFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceRoot, treeRefreshToken]);
+
+  // The last content of a deleted file, read-only — the same preview a
+  // version gets, over the focused pane because the file has no tab.
+  const previewDeleted = useCallback(
+    (file: DeletedFile, root: string) => {
+      void flushPendingAutosave();
+      setVersionPreview({
+        root,
+        docPath: `${root}/${file.path}`,
+        detached: true,
+        newer: null,
+        version: {
+          ts: file.lastSeenMs,
+          hash: file.hash,
+          size: file.size,
+          by: "",
+          reason: "",
+          label: null,
+          pinned: false,
+          restoredFrom: null,
+          path: file.path,
+          source: "local",
+          current: false,
+        },
+      });
+    },
+    [flushPendingAutosave],
+  );
+
+  // Undoing a workspace restore is another workspace restore — of the
+  // snapshot the first one left, with the same paths (§12.3.8).
+  const undoSnapshotRestore = useCallback(
+    async (root: string, report: RestoreReport, paths: string[] | null) => {
+      if (report.preRestoreTs == null) return;
+      try {
+        await versionsRestoreSnapshot(root, report.preRestoreTs, paths);
+      } catch (e) {
+        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+      }
+    },
+    [pushToast],
+  );
+
+  const snapshotRestored = useCallback(
+    (root: string, report: RestoreReport, paths: string[] | null) => {
+      const moved = [
+        report.written > 0 && `${report.written} file${report.written === 1 ? "" : "s"} written`,
+        report.trashed > 0 && `${report.trashed} moved to the Trash`,
+      ].filter(Boolean) as string[];
+      pushToast(moved.length ? `Restored — ${moved.join(", ")}.` : "Nothing needed changing.", {
+        label: "Undo",
+        run: () => void undoSnapshotRestore(root, report, paths),
+      });
+    },
+    [pushToast, undoSnapshotRestore],
   );
 
   const keepMyVersion = useCallback(() => {
@@ -5129,7 +5227,9 @@ export default function App() {
     // live editor hidden behind it — so nothing typed here can ever be
     // autosaved over the newer text (§12.3.1).
     const previewHere =
-      focused && versionPreview != null && historyFor != null && historyFor === paneTab?.path;
+      focused &&
+      versionPreview != null &&
+      (versionPreview.docPath === paneTab?.path || versionPreview.detached === true);
 
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
@@ -5290,15 +5390,15 @@ export default function App() {
               kanban={kanbanHostFor(paneTab)}
             />
           )}
-          {previewHere && historyFor && versionPreview && (
+          {previewHere && versionPreview && (
             <VersionPreview
-              docPath={historyFor}
+              docPath={versionPreview.docPath}
               root={versionPreview.root}
               version={versionPreview.version}
               newer={versionPreview.newer}
               onBack={() => setVersionPreview(null)}
               onRestore={(version, text) =>
-                void restoreVersion(historyFor, versionPreview.root, version, text)
+                void restoreVersion(versionPreview.docPath, versionPreview.root, version, text)
               }
               onOpenFile={(path) => void openTab(path, "file")}
               onError={(message) => pushToast(message)}
@@ -5559,6 +5659,22 @@ export default function App() {
           focusToken={wsFocusToken}
         />
       )}
+      {showSidebar && workspaceRoot && sidebarMode === "deleted" && (
+        <RecentlyDeleted
+          root={workspaceRoot}
+          files={deletedFiles}
+          onBackToFiles={() => setSidebarMode("files")}
+          onOpen={(file) => previewDeleted(file, workspaceRoot)}
+          onRestored={(path) => {
+            setTreeRefreshToken((t) => t + 1);
+            pushToast(`${basename(path)} is back.`, {
+              label: "Open",
+              run: () => void openTab(path, "file"),
+            });
+          }}
+          onError={(message) => pushToast(message)}
+        />
+      )}
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
         <Sidebar
           root={workspaceRoot}
@@ -5591,6 +5707,17 @@ export default function App() {
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onHistory={(path) => void openHistory(path)}
+          onWorkspaceHistory={() => setWorkspaceHistoryOpen(true)}
+          deletedCount={deletedFiles.length}
+          onRecentlyDeleted={() => setSidebarMode("deleted")}
+        />
+      )}
+      {workspaceHistoryOpen && workspaceRoot && (
+        <WorkspaceHistory
+          root={workspaceRoot}
+          onClose={() => setWorkspaceHistoryOpen(false)}
+          onRestored={(report, paths) => snapshotRestored(workspaceRoot, report, paths)}
+          onError={(message) => pushToast(message)}
         />
       )}
       {conflict && (
@@ -5690,6 +5817,10 @@ export default function App() {
           onUpdateWorker={() => {
             setCloudPanelOpen(false);
             setWorkerUpdateOpen(true);
+          }}
+          onWorkspaceHistory={() => {
+            setCloudPanelOpen(false);
+            setWorkspaceHistoryOpen(true);
           }}
           onOpenPublished={() => {
             setCloudPanelOpen(false);

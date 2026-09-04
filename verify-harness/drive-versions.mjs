@@ -355,6 +355,178 @@ step(
   `${mirroredRow} / ${bothCounted}`,
 );
 
+
+/* ---------- The workspace, as it was (docs/versioning-plan.md §7) -------- */
+
+const openRootMenu = async () => {
+  await page.keyboard.press("Escape");
+  // Right-click on the tree's empty space targets the workspace root; the
+  // row handlers stopPropagation, so dispatching on the body itself is the
+  // same gesture without depending on where the rows happen to end.
+  await page.locator(".sidebar-body").dispatchEvent("contextmenu", { clientX: 40, clientY: 420, bubbles: true });
+  await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
+};
+
+/* 20 — the way in. The whole folder's timeline is on the root's menu, for
+   any workspace: like a document's history, it is not a cloud feature. */
+await tid("history-rail").locator(".history-rail-close").click();
+await poll(async () => (await tid("history-rail").count()) === 0);
+await openRootMenu();
+const rootMenu = await page.locator(".sidebar-menu-item").allTextContents();
+step(
+  "the sidebar root offers Workspace history…, and no Recently deleted while nothing is",
+  rootMenu.some((t) => t.startsWith("Workspace history")) &&
+    !rootMenu.some((t) => t.startsWith("Recently deleted")) &&
+    (await tid("recently-deleted-row").count()) === 0,
+  rootMenu.join(" | "),
+);
+
+/* 21 — the timeline, and what a moment would cost. Nothing has happened
+   yet: the modal says what a restore WOULD do, in three lists. */
+await page.locator(".sidebar-menu-item", { hasText: "Workspace history" }).click();
+await poll(async () => (await tid("workspace-history").count()) === 1);
+const deltas = await page.locator('[data-testid="ws-delta"]').allTextContents();
+const namedRow = page.locator('[data-testid="ws-snapshot"]', { hasText: "Before the rewrite" });
+await namedRow.click();
+await poll(async () => (await page.locator('[data-testid="ws-file"]').count()) === 3);
+const kinds = await page.locator('[data-testid="ws-file"]').evaluateAll((els) =>
+  els.map((e) => `${e.dataset.kind}:${e.dataset.path}`),
+);
+step(
+  "the timeline groups moments by day with what each changed, and a moment shows changed / comes back / to the Trash",
+  deltas.some((d) => d.includes("+1")) &&
+    kinds.includes("changed:other.md") &&
+    kinds.includes("missing:Projects/plan.md") &&
+    kinds.includes("added:third.md") &&
+    (await tid("ws-undoable").textContent()).includes("can be undone"),
+  `${deltas.join(" / ")} — ${kinds.join(", ")}`,
+);
+await page.screenshot({ path: SHOTS + "versions-05-workspace.png" });
+
+/* 22 — a partial restore. Untick everything but one file: the confirm
+   states the real counts, in the app's own chrome, and exactly that one
+   path moves. */
+for (const path of ["Projects/plan.md", "third.md"]) {
+  await page.locator(`[data-testid="ws-file"][data-path="${path}"] input`).click();
+}
+await tid("ws-restore-selected").click();
+await poll(async () => (await tid("ws-confirm").count()) === 1);
+const confirmText = await page.locator(".ws-confirm-text").textContent();
+await tid("ws-confirm-yes").click();
+await poll(async () => (await page.evaluate(() => window.__versions.restores.length)) === 1);
+const partial = await page.evaluate(() => window.__versions.restores.at(-1));
+step(
+  "Restore selected confirms with the real counts and touches only the ticked path",
+  confirmText.trim() === "Write 1 file?" &&
+    JSON.stringify(partial.paths) === JSON.stringify(["other.md"]) &&
+    partial.written.length === 1 &&
+    partial.trashed.length === 0,
+  `${confirmText} → ${JSON.stringify(partial)}`,
+);
+
+/* 23 — the whole moment. Restore all is the same act at folder scale: it
+   states everything it will do, writes, trashes, and the tree refreshes off
+   `versions-applied` — the same event a file restore emits. */
+await page.evaluate(() => {
+  window.__treeCalls = 0;
+});
+await tid("ws-restore-all").click();
+await poll(async () => (await tid("ws-confirm").count()) === 1);
+const allText = await page.locator(".ws-confirm-text").textContent();
+await tid("ws-confirm-yes").click();
+await poll(async () => (await page.evaluate(() => window.__versions.restores.length)) === 2);
+const whole = await page.evaluate(() => window.__versions.restores.at(-1));
+const refreshed = await poll(async () => (await page.evaluate(() => window.__treeCalls)) > 0);
+const undoToast = await poll(async () =>
+  (await page.locator(".cloud-toast").last().innerText()).includes("moved to the Trash"),
+);
+step(
+  "Restore all says what it will do, does it, and the tree refreshes with an Undo offered",
+  allText.trim() === "Write 1 file, bring back 1, move 1 to the Trash?" &&
+    whole.paths === null &&
+    whole.written.length === 2 &&
+    whole.trashed.length === 1 &&
+    refreshed &&
+    undoToast &&
+    (await page.locator(".cloud-toast").last().innerText()).includes("Undo"),
+  `${allText} → ${JSON.stringify(whole)}`,
+);
+
+/* 24 — Recently deleted. The row is the point (§12.3.4): it appears at the
+   foot of the tree only when there is something in it, with the count. */
+await page.locator(".modal-close").click();
+await poll(async () => (await tid("workspace-history").count()) === 0);
+await page.evaluate(() => {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  window.__versions.deleted = [
+    { path: "Projects/gone.md", lastSeenMs: midnight.getTime() - 3600000, hash: "9".repeat(64), size: 120 },
+  ];
+  window.__versions.blobs["9".repeat(64)] = "# Gone\n\nthe note that was deleted\n";
+  window.__emit("versions-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await tid("recently-deleted-row").count()) === 1);
+const rowText = await tid("recently-deleted-row").innerText();
+await tid("recently-deleted-row").click();
+await poll(async () => (await tid("recently-deleted").count()) === 1);
+const deletedRow = await tid("deleted-row").innerText();
+step(
+  "a deleted file gets a row at the foot of the sidebar, and a column listing its old folder and when it was last seen",
+  rowText.includes("Recently deleted") &&
+    rowText.includes("1") &&
+    deletedRow.includes("gone") &&
+    deletedRow.includes("Projects") &&
+    deletedRow.includes("last seen"),
+  `${rowText.replace(/\n/g, " ")} / ${deletedRow.replace(/\n/g, " ")}`,
+);
+await page.screenshot({ path: SHOTS + "versions-06-deleted.png" });
+
+/* 25 — Open. The last content, read-only, in the same preview a version
+   gets — the file has no tab of its own to stand in, so it shows over the
+   focused pane. */
+await tid("deleted-open").click();
+await poll(async () => (await tid("version-preview").count()) === 1);
+const gonePreview = await tid("version-preview").innerText();
+step(
+  "Open shows what the file last held, read-only",
+  gonePreview.includes("the note that was deleted") &&
+    (await page.evaluate(() => window.__versions.calls.filter((c) => c.cmd === "versions_read").at(-1)?.args.hash)) ===
+      "9".repeat(64),
+  gonePreview.slice(0, 60),
+);
+
+/* 26 — Restore. It goes back to the path it had; when something else lives
+   there now, both survive and the copy is named. */
+await tid("back-to-now").click();
+await poll(async () => (await tid("version-preview").count()) === 0);
+await tid("deleted-restore").click();
+await poll(async () => (await page.evaluate(() => window.__versions.calls.some((c) => c.cmd === "versions_restore_file" && c.args.path.includes("gone")))));
+const back = await page.evaluate(() =>
+  window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").at(-1),
+);
+// And again, now that the path is taken: the restore lands beside it.
+await page.evaluate(() => {
+  window.__fs.set("/docs/Projects/gone.md", "something else lives here now\n");
+  window.__emit("versions-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await tid("deleted-row").count()) === 1);
+await tid("deleted-restore").click();
+await poll(async () =>
+  (await page.evaluate(
+    () => window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").at(-1)?.args.path,
+  )) !== back.args.path,
+);
+const collided = await page.evaluate(
+  () => window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").at(-1)?.args.path,
+);
+step(
+  "Restore puts a deleted file back where it was, and beside it when the path is taken",
+  back.args.path === "/docs/Projects/gone.md" &&
+    back.args.hash === "9".repeat(64) &&
+    collided === "/docs/Projects/gone (restored).md",
+  `${back.args.path} → ${collided}`,
+);
+
 await settle();
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} steps passed`);

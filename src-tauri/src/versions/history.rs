@@ -196,8 +196,10 @@ pub fn file_versions(
     let mut path = rel.to_string();
     // The newest snapshot that held the tracked path — what the rename rule
     // compares against, and never a snapshot the file was simply missing
-    // from.
+    // from — and, where that snapshot was a restore, the moment its content
+    // came from.
     let mut newer: Option<Arc<Snapshot>> = None;
+    let mut newer_restored: Option<u64> = None;
 
     for row in retained.iter().rev() {
         let Some(snap) = cache.get(store, row) else { continue };
@@ -213,6 +215,11 @@ pub fn file_versions(
                         path = old;
                         entry
                     }
+                    // A restore brought the file back from further down this
+                    // same history (phase 4's *Recently deleted*): step over
+                    // the moments it was missing from instead of starting
+                    // the story where it reappeared.
+                    None if newer_restored.is_some_and(|from| row.ts >= from) => continue,
                     // Nothing older carries this content under any name:
                     // the file was created in the snapshot after this one.
                     None => break,
@@ -233,6 +240,7 @@ pub fn file_versions(
             current: false,
         });
         newer = Some(snap);
+        newer_restored = row.restored_from;
     }
 
     let mut out = collapse(trail);

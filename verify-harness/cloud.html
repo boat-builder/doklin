@@ -114,6 +114,17 @@
       // never depends on what time the suite runs.
       const at = (daysAgo, hour) => startOfToday - daysAgo * DAY + hour * HOUR;
       const H = (c) => c.repeat(64);
+      const snapshot = (ts, extra = {}) => ({
+        ts,
+        reason: "closing",
+        files: 4,
+        bytes: 400,
+        pinned: false,
+        label: null,
+        restoredFrom: null,
+        delta: null,
+        ...extra,
+      });
       const version = (ts, hash, extra = {}) => ({
         ts,
         hash,
@@ -157,6 +168,33 @@
           [H("e")]: "a draft with a history of its own\n",
         },
         diff: "--- original\n+++ modified\n@@ -1,3 +1,3 @@\n # Other\n \n-the first text\n+the current text\n",
+        // The workspace timeline (§7.2): the retained moments, each with what
+        // it changed against the one before it, and — per moment — what
+        // restoring it would do to the folder as it stands.
+        snapshots: [
+          snapshot(at(0, 11), { reason: "closing", delta: { added: 1, removed: 0, changed: 2 } }),
+          snapshot(at(0, 9), { reason: "interval", delta: { added: 0, removed: 1, changed: 1 } }),
+          snapshot(at(1, 16), {
+            reason: "manual",
+            pinned: true,
+            label: "Before the rewrite",
+            delta: { added: 2, removed: 0, changed: 1 },
+          }),
+          snapshot(at(5, 10), { reason: "seed" }),
+        ],
+        // ts → SnapshotDiff.
+        diffs: {
+          [at(1, 16)]: {
+            changed: [{ path: "other.md", thenHash: H("c"), nowHash: H("a") }],
+            added: ["third.md"],
+            missing: ["Projects/plan.md"],
+          },
+        },
+        // What versions_deleted answers; the drive fills it in to make the
+        // sidebar's row appear.
+        deleted: [],
+        // Every workspace restore, as it was asked for.
+        restores: [],
         calls: [],
         seq: 0,
       };
@@ -353,7 +391,39 @@
             case "versions_status":
               return Promise.resolve([]);
             case "versions_snapshots":
-              return Promise.resolve([]);
+              return Promise.resolve(window.__versions.snapshots.map((s) => ({ ...s })));
+            case "versions_snapshot_diff":
+              return Promise.resolve(
+                window.__versions.diffs[args.ts] ?? { changed: [], added: [], missing: [] },
+              );
+            case "versions_deleted":
+              return Promise.resolve(window.__versions.deleted.map((f) => ({ ...f })));
+            case "versions_restore_snapshot": {
+              // The same three lists the modal showed, narrowed to what was
+              // ticked: writes land in the fake filesystem, trashings leave
+              // it, and `versions-applied` names everything that moved.
+              const diff = window.__versions.diffs[args.ts] ?? { changed: [], added: [], missing: [] };
+              const wanted = (rel) => args.paths == null || args.paths.includes(rel);
+              const written = [...diff.changed.map((c) => c.path), ...diff.missing].filter(wanted);
+              const trashed = diff.added.filter(wanted);
+              for (const rel of written) {
+                const abs = `${args.root}/${rel}`;
+                const then = diff.changed.find((c) => c.path === rel)?.thenHash;
+                window.__fs.set(abs, window.__versions.blobs[then] ?? `restored ${rel}\n`);
+                window.__writes.push(abs);
+              }
+              for (const rel of trashed) window.__fs.delete(`${args.root}/${rel}`);
+              window.__versions.restores.push({ ts: args.ts, paths: args.paths ?? null, written, trashed });
+              window.__emit("versions-applied", {
+                root: args.root,
+                paths: [...written, ...trashed].map((rel) => `${args.root}/${rel}`),
+              });
+              return Promise.resolve({
+                written: written.length,
+                trashed: trashed.length,
+                preRestoreTs: Date.now(),
+              });
+            }
             case "versions_history": {
               // A fresh object every time, the way real IPC hands one over —
               // the app re-renders on identity, and the fake mutates in place.
@@ -384,15 +454,7 @@
                   ...history.versions.map((v) => ({ ...v, current: false })),
                 ];
               }
-              return Promise.resolve({
-                ts,
-                reason: "manual",
-                files: 4,
-                bytes: 400,
-                pinned: true,
-                label: args.label ?? null,
-                restoredFrom: null,
-              });
+              return Promise.resolve(snapshot(ts, { reason: "manual", pinned: true, label: args.label ?? null }));
             }
             case "versions_restore_file": {
               const history = versionsFor(args.path);

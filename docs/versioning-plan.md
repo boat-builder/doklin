@@ -40,7 +40,7 @@ settles the handful of details the spec left open (§2).
 | 1 ✅ | The local store | capture, the ladder, blob GC, status; no UI | — | nothing — history starts accruing from this release |
 | 2 ✅ | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
 | 3 ✅ | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
-| 4 | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
+| 4 ✅ | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
 | 5 | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
 | 6 | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
 
@@ -374,6 +374,9 @@ export type VersionsStatus = {
 export type SnapshotMeta = {
   ts: number; reason: string; files: number; bytes: number; pinned: boolean; label: string | null;
   restoredFrom: number | null;
+  // phase 4: what this moment changed against the one before it. Only
+  // versions_snapshots fills it — working it out is a snapshot decode per row.
+  delta: { added: number; removed: number; changed: number } | null;
 };
 // event "versions-status": VersionsStatus[]  (the whole model, on every change)
 ```
@@ -921,10 +924,74 @@ and the tree refreshing, a deleted file restored.
 Docs: `versioning.md` §8 *as built*; `README.md` Features (a sentence on
 workspace history and deleted files); `SKILL.md`.
 
-- [ ] Rust, lint, tsc, harness green.
+- [x] Rust, lint, tsc, harness green.
 - [ ] Manual: reorganise a folder, restore yesterday's snapshot, see the
       restore itself in the history; delete a note on one Mac, restore it
       from the other.
+
+### 7.4 As built
+
+Shipped as written, with these decisions the plan left to the phase. The
+first four are carried into [versioning.md](versioning.md) §8 as an *as
+built* note.
+
+1. **The diff is against disk, not against the last capture.**
+   `versions_snapshot_diff` scans the folder as it stands this second, using
+   the newest snapshot's map as a stat cache (a file whose size and mtime
+   are unchanged is not re-read). A modal that says "what restoring would
+   do" has to mean *now*, or it lies for the ten minutes between captures.
+   A file the snapshot and the folder agree on is in none of the three
+   lists, so a restore never rewrites what it need not touch — and the
+   `versions-applied` event stays the size of the change rather than the
+   size of the folder.
+2. **A restore refuses before it starts, or not at all.** Every blob the
+   plan needs is checked present before the pre-restore capture runs. A
+   folder half-restored because the store ran out of bytes partway is not a
+   state the app can reach.
+3. **`SnapshotMeta` gained a `delta`.** The plan's timeline row shows
+   "+2 −1 ~5"; the index cannot answer that, so `versions_snapshots` reads
+   both file maps per row and counts. It is the only command that fills the
+   field — a capture's answer leaves it null — because the walk costs one
+   decode per retained snapshot, and the status must stay free.
+4. **Recently deleted has a window: 30 days behind the newest snapshot.**
+   The list is the union of the retained snapshots' paths minus what is on
+   disk, which is a decode per snapshot; bounding it to the ladder's dense
+   end keeps a surface the sidebar re-reads on every tree refresh cheap, and
+   *recently* is what the row promises. The newest snapshot is always read
+   however old it is, so a folder nobody has opened in months still answers.
+   Deeper than that, the workspace timeline is the surface: restore the
+   moment the file was last in.
+5. **A restored file keeps its history.** Phase 2's walk stops where a path
+   reappears from nothing — that is what makes a new note at an old note's
+   path a new note. But a file brought back from *Recently deleted*
+   reappears the same way, and "restore puts it back with its history" is
+   this phase's promise. The walk now steps over the gap when the snapshot
+   that holds the path again is a restore that says which moment its content
+   came from, and only down to that moment. A plain recreation still starts
+   its own story.
+6. **`write_workspace_bytes`.** A snapshot holds every file type; a restore
+   that round-tripped an image through `String` would corrupt it. The text
+   entry point is unchanged and delegates.
+7. **The parent directories come back with the files.** Both restores create
+   them, so a folder deleted whole is restorable — from the timeline as
+   `missing` rows, or a file at a time from *Recently deleted*.
+8. **Trashing follows `cloud/engine.rs`'s `delete_local`**: the macOS Trash,
+   falling back to a plain remove when it refuses (and off macOS, where the
+   Rust tests run). Each trashed path rings the edit bus, so a connected
+   workspace propagates the deletion like any other.
+9. **The deleted list is read once.** `App.tsx` owns it: the sidebar's row
+   needs the count and the column needs the list, and it is a walk of the
+   store either way. It re-reads with the tree.
+10. **The preview of a deleted file is `detached`.** `VersionPreview` shows
+    over the pane holding its document; a file that is not on disk has no
+    tab to stand in, so its preview carries its own `docPath` and shows over
+    whatever pane is focused. `versionPreview` gained both fields.
+11. **The confirm is inline, in the modal, never `window.confirm`** — as
+    §7.2 requires, and because the harness auto-dismisses a system dialog.
+    Its sentence is built from what is actually ticked.
+12. **Both surfaces are ungated on the cloud**, like the rail: they read the
+    local store, and `drive-versions.mjs` walks them with no cloud status at
+    all.
 
 ---
 
@@ -1090,6 +1157,7 @@ events: versions-status, versions-applied, versions-progress
 | snapshot cap | 4 MB | `cloud-worker/src/layout.ts` | 3 |
 | index cap | 1 MB | `cloud-worker/src/layout.ts` | 3 |
 | `WORKER_VERSION` | 3 | `cloud-worker/src/version.ts` | 3 |
+| `DELETED_WINDOW_MS` | 30 days | `versions/workspace.rs` | 4 |
 
 ## 12. The surfaces — the UX, decided
 

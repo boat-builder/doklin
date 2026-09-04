@@ -10,6 +10,7 @@
 //! store.rs      the store on disk: the index, snapshot files, blobs, gzip
 //! capture.rs    the cadence state machine and the scan that takes a snapshot
 //! history.rs    one file's versions, read out of the snapshots; the diff
+//! workspace.rs  the whole folder: a snapshot's diff, deleted files, restore
 //! retain.rs     the ladder (pure) and the sweep
 //! status.rs     the status/event contract
 //! settings.rs   <app_data>/versions/settings.json
@@ -33,6 +34,7 @@ mod status;
 pub(crate) mod store;
 #[cfg(test)]
 mod tests;
+mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -54,6 +56,7 @@ use retain::SWEEP_EVERY;
 use settings::{read_settings, write_settings, Settings};
 use status::{emit_statuses, Phase, RestoreOutcome, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus, EV_APPLIED};
 use store::{store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
+use workspace::{DeletedFile, RestoreReport, SnapshotDiff};
 
 /// The folder holding drafts is a root like any workspace, under a fixed
 /// key — so the one thing in the app with nowhere else to live has a
@@ -271,6 +274,113 @@ impl Versioner {
         FileHistory { root: self.store.root.to_string_lossy().to_string(), current_hash, versions }
     }
 
+    /// What restoring one retained snapshot would do to the folder as it
+    /// stands this second (docs/versioning-plan.md §7.1) — the modal shows
+    /// this before anything happens, and the restore plans from the same
+    /// three lists.
+    fn snapshot_diff(&self, ts: u64) -> Result<SnapshotDiff, String> {
+        let then = self.snapshot_at(ts)?;
+        let now = workspace::disk_now(&self.store, &self.last)?;
+        Ok(workspace::diff(&then.files, &now))
+    }
+
+    /// Every file some retained snapshot held that the folder does not hold
+    /// now — *Recently deleted*, and the reason emptying the macOS Trash
+    /// does not lose a note.
+    fn deleted(&self) -> Result<Vec<DeletedFile>, String> {
+        let on_disk = workspace::disk_paths(&self.store)?;
+        Ok(workspace::deleted(&self.store, &self.index, &on_disk))
+    }
+
+    fn snapshot_at(&self, ts: u64) -> Result<store::Snapshot, String> {
+        self.store
+            .read_snapshot(ts)
+            .ok_or_else(|| "that version of this folder is no longer in its history".to_string())
+    }
+
+    /// The file restore, one size up: the state the workspace is about to
+    /// leave, the writes and the trashings, then the state they made. Same
+    /// three steps, same reason they are one command — and the same rule
+    /// that nothing older is ever removed, so *Undo* is simply a restore of
+    /// `preRestoreTs` with the same paths.
+    ///
+    /// `only` is the subset the user ticked; None means the whole snapshot.
+    fn restore_snapshot(
+        &mut self,
+        ts: u64,
+        only: Option<&[String]>,
+        write: WriteBytes,
+        trash: TrashFile,
+    ) -> Result<RestoreReport, String> {
+        if !self.enabled {
+            return Err("versions are turned off on this Mac — turn them back on to restore".to_string());
+        }
+        let then = self.snapshot_at(ts)?;
+        let now = workspace::disk_now(&self.store, &self.last)?;
+        let only: Option<BTreeSet<String>> = only.map(|paths| paths.iter().cloned().collect());
+        let (to_write, to_trash) = workspace::plan(&workspace::diff(&then.files, &now), only.as_ref());
+        // Every byte accounted for before the first one lands: a restore
+        // that ran out of blobs halfway would leave the folder in a state
+        // that was never real.
+        for rel in &to_write {
+            let hash = then.files.get(rel).map(|e| e.h.as_str()).unwrap_or_default();
+            if !self.store.has_blob(hash) {
+                return Err(format!(
+                    "{} is no longer in this folder's history — nothing was changed",
+                    rel
+                ));
+            }
+        }
+
+        let pre = self.capture(Reason::PreRestore, None);
+        if pre.is_none() {
+            if let Some(message) = self.error.clone() {
+                return Err(message);
+            }
+        }
+        let mut report = RestoreReport {
+            pre_restore_ts: pre.map(|row| row.ts).or_else(|| self.index.newest().map(|n| n.ts)),
+            ..Default::default()
+        };
+
+        let mut touched: Vec<String> = Vec::new();
+        for rel in &to_write {
+            let Some(entry) = then.files.get(rel) else { continue };
+            let Some(bytes) = self.store.read_blob(&entry.h) else { continue };
+            let abs = self.store.root.join(rel);
+            // A folder that was deleted along with everything in it comes
+            // back with the files that were in it.
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
+            }
+            write(&abs, &bytes)?;
+            report.written += 1;
+            touched.push(abs.to_string_lossy().to_string());
+        }
+        for rel in &to_trash {
+            let abs = self.store.root.join(rel);
+            if trash(&abs) {
+                report.trashed += 1;
+                touched.push(abs.to_string_lossy().to_string());
+            }
+        }
+
+        let made = self.capture(Reason::Restore, Some(ts));
+        if made.is_none() {
+            if let Some(message) = self.error.clone() {
+                return Err(message);
+            }
+        }
+        self.events.emit_json(
+            EV_APPLIED,
+            serde_json::json!({
+                "root": self.store.root.to_string_lossy(),
+                "paths": touched,
+            }),
+        );
+        Ok(report)
+    }
+
     /// A restore, whole: the state it is about to leave, the write, then the
     /// state it made — three steps the cadence must not get between, which
     /// is why this is one command and not a capture plus a `write_file` from
@@ -311,6 +421,11 @@ impl Versioner {
         let pre_restore_ts = pre.map(|row| row.ts).or_else(|| self.index.newest().map(|n| n.ts));
         let pre_restore_hash = self.last.get(&rel).map(|entry| entry.h.clone());
 
+        // A file restored after its folder was deleted brings the folder
+        // back with it.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
         write(path, &contents)?;
 
         let made = self.capture(Reason::Restore, from_ts);
@@ -336,8 +451,26 @@ impl Versioner {
         self.refresh_status();
     }
 
+    /// The timeline's model: every retained snapshot, newest first, each
+    /// carrying what it changed against the one before it. Working that out
+    /// costs one decode per row — which is why it is this command's job and
+    /// not the status's.
     fn snapshots(&self) -> Vec<SnapshotMeta> {
-        self.index.snapshots.iter().rev().map(SnapshotMeta::from).collect()
+        let mut out: Vec<SnapshotMeta> = Vec::with_capacity(self.index.snapshots.len());
+        let mut before: Option<BTreeMap<String, FileEntry>> = None;
+        for row in &self.index.snapshots {
+            let mut meta = SnapshotMeta::from(row);
+            let after = self.store.read_snapshot(row.ts).map(|snap| snap.files);
+            if let (Some(before), Some(after)) = (before.as_ref(), after.as_ref()) {
+                meta.delta = Some(workspace::delta(before, after));
+            }
+            out.push(meta);
+            if let Some(after) = after {
+                before = Some(after);
+            }
+        }
+        out.reverse();
+        out
     }
 
     fn status(&self) -> VersionsStatus {
@@ -363,6 +496,12 @@ impl Versioner {
         emit_statuses(self.events.as_ref(), &self.statuses);
     }
 }
+
+/// How a restore puts bytes down and how it takes a file away: the app's own
+/// `write_workspace_bytes` and the macOS Trash, handed in rather than reached
+/// for, so the versioner stays testable without a window around it.
+type WriteBytes<'a> = &'a dyn Fn(&Path, &[u8]) -> Result<(), String>;
+type TrashFile<'a> = &'a dyn Fn(&Path) -> bool;
 
 /* ---------- The task ---------- */
 
@@ -396,6 +535,19 @@ enum VersionerCmd {
         hash: Option<String>,
         text: Option<String>,
         reply: oneshot::Sender<Result<RestoreOutcome, String>>,
+    },
+    SnapshotDiff {
+        ts: u64,
+        reply: oneshot::Sender<Result<SnapshotDiff, String>>,
+    },
+    Deleted {
+        reply: oneshot::Sender<Result<Vec<DeletedFile>, String>>,
+    },
+    RestoreSnapshot {
+        app: AppHandle,
+        ts: u64,
+        paths: Option<Vec<String>>,
+        reply: oneshot::Sender<Result<RestoreReport, String>>,
     },
     SetEnabled(bool),
     /// Capture what is pending and answer — the quit flush.
@@ -480,6 +632,36 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                         v.restore_file(&path, from_ts, hash, text, &|path, contents| {
                             crate::write_workspace_file(&app, path, contents).map(|_| ())
                         })
+                    })
+                    .await;
+                    cadence.captured(Instant::now());
+                    let _ = reply.send(answer.unwrap_or_else(|| Err("that restore didn't finish".to_string())));
+                }
+                Some(VersionerCmd::SnapshotDiff { ts, reply }) => {
+                    let answer = blocking(&state, move |v| v.snapshot_diff(ts)).await;
+                    let _ = reply.send(answer.unwrap_or_else(|| Err("that comparison didn't finish".to_string())));
+                }
+                Some(VersionerCmd::Deleted { reply }) => {
+                    let answer = blocking(&state, |v| v.deleted()).await;
+                    let _ = reply
+                        .send(answer.unwrap_or_else(|| Err("that folder's deleted files couldn't be read".to_string())));
+                }
+                Some(VersionerCmd::RestoreSnapshot { app, ts, paths, reply }) => {
+                    let answer = blocking(&state, move |v| {
+                        v.restore_snapshot(
+                            ts,
+                            paths.as_deref(),
+                            &|path, bytes| crate::write_workspace_bytes(&app, path, bytes).map(|_| ()),
+                            &|path| {
+                                let gone = workspace::trash_or_remove(path);
+                                // The cloud engine hears the deletion the
+                                // same way it hears a write.
+                                if gone {
+                                    crate::edits::touched(&app, &path.to_string_lossy());
+                                }
+                                gone
+                            },
+                        )
                     })
                     .await;
                     cadence.captured(Instant::now());
@@ -977,6 +1159,37 @@ pub(crate) async fn versions_diff(
     let before = side(from).await?;
     let after = side(to).await?;
     history::diff_texts(&before, &after)
+}
+
+/// What restoring one snapshot would do to the folder as it is now — the
+/// three lists the workspace timeline shows before anything happens.
+#[tauri::command]
+pub(crate) async fn versions_snapshot_diff(app: AppHandle, root: String, ts: u64) -> Result<SnapshotDiff, String> {
+    let tx = sender_for(&app, &root)?;
+    ask(tx, |reply| VersionerCmd::SnapshotDiff { ts, reply }).await?
+}
+
+/// Every file this folder's history holds and the folder itself does not —
+/// *Recently deleted*, newest sighting first.
+#[tauri::command]
+pub(crate) async fn versions_deleted(app: AppHandle, root: String) -> Result<Vec<DeletedFile>, String> {
+    let tx = sender_for(&app, &root)?;
+    ask(tx, |reply| VersionerCmd::Deleted { reply }).await?
+}
+
+/// Put a whole moment back — or the part of it the user ticked. Like the
+/// file restore it captures the state it leaves first, so the whole thing
+/// is undone by restoring `preRestoreTs` with the same paths.
+#[tauri::command]
+pub(crate) async fn versions_restore_snapshot(
+    app: AppHandle,
+    root: String,
+    ts: u64,
+    paths: Option<Vec<String>>,
+) -> Result<RestoreReport, String> {
+    let tx = sender_for(&app, &root)?;
+    let handle = app.clone();
+    ask(tx, move |reply| VersionerCmd::RestoreSnapshot { app: handle, ts, paths, reply }).await?
 }
 
 /// Put an earlier version back. The content is named either by `hash` (a
