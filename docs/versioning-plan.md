@@ -846,6 +846,37 @@ the build. Each is carried into [versioning.md](versioning.md) §6.3, §8 or
     never the per-cycle one, so a domain that will never answer differently
     costs one request an hour rather than one per cycle.
 
+### 6.6 What the mirror costs at ten devices
+
+The phase was sized for one Mac and a second one. Three of its choices are
+per-device and therefore multiply by the number of people in the workspace.
+None is a blocker on its own — the totals stay in the low percentages of R2's
+free Class A allowance ([versioning.md](versioning.md) §7.1) — and none is
+worth a change until the ceiling in [cloud.md](cloud.md) §11 moves, because
+that is what a team actually hits first. They are written down so the next
+person sizing this does not size it for one Mac again.
+
+1. **`uploaded` is per device** (`engine.rs:157`), so every Mac create-only
+   `PUT`s every blob its snapshots reference. After a sync that is the whole
+   workspace, so one version of one note can cost ten Class A writes, nine of
+   which store nothing. A shared "what is up there" — the blob listing the
+   sweep already pages — would collapse it.
+2. **`load()` reads the cloud index on every pass** (`cloud/versions.rs:155`),
+   and a pass runs per changed cycle (`engine.rs:547`), so this is one request
+   per edit per device rather than one an hour. The index's etag is already
+   held across a pass; holding it *between* passes and revalidating would make
+   it conditional.
+3. **`last_cloud_sweep_ms` is per device** (`engine.rs:161`), so ten Macs each
+   run the daily sweep: ten index rewrites, ten walks of the retained set
+   (cached, so cheap) and ten full paged blob `LIST`s, which are Class A. A
+   `lastSweepMs` in the cloud index would make it one sweeper a day for the
+   workspace instead of one per Mac.
+
+A fourth is a correctness-of-attribution gap rather than a cost:
+**`by` is the capturing device, not the authoring one**
+([versioning.md](versioning.md) §6.3). It cannot be fixed inside this phase —
+it needs an identity to attribute to, which is [cloud.md](cloud.md) §11.1.
+
 ---
 
 ## 7. Phase 4 — Workspace history and deleted files

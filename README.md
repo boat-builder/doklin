@@ -149,8 +149,10 @@ Deeper docs live in dedicated files to keep this page focused:
 - **[docs/cloud.md](docs/cloud.md)** — the cloud as built: one domain per
   workspace, a single Rust engine as the only writer, publishing as a flag
   in the workspace manifest with pages rendered from synced files, the
-  agent + wrangler setup, the room left for invites and locking, and the
-  decisions behind each.
+  agent + wrangler setup, the room left for invites and locking, the
+  decisions behind each, and the blockers a team of ten hits first — one
+  shared credential, and an idle heartbeat that spends most of Cloudflare's
+  free plan.
 - **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
   contract: the bucket, the manifest, the sync API, the public routes, and
   deploying by hand.

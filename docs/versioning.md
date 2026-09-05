@@ -435,6 +435,16 @@ cloud attributes a revision to. Everything is written atomically, blobs
 first, then the snapshot, then the index — a crash leaves bytes the sweep
 collects, never a row whose content is missing.
 
+**`by` is a blocker for a shared workspace.** It names the Mac that
+*captured* the snapshot, not the one that made the change:
+`versions/mod.rs:786` takes it from `cloud::device_name`, the local device.
+When Alice's edit reaches Bob by sync, Bob's watcher fires and Bob's next
+capture records her paragraph as Bob's. **Blocks:** per-person history in a
+workspace more than one person writes to — the rail can say when a line
+appeared, never who wrote it. The sync manifest's `hist` does carry the right
+`by`, and phase 6 retires exactly that. The fix needs an identity to
+attribute *to*, which is [cloud.md](cloud.md) §11.1.
+
 The cloud half (phase 3, `src-tauri/src/cloud/versions.rs` and
 `cloud-worker/src/versions.ts`) landed as planned, with four details the
 plan left open:
@@ -524,6 +534,50 @@ the manifest small, not about affordability.** Even keeping every snapshot
 forever would be affordable for a workspace of this size. The ladder exists
 so a 5000-file workspace on a small SSD stays polite, and so listing a
 file's versions stays a short read.
+
+### 7.1 Ten people in one workspace
+
+Every figure above is for **one device**. "A handful of Class A writes a day"
+is true of one Mac and misleading about ten, so this is what changes and what
+does not.
+
+**The bytes do not.** The cloud ladder is applied to the bucket, not to a
+device's contribution to it, and `ladder_keeps` (`cloud/versions.rs:225`)
+stops a device uploading a snapshot the ladder would drop anyway. Ten devices
+capturing the same synced workspace therefore inflate only the *under an
+hour* band — where the ladder keeps everything — and collapse to one row an
+hour thereafter. Ten people cost roughly what one person costs, plus an hour
+of duplicates. Storage is not a blocker at any team size this app supports.
+
+**Three things do scale with device count, all of them operations:**
+
+1. **Each device uploads each blob once.** `versions_uploaded` is per device
+   (`engine.rs:157`), so content everyone holds — which, after a sync, is all
+   of it — costs up to ten create-only `PUT`s, one per Mac. Nine of them
+   store nothing and all ten are Class A.
+2. **Every mirror pass reads the cloud index.** `load()`
+   (`cloud/versions.rs:155`) does a `GET /api/versions/index` at the top of
+   each pass, and a pass runs on every cycle that changed anything
+   (`engine.rs:547`) — so this is one extra request per edit per device, not
+   one an hour.
+3. **The daily sweep is per device.** `last_cloud_sweep_ms` lives in each
+   engine's own state (`engine.rs:161`), so all ten Macs rewrite the index,
+   read every retained snapshot and page the whole blob listing once a day.
+   The snapshot reads are served from `cloud-cache/`, but the listing is a
+   live paged `LIST`, and `LIST` is Class A.
+
+Even added up, that is tens of thousands of Class A operations a month for a
+team of ten — a few percent of the 1 M allowance. **Versioning is not what
+spends the free plan.** The sync engine's idle presence beat is, at roughly
+860,000 Class A writes a month for ten Macs left running, and the poll and
+its fan-out are what approach the Workers 100,000/day cap.
+[cloud.md](cloud.md) §11 is the accounting and the list of blockers.
+
+**Blocks:** nothing on its own. The mirror is affordable at ten devices; it
+is sharing a budget with a heartbeat that is not. The three items above are
+worth fixing as amplifiers — a shared uploaded-set, an index read cached
+across passes, one sweeper rather than ten — not as the thing standing in
+the way.
 
 ---
 
