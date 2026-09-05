@@ -36,7 +36,7 @@ flowchart TD
   W --> P
   P -->|releases/latest/download/latest.json| A[Installed apps poll,<br/>one-click self-update]
   P -->|releases/latest/download/*.dmg| L[Stable download link]
-  P -->|releases/latest/download/doklin-cloud-worker.js| C[An agent deploys or updates<br/>a domain with wrangler]
+  P -->|releases/latest/download/doklin-cloud-worker.js| C[An agent sets up a domain<br/>with wrangler; the update script<br/>redeploys an existing one]
 ```
 
 Two workflows, no more:
@@ -74,7 +74,8 @@ and the web assets into the release; see commit `4d8f2e8`):
 | `SHA256SUMS` | Checksums for both DMGs | Verification |
 | `Doklin.app.tar.gz` | The signed bundle the updater swaps in | `tauri-plugin-updater` |
 | `latest.json` | Update manifest: version, notes, pub_date, per-platform `{signature, url}` | The updater endpoint in `tauri.conf.json` |
-| `doklin-cloud-worker.js` | The cloud worker, bundled to one file (`scripts/bundle-worker.mjs`, the mermaid module spliced in) | `releases/latest/download/…` — what the app's setup and update prompts tell the agent running wrangler to fetch |
+| `doklin-cloud-worker.js` | The cloud worker, bundled to one file (`scripts/bundle-worker.mjs`, the mermaid module spliced in) | `releases/latest/download/…` — what the app's setup prompt and the update script fetch |
+| `doklin-cloud-update.sh` | `scripts/doklin-cloud-update.sh`, copied verbatim | `releases/latest/download/…` — the two commands on the app's "Update the worker" card curl and run it (docs/cloud.md §7.4) |
 
 Note the `.sig` file is **not** published: its contents are inlined into
 `latest.json` as the `signature` field.
@@ -257,20 +258,30 @@ The manifest's shape, its field-by-field semantics, and what an absent platform
 key does to installs are in
 [auto-update.md § Manifest format](auto-update.md#manifest-format-tauri-v2-static).
 
-### 4.8 The cloud worker asset
+### 4.8 The cloud worker asset, and the update script
 
 ```yaml
 - name: Bundle cloud worker (release asset)
   run: node scripts/bundle-worker.mjs release-assets/doklin-cloud-worker.js
+
+- name: Stage the cloud update script (release asset)
+  run: |
+    cp scripts/doklin-cloud-update.sh release-assets/doklin-cloud-update.sh
+    chmod +x release-assets/doklin-cloud-update.sh
 ```
 
 `cloud-worker/src` (TypeScript) flattened by vite into one readable file with
 the standalone mermaid module spliced in as a string — the same script CI
 runs on every pull request, where it also prints the size and fails past
 Cloudflare's 3 MB compressed ceiling. Staged beside the DMGs so the release
-carries it under a stable name: the app's setup and update prompts point the
-agent at `releases/latest/download/doklin-cloud-worker.js`, and nobody
-clones or builds anything to deploy a domain.
+carries it under a stable name: the app's setup prompt points the agent at
+`releases/latest/download/doklin-cloud-worker.js`, and nobody clones or
+builds anything to deploy a domain.
+
+The update script rides along verbatim. It fetches that same bundle and
+carries its own copy of the worker's compatibility date, both pinned to
+their sources by `verify-harness/cloudprompts.test.mjs`, so a release can
+never publish a script that would deploy against the wrong runtime date.
 
 ### 4.9 Publish
 

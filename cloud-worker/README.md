@@ -213,23 +213,40 @@ A custom domain needs its zone active on the same Cloudflare account, and
 the first TLS certificate can take a minute after deploy.
 
 **Update:** fetch the new bundle, `wrangler deploy` over the same name; the
-secret and the bucket stay. **Teardown:** the app's wipe empties the bucket
-(R2 refuses to delete a non-empty one), then `wrangler delete --name …` and
-`wrangler r2 bucket delete …`.
+secret and the bucket stay. That sequence is a script — nothing in it needs
+a decision — so it ships as one, attached to every release:
+
+```sh
+curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh \
+     -o doklin-cloud-update.sh        # or: scripts/doklin-cloud-update.sh in this repo
+sh doklin-cloud-update.sh https://notes.example.com
+```
+
+**Teardown:** the app's wipe empties the bucket (R2 refuses to delete a
+non-empty one), then `wrangler delete --name …` and `wrangler r2 bucket
+delete …`.
 
 **The prompts** are these steps written for an agent, with the checks a
 person would skip: setup verifies the names are free before it creates
 anything (a same-name deploy silently replaces a worker), pauses for an
 account that has never enabled R2 or whose zone isn't on Cloudflare yet,
 carries the token to `secret put` — it is the one secret the setup prompt
-holds — and ends with one line back, `ENDPOINT: https://…`. Update carries
-no secret, confirms the worker's name before deploying over it (certain for
-a workers.dev address, a convention to verify for a custom domain) and
-verifies with an unauthenticated `/api/meta` (a `401` means the new worker
-is up), ending with `UPDATED:`. Teardown carries no secret either, runs
-only after the app's wipe, refuses to force a non-empty bucket, and ends
-with `TORN DOWN:`. Every prompt closes with the negative scope: no other
-Cloudflare resource is touched, `wrangler.toml` is committed nowhere.
+holds — and ends with one line back, `ENDPOINT: https://…`. Teardown
+carries no secret, runs only after the app's wipe, refuses to force a
+non-empty bucket, and ends with `TORN DOWN:`. Both close with the negative
+scope: no other Cloudflare resource is touched, `wrangler.toml` is
+committed nowhere.
+
+**The update script** carries the same checks in shell. It reads the worker
+and bucket names off the endpoint (certain for a workers.dev address, a
+convention to verify for a custom domain), confirms both against the
+account before writing anything — deploying under a name that doesn't exist
+would create a *second* worker rather than update yours — and verifies with
+an unauthenticated `/api/meta`, where a `401` means the new worker is up.
+It ends with `UPDATED:`. Nothing in it is secret: the `OWNER_TOKEN`, the
+bucket binding and the routing all survive a same-name deploy. The app's
+update card hands out those two commands, and its agent prompt asks for
+nothing more than running them.
 
 ## Developing
 

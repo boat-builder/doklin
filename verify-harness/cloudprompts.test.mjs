@@ -1,13 +1,18 @@
-// Unit tests for the three agent prompts and the naming rule they share
-// (src/cloudPrompts.ts): the setup, update and teardown prompts the app
-// hands to an agent, and the "no step the agent has to invent" check that
-// docs/cloud.md §7.4 asks for. Run:
+// Unit tests for the prompts and the naming rule they share
+// (src/cloudPrompts.ts): the setup and teardown prompts the app hands to an
+// agent, the update prompt that only asks an agent to run
+// scripts/doklin-cloud-update.sh, and the "no step the agent has to invent"
+// check that docs/cloud.md §7.4 asks for. The script is held to the same
+// naming rule and the same compatibility date as the prompts, by running its
+// `--names` mode and reading the worker's source. Run:
 //
 //   node verify-harness/cloudprompts.test.mjs
 //
 // (Compiles the module through vite, mirroring doclinks.test.mjs.)
 import { build } from "vite";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
 
@@ -24,6 +29,7 @@ const out = await build({
 const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
 const {
   WORKER_BUNDLE_URL,
+  WORKER_UPDATE_SCRIPT_URL,
   buildSetupPrompt,
   buildTeardownPrompt,
   buildUpdatePrompt,
@@ -33,6 +39,7 @@ const {
   endpointOf,
   resourceName,
   targetProblem,
+  updateCommands,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 
 let checks = 0;
@@ -95,15 +102,17 @@ eq(endpointOf({ kind: "workers-dev", name: "sherin-notes" }), null, "only wrangl
 }
 
 /* ---------- the skeleton every prompt follows ---------- */
-function skeleton(prompt, { steps, secret }) {
+function skeleton(prompt, { steps, secret, wrangler = true }) {
   // Numbered steps 1..N, contiguous, each starting its own line.
   const nums = [...prompt.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
   assert.deepEqual(nums, Array.from({ length: steps }, (_, i) => i + 1), "contiguous numbered steps");
-  ok(prompt.includes("npx -y wrangler@4 whoami"), "establishes credentials");
-  ok(prompt.includes("npx -y wrangler@4 login"), "…and says how to log in");
+  if (wrangler) {
+    ok(prompt.includes("npx -y wrangler@4 whoami"), "establishes credentials");
+    ok(prompt.includes("npx -y wrangler@4 login"), "…and says how to log in");
+  }
   ok(/ask me/.test(prompt), "asks rather than invents");
   ok(/print exactly/.test(prompt), "one line back");
-  ok(/Do not (commit|touch)/.test(prompt.split("\n").at(-1)), "closes with the negative scope");
+  ok(/Do not (commit|touch|deploy)/.test(prompt.split("\n").at(-1)), "closes with the negative scope");
   eq(prompt.includes(TOKEN), secret, secret ? "setup carries the token" : "no secret in this one");
   ok(!/<[a-z -]*guess[a-z -]*>/i.test(prompt), "no placeholder the agent must guess");
 }
@@ -159,24 +168,23 @@ function skeleton(prompt, { steps, secret }) {
   ok(p.includes("ENDPOINT: <the workers.dev URL wrangler printed>"), "the agent fills the endpoint in");
 }
 
-/* ---------- update ---------- */
+/* ---------- update: the prompt is "run the script" ---------- */
 {
   const p = buildUpdatePrompt({
     endpoint: "https://notes.example.com",
     fromVersion: 1,
     toVersion: 2,
-    compatibilityDate: DATE,
   });
-  skeleton(p, { steps: 6, secret: false });
+  skeleton(p, { steps: 3, secret: false, wrangler: false });
   ok(p.includes("worker version 2"), "says what the app expects");
   ok(p.includes("still runs version 1"), "…and what the domain runs");
-  ok(p.includes("deployments list --name doklin-notes-example-com"), "confirms the worker exists first");
-  ok(/verify it before deploying/.test(p), "a convention-derived name is flagged as such");
-  ok(p.includes('name = "doklin-notes-example-com"'), "the same name, so the deploy updates");
-  ok(p.includes('routes = [{ pattern = "notes.example.com", custom_domain = true }]'), "re-asserts the route");
-  ok(p.includes("wrangler@4 delete --name <that-name>"), "names the wrong outcome and its cleanup");
-  ok(p.includes("https://notes.example.com/api/meta"), "verifies against the endpoint");
+  ok(p.includes(`curl -fsSL ${WORKER_UPDATE_SCRIPT_URL} -o doklin-cloud-update.sh`), "fetches the script");
+  ok(p.includes("sh doklin-cloud-update.sh https://notes.example.com"), "…and runs it on the domain");
+  ok(p.includes("scripts/doklin-cloud-update.sh"), "…with the clone fallback");
+  ok(/SECOND worker/.test(p), "names the wrong outcome the script exists to prevent");
   ok(p.includes("UPDATED: https://notes.example.com"));
+  ok(!/wrangler/.test(p), "the script drives wrangler, so the agent never does");
+  ok(!p.includes("wrangler.toml"), "…and never writes a config");
   ok(!p.includes("OWNER_TOKEN\n"), "never asks to set the secret");
 }
 {
@@ -184,13 +192,56 @@ function skeleton(prompt, { steps, secret }) {
     endpoint: "https://doklin-sherin-notes.sherin.workers.dev",
     fromVersion: null,
     toVersion: 2,
-    compatibilityDate: DATE,
   });
-  skeleton(p, { steps: 6, secret: false });
-  ok(p.includes("deployments list --name doklin-sherin-notes"));
-  ok(/certain: it is the first label/.test(p), "a workers.dev name is certain");
-  ok(p.includes("workers_dev = true"));
+  skeleton(p, { steps: 3, secret: false, wrangler: false });
+  ok(p.includes("sh doklin-cloud-update.sh https://doklin-sherin-notes.sherin.workers.dev"));
   ok(p.includes("an older version"), "no version known — says so instead of inventing one");
+}
+eq(
+  updateCommands("HTTPS://Notes.Example.com/api/meta"),
+  `curl -fsSL ${WORKER_UPDATE_SCRIPT_URL} -o doklin-cloud-update.sh\nsh doklin-cloud-update.sh https://notes.example.com`,
+  "whatever the endpoint was typed as, the command line is a bare https://<host>",
+);
+
+/* ---------- update: the script, held to the same rules ---------- */
+//
+// The card hands out two commands and a prompt that runs them, so the script
+// is as much a part of this contract as the prompts are: it has to derive the
+// same names from an endpoint, pin the same compatibility date as the worker's
+// source, and fetch the same bundle.
+{
+  const script = path.join(repoRoot, "scripts", "doklin-cloud-update.sh");
+  const text = fs.readFileSync(script, "utf8");
+  const names = (endpoint) =>
+    Object.fromEntries(
+      execFileSync("sh", [script, "--names", endpoint], { encoding: "utf8" })
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")),
+    );
+
+  eq(path.basename(WORKER_UPDATE_SCRIPT_URL), "doklin-cloud-update.sh", "the release asset's name");
+  ok(text.includes(`BUNDLE_URL="${WORKER_BUNDLE_URL}"`), "the script fetches the same worker bundle");
+
+  const workerSource = fs.readFileSync(path.join(repoRoot, "cloud-worker", "src", "version.ts"), "utf8");
+  const date = workerSource.match(/^export const COMPATIBILITY_DATE = "(.+)";$/m)?.[1];
+  eq(date, DATE, "the test's date is the worker's");
+  ok(text.includes(`COMPATIBILITY_DATE="${date}"`), "the script pins the date from the worker's source");
+
+  for (const endpoint of [
+    "https://notes.example.com",
+    "https://doklin-sherin-notes.sherin.workers.dev",
+    "https://a.b.c.workers.dev",
+    "NOTES.example.com:8443/api/meta",
+    "https://x.y.z.example.co.uk",
+  ]) {
+    const shell = names(endpoint);
+    const ts = deploymentNames(endpoint);
+    eq(shell.worker, ts.worker, `${endpoint}: the script and the app agree on the worker`);
+    eq(shell.bucket, ts.bucket, `${endpoint}: …and on the bucket`);
+    eq(shell.domain, ts.domain ?? "", `${endpoint}: …and on the routing`);
+    eq(shell.certain, ts.certain ? "1" : "0", `${endpoint}: …and on how sure they are`);
+  }
 }
 
 /* ---------- teardown ---------- */

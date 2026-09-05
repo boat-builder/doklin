@@ -309,10 +309,20 @@ jobs:
 
       # The cloud worker, bundled to one file and attached to the release at
       #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js
-      # — the URL the app's setup and update prompts tell the agent to fetch,
-      # so nobody clones or builds anything to deploy a domain.
+      # — the URL the app's setup prompt and the update script fetch, so nobody
+      # clones or builds anything to deploy a domain.
       - name: Bundle cloud worker (release asset)
         run: node scripts/bundle-worker.mjs release-assets/doklin-cloud-worker.js
+
+      # The update script, beside it at
+      #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh
+      # — what the app's "Update the worker" card tells you (or your agent) to
+      # curl and run. Verbatim: it carries its own compatibility date and the
+      # bundle URL above, both pinned by verify-harness/cloudprompts.test.mjs.
+      - name: Stage the cloud update script (release asset)
+        run: |
+          cp scripts/doklin-cloud-update.sh release-assets/doklin-cloud-update.sh
+          chmod +x release-assets/doklin-cloud-update.sh
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

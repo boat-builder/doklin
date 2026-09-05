@@ -1,9 +1,13 @@
-// "Update the worker" — docs/cloud.md §7.2. One card (v1 → v2), one
-// agent prompt that carries no secret (the token, the bucket and the domain
-// all survive a same-name redeploy), and "Check again", which asks the
-// engine to probe the domain; the fresh version arrives through the status
-// this card is rendered from. The app can't push the update itself: by
-// design it holds only the worker's token, never Cloudflare credentials.
+// "Update the worker" — docs/cloud.md §7.2. One card (v1 → v2), two ways to
+// run the same update, and "Check again", which asks the engine to probe the
+// domain; the fresh version arrives through the status this card is rendered
+// from. The app can't push the update itself: by design it holds only the
+// worker's token, never Cloudflare credentials.
+//
+// The update is a fixed sequence, so it is a script — two commands to run in
+// a terminal — and the agent prompt below them only asks an agent to run that
+// same script. Neither carries a secret: the token, the bucket and the domain
+// all survive a same-name redeploy.
 //
 // A worker that is NEWER than this app is the other way round — the card
 // says so and points at the Doklin release instead.
@@ -11,13 +15,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BUNDLED_WORKER_VERSION,
-  WORKER_COMPATIBILITY_DATE,
   cloudCheckWorker,
   workerAhead,
   workerBehind,
   type CloudStatus,
 } from "./cloud";
-import { buildUpdatePrompt } from "./cloudPrompts";
+import { buildUpdatePrompt, updateCommands } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
 
 function CloseIcon() {
@@ -40,7 +43,7 @@ export default function WorkerUpdate({
 }) {
   const behind = workerBehind(cloud);
   const ahead = workerAhead(cloud);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"commands" | "prompt" | null>(null);
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
@@ -51,26 +54,26 @@ export default function WorkerUpdate({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const commands = useMemo(() => updateCommands(cloud.endpoint), [cloud.endpoint]);
   const prompt = useMemo(
     () =>
       buildUpdatePrompt({
         endpoint: cloud.endpoint,
         fromVersion: cloud.workerVersion,
         toVersion: BUNDLED_WORKER_VERSION,
-        compatibilityDate: WORKER_COMPATIBILITY_DATE,
       }),
     [cloud.endpoint, cloud.workerVersion],
   );
 
-  const copy = useCallback(async () => {
+  const copy = useCallback(async (what: "commands" | "prompt", text: string) => {
     try {
-      await navigator.clipboard.writeText(prompt);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      window.setTimeout(() => setCopied(null), 1600);
     } catch {
-      /* the prompt is selectable text — the user can still copy by hand */
+      /* both blocks are selectable text — the user can still copy by hand */
     }
-  }, [prompt]);
+  }, []);
 
   // The answer comes back as a status; a worker that hasn't changed re-emits
   // the same numbers, so the button simply rests after a moment.
@@ -132,22 +135,39 @@ export default function WorkerUpdate({
 
           {behind && (
             <>
-              <div className="cloud-step-title">Hand this to your agent</div>
+              <div className="cloud-step-title">Run this in a terminal</div>
               <p className="cloud-hint">
-                No secret in this one — the token, the bucket and the domain all survive a
-                same-name redeploy. Run it in Claude Code, or any agent with a terminal: it signs
-                into Cloudflare, deploys the new code over the same name, and stops if anything
-                looks like a second worker.
+                Two commands. The script downloads the worker published with the latest Doklin
+                release, signs you into Cloudflare if you aren't already, confirms the worker and
+                its bucket against your account, and deploys the new code over the same name — so
+                your data, your token and your domain are untouched. Nothing here is secret.
+              </p>
+              <pre className="cloud-prompt" data-testid="update-commands">
+                {commands}
+              </pre>
+              <div className="modal-buttons">
+                <button
+                  className="modal-btn is-primary"
+                  onClick={() => void copy("commands", commands)}
+                >
+                  {copied === "commands" ? "Copied ✓" : "Copy commands"}
+                </button>
+                <button className="modal-btn" disabled={checking} onClick={() => void check()}>
+                  {checking ? "Checking…" : "Check again"}
+                </button>
+              </div>
+
+              <div className="cloud-step-title">Or hand it to your agent</div>
+              <p className="cloud-hint">
+                The same script, with the context around it: paste this into Claude Code, or any
+                agent with a terminal.
               </p>
               <pre className="cloud-prompt" data-testid="update-prompt">
                 {prompt}
               </pre>
               <div className="modal-buttons">
-                <button className="modal-btn is-primary" onClick={() => void copy()}>
-                  {copied ? "Copied ✓" : "Copy prompt"}
-                </button>
-                <button className="modal-btn" disabled={checking} onClick={() => void check()}>
-                  {checking ? "Checking…" : "Check again"}
+                <button className="modal-btn" onClick={() => void copy("prompt", prompt)}>
+                  {copied === "prompt" ? "Copied ✓" : "Copy prompt"}
                 </button>
               </div>
             </>
