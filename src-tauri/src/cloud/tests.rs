@@ -1945,6 +1945,63 @@ async fn mirror_survives_a_lost_index_cas() {
 }
 
 #[tokio::test]
+async fn cloud_horizon_is_a_cas_on_the_cloud_index() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let b = device("Book", &be);
+    a.engine.probe_worker().await;
+    a.captured(ago(MINUTE), Reason::Seed, &[("Home.md", "one\n")]);
+    a.engine.mirror_versions().await;
+    assert_eq!(cloud_index(&be).horizon_days, None, "forever, until someone says otherwise");
+
+    // The other Mac lands its own entry between our read and our write: the
+    // horizon is one field of a shared object, so it goes in by CAS or not
+    // at all — and the retry must not carry our stale copy of their rows.
+    let theirs_ts = ago(3 * MINUTE);
+    let theirs = VersionsIndex {
+        snapshots: vec![VersionsEntry {
+            id: snapshot_id(theirs_ts, &b.device_id()),
+            ts: theirs_ts,
+            device: b.device_id(),
+            reason: "interval".into(),
+            files: 1,
+            bytes: 4,
+            digest: "0".repeat(64),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    be.lock().unwrap().versions_racer = Some(theirs);
+
+    a.engine.set_cloud_horizon(Some(30)).await.expect("set the cloud horizon");
+    let index = cloud_index(&be);
+    assert_eq!(index.horizon_days, Some(30), "the loser re-read and landed it anyway");
+    assert!(
+        index.snapshots.iter().any(|e| e.id == snapshot_id(theirs_ts, &b.device_id())),
+        "and kept what the winner wrote: {:?}",
+        cloud_ids(&be)
+    );
+
+    // The panel says what the bucket now says, without waiting an hour for
+    // the next pass to tell it.
+    assert_eq!(a.status().versions.expect("the mirror").horizon_days, Some(30));
+
+    // And the sweep is the thing that acts on it: a snapshot past thirty
+    // days goes on the next pass, whatever the ladder would have kept.
+    a.captured(ago(40 * DAY), Reason::Interval, &[("Home.md", "long ago\n")]);
+    a.engine.mirror_versions().await;
+    assert!(
+        !cloud_index(&be).snapshots.iter().any(|e| e.ts <= ago(31 * DAY)),
+        "nothing past the horizon survives: {:?}",
+        cloud_index(&be).snapshots.iter().map(|e| e.ts).collect::<Vec<_>>()
+    );
+
+    // Forever is a real answer, not the absence of one.
+    a.engine.set_cloud_horizon(None).await.expect("back to forever");
+    assert_eq!(cloud_index(&be).horizon_days, None);
+}
+
+#[tokio::test]
 async fn cloud_sweep_thins_on_the_cloud_horizon() {
     let be = fake_worker();
     let mut a = device("Air", &be);

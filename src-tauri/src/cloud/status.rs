@@ -69,6 +69,10 @@ pub struct VersionsMirror {
     pub mirrored: u64,
     pub cloud: u64,
     pub last_mirror_ms: Option<u64>,
+    /// How far back the bucket keeps, `null` for forever — the second of the
+    /// two horizons. Meaningful once `last_mirror_ms` is set; before that no
+    /// pass has read the cloud index and the surface says as much.
+    pub horizon_days: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -104,6 +104,10 @@ pub struct MirrorReport {
     pub mirrored: u64,
     /// Every snapshot in the cloud index, from every device.
     pub cloud: u64,
+    /// The bucket's horizon as the index gave it, `None` for forever. Only
+    /// meaningful because a pass has run: before that, no device on this Mac
+    /// has read the index and the settings surface says so.
+    pub horizon_days: Option<u32>,
 }
 
 /* ---------- The pass ---------- */
@@ -258,7 +262,26 @@ fn report(local: &Index, index: &VersionsIndex, device_id: &str) -> MirrorReport
     MirrorReport {
         mirrored: local.snapshots.iter().filter(|r| ids.contains(&snapshot_id(r.ts, device_id))).count() as u64,
         cloud: index.snapshots.len() as u64,
+        horizon_days: index.horizon_days,
     }
+}
+
+/// Set how far back the bucket keeps: read the index, change the one field
+/// every device reads it for, write it back on its etag. A lost race is
+/// another device moving the index in the same moment — re-read and try
+/// again, because there is nothing here to merge and someone is waiting on
+/// the answer.
+pub async fn set_horizon<R: Remote>(remote: &R, days: Option<u32>) -> RemoteResult<VersionsIndex> {
+    for attempt in 0..CAS_ATTEMPTS {
+        let mut held = load(remote).await?;
+        held.index.horizon_days = days;
+        match remote.put_versions_index(&held.etag, &held.index).await {
+            Ok(_) => return Ok(held.index),
+            Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(RemoteError::Conflict)
 }
 
 /* ---------- The cloud sweep ---------- */

@@ -64,6 +64,7 @@ export default function CloudPanel({
   onOpenPublished,
   onOpenExternal,
   onWorkspaceHistory,
+  onOpenVersions,
 }: {
   /** The open workspace folder, if any. */
   root: string | null;
@@ -81,6 +82,9 @@ export default function CloudPanel({
   /** The workspace timeline (docs/versioning-plan.md §7.2). The sidebar
    *  root's menu is the other way in. */
   onWorkspaceHistory?: () => void;
+  /** The Versions settings (docs/versioning-plan.md §8.2) — the two
+   *  horizons, the space, the export. The gear popover is the other way in. */
+  onOpenVersions?: () => void;
 }) {
   const [view, setView] = useState<View>("main");
   const [error, setError] = useState<string | null>(null);
@@ -457,6 +461,11 @@ export default function CloudPanel({
           <button className="modal-btn" data-testid="another-mac" onClick={() => setView("another")}>
             Connect another Mac…
           </button>
+          {onOpenVersions && (
+            <button className="modal-btn" data-testid="cloud-versions-settings" onClick={onOpenVersions}>
+              Version settings…
+            </button>
+          )}
           {!behind && (
             <button className="modal-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
               Update the worker…

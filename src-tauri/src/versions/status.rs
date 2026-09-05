@@ -19,6 +19,10 @@ pub const EV_STATUS: &str = "versions-status";
 /// tree, reload the open document.
 pub const EV_APPLIED: &str = "versions-applied";
 
+/// `{root, done, total}` — an export, file by file. The only long-running
+/// thing the user starts by hand, so the only one with a progress event.
+pub const EV_PROGRESS: &str = "versions-progress";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {

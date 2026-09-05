@@ -20,13 +20,16 @@ import {
 import CloudPanel from "./CloudPanel";
 import {
   onVersionsApplied,
+  onVersionsStatus,
   versionsDeleted,
   versionsRestoreFile,
   versionsRestoreSnapshot,
+  versionsStatus,
   type DeletedFile,
   type FileVersion,
   type RestoreOutcome,
   type RestoreReport,
+  type VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
 import CloudToasts, { type CloudToast } from "./CloudToasts";
@@ -37,6 +40,7 @@ import WorkerUpdate from "./WorkerUpdate";
 import HistoryRail from "./HistoryRail";
 import VersionPreview, { momentLabel } from "./VersionPreview";
 import WorkspaceHistory from "./WorkspaceHistory";
+import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted from "./RecentlyDeleted";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -995,6 +999,10 @@ export default function App() {
   // same count, and reading it costs a walk of the retained snapshots.
   const [workspaceHistoryOpen, setWorkspaceHistoryOpen] = useState(false);
   const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([]);
+  // Every store's status — the settings surface's whole model, the same way
+  // the cloud statuses are the Cloud panel's.
+  const [versionStatuses, setVersionStatuses] = useState<VersionsStatus[]>([]);
+  const [versionsSettingsOpen, setVersionsSettingsOpen] = useState(false);
   const historyForRef = useRef<string | null>(null);
   // What ⌘⌥H opens history for: the active tab, unless it is a board.
   const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
@@ -2702,6 +2710,22 @@ export default function App() {
       cancelled = true;
     };
   }, [workspaceRoot, treeRefreshToken]);
+
+  // The stores' statuses, read when the settings surface opens. The event
+  // keeps them current while it is open, and asking at boot would only race
+  // the manager's own init.
+  useEffect(() => {
+    if (!versionsSettingsOpen) return;
+    let cancelled = false;
+    void versionsStatus()
+      .then((s) => {
+        if (!cancelled) setVersionStatuses(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [versionsSettingsOpen]);
 
   // The last content of a deleted file, read-only — the same preview a
   // version gets, over the focused pane because the file has no tab.
@@ -4933,6 +4957,9 @@ export default function App() {
         if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
         if (pathRef.current && e.paths.includes(pathRef.current)) void reloadFromDisk();
       }),
+      // Every store's size, horizon and count, on every capture and sweep —
+      // what the Versions settings reads.
+      onVersionsStatus((s) => setVersionStatuses(s)),
       onCloudConflict((e) => {
         pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
@@ -5720,6 +5747,14 @@ export default function App() {
           onError={(message) => pushToast(message)}
         />
       )}
+      {versionsSettingsOpen && (
+        <VersionsSettings
+          root={workspaceRoot}
+          statuses={versionStatuses}
+          cloud={cloudForRoot}
+          onClose={() => setVersionsSettingsOpen(false)}
+        />
+      )}
       {conflict && (
         <ConflictBanner
           onReload={() => void reloadFromDisk()}
@@ -5822,6 +5857,10 @@ export default function App() {
             setCloudPanelOpen(false);
             setWorkspaceHistoryOpen(true);
           }}
+          onOpenVersions={() => {
+            setCloudPanelOpen(false);
+            setVersionsSettingsOpen(true);
+          }}
           onOpenPublished={() => {
             setCloudPanelOpen(false);
             setPublishedOpen(true);
@@ -5888,6 +5927,7 @@ export default function App() {
         onOpenExternal={openExternal}
         onOpenCloud={() => setCloudPanelOpen(true)}
         cloudAttention={cloudNeedsAttention(cloudStatuses)}
+        onOpenVersions={() => setVersionsSettingsOpen(true)}
       />
     </div>
   );
@@ -6304,6 +6344,7 @@ function Settings({
   onOpenExternal,
   onOpenCloud,
   cloudAttention,
+  onOpenVersions,
 }: {
   theme: Theme;
   onChange: (t: Theme) => void;
@@ -6323,6 +6364,9 @@ function Settings({
   // when a connected domain's worker is behind this app.
   onOpenCloud: () => void;
   cloudAttention: boolean;
+  /** Open the Versions settings: the two horizons, the space each store
+   *  uses, the export, and the folders whose history outlived them. */
+  onOpenVersions: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -6488,6 +6532,20 @@ function Settings({
               {cloudAttention ? <span className="settings-option-dot" aria-hidden /> : null}
             </span>
             <span className="settings-option-label">Cloud…</span>
+          </button>
+          <div className="settings-divider" />
+          <div className="settings-section-label">Versions</div>
+          <button
+            role="menuitem"
+            className="settings-option"
+            data-testid="settings-versions"
+            onClick={() => {
+              setOpen(false);
+              onOpenVersions();
+            }}
+          >
+            <span className="settings-option-check" />
+            <span className="settings-option-label">Version history…</span>
           </button>
           {recents.length > 0 && (
             <>

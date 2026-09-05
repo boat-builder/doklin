@@ -193,6 +193,29 @@
         // What versions_deleted answers; the drive fills it in to make the
         // sidebar's row appear.
         deleted: [],
+        // The settings surface (§8): every store's status, every store on
+        // this Mac, and what the horizon and export commands were asked.
+        statuses: [
+          {
+            root: "/docs",
+            key: "r-docs",
+            phase: "idle",
+            error: null,
+            snapshots: 4,
+            oldestMs: at(5, 10),
+            newestMs: at(0, 11),
+            lastCaptureMs: at(0, 11),
+            bytes: { blobs: 2_000_000, snapshots: 48_000 },
+            horizonDays: 90,
+          },
+        ],
+        stores: [
+          { key: "r-docs", root: "/docs", exists: true, bytes: 2_100_000, snapshots: 4, newestMs: at(0, 11) },
+          { key: "r-old", root: "/Users/me/Gone", exists: false, bytes: 640_000, snapshots: 9, newestMs: at(40, 9) },
+        ],
+        // What the export answers, and how many progress ticks it sends.
+        exported: { bytes: 3_400_000, files: 12 },
+        forgotten: [],
         // Every workspace restore, as it was asked for.
         restores: [],
         calls: [],
@@ -389,7 +412,44 @@
 
             /* ----- the version store ----- */
             case "versions_status":
-              return Promise.resolve([]);
+              return Promise.resolve(window.__versions.statuses.map((s) => ({ ...s })));
+            case "versions_stores":
+              return Promise.resolve(window.__versions.stores.map((s) => ({ ...s })));
+            case "versions_set_horizon": {
+              recordVersion(cmd, args);
+              // The real command writes the index and sweeps; the status
+              // event is how the surface learns, so the stub emits one too.
+              window.__versions.statuses = window.__versions.statuses.map((s) =>
+                s.root === args.root ? { ...s, horizonDays: args.days } : s,
+              );
+              window.__emit("versions-status", window.__versions.statuses.map((s) => ({ ...s })));
+              return Promise.resolve(null);
+            }
+            case "versions_set_cloud_horizon": {
+              recordVersion(cmd, args);
+              window.__setStatuses(
+                window.__cloud.statuses.map((s) =>
+                  s.root === args.root && s.versions
+                    ? { ...s, versions: { ...s.versions, horizonDays: args.days } }
+                    : s,
+                ),
+              );
+              return Promise.resolve(null);
+            }
+            case "versions_forget": {
+              recordVersion(cmd, args);
+              window.__versions.forgotten.push(args.key);
+              window.__versions.stores = window.__versions.stores.filter((s) => s.key !== args.key);
+              return Promise.resolve(null);
+            }
+            case "versions_export": {
+              recordVersion(cmd, args);
+              const { files } = window.__versions.exported;
+              for (let done = 0; done <= files; done += 1) {
+                window.__emit("versions-progress", { root: args.root, done, total: files });
+              }
+              return Promise.resolve({ ...window.__versions.exported });
+            }
             case "versions_snapshots":
               return Promise.resolve(window.__versions.snapshots.map((s) => ({ ...s })));
             case "versions_snapshot_diff":

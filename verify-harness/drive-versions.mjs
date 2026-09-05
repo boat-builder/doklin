@@ -10,6 +10,9 @@
 // in-place read-only preview and the live editor surviving it, Esc, Show
 // changes, Restore + the toast's Undo, Make a copy, Name this version, the
 // tab menu and ⌘⌥H, a draft's history, and a revision only the cloud has.
+// Then the whole folder: the timeline, a partial restore, *Restore all*, the
+// deleted row and its column — and the settings the two horizons, the space
+// each store uses, the export and *Forget* live in.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 
@@ -526,6 +529,134 @@ step(
     collided === "/docs/Projects/gone (restored).md",
   `${back.args.path} → ${collided}`,
 );
+
+/* ---------- Phase 5: the settings, the space, the copy you keep ---------- */
+
+const openVersionsSettings = async () => {
+  await page.keyboard.press("Escape");
+  await page.locator(".settings-fab").click();
+  await poll(async () => (await tid("settings-versions").count()) === 1);
+  await tid("settings-versions").click();
+  await poll(async () => (await tid("versions-settings").count()) === 1);
+};
+
+/* 27 — the way in, and the trust line. The gear says how far back this
+   folder keeps and what that costs, before offering to change either. */
+await openVersionsSettings();
+const here = await tid("vs-here").innerText();
+step(
+  "the gear opens Versions: what this folder keeps, what it costs, how far back",
+  here.includes("4 versions") && here.includes("MB") && here.includes("kept 90 days"),
+  here,
+);
+
+/* 28 — a horizon is one click, it issues the command with the days the
+   button says, and `forever` is a real answer rather than the absence of
+   one. */
+await tid("vs-local-horizon").locator('[data-days="30"]').click();
+await poll(async () => (await lastVersionCall("versions_set_horizon")) !== undefined);
+const shorter = await lastVersionCall("versions_set_horizon");
+await poll(async () => (await tid("vs-here").innerText()).includes("kept 30 days"));
+await tid("vs-local-horizon").locator('[data-days="forever"]').click();
+await poll(async () => (await tid("vs-here").innerText()).includes("kept forever"));
+const forever = await lastVersionCall("versions_set_horizon");
+step(
+  "a horizon is set per folder, and forever is null rather than a missing field",
+  shorter.args.root === "/docs" &&
+    shorter.args.days === 30 &&
+    forever.args.days === null &&
+    (await tid("vs-local-horizon").locator('[data-days="forever"]').getAttribute("aria-pressed")) === "true",
+  `${shorter.args.days} → ${forever.args.days}`,
+);
+await page.screenshot({ path: SHOTS + "versions-07-settings.png" });
+
+/* 29 — the export: a folder picker, one command, progress while it runs and
+   a sentence when it lands. */
+await tid("vs-export").click();
+await poll(async () => (await tid("vs-exported").count()) === 1);
+const wrote = await tid("vs-exported").innerText();
+const exportCall = await lastVersionCall("versions_export");
+step(
+  "Export asks where, then writes one archive and says what went into it",
+  exportCall.args.root === "/docs" &&
+    exportCall.args.dest === "/Users/me/Downloads" &&
+    wrote.includes("12 files") &&
+    wrote.includes("MB"),
+  `${exportCall.args.dest} — ${wrote}`,
+);
+
+/* 30 — Other folders. The store whose folder is gone says so and can be
+   forgotten; the open one can't, because a running versioner owns it. */
+const rows = tid("vs-store");
+const openRow = rows.filter({ has: page.locator('[data-testid="vs-store-open"]') });
+const orphan = page.locator('[data-testid="vs-store"][data-key="r-old"]');
+step(
+  "every store is listed with its size; the open one offers no Forget",
+  (await rows.count()) === 2 &&
+    (await openRow.count()) === 1 &&
+    (await orphan.innerText()).includes("that folder is gone") &&
+    (await orphan.locator('[data-testid="vs-forget"]').count()) === 1 &&
+    (await openRow.locator('[data-testid="vs-forget"]').count()) === 0,
+  (await rows.allInnerTexts()).join(" | ").replace(/\n/g, " "),
+);
+await orphan.locator('[data-testid="vs-forget"]').click();
+await poll(async () => (await tid("vs-forget-warn").count()) === 1);
+const warned = await tid("vs-forget-warn").innerText();
+await tid("vs-forget-yes").click();
+await poll(async () => (await tid("vs-store").count()) === 1);
+step(
+  "Forget confirms in the app's own chrome, says the folder is safe, then removes just that store",
+  warned.includes("for good") &&
+    warned.includes("folder itself is never touched") &&
+    (await page.evaluate(() => window.__versions.forgotten)).join() === "r-old" &&
+    (await tid("vs-store").getAttribute("data-key")) === "r-docs",
+  warned,
+);
+
+/* 31 — the second horizon. It appears only for a connected workspace whose
+   mirror has run, and setting it is a CAS on the bucket, not a per-Mac
+   preference. */
+step(
+  "with nothing connected there is no cloud horizon to set",
+  (await tid("vs-cloud-horizon").count()) === 0,
+);
+await tid("versions-settings").locator(".modal-close").click();
+await poll(async () => (await tid("versions-settings").count()) === 0);
+await page.evaluate(() => {
+  window.__setStatuses([
+    {
+      root: "/docs",
+      domain: "notes.example.com",
+      endpoint: "https://notes.example.com",
+      wsId: "ws-1",
+      name: "Docs",
+      phase: "idle",
+      lastSyncMs: Date.now(),
+      error: null,
+      pendingDeletes: 0,
+      workerVersion: 3,
+      versions: { mirrored: 4, cloud: 212, lastMirrorMs: Date.now(), horizonDays: null },
+      public: [],
+      presence: [],
+    },
+  ]);
+});
+await openVersionsSettings();
+await poll(async () => (await tid("vs-cloud-horizon").count()) === 1);
+const bucket = await tid("vs-cloud").innerText();
+await tid("vs-cloud-horizon").locator('[data-days="365"]').click();
+await poll(async () => (await lastVersionCall("versions_set_cloud_horizon")) !== undefined);
+const cloudSet = await lastVersionCall("versions_set_cloud_horizon");
+await poll(async () => (await tid("vs-cloud").innerText()).includes("kept a year"));
+step(
+  "a connected workspace gets the bucket's horizon too, and every Mac reads the same answer",
+  bucket.includes("212 versions") &&
+    bucket.includes("kept forever") &&
+    cloudSet.args.root === "/docs" &&
+    cloudSet.args.days === 365,
+  bucket,
+);
+await page.screenshot({ path: SHOTS + "versions-08-cloud-horizon.png" });
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;
