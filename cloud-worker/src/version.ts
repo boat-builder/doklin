@@ -22,13 +22,18 @@
 //       pill), a published folder is a table of contents with Notion-style
 //       nested URLs, links between public notes rewrite, the root page
 //       serves at /, a static OG image, and renders cache by manifest etag.
-export const WORKER_VERSION = 2;
+//   3 = the version store under versions/: a compare-and-swap index,
+//       immutable gzip'd snapshots of the whole workspace and the blobs they
+//       reference, plus DELETE on a per-file history archive. Where 1's
+//       history is one file's revisions, this is the folder's — what every
+//       device keeps locally, mirrored so it outlives the laptop.
+export const WORKER_VERSION = 3;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
 // is served) and "boards" (embedded stores render) joined when the renderer
 // landed, not before.
-export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards"];
+export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions"];
 
 // The manifest schema this worker understands (docs/cloud.md §6.6).
 // A PUT with a lower version is a plain 400 (nothing older exists); one with a

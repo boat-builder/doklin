@@ -19,6 +19,16 @@
 //   DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
 //   GET    /api/history/<fid>        {version, entries}
 //   PUT    /api/history/<fid>        replace the archive (advisory, size-capped)
+//   DELETE /api/history/<fid>        drop the archive (204 whether or not one was there)
+//   GET    /api/versions/index       the version store's index + x-versions-etag; 404 when none
+//   PUT    /api/versions/index       x-base-etag required ("*" creates); 412 + etag on a lost race
+//   GET    /api/versions/snapshots/<id>   the gzip'd workspace state
+//   PUT    /api/versions/snapshots/<id>   create-only ({existed:true} on a re-PUT)
+//   DELETE /api/versions/snapshots/<id>
+//   GET    /api/versions/blobs[?cursor=c] {blobs: [...], cursor?} — one page of the inventory
+//   GET    /api/versions/blobs/<hash>     the bytes
+//   PUT    /api/versions/blobs/<hash>     create-only
+//   DELETE /api/versions/blobs/<hash>     garbage-collect an unreferenced version
 //   PUT    /api/presence             body {name?, path?} — "this device is here (editing path)"
 //   DELETE /api/presence             this device left
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
@@ -46,6 +56,7 @@ import {
 } from "./layout";
 import { emptyManifest, validateManifest, validHistoryArchive } from "./manifest";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
+import { handleVersions } from "./versions";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 
@@ -104,6 +115,12 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     const hash = parts[3];
     if (!BLOB_HASH_RE.test(hash)) return json({ error: "invalid blob hash" }, 400);
     return blob(request, env, fileId, hash);
+  }
+
+  // The version store — its own prefix, its own CAS'd index, nothing to do
+  // with the manifest's per-file history (docs/versioning.md §6.4).
+  if (section === "versions" && (parts.length === 3 || parts.length === 4)) {
+    return handleVersions(request, env, url, parts);
   }
 
   if (section === "history" && parts.length === 3) {
@@ -293,6 +310,12 @@ async function history(request: Request, env: Env, fileId: string): Promise<Resp
     if (!validHistoryArchive(data, MAX_HISTORY_ENTRIES)) return json({ error: "invalid history" }, 400);
     await env.DATA.put(key, text, JSON_OBJECT);
     return json({ stored: true, entries: (data as { entries: unknown[] }).entries.length });
+  }
+  if (request.method === "DELETE") {
+    // Phase 6 of versioning retires these archives; deleting one that was
+    // already gone is the same success, so a sweep never has to check first.
+    await env.DATA.delete(key);
+    return new Response(null, { status: 204 });
   }
   return methodNotAllowed();
 }

@@ -89,8 +89,8 @@ export default function VersionPreview({
   newer: FileVersion | null;
   onBack: () => void;
   /** The app owns the restore: it is one Rust command, never a capture and
-   *  a write from here. The loaded text rides along for a version only the
-   *  cloud still holds. */
+   *  a write from here. The loaded text rides along for a version this Mac's
+   *  own store doesn't hold. */
   onRestore: (version: FileVersion, text: string | null) => void;
   onOpenFile: (path: string) => void;
   onError: (message: string) => void;
@@ -101,9 +101,10 @@ export default function VersionPreview({
   const [patch, setPatch] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
 
-  // A cloud-only revision has no blob in this store, so there is nothing to
-  // diff against locally; it can still be read, previewed and restored.
-  const comparable = version.source === "local" && (newer == null || newer.source === "local");
+  // A sync-manifest revision is named by a 16-character hash the version
+  // store can't resolve, so it can be read and restored but not compared.
+  // A mirrored version is fetched like a local one and compares fine.
+  const comparable = version.source !== "manifest" && (newer == null || newer.source !== "manifest");
 
   useEffect(() => {
     let cancelled = false;
@@ -112,7 +113,7 @@ export default function VersionPreview({
     void (async () => {
       try {
         const loaded =
-          version.source === "cloud"
+          version.source === "manifest"
             ? await cloudRevision(docPath, version.hash)
             : await versionsRead(root, version.hash);
         if (!cancelled) setText(loaded);
@@ -189,7 +190,7 @@ export default function VersionPreview({
             className="version-banner-btn is-primary"
             data-testid="restore-version"
             disabled={text == null}
-            onClick={() => onRestore(version, version.source === "cloud" ? text : null)}
+            onClick={() => onRestore(version, version.source === "local" ? null : text)}
           >
             Restore this version
           </button>

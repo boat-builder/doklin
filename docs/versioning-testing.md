@@ -145,7 +145,11 @@ Where a history has to follow a document, or admit it cannot.
 
 ## 6. Deleted files come back
 
-Phase 4.
+Phase 4. `drive-versions.mjs` walks the surface itself in Chromium — the
+dimmed row appearing with its count, the column's old folder and last-seen
+line, *Open* reading the last content, and *Restore* landing at the old path
+and beside it when that path is taken. What only a Mac can answer is below:
+the real Trash, a real second Mac, and a folder deleted whole.
 
 - [ ] Delete a note. *Recently deleted* appears at the foot of the sidebar
       with the right count.
@@ -162,7 +166,11 @@ Phase 4.
 
 ## 7. The workspace as it was
 
-Phase 4's timeline.
+Phase 4's timeline. `drive-versions.mjs` proves the shape — the day groups
+with each moment's delta, the three lists, the inline confirm's counts, a
+partial restore touching only what was ticked, and *Restore all* with its
+Undo — against a scripted store. What is below is the same walk against a
+real folder, where the Trash and the file sizes are real.
 
 - [ ] Open *Workspace history…* from the sidebar root. The timeline lists
       snapshots by day, each with what changed in it.
@@ -183,16 +191,26 @@ Phase 4's timeline.
 Phase 3.
 
 - [ ] Connect **Fresh** to a domain. Its existing local history stays and
-      begins mirroring.
-- [ ] The Cloud panel says how much history is here and how much is in the
-      cloud.
-- [ ] A version made here appears in the rail on **Other Mac**.
+      begins mirroring: `versions/` in the bucket fills within the hour, and
+      nothing in `<app_data>/versions/<key>/` changes because of it.
+- [ ] The Cloud panel's *Version history* line says how many snapshots the
+      domain holds and how many of them came from this Mac.
+- [ ] A version made here appears in the rail on **Other Mac** — under the
+      name of the Mac that made it and the reason it was captured, not as
+      an anonymous "from the cloud" row.
+- [ ] *Show changes* works on that version: a mirrored version is read and
+      compared exactly like a local one.
 - [ ] A version older than the local horizon is still readable on either
-      Mac — it comes from the cloud, and says so.
+      Mac, and the trust line counts it under "in the cloud".
 - [ ] Restore, on **Other Mac**, a version whose content only exists in the
       cloud.
+- [ ] Leave both Macs running for a day. The cloud store thins on the same
+      ladder the local one does, and what it thinned does **not** reappear
+      on the next hour's mirror — the bucket's snapshot count settles
+      instead of sawing up and down.
 - [ ] Point the app at a domain whose worker has **not** been updated. Sync
-      keeps working, local history keeps working, and the badge asks for the
+      keeps working, local history keeps working, the Cloud panel says the
+      worker is too old to keep version history, and the badge asks for the
       update instead of an error.
 - [ ] Update the worker. The mirror starts on its own, without a restart.
 - [ ] Edit the same note on both Macs at once and let them fight it out. The

@@ -774,6 +774,17 @@ pub(crate) fn write_workspace_file(
     path: &Path,
     contents: &str,
 ) -> Result<FileSnapshot, String> {
+    write_workspace_bytes(app, path, contents.as_bytes())
+}
+
+/// `write_workspace_file` for content that isn't text: a workspace restore
+/// puts back every file a snapshot held, images and all, and those never
+/// survive a round trip through `String`.
+pub(crate) fn write_workspace_bytes(
+    app: &AppHandle,
+    path: &Path,
+    contents: &[u8],
+) -> Result<FileSnapshot, String> {
     std::fs::write(path, contents).map_err(|e| format!("write {}: {}", path.display(), e))?;
     let new_snapshot = stat_snapshot(path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
 
@@ -2015,7 +2026,10 @@ pub fn run() {
             versions::versions_history,
             versions::versions_read,
             versions::versions_diff,
-            versions::versions_restore_file
+            versions::versions_restore_file,
+            versions::versions_snapshot_diff,
+            versions::versions_deleted,
+            versions::versions_restore_snapshot
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

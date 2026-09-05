@@ -14,7 +14,8 @@ pipeline (`src/mermaid.ts` + the Editor wiring), the inline-code newline
 normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
 `PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
-surfaces over a scripted engine (`drive-cloud.mjs`), a document's version history
+surfaces over a scripted engine (`drive-cloud.mjs`), version history — a
+document's rail, the workspace timeline and the deleted files
 (`drive-versions.mjs`), and the public pages a
 published workspace serves (`drive-public.mjs`, against the real worker).
 
@@ -97,7 +98,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 29 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -117,10 +118,14 @@ node verify-harness/drive-cloud.mjs        # 29 steps: boots the REAL <App/> (cl
                                            # sidebar's dots, the folder dialog, a note inside a
                                            # published folder knowing its nested address, the
                                            # published list (home page, stop), the sidebar's
-                                           # undoable stop, and the version rail carrying a
-                                           # cloud-only revision (read through cloud_revision,
-                                           # restored by handing its text to the version store)
-node verify-harness/drive-versions.mjs      # 18 steps over the SAME harness page (cloud.html's IPC
+                                           # undoable stop, the panel's version-history line (what
+                                           # the domain holds; a worker one version behind saying
+                                           # it can't), and the version rail carrying the two rows
+                                           # only a connected workspace has — a version another Mac
+                                           # MIRRORED (read through versions_read, comparable) and
+                                           # a sync-manifest revision (read through cloud_revision,
+                                           # not comparable, restored by handing over its text)
+node verify-harness/drive-versions.mjs      # 26 steps over the SAME harness page (cloud.html's IPC
                                            # stub answers versions_* from a scripted store whose
                                            # restore really writes the file and emits
                                            # `versions-applied`): the version rail from the sidebar
@@ -136,8 +141,23 @@ node verify-harness/drive-versions.mjs      # 18 steps over the SAME harness pag
                                            # the pre-restore hash, the rail gaining a row that says
                                            # what it was restored from, Name this version, the tab
                                            # menu and ⌘⌥H, a draft's history from the drafts
-                                           # store, and a revision only the cloud has — badged,
-                                           # read through cloud_revision, with Show changes absent
+                                           # store, a revision only the sync manifest has (read
+                                           # through cloud_revision, with Show changes absent),
+                                           # and a version another Mac mirrored — its device, its
+                                           # reason, read through the version store, comparable;
+                                           # then the WHOLE FOLDER: Workspace history… on the
+                                           # sidebar root (no cloud connected), the timeline's day
+                                           # groups with each moment's "+2 −1 ~5", a moment's three
+                                           # lists (changed / comes back / to the Trash), a partial
+                                           # restore whose inline confirm states the real counts
+                                           # and which touches only the ticked path, Restore all
+                                           # doing all three and refreshing the tree off
+                                           # `versions-applied` with an Undo toast, and Recently
+                                           # deleted — the dimmed row with its count at the foot of
+                                           # the sidebar, its column (old folder, last seen), Open
+                                           # showing the last content read-only, and Restore
+                                           # putting the file back at its old path and beside it
+                                           # (`<stem> (restored)`) when that path is taken
 node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
                                            # included, ~1 min) over an in-memory bucket seeded with
                                            # cloud-worker/test/seed.mjs, on http://localhost:8787
@@ -318,14 +338,22 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 40 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 49 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, history, the edit bus routing, cloud.json and the marker), the versioning store (`--lib versions` — 37 tests: the cadence
+presence, history, the edit bus routing, cloud.json and the marker, and the
+version store's mirror: a device's snapshots and blobs reaching the bucket,
+content another device already put there skipped by digest while a NAMED
+version is never skipped, a lost index CAS re-read and re-landed, the cloud
+ladder thinning on its own clock with what it thinned never put back, a blob
+younger than the grace period spared, a worker without the `versions`
+feature written to not at all and reported as a null status until the hourly
+pass finds it updated, and another Mac's snapshot downloaded once and
+answered from the cache after), the versioning store (`--lib versions` — 44 tests: the cadence
 rule's consequences on a simulated clock (a burst inside one interval, a
 steady hour, a quiet hour, a session's end, a write loop), the seed capture,
 the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
@@ -338,10 +366,20 @@ and one file's history read back out of those snapshots (a rename followed
 backwards, a recreated path starting over, a deleted path still reachable,
 equal contents collapsing to the row where the content appeared while a
 NAMED version keeps its own, `current` marking what is on disk, the unified
-diff and its cap, the cloud's 16-character hashes deduping against the
-local ones, and the restore — the state it leaves then the state it made,
-naming its source, deduping when nothing was unsaved, undone by restoring
-the pre-restore hash, and never removing a snapshot),
+diff and its cap, the sync manifest's 16-character hashes deduping
+against the local ones, versions another Mac mirrored joining the SAME walk
+(newest first whichever store holds them, a rename made elsewhere followed,
+one moment on both sides listed once), and the restore — the state it leaves
+then the state it made, naming its source, deduping when nothing was
+unsaved, undone by restoring the pre-restore hash, and never removing a
+snapshot), the whole folder (a snapshot's diff against disk classifying
+changed / added / missing while leaving what both sides agree on out of all
+three, a workspace restore capturing first then writing what changed,
+bringing back what was gone — parent folders and all — and trashing what was
+never there, with a blob kept for the trashed file so the undo is real, a
+subset restore touching only the ticked paths, the deleted list naming the
+newest snapshot that still held a file and the content it had then, and a
+deleted file restored keeping the history it had),
 the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one

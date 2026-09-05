@@ -15,13 +15,17 @@ use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::MAX_SYNC_ENTRIES;
 use crate::cloud::status::{Events, Revision};
+use crate::cloud::versions::{snapshot_id, VersionsEntry};
 
 use super::capture::{capture, Cadence, Captured, CAPTURE_MIN_INTERVAL, SESSION_IDLE};
 use super::history::{self, FileVersion, MAX_DIFF_BYTES};
 use super::retain::{retain, sweep, GC_GRACE};
 use super::settings::Settings;
 use super::status::{Phase, RestoreOutcome, EV_APPLIED};
-use super::store::{gunzip, hash_full, Index, Reason, SnapshotRow, Store};
+use super::workspace::RestoreReport;
+use super::store::{
+    digest_of, gunzip, gzip, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
+};
 use super::{Clock, VersionBus, Versioner, VersionerCmd};
 
 /* ---------- The fixture ---------- */
@@ -107,15 +111,57 @@ impl Fixture {
         &self.versioner.index.snapshots
     }
 
+    /// A snapshot another Mac mirrored, already in this store's cloud cache
+    /// — which is where the rail reads one from after the engine has pulled
+    /// it down. Answers the index entry that names it.
+    fn mirrored(&self, ts: u64, device: &str, by: &str, files: &[(&str, &str)]) -> VersionsEntry {
+        let mut map: BTreeMap<String, FileEntry> = BTreeMap::new();
+        let mut bytes = 0u64;
+        for (path, content) in files {
+            map.insert(
+                (*path).to_string(),
+                FileEntry { h: hash_full(content.as_bytes()), s: content.len() as u64, m: ts },
+            );
+            bytes += content.len() as u64;
+        }
+        let snap = Snapshot {
+            version: STORE_VERSION,
+            ts,
+            reason: Reason::Interval,
+            restored_from: None,
+            by: by.to_string(),
+            files: map.clone(),
+        };
+        let id = snapshot_id(ts, device);
+        let gz = gzip(&serde_json::to_vec(&snap).unwrap()).unwrap();
+        self.store().write_cloud_snapshot(&id, &gz);
+        VersionsEntry {
+            id,
+            ts,
+            device: device.to_string(),
+            reason: "interval".to_string(),
+            files: files.len() as u64,
+            bytes,
+            digest: digest_of(&map),
+            ..Default::default()
+        }
+    }
+
     fn blob(&self, hash: &str) -> Vec<u8> {
         gunzip(&std::fs::read(self.store().blob_path(hash)).unwrap()).unwrap()
     }
 
     /// One document's versions, newest first, as the rail asks for them.
     fn history(&mut self, rel: &str) -> Vec<FileVersion> {
+        self.history_with(rel, &[])
+    }
+
+    /// The same, with what other devices mirrored folded into the walk.
+    fn history_with(&mut self, rel: &str, cloud: &[VersionsEntry]) -> Vec<FileVersion> {
         let current = history::hash_on_disk(&self.root.path().join(rel));
         let v = &mut self.versioner;
-        history::file_versions(&v.store, &v.index, &mut v.cache, rel, current.as_deref())
+        let retained = history::retained_set(&v.index, cloud);
+        history::file_versions(&v.store, &retained, &mut v.cache, rel, current.as_deref())
     }
 
     /// A restore, with the write the app would do standing in for the one
@@ -127,6 +173,24 @@ impl Fixture {
                 std::fs::write(path, contents).map_err(|e| e.to_string())
             })
             .expect("restore")
+    }
+
+    /// A workspace restore, with the app's write and its trash standing in
+    /// for the real ones — the same substitution `restore` makes for one
+    /// file. Answers what moved.
+    fn restore_all(&mut self, ts: u64, only: Option<&[String]>) -> RestoreReport {
+        self.versioner
+            .restore_snapshot(
+                ts,
+                only,
+                &|path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()),
+                &|path| std::fs::remove_file(path).is_ok(),
+            )
+            .expect("restore the workspace")
+    }
+
+    fn on_disk(&self, rel: &str) -> Option<String> {
+        std::fs::read_to_string(self.root.path().join(rel)).ok()
     }
 
     /// Hand the versioner to the task that drives it, keeping the temp
@@ -738,7 +802,8 @@ fn diff_is_unified_and_capped() {
     let versions = f.history("a.md");
     let (new, old) = (versions[0].hash.clone(), versions[1].hash.clone());
 
-    let patch = history::diff(f.store(), None, Some(&old), Some(&new)).unwrap();
+    let text = |hash: &str| history::read_version(f.store(), hash).unwrap();
+    let patch = history::diff_texts(&text(&old), &text(&new)).unwrap();
     assert!(patch.contains("--- original"), "a unified patch: {}", patch);
     assert!(patch.contains("-one"), "{}", patch);
     assert!(patch.contains("+two and two"), "{}", patch);
@@ -747,13 +812,11 @@ fn diff_is_unified_and_capped() {
     // compared against now.
     f.write("a.md", "three and three\n");
     let path = f.root.path().join("a.md");
-    let against_now = history::diff(f.store(), Some(&path), Some(&new), None).unwrap();
+    let against_now = history::diff_texts(&text(&new), &history::read_disk(&path).unwrap()).unwrap();
     assert!(against_now.contains("+three and three"), "{}", against_now);
 
-    let big = vec![b'a'; MAX_DIFF_BYTES + 1];
-    let big_hash = hash_full(&big);
-    f.store().write_blob(&big_hash, &big).unwrap();
-    let refused = history::diff(f.store(), None, Some(&old), Some(&big_hash)).unwrap_err();
+    let big = String::from_utf8(vec![b'a'; MAX_DIFF_BYTES + 1]).unwrap();
+    let refused = history::diff_texts(&text(&old), &big).unwrap_err();
     assert!(refused.contains("too large to compare"), "{}", refused);
 
     let gone = history::read_version(f.store(), "0".repeat(64).as_str()).unwrap_err();
@@ -793,7 +856,7 @@ fn cloud_prefix_matches_dedupe_against_local() {
     assert_eq!(merged.len(), 3, "two were already known: {:?}", merged);
     assert_eq!(merged[0].ts, T0 + 60_000, "newest first");
     assert_eq!(merged[1].ts, T0 + 30_000);
-    assert_eq!(merged[1].source, "cloud");
+    assert_eq!(merged[1].source, "manifest", "a sync-manifest revision, not a mirrored version");
     assert_eq!(merged[1].by, "Other Mac");
     assert_eq!(merged[1].path, "a.md");
     assert_eq!(merged[2].ts, T0);
@@ -920,4 +983,179 @@ fn restore_never_removes_a_snapshot() {
     let versions = f.history("a.md");
     assert!(versions.iter().any(|v| v.hash == hash_full(b"three, three and three\n")));
     assert!(versions.iter().any(|v| v.hash == hash_full(b"one\n")));
+}
+
+#[test]
+fn read_through_lists_cloud_only_versions() {
+    let mut f = fixture(T0);
+    // This Mac was asleep for the first two of these; it only ever captured
+    // the last one, and the two before it are in the bucket.
+    let older = f.mirrored(T0, "d-book", "Sherin's MacBook", &[("a.md", "one\n")]);
+    let middle = f.mirrored(T0 + 60_000, "d-book", "Sherin's MacBook", &[("a.md", "one and two\n")]);
+    f.at(T0 + 120_000);
+    f.write("a.md", "one, two and three\n");
+    f.capture(Reason::Interval);
+
+    let versions = f.history_with("a.md", &[older.clone(), middle.clone()]);
+    assert_eq!(versions.len(), 3, "one walk, both stores: {:?}", versions);
+    assert_eq!(
+        versions.iter().map(|v| (v.ts, v.source.as_str())).collect::<Vec<_>>(),
+        vec![(T0 + 120_000, "local"), (T0 + 60_000, "cloud"), (T0, "cloud")],
+        "newest first, whichever store holds it"
+    );
+    assert_eq!(versions[1].by, "Sherin's MacBook", "a mirrored version says which Mac made it");
+    assert_eq!(versions[1].reason, "interval", "and why — the other Mac recorded that too");
+    assert!(versions[0].current, "the newest is what is on disk");
+    assert_eq!(versions[2].hash, hash_full(b"one\n"));
+
+    // A rename another Mac made is followed exactly like one made here.
+    let renamed = f.mirrored(T0 - 60_000, "d-book", "Sherin's MacBook", &[("was.md", "one\n")]);
+    let followed = f.history_with("a.md", &[renamed, older.clone(), middle.clone()]);
+    assert_eq!(followed.len(), 3, "the oldest two hold the same bytes: {:?}", followed);
+    assert_eq!(followed[2].ts, T0 - 60_000, "so the version dates from where the content appeared");
+    assert_eq!(followed[2].path, "was.md", "under the name it had then");
+
+    // The same snapshot on both sides is one row, not two: a mirrored copy
+    // of what this Mac captured is the same moment, seen twice.
+    let mine = f.rows().last().unwrap().clone();
+    let echo = VersionsEntry {
+        id: snapshot_id(mine.ts, "d-test"),
+        ts: mine.ts,
+        digest: mine.digest.clone(),
+        ..Default::default()
+    };
+    assert_eq!(f.history_with("a.md", &[echo, older, middle]).len(), 3);
+}
+
+
+/* ---------- The workspace, as it was ---------- */
+
+/// A folder with one captured moment and three kinds of drift since:
+/// a file edited, a folder deleted, a file made.
+fn with_drift() -> Fixture {
+    let mut f = fixture(T0);
+    f.write("keep.md", "same\n");
+    f.write("a.md", "one\n");
+    f.write("notes/b.md", "bee\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "one changed\n");
+    std::fs::remove_dir_all(f.root.path().join("notes")).unwrap();
+    f.write("new.md", "made since\n");
+    f
+}
+
+#[test]
+fn snapshot_diff_classifies_changed_added_missing() {
+    let f = with_drift();
+    let diff = f.versioner.snapshot_diff(T0).expect("diff the seed against now");
+
+    assert_eq!(diff.changed.len(), 1, "{:?}", diff.changed);
+    assert_eq!(diff.changed[0].path, "a.md");
+    assert_eq!(diff.changed[0].then_hash, hash_full(b"one\n"), "what a restore would write");
+    assert_eq!(diff.changed[0].now_hash, hash_full(b"one changed\n"), "what is there now");
+    assert_eq!(diff.added, vec!["new.md".to_string()], "on disk now, not then — a restore trashes it");
+    assert_eq!(diff.missing, vec!["notes/b.md".to_string()], "then, not now — a restore brings it back");
+    assert!(
+        !diff.changed.iter().any(|c| c.path == "keep.md")
+            && !diff.added.contains(&"keep.md".to_string())
+            && !diff.missing.contains(&"keep.md".to_string()),
+        "an unchanged file is in none of the three lists"
+    );
+}
+
+#[test]
+fn restore_snapshot_captures_first_then_writes_and_trashes() {
+    let mut f = with_drift();
+    f.at(T0 + 120_000);
+    let report = f.restore_all(T0, None);
+
+    assert_eq!(report.written, 2, "the edited file and the deleted one");
+    assert_eq!(report.trashed, 1, "the file that was not there then");
+    assert_eq!(report.pre_restore_ts, Some(T0 + 120_000));
+    assert_eq!(f.on_disk("a.md").as_deref(), Some("one\n"));
+    assert_eq!(f.on_disk("notes/b.md").as_deref(), Some("bee\n"), "the folder came back with it");
+    assert!(!f.root.path().join("new.md").exists(), "and what was never there is gone");
+
+    let rows: Vec<(u64, Reason)> = f.rows().iter().map(|r| (r.ts, r.reason)).collect();
+    assert_eq!(
+        rows,
+        vec![(T0, Reason::Seed), (T0 + 120_000, Reason::PreRestore), (T0 + 120_001, Reason::Restore)],
+        "the state it left and the state it made are both versions"
+    );
+    // Undo has everything it needs: the moment before is a snapshot like
+    // any other, blobs and all.
+    let left = f.store().read_snapshot(T0 + 120_000).unwrap();
+    assert_eq!(f.blob(&left.files["a.md"].h), b"one changed\n");
+    assert_eq!(f.blob(&left.files["new.md"].h), b"made since\n", "even the file that was trashed");
+    let made = f.store().read_snapshot(T0 + 120_001).unwrap();
+    assert_eq!(made.restored_from, Some(T0), "and the new state says where it came from");
+
+    let applied = f.events.last(EV_APPLIED).expect("a restore tells the app what to reload");
+    let paths: Vec<String> =
+        applied["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
+    assert_eq!(paths.len(), 3, "everything that moved: {:?}", paths);
+    assert!(paths.iter().any(|p| p.ends_with("/new.md")), "the trashed file too");
+}
+
+#[test]
+fn restore_subset_touches_only_those_paths() {
+    let mut f = with_drift();
+    f.at(T0 + 120_000);
+    let report = f.restore_all(T0, Some(&["a.md".to_string()]));
+
+    assert_eq!((report.written, report.trashed), (1, 0));
+    assert_eq!(f.on_disk("a.md").as_deref(), Some("one\n"));
+    assert_eq!(f.on_disk("new.md").as_deref(), Some("made since\n"), "an unticked file is untouched");
+    assert!(!f.root.path().join("notes/b.md").exists(), "and an unticked deletion stays deleted");
+}
+
+#[test]
+fn deleted_lists_what_no_longer_exists() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.write("notes/b.md", "bee\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("notes/b.md", "bee two\n");
+    f.capture(Reason::Interval);
+    f.at(T0 + 120_000);
+    f.remove("notes/b.md");
+    f.write("c.md", "cee\n");
+    f.capture(Reason::Closing);
+
+    let gone = f.versioner.deleted().expect("read the deleted files");
+    assert_eq!(gone.len(), 1, "only what is in the history and not on disk: {:?}", gone);
+    assert_eq!(gone[0].path, "notes/b.md");
+    assert_eq!(gone[0].last_seen_ms, T0 + 60_000, "the newest snapshot that still had it");
+    assert_eq!(gone[0].hash, hash_full(b"bee two\n"), "with the content it had then");
+    assert_eq!(gone[0].size, 8);
+
+    // And it comes back to the path it had, with its history intact.
+    f.restore("notes/b.md", Some(T0 + 60_000), Some(gone[0].hash.clone()));
+    assert_eq!(f.on_disk("notes/b.md").as_deref(), Some("bee two\n"));
+    assert!(f.versioner.deleted().unwrap().is_empty(), "and the row is gone");
+    // Its history came back with it: the walk steps over the moments the
+    // file was missing from, because the snapshot that brought it back says
+    // where the content came from.
+    let versions = f.history("notes/b.md");
+    assert_eq!(
+        versions.iter().map(|v| (v.ts, v.hash.clone())).collect::<Vec<_>>(),
+        vec![(T0 + 60_000, hash_full(b"bee two\n")), (T0, hash_full(b"bee\n"))],
+        "both moments, not just the restore"
+    );
+}
+
+#[test]
+fn restore_file_recreates_directories() {
+    let mut f = fixture(T0);
+    f.write("notes/deep/b.md", "bee\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    std::fs::remove_dir_all(f.root.path().join("notes")).unwrap();
+
+    let gone = f.versioner.deleted().expect("read the deleted files");
+    assert_eq!(gone.len(), 1);
+    f.restore("notes/deep/b.md", Some(T0), Some(gone[0].hash.clone()));
+    assert_eq!(f.on_disk("notes/deep/b.md").as_deref(), Some("bee\n"), "both folders came back");
 }

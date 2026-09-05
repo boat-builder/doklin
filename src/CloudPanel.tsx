@@ -20,6 +20,7 @@ import {
   cloudToken,
   cloudWipe,
   phaseLine,
+  versionsLine,
   timeAgo,
   workerAhead,
   workerBehind,
@@ -62,6 +63,7 @@ export default function CloudPanel({
   onUpdateWorker,
   onOpenPublished,
   onOpenExternal,
+  onWorkspaceHistory,
 }: {
   /** The open workspace folder, if any. */
   root: string | null;
@@ -76,6 +78,9 @@ export default function CloudPanel({
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
   onOpenExternal: (url: string) => void;
+  /** The workspace timeline (docs/versioning-plan.md §7.2). The sidebar
+   *  root's menu is the other way in. */
+  onWorkspaceHistory?: () => void;
 }) {
   const [view, setView] = useState<View>("main");
   const [error, setError] = useState<string | null>(null);
@@ -403,6 +408,22 @@ export default function CloudPanel({
                 Get the latest Doklin
               </button>
             </div>
+          </div>
+        )}
+
+        <div className="cloud-section-label">Version history</div>
+        <p className="cloud-hint" data-testid="versions-line">
+          {versionsLine(cloud, now)}
+        </p>
+        {onWorkspaceHistory && (
+          <div className="cloud-phase-actions">
+            <button
+              className="modal-btn"
+              data-testid="cloud-workspace-history"
+              onClick={onWorkspaceHistory}
+            >
+              Workspace history…
+            </button>
           </div>
         )}
 

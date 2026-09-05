@@ -44,6 +44,9 @@ manifest.json               the workspace manifest (v2, below) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
 history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
 presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
+versions/index.json         {version, horizonDays, snapshots: [...]} — the version store — CAS by etag
+versions/snapshots/<id>.json.gz   one workspace state, gzip'd; immutable. <id> is <ts13>-<deviceId>
+versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its full sha256
 auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
 auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
@@ -110,6 +113,17 @@ PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored ha
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
 GET    /api/history/<fid>        {version: 1, entries: [{r, h, s, t, b?}]}; 404 when there is none
 PUT    /api/history/<fid>        replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
+DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
+GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
+PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
+                                 on a lost race; 400 on garbage; 413 past 1 MB
+GET    /api/versions/snapshots/<id>   the gzip'd workspace state; 404
+PUT    /api/versions/snapshots/<id>   store it (immutable: a re-PUT is {existed: true}); 413 past 4 MB
+DELETE /api/versions/snapshots/<id>   drop one the ladder thinned away
+GET    /api/versions/blobs[?cursor=c] {blobs: [{hash, size, uploaded}], cursor?} — one page
+GET    /api/versions/blobs/<hash>     the bytes
+PUT    /api/versions/blobs/<hash>     store bytes (immutable, {existed: true} on a re-PUT); 413 past 25 MB
+DELETE /api/versions/blobs/<hash>     garbage-collect a version no retained snapshot references
 PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
                                  (path absent or null: here, idle); needs x-doklin-device
 DELETE /api/presence             this device left

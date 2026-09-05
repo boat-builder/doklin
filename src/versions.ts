@@ -37,20 +37,23 @@ export type VersionsStatus = {
  *  src-tauri/src/versions/history.rs — change both. */
 export type FileVersion = {
   ts: number;
-  /** The full sha256 for a local version; the manifest's 16-character
-   *  prefix for one only the cloud still holds. */
+  /** The full sha256 for a version in either store; the sync manifest's
+   *  16-character prefix for a `manifest` revision. */
   hash: string;
   size: number;
   /** The device that took the snapshot. */
   by: string;
-  /** The capture's reason, or "" for a revision only the cloud has. */
+  /** The capture's reason, or "" for a sync-manifest revision. */
   reason: VersionReason | "";
   label: string | null;
   pinned: boolean;
   restoredFrom: number | null;
   /** The path as of that version — different from today's after a rename. */
   path: string;
-  source: "local" | "cloud";
+  /** Where the bytes come from: `local` (a blob on this Mac), `cloud` (the
+   *  mirrored version store, read through the engine) or `manifest` (the
+   *  sync manifest's own per-file revisions, which phase 6 retires). */
+  source: "local" | "cloud" | "manifest";
   /** This version is byte-for-byte the file on disk right now. */
   current: boolean;
 };
@@ -73,8 +76,52 @@ export type RestoreOutcome = {
   ts: number | null;
 };
 
+/** One file a retained snapshot and the folder disagree about. Mirrored by
+ *  src-tauri/src/versions/workspace.rs — change both. */
+export type ChangedFile = {
+  path: string;
+  /** The content the snapshot holds — what a restore would write. */
+  thenHash: string;
+  /** The content on disk now. */
+  nowHash: string;
+};
+
+/** The whole of what restoring one snapshot would do, before anything
+ *  happens. A file the snapshot and the folder agree on is in none of the
+ *  three lists. */
+export type SnapshotDiff = {
+  changed: ChangedFile[];
+  /** On disk now and not in the snapshot: a restore moves these to the Trash. */
+  added: string[];
+  /** In the snapshot and not on disk: a restore brings these back. */
+  missing: string[];
+};
+
+/** One file that was here and is not — a row of *Recently deleted*. */
+export type DeletedFile = {
+  /** Workspace-relative, as the snapshot held it. */
+  path: string;
+  /** The newest snapshot that still had it. */
+  lastSeenMs: number;
+  /** Its content then, for the preview and the restore. */
+  hash: string;
+  size: number;
+};
+
+/** What a workspace restore did. *Undo* is a restore of `preRestoreTs` with
+ *  the same paths. */
+export type RestoreReport = {
+  written: number;
+  trashed: number;
+  preRestoreTs: number | null;
+};
+
 /** A restore landed on disk — the same shape as `cloud-applied`. */
 export type VersionsAppliedEvent = { root: string; paths: string[] };
+
+/** What one snapshot changed against the one before it — the "+2 −1 ~5" a
+ *  row of the workspace timeline wears. */
+export type SnapshotDelta = { added: number; removed: number; changed: number };
 
 /** One retained snapshot, as the history surfaces list it. */
 export type SnapshotMeta = {
@@ -87,6 +134,9 @@ export type SnapshotMeta = {
   label: string | null;
   /** For a `restore`: the ts of the snapshot its content came from. */
   restoredFrom: number | null;
+  /** Only `versionsSnapshots` fills this in — it reads both file maps to
+   *  work it out. Null for the oldest row and for a capture's answer. */
+  delta: SnapshotDelta | null;
 };
 
 /* ---------- Commands ---------- */
@@ -161,6 +211,25 @@ export const versionsRestoreFile = (
     text: opts.text ?? null,
   });
 
+/** What restoring one snapshot would do to the folder as it is now — the
+ *  three lists the workspace timeline shows before anything happens. */
+export const versionsSnapshotDiff = (root: string, ts: number) =>
+  invoke<SnapshotDiff>("versions_snapshot_diff", { root, ts });
+
+/** Every file this folder's history holds and the folder itself does not,
+ *  most recently seen first. */
+export async function versionsDeleted(root: string): Promise<DeletedFile[]> {
+  const r = await invoke<unknown>("versions_deleted", { root });
+  return Array.isArray(r) ? (r as DeletedFile[]) : [];
+}
+
+/** Put a whole moment back — or, with `paths`, the part of it the user
+ *  ticked. Like the file restore it captures the state it leaves first, so
+ *  the whole thing is undone by restoring `preRestoreTs` with the same
+ *  paths. */
+export const versionsRestoreSnapshot = (root: string, ts: number, paths?: string[] | null) =>
+  invoke<RestoreReport>("versions_restore_snapshot", { root, ts, paths: paths ?? null });
+
 /* ---------- Events ---------- */
 
 export const onVersionsStatus = (cb: (statuses: VersionsStatus[]) => void): Promise<UnlistenFn> =>
@@ -184,7 +253,10 @@ export const versionsRunning = (s: VersionsStatus | null): boolean =>
 /** The small word a row wears, so a list of times reads as a list of
  *  moments. Kept beside the contract because the reasons are the contract. */
 export function versionReasonWord(v: Pick<FileVersion, "reason" | "source">): string {
-  if (v.source === "cloud") return "from the cloud";
+  // A mirrored version carries the reason the device that took it recorded,
+  // and `by` already says which Mac that was. A manifest revision carries
+  // neither, so the source is all there is to say.
+  if (v.source === "manifest") return "from the cloud";
   switch (v.reason) {
     case "interval":
       return "while editing";

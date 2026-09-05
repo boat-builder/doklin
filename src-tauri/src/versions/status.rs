@@ -55,6 +55,18 @@ pub struct VersionsStatus {
     pub horizon_days: Option<u32>,
 }
 
+/// What one snapshot changed against the one before it — the "+2 −1 ~5" a
+/// row of the workspace timeline wears. Only `versions_snapshots` fills it
+/// (it reads both file maps to work it out); the oldest row has nothing to
+/// compare against, and so does the meta a capture answers with.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotDelta {
+    pub added: u64,
+    pub removed: u64,
+    pub changed: u64,
+}
+
 /// What `versions_snapshots` answers: one row per retained snapshot, newest
 /// first. The index's digest stays inside the store.
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +79,7 @@ pub struct SnapshotMeta {
     pub pinned: bool,
     pub label: Option<String>,
     pub restored_from: Option<u64>,
+    pub delta: Option<SnapshotDelta>,
 }
 
 impl From<&SnapshotRow> for SnapshotMeta {
@@ -79,6 +92,7 @@ impl From<&SnapshotRow> for SnapshotMeta {
             pinned: row.pinned,
             label: row.label.clone(),
             restored_from: row.restored_from,
+            delta: None,
         }
     }
 }

@@ -43,7 +43,7 @@ export function dayLabel(ms: number, now = Date.now()): string {
   });
 }
 
-const timeLabel = (ms: number) =>
+export const timeLabel = (ms: number) =>
   new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
 /** The date a trust line names: "Every change since 3 Jun". */
@@ -51,9 +51,11 @@ export const sinceLabel = (ms: number) =>
   new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
 /** Newest first, grouped into days. Today and yesterday are open: that is
- *  where a reader is looking for "the one from just before lunch". */
-export function groupByDay(versions: FileVersion[], now = Date.now()) {
-  const groups: { day: number; label: string; versions: FileVersion[] }[] = [];
+ *  where a reader is looking for "the one from just before lunch". The
+ *  workspace timeline groups its snapshots the same way, so this takes
+ *  anything with a `ts`. */
+export function groupByDay<T extends { ts: number }>(versions: T[], now = Date.now()) {
+  const groups: { day: number; label: string; versions: T[] }[] = [];
   for (const version of versions) {
     const day = startOfDay(version.ts);
     const last = groups[groups.length - 1];
@@ -63,7 +65,7 @@ export function groupByDay(versions: FileVersion[], now = Date.now()) {
   return groups;
 }
 
-const isRecent = (day: number, now = Date.now()) => startOfDay(now) - day <= DAY_MS;
+export const isRecent = (day: number, now = Date.now()) => startOfDay(now) - day <= DAY_MS;
 
 function PinIcon() {
   return (
@@ -126,7 +128,7 @@ export default function HistoryRail({
   const counts = useMemo(
     () => ({
       here: versions.filter((v) => v.source === "local").length,
-      cloud: versions.filter((v) => v.source === "cloud").length,
+      cloud: versions.filter((v) => v.source !== "local").length,
     }),
     [versions],
   );

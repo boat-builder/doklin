@@ -21,7 +21,7 @@
 //! the one status event that is the frontend's entire model. Generic over
 //! [`Remote`] so all of it runs in tests against an in-memory worker.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,14 +38,19 @@ use super::manifest::{
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
 use super::remote::{Remote, RemoteError, RemoteResult};
+use super::versions::{MirrorReport, VersionsIndex, MIRROR_EVERY};
 use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local,
     stat_pair, write_atomic, write_json, ScanEntry,
 };
 use super::status::{
     emit_statuses, CloudStatus, Events, Phase, PresenceDevice, PublicPage, Revision, StatusTable,
-    EV_APPLIED, EV_CONFLICT, EV_PENDING_DELETES,
+    VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_DELETES,
 };
+// The cloud half of versioning. `crate::versions` is the local versioner —
+// this module only mirrors what that one wrote.
+use super::versions as version_store;
+use crate::versions::store::Snapshot as VersionSnapshot;
 
 /* ---------- Tunables ---------- */
 
@@ -145,6 +150,15 @@ pub struct WorkspaceState {
     /// A pending "make this the root page" (`Some(None)` clears the root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_op: Option<Option<String>>,
+    /// Version blobs this device has put in the bucket, so a mirror pass
+    /// costs one index read rather than a PUT per blob. Pruned each pass to
+    /// what the local store still holds.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub versions_uploaded: BTreeSet<String>,
+    /// When the cloud version store was last thinned — daily, by whichever
+    /// device gets there first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cloud_sweep_ms: Option<u64>,
 }
 
 /* ---------- Commands ---------- */
@@ -190,6 +204,19 @@ pub enum EngineCmd {
         hash: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// The cloud version store, for the history rail's read-through: what
+    /// the bucket holds, one mirrored snapshot, one mirrored version's bytes.
+    VersionsIndex {
+        reply: oneshot::Sender<Result<Option<VersionsIndex>, String>>,
+    },
+    VersionSnapshot {
+        id: String,
+        reply: oneshot::Sender<Result<VersionSnapshot, String>>,
+    },
+    VersionBlob {
+        hash: String,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     Shutdown,
 }
 
@@ -202,6 +229,9 @@ pub struct EngineConfig {
     pub domain: String,
     pub endpoint: String,
     pub state_dir: PathBuf,
+    /// `<app_data>`, so the engine can open this workspace's version store —
+    /// read-only, and only to mirror it.
+    pub data_dir: PathBuf,
     pub device_id: String,
     pub device_name: String,
     /// Real deletions go to the macOS Trash; tests flip this off.
@@ -222,6 +252,15 @@ pub struct Engine<R: Remote> {
     /// Cycles stop until `/api/meta` reports a newer worker.
     outdated: Option<u32>,
     worker_version: Option<u32>,
+    /// What `/api/meta` last listed. A worker without `versions` is mirrored
+    /// to not at all — and says so in the status.
+    worker_features: Vec<String>,
+    /// The last cloud version index this device read, so the rail still has
+    /// something to show when the domain is unreachable.
+    cloud_versions: Option<VersionsIndex>,
+    mirror: Option<MirrorReport>,
+    last_mirror: Option<Instant>,
+    last_mirror_ms: Option<u64>,
     /// Absolute path the user is actively editing (frontend-reported).
     activity: Option<(String, Instant)>,
     last_beat: Option<Instant>,
@@ -286,6 +325,11 @@ impl<R: Remote> Engine<R> {
             paused: false,
             outdated: None,
             worker_version: None,
+            worker_features: Vec::new(),
+            cloud_versions: None,
+            mirror: None,
+            last_mirror: None,
+            last_mirror_ms: None,
             activity: None,
             last_beat: None,
             beaconed: None,
@@ -429,6 +473,11 @@ impl<R: Remote> Engine<R> {
             error: self.error.clone(),
             pending_deletes: self.held_deletes.len() as u32,
             worker_version: self.worker_version,
+            versions: self.worker_has("versions").then(|| VersionsMirror {
+                mirrored: self.mirror.map(|m| m.mirrored).unwrap_or(0),
+                cloud: self.mirror.map(|m| m.cloud).unwrap_or(0),
+                last_mirror_ms: self.last_mirror_ms,
+            }),
             public: self.public_pages(),
             presence: self.presence.clone(),
         };
@@ -443,6 +492,7 @@ impl<R: Remote> Engine<R> {
     pub(crate) async fn probe_worker(&mut self) {
         if let Ok(meta) = self.remote.meta().await {
             self.worker_version = Some(meta.version);
+            self.worker_features = meta.features;
             if let Some(seen_at) = self.outdated {
                 if meta.version > seen_at {
                     self.outdated = None;
@@ -490,6 +540,11 @@ impl<R: Remote> Engine<R> {
                 }
                 if self.cycles % GC_EVERY_N_CYCLES == 0 {
                     self.gc_blobs().await;
+                }
+                if !changed_paths.is_empty() {
+                    // Something arrived from another device, so the versioner
+                    // has (or is about to have) new snapshots worth sending.
+                    self.mirror_versions().await;
                 }
             }
             Err(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
@@ -1269,6 +1324,69 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /* ----- the version store's mirror (docs/versioning-plan.md §6.2) ----- */
+
+    fn worker_has(&self, feature: &str) -> bool {
+        self.worker_features.iter().any(|f| f == feature)
+    }
+
+    /// Put this device's captured history in the bucket, and once a day thin
+    /// what is up there. History is not the document: a mirror that cannot
+    /// finish leaves the sync's phase alone and tries again on the next pass,
+    /// because a version that is late is not a change that is lost.
+    pub(crate) async fn mirror_versions(&mut self) {
+        if self.paused || self.outdated.is_some() {
+            return;
+        }
+        let hourly = self.mirror_due();
+        self.last_mirror = Some(Instant::now());
+        if !self.worker_has("versions") {
+            // Either `/api/meta` never answered (the app started offline) or
+            // the worker predates the version store. Ask again on the hourly
+            // pass — the mirror is meant to start the moment the worker is
+            // updated, without a restart — but never once per cycle.
+            if !hourly {
+                return;
+            }
+            self.probe_worker().await;
+            self.refresh_status();
+            if !self.worker_has("versions") {
+                return;
+            }
+        }
+        let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
+        let remote = self.remote.clone();
+        let mut uploaded = std::mem::take(&mut self.state.versions_uploaded);
+        let mut swept = self.state.last_cloud_sweep_ms;
+        let result = version_store::mirror(
+            remote.as_ref(),
+            &store,
+            &self.cfg.device_id,
+            &mut uploaded,
+            &mut swept,
+            now_ms(),
+        )
+        .await;
+        self.state.versions_uploaded = uploaded;
+        self.state.last_cloud_sweep_ms = swept;
+        self.persist_state();
+        match result {
+            Ok(report) => {
+                self.mirror = Some(report);
+                self.last_mirror_ms = Some(now_ms());
+                self.refresh_status();
+            }
+            Err(e) => eprintln!("cloud: {} could not mirror its version history: {}", self.cfg.domain, e),
+        }
+    }
+
+    /// Is an hourly mirror due? The cycle mirrors whenever something moved;
+    /// this is the floor under a workspace nothing is happening in, and what
+    /// gets the daily sweep run.
+    fn mirror_due(&self) -> bool {
+        self.last_mirror.map(|t| t.elapsed() >= MIRROR_EVERY).unwrap_or(true)
+    }
+
     /* ----- the public map: queued ops ----- */
 
     fn file_id_at(&self, rel: &str) -> Option<String> {
@@ -1479,6 +1597,16 @@ impl<R: Remote> Engine<R> {
     }
 
     #[cfg(test)]
+    pub(crate) fn device_id_for_test(&self) -> &str {
+        &self.cfg.device_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn device_name_for_test(&self) -> &str {
+        &self.cfg.device_name
+    }
+
+    #[cfg(test)]
     pub(crate) async fn poll_for_test(&mut self) {
         let _ = self.poll_and_maybe_cycle().await;
     }
@@ -1591,6 +1719,29 @@ impl<R: Remote> Engine<R> {
                     Some(EngineCmd::Revision { rel, hash, reply }) => {
                         let _ = reply.send(self.revision(&rel, &hash).await);
                     }
+                    Some(EngineCmd::VersionsIndex { reply }) => {
+                        if !self.worker_has("versions") {
+                            let _ = reply.send(Ok(None));
+                        } else {
+                            // Fresh when the domain answers, last-known when
+                            // it doesn't: an unreachable bucket should not
+                            // empty a rail that was full a minute ago.
+                            if let Ok(Some((index, _))) = self.remote.get_versions_index().await {
+                                self.cloud_versions = Some(index);
+                            }
+                            let _ = reply.send(Ok(self.cloud_versions.clone()));
+                        }
+                    }
+                    Some(EngineCmd::VersionSnapshot { id, reply }) => {
+                        let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
+                        let found = version_store::snapshot(self.remote.as_ref(), &store, &id).await;
+                        let _ = reply
+                            .send(found.ok_or_else(|| "that version isn't reachable right now".to_string()));
+                    }
+                    Some(EngineCmd::VersionBlob { hash, reply }) => {
+                        let got = version_store::blob(self.remote.as_ref(), &hash).await;
+                        let _ = reply.send(got.map_err(|e| e.to_string()));
+                    }
                 },
                 ev = fs_events.recv(), if watching => match ev {
                     // No watcher on this workspace: the edit bus still
@@ -1631,6 +1782,9 @@ impl<R: Remote> Engine<R> {
                     let _ = self.poll_and_maybe_cycle().await;
                 }
                 self.presence_tick().await;
+                if self.mirror_due() {
+                    self.mirror_versions().await;
+                }
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
         }

@@ -411,7 +411,7 @@ already in the build and zstd is not; a moved folder starts a fresh store
 and the old one is listed as orphaned in Settings. Adopting a connected
 folder's marker `wsId` as the key is a later refinement.
 
-*As built* (phase 1 — the local store only; the cloud half is phase 3):
+*As built* (phases 1 and 3):
 
 ```
 <app_data>/versions/
@@ -434,6 +434,27 @@ so an untouched file is never re-read. `by` is the same device name the
 cloud attributes a revision to. Everything is written atomically, blobs
 first, then the snapshot, then the index — a crash leaves bytes the sweep
 collects, never a row whose content is missing.
+
+The cloud half (phase 3, `src-tauri/src/cloud/versions.rs` and
+`cloud-worker/src/versions.ts`) landed as planned, with four details the
+plan left open:
+
+- **A snapshot id is `<ts13>-<deviceId>`**, zero-padded so ids sort by time.
+- **The cloud index row is the local one plus `id` and `device`** — the
+  local index's own bookkeeping (`root`, `createdMs`, the sweep clocks) is
+  this Mac's business and does not go up. The horizon does: it lives in the
+  cloud index so every device agrees, and defaults to `null` (forever).
+- **A snapshot the cloud ladder would not keep is never uploaded.** With
+  several devices in one workspace the bucket's bucket-winners are not this
+  Mac's, so without that check a device would re-upload, on every pass,
+  exactly what yesterday's sweep thinned away. A *named* version is exempt
+  from every skip, including the digest one: the user marked that moment.
+- **A downloaded snapshot is cached at `<key>/cloud-cache/<id>.json.gz`.**
+  Snapshots are immutable, so a cached copy is never stale; the same cache
+  serves the rail's walk and the daily sweep's "what do the retained
+  snapshots reference?" pass, which is what keeps that pass to one download
+  per snapshot, ever. It is a cache, not the store: anything in it may be
+  dropped and refetched, and the index's own ids are what it is pruned to.
 
 ### 6.4 What history is, once snapshots exist
 
@@ -566,6 +587,57 @@ workspace timeline is a modal that states what a restore will do
   `text`, so a restore is one command whichever store the content came
   from. Phase 6 removes that branch with the rest of the read-through.
 
+*As built* (phase 3 — what a connected workspace adds to the rail):
+
+- A version has one of **three sources**. `local` is a blob on this Mac;
+  `cloud` is one another device mirrored, read and compared through the
+  version store exactly like a local one; `manifest` is one of the sync
+  manifest's own per-file revisions, read through `cloud_revision` and not
+  comparable (its 16-character hash is not a version-store address). Phase 6
+  removes the third. The trust line counts `local` against the other two —
+  "14 here · 212 in the cloud".
+- Mirrored versions join **the same walk**, ordered by time, so a rename
+  another Mac made is followed exactly like one made here and a run of equal
+  content collapses across both stores. Where the same moment exists on both
+  sides it is one row, not two.
+- Only a `local` version is restored **by hash**; the other two hand
+  `versions_restore_file` their text, because this Mac's store may never
+  have held those bytes.
+- The Cloud panel gains one line: what the domain holds of this folder's
+  history, or — for a worker without the `versions` feature — that it is too
+  old to hold any, beside the update card that fixes it.
+
+*As built* (phase 4 — `WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`,
+`versions/workspace.rs`):
+
+- The workspace timeline says **what a restore would do before it does it**:
+  `versions_snapshot_diff` compares the snapshot with the folder as it is
+  this second — not with the last capture — and answers three lists:
+  `changed`, `added` (on disk now, not then: these go to the Trash) and
+  `missing` (then, not now: these come back). A file both sides agree on is
+  in none of them, so a restore never rewrites what it need not touch.
+- Each row of the timeline wears **what that moment changed** against the
+  one before it ("+2 −1 ~5"). Working that out is one snapshot decode per
+  row, which is why it is `versions_snapshots`' job and never the status's.
+- **The restore is one Rust command**, for the same reason the file one is:
+  it captures the state it is about to leave, writes, trashes, then captures
+  the state it made with `restoredFrom` set. It refuses before touching
+  anything if a blob it needs is gone, so a half-restored folder is not a
+  state the app can reach. *Undo* is a restore of `preRestoreTs` with the
+  same paths.
+- **Recently deleted** is every path some retained snapshot held that the
+  folder does not hold now, whatever the macOS Trash has since done with it.
+  The walk runs newest → oldest and stops 30 days behind the newest
+  snapshot, so its cost is the ladder's dense end rather than the whole
+  horizon; the newest snapshot is always read, so a folder nobody has opened
+  in months still answers. Older than that, the timeline is the surface.
+- A file restored out of that list **keeps its history**. The rail's walk
+  now steps over the moments a file was missing from when the snapshot that
+  brought it back says where its content came from — and only then, so a new
+  note written at an old note's path still starts its own story.
+- A restore recreates the parent directories it needs, so a folder deleted
+  whole comes back with everything that was in it.
+
 ---
 
 ## 9. Build order
@@ -579,10 +651,13 @@ last, retiring the manifest's `hist`. Phase 1 alone takes the reach from
 it past what a laptop should hold; the surfaces are where the promise
 becomes visible.
 
-**Phase 1 is built** — `src-tauri/src/versions/`, invisible by design: one
-versioner per open folder plus drafts, capturing on the cadence, thinning on
-the ladder, reporting a status no surface reads yet. History starts accruing
-from that release; phase 2 is what lets anyone see it.
+**Phases 1, 2, 3 and 4 are built** — the local store
+(`src-tauri/src/versions/`), the rail that shows it (`HistoryRail.tsx`,
+`VersionPreview.tsx`), the cloud mirror (`src-tauri/src/cloud/versions.rs`,
+`cloud-worker/src/versions.ts`) and the two surfaces over the whole folder
+(`WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`, `versions/workspace.rs`).
+What remains is settings and export (phase 5) and retiring the manifest's
+`hist` (phase 6).
 
 ---
 
@@ -660,9 +735,9 @@ tokio's paused clock are what this needs; the cadence rule and the ladder are
 both pure functions of time and are the two things most worth pinning.
 
 ```sh
-cd src-tauri && cargo test --lib versions   # capture cadence, the ladder, dedupe, restore
-cd src-tauri && cargo test --lib cloud      # the existing matrix, with hist gone from the manifest
-pnpm test:worker                            # the snapshot routes beside the manifest route
+cd src-tauri && cargo test --lib versions   # cadence, ladder, dedupe, restore, the walk, the folder (44)
+cd src-tauri && cargo test --lib cloud      # the matrix, plus the mirror, the cloud sweep, read-through (49)
+pnpm test:worker                            # the version routes beside the manifest route (26 cases)
 scripts/versions.sh -w ~/Notes              # what a store holds right now, live
 ```
 
@@ -691,20 +766,49 @@ What each suite must cover:
   the grace period.
 - **Append-only** — deleting a file, trashing a folder and confirming a
   mass-delete each leave every snapshot and blob intact. *Built* for the
-  first of the three; the other two arrive with the surfaces that make them
-  reachable.
+  first two: `deleted_lists_what_no_longer_exists` deletes a file inside a
+  folder and finds it, its content and the moment it was last seen still in
+  the store, and `restore_file_recreates_directories` removes the folder
+  itself and brings it back. The third arrives with phase 6.
 - **Restore** — a file restore pushes a new revision and leaves history
   whole; a workspace restore is snapshotted first and is itself undoable.
-  *Built* for a file: the state it leaves and the state it makes are both
-  captured, the second names its source, the pre-restore capture dedupes
+  *Built* for both: the state it leaves and the state it makes are captured
+  either way, the second names its source, the pre-restore capture dedupes
   when nothing was unsaved, the undo is a restore of the pre-restore hash,
   and no snapshot is ever removed.
+  `restore_snapshot_captures_first_then_writes_and_trashes` proves the
+  folder-scale version writes what changed, brings back what was gone, moves
+  what was never there out, and leaves both bracketing snapshots — including
+  a blob for the file it trashed, which is what makes the undo real;
+  `restore_subset_touches_only_those_paths` proves an unticked file is not
+  touched in either direction.
+- **The folder's diff** — what a restore would do, before it does it.
+  *Built*: `snapshot_diff_classifies_changed_added_missing` pins the three
+  lists against a folder that has drifted three ways since the snapshot, and
+  pins that a file both sides agree on is in none of them.
+- **The mirror** — a device's snapshots and their blobs reach the bucket;
+  content another device already put there is skipped by digest; a lost
+  index CAS is re-read and re-landed; the cloud ladder thins on its own
+  clock and what it thinned is never put back; a blob younger than the
+  grace period is spared. *Built*, in `cloud/tests.rs`, against the
+  in-memory worker.
 - **Migration** — a v2 manifest's `hist` seeds snapshots once, and a v2
-  worker degrades to "no cloud history" rather than an error.
+  worker degrades to "no cloud history" rather than an error. *Built* for
+  the second: `no_versions_feature_means_no_mirror_and_a_null_status`
+  proves the engine writes nothing and the status says so, with sync
+  unaffected, and
+  `a_worker_updated_mid_session_starts_mirroring_on_its_own` proves the
+  hourly pass picks the update up without a restart.
 - **Local-only** — every surface works for a workspace that has never been
-  connected. *Built* for the rail: `drive-versions.mjs` opens it with no
-  cloud status at all, which is the step that would fail the moment history
-  went back behind the Cloud panel.
+  connected. *Built* for the rail and for both of phase 4's surfaces:
+  `drive-versions.mjs` opens all three with no cloud status at all, which is
+  the step that would fail the moment history went back behind the Cloud
+  panel.
+- **Read-through** — a version only another Mac ever held is listed, says
+  which Mac made it and why, and reads out of the mirrored store. *Built*:
+  `read_through_lists_cloud_only_versions` covers the walk,
+  `read_through_caches_another_devices_snapshot` the download and its
+  cache, and both drives walk the row in Chromium.
 
 The one thing a Linux runner cannot do is the real thing: months of real
 editing on a real Mac, and a second Mac reading history the first one wrote.
