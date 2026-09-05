@@ -59,6 +59,10 @@ export type VersionsMirror = {
   mirrored: number;
   cloud: number;
   lastMirrorMs: number | null;
+  /** How far back the bucket keeps, null for forever — the second of the two
+   *  horizons. Meaningful once `lastMirrorMs` is set; before that no pass has
+   *  read the cloud index. */
+  horizonDays: number | null;
 };
 
 export type CloudStatus = {

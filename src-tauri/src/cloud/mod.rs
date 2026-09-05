@@ -634,6 +634,18 @@ pub(crate) async fn versions_index_for(
     ask(tx, |reply| EngineCmd::VersionsIndex { reply }).await
 }
 
+/// How far back the bucket keeps for this workspace — a CAS on the cloud
+/// index, so it is one answer for every device rather than a per-Mac
+/// setting. Errors when the workspace isn't connected: there is no bucket to
+/// set a horizon on.
+pub(crate) async fn set_cloud_horizon(app: &AppHandle, root: &str, days: Option<u32>) -> Result<(), String> {
+    let root = root.to_string();
+    let tx = with_inner(app, |inner| {
+        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "That folder isn't connected.".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::SetCloudHorizon { days, reply }).await
+}
+
 /// One mirrored snapshot, downloaded and cached if this Mac hasn't seen it.
 pub(crate) async fn version_snapshot(
     app: &AppHandle,

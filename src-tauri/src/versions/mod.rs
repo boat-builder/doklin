@@ -11,6 +11,7 @@
 //! capture.rs    the cadence state machine and the scan that takes a snapshot
 //! history.rs    one file's versions, read out of the snapshots; the diff
 //! workspace.rs  the whole folder: a snapshot's diff, deleted files, restore
+//! stores.rs     every store on this Mac: sizes, forgetting one, the export
 //! retain.rs     the ladder (pure) and the sweep
 //! status.rs     the status/event contract
 //! settings.rs   <app_data>/versions/settings.json
@@ -32,6 +33,7 @@ pub(crate) mod retain;
 mod settings;
 mod status;
 pub(crate) mod store;
+mod stores;
 #[cfg(test)]
 mod tests;
 mod workspace;
@@ -54,8 +56,12 @@ use capture::{Cadence, CaptureError};
 use history::{FileHistory, SnapshotCache};
 use retain::SWEEP_EVERY;
 use settings::{read_settings, write_settings, Settings};
-use status::{emit_statuses, Phase, RestoreOutcome, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus, EV_APPLIED};
+use status::{
+    emit_statuses, Phase, RestoreOutcome, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus, EV_APPLIED,
+    EV_PROGRESS,
+};
 use store::{store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
+use stores::{ExportReport, StoreInfo};
 use workspace::{DeletedFile, RestoreReport, SnapshotDiff};
 
 /// The folder holding drafts is a root like any workspace, under a fixed
@@ -93,7 +99,9 @@ struct Versioner {
     cache: SnapshotCache,
     by: String,
     enabled: bool,
-    horizon_days: Option<u32>,
+    /// settings.json's horizon — what a store that has never chosen one
+    /// follows.
+    default_horizon: Option<u32>,
     phase: Phase,
     error: Option<String>,
     /// (blobs, snapshots) on disk, kept current as captures and sweeps run.
@@ -120,7 +128,7 @@ impl Versioner {
             cache: SnapshotCache::default(),
             by,
             enabled: settings.enabled,
-            horizon_days: settings.horizon_days,
+            default_horizon: settings.horizon_days,
             phase: if settings.enabled { Phase::Idle } else { Phase::Disabled },
             error: None,
             bytes: (0, 0),
@@ -191,6 +199,22 @@ impl Versioner {
         row
     }
 
+    /// How far back this store keeps: its own answer when the user has given
+    /// one, settings.json's default until then.
+    fn horizon(&self) -> Option<u32> {
+        self.index.horizon_days.unwrap_or(self.default_horizon)
+    }
+
+    /// The user's answer for this folder, written into the index and applied
+    /// at once — a shorter horizon should free the disk it promises, not on
+    /// the next six-hourly sweep.
+    fn set_horizon(&mut self, days: Option<u32>) -> Result<(), String> {
+        self.index.horizon_days = Some(days);
+        self.store.write_index(&self.index)?;
+        self.sweep(true);
+        Ok(())
+    }
+
     /// The ladder, applied. `force` runs it whatever the clock says (at
     /// start); otherwise it runs at most every `SWEEP_EVERY`.
     fn sweep(&mut self, force: bool) {
@@ -199,8 +223,10 @@ impl Versioner {
         if !force && !due {
             return;
         }
+        // Read before the take: an emptied `index` has no horizon of its own.
+        let horizon = self.horizon();
         let mut index = std::mem::take(&mut self.index);
-        let report = retain::sweep(&self.store, &mut index, now, self.horizon_days);
+        let report = retain::sweep(&self.store, &mut index, now, horizon);
         self.index = index;
         if report.snapshots_dropped > 0 {
             // Decoded copies of snapshots that are no longer there.
@@ -484,7 +510,7 @@ impl Versioner {
             newest_ms: self.index.newest().map(|s| s.ts),
             last_capture_ms: Some(self.index.last_capture_ms).filter(|ms| *ms > 0),
             bytes: StoreBytes { blobs: self.bytes.0, snapshots: self.bytes.1 },
-            horizon_days: self.horizon_days,
+            horizon_days: self.horizon(),
         }
     }
 
@@ -550,6 +576,10 @@ enum VersionerCmd {
         reply: oneshot::Sender<Result<RestoreReport, String>>,
     },
     SetEnabled(bool),
+    SetHorizon {
+        days: Option<u32>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Capture what is pending and answer — the quit flush.
     Flush {
         reply: oneshot::Sender<()>,
@@ -608,6 +638,10 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                 Some(VersionerCmd::Touched(_rel)) => cadence.touched(Instant::now()),
                 Some(VersionerCmd::SetEnabled(enabled)) => {
                     blocking(&state, move |v| v.set_enabled(enabled)).await;
+                }
+                Some(VersionerCmd::SetHorizon { days, reply }) => {
+                    let answer = blocking(&state, move |v| v.set_horizon(days)).await;
+                    let _ = reply.send(answer.unwrap_or_else(|| Err("That change didn't finish.".to_string())));
                 }
                 Some(VersionerCmd::CaptureNow { reason, label, reply }) => {
                     let answer = blocking(&state, move |v| v.capture_now(reason, label, None)).await;
@@ -1190,6 +1224,68 @@ pub(crate) async fn versions_restore_snapshot(
     let tx = sender_for(&app, &root)?;
     let handle = app.clone();
     ask(tx, move |reply| VersionerCmd::RestoreSnapshot { app: handle, ts, paths, reply }).await?
+}
+
+/* ---------- Settings: the horizons, the stores, the export ---------- */
+
+/// How far back this folder keeps, `null` for forever. Written into the
+/// store's own index — a folder the user has never answered for follows
+/// settings.json's default — and applied at once.
+#[tauri::command]
+pub(crate) async fn versions_set_horizon(app: AppHandle, root: String, days: Option<u32>) -> Result<(), String> {
+    let tx = sender_for(&app, &root)?;
+    ask(tx, |reply| VersionerCmd::SetHorizon { days, reply }).await?
+}
+
+/// How far back the *bucket* keeps. One CAS on the cloud index, because a
+/// horizon every device disagreed about would be no horizon at all.
+#[tauri::command]
+pub(crate) async fn versions_set_cloud_horizon(app: AppHandle, root: String, days: Option<u32>) -> Result<(), String> {
+    crate::cloud::set_cloud_horizon(&app, &root, days).await
+}
+
+/// Every version store on this Mac, whether or not its folder is open —
+/// what *Other folders* lists, and where the space goes.
+#[tauri::command]
+pub(crate) async fn versions_stores(app: AppHandle) -> Result<Vec<StoreInfo>, String> {
+    let data_dir = with_inner(&app, |inner| Ok(inner.data_dir.clone()))?;
+    tokio::task::spawn_blocking(move || stores::list(&data_dir))
+        .await
+        .map_err(|_| "That list didn't finish.".to_string())
+}
+
+/// Delete one store outright. Refused while its folder is open: a running
+/// versioner holds an index it would write back a moment later, and the
+/// user asked to forget the history, not to restart it.
+#[tauri::command]
+pub(crate) async fn versions_forget(app: AppHandle, key: String) -> Result<(), String> {
+    let (data_dir, open) = with_inner(&app, |inner| {
+        let open: BTreeSet<String> = inner.versioners.values().map(|handle| handle.key.clone()).collect();
+        Ok((inner.data_dir.clone(), open))
+    })?;
+    tokio::task::spawn_blocking(move || stores::forget(&data_dir, &key, &open))
+        .await
+        .map_err(|_| "That didn't finish.".to_string())?
+}
+
+/// One archive holding the folder as it is now and its whole history, written
+/// into `dest`. The answer to "what if the cloud goes away": plain tar.gz,
+/// readable by anything, with no Doklin needed to open it.
+#[tauri::command]
+pub(crate) async fn versions_export(app: AppHandle, root: String, dest: String) -> Result<ExportReport, String> {
+    let store = store_for(&app, &root)?;
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let handle = app.clone();
+    let for_event = root.clone();
+    tokio::task::spawn_blocking(move || {
+        let events = AppEvents(handle);
+        stores::export(Path::new(&root), &store, Path::new(&dest), &day, &|done, total| {
+            events.emit_json(EV_PROGRESS, serde_json::json!({ "root": for_event, "done": done, "total": total }));
+        })
+        .map(|(_path, report)| report)
+    })
+    .await
+    .map_err(|_| "That export didn't finish.".to_string())?
 }
 
 /// Put an earlier version back. The content is named either by `hash` (a

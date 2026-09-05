@@ -71,6 +71,12 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   what it held, and one click to put it back, history and all. It works
   after the Trash has been emptied, and for a note deleted on another Mac:
   the store is not the Trash.
+- **How much to keep, and a copy you own** — the gear's *Versions* says how
+  far back each folder keeps (thirty days, ninety, a year, forever), what
+  that costs on disk, and the same for your domain when the folder is
+  connected. *Export…* writes one plain `tar.gz` holding the folder as it is
+  now and its whole history — nothing needs Doklin to open it, which is the
+  answer to "what if the cloud goes away".
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
   note. The cloud is one Cloudflare Worker and one bucket on your own account,

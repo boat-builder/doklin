@@ -18,8 +18,9 @@
 //! `cloud-cache/` is a cache, not the store: it holds copies of what the
 //! bucket already has, and anything in it may be dropped and refetched.
 //!
-//! The store never lives under the workspace it versions, and no code
-//! outside retain.rs deletes anything in it.
+//! The store never lives under the workspace it versions, and the only code
+//! that deletes inside one is retain.rs's sweep — plus `stores::forget`,
+//! which deletes a whole store the user named and nothing smaller.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -110,7 +111,19 @@ pub struct Index {
     pub created_ms: u64,
     pub last_capture_ms: u64,
     pub last_sweep_ms: u64,
+    /// This store's own horizon, when the user has set one: `Some(Some(30))`
+    /// is thirty days, `Some(None)` is forever, and the field's absence
+    /// means settings.json's default still applies. Three states, because
+    /// "the user chose forever" and "the user has never chosen" must not be
+    /// the same answer for a store written before phase 5.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "chosen_horizon")]
+    pub horizon_days: Option<Option<u32>>,
     pub snapshots: Vec<SnapshotRow>,
+}
+
+/// A present `horizonDays` is a choice, `null` included.
+fn chosen_horizon<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u32>>, D::Error> {
+    Option::<u32>::deserialize(d).map(Some)
 }
 
 impl Index {

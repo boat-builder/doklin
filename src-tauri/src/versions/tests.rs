@@ -3,7 +3,7 @@
 //! the sweep, the store's round trip, and the two states — disabled, too
 //! large — where capture deliberately does nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::FileTimes;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +26,7 @@ use super::workspace::RestoreReport;
 use super::store::{
     digest_of, gunzip, gzip, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
 };
+use super::stores;
 use super::{Clock, VersionBus, Versioner, VersionerCmd};
 
 /* ---------- The fixture ---------- */
@@ -1158,4 +1159,156 @@ fn restore_file_recreates_directories() {
     assert_eq!(gone.len(), 1);
     f.restore("notes/deep/b.md", Some(T0), Some(gone[0].hash.clone()));
     assert_eq!(f.on_disk("notes/deep/b.md").as_deref(), Some("bee\n"), "both folders came back");
+}
+
+/* ---------- Settings, the stores, and the copy you keep ---------- */
+
+/// The names inside an archive, and their bytes.
+fn archive_entries(path: &Path) -> BTreeMap<String, Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).expect("open the archive");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut out = BTreeMap::new();
+    for entry in archive.entries().expect("read the archive") {
+        let mut entry = entry.expect("an entry");
+        let name = entry.path().expect("a path").to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("the entry's bytes");
+        out.insert(name, bytes);
+    }
+    out
+}
+
+#[test]
+fn horizon_change_is_applied_on_the_next_sweep() {
+    // A store keeping forever, with three months between its snapshots. Each
+    // edit changes the file's LENGTH: two writes in one mtime millisecond
+    // are invisible to the stat cache when the size is also unchanged, and
+    // this test is not the place to discover that.
+    let mut f = fixture_with(T0, Settings { horizon_days: None, ..Default::default() });
+    let day = 24 * 3_600_000u64;
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 100 * day);
+    f.write("a.md", "one, then two\n");
+    f.capture(Reason::Interval);
+    f.at(T0 + 200 * day);
+    f.write("a.md", "one, then two, then three\n");
+    f.capture(Reason::Interval);
+
+    f.versioner.sweep(true);
+    assert_eq!(
+        f.rows().iter().map(|r| r.ts).collect::<Vec<_>>(),
+        vec![T0, T0 + 100 * day, T0 + 200 * day],
+        "forever keeps one a month, and these are months apart"
+    );
+
+    f.versioner.set_horizon(Some(30)).expect("set the horizon");
+    assert_eq!(
+        f.rows().iter().map(|r| r.ts).collect::<Vec<_>>(),
+        vec![T0 + 200 * day],
+        "everything past thirty days goes, except the newest state"
+    );
+
+    // The answer is the store's, not the app's: a versioner built from
+    // settings that still say forever reads thirty days off the index.
+    let index = f.store().read_index();
+    assert_eq!(index.horizon_days, Some(Some(30)), "and it is written down");
+    let reopened = Versioner::new(
+        Store::open(f.data.path(), "r-test", f.root.path()),
+        "Test Mac".to_string(),
+        &Settings { horizon_days: None, ..Default::default() },
+        Arc::new(Mutex::new(Default::default())),
+        f.events.clone(),
+        Clock(Arc::new(|| T0)),
+    );
+    assert_eq!(reopened.horizon(), Some(30), "the store's own horizon outlives the session");
+    assert_eq!(reopened.status().horizon_days, Some(30), "and that is what the surface reads");
+}
+
+#[test]
+fn forget_refuses_an_open_root() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.capture(Reason::Seed);
+
+    // A second store, for a folder that is about to stop existing.
+    let orphan_root = TempDir::new().unwrap();
+    let orphan = Store::open(f.data.path(), "r-gone", orphan_root.path());
+    orphan
+        .write_index(&Index {
+            version: STORE_VERSION,
+            root: orphan_root.path().to_string_lossy().to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let listed = stores::list(f.data.path());
+    assert_eq!(listed.len(), 2, "both stores, whatever is open: {:?}", listed);
+    let here = listed.iter().find(|s| s.key == "r-test").expect("this Mac's store");
+    assert!(here.exists, "its folder is right there");
+    assert_eq!(here.snapshots, 1);
+    assert_eq!(here.newest_ms, Some(T0));
+    assert!(here.bytes > 0, "the index, the snapshot and the blob all count");
+
+    drop(orphan_root);
+    let listed = stores::list(f.data.path());
+    assert!(!listed.iter().find(|s| s.key == "r-gone").expect("the orphan").exists, "its folder has gone");
+
+    // The open one is refused; the orphan goes, and nothing else with it.
+    let open: BTreeSet<String> = ["r-test".to_string()].into_iter().collect();
+    let refused = stores::forget(f.data.path(), "r-test", &open).expect_err("an open root is refused");
+    assert!(refused.contains("close its window"), "and says what to do about it: {}", refused);
+    assert!(f.store().index_path().exists(), "nothing was touched");
+    assert!(stores::forget(f.data.path(), "..", &open).is_err(), "and a key that isn't one never joins a path");
+
+    stores::forget(f.data.path(), "r-gone", &open).expect("forget the orphan");
+    assert_eq!(
+        stores::list(f.data.path()).iter().map(|s| s.key.clone()).collect::<Vec<_>>(),
+        vec!["r-test".to_string()],
+        "one store left, and it is the open one"
+    );
+    assert!(f.on_disk("a.md").is_some(), "and the folder itself was never in question");
+}
+
+#[test]
+fn export_holds_the_tree_and_the_store() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.write("notes/b.md", "bee\n");
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "one\ntwo\n");
+    f.capture(Reason::Interval);
+
+    let dest = TempDir::new().unwrap();
+    let ticks: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let heard = ticks.clone();
+    let (path, report) = stores::export(f.root.path(), f.store(), dest.path(), "2026-09-05", &move |done, total| {
+        heard.lock().unwrap().push((done, total));
+    })
+    .expect("export");
+
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.ends_with(" — 2026-09-05.doklin-backup.tar.gz"), "named for the folder and the day: {}", name);
+
+    let held = archive_entries(&path);
+    assert_eq!(held.get("workspace/a.md").map(|b| b.as_slice()), Some(b"one\ntwo\n".as_slice()), "the tree as it is now");
+    assert_eq!(held.get("workspace/notes/b.md").map(|b| b.as_slice()), Some(b"bee\n".as_slice()), "subfolders and all");
+    assert!(held.contains_key("versions/index.json"), "and the store verbatim");
+    assert_eq!(
+        held.keys().filter(|n| n.starts_with("versions/snapshots/")).count(),
+        2,
+        "every snapshot file, not just the newest"
+    );
+    // Three versions of two files: "one\n", "one\ntwo\n" and "bee\n".
+    assert_eq!(held.keys().filter(|n| n.starts_with("versions/blobs/")).count(), 3, "and every blob they name");
+
+    assert_eq!(report.files as usize, held.len(), "the count is what went in");
+    assert_eq!(report.bytes, std::fs::metadata(&path).unwrap().len(), "and the bytes are the file's");
+    assert_eq!(
+        ticks.lock().unwrap().last().copied(),
+        Some((held.len() as u64, held.len() as u64)),
+        "the progress event ends where it said it would"
+    );
 }

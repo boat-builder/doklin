@@ -222,18 +222,29 @@ Phase 3.
 
 ## 9. Settings, sizes and the export
 
-Phase 5.
+Phase 5. `drive-versions.mjs` proves the surface against a scripted store —
+the gear's entry, a horizon per folder (with `forever` as a real answer),
+the export's picker and its report, every store listed with its size, and
+*Forget* confirming in the app's own chrome. What is below is the same walk
+where the disk, the archive and the Finder are real.
 
-- [ ] Settings shows a *Versions* section with the horizons and what each
-      store costs on disk.
+- [ ] The gear's *Versions · Version history…* opens the settings, and so
+      does *Version settings…* in the Cloud panel's *This Mac*.
+- [ ] It shows this folder's horizon and what its store costs on disk, and
+      the bucket's horizon when the workspace is connected.
 - [ ] Shorten the local horizon. Versions past it go, the named ones stay,
       and the size reported drops to match.
 - [ ] Set the horizon to forever. Nothing is dropped from then on.
 - [ ] Move a versioned folder somewhere else in Finder and reopen it. The
       old store is listed under *Other folders* and can be forgotten.
 - [ ] *Forget* a store. Its space comes back, and no other store is touched.
-- [ ] *Export…* writes one archive. Open it outside the app: the current
-      notes are there as plain files, and the history is there too.
+- [ ] Two folders, two different horizons. Each keeps its own answer across
+      a restart, and neither follows the other.
+- [ ] Change the cloud horizon on one Mac. The other Mac reads the same
+      answer after its next mirror, and the bucket thins to match.
+- [ ] *Export…* writes one archive named `<folder> — <today>`. Open it
+      outside the app with Archive Utility: `workspace/` holds the current
+      notes as plain files, `versions/` holds the store.
 - [ ] Export a workspace of a few thousand files. It reports progress and
       does not wedge the app.
 - [ ] Turn versioning off. Capture stops, nothing already captured is

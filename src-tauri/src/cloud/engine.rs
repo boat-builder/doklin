@@ -213,6 +213,10 @@ pub enum EngineCmd {
         id: String,
         reply: oneshot::Sender<Result<VersionSnapshot, String>>,
     },
+    SetCloudHorizon {
+        days: Option<u32>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     VersionBlob {
         hash: String,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -477,6 +481,7 @@ impl<R: Remote> Engine<R> {
                 mirrored: self.mirror.map(|m| m.mirrored).unwrap_or(0),
                 cloud: self.mirror.map(|m| m.cloud).unwrap_or(0),
                 last_mirror_ms: self.last_mirror_ms,
+                horizon_days: self.mirror.and_then(|m| m.horizon_days),
             }),
             public: self.public_pages(),
             presence: self.presence.clone(),
@@ -1380,6 +1385,26 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// How far back the bucket keeps. One CAS on the cloud index, so every
+    /// device that reads it next agrees; the local horizon is separate and
+    /// stays this Mac's business.
+    pub(crate) async fn set_cloud_horizon(&mut self, days: Option<u32>) -> Result<(), String> {
+        if !self.worker_has("versions") {
+            return Err("This workspace's worker is too old to keep version history.".to_string());
+        }
+        let index = version_store::set_horizon(self.remote.as_ref(), days)
+            .await
+            .map_err(|e| format!("Couldn't change what the cloud keeps: {}.", e))?;
+        // The panel shows what the bucket now says without waiting an hour
+        // for the next pass to tell it.
+        if let Some(report) = self.mirror.as_mut() {
+            report.horizon_days = days;
+        }
+        self.cloud_versions = Some(index);
+        self.refresh_status();
+        Ok(())
+    }
+
     /// Is an hourly mirror due? The cycle mirrors whenever something moved;
     /// this is the floor under a workspace nothing is happening in, and what
     /// gets the daily sweep run.
@@ -1737,6 +1762,9 @@ impl<R: Remote> Engine<R> {
                         let found = version_store::snapshot(self.remote.as_ref(), &store, &id).await;
                         let _ = reply
                             .send(found.ok_or_else(|| "that version isn't reachable right now".to_string()));
+                    }
+                    Some(EngineCmd::SetCloudHorizon { days, reply }) => {
+                        let _ = reply.send(self.set_cloud_horizon(days).await);
                     }
                     Some(EngineCmd::VersionBlob { hash, reply }) => {
                         let got = version_store::blob(self.remote.as_ref(), &hash).await;

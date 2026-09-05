@@ -116,8 +116,31 @@ export type RestoreReport = {
   preRestoreTs: number | null;
 };
 
+/** One version store on this Mac, whether or not its folder is open — a row
+ *  of *Other folders* in the Versions settings. Mirrored by
+ *  src-tauri/src/versions/stores.rs — change both. */
+export type StoreInfo = {
+  /** The store directory's name: `r-<16 hex>`, or `drafts`. */
+  key: string;
+  /** The folder it versions, as the store recorded it. */
+  root: string;
+  /** Is that folder still on this Mac? A store whose root is gone is what
+   *  *Forget* is for. */
+  exists: boolean;
+  /** Everything under the store directory, compressed as it sits. */
+  bytes: number;
+  snapshots: number;
+  newestMs: number | null;
+};
+
+/** What an export wrote. */
+export type ExportReport = { bytes: number; files: number };
+
 /** A restore landed on disk — the same shape as `cloud-applied`. */
 export type VersionsAppliedEvent = { root: string; paths: string[] };
+
+/** An export, file by file. */
+export type VersionsProgressEvent = { root: string; done: number; total: number };
 
 /** What one snapshot changed against the one before it — the "+2 −1 ~5" a
  *  row of the workspace timeline wears. */
@@ -230,6 +253,29 @@ export async function versionsDeleted(root: string): Promise<DeletedFile[]> {
 export const versionsRestoreSnapshot = (root: string, ts: number, paths?: string[] | null) =>
   invoke<RestoreReport>("versions_restore_snapshot", { root, ts, paths: paths ?? null });
 
+/** How far back this folder keeps, null for forever. Written into the
+ *  store's own index, so two folders can answer differently. */
+export const versionsSetHorizon = (root: string, days: number | null) =>
+  invoke<void>("versions_set_horizon", { root, days });
+
+/** How far back the *bucket* keeps — one CAS on the cloud index, so every
+ *  device agrees. Errors when the folder isn't connected. */
+export const versionsSetCloudHorizon = (root: string, days: number | null) =>
+  invoke<void>("versions_set_cloud_horizon", { root, days });
+
+/** Every version store on this Mac, newest first. */
+export async function versionsStores(): Promise<StoreInfo[]> {
+  const r = await invoke<unknown>("versions_stores");
+  return Array.isArray(r) ? (r as StoreInfo[]) : [];
+}
+
+/** Delete one store outright. Refused while its folder is open. */
+export const versionsForget = (key: string) => invoke<void>("versions_forget", { key });
+
+/** One archive of the folder and its whole history, written into `dest`. */
+export const versionsExport = (root: string, dest: string) =>
+  invoke<ExportReport>("versions_export", { root, dest });
+
 /* ---------- Events ---------- */
 
 export const onVersionsStatus = (cb: (statuses: VersionsStatus[]) => void): Promise<UnlistenFn> =>
@@ -237,6 +283,9 @@ export const onVersionsStatus = (cb: (statuses: VersionsStatus[]) => void): Prom
 
 export const onVersionsApplied = (cb: (e: VersionsAppliedEvent) => void): Promise<UnlistenFn> =>
   listen<VersionsAppliedEvent>("versions-applied", (e) => cb(e.payload));
+
+export const onVersionsProgress = (cb: (e: VersionsProgressEvent) => void): Promise<UnlistenFn> =>
+  listen<VersionsProgressEvent>("versions-progress", (e) => cb(e.payload));
 
 /* ---------- Derivations ---------- */
 

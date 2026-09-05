@@ -41,7 +41,7 @@ settles the handful of details the spec left open (§2).
 | 2 ✅ | File history, ungated | the history rail with an in-place preview, a diff, named versions, drafts | 1 | version history for every workspace, cloud or not |
 | 3 ✅ | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
 | 4 ✅ | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
-| 5 | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
+| 5 ✅ | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
 | 6 | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
 
 Phases 3, 4 and 5 are independent of one another and may ship in any order
@@ -1066,8 +1066,60 @@ Rust: `horizon_change_is_applied_on_the_next_sweep`,
 Harness: `drive-versions.mjs` — the settings section, a horizon change
 issuing the command, export invoking the picker and the command.
 
-- [ ] Green everywhere; `versioning.md` §8 *as built*; `SKILL.md`.
+- [x] Green everywhere; `versioning.md` §8 *as built*; `SKILL.md`.
 - [ ] Manual: export, unpack, confirm the tree and the store are complete.
+
+### 8.4 As built
+
+1. **One modal, one entry in the popover.** §8.2 asked for the controls in
+   the gear popover; five of them, two being lists, would double its length
+   and give the Cloud panel nothing to link *to*. `VersionsSettings.tsx` is
+   the surface; the popover keeps a *Versions · Version history…* item and
+   the Cloud panel's *This Mac* a *Version settings…* button, and both open
+   it.
+2. **`index.json`'s `horizonDays` is a triple, not a pair.** Absent means
+   the settings default applies; `null` means the user chose forever; a
+   number is days. A single `Option<u32>` would have read every store
+   written before this phase as "forever" and silently stopped it thinning.
+   In Rust it is `Option<Option<u32>>` with a `deserialize_with` so a
+   present `null` survives as a choice.
+3. **Setting the horizon sweeps at once.** The test's name says "on the next
+   sweep" and that is what happens — `set_horizon` writes the index and
+   forces one, because a user who picks thirty days expects the disk back
+   now.
+4. **settings.json's horizon is not editable in phase 5.** It is the default
+   for a store that has never chosen, exactly as §8.1's parenthetical says.
+   Making it editable would mean picking whether changing it moves stores
+   that never chose, and that question has no good answer that is also
+   obvious.
+5. **The cloud horizon rides the status.** `VersionsMirror` gains
+   `horizonDays`, filled from the mirror pass's own read, so the surface
+   needs no network call to show it; it is meaningful once `lastMirrorMs` is
+   set, and the surface says "waiting for the first mirror" until then.
+   Setting it updates the engine's copy immediately rather than waiting an
+   hour.
+6. **`forget` takes the open keys as an argument.** The refusal is then a
+   pure function the test can hold, rather than something only reachable
+   through an `AppHandle`. The command builds the set from the manager.
+7. **A store key is validated before it is joined onto a path.** `forget`
+   accepts `[A-Za-z0-9_-]{1,64}` and nothing else, so no value that reaches
+   it from the frontend can name a directory outside `<app_data>/versions/`.
+8. **`versions_stores` lists every store, not only the orphans.** "Where is
+   the space going" is the question the list answers; the open ones are
+   marked and offer no *Forget*, which the frontend derives from the status
+   table it already has.
+9. **The export skips what it cannot read.** A file the checked read refuses
+   (oversized, unreadable) is left out and the reported count says how many
+   went in. Failing a whole archive over one file would be the opposite of
+   what this is for.
+10. **`versions-progress` fires per file, and the modal listens only while
+    an export is running.** One event name, `{root, done, total}`, the only
+    long operation the user starts by hand.
+11. **`tar` becomes a direct dependency.** It was already in the lockfile
+    under cargo's own tree, so the change is one line there and no new
+    resolution; it is pure Rust, like `flate2`.
+12. **The archive's date is local, not UTC.** `chrono::Local` — the day the
+    user thinks they made the copy on is the day the filename should say.
 
 ---
 
@@ -1181,7 +1233,7 @@ events: versions-status, versions-applied, versions-progress
 | `SESSION_IDLE` | 2 min | `versions/capture.rs` | 1 |
 | `SWEEP_EVERY` | 6 h | `versions/retain.rs` | 1 |
 | `GC_GRACE` | 1 h | `versions/retain.rs` | 1 |
-| default local horizon | 90 days | `versions/settings.rs` | 1 |
+| default local horizon | 90 days | `versions/settings.rs` | 1 (per store in `index.json` since 5) |
 | default cloud horizon | forever | the cloud index | 3 |
 | `MIRROR_EVERY` | 1 h | `cloud/engine.rs` | 3 |
 | cloud sweep cadence | 24 h | `cloud/engine.rs` | 3 |

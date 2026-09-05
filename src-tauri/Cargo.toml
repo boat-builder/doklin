@@ -37,6 +37,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # snapshot files. flate2 is pure Rust (miniz_oxide) and was already in the
 # lockfile as a transitive dependency — no new C build on any platform.
 flate2 = "1"
+# The export (src/versions/stores.rs) writes one tar.gz of the workspace and
+# its store; `tar` is pure Rust and was already in the lockfile under cargo's
+# own dependency tree.
+tar = "0.4"
 # PDF export (src/pdf_export.rs): a hand-rolled CDP client over websocket
 # drives the pinned headless-Chromium engine, and the validation gate reads
 # the emitted PDF (structure via lopdf — default features off, its `time`

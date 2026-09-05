@@ -15,8 +15,8 @@ normalization (`src/inlineCodeNewlines.ts`), and datastores / kanban boards
 (`src/store/` + `StoreView` / `KanbanBoard` / `TableView` +
 `PropertiesHeader` + `CardPeek` + the sidebar's board row), the cloud's
 surfaces over a scripted engine (`drive-cloud.mjs`), version history — a
-document's rail, the workspace timeline and the deleted files
-(`drive-versions.mjs`), and the public pages a
+document's rail, the workspace timeline, the deleted files and the settings
+behind them (`drive-versions.mjs`), and the public pages a
 published workspace serves (`drive-public.mjs`, against the real worker).
 
 ```sh
@@ -125,7 +125,7 @@ node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cl
                                            # MIRRORED (read through versions_read, comparable) and
                                            # a sync-manifest revision (read through cloud_revision,
                                            # not comparable, restored by handing over its text)
-node verify-harness/drive-versions.mjs      # 26 steps over the SAME harness page (cloud.html's IPC
+node verify-harness/drive-versions.mjs      # 33 steps over the SAME harness page (cloud.html's IPC
                                            # stub answers versions_* from a scripted store whose
                                            # restore really writes the file and emits
                                            # `versions-applied`): the version rail from the sidebar
@@ -157,7 +157,15 @@ node verify-harness/drive-versions.mjs      # 26 steps over the SAME harness pag
                                            # the sidebar, its column (old folder, last seen), Open
                                            # showing the last content read-only, and Restore
                                            # putting the file back at its old path and beside it
-                                           # (`<stem> (restored)`) when that path is taken
+                                           # (`<stem> (restored)`) when that path is taken; then
+                                           # the SETTINGS the gear opens — what this folder keeps
+                                           # and what it costs, a horizon per folder (`forever` as
+                                           # a null, not a missing field), Export asking where and
+                                           # reporting what went in, every store listed with its
+                                           # size (the open one offering no Forget), Forget
+                                           # confirming in the app's own chrome and removing just
+                                           # that store, and — only once a connected workspace's
+                                           # mirror has run — the bucket's own horizon
 node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
                                            # included, ~1 min) over an in-memory bucket seeded with
                                            # cloud-worker/test/seed.mjs, on http://localhost:8787
@@ -338,7 +346,7 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 49 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 50 tests: the two-device merge / conflict /
 tombstone / rename / history / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
@@ -352,8 +360,10 @@ version is never skipped, a lost index CAS re-read and re-landed, the cloud
 ladder thinning on its own clock with what it thinned never put back, a blob
 younger than the grace period spared, a worker without the `versions`
 feature written to not at all and reported as a null status until the hourly
-pass finds it updated, and another Mac's snapshot downloaded once and
-answered from the cache after), the versioning store (`--lib versions` — 44 tests: the cadence
+pass finds it updated, another Mac's snapshot downloaded once and
+answered from the cache after, and the bucket's horizon set by a CAS that
+lands even against a device that wrote between the read and the write),
+the versioning store (`--lib versions` — 47 tests: the cadence
 rule's consequences on a simulated clock (a burst inside one interval, a
 steady hour, a quiet hour, a session's end, a write loop), the seed capture,
 the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
@@ -379,7 +389,14 @@ bringing back what was gone — parent folders and all — and trashing what was
 never there, with a blob kept for the trashed file so the undo is real, a
 subset restore touching only the ticked paths, the deleted list naming the
 newest snapshot that still held a file and the content it had then, and a
-deleted file restored keeping the history it had),
+deleted file restored keeping the history it had), and the settings over
+the set of stores (a horizon written into one store's own index, outliving
+the session and beating the settings default while shortening it thins at
+once; every store listed with its size and whether its folder is still
+there; *Forget* refused for an open root, refused for a key that isn't one,
+and otherwise removing that store and nothing else; and an export unpacked
+to confirm it holds the tree's current bytes, every snapshot file and every
+blob they name),
 the sidebar tree walk including the
 one-row board (`--lib tree_tests`), and the datastore file surface
 (`--lib store`: locating a card's leading frontmatter block, splicing a new one

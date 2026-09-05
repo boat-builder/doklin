@@ -2029,7 +2029,12 @@ pub fn run() {
             versions::versions_restore_file,
             versions::versions_snapshot_diff,
             versions::versions_deleted,
-            versions::versions_restore_snapshot
+            versions::versions_restore_snapshot,
+            versions::versions_set_horizon,
+            versions::versions_set_cloud_horizon,
+            versions::versions_stores,
+            versions::versions_forget,
+            versions::versions_export
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

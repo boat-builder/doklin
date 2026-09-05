@@ -417,7 +417,7 @@ folder's marker `wsId` as the key is a later refinement.
 <app_data>/versions/
   settings.json                  {version, enabled, horizonDays}
   <key>/
-    index.json                   {version, root, createdMs, lastCaptureMs, lastSweepMs, snapshots[]}
+    index.json                   {version, root, createdMs, lastCaptureMs, lastSweepMs, horizonDays?, snapshots[]}
     snapshots/<ts>.json.gz       <ts> zero-padded to 13 digits
     blobs/<hh>/<hash>.gz
 ```
@@ -437,12 +437,12 @@ collects, never a row whose content is missing.
 
 **`by` is a blocker for a shared workspace.** It names the Mac that
 *captured* the snapshot, not the one that made the change:
-`versions/mod.rs:786` takes it from `cloud::device_name`, the local device.
-When Alice's edit reaches Bob by sync, Bob's watcher fires and Bob's next
-capture records her paragraph as Bob's. **Blocks:** per-person history in a
-workspace more than one person writes to — the rail can say when a line
-appeared, never who wrote it. The sync manifest's `hist` does carry the right
-`by`, and phase 6 retires exactly that. The fix needs an identity to
+`versions/mod.rs`'s `init` takes it from `cloud::device_name`, the local
+device. When Alice's edit reaches Bob by sync, Bob's watcher fires and
+Bob's next capture records her paragraph as Bob's. **Blocks:** per-person
+history in a workspace more than one person writes to — the rail can say
+when a line appeared, never who wrote it. The sync manifest's `hist` does
+carry the right `by`, and phase 6 retires exactly that. The fix needs an identity to
 attribute *to*, which is [cloud.md](cloud.md) §11.1.
 
 The cloud half (phase 3, `src-tauri/src/cloud/versions.rs` and
@@ -595,7 +595,7 @@ the way.
   a file deleted on another Mac, or a mass-delete confirmed at the
   `pending-deletes` prompt.
 - **Settings** — the two horizons, the space each store is using, and
-  *Export…*.
+  *Export…*. Reached from the gear and from the Cloud panel's *This Mac*.
 - **Export** — one archive of the current tree plus the version store,
   written wherever the user points it. No schedule, no daemon. This is the
   answer to *what if my Cloudflare account goes away*, which the sync
@@ -692,6 +692,36 @@ workspace timeline is a modal that states what a restore will do
 - A restore recreates the parent directories it needs, so a folder deleted
   whole comes back with everything that was in it.
 
+*As built* (phase 5 — `VersionsSettings.tsx`, `versions/stores.rs`):
+
+- The settings are **one modal**, not a section of the gear popover: five
+  controls, two of them lists, do not belong in a menu, and both the popover
+  (*Versions · Version history…*) and the Cloud panel's *This Mac* need
+  something they can open. The popover keeps the entry, which is what §8
+  asked for.
+- The local horizon is **per store**, in `index.json`. Its `horizonDays` has
+  three states, not two: absent means settings.json's default still applies,
+  `null` means the user chose forever, a number is days. "Chose forever" and
+  "never chose" must not be the same answer, or every store written before
+  this phase would silently stop thinning. Setting one writes the index and
+  sweeps at once — a shorter horizon should free the disk it promises now,
+  not in six hours.
+- The cloud horizon is **one CAS on the cloud index**, so every device reads
+  the same answer; a lost race re-reads and retries, because there is
+  nothing to merge and someone is waiting. The bucket's answer rides the
+  status (`versions.horizonDays`), meaningful once a pass has run.
+- **Forget** deletes a whole store directory and nothing else — the folder
+  itself is never touched — and is refused while that folder is open, since
+  a running versioner would write its index back a moment later. This is the
+  only deletion in the store outside the sweep, and it takes the user's
+  explicit say-so.
+- **Export** is one `tar.gz`: `workspace/…` as `scan_local` sees it and
+  `versions/…` verbatim, named `<folder> — <YYYY-MM-DD>.doklin-backup.tar.gz`.
+  A file it cannot read is skipped rather than failing the whole archive —
+  the point is to get as much out as possible, and the count says how much
+  made it. Import stays out of scope: unpacking `versions/` into
+  `<app_data>/versions/<key>/` is a documented manual step, not a feature.
+
 ---
 
 ## 9. Build order
@@ -705,13 +735,13 @@ last, retiring the manifest's `hist`. Phase 1 alone takes the reach from
 it past what a laptop should hold; the surfaces are where the promise
 becomes visible.
 
-**Phases 1, 2, 3 and 4 are built** — the local store
+**Phases 1 to 5 are built** — the local store
 (`src-tauri/src/versions/`), the rail that shows it (`HistoryRail.tsx`,
 `VersionPreview.tsx`), the cloud mirror (`src-tauri/src/cloud/versions.rs`,
-`cloud-worker/src/versions.ts`) and the two surfaces over the whole folder
-(`WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`, `versions/workspace.rs`).
-What remains is settings and export (phase 5) and retiring the manifest's
-`hist` (phase 6).
+`cloud-worker/src/versions.ts`), the two surfaces over the whole folder
+(`WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`, `versions/workspace.rs`) and
+the settings behind them (`VersionsSettings.tsx`, `versions/stores.rs`).
+What remains is retiring the manifest's `hist` (phase 6).
 
 ---
 
@@ -789,8 +819,8 @@ tokio's paused clock are what this needs; the cadence rule and the ladder are
 both pure functions of time and are the two things most worth pinning.
 
 ```sh
-cd src-tauri && cargo test --lib versions   # cadence, ladder, dedupe, restore, the walk, the folder (44)
-cd src-tauri && cargo test --lib cloud      # the matrix, plus the mirror, the cloud sweep, read-through (49)
+cd src-tauri && cargo test --lib versions   # cadence, ladder, dedupe, restore, the walk, the folder, the settings (47)
+cd src-tauri && cargo test --lib cloud      # the matrix, plus the mirror, the cloud sweep, read-through, the horizon CAS (50)
 pnpm test:worker                            # the version routes beside the manifest route (26 cases)
 scripts/versions.sh -w ~/Notes              # what a store holds right now, live
 ```
@@ -823,7 +853,10 @@ What each suite must cover:
   first two: `deleted_lists_what_no_longer_exists` deletes a file inside a
   folder and finds it, its content and the moment it was last seen still in
   the store, and `restore_file_recreates_directories` removes the folder
-  itself and brings it back. The third arrives with phase 6.
+  itself and brings it back. The third arrives with phase 6. The two
+  deliberate exceptions are the sweep and *Forget*, and
+  `forget_refuses_an_open_root` pins that the second removes one store, only
+  when the user asks, never while its folder is open, and never the folder.
 - **Restore** — a file restore pushes a new revision and leaves history
   whole; a workspace restore is snapshotted first and is itself undoable.
   *Built* for both: the state it leaves and the state it makes are captured
@@ -863,6 +896,18 @@ What each suite must cover:
   `read_through_lists_cloud_only_versions` covers the walk,
   `read_through_caches_another_devices_snapshot` the download and its
   cache, and both drives walk the row in Chromium.
+- **The horizons** — each is the user's, each acts on the store it names.
+  *Built*: `horizon_change_is_applied_on_the_next_sweep` pins that a store's
+  own answer is written down, outlives the session and beats the settings
+  default, and that shortening it thins at once;
+  `cloud_horizon_is_a_cas_on_the_cloud_index` pins that the bucket's answer
+  goes in by CAS — landing even against a device that wrote between the read
+  and the write, and keeping what that device wrote.
+- **The copy you keep** — one archive holds the folder and its history.
+  *Built*: `export_holds_the_tree_and_the_store` unpacks what was written
+  and checks the tree's current bytes, every snapshot file and every blob
+  they name are in it, that the count reported is the count that went in,
+  and that the progress event ends where it said it would.
 
 The one thing a Linux runner cannot do is the real thing: months of real
 editing on a real Mac, and a second Mac reading history the first one wrote.
