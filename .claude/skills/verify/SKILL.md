@@ -268,8 +268,11 @@ node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) a
                                            # the update prompt only runs the script and names
                                            # no wrangler command of its own; and the script is
                                            # held to the app's naming rule (its --names mode),
-                                           # the worker's compatibility date and the bundle URL
-                                           # (130 checks)
+                                           # the worker's compatibility date and the bundle URL,
+                                           # and that no bare $var sits before a multibyte
+                                           # character (bash 3.2 — macOS's /bin/sh — eats its
+                                           # first byte into the name and dies under set -u)
+                                           # (131 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is

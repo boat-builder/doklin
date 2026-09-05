@@ -212,13 +212,33 @@ eq(
 {
   const script = path.join(repoRoot, "scripts", "doklin-cloud-update.sh");
   const text = fs.readFileSync(script, "utf8");
+  // Under the locale a Mac actually has, not the bare one a test inherits:
+  // macOS's /bin/sh is bash 3.2, whose UTF-8 handling is where the script's
+  // one shipped bug lived.
   const names = (endpoint) =>
     Object.fromEntries(
-      execFileSync("sh", [script, "--names", endpoint], { encoding: "utf8" })
+      execFileSync("sh", [script, "--names", endpoint], {
+        encoding: "utf8",
+        env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+      })
         .trim()
         .split("\n")
         .map((line) => line.split("=")),
     );
+
+  // `$ENDPOINT…` deployed the worker and then died on the line after it:
+  // bash 3.2 in a UTF-8 locale eats the first byte of a following multibyte
+  // character into the variable name, and `set -u` kills the script over a
+  // name nobody wrote ("ENDPOINT\xe2: unbound variable"). Braces end the name
+  // explicitly. Read as latin1 so one char is one byte.
+  {
+    const bytes = fs.readFileSync(script, "latin1");
+    const bad = bytes
+      .split("\n")
+      .map((line, i) => [i + 1, line])
+      .filter(([, line]) => /\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]/.test(line));
+    eq(bad.length, 0, `brace these — a bare $var before a multibyte char dies on macOS: ${JSON.stringify(bad)}`);
+  }
 
   eq(path.basename(WORKER_UPDATE_SCRIPT_URL), "doklin-cloud-update.sh", "the release asset's name");
   ok(text.includes(`BUNDLE_URL="${WORKER_BUNDLE_URL}"`), "the script fetches the same worker bundle");
