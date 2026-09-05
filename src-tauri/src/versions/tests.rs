@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::MAX_SYNC_ENTRIES;
-use crate::cloud::status::{Events, Revision};
+use crate::cloud::status::Events;
 use crate::cloud::versions::{snapshot_id, VersionsEntry};
 
 use super::capture::{capture, Cadence, Captured, CAPTURE_MIN_INTERVAL, SESSION_IDLE};
@@ -822,46 +822,6 @@ fn diff_is_unified_and_capped() {
 
     let gone = history::read_version(f.store(), "0".repeat(64).as_str()).unwrap_err();
     assert!(gone.contains("no longer in this folder's history"), "{}", gone);
-}
-
-#[test]
-fn cloud_prefix_matches_dedupe_against_local() {
-    let mut f = fixture(T0);
-    f.write("a.md", "one\n");
-    f.capture(Reason::Seed);
-    f.at(T0 + 60_000);
-    f.write("a.md", "two and two\n");
-    f.capture(Reason::Interval);
-    // Typed since: the file on disk is a state no snapshot holds.
-    f.write("a.md", "three and three and three\n");
-    let disk = history::hash_on_disk(&f.root.path().join("a.md")).unwrap();
-
-    let local = f.history("a.md");
-    assert_eq!(local.len(), 2);
-
-    let revision = |hash: &str, time_ms: u64| Revision {
-        rev: 1,
-        hash: hash[..16].to_string(),
-        size: 4,
-        time_ms,
-        by: "Other Mac".to_string(),
-        current: false,
-    };
-    let cloud = vec![
-        revision(&local[1].hash, T0),                       // the same bytes, shorter name
-        revision(&disk, T0 + 120_000),                      // what is on disk, uncaptured here
-        revision(&"f".repeat(64), T0 + 30_000),             // only the cloud reaches this one
-    ];
-
-    let merged = history::merge_cloud(local, &cloud, Some(&disk), "a.md");
-    assert_eq!(merged.len(), 3, "two were already known: {:?}", merged);
-    assert_eq!(merged[0].ts, T0 + 60_000, "newest first");
-    assert_eq!(merged[1].ts, T0 + 30_000);
-    assert_eq!(merged[1].source, "manifest", "a sync-manifest revision, not a mirrored version");
-    assert_eq!(merged[1].by, "Other Mac");
-    assert_eq!(merged[1].path, "a.md");
-    assert_eq!(merged[2].ts, T0);
-    assert!(merged.iter().filter(|v| v.source == "local").count() == 2);
 }
 
 /* ---------- Restore ---------- */

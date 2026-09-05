@@ -42,11 +42,14 @@ settles the handful of details the spec left open (§2).
 | 3 ✅ | The cloud mirror | worker routes, upload, the cloud horizon, read-through | 1, 2 | history beyond the laptop; badge asks for a worker update |
 | 4 ✅ | Workspace history, deleted files | the workspace timeline, restore-all, the *Recently deleted* row | 1, 2 | "as it was on Tuesday"; a deleted note back |
 | 5 ✅ | Settings and export | horizons, sizes, orphaned stores, one-archive export | 1, 2 | control and an offline copy |
-| 6 | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
+| 6 ✅ | Retire the manifest history | `hist` stops being written; the old commands, archives and orphaned blobs go | 3 | nothing — a smaller manifest |
 
 Phases 3, 4 and 5 are independent of one another and may ship in any order
-after 2. Phase 6 needs 3 to have shipped (and, in practice, to have run for a
-while on every device the user has). The acceptance pass
+after 2. Phase 6 needs 3 to have shipped. It also assumes 3 has *run* on
+every device the user has — a Mac that has not mirrored since phase 3 keeps
+its history only locally once the bucket's `hist` is gone. Shipped anyway,
+knowingly: the manifest's history reached back hours, and the trade is
+described in §9. The acceptance pass
 ([versioning-testing.md](versioning-testing.md)) is organised the same way:
 one section per phase, then the crossings and the promises no single phase
 owns.
@@ -818,17 +821,18 @@ the build. Each is carried into [versioning.md](versioning.md) §6.3, §8 or
    manifest's revisions; those are now `manifest`, and `cloud` means the
    mirrored version store. The distinction is real — a `cloud` version is
    read and diffed through the version store, a `manifest` one only through
-   `cloud_revision` — and phase 6 deletes exactly the `manifest` case. Only
-   a `local` version is restored by hash; the other two hand
-   `versions_restore_file` their text.
+   `cloud_revision` — and phase 6 deleted exactly the `manifest` case, so
+   there are two. Only a `local` version is restored by hash; a `cloud` one
+   hands `versions_restore_file` its text.
 7. **`versions_diff` resolves both sides before comparing**, so *Show
    changes* works on a mirrored version. `history::diff` became
    `history::diff_texts` plus a resolver in the command.
 8. **`uploaded` is pruned to what the store still holds** on every pass, so
    the engine's persisted state cannot grow without bound.
-9. **`DELETE /api/history/<fid>` ships now, unused.** The route is phase 6's;
+9. **`DELETE /api/history/<fid>` ships now, unused.** The route is phase 6's
+   (which now calls it — see §9.3, decision 3);
    adding it here keeps the worker's version bump to one. No `Remote` method
-   goes with it until phase 6 calls it, so the trait has no dead code.
+   went with it until phase 6 called it, so the trait never had dead code.
 10. **The engine opens the version store from its path** (`data_dir` on
     `EngineConfig` plus `versions::store_for_root`), not through the
     versions manager. Reads only: the mirror never writes into a local
@@ -1128,8 +1132,17 @@ issuing the command, export invoking the picker and the command.
 **Goal.** The manifest stops carrying `hist`, the archive rollover goes, and
 the old history commands go with the read-through. Releasable because an
 empty `hist` is a valid v2 manifest to every worker and app that exists;
-`MANIFEST_VERSION` does not move (decision 8). Ship it only after phase 3 has
-been out long enough that every device the user runs has mirrored its store.
+`MANIFEST_VERSION` does not move (decision 8).
+
+The plan said to ship this only once phase 3 had been out long enough that
+every device the user runs had mirrored its store — because the clean-up
+below deletes the bucket's copy of the old history for good. **It shipped
+with phase 5, on the owner's call: the existing manifest history is not
+worth waiting for.** What that costs is written down where it is felt —
+`versioning.md` §6.5 and §6.9 of [cloud.md](cloud.md) — rather than left as
+an assumption. Sync between mixed-version devices is unaffected either way:
+it needs a file's current hash and each device's own base copy, neither of
+which this touches.
 
 ### 9.0 The old system, piece by piece
 
@@ -1146,9 +1159,10 @@ So the clean-up can be checked as complete rather than assumed:
 | `cloud_history` / `cloud_revision` commands | `cloud/mod.rs` | deleted | 6 |
 | `Revision` | `cloud/status.rs` | deleted | 6 |
 | `cloudHistory` / `cloudRevision` / `CloudRevision` | `src/cloud.ts` | deleted | 6 |
-| The read-through branch | `HistoryRail.tsx` | deleted | 6 |
+| The read-through branch | `versions/mod.rs` `versions_history`, `history.rs` `merge_cloud`, `VersionPreview.tsx`'s `manifest` case | deleted | 6 |
 | `HistoryPanel.tsx` (the modal) | `src/` | replaced by the rail and the preview | 2 |
 | `GET/PUT /api/history/<fid>`, `MAX_INLINE_HIST`, `MAX_HISTORY_*`, `validHistoryArchive` | the worker | **kept**, marked deprecated — older apps still send them; the API only grows | 6 (docs only) |
+| `Remote::get_history` / `put_history`, `HistoryArchive`, `HISTORY_VERSION`, Rust's `MAX_INLINE_HIST` | `cloud/{remote,manifest}.rs` | deleted; `delete_history` added | 6 |
 | The engine tests that pin history | `cloud/tests.rs` | replaced (below) | 6 |
 
 ### 9.1 Changes
@@ -1184,21 +1198,65 @@ So the clean-up can be checked as complete rather than assumed:
 
 ### 9.2 Done when
 
-- [ ] `cargo test --lib cloud` green with the tests above.
-- [ ] `manifest_wire_shape_matches_the_worker` still passes against
+- [x] `cargo test --lib cloud` green with the tests above.
+- [x] `manifest_wire_shape_matches_the_worker` still passes against
       `hist: []`.
-- [ ] `legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls` and
+- [x] `legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls` and
       `legacy_cleanup_waits_on_a_worker_without_the_route` pass; after the
       sweep the fake bucket holds one blob per file and no `history/` key.
-- [ ] `cloud.md` §6.6 (the manifest), §6.9 (history) and §5.3 (the
+- [x] `cloud.md` §6.6 (the manifest), §6.9 (history) and §5.3 (the
       deprecated route) updated; `versioning.md` §6.5 *as built*.
 - [ ] Manual: two devices, one on the previous release, editing the same
       workspace — sync works both ways; the older one's history panel still
       answers from the store.
 
+### 9.3 As built
+
+1. **The clean-up's bookmark is three fields, not two.**
+   `LegacyCleanup { archives_done, done, cursor }`. The plan named
+   `{archives_done, inventory_cursor}`; the two passes run strictly one
+   after the other, so one cursor serves both, and naming it after the
+   second would have lied while the first was using it. `done` is what the
+   `skip_serializing_if` reads, so a device that has finished writes nothing
+   about this at all — the state file of a workspace connected after this
+   phase looks exactly like one that never had a history to retire.
+2. **The pass is driven from `poll_and_maybe_cycle`, not the run loop's
+   timer.** Same cadence — it is the poll — but it is then reachable from
+   `poll_for_test`, which is what lets the tests walk it batch by batch
+   instead of pinning the schedule.
+3. **`worker_has("versions")` is the gate for the DELETE route.** Phase 3's
+   decision 9 shipped the route and the `versions` feature in the same
+   worker, so one flag answers both questions and there is no second feature
+   name to invent for a route that already exists everywhere it matters.
+4. **The fid list is `files` ∪ `tombstones`, sorted.** A deleted file's
+   archive and blobs are exactly what the old system left with nothing
+   pointing at them, so the tombstones are the interesting half. Sorted
+   because a cursor into an unsorted list means nothing on the next poll.
+5. **`gc_blobs` and the clean-up's second pass are the same code**
+   (`sweep_blobs`). Once a file's past is not the manifest's, "keep the
+   current hash, drop the rest past `GC_MIN_AGE_MS`" is the whole rule for
+   both, and `gc_candidates` becomes a `BTreeSet` of every fileId pushed
+   since the last run rather than the ones that rolled history.
+6. **`Remote` keeps one history method.** `get_history` and `put_history`
+   are deleted along with `HistoryArchive` and `HISTORY_VERSION` — dead code
+   on a trait is still dead code — and `delete_history` is added. The worker
+   keeps all three routes; only the client stops speaking two of them.
+7. **`MAX_INLINE_HIST` leaves the Rust side.** It mirrored a worker cap for
+   a value the engine no longer writes. The worker's copy stays and still
+   bounds what an older app sends.
+8. **Nothing is migrated out of an old `hist`.** Seeding snapshots from it
+   was considered and rejected in `versioning.md` §6.5: the entries reach
+   back hours, the store reaches back years, and a migration would be a
+   one-shot path with no second chance to get right. An old manifest is read
+   normally and rewritten without them.
+9. **`drive-versions.mjs` is 32 steps, not 33.** The two steps that walked a
+   manifest revision are one step that asserts no rail in the whole session
+   ever asked for one — the honest test of a thing that is gone is that it
+   is not called.
+
 ---
 
-## 10. Reference: the contract after phase 5
+## 10. Reference: the contract after phase 6
 
 Everything `src/versions.ts` wraps, in one place, so a phase can check it is
 adding to this rather than inventing beside it.
@@ -1225,6 +1283,11 @@ versions_export(root, dest)                          -> ExportReport
 events: versions-status, versions-applied, versions-progress
 ```
 
+Phase 6 added nothing here and removed two commands that were never in this
+table: `cloud_history` and `cloud_revision`, which lived on the cloud
+contract ([cloud.md](cloud.md) §6.7). `FileVersion.source` is now `local` or
+`cloud`, two values rather than three.
+
 ## 11. Reference: constants
 
 | Name | Value | Where | Phase |
@@ -1241,6 +1304,12 @@ events: versions-status, versions-applied, versions-progress
 | index cap | 1 MB | `cloud-worker/src/layout.ts` | 3 |
 | `WORKER_VERSION` | 3 | `cloud-worker/src/version.ts` | 3 |
 | `DELETED_WINDOW_MS` | 30 days | `versions/workspace.rs` | 4 |
+| `LEGACY_BATCH` | 50 fileIds | `cloud/engine.rs` | 6 |
+
+Retired by phase 6: `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX` and the Rust
+side's `MAX_INLINE_HIST`. The worker's `MAX_INLINE_HIST`,
+`MAX_HISTORY_ENTRIES` and `MAX_HISTORY_BYTES` stay, deprecated — they bound
+what an app on an older release still sends.
 
 ## 12. The surfaces — the UX, decided
 

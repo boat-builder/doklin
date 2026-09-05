@@ -122,18 +122,6 @@ pub struct Credentials {
     pub token: String,
 }
 
-/// One revision of a file for the History panel.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Revision {
-    pub rev: u64,
-    pub hash: String,
-    pub size: u64,
-    pub time_ms: u64,
-    pub by: String,
-    pub current: bool,
-}
-
 /* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */
 
 pub trait Events: Send + Sync + 'static {

@@ -5,7 +5,9 @@
 //   workspace.json              the binding: one domain, one workspace (written create-only)
 //   manifest.json               the workspace manifest, updated by compare-and-swap on its etag
 //   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-//   history/<fileId>.json       deep revision archive — entries rolled out of the manifest's tail
+//   history/<fileId>.json       DEPRECATED deep revision archive (docs/versioning.md §6.5) —
+//                               written only by an app on a release before the version store
+//                               replaced it; the current app deletes these once and never again
 //   presence.json               {devices: {<deviceId>: {name, path?, ts}}}, TTL'd, best effort
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
@@ -63,7 +65,8 @@ export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 export const MAX_MANIFEST_FILES = 5000;
 export const MAX_TOMBSTONES = 10_000;
 export const MAX_PUBLIC_ENTRIES = 5000;
-/** History entries a manifest carries inline per file before the engine rolls them into the archive. */
+/** DEPRECATED, all three: the retired manifest history. The current app writes
+ *  no `hist` and no archive; these caps still bound what an older one sends. */
 export const MAX_INLINE_HIST = 12;
 export const MAX_HISTORY_ENTRIES = 200;
 export const MAX_HISTORY_BYTES = 256 * 1024;

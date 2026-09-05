@@ -1130,20 +1130,14 @@ async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEn
 
 /// Every version of one document, newest first — the rail's whole model.
 /// This Mac's snapshots and the ones other devices mirrored are one walk
-/// (docs/versioning-plan.md §6.3); behind them, for a connected workspace,
-/// the sync manifest's own revisions are folded in so what history shows
-/// does not shrink on the day this ships. Phase 6 removes that last part.
+/// (docs/versioning-plan.md §6.3), and since phase 6 that walk is the whole
+/// answer: the sync manifest no longer carries a history to fold in behind
+/// it.
 #[tauri::command]
 pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<FileHistory, String> {
     let (tx, root, rel) = route(&app, &path)?;
     let cloud = mirrored_set(&app, &path, &root).await;
-    let asked = rel.clone();
-    let mut history = ask(tx, move |reply| VersionerCmd::History { rel: asked, cloud, reply }).await?;
-    if let Ok(revisions) = crate::cloud::cloud_history(app, path).await {
-        let local = std::mem::take(&mut history.versions);
-        history.versions = history::merge_cloud(local, &revisions, history.current_hash.as_deref(), &rel);
-    }
-    Ok(history)
+    ask(tx, move |reply| VersionerCmd::History { rel, cloud, reply }).await
 }
 
 /// One version's text: this Mac's blob, or — for a version only another

@@ -18,8 +18,6 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::cloud::status::Revision;
-
 use crate::cloud::versions::VersionsEntry;
 
 use super::store::{hash_full, FileEntry, Snapshot, SnapshotRow, Store};
@@ -43,7 +41,7 @@ pub struct FileVersion {
     pub size: u64,
     /// The device that took the snapshot.
     pub by: String,
-    /// The capture's reason, or empty for a revision only the cloud has.
+    /// The capture's reason.
     pub reason: String,
     pub label: Option<String>,
     pub pinned: bool,
@@ -51,9 +49,9 @@ pub struct FileVersion {
     /// The path as of that snapshot — not the one asked for, when the file
     /// has been renamed since.
     pub path: String,
-    /// Where the bytes come from: `local` (a blob in this store), `cloud`
-    /// (the mirrored version store) or `manifest` (the sync manifest's own
-    /// per-file revisions, which phase 6 retires).
+    /// Where the bytes come from: `local` (a blob in this store) or `cloud`
+    /// (one another Mac mirrored, fetched through the engine). Two values
+    /// since phase 6 retired the sync manifest's own revisions.
     pub source: String,
     /// This version is byte-for-byte the file on disk right now.
     pub current: bool,
@@ -293,42 +291,6 @@ fn renamed_from(older: &Snapshot, newer: &Snapshot, path: &str) -> Option<(Strin
 }
 
 /* ---------- The cloud read-through (phase 6 removes this) ---------- */
-
-/// Fold the sync manifest's own per-file revisions into a history. A
-/// manifest revision is named by the first 16 characters of the same sha256
-/// the store uses, so one that prefixes a version already listed — or the
-/// file on disk — is the same bytes under a shorter name and is dropped.
-/// What survives is what neither store reaches back to. Phase 6 retires the
-/// manifest's history and this with it.
-pub fn merge_cloud(
-    mut local: Vec<FileVersion>,
-    cloud: &[Revision],
-    current_hash: Option<&str>,
-    path: &str,
-) -> Vec<FileVersion> {
-    for revision in cloud {
-        let known = local.iter().any(|v| v.hash.starts_with(&revision.hash))
-            || current_hash.map(|h| h.starts_with(&revision.hash)).unwrap_or(false);
-        if known {
-            continue;
-        }
-        local.push(FileVersion {
-            ts: revision.time_ms,
-            hash: revision.hash.clone(),
-            size: revision.size,
-            by: revision.by.clone(),
-            reason: String::new(),
-            label: None,
-            pinned: false,
-            restored_from: None,
-            path: path.to_string(),
-            source: "manifest".to_string(),
-            current: false,
-        });
-    }
-    local.sort_by(|a, b| b.ts.cmp(&a.ts));
-    local
-}
 
 /* ---------- Reading and comparing ---------- */
 

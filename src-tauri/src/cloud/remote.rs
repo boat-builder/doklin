@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{HistoryArchive, Manifest, PollResponse};
+use super::manifest::{Manifest, PollResponse};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -147,15 +147,11 @@ pub trait Remote: Send + Sync + 'static {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    fn get_history(
-        &self,
-        file_id: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<Option<HistoryArchive>>> + Send;
-    fn put_history(
-        &self,
-        file_id: &str,
-        archive: &HistoryArchive,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    /// Drop one file's retired revision archive. Nothing reads or writes
+    /// these any more (docs/versioning-plan.md §9); the engine's one-time
+    /// clean-up calls this and treats `NotFound` as the same answer as
+    /// success.
+    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     /* ----- the version store (docs/versioning.md §6.4) ----- */
 
     /// The index and its etag; None when the workspace has never mirrored.
@@ -467,36 +463,10 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn get_history(
-        &self,
-        file_id: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<Option<HistoryArchive>>> + Send {
+    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let url = self.url(&format!("history/{}", file_id));
         async move {
-            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
-            match expect_status(res).await {
-                Ok(res) => Ok(Some(res.json::<HistoryArchive>().await.map_err(transport_err)?)),
-                Err(RemoteError::NotFound) => Ok(None),
-                Err(e) => Err(e),
-            }
-        }
-    }
-
-    fn put_history(
-        &self,
-        file_id: &str,
-        archive: &HistoryArchive,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("history/{}", file_id));
-        let body = serde_json::to_vec(archive).unwrap_or_default();
-        async move {
-            let res = self
-                .auth(self.client.put(url))
-                .header("content-type", "application/json")
-                .body(body)
-                .send()
-                .await
-                .map_err(transport_err)?;
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
         }
     }
