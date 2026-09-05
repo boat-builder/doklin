@@ -5,7 +5,7 @@
 //! download, resume in place), the timings (a touch settles faster than a
 //! watched write), the worker-outdated state, presence, and the edit bus.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +15,9 @@ use super::config::{
     normalize_endpoint, read_cloud_file, read_marker, write_cloud_file, write_marker, CloudFile, Marker,
     WorkspaceEntry,
 };
-use super::engine::{next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, MANIFEST_HIST_MAX, POLL_INTERVAL};
+use super::engine::{
+    next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, LEGACY_BATCH, POLL_INTERVAL,
+};
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::manifest::*;
 use super::remote::*;
@@ -29,7 +31,8 @@ use crate::versions::store::{
 /* ---------- The in-memory worker ---------- */
 
 /// A stand-in for the worker: the binding, a manifest with CAS-by-etag,
-/// content-addressed blobs, history archives, presence. `racer` lets a test
+/// content-addressed blobs (each with the time it landed, so a grace period
+/// is testable), the retired history archives, presence. `racer` lets a test
 /// inject "another device won the CAS between your fetch and your put";
 /// `reject_schema` plays a worker that predates the app's manifest.
 #[derive(Default)]
@@ -37,8 +40,10 @@ struct FakeWorker {
     bound: Option<WorkspaceRecord>,
     manifest: Manifest,
     etag: u64,
-    blobs: HashMap<(String, String), Vec<u8>>,
-    histories: HashMap<String, HistoryArchive>,
+    blobs: HashMap<(String, String), (Vec<u8>, u64)>,
+    /// fileIds with a `history/<fid>.json` — all a test needs of the
+    /// retired archives now that nothing reads one (docs/versioning-plan.md §9).
+    histories: BTreeSet<String>,
     presence: BTreeMap<String, PresenceEntry>,
     offline: bool,
     reject_schema: bool,
@@ -187,7 +192,7 @@ impl Remote for FakeRemote {
         async move {
             this.check_offline()?;
             let b = this.be.lock().unwrap();
-            b.blobs.get(&key).cloned().ok_or(RemoteError::NotFound)
+            b.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
     }
 
@@ -202,7 +207,7 @@ impl Remote for FakeRemote {
         let key = (file_id.to_string(), hash.to_string());
         async move {
             this.check_offline()?;
-            this.be.lock().unwrap().blobs.entry(key).or_insert(bytes);
+            this.be.lock().unwrap().blobs.entry(key).or_insert((bytes, 0));
             Ok(())
         }
     }
@@ -213,7 +218,7 @@ impl Remote for FakeRemote {
         async move {
             this.check_offline()?;
             let b = this.be.lock().unwrap();
-            Ok(b.blobs.keys().filter(|(f, _)| *f == fid).map(|(_, h)| (h.clone(), 0u64)).collect())
+            Ok(b.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
         }
     }
 
@@ -226,29 +231,13 @@ impl Remote for FakeRemote {
         }
     }
 
-    fn get_history(
-        &self,
-        file_id: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<Option<HistoryArchive>>> + Send {
+    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let this = self.clone();
         let fid = file_id.to_string();
         async move {
             this.check_offline()?;
-            let b = this.be.lock().unwrap();
-            Ok(b.histories.get(&fid).cloned())
-        }
-    }
-
-    fn put_history(
-        &self,
-        file_id: &str,
-        archive: &HistoryArchive,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let fid = file_id.to_string();
-        let archive = archive.clone();
-        async move {
-            this.be.lock().unwrap().histories.insert(fid, archive);
+            // The worker answers 204 whether or not one was there.
+            this.be.lock().unwrap().histories.remove(&fid);
             Ok(())
         }
     }
@@ -630,8 +619,11 @@ async fn initial_push_then_second_device_pulls() {
     assert_eq!(applied[0]["paths"].as_array().unwrap().len(), 2);
 }
 
+/// The manifest carries the current state and nothing else. Revisions still
+/// count up — that is what tells another device its copy is behind — but a
+/// file's past is the version store's since phase 6, so `hist` never fills.
 #[tokio::test]
-async fn edit_propagates_and_builds_history() {
+async fn edit_propagates_and_hist_stays_empty() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
@@ -639,16 +631,58 @@ async fn edit_propagates_and_builds_history() {
     a.cycle().await;
     b.cycle().await;
 
-    a.write("doc.md", "v2 content, longer\n");
-    a.cycle().await;
-    b.cycle().await;
-    assert_eq!(b.read("doc.md").as_deref(), Some("v2 content, longer\n"));
+    for i in 2..=4 {
+        a.write("doc.md", &format!("v{} content, longer and longer\n", i));
+        a.cycle().await;
+        b.cycle().await;
+    }
+    assert_eq!(b.read("doc.md").as_deref(), Some("v4 content, longer and longer\n"));
 
     let m = manifest_of(&be);
     let f = m.files.values().next().unwrap();
-    assert_eq!(f.rev, 2);
-    assert_eq!(f.hist.len(), 1);
-    assert_eq!(f.hist[0].r, 1);
+    assert_eq!(f.rev, 4);
+    assert!(f.hist.is_empty(), "the manifest keeps no history: {:?}", f.hist);
+}
+
+/// A manifest written by a device still on the old release — `hist` full of
+/// entries — reads, syncs, and comes back out of the next CAS without them.
+/// The entries are not migrated anywhere: the version store already holds
+/// this device's own past, and that is the trade phase 6 makes.
+#[tokio::test]
+async fn an_old_manifest_with_hist_is_read_and_rewritten_without_it() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "v1 content\n");
+    a.cycle().await;
+
+    // An older build lands a revision, inline history and all.
+    let fid = {
+        let mut b = be.lock().unwrap();
+        let (fid, f) = b.manifest.files.iter_mut().next().map(|(k, v)| (k.clone(), v)).unwrap();
+        let bytes = b"v2 from the old build\n".to_vec();
+        let hash = hash16(&bytes);
+        f.hist.insert(0, HistEntry { r: f.rev, h: f.hash.clone(), s: f.size, t: f.mtime, b: f.by.clone() });
+        f.rev += 1;
+        f.hash = hash.clone();
+        f.size = bytes.len() as u64;
+        f.mtime = now_ms();
+        f.by = "Old Mac".into();
+        b.etag += 1;
+        b.blobs.insert((fid.clone(), hash), (bytes, 0));
+        fid
+    };
+
+    // It reads: the revision lands on disk like any other.
+    a.cycle().await;
+    assert_eq!(a.read("doc.md").as_deref(), Some("v2 from the old build\n"));
+    assert_eq!(manifest_of(&be).files[&fid].hist.len(), 1, "still theirs, untouched");
+
+    // And the first thing this device publishes drops them.
+    a.write("doc.md", "v3, written here\n");
+    a.cycle().await;
+    let f = &manifest_of(&be).files[&fid];
+    assert_eq!(f.rev, 3, "the revision counter still climbs");
+    assert!(f.hist.is_empty(), "rewritten without the old history: {:?}", f.hist);
 }
 
 #[tokio::test]
@@ -670,7 +704,7 @@ async fn concurrent_distinct_files_converge_via_cas_retry() {
         m.seq += 1;
         let bytes = b"from the racer\n".to_vec();
         let hash = hash16(&bytes);
-        be2.blobs.insert(("f-racer".into(), hash.clone()), bytes.clone());
+        be2.blobs.insert(("f-racer".into(), hash.clone()), (bytes.clone(), 0));
         m.files.insert(
             "f-racer".into(),
             ManifestFile {
@@ -846,33 +880,6 @@ async fn rename_is_metadata_only_and_propagates() {
     b.cycle().await;
     assert!(b.read("old-name.md").is_none());
     assert_eq!(b.read("new-name.md").as_deref(), Some("stable content that does not change\n"));
-}
-
-#[tokio::test]
-async fn history_rolls_over_into_archive() {
-    let be = fake_worker();
-    let mut a = device("Alice", &be);
-    a.write("doc.md", "revision 0 --------\n");
-    a.cycle().await;
-    for i in 1..=13 {
-        a.write("doc.md", &format!("revision {} {}\n", i, "-".repeat(i)));
-        a.cycle().await;
-    }
-    let be2 = be.lock().unwrap();
-    let (fid, f) = be2.manifest.files.iter().next().unwrap();
-    assert_eq!(f.rev, 14);
-    assert_eq!(f.hist.len(), MANIFEST_HIST_MAX);
-    assert!(f.hist.len() <= MAX_INLINE_HIST);
-    let archive = be2.histories.get(fid).expect("archive exists after rollover");
-    assert!(!archive.entries.is_empty());
-    let mut revs: Vec<u64> = f.hist.iter().map(|h| h.r).collect();
-    revs.extend(archive.entries.iter().map(|h| h.r));
-    revs.sort_unstable();
-    revs.dedup();
-    assert_eq!(revs, (1..=13).collect::<Vec<u64>>());
-    for h in f.hist.iter().map(|h| &h.h).chain(archive.entries.iter().map(|h| &h.h)) {
-        assert!(be2.blobs.contains_key(&(fid.clone(), h.clone())));
-    }
 }
 
 #[tokio::test]
@@ -1370,7 +1377,7 @@ async fn resume_in_place_converges_without_conflict_copies() {
     assert_eq!(a.files().len(), 4);
 }
 
-/* ---------- Timing, the worker-outdated state, presence, history ---------- */
+/* ---------- Timing, the worker-outdated state, presence ---------- */
 
 #[tokio::test(start_paused = true)]
 async fn touched_path_settles_faster_than_a_watched_one() {
@@ -1579,27 +1586,6 @@ async fn presence_reports_the_edited_path_and_the_others() {
     assert_eq!(seen[0].device_id, "d-alice");
     assert_eq!(seen[0].name, "Alice");
     assert_eq!(seen[0].path.as_deref(), Some("doc.md"));
-}
-
-#[tokio::test]
-async fn history_lists_every_revision_and_fetches_one() {
-    let be = fake_worker();
-    let mut a = device("Alice", &be);
-    a.write("doc.md", "v1\n");
-    a.cycle().await;
-    a.write("doc.md", "v2 is longer\n");
-    a.cycle().await;
-    a.write("doc.md", "v3, longer still\n");
-    a.cycle().await;
-
-    let revs = a.engine.history("doc.md").await.unwrap();
-    assert_eq!(revs.iter().map(|r| r.rev).collect::<Vec<_>>(), vec![3, 2, 1]);
-    assert!(revs[0].current && !revs[1].current);
-    assert!(revs.iter().all(|r| r.by == "Alice" && r.time_ms > 0));
-    let v1 = revs.iter().find(|r| r.rev == 1).unwrap();
-    assert_eq!(a.engine.revision("doc.md", &v1.hash).await.unwrap(), "v1\n");
-    assert!(a.engine.revision("doc.md", "0000000000000000").await.unwrap_err().contains("cleaned up"));
-    assert!(a.engine.history("never.md").await.unwrap_err().contains("hasn't synced"));
 }
 
 /* ---------- The bus, the wake, the grammars, the config ---------- */
@@ -2132,4 +2118,128 @@ async fn read_through_caches_another_devices_snapshot() {
         super::versions::snapshot(&FakeRemote::new(&be, &b.device_id()), &store, &id).await.is_some(),
         "a cached snapshot is readable with the domain unreachable"
     );
+}
+
+/* ---------- The retired manifest history (docs/versioning-plan.md §9) ---------- */
+
+/// The one-time clean-up: every `history/<fid>.json`, then every blob but
+/// each file's current one, `LEGACY_BATCH` fileIds at a time — archives
+/// first, because deleting the index before the data it names is the order
+/// that is safe to interrupt.
+#[tokio::test]
+async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.engine.probe_worker().await;
+
+    // More files than one batch, so the pass genuinely has to come back.
+    for i in 0..(LEGACY_BATCH + 5) {
+        a.write(&format!("n{:03}.md", i), "first\n");
+    }
+    a.cycle().await;
+    // Three get a second revision: the bucket now holds an old blob nothing
+    // points at. One is deleted: everything it has is old.
+    for i in 0..3 {
+        a.write(&format!("n{:03}.md", i), "second, and rather longer\n");
+    }
+    let last = format!("n{:03}.md", LEGACY_BATCH + 4);
+    a.delete(&last);
+    a.cycle().await;
+
+    let (fids, blobs_before) = {
+        let mut b = be.lock().unwrap();
+        let fids: Vec<String> =
+            b.manifest.files.keys().chain(b.manifest.tombstones.keys()).cloned().collect();
+        for fid in &fids {
+            b.histories.insert(fid.clone());
+        }
+        assert_eq!(fids.len(), LEGACY_BATCH + 5, "every file, the deleted one included");
+        (fids, b.blobs.len())
+    };
+    assert_eq!(blobs_before, LEGACY_BATCH + 5 + 3, "one per file, plus three second revisions");
+
+    // Poll one: a batch of archives, and not one blob.
+    a.engine.poll_for_test().await;
+    {
+        let b = be.lock().unwrap();
+        assert_eq!(b.histories.len(), fids.len() - LEGACY_BATCH, "one batch, no more");
+        assert_eq!(b.blobs.len(), blobs_before, "the archives go first");
+    }
+    let held = serde_json::to_value(&a.engine.state).unwrap();
+    assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
+
+    // Poll two finishes the archives; poll three finds the end of the list.
+    a.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().histories.is_empty(), "every archive is gone");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.state.legacy_cleanup.archives_done);
+    assert!(!a.engine.state.legacy_cleanup.done, "the blobs are still to do");
+
+    // Then the inventory, the same batch at a time.
+    a.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().blobs.len() < blobs_before, "it has started");
+    a.engine.poll_for_test().await;
+    a.engine.poll_for_test().await;
+
+    assert!(a.engine.state.legacy_cleanup.done, "both passes are finished");
+    let b = be.lock().unwrap();
+    assert!(b.histories.is_empty());
+    assert_eq!(b.blobs.len(), LEGACY_BATCH + 4, "one blob per living file, and nothing for the deleted one");
+    for (fid, f) in &b.manifest.files {
+        assert!(b.blobs.contains_key(&(fid.clone(), f.hash.clone())), "{} lost its current bytes", f.path);
+    }
+    drop(b);
+
+    // Being done is persisted like every other step of it. A device that
+    // forgot would walk the whole bucket again on its next launch.
+    let finished = serde_json::to_value(&a.engine.state).unwrap();
+    let reloaded: WorkspaceState = serde_json::from_value(finished.clone()).unwrap();
+    assert!(reloaded.legacy_cleanup.done, "it must survive a restart: {}", finished["legacy_cleanup"]);
+    assert!(finished["legacy_cleanup"].get("cursor").is_none(), "and drop the bookmark it no longer needs");
+
+    // A workspace connected after this phase has no history to retire, and
+    // says nothing about it until the pass actually starts.
+    assert!(
+        serde_json::to_value(WorkspaceState::default()).unwrap().get("legacy_cleanup").is_none(),
+        "an untouched state file carries no flags",
+    );
+}
+
+/// A worker older than 3 has no DELETE route for an archive. The pass waits
+/// where it is — it is not an error, and it does not sweep blobs ahead of
+/// the archives that name them — and runs after the update.
+#[tokio::test]
+async fn legacy_cleanup_waits_on_a_worker_without_the_route() {
+    let be = fake_worker();
+    be.lock().unwrap().features = vec!["sync".into(), "wipe".into()];
+    let mut a = device("Alice", &be);
+    a.engine.probe_worker().await;
+    a.write("doc.md", "one\n");
+    a.cycle().await;
+    a.write("doc.md", "two, and longer\n");
+    a.cycle().await;
+    let fid = manifest_of(&be).files.keys().next().unwrap().clone();
+    let blobs_before = {
+        let mut b = be.lock().unwrap();
+        b.histories.insert(fid.clone());
+        b.blobs.len()
+    };
+
+    for _ in 0..3 {
+        a.engine.poll_for_test().await;
+    }
+    {
+        let b = be.lock().unwrap();
+        assert!(b.histories.contains(&fid), "nothing was deleted");
+        assert_eq!(b.blobs.len(), blobs_before, "and no blob was swept past them");
+    }
+    assert!(!a.engine.state.legacy_cleanup.archives_done);
+    assert!(!a.engine.state.legacy_cleanup.done);
+    assert_eq!(a.phase(), Phase::Idle, "waiting is not an error");
+
+    // The worker is updated. The pass starts where it never got to.
+    be.lock().unwrap().features = vec!["sync".into(), "wipe".into(), "versions".into()];
+    a.engine.probe_worker().await;
+    a.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().histories.is_empty(), "the archive goes now");
 }

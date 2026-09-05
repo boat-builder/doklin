@@ -33,8 +33,8 @@ use tokio::time::Instant;
 
 use super::manifest::{
     clean_text, dedupe_paths, files_under, random_slug, unique_slug, valid_rel_path, valid_slug,
-    HistEntry, HistoryArchive, Manifest, ManifestFile, PublicEntry, PublicKind, Target, Tombstone,
-    HISTORY_VERSION, MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
+    Manifest, ManifestFile, PublicEntry, PublicKind, Target, Tombstone, MANIFEST_VERSION,
+    MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
 use super::remote::{Remote, RemoteError, RemoteResult};
@@ -44,7 +44,7 @@ use super::scan::{
     stat_pair, write_atomic, write_json, ScanEntry,
 };
 use super::status::{
-    emit_statuses, CloudStatus, Events, Phase, PresenceDevice, PublicPage, Revision, StatusTable,
+    emit_statuses, CloudStatus, Events, Phase, PresenceDevice, PublicPage, StatusTable,
     VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_DELETES,
 };
 // The cloud half of versioning. `crate::versions` is the local versioner —
@@ -54,12 +54,6 @@ use crate::versions::store::Snapshot as VersionSnapshot;
 
 /* ---------- Tunables ---------- */
 
-/// How much per-file history rides inline in the manifest (the worker
-/// accepts up to `MAX_INLINE_HIST`); older entries roll into the per-file
-/// archive object (worker cap: 200).
-pub const MANIFEST_HIST_MAX: usize = 10;
-const _: () = assert!(MANIFEST_HIST_MAX <= super::manifest::MAX_INLINE_HIST, "the worker would refuse the inline history");
-const ARCHIVE_HIST_MAX: usize = 200;
 /// Poll cadence. Edits trigger cycles through the bus and the watcher, so
 /// this is the ceiling on how stale a quiet workspace can get, not the feel
 /// of sync.
@@ -88,6 +82,10 @@ const GC_EVERY_N_CYCLES: u64 = 20;
 /// A blob must be at least this old before GC may take it (a racing pusher
 /// may have uploaded it moments ago, ahead of its manifest CAS).
 const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+/// How many fileIds one poll of the legacy clean-up handles. Small enough
+/// that the pass is invisible beside the poll it rides on; a workspace of
+/// 5000 files finishes both of its passes in about an hour of polling.
+pub(crate) const LEGACY_BATCH: usize = 50;
 const CAS_ATTEMPTS: usize = 4;
 
 /* ---------- Local persistent state ---------- */
@@ -159,6 +157,42 @@ pub struct WorkspaceState {
     /// device gets there first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cloud_sweep_ms: Option<u64>,
+    /// How far the one-time clean-up of the retired manifest history has
+    /// got. Absent only on a device that has not started it.
+    #[serde(default, skip_serializing_if = "LegacyCleanup::is_pristine")]
+    pub legacy_cleanup: LegacyCleanup,
+}
+
+/// The bookmark of the one-time clean-up that phase 6 leaves behind
+/// (docs/versioning-plan.md §9.1): the manifest's per-file archives, then
+/// every file's blobs. Two passes in strict order — delete the index before
+/// the data it names — and one cursor between them, because only one of
+/// them is ever running.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LegacyCleanup {
+    /// Every `history/<fid>.json` this workspace can name is gone.
+    #[serde(default)]
+    pub archives_done: bool,
+    /// Both passes are finished and this workspace never looks again. It is
+    /// written down and stays written down: a device that forgot it had
+    /// finished would walk the whole bucket again after every restart.
+    #[serde(default)]
+    pub done: bool,
+    /// The last fileId the running pass handled; the next poll starts after
+    /// it. `None` means "from the beginning", which is where each pass
+    /// starts and where the other one leaves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl LegacyCleanup {
+    /// Nothing has happened yet, so there is nothing worth writing down —
+    /// which is what keeps this out of the state file of a workspace
+    /// connected after phase 6, with no history to retire in the first
+    /// place. Every later state is persisted, the finished one included.
+    fn is_pristine(&self) -> bool {
+        !self.archives_done && !self.done && self.cursor.is_none()
+    }
 }
 
 /* ---------- Commands ---------- */
@@ -194,15 +228,6 @@ pub enum EngineCmd {
     SetRoot {
         slug: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
-    },
-    History {
-        rel: String,
-        reply: oneshot::Sender<Result<Vec<Revision>, String>>,
-    },
-    Revision {
-        rel: String,
-        hash: String,
-        reply: oneshot::Sender<Result<String, String>>,
     },
     /// The cloud version store, for the history rail's read-through: what
     /// the bucket holds, one mirrored snapshot, one mirrored version's bytes.
@@ -274,8 +299,10 @@ pub struct Engine<R: Remote> {
     held_deletes: Vec<String>,
     allow_mass_delete: bool,
     cycles: u64,
-    /// fileIds whose blobs are worth a GC look (they rolled history).
-    gc_candidates: Vec<String>,
+    /// fileIds pushed since the last GC — the only ones that can have an
+    /// old blob to collect. A set, because twenty cycles of edits to one
+    /// file is still one file to look at.
+    gc_candidates: BTreeSet<String>,
     /// Paths the edit bus reported since the last cycle — a hint about when,
     /// never what: the scan decides.
     dirty: HashSet<String>,
@@ -341,7 +368,7 @@ impl<R: Remote> Engine<R> {
             held_deletes: Vec::new(),
             allow_mass_delete: false,
             cycles: 0,
-            gc_candidates: Vec::new(),
+            gc_candidates: BTreeSet::new(),
             dirty: HashSet::new(),
         }
     }
@@ -604,7 +631,7 @@ impl<R: Remote> Engine<R> {
             //     (folders re-pointed, pages following renames, dead pages
             //     re-bound, pending ops overlaid).
             let mut next = remote_manifest.clone();
-            let rollover = self.build_manifest(&mut next, &staged);
+            self.build_manifest(&mut next, &staged);
             let folded = self.fold_public(&mut next, &remote_manifest, &staged);
             let public_changed = next.public != remote_manifest.public;
 
@@ -635,7 +662,6 @@ impl<R: Remote> Engine<R> {
                     self.clear_folded(&folded);
                     self.commit_staged(&staged, &next, new_etag);
                     changed_paths.extend(staged.pushes.iter().map(|p| p.path.clone()));
-                    self.roll_archives(rollover).await;
                     return Ok(changed_paths);
                 }
                 Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => {
@@ -950,10 +976,15 @@ impl<R: Remote> Engine<R> {
     }
 
     /// Fold the staged changes into `next` (a clone of the freshest remote
-    /// manifest). Returns per-file history entries that overflowed the
-    /// inline cap and belong in the archive.
-    fn build_manifest(&self, next: &mut Manifest, staged: &Staged) -> Vec<(String, Vec<HistEntry>)> {
-        let mut rollover = Vec::new();
+    /// manifest).
+    ///
+    /// `hist` is deliberately left empty on everything this writes: since
+    /// phase 6 a file's past lives in the version store, and the manifest
+    /// carries only what sync itself needs. The field stays — an empty array
+    /// is a valid v2 manifest, so an older app reads what we publish — and
+    /// entries another device's older build still writes are simply dropped
+    /// the next time this device rewrites that file.
+    fn build_manifest(&self, next: &mut Manifest, staged: &Staged) {
         next.version = MANIFEST_VERSION;
         next.seq += 1;
         if next.name.is_empty() {
@@ -962,19 +993,9 @@ impl<R: Remote> Engine<R> {
         next.name = super::manifest::cap_utf16(&next.name, MAX_NAME_LEN);
 
         for push in &staged.pushes {
-            let prev = next.files.get(&push.file_id).cloned();
+            let prev = next.files.get(&push.file_id);
             let tomb_rev = next.tombstones.get(&push.file_id).map(|t| t.rev).unwrap_or(0);
-            let rev = prev.as_ref().map(|p| p.rev).unwrap_or(0).max(tomb_rev) + 1;
-            let mut hist = prev.as_ref().map(|p| p.hist.clone()).unwrap_or_default();
-            if let Some(p) = &prev {
-                hist.insert(
-                    0,
-                    HistEntry { r: p.rev, h: p.hash.clone(), s: p.size, t: p.mtime, b: p.by.clone() },
-                );
-            }
-            if hist.len() > MANIFEST_HIST_MAX {
-                rollover.push((push.file_id.clone(), hist.split_off(MANIFEST_HIST_MAX)));
-            }
+            let rev = prev.map(|p| p.rev).unwrap_or(0).max(tomb_rev) + 1;
             next.tombstones.remove(&push.file_id); // resurrection beats deletion
             next.files.insert(
                 push.file_id.clone(),
@@ -985,7 +1006,7 @@ impl<R: Remote> Engine<R> {
                     size: push.bytes.len() as u64,
                     mtime: now_ms(),
                     by: self.cfg.device_name.clone(),
-                    hist,
+                    hist: Vec::new(),
                 },
             );
         }
@@ -1016,8 +1037,6 @@ impl<R: Remote> Engine<R> {
         // Elderly tombstones age out with whoever writes next.
         let cutoff = now_ms().saturating_sub(TOMBSTONE_TTL_MS);
         next.tombstones.retain(|_, t| t.ts >= cutoff);
-
-        rollover
     }
 
     /// Fold this device's public-map bookkeeping into the manifest about to
@@ -1211,9 +1230,7 @@ impl<R: Remote> Engine<R> {
                     FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
                 );
                 let _ = write_atomic(&self.base_path(&push.file_id), &push.bytes);
-                if !rf.hist.is_empty() {
-                    self.gc_candidates.push(push.file_id.clone());
-                }
+                self.gc_candidates.insert(push.file_id.clone());
             }
         }
         for (fid, to) in &staged.moves {
@@ -1286,47 +1303,97 @@ impl<R: Remote> Engine<R> {
         let _ = std::fs::remove_file(abs);
     }
 
-    /// Roll history entries that overflowed the manifest's inline cap into
-    /// the per-file archive object. Best-effort: a lost archive write only
-    /// shortens deep history.
-    async fn roll_archives(&mut self, rollover: Vec<(String, Vec<HistEntry>)>) {
-        for (fid, entries) in rollover {
-            let mut archive = match self.remote.get_history(&fid).await {
-                Ok(Some(a)) => a,
-                Ok(None) => HistoryArchive { version: HISTORY_VERSION, entries: Vec::new() },
-                Err(_) => continue,
-            };
-            for e in entries {
-                if !archive.entries.iter().any(|x| x.r == e.r) {
-                    archive.entries.push(e);
+    /// Drop every blob of a pushed file but the one the manifest points at
+    /// now, once it is old enough that no racing pusher still needs it.
+    /// Since phase 6 there is nothing else to keep: a file's past is the
+    /// version store's, and the sync side needs exactly the current bytes.
+    async fn gc_blobs(&mut self) {
+        let candidates: Vec<String> = std::mem::take(&mut self.gc_candidates).into_iter().collect();
+        self.sweep_blobs(&candidates).await;
+    }
+
+    /// One page of "keep the current hash, drop the rest" over these files.
+    /// A fileId the manifest no longer holds (a deleted file) keeps nothing.
+    async fn sweep_blobs(&self, fids: &[String]) {
+        for fid in fids {
+            let current = self.state.manifest.files.get(fid).map(|f| f.hash.as_str());
+            let Ok(blobs) = self.remote.list_blobs(fid).await else { continue };
+            for (hash, uploaded_ms) in blobs {
+                let old_enough = now_ms().saturating_sub(uploaded_ms) > GC_MIN_AGE_MS;
+                if old_enough && current != Some(hash.as_str()) {
+                    let _ = self.remote.delete_blob(fid, &hash).await;
                 }
             }
-            archive.entries.sort_by(|a, b| b.r.cmp(&a.r));
-            archive.entries.truncate(ARCHIVE_HIST_MAX);
-            archive.version = HISTORY_VERSION;
-            let _ = self.remote.put_history(&fid, &archive).await;
         }
     }
 
-    /// Drop blobs no longer referenced by the manifest hist or the archive,
-    /// once they're old enough that no racing pusher still needs them.
-    async fn gc_blobs(&mut self) {
-        let candidates: Vec<String> = self.gc_candidates.drain(..).collect();
-        for fid in candidates {
-            let Some(current) = self.state.manifest.files.get(&fid) else { continue };
-            let mut referenced: Vec<String> = vec![current.hash.clone()];
-            referenced.extend(current.hist.iter().map(|h| h.h.clone()));
-            if let Ok(Some(archive)) = self.remote.get_history(&fid).await {
-                referenced.extend(archive.entries.iter().map(|e| e.h.clone()));
+    /* ----- the retired manifest history (docs/versioning-plan.md §9.1) ----- */
+
+    /// Every fileId this workspace can name, sorted — live files and
+    /// tombstones both, because a deleted file's archive and its blobs are
+    /// exactly what the old system left in the bucket. Sorted, so a cursor
+    /// into it means the same thing on the next poll.
+    fn legacy_fids(&self) -> Vec<String> {
+        let m = &self.state.manifest;
+        let mut fids: BTreeSet<&String> = m.files.keys().collect();
+        fids.extend(m.tombstones.keys());
+        fids.into_iter().cloned().collect()
+    }
+
+    /// The one-time clean-up of what the manifest's history left behind:
+    /// first every `history/<fid>.json`, then every blob but each file's
+    /// current one. `LEGACY_BATCH` fileIds per poll, so it costs nothing on
+    /// the hot path, and the bookmark is persisted, so it survives a
+    /// restart and is never done twice.
+    ///
+    /// It waits, rather than failing, on everything that isn't its turn: a
+    /// paused workspace, a worker too old to answer 426, and — the case
+    /// worth naming — a worker older than 3, which has no DELETE route for
+    /// an archive. `versions` is the right flag to read for that: it and
+    /// the route shipped in the same worker (phase 3, decision 9).
+    async fn legacy_cleanup(&mut self) {
+        if self.state.legacy_cleanup.done || self.paused || self.outdated.is_some() {
+            return;
+        }
+        if !self.worker_has("versions") {
+            return;
+        }
+        let after = self.state.legacy_cleanup.cursor.clone();
+        let batch: Vec<String> = self
+            .legacy_fids()
+            .into_iter()
+            .filter(|f| after.as_deref().map(|c| f.as_str() > c).unwrap_or(true))
+            .take(LEGACY_BATCH)
+            .collect();
+
+        if batch.is_empty() {
+            // Off the end of the list: whichever pass was running is done.
+            // The cursor goes back to the start for the one after it.
+            if self.state.legacy_cleanup.archives_done {
+                self.state.legacy_cleanup.done = true;
+            } else {
+                self.state.legacy_cleanup.archives_done = true;
             }
-            let Ok(blobs) = self.remote.list_blobs(&fid).await else { continue };
-            for (hash, uploaded_ms) in blobs {
-                let old_enough = now_ms().saturating_sub(uploaded_ms) > GC_MIN_AGE_MS;
-                if old_enough && !referenced.contains(&hash) {
-                    let _ = self.remote.delete_blob(&fid, &hash).await;
+            self.state.legacy_cleanup.cursor = None;
+            self.persist_state();
+            return;
+        }
+
+        if self.state.legacy_cleanup.archives_done {
+            self.sweep_blobs(&batch).await;
+        } else {
+            for fid in &batch {
+                match self.remote.delete_history(fid).await {
+                    // Gone is the answer we wanted, however it got that way.
+                    Ok(()) | Err(RemoteError::NotFound) => {}
+                    // Offline, or a token that just rotated: leave the
+                    // cursor where it is and come back on a later poll.
+                    Err(_) => return,
                 }
             }
         }
+        self.state.legacy_cleanup.cursor = batch.last().cloned();
+        self.persist_state();
     }
 
     /* ----- the version store's mirror (docs/versioning-plan.md §6.2) ----- */
@@ -1539,46 +1606,6 @@ impl<R: Remote> Engine<R> {
         Ok(())
     }
 
-    /* ----- history ----- */
-
-    /// Every revision of a file: the manifest's inline tail plus the deep
-    /// archive, newest first.
-    pub(crate) async fn history(&self, rel: &str) -> Result<Vec<Revision>, String> {
-        let m = &self.state.manifest;
-        let Some((fid, f)) = m.files.iter().find(|(_, f)| f.path == rel) else {
-            return Err("This document hasn't synced yet — history appears after its first sync.".into());
-        };
-        let mut seen: HashSet<u64> = HashSet::new();
-        let mut out: Vec<Revision> = Vec::new();
-        let mut push = |r: u64, h: &str, s: u64, t: u64, b: &str, current: bool| {
-            if seen.insert(r) {
-                out.push(Revision { rev: r, hash: h.to_string(), size: s, time_ms: t, by: b.to_string(), current });
-            }
-        };
-        push(f.rev, &f.hash, f.size, f.mtime, &f.by, true);
-        for h in &f.hist {
-            push(h.r, &h.h, h.s, h.t, &h.b, false);
-        }
-        if let Ok(Some(archive)) = self.remote.get_history(fid).await {
-            for h in &archive.entries {
-                push(h.r, &h.h, h.s, h.t, &h.b, false);
-            }
-        }
-        out.sort_by(|a, b| b.rev.cmp(&a.rev));
-        Ok(out)
-    }
-
-    pub(crate) async fn revision(&self, rel: &str, hash: &str) -> Result<String, String> {
-        let Some(fid) = self.file_id_at(rel) else {
-            return Err("This document hasn't synced yet.".into());
-        };
-        match self.remote.get_blob(&fid, hash).await {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-            Err(RemoteError::NotFound) => Err("That revision's content was already cleaned up.".into()),
-            Err(e) => Err(format!("couldn't fetch the revision: {}", e)),
-        }
-    }
-
     /* ----- activity + presence ----- */
 
     pub(crate) fn set_activity(&mut self, abs_path: Option<String>) {
@@ -1663,6 +1690,7 @@ impl<R: Remote> Engine<R> {
         } else if presence_changed {
             self.refresh_status();
         }
+        self.legacy_cleanup().await;
         Ok(())
     }
 
@@ -1737,12 +1765,6 @@ impl<R: Remote> Engine<R> {
                     Some(EngineCmd::SetRoot { slug, reply }) => {
                         let _ = reply.send(self.queue_set_root(slug));
                         cycle_now = true;
-                    }
-                    Some(EngineCmd::History { rel, reply }) => {
-                        let _ = reply.send(self.history(&rel).await);
-                    }
-                    Some(EngineCmd::Revision { rel, hash, reply }) => {
-                        let _ = reply.send(self.revision(&rel, &hash).await);
                     }
                     Some(EngineCmd::VersionsIndex { reply }) => {
                         if !self.worker_has("versions") {

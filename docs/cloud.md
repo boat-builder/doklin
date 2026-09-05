@@ -35,8 +35,9 @@ is `.claude/skills/verify/SKILL.md`.
   roles, no web editor and no web comments.
 - **Agent + wrangler is the only setup route.** The app mints the owner
   token, writes the prompt, the agent runs wrangler, one `ENDPOINT:` line
-  comes back, the app verifies and connects. Same for updating the worker
-  and for tearing it down.
+  comes back, the app verifies and connects. Tearing it down is another
+  prompt. Updating the worker is neither — the sequence is fixed, so it is
+  a script the app hands you two commands for (§7.4).
 
 ---
 
@@ -202,8 +203,8 @@ GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
 PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
                                  {existed: true}); 413 past 25 MB
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-GET    /api/history/<fid>        {version: 1, entries: [{r, h, s, t, b?}]}; 404 when there is none
-PUT    /api/history/<fid>        replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
+GET    /api/history/<fid>        DEPRECATED {version: 1, entries: [{r, h, s, t, b?}]}; 404 for none
+PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
 DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
 GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
 PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
@@ -221,6 +222,13 @@ DELETE /api/presence             this device left
 POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
                                  repeat until remaining:false. Frees the domain for a new binding.
 ```
+
+The three `/api/history/<fid>` routes are the **retired** manifest history
+([versioning.md](versioning.md) §6.5). No current app reads or writes one;
+`GET` and `PUT` stay because an app on an older release still does and this
+API only grows, and `DELETE` is what the current app's one-time clean-up
+calls (§6.9). Removing them would break a device the user has not updated,
+which is the one thing the worker contract never does.
 
 Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
 `404 {"error":"not bound"}`. Reserved for invites (§8.1), not built:
@@ -565,8 +573,7 @@ in-memory worker in `tests.rs`, timings included (tokio's paused clock).
   "seq": 812,
   "files": {
     "f-3kq8…": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
-                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro",
-                  "hist": [ { "r": 6, "h": "…", "s": 4211, "t": …, "b": "…" } ] }
+                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro", "hist": [] }
   },
   "tombstones": { "f-old…": { "path": "Scratch.md", "rev": 3, "ts": …, "by": "…" } },
   "public": {
@@ -579,6 +586,12 @@ in-memory worker in `tests.rs`, timings included (tokio's paused clock).
 }
 ```
 
+- `hist` is **deprecated and always empty** since versioning phase 6
+  ([versioning.md](versioning.md) §6.5): a file's past is the version store's
+  now, not the manifest's. The field stays because an empty array is a valid
+  v2 manifest — `MANIFEST_VERSION` did not move — and because an app on an
+  older release is still filling it. Entries this device reads are dropped
+  the next time it rewrites that file; nothing is migrated out of them.
 - Keyed by **slug**. A file entry references the **fileId** (so a rename
   carries the page for free) and keeps a `path` snapshot (so a deleted-and-
   recreated file at the same path can be re-bound). A folder entry is keyed
@@ -626,8 +639,6 @@ cloud_sync_now(root) · cloud_pause(root, paused) · cloud_confirm_deletes(root)
 cloud_set_activity(path | null)                                         presence ("editing Projects/plan.md")
 cloud_publish(path, {slug?, title?, desc?})       -> slug               file or folder (decided by the path); queued op
 cloud_unpublish(root, slug) · cloud_set_root(root, slug | null)        slugs are per domain, so the root comes first
-cloud_history(path)                               -> CloudRevision[]    manifest tail + archive
-cloud_revision(path, hash)                        -> string             one revision's text
 cloud_wipe(root)                                  -> purged             owner; disconnects once the bucket is empty
 ```
 
@@ -727,33 +738,31 @@ OWNER_TOKEN` via a prompt, then the new token pasted into the Cloud panel.
 
 ### 6.9 History
 
-`cloud_history(path)` and `cloud_revision(path, hash)` read the manifest's
-inline tail, the archive and the blob from inside the engine (it already
-holds the manifest; the archive and the blob are one request each).
+**History is not a cloud feature** ([versioning.md](versioning.md)). The
+surface is the version rail (`HistoryRail.tsx`), and it reads the local
+version store, which every open folder has whether or not it is connected.
+The engine holds no history of its own: `cloud_history` and `cloud_revision`
+are gone, and so is the manifest's `hist` that fed them (§6.6).
 
-**Since [versioning.md](versioning.md) phase 2, history is no longer a cloud
-feature.** The surface is the version rail (`HistoryRail.tsx`), and it reads
-the local version store, which every open folder has whether or not it is
-connected. What being connected adds is depth, from two places, both folded
-in by `versions_history`:
+What being connected adds is **depth**, from one place — the mirrored
+version store (`cloud/versions.rs`). The engine puts this Mac's snapshots
+under `versions/`; every other device's snapshots come back the same way.
+They join the rail's walk as ordinary retained snapshots — a rename another
+Mac made is followed exactly like one made here — carrying `source: "cloud"`,
+and are read and compared through the version store like local ones.
+`EngineCmd::VersionsIndex`, `VersionSnapshot` and `VersionBlob` are the three
+read-through commands; a downloaded snapshot is cached under
+`<store>/cloud-cache/<id>.json.gz`, which is also what makes the daily cloud
+sweep cheap.
 
-- **The mirrored version store** (phase 3, `cloud/versions.rs`). The engine
-  puts this Mac's snapshots under `versions/`; every other device's
-  snapshots come back the same way. They join the rail's walk as ordinary
-  retained snapshots — a rename another Mac made is followed exactly like
-  one made here — carrying `source: "cloud"`, and are read and compared
-  through the version store like local ones. `EngineCmd::VersionsIndex`,
-  `VersionSnapshot` and `VersionBlob` are the three read-through commands;
-  a downloaded snapshot is cached under `<store>/cloud-cache/<id>.json.gz`,
-  which is also what makes the daily cloud sweep cheap.
-- **The sync manifest's own revisions** (phase 2's bridge). A manifest
-  revision is named by the first 16 characters of the same sha256 the store
-  uses, so one that prefixes a version already listed is the same bytes
-  under a shorter name and is dropped. What survives carries
-  `source: "manifest"`, is read through `cloud_revision`, and is restored by
-  handing its text to `versions_restore_file`. It exists because on the day
-  the rail shipped the local store was hours old and `hist` was not. Phase 6
-  stops writing `hist` and removes this branch.
+**The one-time clean-up.** What the retired system left in the bucket — the
+`history/<fid>.json` archives, and the blobs only their revisions pointed at
+— is deleted once, from the poll, 50 fileIds at a time:
+`WorkspaceState.legacy_cleanup` is the bookmark, archives first and then the
+blob inventory, so an interruption never leaves an archive naming bytes that
+are gone. It waits, silently and without erroring, on a paused workspace or
+a worker older than 3 (which has no `DELETE /api/history/<fid>`), and once
+both passes are done the workspace never looks again.
 
 The mirror itself runs in the engine: after a cycle that changed something,
 and hourly regardless (`MIRROR_EVERY`). It uploads each local snapshot the
@@ -798,7 +807,7 @@ every blob no retained snapshot references and older than an hour's grace.
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
 | **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item — and so are the root's *Workspace history…* and the *Recently deleted* row at the foot of the tree |
-| **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the versions other Macs mirrored — and, behind both, the manifest's own revisions — folded into the same list (§6.9); the trust line counts what is here against what is in the cloud. The selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
+| **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the versions other Macs mirrored folded into the same walk (§6.9); the trust line counts what is here against what is in the cloud. The selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
 | **Workspace history** (`WorkspaceHistory.tsx`) | the sidebar root's menu, the Cloud panel | The folder's retained moments by day, each with what it changed ("+2 −1 ~5"); the selected one's `changed` / `missing` / `added` with per-file ticks, *Restore selected* and *Restore all*, and an inline confirm stating the counts. A snapshot of now is taken first, so the toast's *Undo* is another restore. Not gated on the cloud |
 | **Recently deleted** (`RecentlyDeleted.tsx`) | the dimmed row at the foot of the sidebar (only when there is something in it), and the root's menu | Every file the store holds and the folder does not: name, old folder, when it was last seen, *Open* (the last content, read-only, in the version preview) and *Restore* (its old path, or beside it when that is taken). Not gated on the cloud |
 | **Versions settings** (`VersionsSettings.tsx`) | gear → *Versions · Version history…*, and the Cloud panel's *This Mac* | How far back this folder keeps (30 days / 90 days / a year / forever) and what it costs; the same for the bucket, when the workspace is connected and a mirror pass has run — one CAS, so every Mac reads the same answer; *Export…* (a folder picker, then one `tar.gz` of the folder and its history, with progress); and every store on this Mac with its size, the open one marked, the rest offering *Forget* behind an inline confirm. Only the cloud horizon is gated on the cloud |
@@ -976,8 +985,8 @@ one's own — §11.1 and §11.7 say what each one blocks.
     R2 put on every authenticated request, and the sync loop polls. Drop it,
     or derive it from presence, which already tracks liveness.
 - These routes are a `WORKER_VERSION` bump and a feature name of their own,
-  so every existing domain goes through the update prompt of §7.2 before an
-  invite works anywhere.
+  so every existing domain goes through the update of §7.2 before an invite
+  works anywhere.
 
 ### 8.2 Locking — leases on files
 
@@ -1081,10 +1090,10 @@ pnpm typecheck:worker                      # the worker against the Workers runt
 pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (26 cases)
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
-cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (49 tests)
+cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (50 tests)
 node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (130 checks)
 node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
-node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (33 steps)
+node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
 node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaScript off for the board (8 steps)
 ```

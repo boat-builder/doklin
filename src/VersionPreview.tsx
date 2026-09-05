@@ -11,7 +11,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "./Editor";
-import { cloudRevision } from "./cloud";
 import { versionsDiff, versionsRead, type FileVersion } from "./versions";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -101,21 +100,15 @@ export default function VersionPreview({
   const [patch, setPatch] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
 
-  // A sync-manifest revision is named by a 16-character hash the version
-  // store can't resolve, so it can be read and restored but not compared.
-  // A mirrored version is fetched like a local one and compares fine.
-  const comparable = version.source !== "manifest" && (newer == null || newer.source !== "manifest");
-
   useEffect(() => {
     let cancelled = false;
     setText(null);
     setFailed(null);
     void (async () => {
       try {
-        const loaded =
-          version.source === "manifest"
-            ? await cloudRevision(docPath, version.hash)
-            : await versionsRead(root, version.hash);
+        // Local or mirrored, a version is named by the same full sha256 and
+        // read the same way — the command falls back to the cloud blob.
+        const loaded = await versionsRead(root, version.hash);
         if (!cancelled) setText(loaded);
       } catch (e) {
         if (!cancelled) setFailed(errText(e));
@@ -127,7 +120,7 @@ export default function VersionPreview({
   }, [docPath, root, version]);
 
   useEffect(() => {
-    if (!showChanges || !comparable) return;
+    if (!showChanges) return;
     let cancelled = false;
     setPatch(null);
     void (async () => {
@@ -145,7 +138,7 @@ export default function VersionPreview({
     return () => {
       cancelled = true;
     };
-  }, [showChanges, comparable, root, docPath, version, newer]);
+  }, [showChanges, root, docPath, version, newer]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -202,16 +195,14 @@ export default function VersionPreview({
           >
             {copying ? "Copying…" : "Make a copy"}
           </button>
-          {comparable && (
-            <button
-              className={`version-banner-btn ${showChanges ? "is-on" : ""}`}
-              data-testid="show-changes"
-              aria-pressed={showChanges}
-              onClick={() => setShowChanges((v) => !v)}
-            >
-              Show changes
-            </button>
-          )}
+          <button
+            className={`version-banner-btn ${showChanges ? "is-on" : ""}`}
+            data-testid="show-changes"
+            aria-pressed={showChanges}
+            onClick={() => setShowChanges((v) => !v)}
+          >
+            Show changes
+          </button>
           <button className="version-banner-btn" data-testid="back-to-now" onClick={onBack}>
             Back to now
           </button>
@@ -221,10 +212,10 @@ export default function VersionPreview({
       <div className="version-preview-body">
         {failed && <div className="version-preview-hint">{failed}</div>}
         {!failed && text == null && <div className="version-preview-hint">Opening that version…</div>}
-        {!failed && text != null && showChanges && comparable && (
+        {!failed && text != null && showChanges && (
           patch == null ? <div className="version-preview-hint">Comparing…</div> : <DiffView patch={patch} />
         )}
-        {!failed && text != null && !(showChanges && comparable) && (
+        {!failed && text != null && !showChanges && (
           // The same editor the user writes in, with writing off: an old
           // version reads exactly like the document it is a version of.
           <Editor

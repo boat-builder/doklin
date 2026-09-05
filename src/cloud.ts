@@ -100,15 +100,6 @@ export type CloudProbe = {
   workspace: CloudWorkspaceRecord | null;
 };
 
-export type CloudRevision = {
-  rev: number;
-  hash: string;
-  size: number;
-  timeMs: number;
-  by: string;
-  current: boolean;
-};
-
 /** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
 export type CloudMarker = { domain: string; wsId: string };
 
@@ -177,8 +168,6 @@ export const cloudPublish = (path: string, opts: { slug?: string; title?: string
 
 export const cloudUnpublish = (root: string, slug: string) => invoke<void>("cloud_unpublish", { root, slug });
 export const cloudSetRoot = (root: string, slug: string | null) => invoke<void>("cloud_set_root", { root, slug });
-export const cloudHistory = (path: string) => invoke<CloudRevision[]>("cloud_history", { path });
-export const cloudRevision = (path: string, hash: string) => invoke<string>("cloud_revision", { path, hash });
 
 /** Erase everything on the workspace's domain and forget it here; resolves to the purged count. */
 export const cloudWipe = (root: string) => invoke<number>("cloud_wipe", { root });

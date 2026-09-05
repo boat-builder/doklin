@@ -56,7 +56,7 @@ use engine::{Engine, EngineCmd, EngineConfig, PublishRequest};
 use manifest::{clean_name, PublicKind};
 use remote::HttpRemote;
 use scan::{rel_path, write_json};
-use status::{emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Probe, Revision, StatusTable};
+use status::{emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Probe, StatusTable};
 
 /// The worker version this app was built against, parsed out of
 /// cloud-worker/src/version.ts by build.rs — the number the update badge
@@ -612,15 +612,6 @@ pub(crate) async fn cloud_set_root(app: AppHandle, root: String, slug: Option<St
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
 }
 
-/// Every revision of a document, newest first — for the History panel.
-#[tauri::command]
-pub(crate) async fn cloud_history(app: AppHandle, path: String) -> Result<Vec<Revision>, String> {
-    let (tx, rel) = with_inner(&app, |inner| {
-        route(inner, &path).ok_or_else(|| "that document isn't in a connected workspace".to_string())
-    })?;
-    ask(tx, |reply| EngineCmd::History { rel, reply }).await
-}
-
 /// The cloud version store's index for the workspace holding `path` — what
 /// the history rail merges with this Mac's own snapshots. `Ok(None)` when
 /// the workspace is connected to a worker that has no `versions` feature.
@@ -667,15 +658,6 @@ pub(crate) async fn version_blob(app: &AppHandle, path: &str, hash: &str) -> Res
     })?;
     let hash = hash.to_string();
     ask(tx, move |reply| EngineCmd::VersionBlob { hash, reply }).await
-}
-
-/// One revision's text.
-#[tauri::command]
-pub(crate) async fn cloud_revision(app: AppHandle, path: String, hash: String) -> Result<String, String> {
-    let (tx, rel) = with_inner(&app, |inner| {
-        route(inner, &path).ok_or_else(|| "that document isn't in a connected workspace".to_string())
-    })?;
-    ask(tx, |reply| EngineCmd::Revision { rel, hash, reply }).await
 }
 
 /// Erase everything on the workspace's domain (owner only) — the step that

@@ -37,23 +37,23 @@ export type VersionsStatus = {
  *  src-tauri/src/versions/history.rs — change both. */
 export type FileVersion = {
   ts: number;
-  /** The full sha256 for a version in either store; the sync manifest's
-   *  16-character prefix for a `manifest` revision. */
+  /** The full sha256, whichever store the version came out of. */
   hash: string;
   size: number;
   /** The device that took the snapshot. */
   by: string;
-  /** The capture's reason, or "" for a sync-manifest revision. */
+  /** The capture's reason. Empty only on a row the app synthesises — the
+   *  last state of a deleted file, which no capture produced. */
   reason: VersionReason | "";
   label: string | null;
   pinned: boolean;
   restoredFrom: number | null;
   /** The path as of that version — different from today's after a rename. */
   path: string;
-  /** Where the bytes come from: `local` (a blob on this Mac), `cloud` (the
-   *  mirrored version store, read through the engine) or `manifest` (the
-   *  sync manifest's own per-file revisions, which phase 6 retires). */
-  source: "local" | "cloud" | "manifest";
+  /** Where the bytes come from: `local` (a blob on this Mac) or `cloud`
+   *  (one another Mac mirrored, read through the engine). Two values since
+   *  phase 6 retired the sync manifest's own revisions. */
+  source: "local" | "cloud";
   /** This version is byte-for-byte the file on disk right now. */
   current: boolean;
 };
@@ -192,9 +192,8 @@ export const versionsSetPinned = (root: string, ts: number, pinned: boolean, lab
 /** The kill switch. Nothing already captured is touched. */
 export const versionsSetEnabled = (enabled: boolean) => invoke<void>("versions_set_enabled", { enabled });
 
-/** Every version of one document, newest first. Where the workspace is
- *  connected, the manifest's own revisions are folded in behind the local
- *  ones so history does not shrink on the day the rail ships. */
+/** Every version of one document, newest first — this Mac's snapshots and
+ *  the ones other Macs mirrored, in one walk. */
 export async function versionsHistory(path: string): Promise<FileHistory> {
   const r = await invoke<FileHistory | null>("versions_history", { path });
   return r ?? { root: "", currentHash: null, versions: [] };
@@ -303,9 +302,8 @@ export const versionsRunning = (s: VersionsStatus | null): boolean =>
  *  moments. Kept beside the contract because the reasons are the contract. */
 export function versionReasonWord(v: Pick<FileVersion, "reason" | "source">): string {
   // A mirrored version carries the reason the device that took it recorded,
-  // and `by` already says which Mac that was. A manifest revision carries
-  // neither, so the source is all there is to say.
-  if (v.source === "manifest") return "from the cloud";
+  // and `by` already says which Mac that was — so the word is the same on
+  // both sides of the walk.
   switch (v.reason) {
     case "interval":
       return "while editing";

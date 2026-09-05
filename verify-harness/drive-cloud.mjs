@@ -524,11 +524,11 @@ await poll(async () => (await dialog("Cloud").count()) === 1);
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 
-/* 18 — history: the rail, and the two things only a connected workspace
-   puts on it — a version another Mac mirrored (read like a local one) and,
-   behind both, a revision only the sync manifest reaches back to, read
-   through cloud_revision and restored as the new current state
-   (docs/versioning-plan.md §5.3, §6.3). drive-versions.mjs walks the rail
+/* 18 — history: the one thing only a connected workspace puts on the rail —
+   a version another Mac mirrored, read like a local one and restored as the
+   new current state (docs/versioning-plan.md §6.3). Since phase 6 that is
+   the whole of it: the sync manifest carries no history to fall back on, and
+   nothing here asks it for a revision. drive-versions.mjs walks the rail
    itself; this is the part a folder on its own never has. */
 await page.evaluate(() => {
   const midnight = new Date();
@@ -563,19 +563,6 @@ await page.evaluate(() => {
         source: "cloud",
         current: false,
       },
-      {
-        ts: midnight.getTime() - 86400000 + 15 * 3600000,
-        hash: "h2",
-        size: 20,
-        by: "Bob",
-        reason: "",
-        label: null,
-        pinned: false,
-        restoredFrom: null,
-        path: "other.md",
-        source: "manifest",
-        current: false,
-      },
     ],
   };
   window.__versions.blobs["f".repeat(64)] = "# Other\n\nwritten on the iMac\n";
@@ -584,37 +571,37 @@ await page.locator('[data-tree-path="/docs/other.md"]').click({ button: "right" 
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Version history" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Version history" }).click();
 await poll(async () => (await tid("history-rail").count()) === 1);
-await poll(async () => (await page.locator('[data-source="manifest"]').count()) === 1);
+await poll(async () => (await page.locator('[data-source="cloud"]').count()) === 1);
 const whereHistoryLives = await tid("history-trust").textContent();
 
-// A version another Mac mirrored: it says which Mac and why, reads through
-// the version store like any other, and can be compared.
+// It says which Mac and why, reads through the version store like any other
+// version, compares — and restores by TEXT, because the local store never
+// saw those bytes.
 const mirrored = page.locator('[data-source="cloud"]');
 const mirroredRow = await mirrored.textContent();
 await mirrored.click();
 await poll(async () => (await tid("version-preview").innerText()).includes("written on the iMac"));
 const mirroredRead = await lastVersionCall("versions_read");
 const mirroredComparable = (await tid("show-changes").count()) === 1;
-
-await page.locator('[data-source="manifest"]').click();
-await poll(async () => (await tid("version-preview").innerText()).includes("bob's revision"));
-const manifestComparable = (await tid("show-changes").count()) === 0;
 await tid("restore-version").click();
-await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nbob's revision\n");
+await poll(
+  async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nwritten on the iMac\n",
+);
 const cloudRestore = await lastVersionCall("versions_restore_file");
 step(
-  "history: another Mac's versions and the manifest's own revisions ride the same rail, each read where it lives",
-  // The merge itself happens in Rust (versions_history folds both in there),
-  // so what the frontend can be held to is the rows and how each reads.
-  whereHistoryLives.includes("1 here · 2 in the cloud") &&
+  "history: another Mac's version rides the same rail, read where it lives and restored by its text",
+  // The merge itself happens in Rust (versions_history walks both stores
+  // there), so what the frontend can be held to is the rows and how each reads.
+  whereHistoryLives.includes("1 here · 1 in the cloud") &&
     mirroredRow.includes("Sherin's iMac") &&
     mirroredRead.args.hash === "f".repeat(64) &&
     mirroredComparable &&
-    manifestComparable &&
-    (await lastCall("cloud_revision")).args.hash === "h2" &&
-    // Restored by TEXT, not by a hash: the local store never saw those bytes.
     cloudRestore.args.hash === null &&
-    cloudRestore.args.text === "# Other\n\nbob's revision\n",
+    cloudRestore.args.text === "# Other\n\nwritten on the iMac\n" &&
+    // Phase 6: the manifest is out of the history business entirely.
+    (await page.evaluate(() =>
+      window.__cloud.calls.every((c) => c.cmd !== "cloud_history" && c.cmd !== "cloud_revision"),
+    )),
   `${whereHistoryLives} / ${mirroredRow}`,
 );
 await page.screenshot({ path: SHOTS + "cloud-05-history.png" });

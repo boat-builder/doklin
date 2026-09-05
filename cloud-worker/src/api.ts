@@ -17,9 +17,14 @@
 //   GET    /api/blobs/<fid>/<hash>   the bytes
 //   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op)
 //   DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-//   GET    /api/history/<fid>        {version, entries}
-//   PUT    /api/history/<fid>        replace the archive (advisory, size-capped)
+//   GET    /api/history/<fid>        DEPRECATED {version, entries}
+//   PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, size-capped)
 //   DELETE /api/history/<fid>        drop the archive (204 whether or not one was there)
+//                                    — the three above are the retired manifest history
+//                                    (docs/versioning.md §6.5). No current app reads or writes
+//                                    one; GET and PUT stay because an app on an older release
+//                                    still does, and this API only grows. DELETE is what the
+//                                    current app's one-time clean-up calls.
 //   GET    /api/versions/index       the version store's index + x-versions-etag; 404 when none
 //   PUT    /api/versions/index       x-base-etag required ("*" creates); 412 + etag on a lost race
 //   GET    /api/versions/snapshots/<id>   the gzip'd workspace state
