@@ -253,12 +253,14 @@ Every page carries `<meta name="robots" content="noindex">` and the
 
 - `OWNER_TOKEN` is compared by SHA-256 in constant time. Role `owner`.
 - `auth/tokens/<sha256(token)>.json` — per-person tokens an invite will mint,
-  role `member`. The set is empty today; the lookup exists so the invite
-  feature is an addition, not a change. Members may sync and publish; only
-  the owner may bind, wipe, invite, or revoke. Revocation is deleting the
-  object.
+  role `member`. The set is empty today; the lookup exists so *resolving* a
+  member token is an addition, not a change. The route that mints one is
+  not: it must answer without a bearer, so it carves out of the gate above
+  (§8.1). Members may sync and publish; only the owner may bind, wipe,
+  invite, or revoke. Revocation is deleting the object.
 - No cookies, no gate, no sessions, no rate limiter for visitors — there is
-  nothing to unlock.
+  nothing to unlock. A join route would be the first thing worth guessing,
+  which is why §8.1 leaves throttling open rather than assumed.
 
 ### 5.5 The binding
 
@@ -906,7 +908,40 @@ Neither feature is built; both are shaped for.
 - What is already there for it: the token lookup in `authenticate` beside
   the owner secret, the `by` attribution on every revision, the join flow
   as an engine command, and a `cloud.json` entry that does not care which
-  kind of token it holds.
+  kind of token it holds. Revocation needs nothing new either — a 401
+  already becomes `Phase::Revoked` in the engine — and the wipe already
+  deletes every key, `auth/` included.
+- **A member is not a limited account.** `PUT /api/manifest` is not
+  role-gated: any valid bearer can rewrite the manifest wholesale,
+  tombstones included, and sync carries that to every device. Invites buy
+  attribution and per-person revocation — not read-only access, not
+  per-folder scope. Owner-only is exactly bind and wipe.
+- What is *not* settled, and wants deciding before this is built:
+  - **`POST /api/auth/join` answers without a bearer** — the invitee has no
+    credential yet — so it carves out above the `authenticate` gate in
+    `handleApi`. That part is a change, not an addition, and it is the one
+    change to the entry point every other route trusts: match on method
+    *and* path exactly.
+  - **Nothing throttles it.** §5.4's "no rate limiter" holds only while
+    there is nothing to unlock. A join route mints a credential from a
+    guessable string — three words and two digits is about 31 bits. The
+    wordlist size, an attempt cap and a lockout are all open, and R2 is a
+    poor counter: a cap likely means KV or a Durable Object.
+  - **`expiresAt` has no reaper.** The `wrangler.toml` the setup prompt
+    writes carries no cron trigger, and adding one changes deploy config
+    every existing domain would have to re-apply. Checking expiry at redeem
+    and filtering the list is the cheaper answer.
+  - **The wizard needs a third mode.** `CloudSetupMode` is `connect | join`,
+    and both hand a token to `cloud_probe`. An invitee has an email and a
+    code, so the order inverts: redeem to a token first, then probe. That is
+    a new engine command ahead of `cloud_join`, plus an owner-side members
+    view — the first stateful screen in the Cloud panel.
+  - **`lastSeenAt` in the token record is a trap.** Taken literally it is an
+    R2 put on every authenticated request, and the sync loop polls. Drop it,
+    or derive it from presence, which already tracks liveness.
+- These routes are a `WORKER_VERSION` bump and a feature name of their own,
+  so every existing domain goes through the update prompt of §7.2 before an
+  invite works anywhere.
 
 ### 8.2 Locking — leases on files
 

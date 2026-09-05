@@ -176,8 +176,14 @@ setup) is compared by SHA-256 in constant time — role `owner`. Any other
 bearer is looked up as `auth/tokens/<sha256(token)>.json`, the record an
 invite will mint for a member: role `member`, may sync and publish; only
 the owner may bind, wipe, invite or revoke. No invite exists yet, so the
-lookup finds nothing today — it is there so invites are an addition, not a
-change. Revocation is deleting the object.
+lookup finds nothing today — it is there so *resolving* a member token is an
+addition, not a change. The route that mints one is not: `POST
+/api/auth/join` has to answer without a bearer, so it carves out above the
+gate (docs/cloud.md §8.1). Revocation is deleting the object.
+
+A member is not a limited account: `PUT /api/manifest` is not role-gated, so
+any valid bearer can rewrite the manifest wholesale. Owner-only is exactly
+bind and wipe.
 
 ## Deploying
 
