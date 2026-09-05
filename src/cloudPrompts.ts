@@ -1,18 +1,28 @@
-// The three agent prompts (docs/cloud.md §7.4) and the naming rule
-// they share, as pure functions: the setup wizard, the update card and the
-// panel's teardown step render them, and verify-harness/cloudprompts.test.mjs
-// checks that no step is left for the agent to invent. Nothing here touches
-// the app — the version and the compatibility date come in as arguments
-// (the app reads them from virtual:cloud-worker-version via src/cloud.ts).
+// The agent prompts (docs/cloud.md §7.4) and the naming rule they share, as
+// pure functions: the setup wizard, the update card and the panel's teardown
+// step render them, and verify-harness/cloudprompts.test.mjs checks that no
+// step is left for the agent to invent. Nothing here touches the app — the
+// version and the compatibility date come in as arguments (the app reads
+// them from virtual:cloud-worker-version via src/cloud.ts).
 //
-// One skeleton for all three: the goal in a sentence, fetch the artifact,
-// establish credentials, verify identity before mutating, the config file
-// verbatim, deploy with the failure named, verify and print one line back,
-// and the negative scope at the end. Setup carries the token — its copy
-// point says so; update and teardown carry no secret.
+// Setup and teardown are prompts because they carry judgement: a name that
+// must be free, an account that may not have R2 on, a zone that may not be
+// on the account, a bucket that must be empty before it goes. The update
+// carries none — fetch the worker, confirm the names, write wrangler.toml,
+// deploy over the same name — so it is a script (scripts/doklin-cloud-update.sh,
+// attached to every release) and its "prompt" only asks an agent to run it.
+//
+// The two real prompts share one skeleton: the goal in a sentence, fetch the
+// artifact, establish credentials, verify identity before mutating, the
+// config file verbatim, deploy with the failure named, verify and print one
+// line back, and the negative scope at the end. Setup carries the token —
+// its copy point says so; update and teardown carry no secret.
 
 export const WORKER_BUNDLE_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js";
+/** scripts/doklin-cloud-update.sh, attached to every release beside the bundle. */
+export const WORKER_UPDATE_SCRIPT_URL =
+  "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh";
 export const REPO_URL = "https://github.com/boat-builder/doklin";
 
 /** Where a cloud lives: a domain of the user's own, or a free workers.dev address. */
@@ -180,28 +190,45 @@ export type UpdatePromptInput = {
   fromVersion: number | null;
   /** What this app was built for. */
   toVersion: number;
-  compatibilityDate: string;
 };
 
-/** Update: the same names, the new code, nothing else touched. No secret. */
+/** The endpoint as a bare `https://<host>`: what goes on a command line, and
+ *  what the script parses back into the same names as `deploymentNames`. */
+function endpointArg(endpoint: string): string {
+  return `https://${cleanDomain(endpoint) ?? endpoint.trim().toLowerCase()}`;
+}
+
+/** The two lines that update a domain — fetch the script, run it against the
+ *  endpoint. Shown on the update card for anyone who would rather run it than
+ *  hand it to an agent, and quoted inside the prompt below. */
+export function updateCommands(endpoint: string): string {
+  return [
+    `curl -fsSL ${WORKER_UPDATE_SCRIPT_URL} -o doklin-cloud-update.sh`,
+    `sh doklin-cloud-update.sh ${endpointArg(endpoint)}`,
+  ].join("\n");
+}
+
+/** Update: run the script. No secret — the token, the bucket and the domain
+ *  all survive a same-name redeploy, so nothing here is sensitive. The
+ *  prompt's whole job is the context (which domain, which versions) and the
+ *  boundary (the script is the job; don't deploy anything by hand). */
 export function buildUpdatePrompt(i: UpdatePromptInput): string {
-  const { worker, bucket, domain, certain } = deploymentNames(i.endpoint);
-  const running = i.fromVersion != null ? `the domain still runs version ${i.fromVersion}` : "the domain runs an older version";
-  const nameNote = certain
-    ? "certain: it is the first label of the workers.dev hostname"
-    : "Doklin's naming convention — verify it before deploying";
-  return `Update the Doklin cloud worker serving ${i.endpoint} to the latest code: the app I'm running was built for worker version ${i.toVersion}, and ${running}. It runs on my Cloudflare account. This is a code-only update — the R2 bucket binding, the OWNER_TOKEN secret and the domain routing all survive a same-name redeploy, so do not recreate or modify any of them.
+  const endpoint = endpointArg(i.endpoint);
+  const running =
+    i.fromVersion != null ? `the domain still runs version ${i.fromVersion}` : "the domain runs an older version";
+  const [fetchCmd, runCmd] = updateCommands(i.endpoint).split("\n");
+  return `Update the Doklin cloud worker serving ${endpoint} by running Doklin's update script. The app I'm running was built for worker version ${i.toVersion}, and ${running}. The worker is on my Cloudflare account, and this is a code-only redeploy — the R2 bucket binding, the OWNER_TOKEN secret and the domain routing all survive a same-name deploy — so there is no secret anywhere in this job and nothing else on the account is to be touched.
 
-1. ${FETCH_STEP}
-2. ${LOGIN_STEP}
-3. Confirm the worker's name before touching anything. It should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — I can see it in the Cloudflare dashboard under Workers & Pages — and never substitute a name you invented. Then \`npx -y wrangler@4 r2 bucket list\` must show its bucket, "${bucket}"; if it doesn't, ask me which bucket the worker is bound to (dashboard → the worker → Settings → Bindings) rather than guessing.
-4. Next to the downloaded file, write wrangler.toml with exactly this — the name and bucket confirmed in step 3, the account_id from step 2:
-${wranglerToml(worker, bucket, domain, i.compatibilityDate)}
-5. Deploy: \`npx -y wrangler@4 deploy\`. This must UPDATE the existing worker, never create a second one — the name in wrangler.toml decides. If anything suggests a new worker appeared (a "created" rather than "updated" message, a fresh workers.dev URL that isn't the endpoint above), delete what you just made with \`npx -y wrangler@4 delete --name <that-name>\` and go back to step 3.
-6. Verify: \`curl -sS -o /dev/null -w "%{http_code}" ${i.endpoint}/api/meta\` must print 401 — the updated worker is up and asking for the app's token, which you don't have; the app checks the version itself. Then print exactly this line:
-UPDATED: ${i.endpoint}
+1. In an empty working directory, fetch the script and run it against my domain:
+   mkdir -p doklin-cloud-update && cd doklin-cloud-update
+   ${fetchCmd}
+   ${runCmd}
+   If that download 404s, clone ${REPO_URL} and run \`scripts/doklin-cloud-update.sh\` from the clone instead — it is the same file.
+2. Let the script do the work, and show me its output. It signs me in to Cloudflare if I'm not signed in already, confirms the worker and its R2 bucket against my account before it writes anything, deploys the new code over the same name, and checks the domain afterwards. If it stops and asks for a worker or a bucket name, ask me — I can see both in the Cloudflare dashboard under Workers & Pages — and never give it a name you invented: deploying under a name that doesn't exist would create a SECOND worker instead of updating mine.
+3. When the script finishes, print exactly this line back to me — it is the last thing the script prints:
+UPDATED: ${endpoint}
 
-${NEGATIVE_SCOPE}`;
+Do not deploy anything by hand, and do not create or modify any Cloudflare resource yourself: the script is the whole job.`;
 }
 
 export type TeardownPromptInput = { endpoint: string };

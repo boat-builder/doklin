@@ -35,8 +35,9 @@ is `.claude/skills/verify/SKILL.md`.
   roles, no web editor and no web comments.
 - **Agent + wrangler is the only setup route.** The app mints the owner
   token, writes the prompt, the agent runs wrangler, one `ENDPOINT:` line
-  comes back, the app verifies and connects. Same for updating the worker
-  and for tearing it down.
+  comes back, the app verifies and connects. Tearing it down is another
+  prompt. Updating the worker is neither — the sequence is fixed, so it is
+  a script the app hands you two commands for (§7.4).
 
 ---
 
@@ -791,9 +792,9 @@ every blob no retained snapshot references and older than an hour's grace.
   `cloudForWorkspace` memo, listeners for the five events, the dialogs'
   open-states, `stopPublishing` (with the toast's Undo re-publishing under
   the same slug, title and description), and the wiring below.
-- `src/cloudPrompts.ts` — the three agent prompts and the naming rule, as
-  pure functions of the target, the token, the version and the
-  compatibility date (§7.4).
+- `src/cloudPrompts.ts` — the prompts and the naming rule, as pure functions
+  of the target, the token, the version and the compatibility date, plus the
+  two commands that run the update script (§7.4).
 
 ### 7.2 Surfaces
 
@@ -801,7 +802,7 @@ every blob no retained snapshot references and older than an hour's grace.
 | --- | --- | --- |
 | **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…* and *Open a workspace from a domain…*. Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
 | **Setup wizard** (`CloudSetup.tsx`) | the panel's two entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear |
-| **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), one prompt with no secret that deploys over the same name, *Check again* — which sends the engine a probe; a `worker-outdated` pause resumes on it |
+| **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
@@ -826,15 +827,25 @@ every blob no retained snapshot references and older than an hour's grace.
   version — one signal — and the *Cloud…* item carries a dot for the same
   reason.
 
-### 7.4 The agent prompts
+### 7.4 The prompts, and the update script
 
-Three prompts, one skeleton: the goal in a sentence, fetch the artifact,
-establish credentials, verify identity before mutating, the config file
-verbatim, deploy with the failure named, verify and print one line back,
-and the negative scope at the end. Setup carries the token — its copy point
-says so; update and teardown carry no secret.
-`verify-harness/cloudprompts.test.mjs` checks all three leave the agent
-nothing to invent.
+Setup and teardown are prompts because they carry judgement: a name that
+must be free, an account that may not have R2 switched on, a zone that may
+not be on the account, a bucket that must be empty before it goes. Both
+follow one skeleton: the goal in a sentence, fetch the artifact, establish
+credentials, verify identity before mutating, the config file verbatim,
+deploy with the failure named, verify and print one line back, and the
+negative scope at the end. Setup carries the token — its copy point says
+so; teardown carries no secret.
+
+The update carries no judgement at all — fetch the worker, confirm the
+names, write `wrangler.toml`, deploy over the same name — so it is a
+script, `scripts/doklin-cloud-update.sh`, attached to every release beside
+the bundle. The card hands out the two commands that run it; its "prompt"
+only asks an agent to run those same two.
+`verify-harness/cloudprompts.test.mjs` checks the prompts leave the agent
+nothing to invent, and holds the script to the app's naming rule (through
+its `--names` mode) and to the worker's own compatibility date.
 
 **Setup** (`buildSetupPrompt`): *one Worker in front of one R2 bucket,
 serving Doklin's cloud for the workspace "Notes" at `notes.example.com`* (or
@@ -876,15 +887,38 @@ will answer at …*). Then:
 9. Print exactly `ENDPOINT: https://…`. *Do not commit `wrangler.toml`
    anywhere; do not create or modify any other Cloudflare resources.*
 
-**Update** (`buildUpdatePrompt`, no secret): fetch the bundle, `whoami`,
-confirm the worker's name before touching anything (certain for a
-workers.dev address — it is the hostname's first label; a convention to
-verify for a custom domain — and never a name the agent invented), the
-config verbatim, `deploy` over the same name (a "created" message or a
-fresh URL means a second worker appeared: delete it and go back), verify
-that `/api/meta` now answers `401` (the new worker is up and asking for the
-token the agent doesn't have; the app checks the version itself), print
+**Update** — the script (`scripts/doklin-cloud-update.sh`, no secret):
+
+```sh
+curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh -o doklin-cloud-update.sh
+sh doklin-cloud-update.sh https://notes.example.com
+```
+
+It reads the worker and bucket names off the endpoint by the same rule as
+`deploymentNames` (certain for a workers.dev address — the hostname's first
+label; the convention, to be verified, for a custom domain), fetches the
+bundle, signs in through `wrangler login` if `whoami` names no account,
+picks the account (`CLOUDFLARE_ACCOUNT_ID` when the login has several),
+**confirms the worker and its bucket exist on that account**, writes
+`wrangler.toml` in a temp directory, deploys over the same name, then polls
+`/api/meta` for the `401` that means the new worker is serving (the script
+holds no token; the app checks the version itself) and prints
 `UPDATED: <endpoint>`.
+
+The one hazard is a name that doesn't exist: deploying it would CREATE a
+second worker rather than update the intended one. So the two confirmations
+are hard preconditions — with a terminal the script asks for the real name
+and retries; without one (`curl … | sh`) it stops and names the
+`WORKER_NAME=` / `BUCKET_NAME=` override to re-run with. Nothing else on
+the account is touched, and the temp directory goes on exit, so no
+`wrangler.toml` is left anywhere.
+
+**Update** (`buildUpdatePrompt`, no secret): which domain, which version it
+runs against which the app expects, the two commands above (with the
+clone-the-repo fallback should the download 404), *let the script do the
+work and show me its output — if it asks for a worker or bucket name, ask
+me, and never give it one you invented*, print `UPDATED: <endpoint>`, and
+the negative scope: don't deploy by hand, the script is the whole job.
 
 **Teardown** (`buildTeardownPrompt`, no secret; run only after the app's
 wipe emptied the bucket): `whoami`, confirm the names, `wrangler delete
@@ -951,8 +985,8 @@ one's own — §11.1 and §11.7 say what each one blocks.
     R2 put on every authenticated request, and the sync loop polls. Drop it,
     or derive it from presence, which already tracks liveness.
 - These routes are a `WORKER_VERSION` bump and a feature name of their own,
-  so every existing domain goes through the update prompt of §7.2 before an
-  invite works anywhere.
+  so every existing domain goes through the update of §7.2 before an invite
+  works anywhere.
 
 ### 8.2 Locking — leases on files
 
@@ -995,8 +1029,16 @@ one's own — §11.1 and §11.7 say what each one blocks.
    not what "publish this folder" means anywhere else). The dialog says
    plainly what will be public. Individual notes can still be published on
    their own.
-5. **Agent + wrangler only.** Rejected: a dashboard paste (the route that
-   would have embedded the worker in the app), a terminal script.
+5. **Agent + wrangler for setup and teardown; a script for the update.**
+   Setup and teardown ask questions a script can't (is this name free, is
+   R2 on, is the zone on this account, is the bucket empty) — the update
+   asks none, so making it a prompt only gave an agent room to improvise
+   over a fixed sequence. `scripts/doklin-cloud-update.sh` is the sequence,
+   shipped with the release; the update prompt now just runs it, which is
+   also how a person runs it. Rejected: a dashboard paste (the route that
+   would have embedded the worker in the app); a script for setup too (it
+   would have to invent answers to the questions above, or refuse — which
+   is what an agent is for).
 6. **New resource names (`doklin-<domain>`), a new secret name
    (`OWNER_TOKEN`), a new binding (`DATA`), the version counter restarted
    at 1.** So a deploy can never land on a stack from the previous design,
@@ -1049,7 +1091,7 @@ pnpm test:worker                           # cloud-worker/test/run.mjs — every
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (50 tests)
-node verify-harness/cloudprompts.test.mjs  # the three prompts (111 checks)
+node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (130 checks)
 node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787

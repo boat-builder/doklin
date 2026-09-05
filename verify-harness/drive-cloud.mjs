@@ -414,23 +414,28 @@ step(
   `${mirrorLine} / ${oldWorkerLine}`,
 );
 
-/* 12 — the update card: v→v, a prompt without the token, Check again */
+/* 12 — the update card: v→v, the script commands and a prompt that runs them
+   (neither carrying the token), Check again */
 await setStatuses([status({ phase: "worker-outdated", workerVersion: 0 })]);
 await tid("sidebar-cloud-dot").click();
 await poll(async () => (await tid("update-worker").count()) === 1);
 await tid("update-worker").click();
 await poll(async () => (await dialog("Update the worker").count()) === 1);
+const updateCommands = await tid("update-commands").textContent();
 const updatePrompt = await tid("update-prompt").textContent();
 const versionLine = await page.locator(".cloud-version-line").textContent();
 await page.locator(".modal-btn", { hasText: "Check again" }).click();
 await poll(async () => (await calls("cloud_check_worker")).length === 1);
 await poll(async () => (await dialog("Update the worker").textContent()).includes("Up to date"));
 step(
-  "update card: v0 → current, prompt names the worker and carries no token, Check again re-probes and the card rests",
+  "update card: v0 → current, the two commands and the prompt that runs them, neither carrying the token, Check again re-probes and the card rests",
   versionLine.includes("v0") &&
     versionLine.includes(`v${WORKER_VERSION}`) &&
-    updatePrompt.includes("deployments list --name doklin-notes-example-com") &&
+    updateCommands.includes("doklin-cloud-update.sh") &&
+    updateCommands.includes("sh doklin-cloud-update.sh https://notes.example.com") &&
+    updatePrompt.includes("sh doklin-cloud-update.sh https://notes.example.com") &&
     updatePrompt.includes("UPDATED: https://notes.example.com") &&
+    !updateCommands.includes(TOKEN) &&
     !updatePrompt.includes(TOKEN) &&
     (await page.locator(".settings-fab-badge").count()) === 0,
 );

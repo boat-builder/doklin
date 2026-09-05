@@ -259,14 +259,17 @@ node verify-harness/metafile.test.mjs      # the entity meta file: expand/extrac
 node verify-harness/tablewidths.test.mjs   # table-width identity (src/tableWidths.ts): what
                                            # keeps a column width and what deliberately drops
                                            # it, colspan/rowspan, junk records
-node verify-harness/cloudprompts.test.mjs  # the three agent prompts (src/cloudPrompts.ts) —
-                                           # setup with the token, update and teardown without
-                                           # — and the naming rule they share: numbered steps,
-                                           # login, verify-before-mutate, the config verbatim,
-                                           # the failure named, one line back, the negative
-                                           # scope; a workers.dev name is certain, a custom
-                                           # domain's is a convention the prompt says to verify
-                                           # (112 checks)
+node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) and the update
+                                           # script (scripts/doklin-cloud-update.sh): setup
+                                           # carries the token, teardown doesn't, both follow
+                                           # the skeleton — numbered steps, login,
+                                           # verify-before-mutate, the config verbatim, the
+                                           # failure named, one line back, the negative scope;
+                                           # the update prompt only runs the script and names
+                                           # no wrangler command of its own; and the script is
+                                           # held to the app's naming rule (its --names mode),
+                                           # the worker's compatibility date and the bundle URL
+                                           # (130 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
