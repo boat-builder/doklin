@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "doklin"
-version = "0.1.83"
+version = "0.1.84"
 dependencies = [
  "base64 0.23.1",
  "chrono",
