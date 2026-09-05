@@ -3,9 +3,11 @@
 // when that is not it — looked up as auth/tokens/<sha256>.json, the record
 // an invite mints for a member (docs/cloud.md §5.4, §8.1). No
 // invite exists yet, so today the lookup finds nothing; it is here so that
-// invites are an addition, not a change. Keying credential objects by their
-// own hash makes resolving a bearer ONE strongly-consistent R2 get and makes
-// revocation (delete the object) take effect on the very next request.
+// RESOLVING a member token is an addition, not a change. The route that
+// mints one is not: it has to answer without a bearer, so it carves out
+// above this gate (§8.1). Keying credential objects by their own hash makes
+// resolving a bearer ONE strongly-consistent R2 get and makes revocation
+// (delete the object) take effect on the very next request.
 
 import type { Env } from "./env";
 import { ID_RE, MAX_NAME_LEN, tokenKey } from "./layout";
