@@ -885,7 +885,9 @@ isn't empty, STOP — never force it*), verify the endpoint no longer answers
 
 ## 8. Room to grow
 
-Neither feature is built; both are shaped for.
+Neither feature is built; both are shaped for. Both are also blockers the
+moment a workspace is shared with people rather than with a second Mac of
+one's own — §11.1 and §11.7 say what each one blocks.
 
 ### 8.1 Invites — email + code
 
@@ -1016,7 +1018,124 @@ joining. That is a manual pass on macOS with `pnpm tauri dev`.
 
 ---
 
-## 11. Where it came from
+## 11. Blockers — what a team of ten runs into
+
+Everything above is designed for one person with one or two Macs. This
+section answers a different question: ten people, one workspace, one domain,
+Cloudflare's free plan. Each item is a blocker — what it is, and what it
+actually blocks.
+
+None of them loses data. Blobs are content-addressed and idempotent, a
+manifest CAS loser rebuilds from the winner's manifest rather than
+overwriting it, and two people who overlap on one file get a conflict copy
+with both sides intact. The failures here are quota, latency and
+administration.
+
+### 11.1 There is one credential, so there are no people
+
+§8.1 is not built. `authenticate` (`auth.ts:61`) matches the bearer against
+the `OWNER_TOKEN` secret and answers `role: "owner"`; anything else falls
+through to a token record under `auth/tokens/` that no flow mints. Ten people
+therefore means ten copies of one secret, ten owners, and ten
+`POST /api/admin/wipe` buttons — the route's own guard is
+`auth.role !== "owner"` (`api.ts:139`), which every caller passes. Removing
+one person means rotating the secret and reconnecting every other Mac.
+
+**Blocks:** sharing a workspace with *people* rather than with a second Mac
+of your own — which is the team case entirely. Downstream of it: per-person
+attribution (`by` is a device name, never a person) and §8.2's leases, which
+need an identity to put in "Alice is editing".
+
+### 11.2 The idle heartbeat is the free plan's real budget
+
+Every connected device sends `GET /api/poll` every 15 s (`POLL_INTERVAL`,
+`engine.rs:66`) and `PUT /api/presence` every 30 s — `PRESENCE_BEAT` is 25 s
+(`engine.rs:76`) but is only tested on the poll tick (`engine.rs:1784`), so it
+fires on every second poll. That is **six requests a minute per device,
+forever, with nobody typing**. Ten devices at ten hours is not ten times one
+device at one hour; it is a floor that never drops.
+
+| Free-plan budget | Ten Macs, app left open | Ten Macs, eight hours a day |
+| --- | --- | --- |
+| Workers, 100,000 requests/day | 86,400 — **86 %** | 28,800 — 29 % |
+| R2 Class A, 1 M/month (the presence `put`, `api.ts:348`) | 864,000 — **86 %** | 288,000 — 29 % |
+| R2 Class B, 10 M/month (the poll's `head` + `get`, `api.ts:97`) | 4.3 M — 43 % | 1.4 M — 14 % |
+| R2 storage, 10 GB | well under 1 % | well under 1 % |
+
+The heartbeat, not the content and not the version store, is what spends the
+free plan. `PRESENCE_TTL_MS` is 90 s (`layout.ts:75`), so a 60 s beat would
+still be well inside the TTL and would cut the dominant Class A consumer by
+2.4× — the headroom is there, it is simply not taken.
+
+**Blocks:** ten Macs left running on the free plan. It does *not* block ten
+Macs used during working hours and quit at the end of the day, which is the
+difference between comfortable and over the cap.
+
+### 11.3 One edit fans out to everyone
+
+A won CAS moves the manifest etag, so within 15 s every other device's poll
+sees it and runs a full cycle: `GET /api/manifest` plus a blob `GET` per
+changed file. One person's save therefore costs the author about three
+requests and the rest of the team about two each — roughly `2(N−1) + 3`. At
+N = 10 and a modest 2,000 team edits a day that is some 42,000 requests on
+top of §11.2's floor, which is what carries a left-open team past 100,000.
+
+**Blocks:** the free plan for an actively editing team of ten. The shape is
+right — a poll that only costs a `head` when nothing moved is the cheap
+design — but the fan-out multiplies by device count, and nothing coalesces
+bursts of edits from one author into one wake for everyone else.
+
+### 11.4 Nothing backs off
+
+`next_poll` is reset to `now + POLL_INTERVAL` on every path
+(`engine.rs:1788`), and a 429 arrives as `RemoteError::Other("http 429: …")`
+(`remote.rs:282`) — an error phase, not a signal to slow down. Past the daily
+cap ten devices keep asking six times a minute until midnight UTC.
+
+**Blocks:** degrading gracefully. Over quota the team does not get slower, it
+gets errors and keeps hammering — and burns the next day's allowance on the
+retries.
+
+### 11.5 The manifest CAS retries in lockstep
+
+`CAS_ATTEMPTS` is 4 (`engine.rs:91`) and a lost race is a bare `continue`
+(`engine.rs:636`) — no backoff, no jitter. The algorithm is correct: the
+loser refetches, re-applies remote, re-scans and rebuilds `next` from the
+*winner's* manifest, so two people editing two different files both land and
+neither is overwritten; already-uploaded blobs stay valid. But ten writers
+retry on the same instant, and a device that loses four races in a row does
+nothing until its next poll, up to 15 s later.
+
+**Blocks:** predictable sync latency with ten concurrent writers. Not
+correctness — no edit is lost by this path.
+
+### 11.6 The workspace caps are per workspace, not per person
+
+`MAX_MANIFEST_FILES` is 5000 and `MAX_MANIFEST_BYTES` 4 MB
+(`layout.ts:62-63`). One person's notes and ten people's shared notes meet
+the same ceiling, and a team workspace is the kind that grows.
+
+**Blocks:** a shared workspace past 5000 files.
+[versioning.md](versioning.md) §6.5 buys headroom against the *byte* cap once
+`hist` retires — the manifest drops to about a sixth per file — but the entry
+cap does not move with it.
+
+### 11.7 Two people on one file find out afterwards
+
+§8.2 is not built, and there is no lock anywhere in the engine or the worker.
+Overlapping edits are merged three ways against the stored base, and where
+that fails they land as `Meeting notes (conflict — Alice, Jul 11 14.32).md`
+(`engine.rs:812`). Nothing is lost and nothing is blocked — but the first the
+team hears of a collision is a second file in the sidebar, after the fact.
+Presence already reports who is editing which path; nothing reads it in the
+editor.
+
+**Blocks:** nothing structurally. This is the UX floor a team notices on day
+one, and the reason §8.2 is shaped for.
+
+---
+
+## 12. Where it came from
 
 The previous cloud grew by accretion — a way to share one file became a way
 to share a folder, then a place visitors could comment and edit, then a
