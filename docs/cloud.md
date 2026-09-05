@@ -1091,7 +1091,7 @@ pnpm test:worker                           # cloud-worker/test/run.mjs — every
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (50 tests)
-node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (130 checks)
+node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (131 checks)
 node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
