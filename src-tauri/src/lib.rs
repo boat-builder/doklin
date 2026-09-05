@@ -2015,8 +2015,6 @@ pub fn run() {
             cloud::cloud_publish,
             cloud::cloud_unpublish,
             cloud::cloud_set_root,
-            cloud::cloud_history,
-            cloud::cloud_revision,
             cloud::cloud_wipe,
             versions::versions_status,
             versions::versions_snapshots,

@@ -252,14 +252,29 @@ where the disk, the archive and the Finder are real.
 
 ## 10. The old system is gone and nothing noticed
 
-Phase 6.
+Phase 6. This is the one section where the *absence* of an effect is the
+result: the manifest stops carrying history and the bucket loses what the
+old system left, and none of it should be visible from inside the app.
 
 - [ ] Version history looks the same before and after the upgrade for a
       workspace that has been connected for a while.
 - [ ] A Mac still on the **old** build syncs happily against a domain a new
-      Mac has upgraded, and its own history panel still works.
-- [ ] The bucket loses its old per-file archives over the following day or
-      two, and the manifest gets smaller. Nothing else changes.
+      Mac has upgraded, both ways, and its own history panel still answers —
+      from its own store, which this never touches.
+- [ ] The bucket loses its old per-file archives over the following hour or
+      two of the app being open, and keeps losing them across a restart
+      rather than starting over. Watch `history/` empty out with
+      `wrangler r2 object list`.
+- [ ] The manifest gets smaller — pull it and check a file entry carries
+      `"hist": []` — and nothing else about it changes.
+- [ ] `blobs/<fid>/` ends up holding one object per live file, and nothing
+      at all for a file deleted more than a day ago. No document loses its
+      current content.
+- [ ] Connect a folder to a domain whose worker is one version behind. The
+      clean-up does not run, nothing errors, the phase stays *Synced*, and
+      it runs after the worker is updated.
+- [ ] *Show changes* is on **every** version in the rail now, including the
+      oldest one a connected workspace has.
 
 ## 11. The promises, tested directly
 

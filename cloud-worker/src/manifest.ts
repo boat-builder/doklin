@@ -32,6 +32,9 @@ export type ManifestFile = {
   size: number;
   mtime?: number;
   by?: string;
+  /** DEPRECATED (docs/versioning.md §6.5). The current app always sends an
+   *  empty array; only an older release still fills it. Kept because an
+   *  empty one is a valid v2 manifest and the API only grows. */
   hist?: HistEntry[];
 };
 
@@ -202,7 +205,9 @@ export function validateManifest(data: unknown): ManifestProblem | null {
   return problem ? bad(problem) : null;
 }
 
-/** The deep revision archive of one file, as PUT /api/history/<fid> stores it. */
+/** DEPRECATED (docs/versioning.md §6.5): the deep revision archive of one
+ *  file, as PUT /api/history/<fid> stores it. Nothing current writes one;
+ *  the shape check stays for the apps that still do. */
 export const HISTORY_VERSION = 1;
 
 export function validHistoryArchive(data: unknown, maxEntries: number): boolean {

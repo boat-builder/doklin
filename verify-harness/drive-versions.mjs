@@ -265,57 +265,8 @@ await page.locator(".history-rail-close").click();
 await page.keyboard.press("Meta+Shift+KeyD");
 await poll(async () => (await page.locator(".draft-row").count()) === 0);
 
-/* 17 — the cloud read-through: on the day the rail ships the local store is
-       hours old and the manifest's `hist` is not, so what the user can see
-       today stays visible. A cloud-only revision wears its badge and is read
-       through cloud_revision, not out of the local store. */
-await page.evaluate(() => {
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
-  const h = window.__versions.histories["/docs/other.md"];
-  h.versions = [
-    ...h.versions.slice(0, 2),
-    {
-      // Yesterday afternoon: an open group, so the row is on screen without
-      // an expand — the point of the step is the badge, not the grouping.
-      ts: midnight.getTime() - 86400000 + 14 * 3600000,
-      hash: "h2",
-      size: 20,
-      by: "Bob",
-      reason: "",
-      label: null,
-      pinned: false,
-      restoredFrom: null,
-      path: "other.md",
-      source: "manifest",
-      current: false,
-    },
-  ];
-});
-await openRail("/docs/other.md");
-await poll(async () => (await page.locator('[data-source="manifest"]').count()) === 1);
-const where = await tid("history-trust").textContent();
-const cloudRow = page.locator('[data-source="manifest"]');
-step(
-  "a revision only the cloud has appears, with where history lives",
-  where.includes("in the cloud") && (await cloudRow.textContent()).includes("from the cloud"),
-  where,
-);
-await cloudRow.click();
-await poll(async () => (await tid("version-preview").innerText()).includes("bob's revision"));
-step(
-  "and it is read through the cloud, not the local store",
-  (await page.evaluate(() => window.__cloud.calls.filter((c) => c.cmd === "cloud_revision").at(-1)?.args.hash)) === "h2" &&
-    // The manifest names its revisions by a 16-character hash the version
-    // store can't resolve, so there is nothing to compare it against.
-    (await tid("show-changes").count()) === 0,
-);
-await page.screenshot({ path: SHOTS + "versions-04-cloud.png" });
-
-/* 19 — a version another Mac mirrored: the same rail, the same reads. What
+/* 17 — a version another Mac mirrored: the same rail, the same reads. What
    the cloud adds is depth, and it arrives looking like everything else. */
-await tid("back-to-now").click();
-await poll(async () => (await tid("version-preview").count()) === 0);
 await page.evaluate(() => {
   const midnight = new Date();
   midnight.setHours(0, 0, 0, 0);
@@ -339,8 +290,6 @@ await page.evaluate(() => {
   ];
   window.__versions.blobs["f".repeat(64)] = "# Other\n\nwritten on the iMac\n";
 });
-await tid("history-rail").locator(".history-rail-close").click();
-await poll(async () => (await tid("history-rail").count()) === 0);
 await openRail("/docs/other.md");
 await poll(async () => (await page.locator('[data-source="cloud"]').count()) === 1);
 const mirroredRow = await page.locator('[data-source="cloud"]').textContent();
@@ -351,13 +300,27 @@ step(
   "a version another Mac made rides the same rail: its device, its reason, read through the store and comparable",
   mirroredRow.includes("Sherin's iMac") &&
     mirroredRow.includes("while editing") &&
-    bothCounted.includes("2 in the cloud") &&
+    bothCounted.includes("1 in the cloud") &&
     (await page.evaluate(() => window.__versions.calls.filter((c) => c.cmd === "versions_read").at(-1)?.args.hash)) ===
       "f".repeat(64) &&
     (await tid("show-changes").count()) === 1,
   `${mirroredRow} / ${bothCounted}`,
 );
+await page.screenshot({ path: SHOTS + "versions-04-cloud.png" });
 
+/* 18 — phase 6: the sync manifest is out of the history business. Every row
+   the rail has shown, on every document walked so far, came out of a version
+   store — this Mac's or a mirrored one — and nothing has asked the manifest
+   for a revision at any point in this session. */
+step(
+  "the rail's whole answer is the version store: the manifest is never asked for a revision",
+  (await page.evaluate(() =>
+    window.__cloud.calls.every((c) => c.cmd !== "cloud_history" && c.cmd !== "cloud_revision"),
+  )) &&
+    (await page.evaluate(() =>
+      window.__versions.calls.filter((c) => c.cmd === "versions_history").length > 1,
+    )),
+);
 
 /* ---------- The workspace, as it was (docs/versioning-plan.md §7) -------- */
 
@@ -370,7 +333,7 @@ const openRootMenu = async () => {
   await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
 };
 
-/* 20 — the way in. The whole folder's timeline is on the root's menu, for
+/* 19 — the way in. The whole folder's timeline is on the root's menu, for
    any workspace: like a document's history, it is not a cloud feature. */
 await tid("history-rail").locator(".history-rail-close").click();
 await poll(async () => (await tid("history-rail").count()) === 0);
@@ -384,7 +347,7 @@ step(
   rootMenu.join(" | "),
 );
 
-/* 21 — the timeline, and what a moment would cost. Nothing has happened
+/* 20 — the timeline, and what a moment would cost. Nothing has happened
    yet: the modal says what a restore WOULD do, in three lists. */
 await page.locator(".sidebar-menu-item", { hasText: "Workspace history" }).click();
 await poll(async () => (await tid("workspace-history").count()) === 1);
@@ -406,7 +369,7 @@ step(
 );
 await page.screenshot({ path: SHOTS + "versions-05-workspace.png" });
 
-/* 22 — a partial restore. Untick everything but one file: the confirm
+/* 21 — a partial restore. Untick everything but one file: the confirm
    states the real counts, in the app's own chrome, and exactly that one
    path moves. */
 for (const path of ["Projects/plan.md", "third.md"]) {
@@ -427,7 +390,7 @@ step(
   `${confirmText} → ${JSON.stringify(partial)}`,
 );
 
-/* 23 — the whole moment. Restore all is the same act at folder scale: it
+/* 22 — the whole moment. Restore all is the same act at folder scale: it
    states everything it will do, writes, trashes, and the tree refreshes off
    `versions-applied` — the same event a file restore emits. */
 await page.evaluate(() => {
@@ -455,7 +418,7 @@ step(
   `${allText} → ${JSON.stringify(whole)}`,
 );
 
-/* 24 — Recently deleted. The row is the point (§12.3.4): it appears at the
+/* 23 — Recently deleted. The row is the point (§12.3.4): it appears at the
    foot of the tree only when there is something in it, with the count. */
 await page.locator(".modal-close").click();
 await poll(async () => (await tid("workspace-history").count()) === 0);
@@ -484,7 +447,7 @@ step(
 );
 await page.screenshot({ path: SHOTS + "versions-06-deleted.png" });
 
-/* 25 — Open. The last content, read-only, in the same preview a version
+/* 24 — Open. The last content, read-only, in the same preview a version
    gets — the file has no tab of its own to stand in, so it shows over the
    focused pane. */
 await tid("deleted-open").click();
@@ -498,7 +461,7 @@ step(
   gonePreview.slice(0, 60),
 );
 
-/* 26 — Restore. It goes back to the path it had; when something else lives
+/* 25 — Restore. It goes back to the path it had; when something else lives
    there now, both survive and the copy is named. */
 await tid("back-to-now").click();
 await poll(async () => (await tid("version-preview").count()) === 0);
@@ -540,7 +503,7 @@ const openVersionsSettings = async () => {
   await poll(async () => (await tid("versions-settings").count()) === 1);
 };
 
-/* 27 — the way in, and the trust line. The gear says how far back this
+/* 26 — the way in, and the trust line. The gear says how far back this
    folder keeps and what that costs, before offering to change either. */
 await openVersionsSettings();
 const here = await tid("vs-here").innerText();
@@ -550,7 +513,7 @@ step(
   here,
 );
 
-/* 28 — a horizon is one click, it issues the command with the days the
+/* 27 — a horizon is one click, it issues the command with the days the
    button says, and `forever` is a real answer rather than the absence of
    one. */
 await tid("vs-local-horizon").locator('[data-days="30"]').click();
@@ -570,7 +533,7 @@ step(
 );
 await page.screenshot({ path: SHOTS + "versions-07-settings.png" });
 
-/* 29 — the export: a folder picker, one command, progress while it runs and
+/* 28 — the export: a folder picker, one command, progress while it runs and
    a sentence when it lands. */
 await tid("vs-export").click();
 await poll(async () => (await tid("vs-exported").count()) === 1);
@@ -585,7 +548,7 @@ step(
   `${exportCall.args.dest} — ${wrote}`,
 );
 
-/* 30 — Other folders. The store whose folder is gone says so and can be
+/* 29 — Other folders. The store whose folder is gone says so and can be
    forgotten; the open one can't, because a running versioner owns it. */
 const rows = tid("vs-store");
 const openRow = rows.filter({ has: page.locator('[data-testid="vs-store-open"]') });
@@ -613,7 +576,7 @@ step(
   warned,
 );
 
-/* 31 — the second horizon. It appears only for a connected workspace whose
+/* 30 — the second horizon. It appears only for a connected workspace whose
    mirror has run, and setting it is a CAS on the bucket, not a per-Mac
    preference. */
 step(

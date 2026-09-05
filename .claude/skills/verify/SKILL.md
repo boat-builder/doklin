@@ -120,12 +120,12 @@ node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cl
                                            # published list (home page, stop), the sidebar's
                                            # undoable stop, the panel's version-history line (what
                                            # the domain holds; a worker one version behind saying
-                                           # it can't), and the version rail carrying the two rows
+                                           # it can't), and the version rail carrying the one row
                                            # only a connected workspace has — a version another Mac
-                                           # MIRRORED (read through versions_read, comparable) and
-                                           # a sync-manifest revision (read through cloud_revision,
-                                           # not comparable, restored by handing over its text)
-node verify-harness/drive-versions.mjs      # 33 steps over the SAME harness page (cloud.html's IPC
+                                           # MIRRORED: read through versions_read, comparable, and
+                                           # restored by handing over its text, with the sync
+                                           # manifest asked for nothing (phase 6 retired it)
+node verify-harness/drive-versions.mjs      # 32 steps over the SAME harness page (cloud.html's IPC
                                            # stub answers versions_* from a scripted store whose
                                            # restore really writes the file and emits
                                            # `versions-applied`): the version rail from the sidebar
@@ -141,10 +141,10 @@ node verify-harness/drive-versions.mjs      # 33 steps over the SAME harness pag
                                            # the pre-restore hash, the rail gaining a row that says
                                            # what it was restored from, Name this version, the tab
                                            # menu and ⌘⌥H, a draft's history from the drafts
-                                           # store, a revision only the sync manifest has (read
-                                           # through cloud_revision, with Show changes absent),
-                                           # and a version another Mac mirrored — its device, its
-                                           # reason, read through the version store, comparable;
+                                           # store, a version another Mac mirrored — its device,
+                                           # its reason, read through the version store,
+                                           # comparable — and that across every rail walked the
+                                           # sync manifest is never asked for a revision;
                                            # then the WHOLE FOLDER: Workspace history… on the
                                            # sidebar root (no cloud connected), the timeline's day
                                            # groups with each moment's "+2 −1 ~5", a moment's three
@@ -347,13 +347,19 @@ folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
 in-memory worker (`--lib cloud` — 50 tests: the two-device merge / conflict /
-tombstone / rename / history / CAS-race matrix, the public map (mirroring,
+tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, history, the edit bus routing, cloud.json and the marker, and the
+presence, the edit bus routing, cloud.json and the marker, the retirement of
+the manifest's history (four revisions leaving `hist` empty while `rev`
+climbs, a manifest an older build wrote read and then rewritten without its
+entries, and the one-time bucket clean-up — archives before blobs, more
+fileIds than one batch, its bookmark persisted between polls, one blob per
+living file and nothing for a deleted one at the end, and a worker without
+the DELETE route stopping the pass rather than failing it), and the
 version store's mirror: a device's snapshots and blobs reaching the bucket,
 content another device already put there skipped by digest while a NAMED
 version is never skipped, a lost index CAS re-read and re-landed, the cloud
@@ -363,7 +369,7 @@ feature written to not at all and reported as a null status until the hourly
 pass finds it updated, another Mac's snapshot downloaded once and
 answered from the cache after, and the bucket's horizon set by a CAS that
 lands even against a device that wrote between the read and the write),
-the versioning store (`--lib versions` — 47 tests: the cadence
+the versioning store (`--lib versions` — 46 tests: the cadence
 rule's consequences on a simulated clock (a burst inside one interval, a
 steady hour, a quiet hour, a session's end, a write loop), the seed capture,
 the stat cache, blob dedupe, a deletion on disk leaving the store untouched,
@@ -376,8 +382,7 @@ and one file's history read back out of those snapshots (a rename followed
 backwards, a recreated path starting over, a deleted path still reachable,
 equal contents collapsing to the row where the content appeared while a
 NAMED version keeps its own, `current` marking what is on disk, the unified
-diff and its cap, the sync manifest's 16-character hashes deduping
-against the local ones, versions another Mac mirrored joining the SAME walk
+diff and its cap, versions another Mac mirrored joining the SAME walk
 (newest first whichever store holds them, a rename made elsewhere followed,
 one moment on both sides listed once), and the restore — the state it leaves
 then the state it made, naming its source, deduping when nothing was

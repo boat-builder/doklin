@@ -87,16 +87,6 @@
         // mirror, or null for a worker too old to hold one.
         versionsMirror: null,
         wipeResult: 42,
-        history: [
-          { rev: 3, hash: "h3", size: 30, timeMs: 1757000000000, by: "Test Mac", current: true },
-          { rev: 2, hash: "h2", size: 20, timeMs: 1756900000000, by: "Bob", current: false },
-          { rev: 1, hash: "h1", size: 10, timeMs: 1756800000000, by: "Test Mac", current: false },
-        ],
-        revisions: {
-          h3: "# Other\n\nthe current text\n",
-          h2: "# Other\n\nbob's revision\n",
-          h1: "# Other\n\nthe first revision\n",
-        },
         calls: [],
       };
       // The version store, scripted the same way (docs/versioning-plan.md
@@ -142,7 +132,7 @@
 
       window.__versions = {
         // path → FileHistory. The drive replaces this wholesale to script a
-        // cloud read-through or an empty history.
+        // mirrored version or an empty history.
         histories: {
           "/drafts/d-1.md": {
             root: "/drafts",
@@ -400,10 +390,6 @@
               const s = window.__cloud.statuses.find((s) => s.root === args.root);
               return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });
             }
-            case "cloud_history":
-              return Promise.resolve(window.__cloud.history);
-            case "cloud_revision":
-              return Promise.resolve(window.__cloud.revisions[args.hash] ?? "");
             case "cloud_wipe":
               window.__setStatuses(window.__cloud.statuses.filter((s) => s.root !== args.root));
               return Promise.resolve(window.__cloud.wipeResult);

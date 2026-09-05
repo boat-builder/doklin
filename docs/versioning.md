@@ -37,7 +37,11 @@ each. The sync engine it builds on is [docs/cloud.md](cloud.md).
 
 ---
 
-## 2. What exists today
+## 2. What existed before this
+
+The state of the world this design was written against, kept as written: it
+is the argument for everything below. Every line-numbered reference in this
+section names code that phase 6 has since deleted — see §6.5.
 
 | | Value | Where |
 | --- | --- | --- |
@@ -441,9 +445,11 @@ collects, never a row whose content is missing.
 device. When Alice's edit reaches Bob by sync, Bob's watcher fires and
 Bob's next capture records her paragraph as Bob's. **Blocks:** per-person
 history in a workspace more than one person writes to — the rail can say
-when a line appeared, never who wrote it. The sync manifest's `hist` does
-carry the right `by`, and phase 6 retires exactly that. The fix needs an identity to
-attribute *to*, which is [cloud.md](cloud.md) §11.1.
+when a line appeared, never who wrote it. The sync manifest's `hist` did
+carry the right `by`, and phase 6 retired exactly that — knowingly: it
+reached back hours, the store reaches back years, and a wrong name on the
+long history is a smaller loss than no long history. The fix needs an
+identity to attribute *to*, which is [cloud.md](cloud.md) §11.1.
 
 The cloud half (phase 3, `src-tauri/src/cloud/versions.rs` and
 `cloud-worker/src/versions.ts`) landed as planned, with four details the
@@ -490,8 +496,7 @@ second index to keep agreeing with the first.
 ### 6.5 What this removes
 
 - `hist` leaves the manifest, and `history/<fid>.json` and its archive
-  rollover (`roll_archives`, `engine.rs:1233`) go with it. The snapshot chain
-  is the archive.
+  rollover (`roll_archives`) go with it. The snapshot chain is the archive.
 - The manifest drops from ~900 B to ~150 B per file — about six times
   smaller. The 4 MB / 5000-file collision goes away, and every changed cycle
   re-uploads six times less. **The feature that buys years of history also
@@ -508,6 +513,39 @@ phase 6), by which time the snapshots reach far past the hours it ever
 held; until then the History panel keeps reading it beside the store.
 
 *As planned* (plan §2, decision 8).
+
+*As built* (phase 6):
+
+- `build_manifest` writes `hist: []` and nothing else ever touches it. The
+  field, `HistEntry` and the worker's shape check all stay: an older release
+  on the same workspace is still filling it, and this device has to read what
+  that one writes. The first time this device rewrites such a file, the
+  entries are dropped — not migrated. The version store already holds this
+  Mac's own past, which is the trade the phase makes.
+- `roll_archives`, `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX`,
+  `Remote::get_history` / `put_history`, `HistoryArchive`, the engine's
+  `history` / `revision`, the `cloud_history` / `cloud_revision` commands and
+  the rail's read-through are **gone**. `Remote` keeps one history method,
+  `delete_history`, for the clean-up below. The worker keeps every route
+  (§5.3 of [cloud.md](cloud.md)) — deprecated, not removed.
+- **What the old system left in the bucket is deleted once, lazily.**
+  `WorkspaceState.legacy_cleanup` is a bookmark the engine's poll advances:
+  first every `history/<fid>.json` this workspace can name, then every blob
+  but each file's current one, `LEGACY_BATCH` (50) fileIds at a time. Two
+  passes in that order — delete the index before the data it names, so an
+  interruption never leaves an archive pointing at bytes that are gone. A
+  workspace of 5000 files finishes both in about an hour of polling, and a
+  device that is done writes nothing about it at all.
+- The blob pass is the ordinary `gc_blobs` over the whole workspace rather
+  than a second mechanism: since a file's past is not the manifest's any
+  more, "keep the current hash" is the whole rule, and `gc_candidates` is
+  simply every fileId pushed since the last run. A tombstoned file keeps
+  nothing.
+- The clean-up **waits rather than failing** on anything that isn't its turn:
+  a paused workspace, a worker the app has outrun, and — the case worth
+  naming — a worker older than 3, which has no `DELETE` route for an archive.
+  It is not an error and it is never reported; the pass simply runs after the
+  update.
 
 ---
 
@@ -584,8 +622,8 @@ the way.
 ## 8. The surfaces
 
 - **Version history** (a file) — a right rail listing the document's
-  versions, fed from the local store instead of `cloud_history` and ungated
-  on the cloud. Selecting one shows it where the document is, read-only,
+  versions, fed from the local store rather than the sync manifest, and
+  ungated on the cloud. Selecting one shows it where the document is, read-only,
   with *Restore*, *Make a copy* and *Show changes*.
 - **Workspace history** — a date picker over retained snapshots, showing what
   differs from disk, with *Restore all* and per-file restore. Reached from
@@ -636,27 +674,24 @@ workspace timeline is a modal that states what a restore will do
   answers the pre-restore version, which is what the toast's *Undo*
   restores in turn; `versions-applied` refreshes the tree and reloads the
   open document.
-- A version only the cloud still reaches back to can be restored too: its
-  bytes arrive through `cloud_revision` and ride the same command as
-  `text`, so a restore is one command whichever store the content came
-  from. Phase 6 removes that branch with the rest of the read-through.
+- A version this Mac's store never held can be restored too: its bytes ride
+  the same command as `text`, so a restore is one command whichever store
+  the content came from.
 
 *As built* (phase 3 — what a connected workspace adds to the rail):
 
-- A version has one of **three sources**. `local` is a blob on this Mac;
-  `cloud` is one another device mirrored, read and compared through the
-  version store exactly like a local one; `manifest` is one of the sync
-  manifest's own per-file revisions, read through `cloud_revision` and not
-  comparable (its 16-character hash is not a version-store address). Phase 6
-  removes the third. The trust line counts `local` against the other two —
+- A version has one of **two sources** (three until phase 6 retired the sync
+  manifest's own revisions). `local` is a blob on this Mac; `cloud` is one
+  another device mirrored, read and compared through the version store
+  exactly like a local one. The trust line counts one against the other —
   "14 here · 212 in the cloud".
 - Mirrored versions join **the same walk**, ordered by time, so a rename
   another Mac made is followed exactly like one made here and a run of equal
   content collapses across both stores. Where the same moment exists on both
   sides it is one row, not two.
-- Only a `local` version is restored **by hash**; the other two hand
-  `versions_restore_file` their text, because this Mac's store may never
-  have held those bytes.
+- Only a `local` version is restored **by hash**; a `cloud` one hands
+  `versions_restore_file` its text, because this Mac's store may never have
+  held those bytes.
 - The Cloud panel gains one line: what the domain holds of this folder's
   history, or — for a worker without the `versions` feature — that it is too
   old to hold any, beside the update card that fixes it.
@@ -722,6 +757,17 @@ workspace timeline is a modal that states what a restore will do
   made it. Import stays out of scope: unpacking `versions/` into
   `<app_data>/versions/<key>/` is a documented manual step, not a feature.
 
+*As built* (phase 6 — what the surfaces stop doing):
+
+- The rail's answer is **one walk over the version stores**, and nothing
+  else. There is no second source behind it and no second way of reading a
+  row, so *Show changes* is on every version rather than most of them, and
+  the counts in the trust line are two numbers over one thing.
+- Nothing about this is visible to the user, which is the point: the surface
+  a document's history had before this phase is the surface it has after.
+  What changes is the manifest, which loses about six sevenths of its size
+  per file — see §6.5 and §7.
+
 ---
 
 ## 9. Build order
@@ -735,13 +781,16 @@ last, retiring the manifest's `hist`. Phase 1 alone takes the reach from
 it past what a laptop should hold; the surfaces are where the promise
 becomes visible.
 
-**Phases 1 to 5 are built** — the local store
+**All six phases are built** — the local store
 (`src-tauri/src/versions/`), the rail that shows it (`HistoryRail.tsx`,
 `VersionPreview.tsx`), the cloud mirror (`src-tauri/src/cloud/versions.rs`,
 `cloud-worker/src/versions.ts`), the two surfaces over the whole folder
-(`WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`, `versions/workspace.rs`) and
-the settings behind them (`VersionsSettings.tsx`, `versions/stores.rs`).
-What remains is retiring the manifest's `hist` (phase 6).
+(`WorkspaceHistory.tsx`, `RecentlyDeleted.tsx`, `versions/workspace.rs`),
+the settings behind them (`VersionsSettings.tsx`, `versions/stores.rs`) and
+the retirement of the manifest's `hist` (`cloud/engine.rs`'s
+`legacy_cleanup`). What remains is not code: the by-hand pass in
+[versioning-testing.md](versioning-testing.md), which is the question of
+whether the promise holds rather than whether the parts work.
 
 ---
 
@@ -819,8 +868,8 @@ tokio's paused clock are what this needs; the cadence rule and the ladder are
 both pure functions of time and are the two things most worth pinning.
 
 ```sh
-cd src-tauri && cargo test --lib versions   # cadence, ladder, dedupe, restore, the walk, the folder, the settings (47)
-cd src-tauri && cargo test --lib cloud      # the matrix, plus the mirror, the cloud sweep, read-through, the horizon CAS (50)
+cd src-tauri && cargo test --lib versions   # cadence, ladder, dedupe, restore, the walk, the folder, the settings (46)
+cd src-tauri && cargo test --lib cloud      # the matrix, plus the mirror, the cloud sweep, the horizon CAS, the legacy clean-up (50)
 pnpm test:worker                            # the version routes beside the manifest route (26 cases)
 scripts/versions.sh -w ~/Notes              # what a store holds right now, live
 ```
@@ -853,7 +902,7 @@ What each suite must cover:
   first two: `deleted_lists_what_no_longer_exists` deletes a file inside a
   folder and finds it, its content and the moment it was last seen still in
   the store, and `restore_file_recreates_directories` removes the folder
-  itself and brings it back. The third arrives with phase 6. The two
+  itself and brings it back. The two
   deliberate exceptions are the sweep and *Forget*, and
   `forget_refuses_an_open_root` pins that the second removes one store, only
   when the user asks, never while its folder is open, and never the folder.
@@ -879,13 +928,17 @@ What each suite must cover:
   clock and what it thinned is never put back; a blob younger than the
   grace period is spared. *Built*, in `cloud/tests.rs`, against the
   in-memory worker.
-- **Migration** — a v2 manifest's `hist` seeds snapshots once, and a v2
-  worker degrades to "no cloud history" rather than an error. *Built* for
-  the second: `no_versions_feature_means_no_mirror_and_a_null_status`
-  proves the engine writes nothing and the status says so, with sync
-  unaffected, and
+- **Migration** — a v2 worker degrades to "no cloud history" rather than an
+  error, and a manifest an older app wrote is read and then rewritten
+  without its `hist`. *Built*:
+  `no_versions_feature_means_no_mirror_and_a_null_status` proves the engine
+  writes nothing and the status says so, with sync unaffected;
   `a_worker_updated_mid_session_starts_mirroring_on_its_own` proves the
-  hourly pass picks the update up without a restart.
+  hourly pass picks the update up without a restart; and
+  `an_old_manifest_with_hist_is_read_and_rewritten_without_it` proves a
+  revision an older build landed reaches disk like any other and leaves the
+  manifest on the next CAS. Nothing is seeded from the old `hist` — that
+  was decided against in §6.5, not left undone.
 - **Local-only** — every surface works for a workspace that has never been
   connected. *Built* for the rail and for both of phase 4's surfaces:
   `drive-versions.mjs` opens all three with no cloud status at all, which is
@@ -895,7 +948,8 @@ What each suite must cover:
   which Mac made it and why, and reads out of the mirrored store. *Built*:
   `read_through_lists_cloud_only_versions` covers the walk,
   `read_through_caches_another_devices_snapshot` the download and its
-  cache, and both drives walk the row in Chromium.
+  cache, and both drives walk the row in Chromium — and, since phase 6,
+  assert that the rail asks the sync manifest for nothing at all.
 - **The horizons** — each is the user's, each acts on the store it names.
   *Built*: `horizon_change_is_applied_on_the_next_sweep` pins that a store's
   own answer is written down, outlives the session and beats the settings
@@ -908,6 +962,19 @@ What each suite must cover:
   and checks the tree's current bytes, every snapshot file and every blob
   they name are in it, that the count reported is the count that went in,
   and that the progress event ends where it said it would.
+- **The retirement** — the manifest stops carrying history, and what the old
+  system left in the bucket goes. *Built*:
+  `edit_propagates_and_hist_stays_empty` pins that four revisions of a file
+  leave `hist` empty while `rev` still climbs;
+  `legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls` runs
+  the whole pass over more files than one batch and checks that the archives
+  go first, that the bookmark is persisted between polls, that what is left
+  at the end is one blob per living file and nothing for a deleted one, and
+  that a finished device writes no flags at all; and
+  `legacy_cleanup_waits_on_a_worker_without_the_route` pins that a worker
+  too old to delete an archive stops the pass rather than failing it — no
+  blob swept ahead of the archive naming it, no error phase — and that the
+  update starts it.
 
 The one thing a Linux runner cannot do is the real thing: months of real
 editing on a real Mac, and a second Mac reading history the first one wrote.

@@ -26,9 +26,6 @@ pub const MAX_DESC_LEN: usize = 600;
 pub const MAX_PATH_LEN: usize = 1024;
 /// Segments in a workspace-relative path.
 pub const MAX_PATH_DEPTH: usize = 12;
-/// History entries the worker accepts inline per file; the engine keeps
-/// fewer (engine.rs `MANIFEST_HIST_MAX`) and rolls the rest into the archive.
-pub const MAX_INLINE_HIST: usize = 12;
 
 /// Slugs the worker's own routes speak for — never a public page's.
 pub const RESERVED_SLUGS: &[&str] = &[
@@ -89,11 +86,17 @@ pub struct ManifestFile {
     pub mtime: u64,
     #[serde(default)]
     pub by: String,
+    /// **Deprecated since phase 6** (docs/versioning-plan.md §9). This
+    /// engine always writes an empty array; a file's past is the version
+    /// store's now. The field stays because an empty one is a valid v2
+    /// manifest to every worker and app that exists, and because an older
+    /// device on the same workspace still writes entries we have to read.
     #[serde(default)]
     pub hist: Vec<HistEntry>,
 }
 
-/// One earlier revision of a file: rev, hash, size, time, by.
+/// One earlier revision of a file: rev, hash, size, time, by. Read-only
+/// since phase 6 — see `ManifestFile::hist`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistEntry {
     pub r: u64,
@@ -160,16 +163,6 @@ impl PublicEntry {
         }
     }
 }
-
-/// The deep revision archive of one file (`history/<fileId>.json`).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct HistoryArchive {
-    pub version: u32,
-    #[serde(default)]
-    pub entries: Vec<HistEntry>,
-}
-
-pub const HISTORY_VERSION: u32 = 1;
 
 /// `GET /api/poll`.
 #[derive(Clone, Debug, Default, Deserialize)]

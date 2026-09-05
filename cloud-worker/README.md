@@ -42,7 +42,7 @@ workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceNa
                             — the binding. Written once, create-only.
 manifest.json               the workspace manifest (v2, below) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
+history/<fileId>.json       DEPRECATED deep revision archive — see below
 presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [...]} — the version store — CAS by etag
 versions/snapshots/<id>.json.gz   one workspace state, gzip'd; immutable. <id> is <ts13>-<deviceId>
@@ -60,8 +60,7 @@ auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               �
   "seq": 812,
   "files": {
     "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
-                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro",
-                  "hist": [ { "r": 6, "h": "…", "s": 4211, "t": 1756900000000, "b": "…" } ] }
+                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro", "hist": [] }
   },
   "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "…" } },
   "public": {
@@ -89,6 +88,21 @@ the file is gone and comes back when the file does — stopping is explicit),
 and a folder entry may cover a folder that is empty right now. Semantics
 (which revision wins, merges, what to do with a tombstone) are the engine's.
 
+### `hist` and `history/<fid>.json` — deprecated
+
+The manifest used to carry each file's last revisions inline in `hist`, with
+the overflow in a per-file `history/<fileId>.json` archive; between them they
+were the app's version history. They are not any more — the app keeps a
+version store of its own and mirrors it to `versions/` (see
+[docs/versioning.md](../docs/versioning.md)) — so the current app writes
+`hist: []`, writes no archive, and deletes the archives it finds, once.
+
+The worker still **accepts** all of it, and always will: an app on an older
+release is still sending it, and this API only ever grows. `GET`/`PUT
+/api/history/<fid>` are deprecated but live; `DELETE` is what the current
+app's one-time clean-up calls; `MAX_INLINE_HIST`, `MAX_HISTORY_ENTRIES` and
+`MAX_HISTORY_BYTES` still bound what an older app can send.
+
 ## The API
 
 All `/api/*` routes require `Authorization: Bearer <token>` and answer JSON.
@@ -111,8 +125,8 @@ GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
 PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
                                  {existed: true}); 413 past 25 MB
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-GET    /api/history/<fid>        {version: 1, entries: [{r, h, s, t, b?}]}; 404 when there is none
-PUT    /api/history/<fid>        replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
+GET    /api/history/<fid>        DEPRECATED {version: 1, entries: [{r, h, s, t, b?}]}; 404 for none
+PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
 DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
 GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
 PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
