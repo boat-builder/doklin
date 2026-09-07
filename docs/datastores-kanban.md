@@ -425,6 +425,14 @@ A card already open in a tab is never peeked; the click goes to the tab,
 which is the better answer and is already on screen. That also removes the
 one race a peek could otherwise cause: two editors over one file.
 
+The panel's title is the card's file name, and clicking it renames the file:
+Enter commits, Escape abandons, and clicking away commits rather than losing
+what was typed — the same contract as the sidebar's inline rename, because it
+is the same act. It goes through the app's `movePath`, not the store model,
+so the note's html rendition, its comment sidecar, its open tabs and its
+published address all follow it; the board behind the panel catches up the
+way any change on disk does, through the folder watcher.
+
 The peek writes both halves of a card through their own guarded splices —
 properties through `write_frontmatter`, the body through `write_body` — so
 a sentence typed here and a card dragged on the board behind it cannot lose
@@ -744,9 +752,12 @@ Three things the build settled that the design left implicit:
   definition file). Cards need nothing new: a card is a note, so the existing
   sidecar handling on trash / rename / paste already covers it, and a store
   folder moves whole.
-- **Renaming a card from the board** goes through a plain prompt rather than
-  an inline field — the one rough edge left in phase 1. Renaming from the
-  sidebar (in *Show all files*) or from the tab is unchanged.
+- **Renaming a card** is an inline field wherever a card is shown: the peek's
+  title (click it), and *Rename…* on the card's own menu on a board or in a
+  table, which turns the title into an input in place. It was a
+  `window.prompt` in phase 1 and had to stop being one — a WKWebView does not
+  owe us an answer to a native dialog. Renaming from the sidebar (in *Show all
+  files*) or from the tab is unchanged.
 
 **Phase 2 — boards inside notes. Built.**
 `kanbanEmbed.ts` (the remark transform, the node schema, the node view) and

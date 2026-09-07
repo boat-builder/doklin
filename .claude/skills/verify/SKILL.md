@@ -55,7 +55,7 @@ node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSIS
                                            # restores the columns on first paint, a header
                                            # rename re-keys the record instead of orphaning it,
                                            # and a read-only view resizes without ever emitting
-node verify-harness/drive-kanban.mjs       # 58 steps: boots the REAL <App/> (kanban.html seeds a
+node verify-harness/drive-kanban.mjs       # 81 steps: boots the REAL <App/> (kanban.html seeds a
                                           # /docs workspace holding a DATASTORE) and walks the
                                           # board end to end — the sidebar's one-row board with
                                           # no cards under it, the board tab, columns from
@@ -69,7 +69,19 @@ node verify-harness/drive-kanban.mjs       # 58 steps: boots the REAL <App/> (ka
                                           # heading saving the view's sort — and at every step
                                           # the invariant the design rests on: a card's BODY
                                           # bytes never move when its properties do (and a note
-                                          # with no frontmatter never grows one)
+                                          # with no frontmatter never grows one);
+                                          # then RENAMING a card — its title is its file name, so
+                                          # the peek's title is editable in place (Enter renames
+                                          # the file, Escape abandons without closing the panel,
+                                          # clicking away commits), the board's and the table's
+                                          # Rename… type on the card itself, the board catches up
+                                          # off `dir-changed`, and window.prompt is never called
+                                          # (the drive counts it); and a SELECT property from
+                                          # nothing to a value — the add form outliving a
+                                          # focusout with no relatedTarget (WebKit's shape, which
+                                          # used to eat the click on Add), the field declared on
+                                          # the store, the picker declaring an option and writing
+                                          # it to the card
 node verify-harness/drive-kanban-embed.mjs # 44 steps over the SAME harness page: a ```kanban
                                           # fence in a note (kanban.html seeds /docs/Embed.md
                                           # and /docs/Broken.md) rendering as a live board —
@@ -300,8 +312,10 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # and snapshot (src/store/board.ts) that a tab, an
                                            # embed and a published page all share, so they can't
                                            # disagree — filters, sorts, multi_select and date
-                                           # grouping included; and the CSV a view exports
-                                           # (2252 checks)
+                                           # grouping included; the file name a card's title
+                                           # makes (sanitizeTitle / renamedCardPath — a rename
+                                           # keeps the card's own extension); and the CSV a
+                                           # view exports (2261 checks)
 ```
 
 ## Cloud worker (`cloud-worker/`)

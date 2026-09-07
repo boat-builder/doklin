@@ -5259,6 +5259,26 @@ body.tree-dragging.tree-drag-invalid * {
   cursor: default;
 }
 
+/* The same row, mid-rename: the input sits exactly where the title was, so
+   the header doesn't jump when it turns editable. */
+.dk-peek-title-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--app-accent);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 3px 5px;
+  border-radius: 5px;
+}
+
+.dk-peek-title-input:focus {
+  outline: none;
+}
+
 .dk-peek-tab,
 .dk-peek-close {
   flex: 0 0 auto;

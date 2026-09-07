@@ -16,6 +16,12 @@
 //
 // A card already open in a tab is never peeked: the tab is the better answer
 // and it is already there. App.tsx makes that call before mounting this.
+//
+// The title in the header is the third writer, and the odd one out: a card's
+// title IS its file name, so clicking it renames the FILE. That goes through
+// the app's move (movePath) rather than the store model, because a note's
+// html rendition, its comment sidecar, its open tabs and its published
+// address all have to follow it.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -23,7 +29,7 @@ import Editor, { type EditorHandle } from "./Editor";
 import PropertiesHeader from "./PropertiesHeader";
 import { useStore } from "./store/useStore";
 import { parseFrontmatter, type PropValue } from "./store/frontmatter";
-import type { FileSnapshot } from "./store/board";
+import { CARD_EXT_RE, renamedCardPath, sanitizeTitle, type FileSnapshot } from "./store/board";
 import type { FieldType } from "./store/storeFile";
 import {
   expandMarkdown,
@@ -66,6 +72,8 @@ export default function CardPeek({
 
   const [body, setBody] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The title in the header is the card's FILE NAME; clicking it edits that.
+  const [renaming, setRenaming] = useState(false);
   const snapshotRef = useRef<FileSnapshot | null>(null);
   const threadsRef = useRef<MdThread[]>([]);
   const pendingRef = useRef<string | null>(null);
@@ -79,6 +87,7 @@ export default function CardPeek({
     let cancelled = false;
     setBody(null);
     setError(null);
+    setRenaming(false);
     pendingRef.current = null;
     void (async () => {
       try {
@@ -178,35 +187,46 @@ export default function CardPeek({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const title = path.replace(/^.*\//, "").replace(/\.(md|markdown|mdown|mkd)$/i, "");
+  const title = path.replace(/^.*\//, "").replace(CARD_EXT_RE, "");
 
   const setProp = (key: string, value: PropValue) => {
     if (model) void model.setCardProp(path, key, value);
   };
 
+  // Renaming a card is renaming its file, so it goes through the app's move
+  // (movePath) rather than the store model: an open tab, the html rendition,
+  // the comment sidecar and a published address all follow the note.
+  const rename = async (next: string) => {
+    const clean = sanitizeTitle(next);
+    if (!onRename || !clean || clean === title) return;
+    // Land whatever is pending at the OLD path before it moves.
+    await flush();
+    const failed = await onRename(path, renamedCardPath(path, clean));
+    if (failed) setError(failed);
+  };
+
   return (
     <aside className="dk-peek" aria-label={`Card: ${title}`}>
       <header className="dk-peek-head">
-        <button
-          className="dk-peek-title"
-          title={onRename ? "Rename this card" : path}
-          disabled={!onRename}
-          onClick={() => {
-            if (!onRename) return;
-            const next = window.prompt("Rename card", title);
-            if (!next || !next.trim() || next.trim() === title) return;
-            // Land whatever is pending at the OLD path before it moves.
-            void flush().then(async () => {
-              const failed = await onRename(
-                path,
-                `${dir}/${next.trim().replace(/[/:]/g, "-")}.md`,
-              );
-              if (failed) setError(failed);
-            });
-          }}
-        >
-          {title}
-        </button>
+        {renaming && onRename ? (
+          <TitleInput
+            initial={title}
+            onCommit={(next) => {
+              setRenaming(false);
+              void rename(next);
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : (
+          <button
+            className="dk-peek-title"
+            title={onRename ? "Rename this card" : path}
+            disabled={!onRename}
+            onClick={() => setRenaming(true)}
+          >
+            {title}
+          </button>
+        )}
         <button className="dk-peek-tab" onClick={() => {
           void flush();
           onOpenTab(path);
@@ -228,6 +248,7 @@ export default function CardPeek({
             onChange={setProp}
             onAddField={(name: string, type: FieldType) => void model?.addField(name, type)}
             onRenameField={(id, name) => void model?.renameField(id, name)}
+            onRetypeField={(id, type) => void model?.retypeField(id, type)}
             onDeleteField={(id) => void model?.deleteField(id)}
             onAddOption={(field, name) => void model?.addOption(field, name)}
           />
@@ -245,5 +266,62 @@ export default function CardPeek({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * The card's title, while it is being edited.
+ *
+ * Same contract as the sidebar's inline rename (NameRow), because it is the
+ * same act — renaming a file: Enter commits, Escape abandons, and clicking
+ * away COMMITS rather than throwing the name away. That last one matters
+ * here: the panel stays open behind this input, so "click into the body and
+ * carry on" must not be the gesture that silently loses the retitle.
+ */
+function TitleInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  // Enter commits AND blurs; without this the blur would commit a second time.
+  const doneRef = useRef(false);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  const done = (commit: boolean) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    if (commit && value.trim()) onCommit(value);
+    else onCancel();
+  };
+  return (
+    <input
+      ref={ref}
+      className="dk-peek-title-input"
+      aria-label="Rename card"
+      value={value}
+      spellCheck={false}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          done(true);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          done(false);
+        }
+        // The panel closes on Escape and the app has its own shortcuts; while
+        // a name is being typed, neither is what the key means.
+        e.stopPropagation();
+      }}
+      onBlur={() => done(true)}
+    />
   );
 }

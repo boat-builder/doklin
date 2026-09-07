@@ -13,7 +13,7 @@
 import { useState } from "react";
 import PropertyControl from "./PropertyControl";
 import { CardMenu, InlineInput } from "./storeChrome";
-import type { Card } from "./store/board";
+import { renamedCardPath, sanitizeTitle, type Card } from "./store/board";
 import type { PropValue } from "./store/frontmatter";
 import type { Field, Sort, StoreDef } from "./store/storeFile";
 
@@ -63,6 +63,16 @@ export default function TableView({
   const [open, setOpen] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [menu, setMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+  // A card's title IS its file name; renaming one edits the cell in place.
+  const [renaming, setRenaming] = useState<string | null>(null);
+
+  const renameCard = async (card: Card, title: string) => {
+    if (!onRenameCard) return;
+    const clean = sanitizeTitle(title);
+    if (!clean || clean === card.title) return;
+    const failed = await onRenameCard(card.path, renamedCardPath(card.path, clean));
+    if (failed) window.alert(failed);
+  };
 
   // Click a heading: ascending, then descending, then back to the table's own
   // order — which is by title, and is what the Title heading itself restores.
@@ -109,18 +119,30 @@ export default function TableView({
           {cards.map((card) => (
             <tr className="dk-tr" key={card.path}>
               <td className="dk-td is-title">
-                <button
-                  className="dk-row-title"
-                  title={card.path}
-                  onClick={() => onOpenCard(card.path)}
-                  onContextMenu={(e) => {
-                    if (readOnly) return;
-                    e.preventDefault();
-                    setMenu({ path: card.path, x: e.clientX, y: e.clientY });
-                  }}
-                >
-                  {card.title}
-                </button>
+                {renaming === card.path ? (
+                  <InlineInput
+                    initial={card.title}
+                    ariaLabel={`Rename ${card.title}`}
+                    onCommit={async (title) => {
+                      setRenaming(null);
+                      await renameCard(card, title);
+                    }}
+                    onCancel={() => setRenaming(null)}
+                  />
+                ) : (
+                  <button
+                    className="dk-row-title"
+                    title={card.path}
+                    onClick={() => onOpenCard(card.path)}
+                    onContextMenu={(e) => {
+                      if (readOnly) return;
+                      e.preventDefault();
+                      setMenu({ path: card.path, x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    {card.title}
+                  </button>
+                )}
               </td>
               {fields.map((f) => (
                 <td className="dk-td" key={f.id}>
@@ -186,17 +208,9 @@ export default function TableView({
           onRename={
             onRenameCard
               ? () => {
-                  const card = cards.find((c) => c.path === menu.path);
+                  const path = menu.path;
                   setMenu(null);
-                  if (!card) return;
-                  const next = window.prompt("Rename card", card.title);
-                  if (next && next.trim() && next.trim() !== card.title) {
-                    const dir = card.path.slice(0, card.path.lastIndexOf("/"));
-                    void onRenameCard(
-                      card.path,
-                      `${dir}/${next.trim().replace(/[/:]/g, "-")}.md`,
-                    );
-                  }
+                  setRenaming(path);
                 }
               : undefined
           }
