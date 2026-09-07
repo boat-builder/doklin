@@ -246,9 +246,17 @@ function NameInput({
 }
 
 /**
- * Name and type for a new property. Two controls, so — unlike the one-line
- * rename above — a blur is not a cancel: moving from the name to the type
- * picker is part of filling this in. Focus leaving the form altogether is.
+ * Name and type for a new property. Three controls, and reaching any of them
+ * is part of filling the form in — so what dismisses it is a POINTER LANDING
+ * SOMEWHERE ELSE (and Escape), never a blur.
+ *
+ * Blur was the obvious answer and it was wrong. WebKit — which is the webview
+ * this app actually runs in — does not focus a <button> when you click it and
+ * hands the blur no relatedTarget, so "focus left the form" fired on the way
+ * to the form's own Add button: the form unmounted on pointer-down and the
+ * click landed on nothing. Typing a name and pressing Enter still worked,
+ * which is why a TEXT property could be added and a select — the one case
+ * that has to reach the type picker and then Add — could not.
  */
 function AddProperty({
   typed,
@@ -262,21 +270,39 @@ function AddProperty({
   const [name, setName] = useState("");
   const [type, setType] = useState<FieldType>("text");
   const ref = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     ref.current?.focus();
   }, []);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (!formRef.current?.contains(e.target as Node)) onCancel();
+    };
+    // Defer: the click that opened the form is still propagating.
+    const id = window.setTimeout(() => {
+      window.addEventListener("pointerdown", onDown);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("pointerdown", onDown);
+    };
+  }, [onCancel]);
   const commit = () => {
     const clean = name.trim();
     if (clean) onCommit(clean, type);
     else onCancel();
   };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    }
+  };
   return (
-    <div
-      className="dk-prop-add-form"
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onCancel();
-      }}
-    >
+    <div className="dk-prop-add-form" ref={formRef}>
       <input
         ref={ref}
         className="dk-prop-name-input"
@@ -284,21 +310,16 @@ function AddProperty({
         placeholder="Property name"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            commit();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            onCancel();
-          }
-        }}
+        onKeyDown={onKeyDown}
       />
       {typed && (
         <select
           className="dk-prop-type"
           aria-label="Property type"
           value={type}
+          // Enter from the picker adds it too: having chosen the type, the
+          // keyboard should not have to travel back to the name field.
+          onKeyDown={onKeyDown}
           onChange={(e) => setType(e.target.value as FieldType)}
         >
           {FIELD_TYPE_NAMES.map((t) => (

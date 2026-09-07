@@ -126,6 +126,17 @@
         ],
       });
 
+      // The listener registry the app's listen() lands in, and the emitter a
+      // drive uses to play the folder watcher: `dir-changed { root }` is what
+      // store.rs sends after anything in a board's folder moves.
+      window.__listeners = new Map(); // event → [{ id, handler }]
+      let nextListenerId = 1;
+      window.__emit = (event, payload) => {
+        for (const { id, handler } of window.__listeners.get(event) ?? []) {
+          handler({ event, id, payload });
+        }
+      };
+
       window.__TAURI_INTERNALS__ = {
         metadata: {
           currentWindow: { label: "main" },
@@ -179,6 +190,22 @@
             }
             case "read_store":
               return Promise.resolve(readStore(args.path));
+            // Mirrors move_path in src-tauri/src/lib.rs: the source has to be
+            // there, an occupied destination is refused by name.
+            case "move_path": {
+              if (!window.__fs.has(args.from))
+                return Promise.reject(`"${args.from}" no longer exists`);
+              if (window.__fs.has(args.to))
+                return Promise.reject(
+                  `A file or folder named "${args.to.slice(
+                    args.to.lastIndexOf("/") + 1,
+                  )}" already exists`,
+                );
+              window.__fs.set(args.to, window.__fs.get(args.from));
+              window.__fs.delete(args.from);
+              window.__writes.push(args.to);
+              return Promise.resolve(null);
+            }
             case "watch_dir":
               (window.__watchedDirs ??= []).push(args.path);
               return Promise.resolve(null);
@@ -215,15 +242,38 @@
               return Promise.resolve(null);
             case "plugin:updater|check":
               return Promise.reject("updater unavailable in harness");
-            case "plugin:event|listen":
-              return Promise.resolve(1);
+            // A real listener registry: a drive can then deliver the events
+            // the Rust side emits (dir-changed, after a rename). StrictMode
+            // mounts twice, so unlisten has to really drop the id or every
+            // event arrives twice.
+            case "plugin:event|listen": {
+              const id = nextListenerId++;
+              const list = window.__listeners.get(args.event) ?? [];
+              list.push({ id, handler: args.handler });
+              window.__listeners.set(args.event, list);
+              return Promise.resolve(id);
+            }
+            case "plugin:event|unlisten": {
+              window.__listeners.set(
+                args.event,
+                (window.__listeners.get(args.event) ?? []).filter((l) => l.id !== args.eventId),
+              );
+              return Promise.resolve(null);
+            }
             default:
               return Promise.resolve(null);
           }
         },
       };
 
-      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: (event, id) => {
+          window.__listeners.set(
+            event,
+            (window.__listeners.get(event) ?? []).filter((l) => l.id !== id),
+          );
+        },
+      };
 
       // A /docs workspace with nothing open: the drive opens the board from
       // the sidebar itself. Seeded once per browser context, like split.html.

@@ -442,6 +442,216 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   );
 }
 
+/* ---------- 14. a card is renamed by typing over its title ---------- */
+{
+  // A card's title IS its file name, and the panel's header is where you
+  // meet it — so clicking it edits it, in place. No native dialog is
+  // involved anywhere: window.prompt is not something the webview this app
+  // ships in can be relied on to answer.
+  await page.locator(".dk-card", { hasText: "Write onboarding docs" }).click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 1);
+  const bodyBefore = await bodyOf(CARD_C);
+  await page.locator(".dk-peek-title").click();
+  await poll(async () => (await page.locator(".dk-peek-title-input").count()) === 1);
+  step("clicking the peek's title makes it editable", true);
+  step(
+    "it starts on the card's current name, selected",
+    (await page.locator(".dk-peek-title-input").inputValue()) === "Write onboarding docs",
+  );
+  await page.screenshot({ path: SHOTS + "kanban-peek-rename.png" });
+  await page.locator(".dk-peek-title-input").fill("Onboarding guide");
+  await page.keyboard.press("Enter");
+  const RENAMED = "/docs/Projects/Onboarding guide.md";
+  await poll(async () => (await fileOf(RENAMED)) !== undefined);
+  step("Enter renames the card's file", true, RENAMED);
+  step("nothing is left at the old path", (await fileOf(CARD_C)) === undefined);
+  step(
+    "the note's bytes moved with it",
+    (await bodyOf(RENAMED)) === bodyBefore,
+    JSON.stringify(await bodyOf(RENAMED)),
+  );
+  step(
+    "the panel follows the file it is looking at",
+    (await page.locator(".dk-peek").count()) === 1 &&
+      (await page.locator(".dk-peek-title").innerText()).trim() === "Onboarding guide",
+  );
+  // The board behind it catches up the way any change on disk does: through
+  // the folder watcher (dir-changed, from store.rs).
+  await page.evaluate(() => window.__emit("dir-changed", { root: "/docs/Projects" }));
+  await poll(
+    async () => (await page.locator(".dk-card", { hasText: "Onboarding guide" }).count()) === 1,
+  );
+  step("the board shows the new title once the watcher reports the folder", true);
+
+  // Escape abandons the name — and only the name: the panel stays open.
+  await page.locator(".dk-peek-title").click();
+  await page.locator(".dk-peek-title-input").fill("Thrown away");
+  await page.keyboard.press("Escape");
+  await settle(300);
+  step(
+    "Escape abandons the rename without closing the panel",
+    (await page.locator(".dk-peek").count()) === 1 &&
+      (await fileOf("/docs/Projects/Thrown away.md")) === undefined &&
+      (await fileOf(RENAMED)) !== undefined,
+  );
+
+  // Clicking away COMMITS: the panel stays open behind the input, so
+  // "click into the body and carry on" must not lose the retitle.
+  await page.locator(".dk-peek-title").click();
+  await page.locator(".dk-peek-title-input").fill("Onboarding");
+  await page.locator(".dk-peek-body .ProseMirror").first().click();
+  await poll(async () => (await fileOf("/docs/Projects/Onboarding.md")) !== undefined);
+  step("clicking away commits the name rather than dropping it", true);
+  await page.evaluate(() => window.__emit("dir-changed", { root: "/docs/Projects" }));
+
+  // A name another card already has is refused by move_path, and the panel
+  // says so — no card is clobbered and nothing is quietly uniquified.
+  await page.locator(".dk-peek-title").click();
+  await page.locator(".dk-peek-title-input").fill("Fix login redirect");
+  await page.keyboard.press("Enter");
+  await poll(async () => (await page.locator(".dk-peek-warn").count()) === 1);
+  step(
+    "a name that is taken is refused, in the panel",
+    (await page.locator(".dk-peek-warn").innerText()).includes("already exists") &&
+      (await fileOf("/docs/Projects/Onboarding.md")) !== undefined,
+    (await page.locator(".dk-peek-warn").innerText()).trim(),
+  );
+  await page.locator(".dk-peek-close").click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 0);
+}
+
+/* ---------- 15. and from the card's own menu, on the board ---------- */
+{
+  // Nothing on a board may ask through a native dialog: this webview's
+  // window.prompt is not answerable. The counter proves the app never
+  // reaches for one.
+  await page.evaluate(() => {
+    window.__prompted = 0;
+    window.prompt = () => {
+      window.__prompted++;
+      return null;
+    };
+  });
+  const card = page.locator(".dk-card", { hasText: "Ship dark mode" });
+  await card.click({ button: "right" });
+  await poll(async () => (await page.locator(".dk-popover-item", { hasText: "Rename" }).count()) === 1);
+  await page.locator(".dk-popover-item", { hasText: "Rename" }).click();
+  await poll(async () => (await page.locator(".dk-card .dk-inline-input").count()) === 1);
+  step("Rename… turns the card's title into an input, on the card", true);
+  await page.screenshot({ path: SHOTS + "kanban-card-rename.png" });
+  await page.locator(".dk-card .dk-inline-input").fill("Ship dark mode v2");
+  await page.keyboard.press("Enter");
+  const MOVED = "/docs/Projects/Ship dark mode v2.md";
+  await poll(async () => (await fileOf(MOVED)) !== undefined);
+  step("Enter renames the file", (await fileOf(CARD_B)) === undefined, MOVED);
+  step(
+    "no native prompt was ever opened",
+    (await page.evaluate(() => window.__prompted)) === 0,
+  );
+  await page.evaluate(() => window.__emit("dir-changed", { root: "/docs/Projects" }));
+  await poll(
+    async () => (await page.locator(".dk-card", { hasText: "Ship dark mode v2" }).count()) === 1,
+  );
+  step("the board shows the renamed card", true);
+}
+
+/* ---------- 16. a SELECT property, from nothing to a value ---------- */
+{
+  await page.locator(".dk-card", { hasText: "Onboarding" }).click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 1);
+  await page.locator(".dk-peek .dk-prop-add").click();
+  await page.locator(".dk-peek .dk-prop-name-input").fill("Priority");
+  // The regression this guards. The form used to close on any focusout that
+  // carried no relatedTarget — exactly what WebKit hands you when a click
+  // moves focus onto a <button>, since it doesn't focus buttons — so the
+  // form unmounted on the way to its own Add button and the click landed on
+  // nothing. Enter from the name field still worked, which is why a text
+  // property could be added and a select, which has to reach the type
+  // picker and then Add, could not.
+  await page.evaluate(() => {
+    document
+      .querySelector(".dk-peek .dk-prop-add-form input")
+      .dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+  });
+  await settle(200);
+  step(
+    "the add form outlives a focusout with no relatedTarget",
+    (await page.locator(".dk-peek .dk-prop-add-form").count()) === 1,
+  );
+  await page.locator(".dk-peek .dk-prop-type").selectOption("select");
+  await page.locator(".dk-peek .dk-prop-add-go").click();
+  await poll(async () => (await fileOf("/docs/Projects/store.jsonl")).includes('"id":"priority"'), 8000);
+  step(
+    "a select property is declared on the store",
+    (await fileOf("/docs/Projects/store.jsonl")).includes(
+      '{"t":"field","id":"priority","name":"Priority","type":"select"}',
+    ),
+  );
+  // A select is most often given a value nobody has written down yet: the
+  // picker declares the option and picks it in one go.
+  const row = page.locator(".dk-peek .dk-prop-row", { hasText: "Priority" });
+  await row.locator(".dk-prop-trigger").click();
+  await poll(async () => (await page.locator(".dk-prop-popover").count()) > 0);
+  await page.locator(".dk-prop-popover .dk-popover-search").fill("High");
+  await page.keyboard.press("Enter");
+  await poll(
+    async () => (await fileOf("/docs/Projects/store.jsonl")).includes('"field":"priority"'),
+    8000,
+  );
+  step(
+    "the option it declares is a line of the store, colour and rank included",
+    (await fileOf("/docs/Projects/store.jsonl")).includes(
+      '{"t":"option","field":"priority","name":"High","rank":"a0"}',
+    ),
+  );
+  await poll(async () => (await headOf("/docs/Projects/Onboarding.md")).includes("priority: High"));
+  step(
+    "and the card carries the value",
+    true,
+    JSON.stringify(await headOf("/docs/Projects/Onboarding.md")),
+  );
+  step(
+    "the pill shows it",
+    (await row.locator(".dk-chip").allTextContents()).includes("High"),
+  );
+  await page.screenshot({ path: SHOTS + "kanban-select-prop.png" });
+  await page.locator(".dk-peek-close").click();
+  await poll(async () => (await page.locator(".dk-peek").count()) === 0);
+}
+
+/* ---------- 17. the same rename, in a table row ---------- */
+{
+  await page.locator(".dk-view-tab", { hasText: "Table" }).click();
+  await poll(async () => (await page.locator(".dk-table").count()) === 1);
+  step(
+    "the table's columns grew the new property",
+    (await page.locator(".dk-th").allTextContents()).join(",").includes("Priority"),
+  );
+  await page.locator(".dk-row-title", { hasText: "Ship dark mode v2" }).click({ button: "right" });
+  await poll(async () => (await page.locator(".dk-popover-item", { hasText: "Rename" }).count()) === 1);
+  await page.locator(".dk-popover-item", { hasText: "Rename" }).click();
+  await poll(async () => (await page.locator(".dk-td.is-title .dk-inline-input").count()) === 1);
+  step("a row's title is renamed in the cell it sits in", true);
+  await page.locator(".dk-td.is-title .dk-inline-input").fill("Ship dark mode");
+  await page.keyboard.press("Enter");
+  await poll(async () => (await fileOf(CARD_B)) !== undefined);
+  step(
+    "the row's rename moves the file too",
+    (await fileOf("/docs/Projects/Ship dark mode v2.md")) === undefined,
+    CARD_B,
+  );
+  step(
+    "still no native prompt",
+    (await page.evaluate(() => window.__prompted)) === 0,
+  );
+  await page.evaluate(() => window.__emit("dir-changed", { root: "/docs/Projects" }));
+  await poll(
+    async () =>
+      (await page.locator(".dk-row-title", { hasText: "Ship dark mode" }).count()) === 1,
+  );
+  await page.screenshot({ path: SHOTS + "kanban-table-rename.png" });
+}
+
 await browser.close();
 
 const failed = results.filter((r) => !r.ok);

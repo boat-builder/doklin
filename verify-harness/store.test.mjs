@@ -67,6 +67,8 @@ const {
   columnCards,
   fenceKeyOf,
   orderedOptions,
+  renamedCardPath,
+  sanitizeTitle,
   snapKeyOf,
   snapKind,
   sortCards,
@@ -953,6 +955,40 @@ const eq = (a, b, msg) => {
   eq(csvFileName("Projects"), "Projects.csv");
   eq(csvFileName("a/b:c"), "a-b-c.csv", "nothing a path separator could make something of");
   eq(csvFileName("  "), "Store.csv");
+}
+
+/* ========== a card's title IS its file name ========== */
+{
+  eq(sanitizeTitle("  Ship  dark   mode "), "Ship dark mode", "runs of space collapse");
+  eq(sanitizeTitle("a/b:c"), "a-b-c", "the two characters macOS refuses become a dash");
+  eq(sanitizeTitle("   "), "", "a name of nothing is nothing");
+
+  eq(
+    renamedCardPath("/w/Projects/Old name.md", "New name"),
+    "/w/Projects/New name.md",
+    "same folder, new name",
+  );
+  eq(
+    renamedCardPath("/w/Projects/Old.markdown", "New"),
+    "/w/Projects/New.markdown",
+    "a card keeps its OWN extension — a rename is not a conversion",
+  );
+  eq(
+    renamedCardPath("/w/Projects/Old.MD", "New"),
+    "/w/Projects/New.MD",
+    "including the case it was written in",
+  );
+  eq(
+    renamedCardPath("/w/Projects/no extension", "New"),
+    "/w/Projects/New.md",
+    "a card without one lands on .md",
+  );
+  eq(
+    renamedCardPath("/w/Projects/Old.md", "a/b: c"),
+    "/w/Projects/a-b- c.md",
+    "the new name goes through the same sanitize a new card's does",
+  );
+  eq(renamedCardPath("/w/Projects/Old.md", "   "), "", "nothing to rename it to");
 }
 
 console.log(`store.test.mjs: ${checks} checks passed`);

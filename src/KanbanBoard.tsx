@@ -20,8 +20,10 @@ import type { StoreModel } from "./store/model";
 import {
   boardColumns,
   cardChips,
+  renamedCardPath,
   chipFieldsOf,
   orderedOptions,
+  sanitizeTitle,
   type BoardColumn,
   type Card,
 } from "./store/board";
@@ -130,7 +132,10 @@ export default function KanbanBoard({
   const [cardMenu, setCardMenu] = useState<{ path: string; x: number; y: number } | null>(
     null,
   );
+  // Which column is being renamed, and which card — a card's title IS its
+  // file name, so renaming one is an inline edit here, not a dialog.
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [renamingCard, setRenamingCard] = useState<string | null>(null);
 
   // The columns come from the shared derivation (store/board.ts), which is
   // also what a share push snapshots — a published board and this one can't
@@ -325,6 +330,17 @@ export default function KanbanBoard({
     });
   };
 
+  const renameCard = async (card: Card, title: string) => {
+    if (!onRenameCard) return;
+    const clean = sanitizeTitle(title);
+    if (!clean || clean === card.title) return;
+    const failed = await onRenameCard(card.path, renamedCardPath(card.path, clean));
+    // A name already taken, or a file that moved out from under us: the board
+    // has nowhere quieter to say so, and silently keeping the old title would
+    // read as the rename having worked.
+    if (failed) window.alert(failed);
+  };
+
   const dragging = drag?.started === true;
 
   return (
@@ -398,7 +414,19 @@ export default function KanbanBoard({
                     }}
                     title={card.path}
                   >
-                    <div className="dk-card-title">{card.title}</div>
+                    {renamingCard === card.path ? (
+                      <InlineInput
+                        initial={card.title}
+                        ariaLabel={`Rename ${card.title}`}
+                        onCommit={async (title) => {
+                          setRenamingCard(null);
+                          await renameCard(card, title);
+                        }}
+                        onCancel={() => setRenamingCard(null)}
+                      />
+                    ) : (
+                      <div className="dk-card-title">{card.title}</div>
+                    )}
                     <Chips card={card} def={def} fields={chipFields} />
                   </article>
                 </Fragment>
@@ -509,17 +537,9 @@ export default function KanbanBoard({
           onRename={
             onRenameCard
               ? () => {
-                  const card = cards.find((c) => c.path === cardMenu.path);
+                  const path = cardMenu.path;
                   setCardMenu(null);
-                  if (!card) return;
-                  const next = window.prompt("Rename card", card.title);
-                  if (next && next.trim() && next.trim() !== card.title) {
-                    const dirOf = card.path.slice(0, card.path.lastIndexOf("/"));
-                    void onRenameCard(
-                      card.path,
-                      `${dirOf}/${next.trim().replace(/[/:]/g, "-")}.md`,
-                    );
-                  }
+                  setRenamingCard(path);
                 }
               : undefined
           }

@@ -45,9 +45,11 @@ import { rankBetween } from "./rank";
 // shapes themselves belong to everything that shows a board, published
 // pages included, so they live apart from Tauri.
 import {
+  CARD_EXT_RE,
   cardRank,
   cardValue,
   orderedOptions,
+  sanitizeTitle,
   type Card,
   type FileSnapshot,
 } from "./board";
@@ -83,18 +85,12 @@ export type StoreState = {
   error: string | null;
 };
 
-const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
-
-/** Strip what a file name can't hold. macOS refuses `/` and `:` — nothing else. */
-export const sanitizeTitle = (title: string) =>
-  title.replace(/[/:]/g, "-").replace(/\s+/g, " ").trim();
-
 const cardOf = (head: CardHead): Card => {
   const fm = parseFrontmatter(head.head);
   return {
     path: head.path,
     name: head.name,
-    title: head.name.replace(MD_EXT_RE, ""),
+    title: head.name.replace(CARD_EXT_RE, ""),
     snapshot: head.snapshot,
     props: fm.props,
     opaque: fm.opaque,

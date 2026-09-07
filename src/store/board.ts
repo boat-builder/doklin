@@ -44,6 +44,32 @@ export type Card = {
   opaque: string[];
 };
 
+/** What a card's file is called: a markdown note, by any of its names. */
+export const CARD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+
+/**
+ * Strip what a file name can't hold. macOS refuses `/` and `:` — nothing
+ * else. A card's title IS its file name, so every place that makes one (the
+ * composer, a rename on the board, in a table, or in the peek) runs the name
+ * through here and lands on the same bytes.
+ */
+export const sanitizeTitle = (title: string) =>
+  title.replace(/[/:]/g, "-").replace(/\s+/g, " ").trim();
+
+/**
+ * Where a card lands when it is retitled: the same folder, the same
+ * extension, and a file name the OS will take. "" when the new title is
+ * nothing at all. The extension is the card's OWN — a note that arrived as
+ * `.markdown` is not quietly turned into an `.md` by being renamed.
+ */
+export const renamedCardPath = (path: string, title: string): string => {
+  const clean = sanitizeTitle(title);
+  if (!clean) return "";
+  const slash = path.lastIndexOf("/");
+  const ext = CARD_EXT_RE.exec(path.slice(slash + 1))?.[0] ?? ".md";
+  return `${path.slice(0, slash)}/${clean}${ext}`;
+};
+
 /** The value a card carries for a field, as a single string ("" = unset). */
 export const cardValue = (card: Card, field: string): string => {
   const v = card.props[field];
