@@ -5,7 +5,7 @@
 // presence and the binding) and `x-doklin-client` (the app version, for
 // the logs — nothing reads it).
 //
-//   GET    /api/meta                 {version, features, workspace|null}
+//   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null}
 //   POST   /api/workspace            owner; bind this domain: body {name, deviceName?} → 201
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
@@ -60,6 +60,7 @@ import {
   validPath,
 } from "./layout";
 import { emptyManifest, validateManifest, validHistoryArchive } from "./manifest";
+import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
 
@@ -81,7 +82,12 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   // bound" in one call — what the setup wizard asks before touching anything.
   if (section === "meta" && parts.length === 2) {
     if (method !== "GET") return methodNotAllowed();
-    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace: await readWorkspace(env) });
+    // The probe is also where the database migrates itself: it is the one
+    // route every engine calls on start and on every poll, and the only one
+    // that reports what it found. `d1` is the schema version, or null on a
+    // deployment whose wrangler.toml has no DB binding (docs/teams-plan.md §8).
+    const [workspace, d1] = await Promise.all([readWorkspace(env), ensureSchema(env)]);
+    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace, d1 });
   }
 
   if (section === "workspace" && parts.length === 2) {
@@ -364,6 +370,9 @@ async function presence(request: Request, env: Env, auth: Auth): Promise<Respons
  * budget; the client repeats the call until `remaining` comes back false.
  * The caller's own token object (a minted token, once invites exist) goes
  * last, so a wipe can't cut itself off half-done.
+ *
+ * The last round empties D1 as well (docs/teams-plan.md §4.4) — otherwise a
+ * rebound domain would inherit the old workspace's people.
  */
 async function wipeBucket(env: Env, auth: Auth): Promise<Response> {
   let deleted = 0;
@@ -372,6 +381,7 @@ async function wipeBucket(env: Env, auth: Auth): Promise<Response> {
       await env.DATA.delete(auth.key);
       deleted += 1;
     }
+    await wipeSchema(env);
     return json({ wiped: true, purged: deleted, remaining: false });
   };
   for (let round = 0; round < 20; round += 1) {

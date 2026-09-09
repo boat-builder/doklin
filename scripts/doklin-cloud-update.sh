@@ -14,22 +14,25 @@
 # worker, confirm the names, write wrangler.toml, deploy over the same name.
 # The app's "Update the worker" card hands an agent these same two commands.
 #
-# This is a CODE-ONLY redeploy. The R2 bucket binding, the OWNER_TOKEN secret
-# and the domain routing all survive a same-name deploy, so there is nothing
-# secret in this file and nothing else on the Cloudflare account is touched.
+# It is a code-only redeploy in every respect but one: the R2 bucket binding,
+# the OWNER_TOKEN secret and the domain routing all survive a same-name deploy,
+# so nothing in this file is secret. The exception is the D1 database the
+# worker now binds (docs/teams-plan.md §4.2) — a domain set up before Doklin
+# had one has none, and this is where it gets one: an empty database, free,
+# named after the worker. Nothing else on the account is touched.
 #
 # The one thing it will not do is guess. Deploying under a name that doesn't
-# exist CREATES a second worker rather than updating yours, so the worker and
-# its bucket are confirmed against the account before anything is written, and
-# the script asks — or, with no terminal to ask from, stops and says what to
-# pass — rather than inventing a name.
+# exist CREATES a second worker rather than updating yours, so the worker, its
+# bucket and its database are confirmed against the account before anything is
+# written, and the script asks — or, with no terminal to ask from, stops and
+# says what to pass — rather than inventing a name.
 #
 # Needs curl and Node.js (https://nodejs.org). Wrangler opens a browser to sign
 # you in to Cloudflare if you are not signed in already.
 #
 # Env, all optional:
 #   CLOUDFLARE_ACCOUNT_ID=…              pick one, when the login has several
-#   WORKER_NAME=… BUCKET_NAME=…          override the names read from the endpoint
+#   WORKER_NAME=… BUCKET_NAME=… D1_NAME=…  override the names read from the endpoint
 #
 # `sh doklin-cloud-update.sh --names <endpoint>` prints the names it would use
 # and exits — verify-harness/cloudprompts.test.mjs runs it to hold this file
@@ -84,8 +87,10 @@ derive_names() {
     CERTAIN=0
   fi
   BUCKET="$WORKER"
+  DATABASE="$WORKER"
   [ -z "${WORKER_NAME:-}" ] || { WORKER="$WORKER_NAME"; CERTAIN=0; }
   [ -z "${BUCKET_NAME:-}" ] || BUCKET="$BUCKET_NAME"
+  [ -z "${D1_NAME:-}" ] || DATABASE="$D1_NAME"
 }
 
 case "${1:-}" in
@@ -99,6 +104,7 @@ if [ "${1:-}" = "--names" ]; then
   derive_names "${2:-}"
   say "worker=$WORKER"
   say "bucket=$BUCKET"
+  say "database=$DATABASE"
   say "domain=$DOMAIN"
   say "certain=$CERTAIN"
   exit 0
@@ -116,11 +122,14 @@ fi
 derive_names "$target"
 
 command -v curl >/dev/null 2>&1 || die "curl not found."
+# npx runs wrangler; node reads the JSON `wrangler d1 list` prints.
 command -v npx >/dev/null 2>&1 ||
   die "npx not found. Install Node.js from https://nodejs.org, then re-run this."
+command -v node >/dev/null 2>&1 ||
+  die "node not found. Install Node.js from https://nodejs.org, then re-run this."
 
 say "Updating the Doklin worker serving $ENDPOINT"
-say "  worker \"$WORKER\" · bucket \"$BUCKET\""
+say "  worker \"$WORKER\" · bucket \"$BUCKET\" · database \"$DATABASE\""
 say ""
 
 # ---------- 1. the worker, from the latest release ----------
@@ -241,6 +250,70 @@ while ! bucket_exists "$BUCKET"; do
   BUCKET="$answer"
 done
 
+# The database is the one resource that may legitimately not exist: a domain
+# set up before Doklin bound one has none. A miss under the conventional name
+# is therefore created, not refused — an empty D1 database is free and holds
+# nothing until people are invited. A name given with D1_NAME= is a pointer at
+# a database that already exists, so a miss there is a typo and stops here.
+#
+# `d1 list --json` goes to stdout and wrangler's chatter to stderr: `2>&1
+# >file` keeps the JSON clean for node and wrangler's own words in $probe.
+
+d1_listed=""
+DATABASE_ID=""
+d1_uuid() {
+  d1_listed=""
+  DATABASE_ID=""
+  probe=$(npx -y "$WRANGLER" d1 list --json 2>&1 >d1-list.json) || return 1
+  d1_listed=1
+  DATABASE_ID=$(node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d));
+    process.stdin.on("end", () => {
+      const a = s.indexOf("["), z = s.lastIndexOf("]");
+      let list = [];
+      try {
+        list = JSON.parse(s.slice(a, z + 1));
+      } catch {
+        list = []; // not JSON — treat it as no match
+      }
+      const hit = Array.isArray(list) ? list.find((d) => d && d.name === process.argv[1]) : null;
+      process.stdout.write(hit && hit.uuid ? String(hit.uuid) : "");
+    });
+  ' "$1" <d1-list.json)
+  [ -n "$DATABASE_ID" ]
+}
+
+say "Confirming the database…"
+if ! d1_uuid "$DATABASE"; then
+  if [ -z "$d1_listed" ]; then
+    warn ""
+    warn "Couldn't list this account's D1 databases. Wrangler said:"
+    printf '%s\n' "$probe" | sed 's/^/  | /' >&2
+    die "nothing deployed — $ENDPOINT keeps serving its old worker."
+  fi
+  [ -z "${D1_NAME:-}" ] || die "no D1 database named \"$DATABASE\" on this account.
+       D1_NAME= names one that already exists; check it with
+       \`npx -y $WRANGLER d1 list\` and re-run. Nothing has been deployed."
+  say ""
+  say "No D1 database named \"$DATABASE\" — this domain predates Doklin's."
+  say "Creating it: an empty database on your account, free, holding nothing"
+  say "until people are invited. The worker builds its own schema."
+  created=$(npx -y "$WRANGLER" d1 create "$DATABASE" 2>&1) || {
+    printf '%s\n' "$created" | sed 's/^/  | /' >&2
+    die "couldn't create the database \"$DATABASE\".
+       Nothing has been deployed; $ENDPOINT keeps serving its old worker."
+  }
+  # `d1 create` prints the id in the toml snippet it suggests; the listing is
+  # the fallback if that output ever changes shape.
+  DATABASE_ID=$(printf '%s\n' "$created" |
+    grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+  [ -n "$DATABASE_ID" ] || d1_uuid "$DATABASE" ||
+    die "created \"$DATABASE\" but couldn't read its id back. Run
+       \`npx -y $WRANGLER d1 info $DATABASE\` and re-run this script."
+fi
+say "  database \"$DATABASE\" · $DATABASE_ID"
+
 # ---------- 4. deploy over the same name ----------
 
 if [ -n "$DOMAIN" ]; then
@@ -259,6 +332,10 @@ $routes
 [[r2_buckets]]
 binding = "DATA"
 bucket_name = "$BUCKET"
+[[d1_databases]]
+binding = "DB"
+database_name = "$DATABASE"
+database_id = "$DATABASE_ID"
 TOML
 
 say ""

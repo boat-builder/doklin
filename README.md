@@ -79,9 +79,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   answer to "what if the cloud goes away".
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
-  note. The cloud is one Cloudflare Worker and one bucket on your own account,
-  set up by an agent from a prompt the app writes — no dashboard, no
-  terminal, no account with anyone else. Publishing is one click: a note, a
+  note. The cloud is one Cloudflare Worker with one bucket and one database
+  on your own account, set up by an agent from a prompt the app writes — no
+  dashboard, no terminal, no account with anyone else. Publishing is one click: a note, a
   folder, or the whole workspace gets an address on your domain, rendered
   from the synced files — boards, properties, diagrams, table widths and html
   renditions included — read-only and `noindex`, exactly as fresh as the

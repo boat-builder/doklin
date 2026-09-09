@@ -326,6 +326,16 @@ read the uuid, with a `D1_NAME=` override and the same
 never-deploy-on-a-guess precondition — a wrong name would point the worker
 at someone else's database.
 
+With one exception, which is the whole reason phase 1 exists: the database
+is the one resource that may legitimately be missing. Every domain set up
+before this lands has none, and the update is the only route by which it
+gets one. So a miss under the *conventional* name is created rather than
+refused — an empty D1 database, free, holding nothing until people are
+invited — while a name given by hand with `D1_NAME=` is a pointer at
+something that already exists, so a miss there is a typo and stops the
+script. That makes the update script the one place that creates a
+Cloudflare resource, and its header says so.
+
 ### 4.3 Migrations — the worker owns its schema
 
 The update ships **one bundled JS file and no migrations directory**, so
@@ -413,7 +423,7 @@ budget, for no extra freshness.
 
 | # | Phase | Ships | Depends on | User sees |
 | --- | --- | --- | --- | --- |
-| 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** |
+| 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** (an update badge) |
 | 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) |
 | 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join |
 | 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable |
@@ -436,17 +446,29 @@ is a failed deploy and not a broken workspace.
 
 **Files:** `src/cloudPrompts.ts`, `scripts/doklin-cloud-update.sh`,
 `cloud-worker/wrangler.toml.example`, `cloud-worker/src/env.ts`,
-`cloud-worker/src/schema.ts` (new), `cloud-worker/src/api.ts` (wipe),
-`cloud-worker/src/version.ts`, `verify-harness/cloudprompts.test.mjs`.
+`cloud-worker/src/schema.ts` (new), `cloud-worker/src/api.ts` (meta, wipe),
+`cloud-worker/src/version.ts`, `cloud-worker/test/fake-d1.mjs` (new),
+`verify-harness/cloudprompts.test.mjs`, and the one-word honesty edits in
+`src/CloudSetup.tsx`, `src/CloudPanel.tsx` and `src/WorkerUpdate.tsx` — the
+setup now creates three resources and the teardown removes three, so the
+copy that lists them has to say so.
 
 - `wrangler.toml` gains `[[d1_databases]] binding = "DB"`, with
   `database_name` derived by `resourceName` exactly as the bucket is, and
-  `database_id` filled in by whoever writes the file (§4.1, §4.2).
+  `database_id` filled in by whoever writes the file (§4.1, §4.2). The
+  setup prompt's steps reorder to put both resources before the config: an
+  id cannot be written down before it exists.
 - `schema.ts` creates `meta` and sets `schema_version = 1`. No other table
   yet — a phase that ships an empty schema ships an empty schema.
 - `GET /api/meta` reports `d1: <schema version>` so the app and the update
-  script can both see the database is wired.
+  script can both see the database is wired, and running the migration
+  there is what makes it happen at most once per isolate.
 - Wipe clears D1 and re-runs the schema (§4.4); teardown deletes it.
+- `WORKER_VERSION` → 4, which is the point: the badge is the only thing
+  that carries the binding to a domain already deployed, and a phase whose
+  plumbing never reaches anyone has not de-risked anything. No
+  `WORKER_FEATURES` name — a name there promises behaviour, and there is
+  none yet; `d1: null` says it better.
 
 **Tests:** `node verify-harness/cloudprompts.test.mjs` — the setup prompt
 names the create step and the confirmation, the update script's discovery
@@ -457,7 +479,9 @@ wipe leaves it migrated.
 
 **D1 failure posture:** nothing depends on it. A worker whose `DB` binding
 is missing or broken serves every existing route unchanged, and
-`/api/meta` reports `d1: null`.
+`/api/meta` reports `d1: null`. Both are asserted, and asserted *first* in
+the suite — the runner remembers a successful migration for the life of the
+isolate, so a cold start is only observable before one.
 
 **Done when:** `pnpm typecheck:worker`, `pnpm test:worker`, `pnpm
 bundle:worker` under the 3 MB cap; a fresh setup *and* an update of an

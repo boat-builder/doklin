@@ -7,16 +7,18 @@
 //
 // Setup and teardown are prompts because they carry judgement: a name that
 // must be free, an account that may not have R2 on, a zone that may not be
-// on the account, a bucket that must be empty before it goes. The update
-// carries none — fetch the worker, confirm the names, write wrangler.toml,
-// deploy over the same name — so it is a script (scripts/doklin-cloud-update.sh,
-// attached to every release) and its "prompt" only asks an agent to run it.
+// on the account, a database id only wrangler can print, a bucket that must
+// be empty before it goes. The update carries none — fetch the worker,
+// confirm the names, write wrangler.toml, deploy over the same name — so it
+// is a script (scripts/doklin-cloud-update.sh, attached to every release)
+// and its "prompt" only asks an agent to run it.
 //
 // The two real prompts share one skeleton: the goal in a sentence, fetch the
-// artifact, establish credentials, verify identity before mutating, the
-// config file verbatim, deploy with the failure named, verify and print one
-// line back, and the negative scope at the end. Setup carries the token —
-// its copy point says so; update and teardown carry no secret.
+// artifact, establish credentials, verify identity before mutating, create
+// the resources the config will name, the config file verbatim, deploy with
+// the failure named, verify and print one line back, and the negative scope
+// at the end. Setup carries the token — its copy point says so; update and
+// teardown carry no secret.
 
 export const WORKER_BUNDLE_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js";
@@ -95,6 +97,8 @@ export function endpointOf(target: CloudTarget): string | null {
 export type DeploymentNames = {
   worker: string;
   bucket: string;
+  /** The D1 database beside the bucket — the same name again. */
+  database: string;
   /** The custom domain the route re-asserts; null for a workers.dev address. */
   domain: string | null;
   /** True when the endpoint literally carries the name (workers.dev). */
@@ -107,9 +111,9 @@ export type DeploymentNames = {
 export function deploymentNames(endpoint: string): DeploymentNames {
   const host = cleanDomain(endpoint) ?? endpoint.trim().toLowerCase();
   const m = host.match(/^([a-z0-9-]+)\.[^.]+\.workers\.dev$/);
-  if (m) return { worker: m[1], bucket: m[1], domain: null, certain: true };
+  if (m) return { worker: m[1], bucket: m[1], database: m[1], domain: null, certain: true };
   const name = resourceName({ kind: "domain", domain: host });
-  return { worker: name, bucket: name, domain: host, certain: false };
+  return { worker: name, bucket: name, database: name, domain: host, certain: false };
 }
 
 function routingLines(domain: string | null): string {
@@ -118,7 +122,16 @@ function routingLines(domain: string | null): string {
     : "workers_dev = true";
 }
 
-function wranglerToml(worker: string, bucket: string, domain: string | null, compatibilityDate: string): string {
+/** The config the setup prompt writes verbatim. Two fill-ins, both captured
+ *  by an earlier step and neither guessable: the account id from `whoami`,
+ *  and the database id `d1 create` prints. */
+function wranglerToml(
+  worker: string,
+  bucket: string,
+  database: string,
+  domain: string | null,
+  compatibilityDate: string,
+): string {
   return [
     `name = "${worker}"`,
     `main = "doklin-cloud-worker.js"`,
@@ -128,6 +141,10 @@ function wranglerToml(worker: string, bucket: string, domain: string | null, com
     `[[r2_buckets]]`,
     `binding = "DATA"`,
     `bucket_name = "${bucket}"`,
+    `[[d1_databases]]`,
+    `binding = "DB"`,
+    `database_name = "${database}"`,
+    `database_id = "<from d1 create>"`,
   ].join("\n");
 }
 
@@ -163,22 +180,24 @@ export function buildSetupPrompt(i: SetupPromptInput): string {
   const deploy = domain
     ? `Deploy: \`npx -y wrangler@4 deploy\`. Wrangler binds ${domain} and provisions DNS and TLS itself when the domain's zone is active on this account. If it errors because the zone isn't on this account, pause and ask me to add the registrable domain in the Cloudflare dashboard (Account Home → Add a domain, the free plan is enough) and to point the registrar's nameservers at Cloudflare; retry once the zone is active. The first certificate can take a minute or two.`
     : `Deploy: \`npx -y wrangler@4 deploy\`. Note the workers.dev URL it prints — that is the endpoint.`;
-  return `Set up Doklin's cloud for my workspace "${i.workspaceName}": one Cloudflare Worker in front of one R2 bucket, serving ${where}. Everything runs on my Cloudflare account. The worker is a single published file; nothing else on the account is to be touched.
+  return `Set up Doklin's cloud for my workspace "${i.workspaceName}": one Cloudflare Worker in front of one R2 bucket and one D1 database, serving ${where}. Everything runs on my Cloudflare account. The worker is a single published file; nothing else on the account is to be touched.
 
 1. ${FETCH_STEP}
 2. ${LOGIN_STEP}
-3. Verify the names are free — a same-name deploy silently replaces an existing worker, and a shared bucket serves two sites:
-   \`npx -y wrangler@4 deployments list --name ${name}\` must fail because no such worker exists, and
-   \`npx -y wrangler@4 r2 bucket list\` must not list ${name}.
-   If either exists, stop and ask me; never reuse or replace them on your own.
-4. Next to the downloaded file, write wrangler.toml with exactly this — the account_id from step 2 is the only fill-in:
-${wranglerToml(name, name, domain, i.compatibilityDate)}
-5. Create the bucket: \`npx -y wrangler@4 r2 bucket create ${name}\`. If the account has never enabled R2, pause and ask me to enable it once in the Cloudflare dashboard (it may ask for a payment method; the free allowance covers this use).
-6. Store the app's token as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN\` and give it exactly this value:
+3. Verify the names are free — a same-name deploy silently replaces an existing worker, and a shared bucket or database serves two sites:
+   \`npx -y wrangler@4 deployments list --name ${name}\` must fail because no such worker exists,
+   \`npx -y wrangler@4 r2 bucket list\` must not list ${name}, and
+   \`npx -y wrangler@4 d1 list\` must not list ${name}.
+   If any of them exists, stop and ask me; never reuse or replace them on your own.
+4. Create the bucket: \`npx -y wrangler@4 r2 bucket create ${name}\`. If the account has never enabled R2, pause and ask me to enable it once in the Cloudflare dashboard (it may ask for a payment method; the free allowance covers this use).
+5. Create the database: \`npx -y wrangler@4 d1 create ${name}\`. It prints a \`database_id\` — a uuid; keep it, the next step needs it verbatim. Confirm with \`npx -y wrangler@4 d1 list\`, which must now list ${name}; if it doesn't, stop and ask me. If the id has scrolled away, \`npx -y wrangler@4 d1 info ${name}\` prints it again — never make one up, and never copy one from another database.
+6. Next to the downloaded file, write wrangler.toml with exactly this. Two fill-ins, both from steps above: the account_id from step 2 and the database_id from step 5.
+${wranglerToml(name, name, name, domain, i.compatibilityDate)}
+7. Store the app's token as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN\` and give it exactly this value:
 ${i.token}
-7. ${deploy}
-8. Verify: \`curl -fsS -H "Authorization: Bearer ${i.token}" ${endpoint}/api/meta\` must answer 200 with JSON whose "workspace" is null and whose "version" is at least ${i.workerVersion}. On a custom domain, retry that for up to five minutes while the certificate is being issued before treating it as a failure.
-9. Then print exactly this line, filled in:
+8. ${deploy}
+9. Verify: \`curl -fsS -H "Authorization: Bearer ${i.token}" ${endpoint}/api/meta\` must answer 200 with JSON whose "workspace" is null, whose "version" is at least ${i.workerVersion}, and whose "d1" is a number — a null "d1" means the database binding didn't take, so re-check the database_id in wrangler.toml and deploy again. On a custom domain, retry the whole check for up to five minutes while the certificate is being issued before treating it as a failure.
+10. Then print exactly this line, filled in:
 ENDPOINT: ${endpoint}
 
 The token is already in the app, so the endpoint is the only value I need back. ${NEGATIVE_SCOPE}`;
@@ -236,17 +255,18 @@ export type TeardownPromptInput = { endpoint: string };
 /** Teardown: after the app's wipe emptied the bucket, remove the worker and
  *  the bucket. No secret. */
 export function buildTeardownPrompt(i: TeardownPromptInput): string {
-  const { worker, bucket, certain } = deploymentNames(i.endpoint);
+  const { worker, bucket, database, certain } = deploymentNames(i.endpoint);
   const nameNote = certain
     ? "certain: it is the first label of the workers.dev hostname"
     : "Doklin's naming convention — verify it before deleting";
-  return `Tear down the Doklin cloud that served ${i.endpoint}: delete its Cloudflare Worker and its R2 bucket from my account. The app has already erased everything in the bucket; nothing on this domain is needed any more.
+  return `Tear down the Doklin cloud that served ${i.endpoint}: delete its Cloudflare Worker, its D1 database and its R2 bucket from my account. The app has already erased everything in the bucket and the database; nothing on this domain is needed any more.
 
 1. ${LOGIN_STEP}
-2. Confirm the names before deleting anything. The worker should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — never delete one you guessed. Its bucket should be "${bucket}": confirm it with \`npx -y wrangler@4 r2 bucket list\`, and ask me if it isn't there.
+2. Confirm the names before deleting anything. The worker should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — never delete one you guessed. Its bucket should be "${bucket}": confirm it with \`npx -y wrangler@4 r2 bucket list\`. Its database should be "${database}": confirm it with \`npx -y wrangler@4 d1 list\`. Ask me about anything that isn't there — a domain set up before Doklin used a database simply has none, which is fine, but a name that doesn't match is not.
 3. Delete the worker: \`npx -y wrangler@4 delete --name ${worker}\`. This also releases its route or workers.dev address.
-4. Delete the bucket: \`npx -y wrangler@4 r2 bucket delete ${bucket}\`. If it refuses because the bucket isn't empty, STOP and tell me — the app's erase step may not have finished. Never force it.
-5. Verify: \`curl -sS -o /dev/null -w "%{http_code}" ${i.endpoint}/\` must no longer print 200 (a custom domain stops resolving or answers 5xx once the route is gone; a workers.dev address answers 404). Then print exactly this line:
+4. Delete the database: \`npx -y wrangler@4 d1 delete ${database}\` — answer yes if it asks (\`-y\` skips the prompt). Skip this if step 2 found no such database.
+5. Delete the bucket: \`npx -y wrangler@4 r2 bucket delete ${bucket}\`. If it refuses because the bucket isn't empty, STOP and tell me — the app's erase step may not have finished. Never force it.
+6. Verify: \`curl -sS -o /dev/null -w "%{http_code}" ${i.endpoint}/\` must no longer print 200 (a custom domain stops resolving or answers 5xx once the route is gone; a workers.dev address answers 404). Then print exactly this line:
 TORN DOWN: ${i.endpoint}
 
 Do not touch any other Cloudflare resource.`;

@@ -8,6 +8,7 @@
 #   curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js \
 #        -o doklin-cloud-worker.js                            # or: node scripts/bundle-worker.mjs
 #   npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # the bucket must exist BEFORE deploy
+#   npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the database_id below
 #   npx -y wrangler@4 secret put OWNER_TOKEN                     # 32 random bytes, hex — the app mints it
 #   npx -y wrangler@4 deploy
 #
@@ -33,3 +34,12 @@ routes = [{ pattern = "notes.example.com", custom_domain = true }]
 [[r2_buckets]]
 binding = "DATA"                          # the worker reads env.DATA — leave as is
 bucket_name = "doklin-notes-example-com"
+
+# The database beside the bucket: people, presence and file leases
+# (docs/teams-plan.md). `wrangler d1 create` prints the id; `wrangler d1 info
+# <name>` prints it again if the create output has scrolled away. The worker
+# migrates its own schema, so there is no migrations directory to apply.
+[[d1_databases]]
+binding = "DB"                            # the worker reads env.DB — leave as is
+database_name = "doklin-notes-example-com"
+database_id = "<from wrangler d1 create>"

@@ -27,13 +27,22 @@
 //       reference, plus DELETE on a per-file history archive. Where 1's
 //       history is one file's revisions, this is the folder's — what every
 //       device keeps locally, mirrored so it outlives the laptop.
-export const WORKER_VERSION = 3;
+//   4 = a D1 database beside the bucket (docs/teams-plan.md §8): the binding,
+//       the worker's own migration runner, a schema version reported by
+//       /api/meta as `d1`, and a wipe that empties it. Nothing reads or
+//       writes a table yet — the bump exists so the update badge lands the
+//       plumbing before any feature rides on it, and a worker still running 3
+//       has no binding and answers `d1: null`.
+export const WORKER_VERSION = 4;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
 // is served) and "boards" (embedded stores render) joined when the renderer
 // landed, not before.
 export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions"];
+// D1 is deliberately absent: a feature name promises behaviour, and nothing
+// behaves differently yet. /api/meta's `d1` says whether the database is
+// wired, and says it more precisely than a name in this list could.
 
 // The manifest schema this worker understands (docs/cloud.md §6.6).
 // A PUT with a lower version is a plain 400 (nothing older exists); one with a

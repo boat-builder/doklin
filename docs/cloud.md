@@ -108,6 +108,7 @@ flowchart LR
   end
   subgraph cf[notes.example.com — the user's Cloudflare account]
     W[cloud worker] --- R2[(R2 bucket<br/>workspace.json · manifest.json<br/>blobs · history · presence)]
+    W --- D1[(D1 database<br/>meta — people, presence<br/>and leases to come)]
   end
   ENG <-- HTTPS, bearer OWNER_TOKEN --> W
   V[visitor's browser] -- GET /slug --> W
@@ -139,18 +140,29 @@ https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-wor
 
 ### 5.1 Resources and names
 
-One domain = one worker + one bucket + one secret, named from the domain so
-two setups can never collide:
+One domain = one worker + one bucket + one D1 database + one secret, all
+named from the domain so two setups can never collide:
 
-| Domain | Worker | Bucket | Endpoint |
-| --- | --- | --- | --- |
-| `notes.example.com` (a zone on the same account) | `doklin-notes-example-com` | `doklin-notes-example-com` | `https://notes.example.com` |
-| free `workers.dev`, chosen name `sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `https://doklin-sherin-notes.<account>.workers.dev` (the agent reports it) |
+| Domain | Worker | Bucket | Database | Endpoint |
+| --- | --- | --- | --- | --- |
+| `notes.example.com` (a zone on the same account) | `doklin-notes-example-com` | `doklin-notes-example-com` | `doklin-notes-example-com` | `https://notes.example.com` |
+| free `workers.dev`, chosen name `sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `https://doklin-sherin-notes.<account>.workers.dev` (the agent reports it) |
 
 Secret: `OWNER_TOKEN` (32 random bytes, hex; the app mints it). R2 binding:
-`DATA`. `wrangler.toml` is written verbatim into the prompt (§7.4);
-`cloud-worker/wrangler.toml.example` is the same file for doing it by hand.
-The naming rule is one function, `resourceName` in `src/cloudPrompts.ts`.
+`DATA`; D1 binding: `DB`. `wrangler.toml` is written verbatim into the
+prompt (§7.4); `cloud-worker/wrangler.toml.example` is the same file for
+doing it by hand. The naming rule is one function, `resourceName` in
+`src/cloudPrompts.ts`.
+
+The database is where people, presence and file leases are going to live
+([teams-plan.md](teams-plan.md)). Nothing reads or writes a table yet: it is
+deployed first and alone, so landing the plumbing can fail as a failed
+deploy rather than as a broken workspace. Its whole schema today is a `meta`
+table holding a version; the worker builds and migrates that schema itself
+(`cloud-worker/src/schema.ts` — an update ships one bundled file and no
+migrations directory); and a domain deployed before the binding existed has
+no `DB` at all and works exactly as it did, since every route is indifferent
+to it and `/api/meta` simply answers `"d1": null`.
 
 ### 5.2 R2 layout
 
@@ -189,8 +201,10 @@ logs; nothing reads it). There is no CORS and no preflight — the engine is
 the only caller.
 
 ```
-GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null}
-                                 — liveness, the credential and "is this domain bound" in one call
+GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
+                                 d1: <schema version> | null}
+                                 — liveness, the credential, "is this domain bound" and the state of the
+                                 database in one call; also where the schema migrates itself
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
@@ -385,8 +399,9 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (3 — the sync API was 1; publishing
-  made it 2; the version store made it 3), `WORKER_FEATURES`
+  the worker (§7.1): `WORKER_VERSION` (4 — the sync API was 1; publishing
+  made it 2; the version store made it 3; the D1 binding made it 4),
+  `WORKER_FEATURES`
   (`["sync", "wipe", "publish", "boards", "versions"]`; a feature name is a
   promise about behaviour, listed only once the behaviour exists — the
   engine mirrors nothing to a worker that does not list `versions`),
@@ -400,7 +415,14 @@ decision 7).
   reports as phase `worker-outdated` — the one case where sync pauses — and
   it resumes on its own the moment a newer version answers the probe.
 - `POST /api/admin/wipe` is batched, owner-only, repeated until done; it is
-  the erase step of teardown and the only way to free a domain.
+  the erase step of teardown and the only way to free a domain. Its last
+  round also empties the D1 tables and re-runs the schema, so a rebound
+  domain inherits nobody from the old one.
+- Version 4 carries no new behaviour of its own — it is the update badge
+  doing its job, so the `DB` binding reaches deployed domains before
+  anything depends on it. D1 is deliberately not a `WORKER_FEATURES` name:
+  a name there promises behaviour, and `/api/meta`'s `d1` already says
+  whether the database is wired, more precisely than a name could.
 
 ### 5.8 Size and tests
 
@@ -412,8 +434,10 @@ empty so the tests compile the worker without building mermaid; the bundle
 script splices the module in.
 
 `node cloud-worker/test/run.mjs` (plain node; an in-memory R2 and cache in
-`test/fake-r2.mjs`; the worker compiled in-process through vite) covers
-auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
+`test/fake-r2.mjs`, and a D1 over node's own SQLite in `test/fake-d1.mjs`,
+so the schema runner's `IF NOT EXISTS` and its guarded version bump run as
+real SQL; the worker compiled in-process through vite) covers the migration
+and the two ways a database can be absent, auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
 (304 / 412 / 428), validation and the public map, 426 on a newer schema,
 blobs, history, presence, the statics, and then loads a seed workspace
 through the API (`test/seed.mjs` — a note, a note with an html rendition, a
@@ -847,8 +871,9 @@ only asks an agent to run those same two.
 nothing to invent, and holds the script to the app's naming rule (through
 its `--names` mode) and to the worker's own compatibility date.
 
-**Setup** (`buildSetupPrompt`): *one Worker in front of one R2 bucket,
-serving Doklin's cloud for the workspace "Notes" at `notes.example.com`* (or
+**Setup** (`buildSetupPrompt`): *one Worker in front of one R2 bucket and
+one D1 database, serving Doklin's cloud for the workspace "Notes" at
+`notes.example.com`* (or
 *at a free workers.dev address — the worker is named `doklin-<name>`, so it
 will answer at …*). Then:
 
@@ -858,11 +883,18 @@ will answer at …*). Then:
 2. `npx -y wrangler@4 whoami`; if not logged in, `wrangler login` and *ask
    me to finish the sign-in in the browser*; note the account id.
 3. Verify the names are free: `wrangler deployments list --name
-   doklin-notes-example-com` must fail, `wrangler r2 bucket list` must not
-   show the bucket. *If either exists, stop and ask me — a same-name deploy
-   silently replaces the existing worker and a shared bucket serves two
-   sites.*
-4. `wrangler.toml`, verbatim, the account id the only fill-in:
+   doklin-notes-example-com` must fail, and neither `wrangler r2 bucket
+   list` nor `wrangler d1 list` may show the name. *If any of them exists,
+   stop and ask me — a same-name deploy silently replaces the existing
+   worker, and a shared bucket or database serves two sites.*
+4. `wrangler r2 bucket create …` — with the pause for an account that has
+   never enabled R2.
+5. `wrangler d1 create …`, which prints the `database_id` the next step
+   needs; confirm with `wrangler d1 list`, and *if the id has scrolled away,
+   `wrangler d1 info …` prints it again — never make one up.* Resources
+   before config: an id cannot be written down before it exists.
+6. `wrangler.toml`, verbatim, with two fill-ins — the account id from step 2
+   and the database id from step 5:
    ```toml
    name = "doklin-notes-example-com"
    main = "doklin-cloud-worker.js"
@@ -873,19 +905,23 @@ will answer at …*). Then:
    [[r2_buckets]]
    binding = "DATA"
    bucket_name = "doklin-notes-example-com"
+   [[d1_databases]]
+   binding = "DB"
+   database_name = "doklin-notes-example-com"
+   database_id = "<from d1 create>"
    ```
    (`workers_dev = true` and no `routes` for the free address.)
-5. `wrangler r2 bucket create …` — with the pause for an account that has
-   never enabled R2.
-6. `wrangler secret put OWNER_TOKEN` with the token on the next line.
-7. `wrangler deploy` — with the custom-domain pause (*if deploy says the
+7. `wrangler secret put OWNER_TOKEN` with the token on the next line.
+8. `wrangler deploy` — with the custom-domain pause (*if deploy says the
    zone isn't on this account, ask me to add the domain to Cloudflare and
    point the nameservers at it*) and the TLS-minute caveat.
-8. Verify: `curl` `<endpoint>/api/meta` with the bearer must answer 200 with
-   `"workspace": null` and a version at least the bundled one; on a custom
-   domain, retry for up to five minutes while the certificate is issued.
-9. Print exactly `ENDPOINT: https://…`. *Do not commit `wrangler.toml`
-   anywhere; do not create or modify any other Cloudflare resources.*
+9. Verify: `curl` `<endpoint>/api/meta` with the bearer must answer 200 with
+   `"workspace": null`, a version at least the bundled one, and a `"d1"`
+   that is a number rather than null — *null means the database binding
+   didn't take, so re-check the id and deploy again*; on a custom domain,
+   retry for up to five minutes while the certificate is issued.
+10. Print exactly `ENDPOINT: https://…`. *Do not commit `wrangler.toml`
+    anywhere; do not create or modify any other Cloudflare resources.*
 
 **Update** — the script (`scripts/doklin-cloud-update.sh`, no secret):
 
@@ -894,37 +930,48 @@ curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/dokli
 sh doklin-cloud-update.sh https://notes.example.com
 ```
 
-It reads the worker and bucket names off the endpoint by the same rule as
-`deploymentNames` (certain for a workers.dev address — the hostname's first
-label; the convention, to be verified, for a custom domain), fetches the
-bundle, signs in through `wrangler login` if `whoami` names no account,
-picks the account (`CLOUDFLARE_ACCOUNT_ID` when the login has several),
-**confirms the worker and its bucket exist on that account**, writes
+It reads the worker, bucket and database names off the endpoint by the same
+rule as `deploymentNames` (certain for a workers.dev address — the
+hostname's first label; the convention, to be verified, for a custom
+domain), fetches the bundle, signs in through `wrangler login` if `whoami`
+names no account, picks the account (`CLOUDFLARE_ACCOUNT_ID` when the login
+has several), **confirms the worker and its bucket exist on that account**,
+resolves the database's uuid out of `wrangler d1 list --json`, writes
 `wrangler.toml` in a temp directory, deploys over the same name, then polls
 `/api/meta` for the `401` that means the new worker is serving (the script
 holds no token; the app checks the version itself) and prints
 `UPDATED: <endpoint>`.
 
 The one hazard is a name that doesn't exist: deploying it would CREATE a
-second worker rather than update the intended one. So the two confirmations
-are hard preconditions — with a terminal the script asks for the real name
-and retries; without one (`curl … | sh`) it stops and names the
-`WORKER_NAME=` / `BUCKET_NAME=` override to re-run with. Nothing else on
-the account is touched, and the temp directory goes on exit, so no
-`wrangler.toml` is left anywhere.
+second worker rather than update the intended one. So the confirmations are
+hard preconditions — with a terminal the script asks for the real name and
+retries; without one (`curl … | sh`) it stops and names the `WORKER_NAME=`
+/ `BUCKET_NAME=` / `D1_NAME=` override to re-run with.
+
+The database is the one exception, and the one resource the script may
+create: a domain set up before Doklin bound one simply has none, and the
+update is how it gets one. So a miss under the conventional name is created
+rather than refused — an empty D1 database, free, holding nothing until
+people are invited — while a name given by hand with `D1_NAME=` is a
+pointer at something that already exists, so a miss there is a typo and
+stops the script. Nothing else on the account is touched, and the temp
+directory goes on exit, so no `wrangler.toml` is left anywhere.
 
 **Update** (`buildUpdatePrompt`, no secret): which domain, which version it
 runs against which the app expects, the two commands above (with the
 clone-the-repo fallback should the download 404), *let the script do the
-work and show me its output — if it asks for a worker or bucket name, ask
-me, and never give it one you invented*, print `UPDATED: <endpoint>`, and
+work and show me its output — if it asks for a worker, bucket or database
+name, ask me, and never give it one you invented*, print
+`UPDATED: <endpoint>`, and
 the negative scope: don't deploy by hand, the script is the whole job.
 
 **Teardown** (`buildTeardownPrompt`, no secret; run only after the app's
-wipe emptied the bucket): `whoami`, confirm the names, `wrangler delete
---name …`, `wrangler r2 bucket delete …` (*if it refuses because the bucket
-isn't empty, STOP — never force it*), verify the endpoint no longer answers
-200, print `TORN DOWN: <endpoint>`.
+wipe emptied the bucket and the database): `whoami`, confirm the names,
+`wrangler delete --name …`, `wrangler d1 delete …` (skipped when step 2
+found no database — a domain set up before Doklin had one), `wrangler r2
+bucket delete …` (*if it refuses because the bucket isn't empty, STOP —
+never force it*), verify the endpoint no longer answers 200, print
+`TORN DOWN: <endpoint>`.
 
 ---
 

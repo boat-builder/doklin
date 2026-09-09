@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { build } from "vite";
 import { FakeCache, FakeR2 } from "./fake-r2.mjs";
+import { FakeD1, brokenD1 } from "./fake-d1.mjs";
 import { PIXEL_PNG, SEED_FILES, SEED_PUBLIC, WIDE_TABLE, fidOf, seedThroughApi } from "./seed.mjs";
 
 /* ---------- The worker under test: compiled from src/, or a bundle ---------- */
@@ -58,7 +59,8 @@ const MEMBER = "member-secret-token";
 const DEVICE = "d-macbook";
 const OTHER_DEVICE = "d-imac";
 const fake = new FakeR2();
-const env = { OWNER_TOKEN: OWNER, DATA: fake };
+const db = new FakeD1();
+const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const blobHash = (content) => sha256(content).slice(0, 16);
@@ -70,7 +72,7 @@ await fake.put(
   JSON.stringify({ id: "t-alice", name: "Alice", role: "member", createdAt: "2026-01-01T00:00:00Z" }),
 );
 
-async function call(path, { method = "GET", token, device = DEVICE, body, headers = {} } = {}) {
+async function call(path, { method = "GET", token, device = DEVICE, body, headers = {}, bindings = env } = {}) {
   const init = { method, headers: { "x-doklin-client": "0.0.0-test", ...headers } };
   if (token) init.headers.authorization = `Bearer ${token}`;
   if (device) init.headers["x-doklin-device"] = device;
@@ -82,7 +84,7 @@ async function call(path, { method = "GET", token, device = DEVICE, body, header
       init.headers["content-type"] ??= "application/json";
     }
   }
-  const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), env);
+  const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), bindings);
   // Read the bytes, not the text: the version store round-trips gzip, and a
   // body decoded as UTF-8 could not be compared with what went in.
   const bytes = new Uint8Array(await res.arrayBuffer());
@@ -141,6 +143,37 @@ const putManifest = async (body, etag, token = OWNER) =>
 
 let ws; // the binding, once made
 let workerVersion;
+
+// First, because the schema runner remembers a successful migration for the
+// life of the isolate: the cold-start postures can only be seen before one.
+await test("d1: no binding and a broken binding both leave every route working", async () => {
+  const none = await call("/api/meta", { token: OWNER, bindings: { OWNER_TOKEN: OWNER, DATA: fake } });
+  assert.equal(none.status, 200, "a domain deployed before the binding existed");
+  assert.equal(none.json.d1, null);
+  assert.ok(none.json.features.includes("sync"), "…and it is the same worker otherwise");
+
+  const bad = await call("/api/meta", { token: OWNER, bindings: { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() } });
+  assert.equal(bad.status, 200, "a database deleted under a deployed worker is not an outage");
+  assert.equal(bad.json.d1, null);
+});
+
+await test("d1: a fresh database migrates itself, once per isolate", async () => {
+  assert.deepEqual(db.tables(), [], "nothing has touched it yet");
+  db.queries.length = 0;
+
+  const first = await call("/api/meta", { token: OWNER });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.d1, 1, "the probe reports the schema version");
+  assert.ok(db.queries.length > 0, "…and the probe is what ran the migration");
+  assert.deepEqual(db.tables(), ["meta"], "phase 1 ships an empty schema: meta and nothing else");
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 1);
+  assert.equal(db.rows("SELECT * FROM meta").length, 1, "one row, and re-running never adds another");
+
+  db.queries.length = 0;
+  const again = await call("/api/meta", { token: OWNER });
+  assert.equal(again.json.d1, 1);
+  assert.equal(db.queries.length, 0, "a migrated isolate never asks again");
+});
 
 await test("auth: /api/meta rejects a missing or wrong token; owner and member get in", async () => {
   assert.equal((await call("/api/meta")).status, 401);
@@ -997,6 +1030,12 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal(meta.status, 200);
   assert.equal(meta.json.workspace, null, "the domain is free");
   assert.equal((await call("/api/manifest", { token: OWNER })).status, 404);
+
+  // The database is emptied, not dropped: the schema is re-run so the next
+  // binding finds a migrated database rather than a half-built one.
+  assert.deepEqual(db.tables(), ["meta"]);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 1);
+  assert.equal(meta.json.d1, 1, "…and the probe still says so");
 
   const rebound = await call("/api/workspace", {
     method: "POST",

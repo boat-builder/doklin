@@ -478,7 +478,7 @@ export default function CloudSetup({
                 )}
                 {target && !targetError && (
                   <div className="cloud-step-note">
-                    Worker and bucket: <code>{resourceName(target)}</code>
+                    Worker, bucket and database: <code>{resourceName(target)}</code>
                   </div>
                 )}
                 {targetError && <div className="modal-error">{targetError}</div>}
@@ -489,8 +489,8 @@ export default function CloudSetup({
                 <div className="cloud-step-title">Copy the prompt for your agent</div>
                 <div className="cloud-step-note">
                   Run it in Claude Code, or any agent with a terminal. It signs into Cloudflare,
-                  deploys the worker and its bucket under names derived from the domain, stores
-                  the token as the worker’s secret, and prints the endpoint. It carries the token
+                  deploys the worker with its bucket and database under names derived from the
+                  domain, stores the token as the worker’s secret, and prints the endpoint. It carries the token
                   this app just minted — the domain’s owner credential — so paste it only into an
                   agent you run yourself.
                 </div>

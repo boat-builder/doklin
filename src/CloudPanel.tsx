@@ -187,7 +187,7 @@ export default function CloudPanel({
             untouched; other Macs keep their copies and stop syncing.
           </p>
         </div>
-        <div className="cloud-step-title">Remove the worker and bucket from Cloudflare</div>
+        <div className="cloud-step-title">Remove the worker, bucket and database from Cloudflare</div>
         <p className="cloud-hint">
           Nothing on the domain is needed any more. Hand this to your agent — no secret in it —
           or leave the empty worker in place: it serves the landing page and costs nothing.
@@ -209,8 +209,8 @@ export default function CloudPanel({
     body = (
       <>
         <p className="cloud-intro">
-          Sync this folder to a domain of your own — one Cloudflare Worker and one bucket on your
-          account, set up by an agent from a prompt this app writes. Every Mac with the token
+          Sync this folder to a domain of your own — one Cloudflare Worker, one bucket and one
+          database on your account, set up by an agent from a prompt this app writes. Every Mac with the token
           stays in step, and publishing a note is one click once it is there.
         </p>
         <div className="cloud-doors">
@@ -274,8 +274,8 @@ export default function CloudPanel({
           This erases every file, every revision and every published page on{" "}
           <strong>{cloud.domain}</strong>, and this Mac forgets the workspace. The folder on this
           Mac stays exactly as it is; other Macs keep their copies but stop syncing. The domain is
-          free for a new workspace afterwards — and the worker and bucket can then be removed from
-          Cloudflare with a prompt you get next.
+          free for a new workspace afterwards — and the worker, bucket and database can then be
+          removed from Cloudflare with a prompt you get next.
         </p>
         <div className="modal-field">
           <div className="modal-field-label">Type the domain to confirm</div>

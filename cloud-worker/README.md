@@ -1,8 +1,8 @@
 # Doklin cloud worker
 
-One Cloudflare Worker in front of one R2 bucket, serving one workspace's
-cloud at one domain: the private sync API the app's engine speaks, and the
-public pages rendered from the synced files.
+One Cloudflare Worker in front of one R2 bucket and one D1 database, serving
+one workspace's cloud at one domain: the private sync API the app's engine
+speaks, and the public pages rendered from the synced files.
 The whole system — the engine, this worker, the app's surfaces, the
 decisions — is described in [docs/cloud.md](../docs/cloud.md); this file is
 the worker's contract.
@@ -50,6 +50,31 @@ versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its 
 auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
 auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
+
+## The database
+
+A D1 database beside the bucket, bound as `DB`, for the state a blob store
+cannot hold: people, presence and file leases
+([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds one table and
+nobody's data:
+
+```
+meta(key, schema_version)   one row — the migration runner's anchor
+```
+
+The worker owns its schema (`src/schema.ts`). An update ships one bundled
+file and no migrations directory, so `wrangler d1 migrations apply` is not
+available to a domain being updated: instead an ordered list of steps runs
+on the `/api/meta` probe, at most once per isolate, with idempotent
+`CREATE TABLE IF NOT EXISTS` statements and a guarded
+`UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`, so
+two isolates reaching a fresh database converge rather than collide.
+
+The binding is optional and every route is indifferent to it: a domain
+deployed before it existed has no `DB`, and one whose database is broken or
+deleted answers exactly as it did before — `/api/meta` reports `"d1": null`
+and nothing else changes. The owner's wipe empties the tables and re-runs
+the schema, so a rebound domain inherits nobody.
 
 ### The manifest (v2)
 
@@ -111,7 +136,8 @@ the binding's `createdBy`) and `x-doklin-client: <app version>` (for the
 logs; nothing reads it).
 
 ```
-GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null}
+GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
+                                 d1: <schema version> | null} — also runs the D1 migration
                                  — liveness, the credential and "is this domain bound" in one call
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
@@ -203,25 +229,33 @@ bind and wipe.
 
 The app writes the whole procedure into a prompt for an agent
 (`buildSetupPrompt` in `src/cloudPrompts.ts`; docs/cloud.md §7.4 walks its
-nine steps). By hand, the same steps:
+ten steps). By hand, the same steps:
 
-Names derive from the domain — `notes.example.com` → worker and bucket
-`doklin-notes-example-com`; a free `workers.dev` address with the chosen
-name `sherin-notes` → `doklin-sherin-notes` — so two setups can never
-collide. The secret is `OWNER_TOKEN`, the R2 binding is `DATA`.
+Names derive from the domain — `notes.example.com` → worker, bucket and
+database `doklin-notes-example-com`; a free `workers.dev` address with the
+chosen name `sherin-notes` → `doklin-sherin-notes` — so two setups can never
+collide. The secret is `OWNER_TOKEN`, the R2 binding is `DATA`, the D1
+binding is `DB`.
 
 ```sh
 mkdir doklin-cloud && cd doklin-cloud
 curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js \
      -o doklin-cloud-worker.js        # or: node scripts/bundle-worker.mjs in this repo
 npx -y wrangler@4 whoami              # `wrangler login` first if it asks
-# wrangler.toml: copy wrangler.toml.example, fill in the account id, domain, names
 npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # before deploy — it must exist
+npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the database_id
+# wrangler.toml: copy wrangler.toml.example, fill in the account id, database id, domain, names
 npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
 npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
-# → {"version":2,"features":["sync","wipe","publish","boards"],"workspace":null}
+# → {"version":4,"features":["sync","wipe","publish","boards","versions"],"workspace":null,"d1":1}
 ```
+
+`"d1"` is the database's schema version, or `null` on a deployment with no
+`DB` binding — every route works either way, because nothing reads a table
+yet (docs/teams-plan.md). The worker owns its schema: it creates and
+migrates the tables itself on the `/api/meta` probe, so there is no
+migrations directory to apply.
 
 A custom domain needs its zone active on the same Cloudflare account, and
 the first TLS certificate can take a minute after deploy.
@@ -237,8 +271,8 @@ sh doklin-cloud-update.sh https://notes.example.com
 ```
 
 **Teardown:** the app's wipe empties the bucket (R2 refuses to delete a
-non-empty one), then `wrangler delete --name …` and `wrangler r2 bucket
-delete …`.
+non-empty one) and the database's tables, then `wrangler delete --name …`,
+`wrangler d1 delete …` and `wrangler r2 bucket delete …`.
 
 **The prompts** are these steps written for an agent, with the checks a
 person would skip: setup verifies the names are free before it creates
@@ -251,23 +285,27 @@ non-empty bucket, and ends with `TORN DOWN:`. Both close with the negative
 scope: no other Cloudflare resource is touched, `wrangler.toml` is
 committed nowhere.
 
-**The update script** carries the same checks in shell. It reads the worker
-and bucket names off the endpoint (certain for a workers.dev address, a
-convention to verify for a custom domain), confirms both against the
-account before writing anything — deploying under a name that doesn't exist
-would create a *second* worker rather than update yours — and verifies with
-an unauthenticated `/api/meta`, where a `401` means the new worker is up.
-It ends with `UPDATED:`. Nothing in it is secret: the `OWNER_TOKEN`, the
-bucket binding and the routing all survive a same-name deploy. The app's
-update card hands out those two commands, and its agent prompt asks for
-nothing more than running them.
+**The update script** carries the same checks in shell. It reads the worker,
+bucket and database names off the endpoint (certain for a workers.dev
+address, a convention to verify for a custom domain), confirms them against
+the account before writing anything — deploying under a name that doesn't
+exist would create a *second* worker rather than update yours — resolves the
+database's uuid out of `wrangler d1 list --json`, and verifies with an
+unauthenticated `/api/meta`, where a `401` means the new worker is up. It
+ends with `UPDATED:`. Nothing in it is secret: the `OWNER_TOKEN`, the bucket
+binding and the routing all survive a same-name deploy. The database is the
+one resource it may create, and only under the conventional name: a domain
+set up before Doklin bound one has none, and the update is how it gets one.
+The app's update card hands out those two commands, and its agent prompt
+asks for nothing more than running them.
 
 ## Developing
 
 ```sh
 pnpm typecheck:worker      # tsc against the Workers runtime types (no DOM)
-pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2, every route,
-                           # the renderer over test/seed.mjs (a workspace with a bit of everything)
+pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2 and a D1 over
+                           # node:sqlite, every route, and the renderer over test/seed.mjs
+                           # (a workspace with a bit of everything)
 pnpm bundle:worker         # → cloud-worker/dist/doklin-cloud-worker.js, size printed
 node scripts/bundle-worker.mjs --no-mermaid    # a quick bundle without the mermaid module
 node verify-harness/serve-worker.mjs           # the bundled worker over the seed, on :8787 —

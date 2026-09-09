@@ -284,7 +284,10 @@ node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) a
                                            # and that no bare $var sits before a multibyte
                                            # character (bash 3.2 — macOS's /bin/sh — eats its
                                            # first byte into the name and dies under set -u)
-                                           # (131 checks)
+                                           # — plus the D1 resources: setup creates the database
+                                           # before the config that names its id, teardown deletes
+                                           # it, and the script writes the binding, discovers the
+                                           # uuid and takes a D1_NAME= override (159 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
@@ -325,9 +328,15 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 23 cases against an in-memory R2 fake (test/fake-r2.mjs,
-                                           # shared with serve-worker.mjs), the sources compiled
-                                           # in-process through vite: auth, meta, bind-once (409),
+node cloud-worker/test/run.mjs             # 28 cases against an in-memory R2 fake (test/fake-r2.mjs,
+                                           # shared with serve-worker.mjs) and a D1 over node:sqlite
+                                           # (test/fake-d1.mjs — real SQL), the sources compiled
+                                           # in-process through vite: the schema runner (a fresh
+                                           # database migrates on the first /api/meta and the
+                                           # isolate never asks again; no binding and a broken
+                                           # binding both leave every route working — asserted
+                                           # first, since a cold start is only visible before a
+                                           # migration), auth, meta, bind-once (409),
                                            # the unbound 404s + landing page, manifest CAS (304 /
                                            # 412 / 428), validation + the public map, 426 on a
                                            # newer schema, blobs (a re-put is a no-op), history,
@@ -342,7 +351,8 @@ node cloud-worker/test/run.mjs             # 23 cases against an in-memory R2 fa
                                            # the app's table identity, comment stripping, the
                                            # mermaid hydrator, link rewriting, the root page, the
                                            # cache keyed by manifest etag (a fake caches.default),
-                                           # the landing fallback; wipe freeing the domain last
+                                           # the landing fallback; wipe freeing the domain and
+                                           # leaving D1 migrated, last
 node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
                                            # mermaid module spliced in; ~40 s); prints raw +
                                            # gzipped size, fails past 3 MB gzipped
