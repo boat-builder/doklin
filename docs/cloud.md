@@ -937,13 +937,13 @@ one's own — §11.1 and §11.7 say what each one blocks.
 ### 8.1 Invites — email + code
 
 > **Superseded in the planning.**
-> [identity-plan.md](identity-plan.md) splits this into a *person* (a member
-> keyed by their email, permanent) and a *credential* (a token, disposable),
-> settles the three open questions below — a 100-bit capability instead of a
-> passphrase, expiry checked at redeem with the invite deleted on use,
-> `lastSeenAt` moved onto the member and written at most daily — and adds a
-> fourth: no password, ever. Read this section for the shape and that one
-> for what will be built.
+> [teams-plan.md](teams-plan.md) splits this into a *person* (a member keyed
+> by their email, permanent) and a *credential* (a token, disposable), moves
+> both into a D1 database beside the bucket, and settles the three open
+> questions below — a 100-bit capability instead of a passphrase, expiry
+> checked at redeem with the invite deleted on use, `lastSeenAt` on the
+> member and written at most daily — plus a fourth: no password, ever. Read
+> this section for the shape and that one for what will be built.
 
 - The owner mints an invite in the Cloud panel: an email and a code the app
   generates (`amber-canyon-lantern-42`). The worker stores
@@ -998,6 +998,13 @@ one's own — §11.1 and §11.7 say what each one blocks.
   works anywhere.
 
 ### 8.2 Locking — leases on files
+
+> **Superseded in the planning.**
+> [teams-plan.md](teams-plan.md) §3.4 keeps this shape and gives it a store
+> that can hold a lock: a `leases` table in D1, acquired by one atomic
+> upsert, renewed on the poll rather than on a beat of its own, and still
+> advisory — it never gates a write, and the three-way merge stays the
+> fallback.
 
 - A *lease* is a presence entry with a `lock`: `{deviceId, name, path,
   until}`. The engine acquires one when a document gains editing focus (it
