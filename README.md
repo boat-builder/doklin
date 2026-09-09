@@ -159,6 +159,12 @@ Deeper docs live in dedicated files to keep this page focused:
   decisions behind each, and the blockers a team of ten hits first — one
   shared credential, and an idle heartbeat that spends most of Cloudflare's
   free plan.
+- **[docs/identity-plan.md](docs/identity-plan.md)** — people, and the plan
+  to build them: a member keyed by their email that outlives every machine
+  and token they use, an invite code that is a 100-bit capability rather
+  than a passphrase, why the store stays R2 and what a Durable Object would
+  actually be for, and the phases from the worker's routes to per-person
+  attribution.
 - **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
   contract: the bucket, the manifest, the sync API, the public routes, and
   deploying by hand.

@@ -936,6 +936,15 @@ one's own — §11.1 and §11.7 say what each one blocks.
 
 ### 8.1 Invites — email + code
 
+> **Superseded in the planning.**
+> [identity-plan.md](identity-plan.md) splits this into a *person* (a member
+> keyed by their email, permanent) and a *credential* (a token, disposable),
+> settles the three open questions below — a 100-bit capability instead of a
+> passphrase, expiry checked at redeem with the invite deleted on use,
+> `lastSeenAt` moved onto the member and written at most daily — and adds a
+> fourth: no password, ever. Read this section for the shape and that one
+> for what will be built.
+
 - The owner mints an invite in the Cloud panel: an email and a code the app
   generates (`amber-canyon-lantern-42`). The worker stores
   `auth/invites/<sha256(email + code)>.json` `{email, role: "member",
