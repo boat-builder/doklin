@@ -539,6 +539,8 @@ src-tauri/src/cloud/
   manifest.rs   the wire types (manifest v2, the public map) + their grammar
   remote.rs     the Remote trait; HttpRemote (the real worker)
   flows.rs      bind + upload, download, wipe — generic over Remote, so the tests run them
+  invite.rs     the invite code and the paste blob — the grammar, and the only
+                place a code is ever in the clear
   merge.rs      the three-way merge and conflict copies
   scan.rs       the local walk, hashing, atomic writes
   bus.rs        the edit bus (every write command → the engine)
@@ -714,6 +716,9 @@ cloud_mint_token()                                -> token              32 rando
 cloud_probe(endpoint, token)                      -> CloudProbe         {workerVersion, bundledVersion, features, workspace|null}
 cloud_marker(root)                                -> CloudMarker|null   the folder's hidden marker
 cloud_token(root)                                 -> {endpoint, token}  behind "Connect another Mac…"; never in a status
+cloud_parse_invite(text)                          -> {endpoint, code}   one paste, split into the wizard's two boxes (pure)
+cloud_redeem(endpoint, code)                      -> CloudRedeemed      {endpoint, token, memberId, email, name} — no bearer sent
+cloud_invite(root, email, name?, days?)           -> CloudInvited       owner; {code, blob, invite} — the code, once
 cloud_check_worker(root)                                                "Check again": an EngineCmd::Probe
 cloud_connect(root, endpoint, token, name)        -> wsId               bind + initial upload (progress events)
 cloud_join(endpoint, token, destParent)           -> root               download into a fresh folder
@@ -801,6 +806,38 @@ manifest and blobs into `<parent>/<name>` (four in flight, progress
 events), writes the marker and `cloud.json`, spawns the engine, and the app
 opens the folder as a workspace.
 
+**Redeem an invite** (an invited Mac) — the entrance runs backwards, and
+has to: `/api/meta` is inside the worker's auth gate, so an invitee cannot
+ask the domain anything until they hold a token.
+
+```mermaid
+sequenceDiagram
+  participant O as Owner's Mac
+  participant B as Invitee (wizard)
+  participant E as Engine
+  participant W as Worker
+  O->>E: cloud_invite(root, "bob@example.com")
+  E->>E: mint 100 bits, Crockford base32
+  E->>W: POST /api/auth/invites {email, codeHash, expiresAt}
+  W-->>E: 201 {invite}
+  E-->>O: the code, once, and the line to send
+  O->>B: doklin-invite https://notes.example.com dkln-…
+  B->>E: cloud_parse_invite(the pasted line)
+  E-->>B: {endpoint, code} — both boxes fill
+  B->>E: cloud_redeem(endpoint, code)
+  E->>W: POST /api/auth/join {code, deviceId} — NO bearer
+  W-->>E: 201 {token, member}
+  E-->>B: this Mac's own credential, and who it says you are
+  B->>E: cloud_probe(endpoint, token) → cloud_join(endpoint, token, parent)
+```
+
+Only `sha256(code)` ever leaves the owner's Mac, and the code is spent the
+moment the redeem answers — so a probe that fails afterwards offers another
+look, never another redeem. From the download on, the invitee's flow **is**
+the second Mac's flow: same probe, same `cloud_join`, same engine. What
+differs is the credential in `cloud.json` — theirs, revocable on its own,
+and not the owner's.
+
 **Resume in place** — the marker's `wsId` matches; the engine starts with
 empty state, so every local file reads as new and every remote file as new:
 `stage_local` adopts a remote fileId for a path that exists in the
@@ -884,8 +921,8 @@ every blob no retained snapshot references and older than an hour's grace.
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…* and *Open a workspace from a domain…*. Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
-| **Setup wizard** (`CloudSetup.tsx`) | the panel's two entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Setup wizard** (`CloudSetup.tsx`) | the panel's three entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear. The third mode is *redeem*: paste the line an owner sent — into either box, both fill — trade the code for this Mac's own credential, then the same *Download it here* (§6.8) |
 | **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
@@ -1051,12 +1088,13 @@ one's own — §11.1 and §11.7 say what each one blocks.
 > checked at redeem with the invite deleted on use, `lastSeenAt` on the
 > member and written at most daily — plus a fourth: no password, ever.
 >
-> Phase 2 of that plan shipped: §5.3's `/api/auth/*` routes mint, list,
-> redeem and revoke, and §5.4 is what auth actually does now. What is *not*
-> built is the app — nothing mints a code, and no panel shows a person — so
-> a workspace still has one credential in practice (§11.1). Read this
-> section for the shape it came from, §5.3–5.4 for what exists, and the plan
-> for what is left.
+> Phases 2 and 3 of that plan shipped: §5.3's `/api/auth/*` routes mint,
+> list, redeem and revoke, §5.4 is what auth actually does now, and the app
+> mints a code and redeems one — `cloud_invite` and the wizard's third mode
+> (§6.7–6.8). What is *not* built is the People panel: nothing lists who has
+> access and nothing revokes a device (§11.1). Read this section for the
+> shape it came from, §5.3–5.4 and §6.8 for what exists, and the plan for
+> what is left.
 
 - The owner mints an invite in the Cloud panel: an email and a code the app
   generates (`amber-canyon-lantern-42`). The worker stores
@@ -1255,16 +1293,22 @@ holds it, and `/api/auth/*` mints, lists and revokes those (§5.3–5.4). A
 member reaching `POST /api/admin/wipe` gets a `403`, because their role is
 `member` rather than everyone's `owner`.
 
-What is still true is the part the user sees: **nothing in the app drives
-any of it.** No surface mints a code, so in practice ten people is still ten
-copies of one secret, and removing one person is still rotating the secret
-and reconnecting every other Mac.
+The app now drives one invite end to end: `cloud_invite` mints a 100-bit
+code, sends only its sha256 and hands the code over once; the wizard's third
+mode trades it for a credential of that Mac's own (§6.8). So a person can be
+let in, and revoking them is deleting one row rather than rotating the secret
+and reconnecting everybody.
 
-**Blocks:** sharing a workspace with *people* rather than with a second Mac
-of your own — which is the team case entirely. Downstream of it: per-person
-attribution (`by` is a device name, never a person) and §8.2's leases, which
-need an identity to put in "Alice is editing". [teams-plan.md](teams-plan.md)
-phases 3 and 4 are what close it.
+What is still true is the part the user sees: **there is no People surface.**
+Nothing lists who has access, nothing revokes a device, and the owner has no
+member row of their own until something writes one — so "who is in this
+workspace?" is still a question the app cannot answer.
+
+**Blocks:** administering a shared workspace — seeing who is in it and
+putting somebody out of it. Downstream of that: per-person attribution (`by`
+is a device name, never a person) and §8.2's leases, which need an identity
+to put in "Alice is editing". [teams-plan.md](teams-plan.md) phase 4 is what
+closes it.
 
 ### 11.2 The idle heartbeat is the free plan's real budget
 

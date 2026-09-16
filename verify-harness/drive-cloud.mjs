@@ -7,8 +7,10 @@
 // `cloud-applied` refreshing the tree, presence chips, the worker update
 // card and its badge, the version rail reading a cloud-only revision
 // through the manifest and restoring it, "Connect
-// another Mac", disconnect, the wipe → teardown prompt, and the join flow
-// opening the downloaded folder — and publishing: the pill's not-connected
+// another Mac", disconnect, the wipe → teardown prompt, the join flow
+// opening the downloaded folder, and the invite door: one paste filling both
+// boxes, a refused code spending nothing, a download on the member's own
+// credential — and publishing: the pill's not-connected
 // door, publishing a note at a random then a chosen address, the sidebar's
 // dots, the folder dialog, the published list (home page, stop), and the
 // sidebar's undoable stop.
@@ -62,6 +64,30 @@ await page.goto("http://localhost:1420/verify-harness/cloud.html");
 await page.evaluate((v) => {
   window.__cloud.workerVersion = v;
 }, WORKER_VERSION);
+
+// The invite the stub is scripted with, plus the line an owner would send.
+const INVITE = {
+  endpoint: "https://notes.example.com",
+  code: "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+  token: "cd".repeat(32),
+  member: { memberId: "m-1a2b3c4d", email: "bob@example.com", name: "Bob" },
+  error: null,
+};
+INVITE.blob = `doklin-invite ${INVITE.endpoint} ${INVITE.code}`;
+
+/** A real paste into a field: React's onPaste is what fills both boxes, so
+ *  typing the text in would test nothing. */
+const paste = (testid, text) =>
+  page.evaluate(
+    ([id, t]) => {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      el.focus();
+      const data = new DataTransfer();
+      data.setData("text", t);
+      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    },
+    [testid, text],
+  );
 
 const calls = (cmd) => page.evaluate((c) => window.__cloud.calls.filter((x) => x.cmd === c), cmd);
 const lastCall = async (cmd) => (await calls(cmd)).at(-1) ?? null;
@@ -708,6 +734,49 @@ step(
     (await tid("sidebar-cloud-dot").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-08-joined.png" });
+
+/* 23 — redeem: one paste fills both boxes, a bad code costs nothing, and the
+   download rides the credential the redeem minted, never the owner's */
+await setStatuses([]); // back to a Mac with nothing connected
+await setCloud({ marker: null, invite: { ...INVITE, error: "that invite code doesn't work." } });
+await openPanelFromGear();
+await tid("join-with-invite").click();
+await poll(async () => (await dialog("Join with an invite").count()) === 1);
+// The line as it arrives in a chat client, pasted into the code box alone.
+await paste("code-input", `Come and join us:\n\n  ${INVITE.blob}  .`);
+await poll(async () => (await tid("endpoint-input").inputValue()) === INVITE.endpoint);
+const pasteFilledBoth = (await tid("code-input").inputValue()) === INVITE.code;
+
+await tid("redeem-button").click();
+await poll(async () => (await tid("setup-error").count()) === 1);
+const refusedKindly =
+  (await tid("setup-error").textContent()).includes("doesn't work") &&
+  (await tid("redeem-button").count()) === 1 &&
+  (await tid("redeemed-as").count()) === 0 &&
+  (await tid("code-input").isEnabled());
+
+await setCloud({ invite: INVITE });
+await tid("redeem-button").click();
+await poll(async () => (await tid("probe-outcome").count()) === 1);
+const redeemedAs = await tid("redeemed-as").textContent();
+await page.screenshot({ path: SHOTS + "cloud-09-invite.png" });
+await tid("download-here").click();
+await poll(async () => (await tid("setup-done").count()) === 1);
+const redeemJoin = await lastCall("cloud_join");
+await page.locator(".modal-btn", { hasText: "Open the folder" }).click();
+await poll(async () => (await dialog("Join with an invite").count()) === 0);
+step(
+  "redeem: one paste fills both boxes, a refused code spends nothing, and the download carries the member's own token",
+  pasteFilledBoth &&
+    refusedKindly &&
+    redeemedAs.includes("Bob") &&
+    (await lastCall("cloud_redeem")).args.code === INVITE.code &&
+    redeemJoin.args.token === INVITE.token &&
+    redeemJoin.args.token !== TOKEN &&
+    (await tid("sidebar-cloud-dot").count()) === 1,
+  redeemedAs.trim(),
+);
+await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 
 await browser.close();
 const failed = results.filter((r) => !r.ok);

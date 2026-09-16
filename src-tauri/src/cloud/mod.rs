@@ -12,6 +12,8 @@
 //! manifest.rs   the wire types (manifest v2, the public map) + their grammar
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
+//! invite.rs     the invite code and the paste blob — the grammar, and the
+//!               only place a code is ever in the clear
 //! merge.rs      the three-way merge and conflict copies
 //! scan.rs       the local walk, hashing, atomic writes
 //! bus.rs        the edit bus (every write command → the engine)
@@ -25,6 +27,7 @@ pub mod bus;
 mod config;
 mod engine;
 mod flows;
+mod invite;
 mod manifest;
 mod merge;
 mod remote;
@@ -56,7 +59,9 @@ use engine::{Engine, EngineCmd, EngineConfig, PublishRequest};
 use manifest::{clean_name, PublicKind};
 use remote::HttpRemote;
 use scan::{rel_path, write_json};
-use status::{emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Probe, StatusTable};
+use status::{
+    emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Invited, Probe, Redeemed, StatusTable,
+};
 
 /// The worker version this app was built against, parsed out of
 /// cloud-worker/src/version.ts by build.rs — the number the update badge
@@ -298,6 +303,64 @@ pub(crate) fn cloud_mint_token() -> String {
     scan::random_token()
 }
 
+/// Split one paste into the two halves of an invite — the address and the
+/// code — so the redeem screen fills both boxes from whatever arrived: the
+/// line as it was sent, the whole chat message around it, or one half on its
+/// own. Pure: it touches no domain and no file.
+#[tauri::command]
+pub(crate) fn cloud_parse_invite(text: String) -> invite::Pasted {
+    invite::parse_pasted(&text)
+}
+
+/// Trade an invite code for this Mac's own credential (docs/cloud.md §6.8).
+///
+/// The one command that runs before this Mac holds any credential at all,
+/// which inverts the order every other entrance uses: redeem first, then
+/// probe with what the redeem minted. An invitee cannot ask a domain
+/// anything until they have a token, because `/api/meta` is inside the gate
+/// and `POST /api/auth/join` is the only route above it.
+///
+/// It writes nothing and spawns nothing: `cloud_join` with the token this
+/// answers is the second Mac's flow, unchanged.
+#[tauri::command]
+pub(crate) async fn cloud_redeem(app: AppHandle, endpoint: String, code: String) -> Result<Redeemed, String> {
+    let endpoint = normalize_endpoint(&endpoint)?;
+    let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
+    let Some(canonical) = invite::normalize_code(&code) else {
+        return Err("that isn't a Doklin invite code — one looks like dkln-K7QM2-9XVR4-8TBHN-3WGYD".into());
+    };
+    let device = with_inner(&app, |inner| Ok(inner.device.clone()))?;
+    // No token, on purpose: there is none yet, and the route that answers
+    // this is the one above the worker's auth gate.
+    let remote = HttpRemote::new(&endpoint, "", &device.id);
+    let redeemed = remote::Remote::redeem(&remote, &canonical, &device.name)
+        .await
+        .map_err(|e| describe_redeem(&domain, e))?;
+    Ok(Redeemed {
+        endpoint,
+        token: redeemed.token,
+        member_id: redeemed.member.id,
+        email: redeemed.member.email,
+        name: redeemed.member.name,
+    })
+}
+
+/// A failed redeem in words. `Unauthorized` is the one that carries weight:
+/// the worker answers unknown and expired identically on purpose — a caller
+/// learns whether a code works, never whether it once existed or whom it was
+/// for — so this sentence has to cover both without guessing between them.
+fn describe_redeem(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::Unauthorized => {
+            "that invite code doesn't work — it may have been used already, or run out. Ask for a fresh one.".into()
+        }
+        remote::RemoteError::Outdated(_) | remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old to take invites — whoever set it up needs to update it", domain)
+        }
+        other => flows::describe(domain, other.into()),
+    }
+}
+
 /// Ask a domain what it is before touching anything: the worker's version
 /// and whether it already holds a workspace.
 #[tauri::command]
@@ -332,6 +395,52 @@ pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, S
         let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
         Ok(Credentials { endpoint: entry.endpoint.clone(), token: entry.token.clone() })
     })
+}
+
+/// Invite someone to this workspace by email (owner only): the code is
+/// minted here, hashed here, and only its sha256 goes up — a worker log, a
+/// database backup and the request body are all incapable of letting anyone
+/// in. The code comes back once, in the answer, and nothing stores it.
+///
+/// Re-inviting an address reaches the same person: their row is found by
+/// their email, and the invite they had stops working the moment this one is
+/// made. That is what "they lost the code" costs — one call, same member.
+#[tauri::command]
+pub(crate) async fn cloud_invite(
+    app: AppHandle,
+    root: String,
+    email: String,
+    name: Option<String>,
+    days: Option<u32>,
+) -> Result<Invited, String> {
+    let (endpoint, token, domain, device) = with_inner(&app, |inner| {
+        let file = read_cloud_file(&inner.data_dir);
+        let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
+        Ok((entry.endpoint.clone(), entry.token.clone(), entry.domain.clone(), inner.device.clone()))
+    })?;
+
+    let canonical = invite::random_code();
+    let code = invite::format_code(&canonical);
+    let remote = HttpRemote::new(&endpoint, &token, &device.id);
+    let record = remote::Remote::create_invite(
+        &remote,
+        email.trim(),
+        name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+        &invite::code_hash(&canonical),
+        invite::expires_at(scan::now_ms(), days),
+    )
+    .await
+    .map_err(|e| match e {
+        // A worker that predates the identity routes has no /api/auth to
+        // miss, so it 404s — which `flows::describe` would otherwise read as
+        // "that domain holds no workspace yet".
+        remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old to hold people — update it from the Cloud panel", domain)
+        }
+        other => flows::describe(&domain, other.into()),
+    })?;
+
+    Ok(Invited { blob: invite::blob(&endpoint, &code), code, invite: record })
 }
 
 /// Ask the engine to probe the worker again — "Check again" after an

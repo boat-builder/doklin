@@ -110,7 +110,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 31 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -123,8 +123,11 @@ node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cl
                                            # copy's toast opening the copy, cloud-applied refreshing
                                            # the tree, presence chips, Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
-                                           # the teardown prompt, and the join flow opening the
-                                           # downloaded folder — and publishing: the pill's
+                                           # the teardown prompt, the join flow opening the
+                                           # downloaded folder, and the invite door (one paste
+                                           # filling both boxes, a refused code spending nothing,
+                                           # the download riding the member's own token rather
+                                           # than the owner's) — and publishing: the pill's
                                            # not-connected door, a note published at a random then
                                            # a chosen address (Copy, a bad slug refused), the
                                            # sidebar's dots, the folder dialog, a note inside a
@@ -384,16 +387,22 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 50 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 55 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, the edit bus routing, cloud.json and the marker, the retirement of
-the manifest's history (four revisions leaving `hist` empty while `rev`
-climbs, a manifest an older build wrote read and then rewritten without its
+presence, the invite code and the redeem flow (a minted code reading back the
+way it was written and surviving what a chat client does to it, one paste
+filling both of the wizard's boxes — an address never read as a code though
+its letters spell one — a code traded once for a token of that Mac's own, a
+second try and an expired one refused the same way, and an invited Mac
+downloading and writing with its own credential while `bind`, `wipe` and
+inviting answer it `403`), the edit bus routing, cloud.json and the marker,
+the retirement of the manifest's history (four revisions leaving `hist`
+empty while `rev` climbs, a manifest an older build wrote read and then rewritten without its
 entries, and the one-time bucket clean-up — archives before blobs, more
 fileIds than one batch, its bookmark persisted between polls, one blob per
 living file and nothing for a deleted one at the end, and a worker without

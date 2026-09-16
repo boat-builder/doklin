@@ -1,11 +1,18 @@
-// The setup wizard — docs/cloud.md §6.8 and §7.2. Two entrances:
+// The setup wizard — docs/cloud.md §6.8 and §7.2. Three entrances:
 //
 //   connect  the open folder goes to a fresh domain: name it, choose where
 //            it lives (a domain of your own or a free workers.dev address),
 //            copy the prompt (it carries the token this app just minted),
 //            paste the endpoint the agent printed, probe, connect & upload;
 //   join     open a workspace another Mac already connected: endpoint and
-//            token from that Mac's Cloud panel, probe, download it here.
+//            token from that Mac's Cloud panel, probe, download it here;
+//   redeem   somebody invited you: paste the line they sent, trade the code
+//            for a credential of this Mac's own, then download it here.
+//
+// Redeem runs the entrance backwards, and has to: /api/meta is inside the
+// worker's auth gate, so an invitee cannot ask the domain anything until the
+// redeem has minted them a token. Once it has, the rest is the join — the
+// same probe, the same download, the same engine.
 //
 // The probe decides what the domain is, and the wizard says so in words:
 // fresh → "Connect & upload"; already holding a workspace → "Download it
@@ -13,7 +20,7 @@
 // that workspace's marker (a reinstall, a restore from a backup). There is
 // no "bind anyway": a domain holds one workspace.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ClipboardEvent } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   BUNDLED_WORKER_VERSION,
@@ -22,7 +29,9 @@ import {
   cloudJoin,
   cloudMarker,
   cloudMintToken,
+  cloudParseInvite,
   cloudProbe,
+  cloudRedeem,
   cloudResume,
   onCloudProgress,
   timeAgo,
@@ -40,7 +49,9 @@ import {
   type CloudTarget,
 } from "./cloudPrompts";
 
-export type CloudSetupMode = "connect" | "join";
+export type CloudSetupMode = "connect" | "join" | "redeem";
+/** A redeem ends in a download, so it ends as a join: what the outcome names
+ *  is what happened to the folder, not which door was used. */
 export type CloudSetupOutcome = "connect" | "join" | "resume";
 
 function CloseIcon() {
@@ -92,6 +103,13 @@ export default function CloudSetup({
   const [work, setWork] = useState<Work | null>(null);
   const [done, setDone] = useState<{ root: string; how: CloudSetupOutcome } | null>(null);
   const [copied, setCopied] = useState(false);
+  // Redeem only: the code as typed or pasted, and who the domain says you
+  // are once it has been spent. `member` set is what says this Mac already
+  // holds a credential — the code cannot be traded twice, so nothing after
+  // that point may offer to trade it again.
+  const [code, setCode] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
+  const [member, setMember] = useState<{ email: string; name: string } | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -152,7 +170,7 @@ export default function CloudSetup({
 
   // A domain of your own answers at https://<domain>; a workers.dev address
   // is only known once wrangler prints it, so that one is pasted.
-  const endpoint = endpointTouched || mode === "join" ? endpointInput : (target && endpointOf(target)) ?? "";
+  const endpoint = endpointTouched || mode !== "connect" ? endpointInput : (target && endpointOf(target)) ?? "";
 
   const copyPrompt = useCallback(async () => {
     if (!prompt) return;
@@ -165,22 +183,77 @@ export default function CloudSetup({
     }
   }, [prompt]);
 
-  const probe = useCallback(async () => {
+  const probeWith = useCallback(
+    async (at: string, bearer: string) => {
+      setError(null);
+      setProbed(null);
+      setProbing(true);
+      try {
+        const [result, marker] = await Promise.all([
+          cloudProbe(at, bearer),
+          root ? cloudMarker(root).catch(() => null) : Promise.resolve(null),
+        ]);
+        setProbed({ endpoint: at, result, marker });
+      } catch (e) {
+        setError(errText(e));
+      } finally {
+        setProbing(false);
+      }
+    },
+    [root],
+  );
+  const probe = useCallback(() => probeWith(endpoint, token), [probeWith, endpoint, token]);
+
+  /**
+   * Trade the code for this Mac's own credential, then probe with it.
+   *
+   * The two calls are deliberately separate: the code is spent the moment
+   * the redeem answers, so a probe that fails afterwards must leave the
+   * credential in hand and offer another look — never another redeem.
+   */
+  const redeem = useCallback(async () => {
     setError(null);
     setProbed(null);
-    setProbing(true);
+    setRedeeming(true);
     try {
-      const [result, marker] = await Promise.all([
-        cloudProbe(endpoint, token),
-        root ? cloudMarker(root).catch(() => null) : Promise.resolve(null),
-      ]);
-      setProbed({ endpoint, result, marker });
+      const r = await cloudRedeem(endpoint, code);
+      setToken(r.token);
+      setEndpointInput(r.endpoint);
+      setEndpointTouched(true);
+      setMember({ email: r.email, name: r.name });
+      await probeWith(r.endpoint, r.token);
     } catch (e) {
       setError(errText(e));
     } finally {
-      setProbing(false);
+      setRedeeming(false);
     }
-  }, [endpoint, token, root]);
+  }, [endpoint, code, probeWith]);
+
+  /** One paste fills both boxes: the line as it was sent, the whole message
+   *  around it, or one half on its own — whatever the engine can find in it. */
+  const pasteInvite = (field: "endpoint" | "code") => (e: ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text").trim();
+    if (!text) return;
+    e.preventDefault();
+    const asTyped = () => {
+      if (field === "endpoint") {
+        setEndpointInput(text);
+        setEndpointTouched(true);
+      } else {
+        setCode(text);
+      }
+    };
+    void cloudParseInvite(text)
+      .then((p) => {
+        if (p.endpoint) {
+          setEndpointInput(p.endpoint);
+          setEndpointTouched(true);
+        }
+        if (p.code) setCode(p.code);
+        if (field === "endpoint" ? !p.endpoint : !p.code) asTyped();
+      })
+      .catch(asTyped);
+  };
 
   const run = useCallback(
     async (how: CloudSetupOutcome, go: () => Promise<string>) => {
@@ -380,6 +453,74 @@ export default function CloudSetup({
     </>
   );
 
+  const redeemStep = (
+    <>
+      <div className="modal-field">
+        <div className="modal-field-label">Address</div>
+        <input
+          className="modal-field-input"
+          data-testid="endpoint-input"
+          value={endpoint}
+          placeholder="https://notes.example.com"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          disabled={!!member}
+          onPaste={pasteInvite("endpoint")}
+          onChange={(e) => {
+            setEndpointInput(e.target.value);
+            setEndpointTouched(true);
+            setProbed(null);
+          }}
+        />
+      </div>
+      <div className="modal-field">
+        <div className="modal-field-label">Invite code</div>
+        <input
+          className="modal-field-input modal-field-token"
+          data-testid="code-input"
+          value={code}
+          placeholder="dkln-K7QM2-9XVR4-8TBHN-3WGYD"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          disabled={!!member}
+          onPaste={pasteInvite("code")}
+          onChange={(e) => setCode(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && endpoint && code && !redeeming && !member) void redeem();
+          }}
+        />
+      </div>
+      {member ? (
+        <p className="cloud-hint" data-testid="redeemed-as">
+          You’re in as {member.name || member.email} — the code is spent, and this Mac has a
+          credential of its own. Finish the download here: a code works once, so closing now
+          would mean asking for a fresh invite.
+        </p>
+      ) : (
+        <div className="modal-buttons">
+          <button
+            className="modal-btn is-primary"
+            data-testid="redeem-button"
+            disabled={!endpoint || !code || redeeming || !!work}
+            onClick={() => void redeem()}
+          >
+            {redeeming ? "Joining…" : "Join"}
+          </button>
+        </div>
+      )}
+      {member && !probed && !probing && (
+        <div className="modal-buttons">
+          <button className="modal-btn is-primary" data-testid="probe-button" onClick={() => void probe()}>
+            Check again
+          </button>
+        </div>
+      )}
+      {error && <div className="modal-error" data-testid="setup-error">{error}</div>}
+    </>
+  );
+
   return (
     <div
       className="modal-overlay"
@@ -391,12 +532,10 @@ export default function CloudSetup({
         className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"
-        aria-label={mode === "connect" ? "Connect a domain" : "Open a workspace from a domain"}
+        aria-label={modalTitle(mode)}
       >
         <div className="modal-header">
-          <div className="modal-title">
-            {mode === "connect" ? "Connect a domain" : "Open a workspace from a domain"}
-          </div>
+          <div className="modal-title">{modalTitle(mode)}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close" disabled={!!work}>
             <CloseIcon />
           </button>
@@ -521,15 +660,28 @@ export default function CloudSetup({
             </ol>
           ) : (
             <ol className="cloud-steps">
-              <li className="cloud-step">
-                <div className="cloud-step-title">Where is it?</div>
-                <div className="cloud-step-note">
-                  On the Mac that has the workspace: the gear → Cloud… → Connect another Mac…
-                  shows both. The token is that domain’s owner credential — keep it to Macs you
-                  own.
-                </div>
-                {endpointStep}
-              </li>
+              {mode === "redeem" ? (
+                <li className="cloud-step">
+                  <div className="cloud-step-title">Paste the invite</div>
+                  <div className="cloud-step-note">
+                    One line from whoever invited you — the address and the code together. Paste it
+                    into either box and both fill in. The code works once, on this Mac, and the
+                    credential it hands back is yours alone: revoking it later costs nobody else
+                    anything.
+                  </div>
+                  {redeemStep}
+                </li>
+              ) : (
+                <li className="cloud-step">
+                  <div className="cloud-step-title">Where is it?</div>
+                  <div className="cloud-step-note">
+                    On the Mac that has the workspace: the gear → Cloud… → Connect another Mac…
+                    shows both. The token is that domain’s owner credential — keep it to Macs you
+                    own.
+                  </div>
+                  {endpointStep}
+                </li>
+              )}
               <li className={`cloud-step ${probed ? "" : "is-waiting"}`}>
                 <div className="cloud-step-title">Download it</div>
                 <div className="cloud-step-note">
@@ -546,6 +698,12 @@ export default function CloudSetup({
       </div>
     </div>
   );
+}
+
+/** What the dialog calls itself, which is the door that was used. */
+function modalTitle(mode: CloudSetupMode): string {
+  if (mode === "connect") return "Connect a domain";
+  return mode === "redeem" ? "Join with an invite" : "Open a workspace from a domain";
 }
 
 /** The host of an endpoint, for prose. */

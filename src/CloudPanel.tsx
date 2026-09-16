@@ -3,8 +3,9 @@
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
 //
-// Not connected: two doors — connect this folder to a domain, or open a
-// workspace another Mac connected. Connected: the domain and its phase,
+// Not connected: three doors — connect this folder to a domain, open a
+// workspace another Mac of yours connected, or join one somebody invited you
+// to with the line they sent. Connected: the domain and its phase,
 // sync now / pause, who else is here, the held mass-deletion waiting for a
 // word, the worker's version against this app's, the credentials a second
 // Mac needs, disconnect, and the danger zone: erase everything on the
@@ -60,6 +61,7 @@ export default function CloudPanel({
   onClose,
   onConnect,
   onJoin,
+  onRedeem,
   onUpdateWorker,
   onOpenPublished,
   onOpenExternal,
@@ -75,6 +77,8 @@ export default function CloudPanel({
   onClose: () => void;
   onConnect: () => void;
   onJoin: () => void;
+  /** Somebody invited this Mac: the wizard's third mode (CloudSetup.tsx). */
+  onRedeem: () => void;
   onUpdateWorker: () => void;
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
@@ -225,8 +229,16 @@ export default function CloudPanel({
           <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
             Open a workspace from a domain…
           </button>
+          <button className="modal-btn" data-testid="join-with-invite" onClick={onRedeem}>
+            Join with an invite…
+          </button>
         </div>
         {!root && <p className="cloud-hint">Open a folder first to connect it.</p>}
+        <p className="cloud-hint">
+          The second door is for another Mac of your own — it wants that domain’s token. The third
+          is for a workspace somebody else runs: paste the line they sent and this Mac gets a
+          credential of its own.
+        </p>
       </>
     );
   } else if (view === "another") {

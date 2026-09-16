@@ -425,7 +425,7 @@ budget, for no extra freshness.
 | --- | --- | --- | --- | --- |
 | 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** (an update badge) — **built** |
 | 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) — **built** |
-| 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join |
+| 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join — **built** |
 | 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable |
 | 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | history says *who*, not *which Mac* |
 | 6 | Presence in D1, folded into the poll | the presence table, `POST /api/poll`, the beat's own request gone | 2 | **nothing** — 33% fewer requests |
@@ -579,9 +579,13 @@ into a 500.
 
 ## 10. Phase 3 — The code and the redeem flow
 
-**Files:** `src-tauri/src/cloud/scan.rs`, `src-tauri/src/cloud/mod.rs`,
-`src-tauri/src/cloud/remote.rs`, `src-tauri/src/cloud/tests.rs`,
-`src/cloud.ts`, `src/CloudSetup.tsx`.
+**Files:** `src-tauri/src/cloud/invite.rs` (new — the grammar wanted a module
+of its own rather than a corner of `scan.rs`, whose subject is the local
+walk), `src-tauri/src/cloud/mod.rs`, `src-tauri/src/cloud/remote.rs`,
+`src-tauri/src/cloud/status.rs`, `src-tauri/src/cloud/tests.rs`,
+`src/cloud.ts`, `src/CloudSetup.tsx`, `src/CloudPanel.tsx` + `src/App.tsx`
+(the door the third mode is reached through), `verify-harness/cloud.html` +
+`verify-harness/drive-cloud.mjs`.
 
 - **The code.** `dkln-` plus 20 Crockford base32 characters from
   `getrandom`, grouped in fives, beside `random_token`
@@ -607,16 +611,49 @@ round-trip property test for the code parser.
 **Done when:** those pass, `verify-harness/cloudprompts.test.mjs` still
 passes, and an invited Mac joins a real domain in the manual macOS pass.
 
+**Built,** with three things the sketch above did not say:
+
+- **The owner's half ships here too.** `cloud_invite` mints the code, hashes
+  it and sends only the hash. Without it the code minter would have had no
+  caller, the paste blob no writer, and "an invited Mac can join" nothing to
+  join with — a phase that cannot be exercised is not a phase. What phase 4
+  adds is the People *panel*: listing, revoking, and the owner's own row.
+- **The in-memory worker grew an auth gate.** It was answering every route
+  to anyone; now it resolves a bearer the way the worker does — the env
+  secret first with no row read, then the tokens table — so "join and sync
+  as the member" is a claim about a credential rather than about a call. A
+  token nobody minted is refused everywhere, and `bind` and `wipe` answer a
+  member `403`.
+- **A redeem and the probe after it are separate failures.** The code is
+  spent the moment the redeem answers, so the wizard keeps the credential
+  and offers another *look* — never another redeem — if the probe that
+  follows it fails.
+
+`cloud_redeem` writing nothing has one cost worth naming: a wizard closed
+between the redeem and the download drops the credential it was handed, and
+the code that bought it is already spent. The recovery is a fresh invite for
+the same address — the member row is reused, so nothing is lost but a
+round trip — and the screen says so rather than persisting a floating token
+with no workspace behind it.
+
+The trap worth recording: strip the punctuation out of
+`https://notes.example.com` and what is left is twenty characters, every one
+of them in Crockford's alphabet — a perfectly good code. The paste parser
+therefore reads a word carrying `.`, `/` or `:` as an address and never as a
+code, and `one_paste_fills_both_boxes` asserts exactly that.
+
 ## 11. Phase 4 — The People panel
 
 **Files:** `src/CloudPanel.tsx`, `src/cloud.ts`,
-`src-tauri/src/cloud/mod.rs` (the commands behind it),
+`src-tauri/src/cloud/mod.rs` (the commands behind it — `cloud_invite` landed
+in phase 3, so what is left is listing, revoking and adopting),
 `verify-harness/drive-cloud.mjs`.
 
 - **Owner:** a *People* view — name, email, role, device count, last seen —
   with **Invite…** (email, optional name, expiry) and **Revoke** (this
   device, or this person entirely). A freshly minted code is shown once,
-  with a copy button, and never again.
+  with a copy button, and never again — `cloud_invite` already answers with
+  the code and the line to send; the panel is what puts them on screen.
 - **The owner's own identity:** when the workspace has no owner member row,
   the panel asks for an email once and calls `POST /api/auth/members`. This
   is the only place the app learns the user's email, and it is what phase 5

@@ -19,6 +19,7 @@ use super::engine::{
     next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, LEGACY_BATCH, POLL_INTERVAL,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
+use super::invite;
 use super::manifest::*;
 use super::remote::*;
 use super::scan::{hash16, now_ms, scan_local};
@@ -59,6 +60,30 @@ struct FakeWorker {
     version_snapshots: HashMap<String, Vec<u8>>,
     version_blobs: HashMap<String, (Vec<u8>, u64)>,
     versions_racer: Option<VersionsIndex>,
+    /* People and the credentials they hold (docs/teams-plan.md §3.5). The
+       worker keeps only hashes; so does this — a code is looked up by its
+       sha256 here exactly as it is there, which is what makes "the app hashes
+       the canonical form" a thing a test can get wrong. */
+    owner_token: String,
+    /// By normalized email — a person is found by their address, so
+    /// re-inviting one reaches the same row.
+    members: BTreeMap<String, MemberRecord>,
+    /// sha256(code) -> (email, expires_at). One per person, at most.
+    invites: BTreeMap<String, (String, u64)>,
+    /// token -> (email, device name). Deleting the entry is revoking it.
+    tokens: BTreeMap<String, (String, String)>,
+    next_id: u64,
+}
+
+/// The owner's env secret, as the fake holds it: matched with no row read,
+/// so it keeps working whatever happens to the people above.
+const OWNER_TOKEN: &str = "owner-secret-token";
+
+/// Who a bearer is, the way the worker decides it (docs/cloud.md §5.4).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Caller {
+    Owner,
+    Member,
 }
 
 impl FakeWorker {
@@ -72,7 +97,8 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 fn fake_worker() -> SharedWorker {
     Arc::new(Mutex::new(FakeWorker {
         worker_version: 1,
-        features: vec!["sync".into(), "wipe".into(), "versions".into()],
+        features: vec!["sync".into(), "wipe".into(), "versions".into(), "members".into()],
+        owner_token: OWNER_TOKEN.into(),
         ..Default::default()
     }))
 }
@@ -81,11 +107,19 @@ fn fake_worker() -> SharedWorker {
 struct FakeRemote {
     be: SharedWorker,
     device_id: String,
+    /// The bearer this device speaks with — the owner secret unless a test
+    /// says otherwise, which is what most of them are.
+    token: String,
 }
 
 impl FakeRemote {
     fn new(be: &SharedWorker, device_id: &str) -> Self {
-        FakeRemote { be: be.clone(), device_id: device_id.to_string() }
+        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: OWNER_TOKEN.to_string() }
+    }
+
+    /// A device holding a token somebody redeemed, rather than the secret.
+    fn with_token(be: &SharedWorker, device_id: &str, token: &str) -> Self {
+        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string() }
     }
 
     fn check_offline(&self) -> RemoteResult<()> {
@@ -95,13 +129,42 @@ impl FakeRemote {
             Ok(())
         }
     }
+
+    /// Offline, then the bearer. Every gated route goes through here, so a
+    /// token nobody minted is refused everywhere at once — and the secret is
+    /// matched first, with no row read, exactly as the worker matches it.
+    fn ready(&self) -> RemoteResult<Caller> {
+        self.check_offline()?;
+        let be = self.be.lock().unwrap();
+        if self.token == be.owner_token {
+            return Ok(Caller::Owner);
+        }
+        if be.tokens.contains_key(&self.token) {
+            return Ok(Caller::Member);
+        }
+        Err(RemoteError::Unauthorized)
+    }
+
+    /// The owner-only routes: bind, wipe, and everything under /api/auth.
+    fn owner_only(&self) -> RemoteResult<()> {
+        match self.ready()? {
+            Caller::Owner => Ok(()),
+            Caller::Member => Err(RemoteError::Forbidden),
+        }
+    }
+
+    /// The next `<prefix>-<n>` id this fake hands out.
+    fn mint_id(be: &mut FakeWorker, prefix: &str) -> String {
+        be.next_id += 1;
+        format!("{}-{:08x}", prefix, be.next_id)
+    }
 }
 
 impl Remote for FakeRemote {
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(Meta { version: b.worker_version, features: b.features.clone(), workspace: b.bound.clone() })
         }
@@ -112,7 +175,7 @@ impl Remote for FakeRemote {
         let name = name.to_string();
         let device_name = device_name.to_string();
         async move {
-            this.check_offline()?;
+            this.owner_only()?;
             let mut b = this.be.lock().unwrap();
             if let Some(w) = &b.bound {
                 return Err(RemoteError::AlreadyBound(w.clone()));
@@ -133,7 +196,7 @@ impl Remote for FakeRemote {
     fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone() })
         }
@@ -146,7 +209,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let since = since.map(String::from);
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             if since.as_deref() == Some(b.etag_str().as_str()) {
                 return Ok(None);
@@ -164,7 +227,7 @@ impl Remote for FakeRemote {
         let manifest = manifest.clone();
         let base = base_etag.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.put_manifest_calls += 1;
             if b.reject_schema {
@@ -190,7 +253,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
@@ -206,7 +269,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.check_offline()?;
+            this.ready()?;
             this.be.lock().unwrap().blobs.entry(key).or_insert((bytes, 0));
             Ok(())
         }
@@ -216,7 +279,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let fid = file_id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(b.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
         }
@@ -235,7 +298,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let fid = file_id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             // The worker answers 204 whether or not one was there.
             this.be.lock().unwrap().histories.remove(&fid);
             Ok(())
@@ -249,7 +312,7 @@ impl Remote for FakeRemote {
     ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(b.versions_index.clone().map(|i| (i, format!("v{}", b.versions_etag))))
         }
@@ -264,7 +327,7 @@ impl Remote for FakeRemote {
         let base = base_etag.to_string();
         let index = index.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let mut b = this.be.lock().unwrap();
             // "Another device landed between your read and your write."
             if let Some(theirs) = b.versions_racer.take() {
@@ -287,7 +350,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
         }
@@ -297,7 +360,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             // Immutable and create-only, exactly as the worker stores them.
             this.be.lock().unwrap().version_snapshots.entry(id).or_insert(gz);
             Ok(())
@@ -320,7 +383,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let at: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             // A deliberately tiny page, so the caller's paging is exercised
             // by every sweep rather than by one test with a thousand blobs.
@@ -338,7 +401,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.version_blobs.get(&hash).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
@@ -348,7 +411,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             this.be.lock().unwrap().version_blobs.entry(hash).or_insert((gz, now_ms()));
             Ok(())
         }
@@ -367,7 +430,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let entry = PresenceEntry { name: name.to_string(), path: path.map(String::from), ts: now_ms() };
         async move {
-            this.check_offline()?;
+            this.ready()?;
             this.be.lock().unwrap().presence.insert(this.device_id.clone(), entry);
             Ok(())
         }
@@ -384,7 +447,7 @@ impl Remote for FakeRemote {
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.owner_only()?;
             let mut b = this.be.lock().unwrap();
             let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64 + b.histories.len() as u64;
             b.bound = None;
@@ -396,7 +459,87 @@ impl Remote for FakeRemote {
             b.versions_index = None;
             b.version_snapshots.clear();
             b.version_blobs.clear();
+            // The wipe empties the database too (teams-plan.md §4.4): the
+            // domain is free for a new binding, and nobody is left on it.
+            b.members.clear();
+            b.invites.clear();
+            b.tokens.clear();
             Ok(WipeRound { purged, remaining: false })
+        }
+    }
+
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send {
+        let this = self.clone();
+        let email = email.trim().to_lowercase();
+        let name = name.map(|n| n.to_string());
+        let code_hash = code_hash.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let id = FakeRemote::mint_id(&mut b, "m");
+            let member = b.members.entry(email.clone()).or_insert(MemberRecord {
+                id,
+                email: email.clone(),
+                name: String::new(),
+                role: "member".into(),
+                created_at: now_ms(),
+                ..Default::default()
+            });
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                member.name = n.to_string();
+            }
+            let member = member.clone();
+            // One pending invite per person: the old one stops working the
+            // moment a new one is made.
+            b.invites.retain(|_, (holder, _)| holder != &email);
+            b.invites.insert(code_hash, (email.clone(), expires_at));
+            let id = FakeRemote::mint_id(&mut b, "i");
+            Ok(InviteRecord {
+                id,
+                member_id: member.id,
+                email,
+                name: member.name,
+                created_at: now_ms(),
+                expires_at,
+            })
+        }
+    }
+
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send {
+        let this = self.clone();
+        // The fake looks a code up by its sha256, as the worker does — so a
+        // canonical form the app got wrong would miss here too.
+        let hash = hash_full(code.as_bytes());
+        let device_name = device_name.to_string();
+        async move {
+            // No bearer: this is the route above the gate.
+            this.check_offline()?;
+            let mut b = this.be.lock().unwrap();
+            let Some((email, expires_at)) = b.invites.remove(&hash) else {
+                return Err(RemoteError::Unauthorized);
+            };
+            // Removed either way — redeemed or found expired — which is what
+            // makes "one-time" and "expiring" true without a reaper. Unknown
+            // and expired answer identically: a caller learns whether a code
+            // works, never whether it once existed.
+            if expires_at <= now_ms() {
+                return Err(RemoteError::Unauthorized);
+            }
+            let member = b.members.get(&email).cloned().unwrap_or_default();
+            let token = format!("member-token-{}", FakeRemote::mint_id(&mut b, "k"));
+            let token_id = FakeRemote::mint_id(&mut b, "t");
+            b.tokens.insert(token.clone(), (email, device_name));
+            Ok(RedeemedToken { token, token_id, member })
         }
     }
 }
@@ -437,6 +580,18 @@ fn device(name: &str, be: &SharedWorker) -> Device {
 }
 
 fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: tempfile::TempDir) -> Device {
+    device_as(name, be, root, state, OWNER_TOKEN)
+}
+
+/// A device speaking with `token` rather than the owner's secret — an
+/// invited Mac, once it has redeemed.
+fn device_as(
+    name: &str,
+    be: &SharedWorker,
+    root: tempfile::TempDir,
+    state: tempfile::TempDir,
+    token: &str,
+) -> Device {
     std::fs::create_dir_all(state.path().join("base")).unwrap();
     let data = tempfile::tempdir().unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
@@ -454,7 +609,7 @@ fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: temp
             device_name: name.to_string(),
             use_trash: false,
         },
-        Arc::new(FakeRemote::new(be, &format!("d-{}", name.to_lowercase()))),
+        Arc::new(FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)),
         events.clone(),
         statuses.clone(),
     );
@@ -1375,6 +1530,237 @@ async fn resume_in_place_converges_without_conflict_copies() {
     assert_eq!(a.read("three.md").as_deref(), Some("# three, edited after the resume\n"));
     assert_eq!(a.read("only-here.md").as_deref(), Some("# new on carol's mac\n"));
     assert_eq!(a.files().len(), 4);
+}
+
+/* ---------- The invite code and the redeem flow (teams-plan.md §10) ---------- */
+
+#[test]
+fn a_minted_code_reads_back_the_way_it_was_written() {
+    // The round trip that matters: what the app hashes when it mints an
+    // invite has to be what it hashes when somebody types the code back in.
+    for _ in 0..500 {
+        let canonical = invite::random_code();
+        assert_eq!(canonical.len(), 20, "100 bits, five to a character");
+        assert!(
+            !canonical.contains(['I', 'L', 'O', 'U']),
+            "Crockford's alphabet drops the letters that read as digits: {}",
+            canonical
+        );
+        let written = invite::format_code(&canonical);
+        let groups: Vec<&str> = written.split('-').collect();
+        assert_eq!(groups[0], "dkln", "self-identifying: {}", written);
+        assert_eq!(groups.len(), 5, "the prefix and four groups: {}", written);
+        assert!(groups[1..].iter().all(|g| g.len() == 5), "five to a group: {}", written);
+        assert_eq!(invite::normalize_code(&written).as_deref(), Some(canonical.as_str()));
+    }
+
+    // Two codes in a row are two codes. (At 100 bits a collision here would
+    // mean the randomness is not random, not that we got unlucky.)
+    let mint: Vec<String> = (0..200).map(|_| invite::random_code()).collect();
+    assert_eq!(mint.iter().collect::<BTreeSet<_>>().len(), 200);
+    // Every character of the alphabet turns up: a mask that lost a bit would
+    // still pass everything above while halving the entropy.
+    let seen: BTreeSet<char> = mint.iter().flat_map(|c| c.chars()).collect();
+    assert_eq!(seen.len(), 32, "all 32 Crockford characters, in 4000 of them");
+
+    // Everything a chat client, a keyboard or a spreadsheet does to it.
+    let canonical = "K7QM29XVR48TBHN3WGYD";
+    for typed in [
+        "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+        "  dkln-k7qm2-9xvr4-8tbhn-3wgyd  ",
+        "dkln k7qm2 9xvr4 8tbhn 3wgyd",
+        "DKLN—K7QM2—9XVR4—8TBHN—3WGYD",
+        "K7QM29XVR48TBHN3WGYD",
+        "k7qm2-9xvr4-8tbhn-3wgyd",
+    ] {
+        assert_eq!(invite::normalize_code(typed).as_deref(), Some(canonical), "{}", typed);
+    }
+    // The confusables land where Crockford says they land.
+    assert_eq!(invite::normalize_code("dkln-IL0M2-9XVR4-8TBHN-3WGYD").as_deref(), Some("110M29XVR48TBHN3WGYD"));
+    assert_eq!(invite::normalize_code("dkln-o1om2-9xvr4-8tbhn-3wgyd").as_deref(), Some("010M29XVR48TBHN3WGYD"));
+
+    // And what is not a code is not a code.
+    for junk in ["", "dkln-", "K7QM29XVR48TBHN3WGY", "K7QM29XVR48TBHN3WGYDD", "K7QM29XVR48TBHN3WGY!", "hello"] {
+        assert_eq!(invite::normalize_code(junk), None, "{:?} is not a code", junk);
+    }
+    // U is the one letter that is neither in the alphabet nor a confusable.
+    assert_eq!(invite::normalize_code("dkln-U7QM2-9XVR4-8TBHN-3WGYD"), None);
+}
+
+#[test]
+fn one_paste_fills_both_boxes() {
+    let canonical = invite::random_code();
+    let code = invite::format_code(&canonical);
+    let line = invite::blob("https://notes.example.com", &code);
+    assert_eq!(line, format!("doklin-invite https://notes.example.com {}", code));
+
+    let both = invite::Pasted {
+        endpoint: Some("https://notes.example.com".into()),
+        code: Some(code.clone()),
+    };
+    assert_eq!(invite::parse_pasted(&line), both);
+    // The line as a chat client delivers it: wrapped in a sentence, on its
+    // own paragraph, with the full stop somebody typed after it.
+    assert_eq!(
+        invite::parse_pasted(&format!("Come and join us:\n\n  {}  .\n", line)),
+        both,
+        "a whole message carrying the line still parses"
+    );
+    // Either half on its own is worth filling in.
+    assert_eq!(invite::parse_pasted(&code), invite::Pasted { endpoint: None, code: Some(code.clone()) });
+    assert_eq!(
+        invite::parse_pasted("notes.example.com"),
+        invite::Pasted { endpoint: Some("https://notes.example.com".into()), code: None }
+    );
+    // The trap this design walks past: strip the punctuation out of
+    // "https://notes.example.com" and what is left is twenty characters that
+    // are every one of them in Crockford's alphabet — a perfectly good code.
+    // Punctuation is what tells an address from a code, so the address never
+    // lands in the code box.
+    assert_eq!(invite::normalize_code("https://notes.example.com").as_deref(), Some("HTTPSN0TESEXAMP1EC0M"));
+    assert_eq!(invite::parse_pasted("https://notes.example.com").code, None);
+    // Nothing usable in, nothing out — the wizard leaves what was typed.
+    assert_eq!(invite::parse_pasted("see you tomorrow"), invite::Pasted::default());
+}
+
+#[tokio::test]
+async fn a_code_is_traded_for_a_token_of_this_macs_own() {
+    let be = fake_worker();
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let canonical = invite::random_code();
+    let invited = alice
+        .create_invite("  Bob@Example.com ", Some("Bob"), &invite::code_hash(&canonical), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    // The person is keyed by their address, normalized — inviting
+    // "Bob@Example.com" again reaches this same row.
+    assert_eq!(invited.email, "bob@example.com");
+    assert_eq!(invited.name, "Bob");
+    assert!(invited.expires_at > now_ms());
+
+    // Bob's Mac has no credential at all, which is the point of the route.
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", ""));
+    let redeemed = bob.redeem(&canonical, "Bob's Mac").await.expect("the code works once");
+    assert_eq!(redeemed.member.email, "bob@example.com");
+    assert_eq!(redeemed.member.id, invited.member_id, "the same person the invite named");
+    assert_eq!(redeemed.member.role, "member");
+    assert!(!redeemed.token.is_empty());
+    assert_ne!(redeemed.token, OWNER_TOKEN, "a member's credential is not the owner's");
+
+    // The formatted code redeems too: both ends canonicalize first.
+    let canonical2 = invite::random_code();
+    alice
+        .create_invite("carol@example.com", None, &invite::code_hash(&canonical2), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let typed = invite::normalize_code(&format!("  {}  ", invite::format_code(&canonical2))).unwrap();
+    assert!(bob.redeem(&typed, "Carol's Mac").await.is_ok());
+}
+
+#[tokio::test]
+async fn a_code_works_once_and_a_stale_one_not_at_all() {
+    let be = fake_worker();
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", ""));
+
+    let first = invite::random_code();
+    alice
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&first), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert!(bob.redeem(&first, "Bob's Mac").await.is_ok());
+    // One-time: the row went with the redeem, so the second try cannot tell
+    // itself apart from a code that never existed.
+    assert!(matches!(bob.redeem(&first, "Bob's other Mac").await, Err(RemoteError::Unauthorized)));
+    assert!(matches!(bob.redeem(&invite::random_code(), "Nobody's Mac").await, Err(RemoteError::Unauthorized)));
+
+    // A second invite for the same person kills the one they had: a second
+    // Mac never needs an invite, so a second invite is always "lost the code".
+    let second = invite::random_code();
+    let third = invite::random_code();
+    alice
+        .create_invite("dana@example.com", None, &invite::code_hash(&second), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    alice
+        .create_invite("dana@example.com", None, &invite::code_hash(&third), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert!(matches!(bob.redeem(&second, "Dana's Mac").await, Err(RemoteError::Unauthorized)));
+    assert!(bob.redeem(&third, "Dana's Mac").await.is_ok());
+
+    // Expiring, and expired reads exactly like unknown.
+    let stale = invite::random_code();
+    alice
+        .create_invite("erin@example.com", None, &invite::code_hash(&stale), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    for (_, expires_at) in be.lock().unwrap().invites.values_mut() {
+        *expires_at = now_ms() - 1;
+    }
+    assert!(matches!(bob.redeem(&stale, "Erin's Mac").await, Err(RemoteError::Unauthorized)));
+    // And it is gone: the only row time can delete is one somebody tried to
+    // use, which is what makes "expiring" true without a reaper.
+    assert!(be.lock().unwrap().invites.is_empty());
+
+    // An invite may not be dated past what the worker accepts, whatever is
+    // asked for.
+    let far = invite::expires_at(now_ms(), Some(365));
+    assert!(far <= now_ms() + u64::from(invite::MAX_DAYS) * 24 * 60 * 60 * 1000);
+}
+
+#[tokio::test]
+async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
+    let be = fake_worker();
+    let events: Arc<dyn Events> = Arc::new(Collected::default());
+    let a_root = tempfile::tempdir().unwrap();
+    let a_state = tempfile::tempdir().unwrap();
+    std::fs::write(a_root.path().join("readme.md"), "root doc\n").unwrap();
+
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let bound = bind_domain(&alice, "Notes", "Alice's Mac").await.unwrap();
+    seed_upload(&alice, a_root.path(), a_state.path(), "Notes", &bound.manifest_etag, "Alice's Mac", &events, "a")
+        .await
+        .unwrap();
+
+    let canonical = invite::random_code();
+    alice
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&canonical), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let redeemed = Arc::new(FakeRemote::with_token(&be, "d-bob", ""))
+        .redeem(&canonical, "Bob's Mac")
+        .await
+        .unwrap();
+
+    // From here the invitee's flow IS the second Mac's flow: the token goes
+    // into the same download the panel's "Connect another Mac…" feeds.
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", &redeemed.token));
+    let parent = tempfile::tempdir().unwrap();
+    let dest = parent.path().join("Notes");
+    let b_state = tempfile::tempdir().unwrap();
+    let state = seed_download(&bob, &dest, b_state.path(), &events).await.unwrap();
+    assert_eq!(state.files.len(), 1);
+    assert_eq!(std::fs::read_to_string(dest.join("readme.md")).unwrap(), "root doc\n");
+
+    // And it writes: a member is not a limited account (docs/cloud.md §5.4).
+    // What it cannot do is administer the domain.
+    let (manifest, etag) = bob.fetch_manifest(None).await.unwrap().unwrap();
+    assert!(bob.put_manifest(&manifest, &etag).await.is_ok(), "the manifest is not role-gated");
+    assert!(matches!(bob.wipe().await, Err(RemoteError::Forbidden)));
+    assert!(matches!(
+        bob.create_invite("eve@example.com", None, &invite::code_hash(&invite::random_code()), invite::expires_at(now_ms(), None))
+            .await,
+        Err(RemoteError::Forbidden)
+    ));
+
+    // A token nobody minted is refused outright, wherever it is presented.
+    let nobody = FakeRemote::with_token(&be, "d-eve", "not-a-token");
+    assert!(matches!(nobody.meta().await, Err(RemoteError::Unauthorized)));
+    assert!(matches!(nobody.fetch_manifest(None).await, Err(RemoteError::Unauthorized)));
+
+    // The owner's secret never went near the database, so it still works.
+    assert!(alice.meta().await.is_ok());
 }
 
 /* ---------- Timing, the worker-outdated state, presence ---------- */

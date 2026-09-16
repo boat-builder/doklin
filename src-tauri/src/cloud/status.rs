@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use super::manifest::PublicKind;
-use super::remote::WorkspaceRecord;
+use super::remote::{InviteRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -120,6 +120,32 @@ pub struct Probe {
 pub struct Credentials {
     pub endpoint: String,
     pub token: String,
+}
+
+/// `cloud_redeem`: this Mac's own credential, and who the domain says the
+/// person holding it is. The token goes straight into `cloud_join` — the
+/// invitee's flow is the second Mac's flow from here on.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Redeemed {
+    /// Normalized, so the caller probes the address the worker answered on.
+    pub endpoint: String,
+    pub token: String,
+    pub member_id: String,
+    pub email: String,
+    pub name: String,
+}
+
+/// `cloud_invite`: the invite the domain now holds, plus the code itself —
+/// the one moment it exists in the clear. The panel shows it once; nothing
+/// on this Mac or on the domain can produce it again.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invited {
+    pub code: String,
+    /// The one line to send: address and code together (`cloud/invite.rs`).
+    pub blob: String,
+    pub invite: InviteRecord,
 }
 
 /* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */

@@ -107,6 +107,37 @@ export type CloudMarker = { domain: string; wsId: string };
  *  "Connect another Mac…", never part of a status. */
 export type CloudCredentials = { endpoint: string; token: string };
 
+/** The two halves of an invite found in one paste — either may be missing,
+ *  and the redeem screen fills what it finds. */
+export type CloudPastedInvite = { endpoint: string | null; code: string | null };
+
+/** What a redeemed code answers with: this Mac's own credential, and who the
+ *  domain says the person holding it is. The token goes straight into
+ *  `cloudJoin` — an invitee's flow is the second Mac's flow from there on. */
+export type CloudRedeemed = {
+  endpoint: string;
+  token: string;
+  memberId: string;
+  email: string;
+  name: string;
+};
+
+/** A pending invite, as the domain holds it. The code is not in it: the
+ *  worker keeps only `sha256(code)` and cannot hand one back. */
+export type CloudInvite = {
+  id: string;
+  memberId: string;
+  email: string;
+  name: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+/** `cloudInvite`: the invite the domain now holds, plus the code itself —
+ *  the one moment it exists in the clear. Show it once; nothing can produce
+ *  it again. */
+export type CloudInvited = { code: string; blob: string; invite: CloudInvite };
+
 export type CloudAppliedEvent = { root: string; paths: string[] };
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
@@ -132,6 +163,21 @@ export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_m
 
 /** The endpoint and owner token of a connected workspace. */
 export const cloudToken = (root: string) => invoke<CloudCredentials>("cloud_token", { root });
+
+/** Split one paste into the address and the code. Pure — no domain is touched. */
+export const cloudParseInvite = (text: string) =>
+  invoke<CloudPastedInvite>("cloud_parse_invite", { text });
+
+/** Trade an invite code for this Mac's own credential. The order is inverted
+ *  from every other entrance — redeem first, probe with what it minted —
+ *  because an invitee cannot ask a domain anything until they hold a token. */
+export const cloudRedeem = (endpoint: string, code: string) =>
+  invoke<CloudRedeemed>("cloud_redeem", { endpoint, code });
+
+/** Invite someone to a connected workspace by email (owner only). The code is
+ *  minted and hashed on this Mac; only its sha256 goes up. */
+export const cloudInvite = (root: string, email: string, name: string | null, days: number | null) =>
+  invoke<CloudInvited>("cloud_invite", { root, email, name, days });
 
 /** Ask the domain's worker what it is again ("Check again" after an update);
  *  the fresh version arrives in the next status. */

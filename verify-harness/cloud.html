@@ -87,6 +87,18 @@
         // mirror, or null for a worker too old to hold one.
         versionsMirror: null,
         wipeResult: 42,
+        // The invite the redeem door is scripted with. The engine does the
+        // real parsing and the real trade (src-tauri/src/cloud/invite.rs);
+        // this only answers the way it would for the line pasted below.
+        invite: {
+          endpoint: "https://notes.example.com",
+          code: "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+          // Not the owner's token: that is the whole point of redeeming.
+          token: "cd".repeat(32),
+          member: { memberId: "m-1a2b3c4d", email: "bob@example.com", name: "Bob" },
+          /** A string here is what cloud_redeem rejects with. */
+          error: null,
+        },
         calls: [],
       };
       // The version store, scripted the same way (docs/versioning-plan.md
@@ -386,6 +398,24 @@
             case "cloud_check_worker":
               patchStatus(args.root, { phase: "idle", workerVersion: window.__cloud.workerVersion, error: null });
               return Promise.resolve(null);
+            case "cloud_parse_invite": {
+              const text = String(args.text ?? "");
+              const inv = window.__cloud.invite;
+              return Promise.resolve({
+                endpoint: text.includes(inv.endpoint) ? inv.endpoint : null,
+                code: text.includes(inv.code) ? inv.code : null,
+              });
+            }
+            case "cloud_redeem": {
+              const inv = window.__cloud.invite;
+              if (typeof inv.error === "string") return Promise.reject(inv.error);
+              if (args.code !== inv.code) {
+                return Promise.reject(
+                  "that invite code doesn't work \u2014 it may have been used already, or run out. Ask for a fresh one.",
+                );
+              }
+              return Promise.resolve({ endpoint: inv.endpoint, token: inv.token, ...inv.member });
+            }
             case "cloud_token": {
               const s = window.__cloud.statuses.find((s) => s.root === args.root);
               return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });

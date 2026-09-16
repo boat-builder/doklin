@@ -5849,6 +5849,10 @@ export default function App() {
             setCloudPanelOpen(false);
             setCloudSetup("join");
           }}
+          onRedeem={() => {
+            setCloudPanelOpen(false);
+            setCloudSetup("redeem");
+          }}
           onUpdateWorker={() => {
             setCloudPanelOpen(false);
             setWorkerUpdateOpen(true);

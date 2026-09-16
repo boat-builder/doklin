@@ -55,6 +55,62 @@ pub struct Bound {
     pub manifest_etag: String,
 }
 
+/* ---------- Who the workspace's people are (teams-plan.md §3.5) ---------- */
+
+/// A person, as the identity routes describe one. Never a credential: the
+/// app is told who holds one, never what it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRecord {
+    pub id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    /// `owner` or `member` — what the People list shows. Never authority:
+    /// the owner's credential is the worker's env secret, so no row anybody
+    /// can write confers it (docs/cloud.md §5.4).
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// A pending invite, as `POST /api/auth/invites` answers. The code is not in
+/// it and never comes back from the worker — the app is the only place it
+/// ever exists in the clear.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteRecord {
+    pub id: String,
+    #[serde(default)]
+    pub member_id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+}
+
+/// What a redeemed code answers with: this device's own token, handed over
+/// exactly once — the domain keeps only its sha256 from here on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemedToken {
+    pub token: String,
+    #[serde(default)]
+    pub token_id: String,
+    #[serde(default)]
+    pub member: MemberRecord,
+}
+
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WipeRound {
@@ -198,6 +254,30 @@ pub trait Remote: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
+
+    /* ----- people (docs/cloud.md §5.4, teams-plan.md §3.1) ----- */
+
+    /// `POST /api/auth/invites` (owner): put a pending invite on `email`,
+    /// creating that person if the address is new, and replacing whatever
+    /// invite they had. Only `sha256(code)` goes up — the code itself never
+    /// leaves the app.
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send;
+
+    /// `POST /api/auth/join`: trade a code for this device's own token. The
+    /// one call made with **no bearer at all**, because answering it is how
+    /// a Mac gets one — so it is also the one call whose `Unauthorized` says
+    /// "that code is no good", not "that token is".
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send;
 }
 
 /* ---------- HTTP remote (the real worker) ---------- */
@@ -223,13 +303,18 @@ impl HttpRemote {
         format!("{}/api/{}", self.endpoint, tail)
     }
 
-    /// The bearer plus the two attribution headers every request carries:
-    /// which device speaks (presence, the binding's `createdBy`) and which
-    /// app version (the logs).
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        req.header("authorization", format!("Bearer {}", self.token))
-            .header("x-doklin-device", &self.device_id)
+    /// The two attribution headers every request carries: which device
+    /// speaks (presence, the binding's `createdBy`) and which app version
+    /// (the logs). Never authority — `redeem` sends these and nothing else,
+    /// because it has nothing else to send.
+    fn tags(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req.header("x-doklin-device", &self.device_id)
             .header("x-doklin-client", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The bearer, plus the attribution headers.
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.tags(req).header("authorization", format!("Bearer {}", self.token))
     }
 }
 
@@ -249,9 +334,18 @@ fn body_error(v: &serde_json::Value) -> Option<String> {
     v.get("error").and_then(|e| e.as_str()).map(String::from)
 }
 
+/// The worker's own sentence for a status whose body carries one, so what
+/// the user reads is what the worker said ("this domain has no database —
+/// update the worker") rather than a code with a sentence stapled to it.
+async fn worker_sentence(res: reqwest::Response, fallback: &str) -> RemoteError {
+    let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+    RemoteError::Other(body_error(&v).unwrap_or_else(|| fallback.to_string()))
+}
+
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
     match res.status().as_u16() {
         200..=299 | 304 => Ok(res),
+        400 => Err(worker_sentence(res, "the domain refused that").await),
         401 => Err(RemoteError::Unauthorized),
         403 => Err(RemoteError::Forbidden),
         404 => Err(RemoteError::NotFound),
@@ -269,6 +363,9 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
                 body_error(&v).unwrap_or_else(|| "the worker predates this app's manifest".into()),
             ))
         }
+        // Identity is the database, so a deployment with no `DB` binding says
+        // so here rather than pretending nobody has been invited.
+        503 => Err(worker_sentence(res, "the domain is unavailable").await),
         code => {
             let body = res.text().await.unwrap_or_default();
             let detail = serde_json::from_str::<serde_json::Value>(&body)
@@ -664,6 +761,65 @@ impl Remote for HttpRemote {
                 .map_err(transport_err)?;
             let res = expect_status(res).await?;
             res.json::<WipeRound>().await.map_err(transport_err)
+        }
+    }
+
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send {
+        let body = json!({ "email": email, "name": name, "codeHash": code_hash, "expiresAt": expires_at });
+        async move {
+            let res = self
+                .auth(self.client.post(self.url("auth/invites")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("invite").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't an invite: {}", e)))
+        }
+    }
+
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send {
+        // No bearer: this is the route above the worker's auth gate. The
+        // device id rides in the body rather than the header it usually
+        // does, because nothing has authenticated it to read a header from.
+        let body = json!({ "code": code, "deviceId": self.device_id, "deviceName": device_name });
+        async move {
+            let res = self
+                .tags(self.client.post(self.url("auth/join")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            if res.status().as_u16() == 401 {
+                // A worker that predates the identity routes has no carve-out
+                // above its gate, so a bearer-less POST comes back as the
+                // gate's own bare `unauthorized` — the one error in the
+                // worker that is a code word rather than a sentence. The join
+                // route answers a sentence, so the body is what tells "this
+                // code is no good" from "this worker has never heard of
+                // invites".
+                let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+                return Err(match body_error(&v).as_deref() {
+                    Some("unauthorized") => RemoteError::Outdated("the worker predates invites".into()),
+                    _ => RemoteError::Unauthorized,
+                });
+            }
+            let res = expect_status(res).await?;
+            res.json::<RedeemedToken>().await.map_err(transport_err)
         }
     }
 }
