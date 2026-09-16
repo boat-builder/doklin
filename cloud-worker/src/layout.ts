@@ -12,17 +12,17 @@
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
-//   auth/tokens/<sha256>.json   per-person tokens (minted by invites — not built; the lookup is)
-//   auth/invites/<sha256>.json  pending invites (not built)
 //
-// Nothing public is stored here: public pages are rendered from blobs/.
+// Nothing public is stored here: public pages are rendered from blobs/. And
+// nobody is stored here: people, their tokens and their invites live in the
+// D1 database beside the bucket (schema.ts, members.ts) — a blob store cannot
+// hold a UNIQUE email or delete a credential atomically.
 
 export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";
 export const PRESENCE_KEY = "presence.json";
 export const BLOBS_PREFIX = "blobs/";
 export const HISTORY_PREFIX = "history/";
-export const TOKENS_PREFIX = "auth/tokens/";
 export const VERSIONS_PREFIX = "versions/";
 export const VERSIONS_INDEX_KEY = "versions/index.json";
 export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
@@ -31,7 +31,6 @@ export const VERSION_BLOBS_PREFIX = "versions/blobs/";
 export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
 export const historyKey = (fileId: string): string => `${HISTORY_PREFIX}${fileId}.json`;
-export const tokenKey = (hash: string): string => `${TOKENS_PREFIX}${hash}.json`;
 export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
 export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;
 
@@ -73,6 +72,8 @@ export const MAX_HISTORY_BYTES = 256 * 1024;
 export const MAX_PATH_LEN = 1024;
 export const MAX_PATH_DEPTH = 12;
 export const MAX_NAME_LEN = 80;
+/** An address is allowed to be long; RFC 5321 caps a path at 254 characters. */
+export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
 export const PRESENCE_TTL_MS = 90_000;

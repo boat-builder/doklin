@@ -99,6 +99,12 @@ export class FakeD1 {
       .map((r) => r.name);
   }
 
+  /** Run a statement directly — how a test moves the clock on a stored row,
+   *  or looks at one the routes wrote. Never the worker's path. */
+  run(sql, ...params) {
+    return this.db.prepare(sql).run(...params);
+  }
+
   /** One scalar, for asserting on a row without ceremony. */
   value(sql, ...params) {
     const row = this.db.prepare(sql).get(...params);

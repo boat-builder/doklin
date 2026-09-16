@@ -33,16 +33,23 @@
 //       writes a table yet — the bump exists so the update badge lands the
 //       plumbing before any feature rides on it, and a worker still running 3
 //       has no binding and answers `d1: null`.
-export const WORKER_VERSION = 4;
+//   5 = people (docs/teams-plan.md §9): members keyed by a normalized email,
+//       per-device tokens stored as their own sha256, one-time invites, and
+//       the /api/auth routes that mint, list and revoke them. A member's
+//       bearer now resolves through D1; the owner's is still the env secret
+//       and still reads no row, so a database that is gone costs a workspace
+//       its people and never its owner.
+export const WORKER_VERSION = 5;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
 // is served) and "boards" (embedded stores render) joined when the renderer
 // landed, not before.
-export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions"];
-// D1 is deliberately absent: a feature name promises behaviour, and nothing
-// behaves differently yet. /api/meta's `d1` says whether the database is
-// wired, and says it more precisely than a name in this list could.
+export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions", "members"];
+// "members" is a promise the app can act on: this worker mints and resolves
+// per-person tokens, so the People panel has something to talk to. A bare
+// "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
+// reports it more precisely than a name in this list could.
 
 // The manifest schema this worker understands (docs/cloud.md §6.6).
 // A PUT with a lower version is a plain 400 (nothing older exists); one with a

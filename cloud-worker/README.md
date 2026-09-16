@@ -7,12 +7,14 @@ The whole system — the engine, this worker, the app's surfaces, the
 decisions — is described in [docs/cloud.md](../docs/cloud.md); this file is
 the worker's contract.
 
-**What it serves.** Version 2: the sync API, the meta probe and the owner's
-wipe, and publishing — the public map served as pages rendered from synced
+**What it serves.** Version 5: the sync API, the meta probe and the owner's
+wipe; publishing — the public map served as pages rendered from synced
 blobs: a note, its html rendition behind the MD/HTML pill, a folder's table
 of contents with nested addresses, boards and tables derived from a
 datastore, a card's properties, column widths, links between public notes,
-the root page, a static OG image, and a cache keyed by the manifest's etag.
+the root page, a static OG image, and a cache keyed by the manifest's etag;
+the mirrored version store; and people — members, per-device tokens and
+one-time invites in the D1 database beside the bucket.
 The engine that drives this API from the app is `src-tauri/src/cloud/`; the
 app's setup wizard, update card and teardown step write the prompts that
 deploy, update and remove a worker — `src/cloudPrompts.ts` is their one
@@ -47,20 +49,31 @@ presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd
 versions/index.json         {version, horizonDays, snapshots: [...]} — the version store — CAS by etag
 versions/snapshots/<id>.json.gz   one workspace state, gzip'd; immutable. <id> is <ts13>-<deviceId>
 versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its full sha256
-auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
-auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
+
+Nobody is stored here — people and their credentials are rows next door.
 
 ## The database
 
 A D1 database beside the bucket, bound as `DB`, for the state a blob store
 cannot hold: people, presence and file leases
-([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds one table and
-nobody's data:
+([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds the first:
 
+```sql
+meta     (key, schema_version)                   one row — the runner's anchor
+members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
+tokens   (hash, id, member_id, device_id, device_name, created_at)
+invites  (hash, id, member_id, created_at, expires_at)
 ```
-meta(key, schema_version)   one row — the migration runner's anchor
-```
+
+An *identity* is not a *credential*, and the three tables are that sentence.
+A **member** is permanent and keyed by their normalized email, so a new Mac
+re-reaches the same person and a lost laptop costs nothing but a re-invite.
+A **token** is per-device and disposable. An **invite** is a token nobody has
+claimed yet. Neither secret is stored: `tokens.hash` is `sha256(token)` and
+`invites.hash` is `sha256(code)`, so the database is a list of people rather
+than a list of credentials — and `last_seen_at` is written by the presence
+beat, never by authenticating, which would be a write on every request.
 
 The worker owns its schema (`src/schema.ts`). An update ships one bundled
 file and no migrations directory, so `wrangler d1 migrations apply` is not
@@ -70,11 +83,15 @@ on the `/api/meta` probe, at most once per isolate, with idempotent
 `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`, so
 two isolates reaching a fresh database converge rather than collide.
 
-The binding is optional and every route is indifferent to it: a domain
-deployed before it existed has no `DB`, and one whose database is broken or
-deleted answers exactly as it did before — `/api/meta` reports `"d1": null`
-and nothing else changes. The owner's wipe empties the tables and re-runs
-the schema, so a rebound domain inherits nobody.
+The binding is optional and the whole sync API is indifferent to it: a
+domain deployed before it existed has no `DB`, and one whose database is
+broken or deleted keeps serving every sync route — `/api/meta` reports
+`"d1": null`. What it cannot do is resolve a member's token (they get a
+`401`) or answer an identity route (a `503`). The owner is unaffected either
+way, because `OWNER_TOKEN` is matched against the worker's env secret with
+no database read at all; losing D1 costs a workspace its people, never its
+owner. The owner's wipe empties the tables and re-runs the schema, so a
+rebound domain inherits nobody.
 
 ### The manifest (v2)
 
@@ -138,6 +155,16 @@ logs; nothing reads it).
 ```
 GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
                                  d1: <schema version> | null} — also runs the D1 migration
+POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201 {token, tokenId, member}
+                                 401 when the code is unknown or expired, which answer identically
+POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite}
+GET    /api/auth/invites         owner; the pending, unexpired ones
+DELETE /api/auth/invites/<id>    owner; withdraw one (204)
+GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
+POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own identity
+DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
+DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
                                  — liveness, the credential and "is this domain bound" in one call
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
@@ -172,10 +199,8 @@ POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everyt
 ```
 
 Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
-`404 {"error":"not bound"}`.
-
-Reserved for invites (docs/cloud.md §8.1), not built: `POST /api/auth/join`,
-`GET/POST/DELETE /api/auth/invites`, `GET/DELETE /api/auth/tokens`.
+`404 {"error":"not bound"}`. No `DB` binding? Everything under `/api/auth`
+answers `503`, and nothing else changes.
 
 ### Public (no auth, `GET`/`HEAD` only)
 
@@ -212,18 +237,37 @@ gives every URL a new key, so a page is never stale past one `head`.
 ## Auth
 
 `OWNER_TOKEN` (the worker secret; 32 random bytes hex, minted by the app at
-setup) is compared by SHA-256 in constant time — role `owner`. Any other
-bearer is looked up as `auth/tokens/<sha256(token)>.json`, the record an
-invite will mint for a member: role `member`, may sync and publish; only
-the owner may bind, wipe, invite or revoke. No invite exists yet, so the
-lookup finds nothing today — it is there so *resolving* a member token is an
-addition, not a change. The route that mints one is not: `POST
-/api/auth/join` has to answer without a bearer, so it carves out above the
-gate (docs/cloud.md §8.1). Revocation is deleting the object.
+setup) is compared by SHA-256 in constant time against the worker's env —
+**with no database read**. Role `owner`. That order is the design: a D1
+outage degrades a workspace to one credential rather than locking its owner
+out of their own domain.
+
+Only a bearer that is *not* the owner's costs a row read: `tokens.hash =
+sha256(bearer)`, joined to the member holding it — one primary-key lookup.
+Revoking is deleting that row, and it lands on that device's very next
+request; there is no session, so there is nothing to expire.
+
+A token always authenticates as `member`, whatever `members.role` says. That
+column describes a *person* — what the People list shows — and never confers
+authority: owner is the env secret and nothing else, so no row anybody can
+write can grant it.
+
+`POST /api/auth/join` is the one route above the gate — answering it is how
+a Mac gets a bearer at all — matched on method **and** path exactly, so
+`GET /api/auth/join` and `POST /api/auth/joinx` still meet it. Everything
+else under `/api/auth` is owner-only and inside it.
 
 A member is not a limited account: `PUT /api/manifest` is not role-gated, so
-any valid bearer can rewrite the manifest wholesale. Owner-only is exactly
-bind and wipe.
+any valid bearer can rewrite the manifest wholesale. What a member cannot do
+is administer the domain — bind, wipe, invite, list people and revoke are
+owner-only. Identity buys attribution and per-person revocation, not
+read-only access and not per-folder scope.
+
+An invite code is 100 bits of Crockford base32, so guessing is off the table
+rather than throttled: no attempt cap, no lockout, no counter to store. The
+app mints the code and sends only `sha256(code)`, so the plaintext reaches
+the worker at one place only — the redeem — which is exactly what makes the
+stored hash useless to whoever reads the database.
 
 ## Deploying
 
@@ -248,14 +292,13 @@ npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the datab
 npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
 npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
-# → {"version":4,"features":["sync","wipe","publish","boards","versions"],"workspace":null,"d1":1}
+# → {"version":5,"features":["sync","wipe","publish","boards","versions","members"],"workspace":null,"d1":2}
 ```
 
 `"d1"` is the database's schema version, or `null` on a deployment with no
-`DB` binding — every route works either way, because nothing reads a table
-yet (docs/teams-plan.md). The worker owns its schema: it creates and
-migrates the tables itself on the `/api/meta` probe, so there is no
-migrations directory to apply.
+`DB` binding — the sync API works either way (see **The database** above).
+The worker owns its schema: it creates and migrates the tables itself on the
+`/api/meta` probe, so there is no migrations directory to apply.
 
 A custom domain needs its zone active on the same Cloudflare account, and
 the first TLS certificate can take a minute after deploy.
@@ -304,8 +347,9 @@ asks for nothing more than running them.
 ```sh
 pnpm typecheck:worker      # tsc against the Workers runtime types (no DOM)
 pnpm test:worker           # node cloud-worker/test/run.mjs — an in-memory R2 and a D1 over
-                           # node:sqlite, every route, and the renderer over test/seed.mjs
-                           # (a workspace with a bit of everything)
+                           # node:sqlite, every route (identity end to end: the suite's own
+                           # member token comes from a real invite and redeem), and the
+                           # renderer over test/seed.mjs (a workspace with a bit of everything)
 pnpm bundle:worker         # → cloud-worker/dist/doklin-cloud-worker.js, size printed
 node scripts/bundle-worker.mjs --no-mermaid    # a quick bundle without the mermaid module
 node verify-harness/serve-worker.mjs           # the bundled worker over the seed, on :8787 —

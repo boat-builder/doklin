@@ -18,10 +18,13 @@
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
 //
-// Nothing outside `/api/meta` and the owner's wipe touches D1 yet. A worker
-// whose `DB` binding is missing or broken — every domain deployed before the
-// binding existed — serves every route unchanged and reports `d1: null`;
-// later phases add tables here and state their own failure posture.
+// A worker whose `DB` binding is missing or broken — every domain deployed
+// before the binding existed — still serves the whole sync API unchanged and
+// reports `d1: null`. What it cannot do is resolve a member's token or
+// answer an identity route, because those ARE the database (members.ts);
+// the owner's own credential is the env secret and never reads a row, so a
+// database that is gone degrades a workspace to one credential rather than
+// locking anyone out (§3.2).
 
 import type { Env } from "./env";
 
@@ -38,8 +41,48 @@ type Step = {
 const BASE_VERSION = 1;
 
 const STEPS: readonly Step[] = [
-  // Phase 2 opens this list with { to: 2, tables: ["members", "tokens",
-  // "invites"], sql: [...] }. Phase 1 deliberately ships an empty schema.
+  {
+    // People and the credentials they hold (docs/teams-plan.md §3.5). The
+    // separation is the whole point: a *member* is permanent and keyed by
+    // their email, so a new Mac re-reaches the same person; a *token* is
+    // per-device and disposable; an *invite* is a token that has not been
+    // claimed yet. Nothing here stores a code or a token in the clear —
+    // both tables are keyed by the sha256 of the secret, so the database is
+    // not a list of credentials.
+    to: 2,
+    // Children before parents: the wipe walks this list in order, so it
+    // empties the tables that reference `members` before `members` itself
+    // and never leans on whether foreign keys are being enforced.
+    tables: ["tokens", "invites", "members"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS members (
+         id           TEXT PRIMARY KEY,         -- m-xxxxxxxx
+         email        TEXT NOT NULL UNIQUE,     -- normalized: trimmed, lowercased
+         name         TEXT NOT NULL,
+         role         TEXT NOT NULL,            -- 'owner' | 'member'
+         created_at   INTEGER NOT NULL,
+         last_seen_at INTEGER,                  -- written by the presence beat, not by auth
+         disabled     INTEGER NOT NULL DEFAULT 0
+       )`,
+      `CREATE TABLE IF NOT EXISTS tokens (
+         hash        TEXT PRIMARY KEY,          -- sha256(token) — the auth lookup
+         id          TEXT NOT NULL,             -- t-xxxxxxxx, what revocation names
+         member_id   TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+         device_id   TEXT,
+         device_name TEXT,
+         created_at  INTEGER NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS tokens_by_member ON tokens(member_id)`,
+      `CREATE TABLE IF NOT EXISTS invites (
+         hash       TEXT PRIMARY KEY,           -- sha256(code) — never the plaintext
+         id         TEXT NOT NULL,              -- i-xxxxxxxx
+         member_id  TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS invites_by_member ON invites(member_id)`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */

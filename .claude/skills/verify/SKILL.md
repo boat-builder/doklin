@@ -328,7 +328,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 28 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 37 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh
@@ -336,7 +336,15 @@ node cloud-worker/test/run.mjs             # 28 cases against an in-memory R2 fa
                                            # isolate never asks again; no binding and a broken
                                            # binding both leave every route working — asserted
                                            # first, since a cold start is only visible before a
-                                           # migration), auth, meta, bind-once (409),
+                                           # migration), identity end to end (the suite's own
+                                           # member token comes from a real invite and redeem —
+                                           # one-time, expiring, swept only when used; one email
+                                           # is one person through case and spacing; a code
+                                           # survives autocorrect; revoking a device and removing
+                                           # a person; the POST /api/auth/join carve-out and
+                                           # nothing else; a member writes but does not
+                                           # administer; the owner authenticating with the DB
+                                           # binding removed), auth, meta, bind-once (409),
                                            # the unbound 404s + landing page, manifest CAS (304 /
                                            # 412 / 428), validation + the public map, 426 on a
                                            # newer schema, blobs (a re-put is a no-op), history,

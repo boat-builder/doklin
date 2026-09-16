@@ -154,15 +154,30 @@ prompt (§7.4); `cloud-worker/wrangler.toml.example` is the same file for
 doing it by hand. The naming rule is one function, `resourceName` in
 `src/cloudPrompts.ts`.
 
-The database is where people, presence and file leases are going to live
-([teams-plan.md](teams-plan.md)). Nothing reads or writes a table yet: it is
-deployed first and alone, so landing the plumbing can fail as a failed
-deploy rather than as a broken workspace. Its whole schema today is a `meta`
-table holding a version; the worker builds and migrates that schema itself
-(`cloud-worker/src/schema.ts` — an update ships one bundled file and no
-migrations directory); and a domain deployed before the binding existed has
-no `DB` at all and works exactly as it did, since every route is indifferent
-to it and `/api/meta` simply answers `"d1": null`.
+The database is where people, presence and file leases live
+([teams-plan.md](teams-plan.md)). Today it holds the first of those:
+
+```sql
+meta     (key, schema_version)                   the migration runner's anchor
+members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
+tokens   (hash, id, member_id, device_id, device_name, created_at)
+invites  (hash, id, member_id, created_at, expires_at)
+```
+
+The worker builds and migrates that schema itself
+(`cloud-worker/src/schema.ts`): an update ships one bundled file and no
+migrations directory, so `wrangler d1 migrations apply` is not available to
+a domain being updated. An ordered list of steps runs on the `/api/meta`
+probe, at most once per isolate, with idempotent `CREATE TABLE IF NOT
+EXISTS` statements and a guarded `UPDATE meta SET schema_version = <to>
+WHERE schema_version = <to-1>`, so two isolates reaching a fresh database
+converge instead of colliding.
+
+A domain deployed before the binding existed has no `DB` at all, and the
+whole sync API works exactly as it did — `/api/meta` answers `"d1": null`.
+What it cannot do is resolve a member's token or answer an identity route,
+because those *are* the database. The owner's own credential never reads a
+row (§5.4), so losing D1 costs a workspace its people, never its owner.
 
 ### 5.2 R2 layout
 
@@ -178,11 +193,12 @@ versions/index.json         {version, horizonDays, snapshots: [{id, ts, device, 
 versions/snapshots/<id>.json.gz   one whole workspace state, gzip'd; immutable.
                             <id> is <ts13>-<deviceId> — when it was taken and by whom
 versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its FULL sha256
-auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
-auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
 
 Nothing public is stored here: public pages are *rendered* from `blobs/`.
+And nobody is stored here: people, their tokens and their invites are rows
+in the D1 database beside the bucket (§5.1), because a blob store cannot
+hold a `UNIQUE` email or delete a credential atomically.
 The layout and the grammar of its ids live in `cloud-worker/src/layout.ts`.
 
 `versions/` is the cloud half of versioning ([versioning.md](versioning.md)
@@ -205,8 +221,9 @@ GET    /api/meta                 {version, features, workspace: {id, name, creat
                                  d1: <schema version> | null}
                                  — liveness, the credential, "is this domain bound" and the state of the
                                  database in one call; also where the schema migrates itself
-POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
-                                 createdBy, manifestEtag}; 409 {workspace} when already bound
+POST   /api/workspace            owner; bind: body {name, deviceName?, ownerEmail?, ownerName?}
+                                 → 201 {id, name, createdAt, createdBy, manifestEtag, owner?};
+                                 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
 GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
@@ -235,7 +252,23 @@ PUT    /api/presence             body {name?, path?} — "this device is here, e
 DELETE /api/presence             this device left
 POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
                                  repeat until remaining:false. Frees the domain for a new binding.
+
+POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
+                                 {token, tokenId, member}; 401 when the code is unknown or
+                                 expired, which answer identically
+POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite};
+                                 creates the member if the email is new, replaces their pending one
+GET    /api/auth/invites         owner; the pending, unexpired ones
+DELETE /api/auth/invites/<id>    owner; withdraw one (204)
+GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
+POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own identity
+DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
+DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
 ```
+
+Everything under `/api/auth` is the D1 database beside the bucket; a
+deployment that has none answers `503` there and loses nothing else.
 
 The three `/api/history/<fid>` routes are the **retired** manifest history
 ([versioning.md](versioning.md) §6.5). No current app reads or writes one;
@@ -245,9 +278,7 @@ calls (§6.9). Removing them would break a device the user has not updated,
 which is the one thing the worker contract never does.
 
 Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
-`404 {"error":"not bound"}`. Reserved for invites (§8.1), not built:
-`POST /api/auth/join`, `GET/POST/DELETE /api/auth/invites`,
-`GET/DELETE /api/auth/tokens`.
+`404 {"error":"not bound"}`.
 
 Public (no auth, `GET`/`HEAD` only; anything else is a 405):
 
@@ -273,16 +304,40 @@ Every page carries `<meta name="robots" content="noindex">` and the
 
 ### 5.4 Auth
 
-- `OWNER_TOKEN` is compared by SHA-256 in constant time. Role `owner`.
-- `auth/tokens/<sha256(token)>.json` — per-person tokens an invite will mint,
-  role `member`. The set is empty today; the lookup exists so *resolving* a
-  member token is an addition, not a change. The route that mints one is
-  not: it must answer without a bearer, so it carves out of the gate above
-  (§8.1). Members may sync and publish; only the owner may bind, wipe,
-  invite, or revoke. Revocation is deleting the object.
+- `OWNER_TOKEN` is compared by SHA-256 in constant time against the worker's
+  env secret, **with no database read**. The order is the design, not an
+  optimization: a D1 outage degrades a workspace to one credential rather
+  than locking its owner out of their own domain. Role `owner`.
+- Only a bearer that is *not* the owner's costs a row read —
+  `tokens.hash = sha256(bearer)`, joined to the member holding it: one
+  primary-key lookup. Revoking is deleting that row, and it takes effect on
+  that device's very next request; there is no session, so there is nothing
+  to expire.
+- **A token always authenticates as `member`**, whatever `members.role`
+  says. That column describes a *person* — it is what the People list shows
+  — and is never evidence of authority: owner comes from the env secret and
+  from nowhere else, so no row anybody can write confers it. Inviting the
+  owner's own address mints an ordinary member credential, which is right:
+  their second Mac already has the real one.
+- **A member is not a limited account.** `PUT /api/manifest` is not
+  role-gated: any valid bearer rewrites the manifest wholesale, tombstones
+  included. What a member cannot do is *administer* the domain — bind,
+  wipe, invite, list people and revoke are owner-only. Identity buys
+  attribution and per-person revocation, not read-only access and not
+  per-folder scope.
+- `POST /api/auth/join` is the one route above the gate, matched on method
+  **and** path exactly, because answering it is how a Mac gets a bearer at
+  all. Everything else under `/api/auth` is owner-only and inside it.
+- Guessing is off the table rather than throttled: an invite code is 100
+  bits of Crockford base32, so there is no attempt cap, no lockout and no
+  counter to store. Entropy is free; a counter is not.
+- Neither secret is ever stored in the clear: a token is its own sha256, an
+  invite is `sha256(code)`, so the database is a list of people rather than
+  a list of credentials. The plaintext code crosses the wire only at
+  redeem, which is precisely what makes the stored hash useless to anyone
+  who reads it.
 - No cookies, no gate, no sessions, no rate limiter for visitors — there is
-  nothing to unlock. A join route would be the first thing worth guessing,
-  which is why §8.1 leaves throttling open rather than assumed.
+  nothing to unlock.
 
 ### 5.5 The binding
 
@@ -399,9 +454,9 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (4 — the sync API was 1; publishing
-  made it 2; the version store made it 3; the D1 binding made it 4),
-  `WORKER_FEATURES`
+  the worker (§7.1): `WORKER_VERSION` (5 — the sync API was 1; publishing
+  made it 2; the version store made it 3; the D1 binding made it 4; people
+  made it 5), `WORKER_FEATURES`
   (`["sync", "wipe", "publish", "boards", "versions"]`; a feature name is a
   promise about behaviour, listed only once the behaviour exists — the
   engine mirrors nothing to a worker that does not list `versions`),
@@ -418,11 +473,13 @@ decision 7).
   the erase step of teardown and the only way to free a domain. Its last
   round also empties the D1 tables and re-runs the schema, so a rebound
   domain inherits nobody from the old one.
-- Version 4 carries no new behaviour of its own — it is the update badge
-  doing its job, so the `DB` binding reaches deployed domains before
-  anything depends on it. D1 is deliberately not a `WORKER_FEATURES` name:
-  a name there promises behaviour, and `/api/meta`'s `d1` already says
-  whether the database is wired, more precisely than a name could.
+- Version 4 carried no new behaviour of its own — it was the update badge
+  doing its job, so the `DB` binding reached deployed domains before
+  anything depended on it. Version 5 is what depends on it, and it adds the
+  feature name `"members"`: a promise the app can act on, that this worker
+  mints and resolves per-person tokens. A bare `d1` is still deliberately
+  not a feature name — that is plumbing, and `/api/meta`'s `d1` reports it
+  more precisely than a name in a list could.
 
 ### 5.8 Size and tests
 
@@ -437,7 +494,10 @@ script splices the module in.
 `test/fake-r2.mjs`, and a D1 over node's own SQLite in `test/fake-d1.mjs`,
 so the schema runner's `IF NOT EXISTS` and its guarded version bump run as
 real SQL; the worker compiled in-process through vite) covers the migration
-and the two ways a database can be absent, auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
+and the two ways a database can be absent, identity end to end (invite →
+redeem → sync → revoke, the one-time and expiring invite, one email as one
+person, the carve-out, and the owner authenticating with the binding
+removed), auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
 (304 / 412 / 428), validation and the public map, 426 on a newer schema,
 blobs, history, presence, the statics, and then loads a seed workspace
 through the API (`test/seed.mjs` — a note, a note with an html rendition, a
@@ -983,14 +1043,20 @@ one's own — §11.1 and §11.7 say what each one blocks.
 
 ### 8.1 Invites — email + code
 
-> **Superseded in the planning.**
+> **Superseded, and the worker half is built.**
 > [teams-plan.md](teams-plan.md) splits this into a *person* (a member keyed
 > by their email, permanent) and a *credential* (a token, disposable), moves
 > both into a D1 database beside the bucket, and settles the three open
 > questions below — a 100-bit capability instead of a passphrase, expiry
 > checked at redeem with the invite deleted on use, `lastSeenAt` on the
-> member and written at most daily — plus a fourth: no password, ever. Read
-> this section for the shape and that one for what will be built.
+> member and written at most daily — plus a fourth: no password, ever.
+>
+> Phase 2 of that plan shipped: §5.3's `/api/auth/*` routes mint, list,
+> redeem and revoke, and §5.4 is what auth actually does now. What is *not*
+> built is the app — nothing mints a code, and no panel shows a person — so
+> a workspace still has one credential in practice (§11.1). Read this
+> section for the shape it came from, §5.3–5.4 for what exists, and the plan
+> for what is left.
 
 - The owner mints an invite in the Cloud panel: an email and a code the app
   generates (`amber-canyon-lantern-42`). The worker stores
@@ -1182,18 +1248,23 @@ administration.
 
 ### 11.1 There is one credential, so there are no people
 
-§8.1 is not built. `authenticate` (`auth.ts:61`) matches the bearer against
-the `OWNER_TOKEN` secret and answers `role: "owner"`; anything else falls
-through to a token record under `auth/tokens/` that no flow mints. Ten people
-therefore means ten copies of one secret, ten owners, and ten
-`POST /api/admin/wipe` buttons — the route's own guard is
-`auth.role !== "owner"` (`api.ts:139`), which every caller passes. Removing
-one person means rotating the secret and reconnecting every other Mac.
+**Half closed.** The worker can now hold people: `authenticate` still
+matches the `OWNER_TOKEN` secret first and answers `role: "owner"`, but a
+bearer that is not it resolves through the `tokens` table to the member who
+holds it, and `/api/auth/*` mints, lists and revokes those (§5.3–5.4). A
+member reaching `POST /api/admin/wipe` gets a `403`, because their role is
+`member` rather than everyone's `owner`.
+
+What is still true is the part the user sees: **nothing in the app drives
+any of it.** No surface mints a code, so in practice ten people is still ten
+copies of one secret, and removing one person is still rotating the secret
+and reconnecting every other Mac.
 
 **Blocks:** sharing a workspace with *people* rather than with a second Mac
 of your own — which is the team case entirely. Downstream of it: per-person
 attribution (`by` is a device name, never a person) and §8.2's leases, which
-need an identity to put in "Alice is editing".
+need an identity to put in "Alice is editing". [teams-plan.md](teams-plan.md)
+phases 3 and 4 are what close it.
 
 ### 11.2 The idle heartbeat is the free plan's real budget
 

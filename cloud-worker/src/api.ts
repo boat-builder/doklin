@@ -6,7 +6,8 @@
 // the logs — nothing reads it).
 //
 //   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null}
-//   POST   /api/workspace            owner; bind this domain: body {name, deviceName?} → 201
+//   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
+//                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
 //   GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
@@ -38,8 +39,29 @@
 //   DELETE /api/presence             this device left
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
 //                                    repeat until remaining:false. Frees the domain.
+//
+//   People (docs/teams-plan.md §9). Everything here is the D1 database beside
+//   the bucket; a deployment without one answers 503 and loses nothing else.
+//
+//   POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
+//                                    {token, tokenId, member}; 401 when the code is unknown or
+//                                    expired (the row goes either way). The ONE route above the
+//                                    authenticate gate, matched on method AND path exactly,
+//                                    because answering it is how a Mac gets a bearer at all.
+//   POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite};
+//                                    creates the member if the email is new, and replaces any
+//                                    invite they already had. The worker never sees the code.
+//   GET    /api/auth/invites         owner; the pending, unexpired ones
+//   DELETE /api/auth/invites/<id>    owner; withdraw one (204)
+//   GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
+//   POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own
+//                                    identity, for attribution and the People list
+//   DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+//   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
+//   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
 
-import { authenticate, randomHex, type Auth } from "./auth";
+import { authenticate, type Auth } from "./auth";
+import { randomHex } from "./crypto";
 import { prunePresence, readManifestTotals, readPresence, readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
@@ -60,6 +82,24 @@ import {
   validPath,
 } from "./layout";
 import { emptyManifest, validateManifest, validHistoryArchive } from "./manifest";
+import {
+  ENTITY_ID_RE,
+  HASH_RE,
+  MAX_INVITE_TTL_MS,
+  adoptOwner,
+  deleteInvite,
+  deleteMember,
+  deleteToken,
+  listInvites,
+  listMembers,
+  listTokens,
+  normalizeCode,
+  normalizeEmail,
+  putInvite,
+  redeemInvite,
+  upsertMember,
+} from "./members";
+import { sha256Hex } from "./crypto";
 import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
@@ -72,6 +112,15 @@ const notBound = (): Response => json({ error: "not bound" }, 404);
 
 export async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const parts = url.pathname.split("/").filter(Boolean); // ["api", section, …]
+
+  // The one route above the gate. Redeeming an invite is how a Mac GETS a
+  // bearer, so it cannot be behind one — and the carve-out is method AND
+  // path, exactly, so `GET /api/auth/join`, `POST /api/auth/joinx` and every
+  // other route under /api/auth still meet `authenticate` below.
+  if (request.method === "POST" && parts.length === 3 && parts[1] === "auth" && parts[2] === "join") {
+    return joinWithInvite(request, env);
+  }
+
   const auth = await authenticate(request, env);
   if (!auth) return json({ error: "unauthorized" }, 401);
 
@@ -145,15 +194,151 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     return presence(request, env, auth);
   }
 
+  if (section === "auth" && (parts.length === 3 || parts.length === 4)) {
+    if (auth.role !== "owner") return ownerOnly();
+    return handleAuth(request, env, parts);
+  }
+
   if (section === "admin" && parts[2] === "wipe" && parts.length === 3) {
     if (method !== "POST") return methodNotAllowed();
     if (auth.role !== "owner") return ownerOnly();
     const body = await readJsonObject(request);
     if (body?.confirm !== "wipe") return json({ error: 'body must be {"confirm":"wipe"}' }, 400);
-    return wipeBucket(env, auth);
+    return wipeBucket(env);
   }
 
   return json({ error: "not found" }, 404);
+}
+
+/* ---------- People ---------- */
+
+/** A deployment whose wrangler.toml has no `DB` binding, or whose database is
+ *  gone. The sync API does not care; identity IS the database, so these
+ *  routes say so instead of pretending nobody has been invited. */
+const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
+
+/**
+ * Trade an invite code for this device's own token — the one unauthenticated
+ * route (see the carve-out in `handleApi`).
+ *
+ * The plaintext code crosses the wire here, where every *other* part of the
+ * design sends a hash. That is deliberate and it is the point of hashing: the
+ * owner's app sends `sha256(code)` when it creates the invite, so what the
+ * database stores is not itself redeemable. If redeeming took the hash too,
+ * the stored value would be the credential and hashing it would buy nothing.
+ *
+ * Unknown and expired answer identically. A caller learns whether a code
+ * works, never whether it once existed or whom it was for.
+ */
+async function joinWithInvite(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const code = normalizeCode(body.code);
+  if (!code) return json({ error: "that is not a Doklin invite code" }, 400);
+  const deviceId = typeof body.deviceId === "string" && ID_RE.test(body.deviceId) ? body.deviceId : null;
+  const deviceName = typeof body.deviceName === "string" ? body.deviceName : null;
+
+  const redeemed = await redeemInvite(env, await sha256Hex(code), deviceId, deviceName);
+  if (redeemed === null) return noDatabase();
+  if (redeemed === "unknown" || redeemed === "expired") return json({ error: "that code is not valid" }, 401);
+  return json({ token: redeemed.token, tokenId: redeemed.tokenId, member: redeemed.member }, 201);
+}
+
+/** Everything else under /api/auth — owner-only, checked by the caller. */
+async function handleAuth(request: Request, env: Env, parts: string[]): Promise<Response> {
+  const kind = parts[2];
+  const id = parts[3];
+  const method = request.method;
+
+  if (kind === "invites") {
+    if (id === undefined) {
+      if (method === "GET") {
+        const invites = await listInvites(env);
+        return invites === null ? noDatabase() : json({ invites });
+      }
+      if (method === "POST") return createInvite(request, env);
+      return methodNotAllowed();
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid invite id" }, 400);
+    const gone = await deleteInvite(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such invite" }, 404);
+  }
+
+  if (kind === "members") {
+    if (id === undefined) {
+      if (method === "GET") {
+        const members = await listMembers(env);
+        return members === null ? noDatabase() : json({ members });
+      }
+      if (method === "POST") return adoptOwnerIdentity(request, env);
+      return methodNotAllowed();
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid member id" }, 400);
+    const gone = await deleteMember(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such member" }, 404);
+  }
+
+  if (kind === "tokens") {
+    if (id === undefined) {
+      if (method !== "GET") return methodNotAllowed();
+      const tokens = await listTokens(env);
+      return tokens === null ? noDatabase() : json({ tokens });
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid token id" }, 400);
+    const gone = await deleteToken(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such token" }, 404);
+  }
+
+  // `join` only ever answers POST, and that one is handled above the gate.
+  if (kind === "join" && id === undefined) return methodNotAllowed();
+  return json({ error: "not found" }, 404);
+}
+
+/**
+ * Invite someone by email, creating the person if this is the first time that
+ * address has been seen. The body carries `codeHash`, never a code: the app
+ * mints the 100-bit code and hashes it, so a worker log, a D1 backup and this
+ * request body are all incapable of letting anyone in (teams-plan.md §6.3).
+ */
+async function createInvite(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ error: "a valid email address is required" }, 400);
+  const codeHash = typeof body.codeHash === "string" ? body.codeHash.trim().toLowerCase() : "";
+  if (!HASH_RE.test(codeHash)) return json({ error: "codeHash must be the sha256 of the code, in hex" }, 400);
+
+  const now = Date.now();
+  const expiresAt =
+    typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? Math.floor(body.expiresAt) : 0;
+  if (expiresAt <= now || expiresAt > now + MAX_INVITE_TTL_MS) {
+    const days = MAX_INVITE_TTL_MS / 86_400_000;
+    return json({ error: `expiresAt must be a time within the next ${days} days` }, 400);
+  }
+
+  // The role is only used when the row is new: inviting the owner by their own
+  // address must not demote them.
+  const member = await upsertMember(env, email, typeof body.name === "string" ? body.name : null, "member");
+  if (!member) return noDatabase();
+  const invite = await putInvite(env, member, codeHash, expiresAt);
+  return invite === null ? noDatabase() : json({ invite }, 201);
+}
+
+/** The owner saying who they are. Identity, not authority — `OWNER_TOKEN`
+ *  keeps authenticating them either way (auth.ts). */
+async function adoptOwnerIdentity(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ error: "a valid email address is required" }, 400);
+  const member = await adoptOwner(env, email, typeof body.name === "string" ? body.name : null);
+  return member === null ? noDatabase() : json({ member });
 }
 
 /* ---------- The binding ---------- */
@@ -199,7 +384,16 @@ async function bindWorkspace(request: Request, env: Env, auth: Auth): Promise<Re
     onlyIf: { etagDoesNotMatch: "*" },
   });
   if (!put) return json({ error: "already bound", workspace: await readWorkspace(env) }, 409);
-  return json({ ...record, manifestEtag }, 201);
+
+  // Who bound it, as a person. Best effort on purpose: the owner's access is
+  // the env secret, so a domain whose database is missing must still bind —
+  // `POST /api/auth/members` adopts an identity afterwards. An owner row is
+  // reported when there is one and simply absent when there is not.
+  const ownerEmail = normalizeEmail(body.ownerEmail);
+  const owner = ownerEmail
+    ? await adoptOwner(env, ownerEmail, typeof body.ownerName === "string" ? body.ownerName : null)
+    : null;
+  return json({ ...record, manifestEtag, ...(owner ? { owner } : {}) }, 201);
 }
 
 /* ---------- The manifest ---------- */
@@ -368,25 +562,22 @@ async function presence(request: Request, env: Env, auth: Auth): Promise<Respons
  * delete` (which refuses a non-empty bucket) can finish the job, and so the
  * next bind finds no workspace.json. Batched to the per-request subrequest
  * budget; the client repeats the call until `remaining` comes back false.
- * The caller's own token object (a minted token, once invites exist) goes
- * last, so a wipe can't cut itself off half-done.
  *
  * The last round empties D1 as well (docs/teams-plan.md §4.4) — otherwise a
- * rebound domain would inherit the old workspace's people.
+ * rebound domain would inherit the old workspace's people. Nothing has to be
+ * saved for last any more: a wipe is owner-only, and the owner's credential
+ * is the worker's env secret rather than anything in here, so the call cannot
+ * cut itself off half-done. Members lose theirs, which is the intent.
  */
-async function wipeBucket(env: Env, auth: Auth): Promise<Response> {
+async function wipeBucket(env: Env): Promise<Response> {
   let deleted = 0;
   const finish = async (): Promise<Response> => {
-    if (auth.key) {
-      await env.DATA.delete(auth.key);
-      deleted += 1;
-    }
     await wipeSchema(env);
     return json({ wiped: true, purged: deleted, remaining: false });
   };
   for (let round = 0; round < 20; round += 1) {
     const batch = await env.DATA.list({ limit: 1000 });
-    const keys = batch.objects.map((o) => o.key).filter((k) => k !== auth.key);
+    const keys = batch.objects.map((o) => o.key);
     if (keys.length === 0) return finish();
     await env.DATA.delete(keys);
     deleted += keys.length;

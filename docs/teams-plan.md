@@ -423,8 +423,8 @@ budget, for no extra freshness.
 
 | # | Phase | Ships | Depends on | User sees |
 | --- | --- | --- | --- | --- |
-| 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** (an update badge) |
-| 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) |
+| 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** (an update badge) — **built** |
+| 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) — **built** |
 | 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join |
 | 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable |
 | 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | history says *who*, not *which Mac* |
@@ -492,7 +492,10 @@ existing domain both report a schema version; [cloud.md](cloud.md) §5.1,
 
 **Files:** `cloud-worker/src/schema.ts` (version 2: members, tokens,
 invites), `cloud-worker/src/auth.ts`, `cloud-worker/src/members.ts` (new),
-`cloud-worker/src/api.ts`, `cloud-worker/src/version.ts`,
+`cloud-worker/src/crypto.ts` (new — sha256/timingEq/randomHex, so auth.ts
+and members.ts need not import each other), `cloud-worker/src/api.ts`,
+`cloud-worker/src/layout.ts` (the `auth/` prefixes go: there is nowhere in
+the bucket for a person any more), `cloud-worker/src/version.ts`,
 `cloud-worker/test/run.mjs`.
 
 ### 9.1 The routes
@@ -515,6 +518,27 @@ DELETE /api/auth/tokens/<id>  owner — revoke one device
 `authenticate` resolves a member token to `{role: "member", memberId,
 email, name}` in one indexed row read; the owner still short-circuits on
 the env secret before touching D1 (§3.2).
+
+Two details the routes settled that the sketch above left open:
+
+- **The redeem takes the plaintext code, where everything else takes a
+  hash.** That is not an inconsistency, it is the point of hashing: the
+  owner's app sends `sha256(code)` when it *creates* the invite, so what the
+  database stores is not itself redeemable. If redeeming took the hash too,
+  the stored value would be the credential and hashing it would buy nothing.
+  `normalizeCode` is therefore a wire contract — uppercase, Crockford's I/L
+  → 1 and O → 0, prefix and dashes dropped — and both sides hash the same
+  twenty characters.
+- **One pending invite per person.** A second Mac never needs one (the panel
+  shows the token it already holds), so a second invite always means "they
+  lost the code" — and the old one should stop working the moment the new
+  one is made. `putInvite` deletes and inserts in one batch.
+- **A token always authenticates as `member`.** §3.2 says the owner's member
+  row "is never what authenticates them"; resolving a token to whatever
+  `members.role` said would have made that false in the other direction —
+  invite the owner's own address, redeem it, and a *row* would be granting
+  administrative authority. The role column describes a person, for the
+  People list; `authenticate` hardcodes `member` on the token path.
 
 `POST /api/workspace` gains optional `ownerEmail` and `ownerName` and
 writes the owner's member row at bind. A domain bound before this phase has
@@ -546,6 +570,12 @@ unaffected, and so is every route the owner drives.
 `WORKER_VERSION` is bumped with feature `"members"`, and
 [cloud.md](cloud.md) §5.3–5.4 and `cloud-worker/README.md` are rewritten
 from "reserved, not built" to what shipped.
+
+**Built.** One addition to the posture above, found while writing it: every
+identity route funnels through a single `withDb` helper, so "no binding",
+"the migration failed" and "the query threw" are one answer — a `503` — and
+a database deleted out from under a deployed worker can never turn a route
+into a 500.
 
 ## 10. Phase 3 — The code and the redeem flow
 
