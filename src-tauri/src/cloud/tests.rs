@@ -68,10 +68,12 @@ struct FakeWorker {
     /// By normalized email — a person is found by their address, so
     /// re-inviting one reaches the same row.
     members: BTreeMap<String, MemberRecord>,
-    /// sha256(code) -> (email, expires_at). One per person, at most.
-    invites: BTreeMap<String, (String, u64)>,
-    /// token -> (email, device name). Deleting the entry is revoking it.
-    tokens: BTreeMap<String, (String, String)>,
+    /// sha256(code) -> the pending invite. One per person, at most.
+    invites: BTreeMap<String, InviteRecord>,
+    /// token -> the row that resolves it. Deleting the entry is revoking it,
+    /// and it bites on that Mac's next call because every call comes through
+    /// `ready` — which is the whole of what a session would have been.
+    tokens: BTreeMap<String, TokenRecord>,
     next_id: u64,
 }
 
@@ -497,17 +499,18 @@ impl Remote for FakeRemote {
             let member = member.clone();
             // One pending invite per person: the old one stops working the
             // moment a new one is made.
-            b.invites.retain(|_, (holder, _)| holder != &email);
-            b.invites.insert(code_hash, (email.clone(), expires_at));
+            b.invites.retain(|_, held| held.email != email);
             let id = FakeRemote::mint_id(&mut b, "i");
-            Ok(InviteRecord {
+            let record = InviteRecord {
                 id,
                 member_id: member.id,
                 email,
                 name: member.name,
                 created_at: now_ms(),
                 expires_at,
-            })
+            };
+            b.invites.insert(code_hash, record.clone());
+            Ok(record)
         }
     }
 
@@ -525,21 +528,154 @@ impl Remote for FakeRemote {
             // No bearer: this is the route above the gate.
             this.check_offline()?;
             let mut b = this.be.lock().unwrap();
-            let Some((email, expires_at)) = b.invites.remove(&hash) else {
+            let Some(invited) = b.invites.remove(&hash) else {
                 return Err(RemoteError::Unauthorized);
             };
             // Removed either way — redeemed or found expired — which is what
             // makes "one-time" and "expiring" true without a reaper. Unknown
             // and expired answer identically: a caller learns whether a code
             // works, never whether it once existed.
-            if expires_at <= now_ms() {
+            if invited.expires_at <= now_ms() {
                 return Err(RemoteError::Unauthorized);
             }
-            let member = b.members.get(&email).cloned().unwrap_or_default();
+            let member = b.members.get(&invited.email).cloned().unwrap_or_default();
             let token = format!("member-token-{}", FakeRemote::mint_id(&mut b, "k"));
             let token_id = FakeRemote::mint_id(&mut b, "t");
-            b.tokens.insert(token.clone(), (email, device_name));
+            b.tokens.insert(
+                token.clone(),
+                TokenRecord {
+                    id: token_id.clone(),
+                    member_id: member.id.clone(),
+                    email: invited.email,
+                    device_id: Some(this.device_id.clone()),
+                    device_name: Some(device_name),
+                    created_at: now_ms(),
+                },
+            );
             Ok(RedeemedToken { token, token_id, member })
+        }
+    }
+
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            Ok(b.members
+                .values()
+                .map(|m| MemberRecord {
+                    // Counted, not stored: a device count that could disagree
+                    // with the tokens beside it would be a second truth.
+                    devices: b.tokens.values().filter(|t| t.member_id == m.id).count() as u32,
+                    ..m.clone()
+                })
+                .collect())
+        }
+    }
+
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let this = self.clone();
+        let email = email.trim().to_lowercase();
+        let name = name.map(str::to_string);
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let id = FakeRemote::mint_id(&mut b, "m");
+            let member = b.members.entry(email.clone()).or_insert(MemberRecord {
+                id,
+                email: email.clone(),
+                name: String::new(),
+                role: "member".into(),
+                created_at: now_ms(),
+                ..Default::default()
+            });
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                member.name = n.to_string();
+            }
+            member.role = "owner".into();
+            let adopted = member.clone();
+            // Exactly one row carries the role: adopting a new address demotes
+            // the old one rather than deleting it, because that row may
+            // already be named in a manifest.
+            for other in b.members.values_mut() {
+                if other.id != adopted.id {
+                    other.role = "member".into();
+                }
+            }
+            Ok(adopted)
+        }
+    }
+
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(email) = b.members.values().find(|m| m.id == id).map(|m| m.email.clone()) else {
+                return Err(RemoteError::NotFound);
+            };
+            // The person and everything they can sign in with, together.
+            b.tokens.retain(|_, t| t.member_id != id);
+            b.invites.retain(|_, held| held.email != email);
+            b.members.remove(&email);
+            Ok(())
+        }
+    }
+
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            // Expired ones are filtered rather than swept: a row past its date
+            // is dead on redeem, so listing it would be a lie.
+            Ok(b.invites.values().filter(|i| i.expires_at > now_ms()).cloned().collect())
+        }
+    }
+
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let before = b.invites.len();
+            b.invites.retain(|_, held| held.id != id);
+            if b.invites.len() == before {
+                return Err(RemoteError::NotFound);
+            }
+            Ok(())
+        }
+    }
+
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            // The rows, never the keys they are filed under: the owner is told
+            // who holds a credential, never what it is.
+            Ok(b.tokens.values().cloned().collect())
+        }
+    }
+
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let before = b.tokens.len();
+            b.tokens.retain(|_, t| t.id != id);
+            if b.tokens.len() == before {
+                return Err(RemoteError::NotFound);
+            }
+            Ok(())
         }
     }
 }
@@ -1695,8 +1831,8 @@ async fn a_code_works_once_and_a_stale_one_not_at_all() {
         .create_invite("erin@example.com", None, &invite::code_hash(&stale), invite::expires_at(now_ms(), None))
         .await
         .unwrap();
-    for (_, expires_at) in be.lock().unwrap().invites.values_mut() {
-        *expires_at = now_ms() - 1;
+    for held in be.lock().unwrap().invites.values_mut() {
+        held.expires_at = now_ms() - 1;
     }
     assert!(matches!(bob.redeem(&stale, "Erin's Mac").await, Err(RemoteError::Unauthorized)));
     // And it is gone: the only row time can delete is one somebody tried to
@@ -1761,6 +1897,250 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
 
     // The owner's secret never went near the database, so it still works.
     assert!(alice.meta().await.is_ok());
+}
+
+/* ---------- The People panel (docs/teams-plan.md §11) ---------- */
+
+/// Invite `email`, redeem the code on `device_id`, and answer the token that
+/// Mac now holds — the whole of "somebody joined", as the two commands behind
+/// the panel run it.
+async fn invite_and_redeem(be: &SharedWorker, owner: &FakeRemote, email: &str, name: &str, device_id: &str) -> String {
+    let code = invite::random_code();
+    owner
+        .create_invite(email, Some(name), &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    FakeRemote::with_token(be, device_id, "")
+        .redeem(&code, &format!("{}'s Mac", name))
+        .await
+        .unwrap()
+        .token
+}
+
+#[tokio::test]
+async fn the_owner_sees_everyone_and_what_each_of_them_holds() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+
+    let bob_token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    // Bob lost the code for his second Mac and asked again: one more invite,
+    // one more credential, the same person.
+    invite_and_redeem(&be, &owner, "Bob@example.com", "Bob", "d-bob-2").await;
+    // Carol was invited and has not redeemed yet.
+    let carol_code = invite::random_code();
+    let carol_invite = owner
+        .create_invite("carol@example.com", Some("Carol"), &invite::code_hash(&carol_code), invite::expires_at(now_ms(), Some(3)))
+        .await
+        .unwrap();
+
+    let members = owner.list_members().await.unwrap();
+    let bob = members.iter().find(|m| m.email == "bob@example.com").expect("Bob is a person here");
+    let carol = members.iter().find(|m| m.email == "carol@example.com").expect("Carol is too");
+    assert_eq!(bob.devices, 2, "one row per Mac, counted from the tokens");
+    assert_eq!(carol.devices, 0, "invited is not signed in");
+    assert_eq!(bob.role, "member");
+
+    // The pending list is what has not been traded in. Bob's two codes are
+    // both spent, so neither is on it.
+    let invites = owner.list_invites().await.unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].id, carol_invite.id);
+    assert_eq!(invites[0].email, "carol@example.com");
+
+    // Every signed-in Mac, named — and never the credential that names it.
+    let devices = owner.list_tokens().await.unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|t| t.member_id == bob.id));
+    assert!(devices.iter().any(|t| t.device_id.as_deref() == Some("d-bob") && t.device_name.as_deref() == Some("Bob's Mac")));
+    assert!(
+        devices.iter().all(|t| t.id != bob_token),
+        "the list names a credential; it does not carry one"
+    );
+    // The owner's own Macs are not in it at all: they authenticate with the
+    // domain's env secret, which is matched against no row, so there is
+    // nothing here to list and nothing to revoke but the secret itself.
+    assert!(devices.iter().all(|t| t.device_id.as_deref() != Some("d-alice")));
+}
+
+#[tokio::test]
+async fn people_tells_a_mac_which_door_it_came_in_by() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+
+    let seen = super::people_of(&owner, "d-alice", "notes.example.com").await.unwrap();
+    assert_eq!(seen.role, "owner");
+    assert_eq!(seen.device_id, "d-alice");
+    assert_eq!(seen.members.len(), 1);
+    assert_eq!(seen.devices.len(), 1);
+
+    // A member is refused the list, and that refusal IS the answer — the
+    // panel shows them their own half instead of an error. Nothing on disk
+    // said which door this Mac came in by; the domain did.
+    let bob = FakeRemote::with_token(&be, "d-bob", &token);
+    let mine = super::people_of(&bob, "d-bob", "notes.example.com").await.unwrap();
+    assert_eq!(mine.role, "member");
+    assert_eq!(mine.device_id, "d-bob");
+    assert!(mine.members.is_empty() && mine.invites.is_empty() && mine.devices.is_empty());
+
+    // A credential nobody minted is a failure, not a door.
+    let nobody = FakeRemote::with_token(&be, "d-eve", "not-a-token");
+    let err = super::people_of(&nobody, "d-eve", "notes.example.com").await.unwrap_err();
+    assert!(err.contains("rejected this token"), "{}", err);
+
+    // The trap in the sentences: a worker predating the identity routes has
+    // no /api/auth to miss, so it 404s — which must not come back as "that
+    // domain holds no workspace yet".
+    let old = super::describe_people("notes.example.com", RemoteError::NotFound);
+    assert!(old.contains("too old to hold people"), "{}", old);
+    // And on the way back out, a 404 from a revoke is success: the row is
+    // gone, which is what was asked for.
+    assert!(super::revoked("notes.example.com", Err(RemoteError::NotFound)).is_ok());
+}
+
+#[tokio::test]
+async fn a_revoked_mac_stops_syncing_on_its_very_next_call() {
+    let be = fake_worker();
+    let mut alice = device("Alice", &be);
+    alice.write("readme.md", "root doc\n");
+    alice.cycle().await;
+
+    let owner = FakeRemote::new(&be, "d-alice");
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    bob.cycle().await;
+    assert_eq!(bob.read("readme.md").as_deref(), Some("root doc\n"));
+
+    // The owner finds that Mac in the list and takes it away.
+    let row = owner
+        .list_tokens()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.device_id.as_deref() == Some("d-bob"))
+        .expect("Bob's Mac is listed");
+    owner.delete_token(&row.id).await.unwrap();
+
+    // It bites on the very next call: the bearer resolves through the table
+    // the delete emptied, so there is no session to wait out.
+    bob.write("late.md", "written after the revoke\n");
+    let _ = bob.engine.cycle().await;
+    assert_eq!(bob.phase(), Phase::Revoked);
+    assert!(!manifest_of(&be).files.values().any(|f| f.path == "late.md"));
+    // The person stays: a Mac was revoked, not a colleague.
+    assert_eq!(owner.list_members().await.unwrap().len(), 1);
+    assert!(owner.list_tokens().await.unwrap().is_empty());
+
+    // And the owner's own sync never noticed any of it.
+    alice.write("after.md", "still fine\n");
+    alice.cycle().await;
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "after.md"));
+}
+
+#[tokio::test]
+async fn revoking_a_person_takes_every_mac_and_the_code_they_had() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let first = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    let second = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob-2").await;
+    invite_and_redeem(&be, &owner, "carol@example.com", "Carol", "d-carol").await;
+    // A third code, minted and never used — it has to go with the person too.
+    let pending = invite::random_code();
+    owner
+        .create_invite("bob@example.com", None, &invite::code_hash(&pending), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+
+    let bob = owner.list_members().await.unwrap().into_iter().find(|m| m.email == "bob@example.com").unwrap();
+    owner.delete_member(&bob.id).await.unwrap();
+
+    let left = owner.list_members().await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].email, "carol@example.com");
+    assert_eq!(left[0].devices, 1, "Carol kept her Mac");
+    // Both of Bob's Macs, and the code he never used.
+    for token in [&first, &second] {
+        let mac = FakeRemote::with_token(&be, "d-bob", token);
+        assert!(matches!(mac.meta().await, Err(RemoteError::Unauthorized)));
+    }
+    assert!(owner.list_invites().await.unwrap().is_empty());
+    assert!(matches!(
+        FakeRemote::with_token(&be, "d-bob", "").redeem(&pending, "Bob's third Mac").await,
+        Err(RemoteError::Unauthorized)
+    ));
+    // Asking twice is not an error the panel should show: the row is gone,
+    // which is what was asked for.
+    assert!(super::revoked("notes.example.com", owner.delete_member(&bob.id).await).is_ok());
+}
+
+#[tokio::test]
+async fn an_invite_can_be_withdrawn_before_anybody_trades_it_in() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let code = invite::random_code();
+    let invite = owner
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert_eq!(owner.list_invites().await.unwrap().len(), 1);
+
+    owner.delete_invite(&invite.id).await.unwrap();
+    assert!(owner.list_invites().await.unwrap().is_empty());
+    assert!(matches!(
+        FakeRemote::with_token(&be, "d-bob", "").redeem(&code, "Bob's Mac").await,
+        Err(RemoteError::Unauthorized)
+    ));
+
+    // The person stays: they were invited, not signed in, and inviting them
+    // again reaches the same row rather than making a second Bob.
+    let people = owner.list_members().await.unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].devices, 0);
+    let again = invite::random_code();
+    let re = owner
+        .create_invite("bob@example.com", None, &invite::code_hash(&again), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert_eq!(re.member_id, people[0].id);
+    assert_eq!(re.name, "Bob", "a re-invite without a name does not rename anybody");
+}
+
+#[tokio::test]
+async fn the_owner_adopts_an_identity_and_only_one_row_holds_it() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    // Before it: a domain bound by an app that never asked who was binding it.
+    assert!(owner.list_members().await.unwrap().iter().all(|m| m.role != "owner"));
+
+    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    assert_eq!(ada.role, "owner");
+    assert_eq!(ada.name, "Ada");
+    // Saying it again renames rather than duplicating: the address is the key.
+    let renamed = owner.adopt_owner("  Ada@Example.com ", Some("Ada Lovelace")).await.unwrap();
+    assert_eq!(renamed.id, ada.id);
+    assert_eq!(renamed.name, "Ada Lovelace");
+    assert_eq!(owner.list_members().await.unwrap().len(), 1);
+
+    // Inviting the owner's own address must not demote them — the role
+    // describes a person, and a member token would never confer it anyway.
+    let code = invite::random_code();
+    owner
+        .create_invite("ada@example.com", None, &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let redeemed = FakeRemote::with_token(&be, "d-ada-2", "").redeem(&code, "Ada's other Mac").await.unwrap();
+    assert_eq!(redeemed.member.role, "owner", "the row is unchanged");
+    let mine = super::people_of(&FakeRemote::with_token(&be, "d-ada-2", &redeemed.token), "d-ada-2", "d").await.unwrap();
+    assert_eq!(mine.role, "member", "but the credential it minted is an ordinary one");
+
+    // A new address takes the role and the old row keeps its place: it may
+    // already be named in a manifest.
+    let grace = owner.adopt_owner("grace@example.com", Some("Grace")).await.unwrap();
+    let all = owner.list_members().await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.iter().filter(|m| m.role == "owner").count(), 1);
+    assert_eq!(all.iter().find(|m| m.role == "owner").unwrap().id, grace.id);
+    assert_eq!(all.iter().find(|m| m.id == ada.id).unwrap().role, "member");
 }
 
 /* ---------- Timing, the worker-outdated state, presence ---------- */

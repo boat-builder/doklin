@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use super::manifest::PublicKind;
-use super::remote::{InviteRecord, WorkspaceRecord};
+use super::remote::{InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -146,6 +146,28 @@ pub struct Invited {
     /// The one line to send: address and code together (`cloud/invite.rs`).
     pub blob: String,
     pub invite: InviteRecord,
+}
+
+/// `cloud_people`: everything the People view shows (docs/cloud.md §7.2).
+///
+/// `role` is how *this Mac* authenticates, and it is asked rather than
+/// remembered: the members route answers the owner's credential and refuses
+/// every other, so the `403` a member's token gets is itself the answer.
+/// Nothing on disk records which door a Mac came in by, and nothing needs to.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct People {
+    /// `owner` or `member`.
+    pub role: String,
+    /// This Mac's own device id, so the list can mark which Mac is this one.
+    pub device_id: String,
+    /// Everyone, newest last. Empty for a member: the list is the owner's.
+    pub members: Vec<MemberRecord>,
+    /// The pending, unexpired invites.
+    pub invites: Vec<InviteRecord>,
+    /// Every signed-in Mac. The owner's own are not among them — their
+    /// credential is the domain's env secret, which has no row (remote.rs).
+    pub devices: Vec<TokenRecord>,
 }
 
 /* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */

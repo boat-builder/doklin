@@ -110,7 +110,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 31 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 34 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -124,10 +124,17 @@ node verify-harness/drive-cloud.mjs        # 31 steps: boots the REAL <App/> (cl
                                            # the tree, presence chips, Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
                                            # the teardown prompt, the join flow opening the
-                                           # downloaded folder, and the invite door (one paste
+                                           # downloaded folder, the invite door (one paste
                                            # filling both boxes, a refused code spending nothing,
                                            # the download riding the member's own token rather
-                                           # than the owner's) — and publishing: the pill's
+                                           # than the owner's), and the People view (a domain with
+                                           # no owner row asking for one, an invite's code shown
+                                           # once with the line to send, and the three ways access
+                                           # ends — one Mac, one code, one person — each taking
+                                           # exactly one thing away; then the same view on a Mac
+                                           # that joined on an invite, where the list is the
+                                           # owner's and the member is told so, not errored at)
+                                           # — and publishing: the pill's
                                            # not-connected door, a note published at a random then
                                            # a chosen address (Copy, a bad slug refused), the
                                            # sidebar's dots, the folder dialog, a note inside a
@@ -387,7 +394,7 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 55 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 61 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
@@ -400,7 +407,13 @@ filling both of the wizard's boxes — an address never read as a code though
 its letters spell one — a code traded once for a token of that Mac's own, a
 second try and an expired one refused the same way, and an invited Mac
 downloading and writing with its own credential while `bind`, `wipe` and
-inviting answer it `403`), the edit bus routing, cloud.json and the marker,
+inviting answer it `403`), the People panel behind it (the owner's list with a
+device count per person and never a credential, a Mac revoked mid-sync landing
+that engine in `revoked` on its very next cycle while the owner's own carries
+on, removing a person taking every Mac and the code they had, a code withdrawn
+before anybody trades it in, one owner row at a time however often it is
+adopted, and the `403` that tells a member which door it came in by being an
+answer rather than a failure), the edit bus routing, cloud.json and the marker,
 the retirement of the manifest's history (four revisions leaving `hist`
 empty while `rev` climbs, a manifest an older build wrote read and then rewritten without its
 entries, and the one-time bucket clean-up — archives before blobs, more

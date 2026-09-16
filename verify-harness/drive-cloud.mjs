@@ -8,9 +8,11 @@
 // card and its badge, the version rail reading a cloud-only revision
 // through the manifest and restoring it, "Connect
 // another Mac", disconnect, the wipe → teardown prompt, the join flow
-// opening the downloaded folder, and the invite door: one paste filling both
+// opening the downloaded folder, the invite door: one paste filling both
 // boxes, a refused code spending nothing, a download on the member's own
-// credential — and publishing: the pill's not-connected
+// credential, the People view: adopting an identity, inviting somebody, the
+// code shown once, and the three ways access goes away — and publishing:
+// the pill's not-connected
 // door, publishing a note at a random then a chosen address, the sidebar's
 // dots, the folder dialog, the published list (home page, stop), and the
 // sidebar's undoable stop.
@@ -540,10 +542,12 @@ step(
 /* 17 — Connect another Mac: endpoint + token shown */
 await tid("another-mac").click();
 await poll(async () => (await tid("creds-token").inputValue()) === TOKEN);
+const credsWarning = await dialog("Connect another Mac").textContent();
 step(
-  "Connect another Mac: the endpoint and the owner token, with the warning",
+  "Connect another Mac: the endpoint and this Mac's token, warned about and pointed away from for anyone else",
   (await tid("creds-endpoint").inputValue()) === "https://notes.example.com" &&
-    (await dialog("Connect another Mac").textContent()).includes("owner credential"),
+    credsWarning.includes("Share it only with Macs you own") &&
+    credsWarning.includes("invite them under People"),
 );
 await page.keyboard.press("Escape"); // back to main
 await poll(async () => (await dialog("Cloud").count()) === 1);
@@ -777,6 +781,95 @@ step(
   redeemedAs.trim(),
 );
 await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
+
+/* 24 — People: the panel adopts an identity for a domain that has none,
+   lists everyone with the Macs they hold, and mints a code that is on screen
+   once (docs/teams-plan.md §11) */
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await tid("people-open").count()) === 1);
+await tid("people-open").click();
+await poll(async () => (await dialog("People").count()) === 1);
+await poll(async () => (await tid("people-list").count()) === 1);
+const adoptAsked = (await tid("adopt-owner").count()) === 1;
+await tid("adopt-email").fill("ada@example.com");
+await tid("adopt-name").fill("Ada");
+await tid("adopt-save").click();
+await poll(async () => (await tid("person-m-owner").count()) === 1);
+const adoptCall = await lastCall("cloud_adopt_owner");
+const ownerRow = await tid("person-m-owner").textContent();
+const bobRow = await tid("person-m-bob").textContent();
+
+await tid("invite-open").click();
+await poll(async () => (await tid("invite-form").count()) === 1);
+await tid("invite-email").fill("carol@example.com");
+await tid("invite-name").fill("Carol");
+await tid("invite-days").selectOption("30");
+await tid("invite-send").click();
+await poll(async () => (await tid("minted-invite").count()) === 1);
+const shownCode = (await tid("invite-code").textContent()).trim();
+const inviteCall = await lastCall("cloud_invite");
+await tid("copy-invite-line").click();
+const copiedLine = await poll(async () => await page.evaluate(() => navigator.clipboard.readText()));
+await page.screenshot({ path: SHOTS + "cloud-10-people.png" });
+step(
+  "People: a domain with no owner row asks for one; the list names everyone and the code is shown once, with the line to send",
+  adoptAsked &&
+    (await tid("adopt-owner").count()) === 0 &&
+    adoptCall.args.email === "ada@example.com" &&
+    ownerRow.includes("Ada") &&
+    ownerRow.includes("owner") &&
+    bobRow.includes("bob@example.com") &&
+    (await tid("mac-t-bob-1").textContent()).includes("Bob\u2019s MacBook") &&
+    inviteCall.args.days === 30 &&
+    shownCode === "dkln-9F4TR-2QWXM-7NBKD-5HGVZ" &&
+    copiedLine === `doklin-invite https://notes.example.com ${shownCode}` &&
+    (await tid("invite-list").textContent()).includes("carol@example.com"),
+  shownCode,
+);
+
+/* 24b — and each way of taking access away takes exactly one thing */
+await tid("minted-done").click();
+await tid("revoke-mac-t-bob-1").click();
+await tid("revoke-mac-yes-t-bob-1").click();
+await poll(async () => (await tid("mac-t-bob-1").count()) === 0);
+const bobKept = (await tid("person-m-bob").count()) === 1;
+const bobRevoked = await lastCall("cloud_revoke_device");
+
+await tid("withdraw-i-new-1").click();
+await tid("withdraw-yes-i-new-1").click();
+await poll(async () => (await tid("invite-list").count()) === 0);
+const carolKept = (await tid("person-m-new-1").count()) === 1;
+
+await tid("remove-person-m-new-1").click();
+await tid("remove-person-yes-m-new-1").click();
+await poll(async () => (await tid("person-m-new-1").count()) === 0);
+step(
+  "People: revoking a Mac leaves the person, withdrawing a code leaves them too, and removing a person takes their row away",
+  bobKept &&
+    bobRevoked.args.tokenId === "t-bob-1" &&
+    (await tid("person-m-bob").textContent()).includes("No Mac signed in") &&
+    carolKept &&
+    (await lastCall("cloud_withdraw_invite")).args.inviteId === "i-new-1" &&
+    (await lastCall("cloud_revoke_person")).args.memberId === "m-new-1" &&
+    (await tid("person-m-owner").count()) === 1,
+);
+
+/* 25 — the same view on a Mac that joined with an invite: the list is the
+   owner's to see, so a member is shown their own half instead of an error */
+await page.keyboard.press("Escape"); // back to the panel's main view
+await poll(async () => (await dialog("Cloud").count()) === 1);
+await setCloud({ people: { role: "member", deviceId: "d-this-mac", members: [], invites: [], devices: [] } });
+await tid("people-open").click();
+await poll(async () => (await tid("people-member").count()) === 1);
+const memberCard = await tid("people-member").textContent();
+step(
+  "People (a member): no list, no invite door — their own credential and how to get another code",
+  memberCard.includes("invite") &&
+    (await tid("invite-open").count()) === 0 &&
+    (await tid("people-list").count()) === 0 &&
+    (await dialog("People").locator(".modal-error").count()) === 0,
+);
+await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
 
 await browser.close();
 const failed = results.filter((r) => !r.ok);

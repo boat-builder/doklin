@@ -5641,6 +5641,93 @@ body.tree-dragging.tree-drag-invalid * {
   white-space: nowrap;
 }
 
+/* The People view: one block per person, their Macs indented under them. */
+.cloud-people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cloud-person {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.cloud-person-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cloud-person-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.cloud-person-tag {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  color: var(--app-text-muted);
+}
+
+.cloud-person-email {
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.cloud-macs {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0 0 0 10px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 1px solid var(--app-border);
+}
+
+.cloud-mac-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.cloud-mac-name {
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+/* A minted invite code: shown once, so it is set out to be read aloud. */
+.cloud-code {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  color: var(--app-text);
+  user-select: all;
+  overflow-x: auto;
+}
+
 .cloud-copy-row {
   display: flex;
   gap: 6px;

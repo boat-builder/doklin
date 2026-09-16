@@ -138,6 +138,48 @@ export type CloudInvite = {
  *  it again. */
 export type CloudInvited = { code: string; blob: string; invite: CloudInvite };
 
+/** A person on a workspace. Never a credential: the app is told who holds
+ *  one, never what it is. */
+export type CloudMember = {
+  id: string;
+  email: string;
+  name: string;
+  /** What the People list shows — never authority. The owner's credential is
+   *  the domain's env secret, so no row anybody can write confers it. */
+  role: "owner" | "member";
+  createdAt: number;
+  /** Null until something writes one: the presence beat carries it, so it
+   *  fills in with the phase that folds presence into the poll. */
+  lastSeenAt: number | null;
+  disabled: boolean;
+  /** How many Macs this person is signed in on. */
+  devices: number;
+};
+
+/** One signed-in Mac. The owner's own are not among them: their credential is
+ *  the domain's env secret, which has no row to list and none to revoke. */
+export type CloudDevice = {
+  id: string;
+  memberId: string;
+  email: string;
+  deviceId: string | null;
+  deviceName: string | null;
+  createdAt: number;
+};
+
+/** `cloudPeople`: everything the People view draws. `role` is how *this Mac*
+ *  authenticates, and it is asked rather than remembered — the members route
+ *  answers the owner's credential and refuses every other, so a member's
+ *  lists are empty because they were never asked for. */
+export type CloudPeople = {
+  role: "owner" | "member";
+  /** This Mac's own device id, so the list can mark which Mac is this one. */
+  deviceId: string;
+  members: CloudMember[];
+  invites: CloudInvite[];
+  devices: CloudDevice[];
+};
+
 export type CloudAppliedEvent = { root: string; paths: string[] };
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
@@ -178,6 +220,29 @@ export const cloudRedeem = (endpoint: string, code: string) =>
  *  minted and hashed on this Mac; only its sha256 goes up. */
 export const cloudInvite = (root: string, email: string, name: string | null, days: number | null) =>
   invoke<CloudInvited>("cloud_invite", { root, email, name, days });
+
+/** Who is on this workspace and what each of them holds — the People view's
+ *  whole answer, this Mac's own role included. */
+export const cloudPeople = (root: string) => invoke<CloudPeople>("cloud_people", { root });
+
+/** The owner saying who they are. Identity, never authority: the domain's
+ *  token authenticates them either way. */
+export const cloudAdoptOwner = (root: string, email: string, name: string | null) =>
+  invoke<CloudMember>("cloud_adopt_owner", { root, email, name });
+
+/** Take a person off the workspace: their row, their pending invite and every
+ *  Mac they signed in on. */
+export const cloudRevokePerson = (root: string, memberId: string) =>
+  invoke<void>("cloud_revoke_person", { root, memberId });
+
+/** Revoke one Mac, leaving the person and their other Macs alone. It takes
+ *  effect on that Mac's very next request. */
+export const cloudRevokeDevice = (root: string, tokenId: string) =>
+  invoke<void>("cloud_revoke_device", { root, tokenId });
+
+/** Withdraw a code nobody has traded in yet. The person's row stays. */
+export const cloudWithdrawInvite = (root: string, inviteId: string) =>
+  invoke<void>("cloud_withdraw_invite", { root, inviteId });
 
 /** Ask the domain's worker what it is again ("Check again" after an update);
  *  the fresh version arrives in the next status. */
@@ -248,6 +313,19 @@ export function timeAgo(ms: number, now = Date.now()): string {
   const hours = Math.round(mins / 60);
   if (hours < 24) return `${hours} h ago`;
   return `${Math.round(hours / 24)} d ago`;
+}
+
+/** How long something has left: "6 days", "3 h", "12 min", "any moment now".
+ *  What a pending invite's expiry is written with. */
+export function timeUntil(ms: number, now = Date.now()): string {
+  const secs = Math.round((ms - now) / 1000);
+  if (secs < 60) return "any moment now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `${hours} h`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 /** The phase in words, lowercase: "synced 2 min ago", "paused", "offline — synced 3 h ago". */

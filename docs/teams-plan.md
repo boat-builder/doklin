@@ -426,7 +426,7 @@ budget, for no extra freshness.
 | 1 | D1 in the deployment | the binding, the schema runner, wipe and teardown | — | **nothing** (an update badge) — **built** |
 | 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) — **built** |
 | 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join — **built** |
-| 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable |
+| 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable — **built** |
 | 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | history says *who*, not *which Mac* |
 | 6 | Presence in D1, folded into the poll | the presence table, `POST /api/poll`, the beat's own request gone | 2 | **nothing** — 33% fewer requests |
 | 7 | Leases | acquire, renew on the poll, release; the editor's banner and *Take over* | 6 | §11.7 closes |
@@ -666,6 +666,51 @@ in phase 3, so what is left is listing, revoking and adopting),
 **Done when:** `node verify-harness/drive-cloud.mjs` covers adopt → invite
 → list → revoke over the scripted engine, `.claude/skills/verify/SKILL.md`
 names the new steps, and [cloud.md](cloud.md) §7.2 describes the panel.
+
+**Built,** as `src/CloudPeople.tsx` — a view of the panel rather than more of
+`CloudPanel.tsx`, which was already long enough — behind five commands
+(`cloud_people`, `cloud_adopt_owner`, `cloud_revoke_person`,
+`cloud_revoke_device`, `cloud_withdraw_invite`) and seven `Remote` methods,
+one per route. Four things the sketch above did not say:
+
+- **The role is asked, never stored.** `cloud.json` holds a credential and
+  no claim about one, so nothing on the Mac knows whether it is the owner's.
+  It does not have to: the members route answers the owner's credential and
+  refuses every other, so the `403` *is* the answer, and opening the view is
+  how the domain says which door this Mac came in by. Nothing to keep in
+  sync, nothing to migrate, and a Mac handed the domain's token later reads
+  correctly the moment it is.
+- **A member's own device list is not there, and that is a wire decision.**
+  Every identity route is the owner's; a member-scoped one would be a worker
+  change, a `WORKER_VERSION` bump and a forced update on every deployed
+  domain (§2) — for a read-only list of Macs a member cannot revoke anyway,
+  since revoking is owner-only. What re-enrollment actually needs is their
+  own credential for a second Mac, and that was already behind *Connect
+  another Mac…*; the member's half of the view says so. Phase 6 gives that
+  route a reason to exist (`lastSeenAt` is null on every row until the
+  presence beat writes one); until then the surface would be a list of one
+  Mac with a disabled button.
+- **A `404` means two things, and the two are told apart by where you are,
+  not by what came back.** A worker predating the identity routes has no
+  `/api/auth` to miss, so it 404s — and `flows::describe` would read that as
+  "that domain holds no workspace yet", which is both wrong and
+  unactionable, hence `describe_people`. On a *revoke*, though, a 404 is
+  success: the row is gone, which is what was asked for, and it cannot be
+  the old worker, because a Revoke button only exists on a list that route
+  answered.
+- **One sentence elsewhere was wrong and phase 4 is what makes it wrong.**
+  *Connect another Mac…* said "the token is the owner credential for
+  notes.example.com — share it only with Macs you own", which an invited Mac
+  reads as a lie, and which was the only advice on screen about letting
+  anybody in. It now names what this Mac holds and points at People, where
+  somebody else gets a credential of their own instead.
+
+The in-memory worker grew the three lists and the three deletes, so the
+claim that matters is a test rather than a diagram:
+`a_revoked_mac_stops_syncing_on_its_very_next_call` runs an engine on a
+member's token, has the owner find that Mac in `list_tokens` and delete it,
+and watches the next cycle land in `Phase::Revoked` while the owner's own
+sync never notices — no session, nothing to expire, one row.
 
 ## 12. Phase 5 — Attribution by person
 

@@ -78,6 +78,11 @@ pub struct MemberRecord {
     pub last_seen_at: Option<u64>,
     #[serde(default)]
     pub disabled: bool,
+    /// How many Macs this person is signed in on, counted by the members
+    /// route. Zero on a record that came from somewhere else — a redeem
+    /// answers with the person, not with a census of them.
+    #[serde(default)]
+    pub devices: u32,
 }
 
 /// A pending invite, as `POST /api/auth/invites` answers. The code is not in
@@ -109,6 +114,31 @@ pub struct RedeemedToken {
     pub token_id: String,
     #[serde(default)]
     pub member: MemberRecord,
+}
+
+/// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
+/// credential: the owner is told who holds one and may take it away, never
+/// what it is — a list of tokens would be a list of keys (docs/cloud.md §5.4).
+///
+/// The owner's own Macs are not in here at all. They authenticate with the
+/// domain's env secret, which is matched against no row, so there is nothing
+/// to list and nothing to revoke but the secret itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRecord {
+    pub id: String,
+    #[serde(default)]
+    pub member_id: String,
+    #[serde(default)]
+    pub email: String,
+    /// The `x-doklin-device` id that redeemed it — how a Mac recognizes its
+    /// own row in the list. Null on a token minted before the app sent one.
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
@@ -278,6 +308,40 @@ pub trait Remote: Send + Sync + 'static {
         code: &str,
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send;
+
+    /// `GET /api/auth/members` (owner): everyone, with a device count and a
+    /// last-seen. This is also what tells a Mac which door it came in by —
+    /// only the owner's credential is answered, so a `Forbidden` here is the
+    /// People panel's member branch, not a failure (docs/cloud.md §7.2).
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
+
+    /// `POST /api/auth/members` (owner): the owner saying who they are.
+    /// Identity, never authority — the env secret keeps authenticating them
+    /// either way, and losing this row costs a name, not access.
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
+
+    /// `DELETE /api/auth/members/<id>` (owner): the person and every
+    /// credential they hold, in one batch.
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `GET /api/auth/invites` (owner): the pending, unexpired ones.
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send;
+
+    /// `DELETE /api/auth/invites/<id>` (owner): withdraw a code before
+    /// anybody trades it in.
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `GET /api/auth/tokens` (owner): every signed-in Mac.
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send;
+
+    /// `DELETE /api/auth/tokens/<id>` (owner): revoke one Mac. It takes
+    /// effect on that Mac's very next request — the bearer resolves through
+    /// the table, so there is no session to expire.
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
 /* ---------- HTTP remote (the real worker) ---------- */
@@ -318,6 +382,33 @@ impl HttpRemote {
     }
 }
 
+impl HttpRemote {
+    /// `DELETE /api/auth/<kind>/<id>` — the shape all three revocations
+    /// take. A `404` is left as it is: the caller decides whether "already
+    /// gone" is the same as done (mod.rs — it is, once the list has proved
+    /// the routes are there).
+    fn revoke<'a>(&'a self, kind: &str, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send + 'a {
+        let url = self.url(&format!("auth/{}/{}", kind, id));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    /// One of the identity lists, by its route and the key its body carries.
+    fn list_of<'a, T: serde::de::DeserializeOwned + 'a>(
+        &'a self,
+        kind: &'static str,
+    ) -> impl std::future::Future<Output = RemoteResult<Vec<T>>> + Send + 'a {
+        let url = self.url(&format!("auth/{}", kind));
+        async move {
+            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            read_list(res, kind).await
+        }
+    }
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -340,6 +431,17 @@ fn body_error(v: &serde_json::Value) -> Option<String> {
 async fn worker_sentence(res: reqwest::Response, fallback: &str) -> RemoteError {
     let v = res.json::<serde_json::Value>().await.unwrap_or_default();
     RemoteError::Other(body_error(&v).unwrap_or_else(|| fallback.to_string()))
+}
+
+/// `{ "<key>": [...] }` — the shape every identity list answers with. A key
+/// that is missing reads as an empty list: a domain with nobody on it and a
+/// domain that named the array differently are not worth telling apart here,
+/// because the routes that answer this are the ones `list_members` already
+/// proved exist.
+async fn read_list<T: serde::de::DeserializeOwned>(res: reqwest::Response, key: &str) -> RemoteResult<Vec<T>> {
+    let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+    serde_json::from_value(v.get(key).cloned().unwrap_or_else(|| json!([])))
+        .map_err(|e| RemoteError::Other(format!("the domain's {} didn't parse: {}", key, e)))
 }
 
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
@@ -821,5 +923,49 @@ impl Remote for HttpRemote {
             let res = expect_status(res).await?;
             res.json::<RedeemedToken>().await.map_err(transport_err)
         }
+    }
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send {
+        self.list_of("members")
+    }
+
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let body = json!({ "email": email, "name": name });
+        async move {
+            let res = self
+                .auth(self.client.post(self.url("auth/members")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("member").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a person: {}", e)))
+        }
+    }
+
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("members", id)
+    }
+
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send {
+        self.list_of("invites")
+    }
+
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("invites", id)
+    }
+
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
+        self.list_of("tokens")
+    }
+
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("tokens", id)
     }
 }

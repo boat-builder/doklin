@@ -719,6 +719,11 @@ cloud_token(root)                                 -> {endpoint, token}  behind "
 cloud_parse_invite(text)                          -> {endpoint, code}   one paste, split into the wizard's two boxes (pure)
 cloud_redeem(endpoint, code)                      -> CloudRedeemed      {endpoint, token, memberId, email, name} — no bearer sent
 cloud_invite(root, email, name?, days?)           -> CloudInvited       owner; {code, blob, invite} — the code, once
+cloud_people(root)                                -> CloudPeople        {role, deviceId, members, invites, devices} — role is asked, not stored
+cloud_adopt_owner(root, email, name?)             -> CloudMember        owner; identity, never authority
+cloud_revoke_person(root, memberId)                                     owner; the person, their invite and every Mac they hold
+cloud_revoke_device(root, tokenId)                                      owner; one Mac, effective on its next request
+cloud_withdraw_invite(root, inviteId)                                   owner; a code nobody traded in
 cloud_check_worker(root)                                                "Check again": an EngineCmd::Probe
 cloud_connect(root, endpoint, token, name)        -> wsId               bind + initial upload (progress events)
 cloud_join(endpoint, token, destParent)           -> root               download into a fresh folder
@@ -921,8 +926,9 @@ every blob no retained snapshot references and older than an hour's grace.
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* (the view below), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
 | **Setup wizard** (`CloudSetup.tsx`) | the panel's three entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear. The third mode is *redeem*: paste the line an owner sent — into either box, both fill — trade the code for this Mac's own credential, then the same *Download it here* (§6.8) |
+| **People** (`CloudPeople.tsx`) | the Cloud panel, *People…* | Everything `cloud_people` answers, this Mac's own role included — and the role is asked rather than remembered: only the owner's credential is answered by the members route, so a `403` is the member branch, not an error. Owner: every person with their address, role and the Macs they hold, each Mac revocable on its own; *Remove from notes.example.com…* for the person, their invite and every Mac at once; the pending codes with what is left of their life, *New code…* and *Withdraw*; *Invite someone…* (address, an optional name, 1 / 7 / 30 days) and then the code, once, with the line to send beside it. The owner's own Macs are not listed: their credential is the domain's env secret, which has no row to revoke. A domain with no owner row asks for an address once — identity, never authority. Member: no list and no invite door, because both are the owner's — their own credential for a second Mac is behind *Connect another Mac…* |
 | **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
@@ -1286,29 +1292,32 @@ administration.
 
 ### 11.1 There is one credential, so there are no people
 
-**Half closed.** The worker can now hold people: `authenticate` still
-matches the `OWNER_TOKEN` secret first and answers `role: "owner"`, but a
-bearer that is not it resolves through the `tokens` table to the member who
-holds it, and `/api/auth/*` mints, lists and revokes those (§5.3–5.4). A
-member reaching `POST /api/admin/wipe` gets a `403`, because their role is
-`member` rather than everyone's `owner`.
+**Closed.** The worker holds people: `authenticate` still matches the
+`OWNER_TOKEN` secret first and answers `role: "owner"`, but a bearer that is
+not it resolves through the `tokens` table to the member who holds it, and
+`/api/auth/*` mints, lists and revokes those (§5.3–5.4). A member reaching
+`POST /api/admin/wipe` gets a `403`, because their role is `member` rather
+than everyone's `owner`.
 
-The app now drives one invite end to end: `cloud_invite` mints a 100-bit
-code, sends only its sha256 and hands the code over once; the wizard's third
-mode trades it for a credential of that Mac's own (§6.8). So a person can be
-let in, and revoking them is deleting one row rather than rotating the secret
-and reconnecting everybody.
+The app drives it end to end. `cloud_invite` mints a 100-bit code, sends only
+its sha256 and hands the code over once; the wizard's third mode trades it
+for a credential of that Mac's own (§6.8); and the Cloud panel's People view
+(§7.2) is where an owner sees who is in the workspace, which Macs each of
+them is signed in on, and which codes are still outstanding — and where any
+of those goes away again, one row at a time. Putting somebody out is now
+deleting one row rather than rotating the secret and reconnecting everybody.
 
-What is still true is the part the user sees: **there is no People surface.**
-Nothing lists who has access, nothing revokes a device, and the owner has no
-member row of their own until something writes one — so "who is in this
-workspace?" is still a question the app cannot answer.
+Two smaller things the surface inherits rather than fixes. `lastSeenAt` is
+null on every row until something writes one — the presence beat is what
+will, so the column fills in with §11.2's phase. And a member is shown their
+own half of the view rather than a roster: every identity route is the
+owner's, so a Mac that joined on an invite is told as much instead of an
+error.
 
-**Blocks:** administering a shared workspace — seeing who is in it and
-putting somebody out of it. Downstream of that: per-person attribution (`by`
-is a device name, never a person) and §8.2's leases, which need an identity
-to put in "Alice is editing". [teams-plan.md](teams-plan.md) phase 4 is what
-closes it.
+**Blocks:** nothing of the administration itself. What is still downstream of
+it: per-person attribution (`by` is a device name, never a person) and
+§8.2's leases, which need an identity to put in "Alice is editing" —
+[teams-plan.md](teams-plan.md) phases 5 and 7.
 
 ### 11.2 The idle heartbeat is the free plan's real budget
 

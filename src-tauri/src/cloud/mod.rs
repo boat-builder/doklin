@@ -57,10 +57,11 @@ use config::{
 };
 use engine::{Engine, EngineCmd, EngineConfig, PublishRequest};
 use manifest::{clean_name, PublicKind};
-use remote::HttpRemote;
+use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Invited, Probe, Redeemed, StatusTable,
+    emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Invited, People, Probe, Redeemed,
+    StatusTable,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -289,6 +290,26 @@ fn record_and_spawn(app: &AppHandle, entry: WorkspaceEntry) -> Result<(), String
     })
 }
 
+/// What a command aimed at one connected workspace opens with: the credential
+/// that workspace holds, already wrapped in a remote, beside the two things
+/// every sentence about it needs — the domain's name and this Mac's identity.
+struct WorkspaceCall {
+    remote: HttpRemote,
+    endpoint: String,
+    domain: String,
+    device: DeviceIdentity,
+}
+
+fn workspace_call(app: &AppHandle, root: &str) -> Result<WorkspaceCall, String> {
+    let (endpoint, token, domain, device) = with_inner(app, |inner| {
+        let file = read_cloud_file(&inner.data_dir);
+        let entry = file.by_root(root).ok_or_else(|| "that workspace isn't connected".to_string())?;
+        Ok((entry.endpoint.clone(), entry.token.clone(), entry.domain.clone(), inner.device.clone()))
+    })?;
+    let remote = HttpRemote::new(&endpoint, &token, &device.id);
+    Ok(WorkspaceCall { remote, endpoint, domain, device })
+}
+
 /* ---------- Tauri commands ---------- */
 
 /// Every connected workspace's status — the frontend's whole model.
@@ -333,9 +354,7 @@ pub(crate) async fn cloud_redeem(app: AppHandle, endpoint: String, code: String)
     // No token, on purpose: there is none yet, and the route that answers
     // this is the one above the worker's auth gate.
     let remote = HttpRemote::new(&endpoint, "", &device.id);
-    let redeemed = remote::Remote::redeem(&remote, &canonical, &device.name)
-        .await
-        .map_err(|e| describe_redeem(&domain, e))?;
+    let redeemed = remote.redeem(&canonical, &device.name).await.map_err(|e| describe_redeem(&domain, e))?;
     Ok(Redeemed {
         endpoint,
         token: redeemed.token,
@@ -369,7 +388,7 @@ pub(crate) async fn cloud_probe(app: AppHandle, endpoint: String, token: String)
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
     let device = with_inner(&app, |inner| Ok(inner.device.clone()))?;
     let remote = HttpRemote::new(&endpoint, token.trim(), &device.id);
-    let meta = remote::Remote::meta(&remote).await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
     Ok(Probe {
         worker_version: meta.version,
         bundled_version: BUNDLED_WORKER_VERSION,
@@ -413,34 +432,126 @@ pub(crate) async fn cloud_invite(
     name: Option<String>,
     days: Option<u32>,
 ) -> Result<Invited, String> {
-    let (endpoint, token, domain, device) = with_inner(&app, |inner| {
-        let file = read_cloud_file(&inner.data_dir);
-        let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
-        Ok((entry.endpoint.clone(), entry.token.clone(), entry.domain.clone(), inner.device.clone()))
-    })?;
-
+    let call = workspace_call(&app, &root)?;
     let canonical = invite::random_code();
     let code = invite::format_code(&canonical);
-    let remote = HttpRemote::new(&endpoint, &token, &device.id);
-    let record = remote::Remote::create_invite(
-        &remote,
-        email.trim(),
-        name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
-        &invite::code_hash(&canonical),
-        invite::expires_at(scan::now_ms(), days),
-    )
-    .await
-    .map_err(|e| match e {
-        // A worker that predates the identity routes has no /api/auth to
-        // miss, so it 404s — which `flows::describe` would otherwise read as
-        // "that domain holds no workspace yet".
+    let record = call
+        .remote
+        .create_invite(
+            email.trim(),
+            name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
+            &invite::code_hash(&canonical),
+            invite::expires_at(scan::now_ms(), days),
+        )
+        .await
+        .map_err(|e| describe_people(&call.domain, e))?;
+
+    Ok(Invited { blob: invite::blob(&call.endpoint, &code), code, invite: record })
+}
+
+/// Who is on this workspace and what they hold (docs/cloud.md §7.2) — the
+/// whole People view in one answer, so the panel never draws half a roster.
+#[tauri::command]
+pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People, String> {
+    let call = workspace_call(&app, &root)?;
+    people_of(&call.remote, &call.device.id, &call.domain).await
+}
+
+/// The owner saying who they are — once, and only here (§7.2). Identity,
+/// never authority: the domain's env secret is what authenticates them either
+/// way, so this row is what puts a name in the People list, and losing it
+/// costs a name rather than access.
+#[tauri::command]
+pub(crate) async fn cloud_adopt_owner(
+    app: AppHandle,
+    root: String,
+    email: String,
+    name: Option<String>,
+) -> Result<remote::MemberRecord, String> {
+    let call = workspace_call(&app, &root)?;
+    call.remote
+        .adopt_owner(email.trim(), name.as_deref().map(str::trim).filter(|n| !n.is_empty()))
+        .await
+        .map_err(|e| describe_people(&call.domain, e))
+}
+
+/// Take a person off this workspace: their row, the invite they had and every
+/// Mac they signed in on, in one batch. Each of those Macs stops syncing on
+/// its very next request — the bearer resolves through the table the batch
+/// emptied, so there is no session left to expire.
+#[tauri::command]
+pub(crate) async fn cloud_revoke_person(app: AppHandle, root: String, member_id: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    revoked(&call.domain, call.remote.delete_member(&member_id).await)
+}
+
+/// Revoke one Mac, leaving the person and their other Macs alone. What comes
+/// back is not the credential — the domain never had it in the clear — it is
+/// the row that resolves it.
+#[tauri::command]
+pub(crate) async fn cloud_revoke_device(app: AppHandle, root: String, token_id: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    revoked(&call.domain, call.remote.delete_token(&token_id).await)
+}
+
+/// Withdraw a code nobody has traded in yet. The person's row stays: they
+/// were invited, not signed in, and inviting them again reaches it.
+#[tauri::command]
+pub(crate) async fn cloud_withdraw_invite(app: AppHandle, root: String, invite_id: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    revoked(&call.domain, call.remote.delete_invite(&invite_id).await)
+}
+
+/// The People view's whole answer, composed from the three identity lists.
+///
+/// Generic over the remote so the in-memory worker can prove the branch that
+/// carries the design: a `403` from the members route is not a failure, it is
+/// this Mac being told which door it came in by. Nothing on disk records that
+/// — `cloud.json` holds a credential, never a claim about one — so the
+/// question is asked every time the view opens, and answered by the domain.
+/// A member asks for nothing further: the other two lists are the owner's as
+/// well, and asking would only collect two more refusals.
+async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str) -> Result<People, String> {
+    let members = match remote.list_members().await {
+        Ok(members) => members,
+        Err(remote::RemoteError::Forbidden) => {
+            return Ok(People {
+                role: "member".into(),
+                device_id: device_id.to_string(),
+                members: Vec::new(),
+                invites: Vec::new(),
+                devices: Vec::new(),
+            })
+        }
+        Err(e) => return Err(describe_people(domain, e)),
+    };
+    let (invites, devices) = tokio::try_join!(remote.list_invites(), remote.list_tokens())
+        .map_err(|e| describe_people(domain, e))?;
+    Ok(People { role: "owner".into(), device_id: device_id.to_string(), members, invites, devices })
+}
+
+/// A failed people call in words. The arm that earns its place is `NotFound`:
+/// a worker predating the identity routes has no `/api/auth` to miss, so it
+/// 404s — which `flows::describe` would otherwise read as "that domain holds
+/// no workspace yet", which is both wrong and unactionable.
+fn describe_people(domain: &str, e: remote::RemoteError) -> String {
+    match e {
         remote::RemoteError::NotFound => {
             format!("{} runs a worker too old to hold people — update it from the Cloud panel", domain)
         }
-        other => flows::describe(&domain, other.into()),
-    })?;
+        other => flows::describe(domain, other.into()),
+    }
+}
 
-    Ok(Invited { blob: invite::blob(&endpoint, &code), code, invite: record })
+/// A revocation's answer, where `NotFound` is success: the row is gone, which
+/// is what was asked for. It cannot be the old worker `describe_people`
+/// blames for a 404 either — a Revoke button only exists on a list that route
+/// answered.
+fn revoked(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
+    match r {
+        Ok(()) | Err(remote::RemoteError::NotFound) => Ok(()),
+        Err(e) => Err(describe_people(domain, e)),
+    }
 }
 
 /// Ask the engine to probe the worker again — "Check again" after an
@@ -530,7 +641,7 @@ pub(crate) async fn cloud_join(
     let (data_dir, device) = with_inner(&app, |inner| Ok((inner.data_dir.clone(), inner.device.clone())))?;
 
     let remote = Arc::new(HttpRemote::new(&endpoint, &token, &device.id));
-    let meta = remote::Remote::meta(remote.as_ref()).await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
@@ -588,7 +699,7 @@ pub(crate) async fn cloud_resume(
     }
 
     let remote = HttpRemote::new(&endpoint, &token, &device.id);
-    let meta = remote::Remote::meta(&remote).await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
