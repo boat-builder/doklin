@@ -39,7 +39,14 @@
 //       bearer now resolves through D1; the owner's is still the env secret
 //       and still reads no row, so a database that is gone costs a workspace
 //       its people and never its owner.
-export const WORKER_VERSION = 5;
+//   6 = attribution by person (docs/teams-plan.md §12): a manifest's `by` is
+//       a member id rather than a device name (MANIFEST_VERSION 3), and
+//       /api/meta says who the bearer is and what this workspace's people are
+//       called, so any Mac can put a name to an id without being the owner.
+//       The three deprecated /api/history/<fid> routes go with it: the
+//       manifest has carried no revisions since the version store landed, and
+//       what reads them is a release nobody is running.
+export const WORKER_VERSION = 6;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -52,10 +59,12 @@ export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "b
 // reports it more precisely than a name in this list could.
 
 // The manifest schema this worker understands (docs/cloud.md §6.6).
-// A PUT with a lower version is a plain 400 (nothing older exists); one with a
-// higher version comes from a newer app: the worker answers 426 and the
-// engine pauses with phase `worker-outdated` until the worker is updated.
-export const MANIFEST_VERSION = 2;
+// A PUT carrying any other version is a 426 in both directions, with a
+// sentence naming which side is behind: an app newer than this worker pauses
+// in `worker-outdated` until the worker is updated, and an app older than it
+// is told to update itself (docs/teams-plan.md §2 — refuse politely, never
+// corrupt). Version 3 is where `by` became a member id.
+export const MANIFEST_VERSION = 3;
 
 // The Workers runtime compatibility date wrangler.toml pins — the app writes
 // that file verbatim into the setup prompt, so this is its one source.

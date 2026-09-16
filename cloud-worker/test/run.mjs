@@ -117,7 +117,7 @@ async function test(name, fn) {
 }
 
 const manifest = (seq, files, extra = {}) => ({
-  version: 2,
+  version: 3,
   name: "Notes",
   seq,
   files,
@@ -131,8 +131,8 @@ const fileEntry = (p, rev, seed) => ({
   hash: blobHash(seed),
   size: 42,
   mtime: 1700000000000,
-  by: "Sherin's MacBook Pro",
-  hist: [],
+  // A member id since v3 — who changed it, not which Mac did.
+  by: "m-1a2b3c4d",
 });
 const currentEtag = async () =>
   (await call("/api/manifest", { token: OWNER })).headers.get("x-manifest-etag");
@@ -177,7 +177,13 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
   db.queries.length = 0;
   const again = await call("/api/meta", { token: OWNER });
   assert.equal(again.json.d1, 2);
-  assert.equal(db.queries.length, 0, "a migrated isolate never asks again");
+  // The migration never runs twice in an isolate. Identity does run every
+  // time — a probe answers who the caller is and what everyone here is
+  // called — but it only ever reads.
+  assert.ok(
+    db.queries.length > 0 && db.queries.every((sql) => /^\s*SELECT/i.test(sql)),
+    `a migrated isolate only reads: ${db.queries.join(" | ")}`,
+  );
 });
 
 /* ---------- People ---------- */
@@ -591,6 +597,34 @@ await test("identity: the owner is a person for attribution, and a secret for ac
   assert.equal((await call(`/api/auth/tokens/${mine.id}`, { method: "DELETE", token: OWNER })).status, 204);
 });
 
+await test("meta: the probe says who the bearer is, and what everyone here is called", async () => {
+  const owner = (await call("/api/meta", { token: OWNER })).json;
+  assert.equal(owner.you.role, "owner");
+  assert.equal(owner.you.email, "sherin@example.com", "identity is the adopted row; the secret is the access");
+  assert.ok(/^m-[a-f0-9]{8}$/.test(owner.you.memberId), "what a manifest this Mac writes signs with");
+
+  // A member's identity came off their token in the very read that let them
+  // in, so saying it back costs nothing.
+  const mine = (await call("/api/meta", { token: MEMBER })).json;
+  assert.equal(mine.you.role, "member");
+  assert.equal(mine.you.memberId, ALICE.id);
+  assert.equal(mine.you.email, "alice@example.com");
+
+  // The directory is everybody's — a manifest names ids, so every Mac in the
+  // workspace has to be able to put a name to one — and it is names and
+  // nothing else. The People list, with addresses and devices, stays the
+  // owner's (docs/teams-plan.md §6, decision 4).
+  assert.ok(mine.people.length >= 2);
+  assert.deepEqual(
+    [...new Set(mine.people.map((p) => Object.keys(p).sort().join(",")))],
+    ["id,name"],
+    "no address, no role, no device count",
+  );
+  assert.ok(mine.people.some((p) => p.id === ALICE.id && p.name === "Alice"));
+  assert.ok(mine.people.some((p) => p.id === owner.you.memberId), "the owner is in it too");
+  assert.deepEqual(owner.people, mine.people, "the same list, whoever asks");
+});
+
 await test("identity: a member is not a limited account — they write, they just do not administer", async () => {
   // Reaching the CAS is the proof: a 412 means the bearer was authorized and
   // the request was turned away by the etag, not by the role. (The CAS test
@@ -623,13 +657,13 @@ await test("workspace: GET describes the binding with what the manifest holds", 
   assert.equal((await call("/api/workspace", { method: "PUT", token: OWNER })).status, 405);
 });
 
-await test("manifest: the empty v2 manifest, 304 on since, CAS PUT, a stale PUT loses with the current etag", async () => {
+await test("manifest: the empty v3 manifest, 304 on since, CAS PUT, a stale PUT loses with the current etag", async () => {
   const first = await call("/api/manifest", { token: OWNER });
   assert.equal(first.status, 200);
   const etag0 = first.headers.get("x-manifest-etag");
   assert.equal(etag0, ws.manifestEtag, "the etag the bind returned is the manifest's");
   const fresh = JSON.parse(first.text);
-  assert.equal(fresh.version, 2);
+  assert.equal(fresh.version, 3);
   assert.equal(fresh.name, "Notes");
   assert.deepEqual([fresh.seq, fresh.files, fresh.tombstones, fresh.public], [0, {}, {}, {}]);
 
@@ -668,7 +702,7 @@ await test("manifest: the empty v2 manifest, 304 on since, CAS PUT, a stale PUT 
   assert.equal(await currentEtag(), etag1, "none of the rejects touched the manifest");
 });
 
-await test("manifest: validation rejects traversal, duplicate paths, bad revs and hashes, oversized hist, bad tombstones", async () => {
+await test("manifest: validation rejects traversal, duplicate paths, bad revs and hashes, bad tombstones", async () => {
   const etag = await currentEtag();
   const bad = [
     [manifest(3, { "f-evil": fileEntry("../evil.md", 1, "x") }), /path/],
@@ -676,16 +710,6 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
     [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), rev: 0 } }), /rev/],
     [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), hash: "ZZZ" } }), /hash/],
     [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), size: -1 } }), /size/],
-    [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), hist: [{ r: "one" }] } }), /hist/],
-    [
-      manifest(3, {
-        "f-a": {
-          ...fileEntry("ok.md", 1, "a"),
-          hist: Array.from({ length: 13 }, (_, i) => ({ r: i + 1, h: blobHash(`h${i}`), s: 1, t: 1 })),
-        },
-      }),
-      /hist/,
-    ],
     [manifest(3, { "Bad Id": fileEntry("ok.md", 1, "a") }), /file id/],
     [manifest(3, {}, { tombstones: { "f-old": { path: "a/../b.md" } } }), /tombstone/],
     [manifest(3, {}, { tombstones: [] }), /tombstones/],
@@ -707,13 +731,16 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
   assert.equal(await currentEtag(), etag, "nothing invalid landed");
 });
 
-await test("manifest: a newer schema is 426 (update the worker), an older one plain 400", async () => {
-  const newer = await putManifest(manifest(3, {}, { version: 3 }));
+await test("manifest: either side of a schema skew is 426, and the sentence says which one is behind", async () => {
+  const newer = await putManifest(manifest(3, {}, { version: 4 }));
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
-  const older = await putManifest(manifest(3, {}, { version: 1 }));
-  assert.equal(older.status, 400);
-  assert.equal((await putManifest(manifest(3, {}, { version: "2" }))).status, 400);
+  // An app still writing v2 — `by` a device name, `hist` an array — is not
+  // corrupt, it is old, and 426 is the status that says so (teams-plan.md §2).
+  const older = await putManifest(manifest(3, {}, { version: 2 }));
+  assert.equal(older.status, 426);
+  assert.match(older.json.error, /update the app/);
+  assert.equal((await putManifest(manifest(3, {}, { version: "3" }))).status, 400, "a version that is not a number is garbage");
 });
 
 await test("manifest: the public map — slug grammar, reserved words, kinds, references, one root; an entry may outlive its file", async () => {
@@ -834,25 +861,15 @@ await test("blobs: content-addressed round-trip, list, delete; a re-put is a no-
   assert.equal(rejected.status, 413);
 });
 
-await test("history: archive round-trip, validation, 404 when there is none", async () => {
-  assert.equal((await call("/api/history/f-doc1", { token: OWNER })).status, 404);
-  const entries = [{ r: 1, h: "a".repeat(16), s: 10, t: 1700000000000, b: "Sherin's MacBook Pro" }];
-  const put = await call("/api/history/f-doc1", { method: "PUT", token: OWNER, body: { version: 1, entries } });
-  assert.equal(put.status, 200);
-  assert.equal(put.json.entries, 1);
-  const got = await call("/api/history/f-doc1", { token: MEMBER });
-  assert.equal(got.status, 200);
-  assert.deepEqual(JSON.parse(got.text).entries, entries);
-
-  const bad = await call("/api/history/f-doc1", { method: "PUT", token: OWNER, body: { version: 1, entries: [{ r: "one" }] } });
-  assert.equal(bad.status, 400);
-  const wrongVersion = await call("/api/history/f-doc1", { method: "PUT", token: OWNER, body: { version: 2, entries } });
-  assert.equal(wrongVersion.status, 400);
-  // Phase 6 of versioning drops these archives; deleting one that is already
-  // gone is the same success, so a sweep never has to look first.
-  assert.equal((await call("/api/history/f-doc1", { method: "DELETE", token: OWNER })).status, 204);
-  assert.equal((await call("/api/history/f-doc1", { token: OWNER })).status, 404);
-  assert.equal((await call("/api/history/f-doc1", { method: "DELETE", token: MEMBER })).status, 204);
+await test("history: the three deprecated routes are gone, in every verb", async () => {
+  // The manifest has carried no revisions since the version store landed, and
+  // §2's compatibility rule is what let these go rather than linger as dead
+  // routes. A 404 is the whole answer: not a method error, not an empty
+  // archive — there is no such thing here any more.
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    const res = await call("/api/history/f-doc1", { method, token: OWNER, body: method === "PUT" ? {} : undefined });
+    assert.equal(res.status, 404, method);
+  }
 });
 
 /* ---------- The version store (docs/versioning.md §6.4) ---------- */

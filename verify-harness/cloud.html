@@ -80,6 +80,9 @@
         // What the folder picker answers.
         pickedDir: "/Users/me/Downloads",
         token: "ab".repeat(32),
+        // Who this Mac is on the scripted domain — what the engine resolved
+        // its own signature to (docs/teams-plan.md §12).
+        me: "Sherin",
         // What a deployed worker reports; the drive sets it to the version
         // the app was built against (parsed from cloud-worker/src/version.ts).
         workerVersion: 1,
@@ -277,6 +280,9 @@
         lastSyncMs: Date.now(),
         error: null,
         pendingDeletes: 0,
+        // What this Mac signs with here: the person the domain says it is
+        // (docs/teams-plan.md §12), or its own name when it has not said.
+        me: window.__cloud.me,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
         public: [],
@@ -698,7 +704,9 @@
                 path: rel,
                 title: args.title ?? null,
                 desc: args.desc ?? null,
-                by: "Test Mac",
+                // Signed the way the engine signs it: with whoever this Mac
+                // is on this domain, resolved to a name before it gets here.
+                by: window.__cloud.me,
                 at: Date.now(),
                 alive: true,
                 root: existing?.root ?? false,

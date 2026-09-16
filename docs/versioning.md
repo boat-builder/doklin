@@ -439,17 +439,24 @@ cloud attributes a revision to. Everything is written atomically, blobs
 first, then the snapshot, then the index — a crash leaves bytes the sweep
 collects, never a row whose content is missing.
 
-**`by` is a blocker for a shared workspace.** It names the Mac that
-*captured* the snapshot, not the one that made the change:
+**`by` is still a blocker for a shared workspace, and now only here.** It
+names the Mac that *captured* the snapshot, not the one that made the change:
 `versions/mod.rs`'s `init` takes it from `cloud::device_name`, the local
-device. When Alice's edit reaches Bob by sync, Bob's watcher fires and
-Bob's next capture records her paragraph as Bob's. **Blocks:** per-person
-history in a workspace more than one person writes to — the rail can say
-when a line appeared, never who wrote it. The sync manifest's `hist` did
-carry the right `by`, and phase 6 retired exactly that — knowingly: it
-reached back hours, the store reaches back years, and a wrong name on the
-long history is a smaller loss than no long history. The fix needs an
-identity to attribute *to*, which is [cloud.md](cloud.md) §11.1.
+device. When Alice's edit reaches Bob by sync, Bob's watcher fires and Bob's
+next capture records her paragraph as Bob's. **Blocks:** per-person history
+in a workspace more than one person writes to — the rail can say when a line
+appeared, never who wrote it.
+
+The identity this needed exists now: manifest v3 signs every revision,
+tombstone and published page with a member id
+([teams-plan.md](teams-plan.md) §12), so *sync* attribution names a person.
+The version store was deliberately left out of that change. A snapshot is
+something a Mac did to a folder — connected or not, invited or not — and for
+one person with two Macs "which Mac" is the more useful half; the wrong-name
+problem above is a capture-time bug, not an attribution-format one, and
+renaming the field would hide it rather than fix it. Fixing it properly means
+capturing *what changed since the last snapshot* against who sync says
+changed it, which is a versioning phase and not a teams one.
 
 The cloud half (phase 3, `src-tauri/src/cloud/versions.rs` and
 `cloud-worker/src/versions.ts`) landed as planned, with four details the
@@ -505,36 +512,42 @@ second index to keep agreeing with the first.
 - `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX`, `MAX_HISTORY_ENTRIES` and
   `MAX_HISTORY_BYTES` all retire.
 
-`MANIFEST_VERSION` does not move: an empty `hist` is a valid v2 manifest
-to every worker and app that exists, so the change is invisible on the
-wire and forces no worker update. Nothing is seeded from the old `hist`
-either — it is retired last ([versioning-plan.md](versioning-plan.md)
-phase 6), by which time the snapshots reach far past the hours it ever
-held; until then the History panel keeps reading it beside the store.
+`MANIFEST_VERSION` did not move *then*: an empty `hist` was a valid v2
+manifest to every worker and app that existed, so the change was invisible
+on the wire and forced no worker update. It moved later, when the teams plan
+gave up on compatibility with released builds
+([teams-plan.md](teams-plan.md) §2, §12): `MANIFEST_VERSION` is 3, the field
+and its routes are deleted outright, and a skewed app and worker refuse each
+other politely with a `426` instead. Nothing was ever seeded from the old
+`hist` — by the time it went, the snapshots reached far past the hours it
+ever held.
 
 *As planned* (plan §2, decision 8).
 
 *As built* (phase 6):
 
-- `build_manifest` writes `hist: []` and nothing else ever touches it. The
-  field, `HistEntry` and the worker's shape check all stay: an older release
-  on the same workspace is still filling it, and this device has to read what
-  that one writes. The first time this device rewrites such a file, the
-  entries are dropped — not migrated. The version store already holds this
-  Mac's own past, which is the trade the phase makes.
+- `build_manifest` wrote `hist: []` and nothing else ever touched it. The
+  field, `HistEntry` and the worker's shape check stayed while an older
+  release on the same workspace was still filling it. **All of it is gone**
+  as of manifest v3 ([teams-plan.md](teams-plan.md) §12): no field, no type,
+  no check, and a manifest that carries one is simply a manifest from a
+  version this worker refuses. Nothing was migrated out of the entries — the
+  version store already holds this Mac's own past, which is the trade this
+  phase made.
 - `roll_archives`, `MANIFEST_HIST_MAX`, `ARCHIVE_HIST_MAX`,
   `Remote::get_history` / `put_history`, `HistoryArchive`, the engine's
   `history` / `revision`, the `cloud_history` / `cloud_revision` commands and
-  the rail's read-through are **gone**. `Remote` keeps one history method,
-  `delete_history`, for the clean-up below. The worker keeps every route
-  (§5.3 of [cloud.md](cloud.md)) — deprecated, not removed.
+  the rail's read-through are **gone**. `Remote::delete_history` outlived
+  them by one plan, for the clean-up below, and went with the three
+  `/api/history/<fid>` routes it called (§5.3 of [cloud.md](cloud.md)).
 - **What the old system left in the bucket is deleted once, lazily.**
-  `WorkspaceState.legacy_cleanup` is a bookmark the engine's poll advances:
-  first every `history/<fid>.json` this workspace can name, then every blob
-  but each file's current one, `LEGACY_BATCH` (50) fileIds at a time. Two
-  passes in that order — delete the index before the data it names, so an
-  interruption never leaves an archive pointing at bytes that are gone. A
-  workspace of 5000 files finishes both in about an hour of polling, and a
+  `WorkspaceState.legacy_cleanup` is a bookmark the engine's poll advances
+  over every blob but each file's current one, `LEGACY_BATCH` (50) fileIds at
+  a time. It had a first pass over the `history/<fid>.json` archives until
+  those routes were deleted; what remains is the part that was worth the walk
+  — a deep revision of a large file is megabytes, and nothing else collects
+  them, because the per-cycle GC only looks at files this device has touched.
+  A workspace of 5000 files finishes in about half an hour of polling, and a
   device that is done writes nothing about it at all.
 - The blob pass is the ordinary `gc_blobs` over the whole workspace rather
   than a second mechanism: since a file's past is not the manifest's any
@@ -542,10 +555,9 @@ held; until then the History panel keeps reading it beside the store.
   simply every fileId pushed since the last run. A tombstoned file keeps
   nothing.
 - The clean-up **waits rather than failing** on anything that isn't its turn:
-  a paused workspace, a worker the app has outrun, and — the case worth
-  naming — a worker older than 3, which has no `DELETE` route for an archive.
-  It is not an error and it is never reported; the pass simply runs after the
-  update.
+  a paused workspace, or a worker the app has outrun. It is not an error and
+  it is never reported; the pass simply runs when it is that workspace's
+  turn again.
 
 ---
 

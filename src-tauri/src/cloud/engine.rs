@@ -32,9 +32,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::manifest::{
-    clean_text, dedupe_paths, files_under, random_slug, unique_slug, valid_rel_path, valid_slug,
-    Manifest, ManifestFile, PublicEntry, PublicKind, Target, Tombstone, MANIFEST_VERSION,
-    MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
+    clean_text, dedupe_paths, files_under, is_member_id, random_slug, unique_slug, valid_rel_path,
+    valid_slug, Manifest, ManifestFile, PublicEntry, PublicKind, Target, Tombstone,
+    MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
 use super::remote::{Remote, RemoteError, RemoteResult};
@@ -84,9 +84,15 @@ const GC_EVERY_N_CYCLES: u64 = 20;
 const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// How many fileIds one poll of the legacy clean-up handles. Small enough
 /// that the pass is invisible beside the poll it rides on; a workspace of
-/// 5000 files finishes both of its passes in about an hour of polling.
+/// 5000 files finishes in about half an hour of polling.
 pub(crate) const LEGACY_BATCH: usize = 50;
 const CAS_ATTEMPTS: usize = 4;
+/// The least time between two fetches of the workspace's directory. A
+/// manifest naming somebody this engine cannot name asks for it again — a
+/// colleague invited an hour ago should not need a restart to get a name —
+/// but an id belonging to somebody since removed never resolves, and that
+/// must cost one request every so often rather than one per cycle.
+pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
 
 /* ---------- Local persistent state ---------- */
 
@@ -164,13 +170,15 @@ pub struct WorkspaceState {
 }
 
 /// The bookmark of the one-time clean-up that phase 6 leaves behind
-/// (docs/versioning-plan.md §9.1): the manifest's per-file archives, then
-/// every file's blobs. Two passes in strict order — delete the index before
-/// the data it names — and one cursor between them, because only one of
-/// them is ever running.
+/// (docs/versioning-plan.md §9.1): every file's retired revision blobs. It
+/// had a first pass over the `history/<fid>.json` archives too, until the
+/// routes it called were deleted (docs/teams-plan.md §12).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LegacyCleanup {
-    /// Every `history/<fid>.json` this workspace can name is gone.
+    /// What an older release wrote here when it finished deleting archives.
+    /// Kept under its own name so that a state file written by one is read
+    /// the way it meant it: false means that device's cursor belongs to a
+    /// pass that no longer exists, and the blob pass starts over.
     #[serde(default)]
     pub archives_done: bool,
     /// Both passes are finished and this workspace never looks again. It is
@@ -284,6 +292,17 @@ pub struct Engine<R: Remote> {
     /// What `/api/meta` last listed. A worker without `versions` is mirrored
     /// to not at all — and says so in the status.
     worker_features: Vec<String>,
+    /// The member id this Mac signs with here, as `/api/meta` last said it
+    /// (docs/teams-plan.md §12). None on a domain that has not been asked
+    /// yet, or one whose owner has never adopted an identity — then work is
+    /// signed with the Mac's name, exactly as it was before v3.
+    me: Option<String>,
+    /// id → display name for everyone on this workspace, from the same
+    /// answer. What a `by` is read with; a miss is shown as it stands.
+    people: BTreeMap<String, String>,
+    /// When the directory was last fetched, so meeting an id nobody can name
+    /// asks again — once, not once a cycle (`DIRECTORY_MIN_GAP`).
+    people_at: Option<Instant>,
     /// The last cloud version index this device read, so the rail still has
     /// something to show when the domain is unreachable.
     cloud_versions: Option<VersionsIndex>,
@@ -357,6 +376,9 @@ impl<R: Remote> Engine<R> {
             outdated: None,
             worker_version: None,
             worker_features: Vec::new(),
+            me: None,
+            people: BTreeMap::new(),
+            people_at: None,
             cloud_versions: None,
             mirror: None,
             last_mirror: None,
@@ -470,7 +492,7 @@ impl<R: Remote> Engine<R> {
                     path: e.path,
                     title: e.title,
                     desc: e.desc,
-                    by: e.by,
+                    by: self.name_of(&e.by),
                     at: e.at,
                     alive,
                     root: e.root,
@@ -503,6 +525,7 @@ impl<R: Remote> Engine<R> {
             last_sync_ms: self.last_sync_ms,
             error: self.error.clone(),
             pending_deletes: self.held_deletes.len() as u32,
+            me: self.name_of(&self.signature()),
             worker_version: self.worker_version,
             versions: self.worker_has("versions").then(|| VersionsMirror {
                 mirrored: self.mirror.map(|m| m.mirrored).unwrap_or(0),
@@ -525,12 +548,57 @@ impl<R: Remote> Engine<R> {
         if let Ok(meta) = self.remote.meta().await {
             self.worker_version = Some(meta.version);
             self.worker_features = meta.features;
+            // Identity rides on the probe because the probe is what happens
+            // before this engine writes anything: `me` is what a manifest it
+            // publishes signs with, and `people` is what the `by` in one it
+            // reads is shown as. A worker older than v6 answers neither, and
+            // everything falls back to device names (docs/teams-plan.md §12).
+            self.me = meta.you.and_then(|you| you.member_id).filter(|id| !id.is_empty());
+            self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
+            self.people_at = Some(Instant::now());
             if let Some(seen_at) = self.outdated {
                 if meta.version > seen_at {
                     self.outdated = None;
                 }
             }
         }
+    }
+
+    /// What this Mac signs its work with on this workspace: the person the
+    /// domain says it is, and its own name when the domain has not said.
+    ///
+    /// One answer, used everywhere something is attributed — the manifest's
+    /// `by`, a tombstone's, a published page's — so "who did this" never
+    /// depends on which code path wrote it down.
+    pub(crate) fn signature(&self) -> String {
+        self.me.clone().unwrap_or_else(|| self.cfg.device_name.clone())
+    }
+
+    /// A `by` in words. A member id resolves through the directory; anything
+    /// else is shown as it stands — a device name from before v3, or from a
+    /// Mac that signed while the domain had not said who it was. An id
+    /// nobody can name (a person since removed) stays an id rather than
+    /// becoming "someone".
+    pub(crate) fn name_of(&self, by: &str) -> String {
+        self.people.get(by).cloned().unwrap_or_else(|| by.to_string())
+    }
+
+    /// Ask for the directory again when a manifest names somebody this
+    /// engine cannot: a person invited since it last probed. Rate-limited by
+    /// `DIRECTORY_MIN_GAP`, because an id belonging to somebody since removed
+    /// never resolves, and must not cost a request every cycle for ever.
+    async fn learn_people(&mut self, m: &Manifest) {
+        let stranger = m
+            .files
+            .values()
+            .map(|f| f.by.as_str())
+            .chain(m.tombstones.values().map(|t| t.by.as_str()))
+            .chain(m.public.values().map(|e| e.by.as_str()))
+            .any(|by| is_member_id(by) && !self.people.contains_key(by));
+        if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
+            return;
+        }
+        self.probe_worker().await;
     }
 
     /* ----- the cycle ----- */
@@ -617,6 +685,11 @@ impl<R: Remote> Engine<R> {
                     self.state.manifest_etag.clone().unwrap_or_default(),
                 ),
             };
+
+            // 1½. Somebody may have joined since the last probe: a `by` in
+            //     here that nobody can name is what asks for the directory
+            //     again, so a new colleague's name appears without a restart.
+            self.learn_people(&remote_manifest).await;
 
             // 2. Apply remote-only changes to disk (downloads, renames,
             //    deletions). Local-vs-remote overlap is decided inside.
@@ -839,8 +912,11 @@ impl<R: Remote> Engine<R> {
                     // Keep ours as the live document; their version lands
                     // beside it as a conflict copy (a normal file that syncs
                     // to everyone). Ours pushes as rev+1 this cycle.
-                    let copy =
-                        conflict_copy_path(&target, if rf.by.is_empty() { "someone" } else { &rf.by });
+                    // The filename carries a name, so the id is resolved
+                    // here rather than shown: a file called
+                    // "notes (conflict — m-1a2b3c4d…).md" helps nobody.
+                    let author = self.name_of(&rf.by);
+                    let copy = conflict_copy_path(&target, if author.is_empty() { "someone" } else { &author });
                     write_atomic(&copy, &theirs)
                         .map_err(|e| RemoteError::Other(format!("write conflict copy: {}", e)))?;
                     self.record_synced_content(&fid, &rf, &theirs);
@@ -851,7 +927,7 @@ impl<R: Remote> Engine<R> {
                         json!({
                             "root": self.root_key(),
                             "path": rf.path,
-                            "by": rf.by,
+                            "by": author,
                             "conflictPath": copy_rel,
                         }),
                     );
@@ -978,12 +1054,11 @@ impl<R: Remote> Engine<R> {
     /// Fold the staged changes into `next` (a clone of the freshest remote
     /// manifest).
     ///
-    /// `hist` is deliberately left empty on everything this writes: since
-    /// phase 6 a file's past lives in the version store, and the manifest
-    /// carries only what sync itself needs. The field stays — an empty array
-    /// is a valid v2 manifest, so an older app reads what we publish — and
-    /// entries another device's older build still writes are simply dropped
-    /// the next time this device rewrites that file.
+    /// Everything this writes is signed with [`Engine::signature`] — a member
+    /// id since manifest v3. Entries it does not touch keep whatever they
+    /// carry, including the device names a v2 workspace was written with:
+    /// rewriting those would attribute somebody else's edit to whoever
+    /// happened to upgrade first.
     fn build_manifest(&self, next: &mut Manifest, staged: &Staged) {
         next.version = MANIFEST_VERSION;
         next.seq += 1;
@@ -1005,8 +1080,7 @@ impl<R: Remote> Engine<R> {
                     hash: push.hash.clone(),
                     size: push.bytes.len() as u64,
                     mtime: now_ms(),
-                    by: self.cfg.device_name.clone(),
-                    hist: Vec::new(),
+                    by: self.signature(),
                 },
             );
         }
@@ -1016,7 +1090,7 @@ impl<R: Remote> Engine<R> {
                 f.path = to.clone();
                 f.rev += 1;
                 f.mtime = now_ms();
-                f.by = self.cfg.device_name.clone();
+                f.by = self.signature();
             }
         }
 
@@ -1024,7 +1098,7 @@ impl<R: Remote> Engine<R> {
             if let Some(f) = next.files.remove(fid) {
                 next.tombstones.insert(
                     fid.clone(),
-                    Tombstone { path: f.path, rev: f.rev + 1, ts: now_ms(), by: self.cfg.device_name.clone() },
+                    Tombstone { path: f.path, rev: f.rev + 1, ts: now_ms(), by: self.signature() },
                 );
             }
         }
@@ -1330,9 +1404,9 @@ impl<R: Remote> Engine<R> {
     /* ----- the retired manifest history (docs/versioning-plan.md §9.1) ----- */
 
     /// Every fileId this workspace can name, sorted — live files and
-    /// tombstones both, because a deleted file's archive and its blobs are
-    /// exactly what the old system left in the bucket. Sorted, so a cursor
-    /// into it means the same thing on the next poll.
+    /// tombstones both, because a deleted file's blobs are exactly what the
+    /// old system left in the bucket. Sorted, so a cursor into it means the
+    /// same thing on the next poll.
     fn legacy_fids(&self) -> Vec<String> {
         let m = &self.state.manifest;
         let mut fids: BTreeSet<&String> = m.files.keys().collect();
@@ -1341,22 +1415,30 @@ impl<R: Remote> Engine<R> {
     }
 
     /// The one-time clean-up of what the manifest's history left behind:
-    /// first every `history/<fid>.json`, then every blob but each file's
-    /// current one. `LEGACY_BATCH` fileIds per poll, so it costs nothing on
-    /// the hot path, and the bookmark is persisted, so it survives a
-    /// restart and is never done twice.
+    /// every blob but each file's current one. `LEGACY_BATCH` fileIds per
+    /// poll, so it costs nothing on the hot path, and the bookmark is
+    /// persisted, so it survives a restart and is never done twice.
     ///
-    /// It waits, rather than failing, on everything that isn't its turn: a
-    /// paused workspace, a worker too old to answer 426, and — the case
-    /// worth naming — a worker older than 3, which has no DELETE route for
-    /// an archive. `versions` is the right flag to read for that: it and
-    /// the route shipped in the same worker (phase 3, decision 9).
+    /// This used to sweep the `history/<fid>.json` archives first. Those
+    /// routes are gone (docs/teams-plan.md §12), and the archives with them:
+    /// a workspace whose first pass never finished keeps a few small objects
+    /// nothing reads, and the wipe takes them. The blobs are the part that
+    /// was worth the walk — a deep revision of a large file is megabytes —
+    /// and nothing else collects them: the per-cycle GC only looks at files
+    /// this device has touched, so a file never edited again would keep its
+    /// old revisions for ever.
     async fn legacy_cleanup(&mut self) {
         if self.state.legacy_cleanup.done || self.paused || self.outdated.is_some() {
             return;
         }
-        if !self.worker_has("versions") {
-            return;
+        if !self.state.legacy_cleanup.archives_done {
+            // A device still deleting archives when this release arrived has
+            // a bookmark into a pass that no longer exists. The blob pass
+            // starts from the beginning rather than inheriting it — it is
+            // idempotent, and skipping part of the backlog is not.
+            self.state.legacy_cleanup.archives_done = true;
+            self.state.legacy_cleanup.cursor = None;
+            self.persist_state();
         }
         let after = self.state.legacy_cleanup.cursor.clone();
         let batch: Vec<String> = self
@@ -1367,31 +1449,14 @@ impl<R: Remote> Engine<R> {
             .collect();
 
         if batch.is_empty() {
-            // Off the end of the list: whichever pass was running is done.
-            // The cursor goes back to the start for the one after it.
-            if self.state.legacy_cleanup.archives_done {
-                self.state.legacy_cleanup.done = true;
-            } else {
-                self.state.legacy_cleanup.archives_done = true;
-            }
+            // Off the end of the list: this workspace never looks again.
+            self.state.legacy_cleanup.done = true;
             self.state.legacy_cleanup.cursor = None;
             self.persist_state();
             return;
         }
 
-        if self.state.legacy_cleanup.archives_done {
-            self.sweep_blobs(&batch).await;
-        } else {
-            for fid in &batch {
-                match self.remote.delete_history(fid).await {
-                    // Gone is the answer we wanted, however it got that way.
-                    Ok(()) | Err(RemoteError::NotFound) => {}
-                    // Offline, or a token that just rotated: leave the
-                    // cursor where it is and come back on a later poll.
-                    Err(_) => return,
-                }
-            }
-        }
+        self.sweep_blobs(&batch).await;
         self.state.legacy_cleanup.cursor = batch.last().cloned();
         self.persist_state();
     }
@@ -1559,7 +1624,7 @@ impl<R: Remote> Engine<R> {
             title: clean_text(req.title.as_deref(), MAX_TITLE_LEN),
             desc: clean_text(req.desc.as_deref(), MAX_DESC_LEN),
             custom,
-            by: self.cfg.device_name.clone(),
+            by: self.signature(),
             at: now_ms(),
         };
         // A re-key: a page still only queued under the old slug is

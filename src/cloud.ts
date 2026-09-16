@@ -36,6 +36,9 @@ export type PublicPage = {
   path: string;
   title: string | null;
   desc: string | null;
+  /** Who published it, in words. The engine resolves the manifest's member
+   *  id through the workspace's directory before this gets here, so nothing
+   *  in the frontend holds a second answer to "who is m-1a2b3c4d". */
   by: string;
   at: number;
   /** False when the file is gone (the page 404s until stopped or the file
@@ -75,6 +78,10 @@ export type CloudStatus = {
   lastSyncMs: number | null;
   error: string | null;
   pendingDeletes: number;
+  /** What this Mac signs work with here, in words: the person the domain
+   *  says it is, or this Mac's own name when it has not said. What a `by` is
+   *  compared against to know whether somebody *else* did a thing. */
+  me: string;
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
   /** The version store's mirror; null when the worker predates it — which
@@ -181,6 +188,8 @@ export type CloudPeople = {
 };
 
 export type CloudAppliedEvent = { root: string; paths: string[] };
+/** `by` is a name, not an id: the engine resolves it, because the conflict
+ *  copy it names is a real file on disk and had to be called something. */
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };

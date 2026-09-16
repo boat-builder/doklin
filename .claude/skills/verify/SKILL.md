@@ -136,7 +136,9 @@ node verify-harness/drive-cloud.mjs        # 34 steps: boots the REAL <App/> (cl
                                            # owner's and the member is told so, not errored at)
                                            # — and publishing: the pill's
                                            # not-connected door, a note published at a random then
-                                           # a chosen address (Copy, a bad slug refused), the
+                                           # a chosen address (Copy, a bad slug refused, the page
+                                           # naming the person who published it and reading as
+                                           # yours when that person is you), the
                                            # sidebar's dots, the folder dialog, a note inside a
                                            # published folder knowing its nested address, the
                                            # published list (home page, stop), the sidebar's
@@ -338,7 +340,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 37 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 38 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh
@@ -394,7 +396,7 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 61 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 64 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
@@ -414,12 +416,16 @@ on, removing a person taking every Mac and the code they had, a code withdrawn
 before anybody trades it in, one owner row at a time however often it is
 adopted, and the `403` that tells a member which door it came in by being an
 answer rather than a failure), the edit bus routing, cloud.json and the marker,
-the retirement of the manifest's history (four revisions leaving `hist`
-empty while `rev` climbs, a manifest an older build wrote read and then rewritten without its
-entries, and the one-time bucket clean-up — archives before blobs, more
+attribution by person (a manifest signed with the member id `/api/meta`
+gave this Mac and a status that says who that is in words, a `by` an older
+build wrote read and never rewritten, a conflict copy named after a person
+rather than an id, and a manifest naming somebody this engine cannot name
+asking the domain once — not once a cycle — who they are),
+the retirement of the manifest's history (four revisions leaving no
+revisions behind while `rev` climbs, and the one-time bucket clean-up — more
 fileIds than one batch, its bookmark persisted between polls, one blob per
-living file and nothing for a deleted one at the end, and a worker without
-the DELETE route stopping the pass rather than failing it), and the
+living file and nothing for a deleted one at the end, and a bookmark from the
+archive pass that no longer exists not carrying into the blob sweep), and the
 version store's mirror: a device's snapshots and blobs reaching the bucket,
 content another device already put there skipped by digest while a NAMED
 version is never skipped, a lost index CAS re-read and re-landed, the cloud

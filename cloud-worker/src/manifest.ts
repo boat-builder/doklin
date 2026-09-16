@@ -10,7 +10,6 @@ import {
   ID_RE,
   MAX_DESC_LEN,
   MAX_FILE_BYTES,
-  MAX_INLINE_HIST,
   MAX_MANIFEST_FILES,
   MAX_NAME_LEN,
   MAX_PUBLIC_ENTRIES,
@@ -22,20 +21,17 @@ import {
 } from "./layout";
 import { MANIFEST_VERSION } from "./version";
 
-/** One earlier revision of a file: rev, hash, size, time, by. */
-export type HistEntry = { r: number; h: string; s: number; t: number; b?: string };
-
 export type ManifestFile = {
   path: string;
   rev: number;
   hash: string;
   size: number;
   mtime?: number;
+  /** Who last changed it: a member id since v3 (docs/teams-plan.md §12).
+   *  Checked as a bounded string rather than as an id, because a workspace
+   *  upgraded from v2 carries the device names it was written with and
+   *  refusing those would throw away the attribution it already has. */
   by?: string;
-  /** DEPRECATED (docs/versioning.md §6.5). The current app always sends an
-   *  empty array; only an older release still fills it. Kept because an
-   *  empty one is a valid v2 manifest and the API only grows. */
-  hist?: HistEntry[];
 };
 
 export type Tombstone = { path: string; rev?: number; ts?: number; by?: string };
@@ -92,19 +88,6 @@ const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFi
 const optionalText = (v: unknown, max: number): boolean =>
   v === undefined || (typeof v === "string" && v.length <= max);
 
-function validHistEntry(e: unknown): boolean {
-  return (
-    isObject(e) &&
-    isCount(e.r) &&
-    e.r >= 1 &&
-    typeof e.h === "string" &&
-    BLOB_HASH_RE.test(e.h) &&
-    isCount(e.s) &&
-    isTime(e.t) &&
-    optionalText(e.b, MAX_NAME_LEN)
-  );
-}
-
 function validateFiles(files: unknown): string | null {
   if (!isObject(files)) return "files must be an object";
   const ids = Object.keys(files);
@@ -124,11 +107,6 @@ function validateFiles(files: unknown): string | null {
     if (!isCount(f.size) || f.size > MAX_FILE_BYTES) return `invalid size for ${id}`;
     if (f.mtime !== undefined && !isTime(f.mtime)) return `invalid mtime for ${id}`;
     if (!optionalText(f.by, MAX_NAME_LEN)) return `invalid by for ${id}`;
-    if (f.hist !== undefined) {
-      if (!Array.isArray(f.hist) || f.hist.length > MAX_INLINE_HIST || !f.hist.every(validHistEntry)) {
-        return `invalid hist for ${id}`;
-      }
-    }
   }
   return null;
 }
@@ -191,31 +169,22 @@ function validatePublic(map: unknown): string | null {
 export function validateManifest(data: unknown): ManifestProblem | null {
   const bad = (error: string): ManifestProblem => ({ status: 400, error });
   if (!isObject(data)) return bad("manifest must be an object");
-  if (Number.isInteger(data.version) && (data.version as number) > MANIFEST_VERSION) {
+  if (!Number.isInteger(data.version)) return bad("manifest version must be an integer");
+  // A skew is 426 in both directions — "upgrade required" is what it is, and
+  // the sentence says which side (docs/teams-plan.md §2). A 400 here would
+  // read as corruption, which a version older than this worker's is not.
+  if (data.version !== MANIFEST_VERSION) {
     return {
       status: 426,
-      error: `manifest version ${data.version} is newer than this worker understands (${MANIFEST_VERSION}) — update the worker`,
+      error:
+        (data.version as number) > MANIFEST_VERSION
+          ? `manifest version ${data.version} is newer than this worker understands (${MANIFEST_VERSION}) — update the worker`
+          : `manifest version ${data.version} is older than this worker accepts (${MANIFEST_VERSION}) — update the app`,
     };
   }
-  if (data.version !== MANIFEST_VERSION) return bad("unsupported manifest version");
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
     validateFiles(data.files) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public);
   return problem ? bad(problem) : null;
-}
-
-/** DEPRECATED (docs/versioning.md §6.5): the deep revision archive of one
- *  file, as PUT /api/history/<fid> stores it. Nothing current writes one;
- *  the shape check stays for the apps that still do. */
-export const HISTORY_VERSION = 1;
-
-export function validHistoryArchive(data: unknown, maxEntries: number): boolean {
-  return (
-    isObject(data) &&
-    data.version === HISTORY_VERSION &&
-    Array.isArray(data.entries) &&
-    data.entries.length <= maxEntries &&
-    data.entries.every(validHistEntry)
-  );
 }

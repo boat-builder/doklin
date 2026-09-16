@@ -48,6 +48,11 @@ pub struct CloudStatus {
     pub last_sync_ms: Option<u64>,
     pub error: Option<String>,
     pub pending_deletes: u32,
+    /// What this Mac signs work with here, in words: the person the domain
+    /// says it is, and this Mac's own name when the domain has not said
+    /// (docs/teams-plan.md §12). What a surface compares a `by` against to
+    /// know whether somebody *else* did a thing.
+    pub me: String,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
     /// The version store's mirror — null when this worker has no `versions`
@@ -84,6 +89,9 @@ pub struct PublicPage {
     pub path: String,
     pub title: Option<String>,
     pub desc: Option<String>,
+    /// Who published it, in words: the engine resolves the manifest's member
+    /// id through the workspace's directory before it gets here, so no
+    /// surface has to hold a second answer to "who is m-1a2b3c4d".
     pub by: String,
     pub at: u64,
     /// False when the page's file is gone (its page 404s until stopped or

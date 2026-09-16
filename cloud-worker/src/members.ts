@@ -213,6 +213,36 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
 }
 
 /**
+ * Everyone's id and display name, and nothing else — what a `by` in the
+ * manifest is read with (docs/teams-plan.md §12).
+ *
+ * This is the one piece of the identity tables that is not the owner's, and
+ * it is served by `GET /api/meta` rather than a route of its own, so decision
+ * 4 holds unchanged: every route under `/api/auth` is still owner-only. A
+ * workspace's people have to be able to put a name to each other's ids —
+ * attribution is the point — but an address, a device count and a role stay
+ * where they were.
+ */
+export async function listDirectory(env: Env): Promise<{ id: string; name: string }[] | null> {
+  return withDb(env, async (db) => {
+    const { results } = await db
+      .prepare("SELECT id, name FROM members WHERE disabled = 0 ORDER BY created_at, id")
+      .all<{ id: string; name: string }>();
+    return results.map((r) => ({ id: r.id, name: r.name }));
+  });
+}
+
+/** The row that carries the owner role, if anybody has adopted one. Identity,
+ *  never authority: the env secret is what authenticates them, and this is
+ *  only how `GET /api/meta` can tell them what they are called. */
+export async function findOwner(env: Env): Promise<Member | null> {
+  return withDb(env, async (db) => {
+    const row = await db.prepare("SELECT * FROM members WHERE role = 'owner' LIMIT 1").first<MemberRow>();
+    return row ? toMember(row) : null;
+  });
+}
+
+/**
  * The member for this email, created if this is the first time it has been
  * seen. A name that comes with it wins, so re-inviting someone is also how
  * they get renamed; the role of an existing row is left alone, because

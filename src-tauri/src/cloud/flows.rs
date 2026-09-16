@@ -127,8 +127,13 @@ pub async fn seed_upload<R: Remote>(
                 hash: hash.clone(),
                 size: bytes.len() as u64,
                 mtime: now_ms(),
+                // The seed signs with the Mac's name, and it is not a
+                // fallback: a domain gets its first member row from the
+                // People panel, which needs a connected workspace — so at
+                // the moment a folder is uploaded nobody has said who this
+                // is yet. Everything the engine writes afterwards is signed
+                // with the person (docs/teams-plan.md §12).
                 by: device_name.to_string(),
-                hist: Vec::new(),
             },
         );
         states.insert(

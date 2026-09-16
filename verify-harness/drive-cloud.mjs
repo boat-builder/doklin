@@ -111,6 +111,7 @@ const status = (over = {}) => ({
   lastSyncMs: Date.now(),
   error: null,
   pendingDeletes: 0,
+  me: "Sherin",
   workerVersion: WORKER_VERSION,
   versions: null,
   public: [],
@@ -288,7 +289,7 @@ step(
   firstPublish.args.path === "/docs/notes.md" &&
     firstPublish.args.slug === null &&
     /^notes\.example\.com\/[a-z0-9]{8}$/.test(publishedUrl) &&
-    (await tid("publish-by").textContent()).includes("by this Mac") &&
+    (await tid("publish-by").textContent()).includes("by you") &&
     (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1,
   publishedUrl,
 );
@@ -301,11 +302,30 @@ await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-not
 await poll(async () => (await tid("publish-url").textContent()) === "notes.example.com/team-notes");
 await tid("publish-copy").click();
 await poll(async () => (await page.evaluate(() => navigator.clipboard.readText())) === "https://notes.example.com/team-notes");
+
+// Attribution is by person since manifest v3: the same page, published by
+// somebody else, names them — and one published from another Mac of your own
+// reads as yours, because `me` is a person rather than a Mac (§12).
+await page.evaluate(() => {
+  const s = window.__cloud.statuses[0];
+  window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: "Bob" })) }]);
+});
+await poll(async () => (await tid("publish-by").textContent()).includes("Published by Bob"));
+const byOther = await tid("publish-by").textContent();
+await page.evaluate(() => {
+  const s = window.__cloud.statuses[0];
+  window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: window.__cloud.me })) }]);
+});
+await poll(async () => (await tid("publish-by").textContent()).includes("by you"));
+
 await tid("publish-slug").fill("AB");
 await poll(async () => (await tid("publish-pop").locator(".modal-error").count()) === 1);
 step(
-  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it",
-  (await tid("publish-rename").isDisabled()) && (await calls("cloud_publish")).length === 2,
+  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it; a page names the person who published it",
+  (await tid("publish-rename").isDisabled()) &&
+    (await calls("cloud_publish")).length === 2 &&
+    byOther.includes("Published by Bob") &&
+    !byOther.includes("by you"),
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await tid("publish-pop").count()) === 0);

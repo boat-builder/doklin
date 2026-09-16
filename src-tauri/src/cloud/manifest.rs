@@ -45,6 +45,17 @@ const SLUG_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 pub const RANDOM_SLUG_LEN: usize = 8;
 const MAX_SLUG_LEN: usize = 64;
 
+/// The shape of a member id — `m-` and eight hex characters, `ENTITY_ID_RE`
+/// in cloud-worker/src/members.ts narrowed to the one prefix a manifest can
+/// carry. **Change both.**
+///
+/// What tells a `by` that can be looked up from one written before v3, when
+/// it was a device's name: the engine resolves the first through the
+/// workspace's directory and shows the second exactly as it stands.
+pub fn is_member_id(by: &str) -> bool {
+    by.len() == 10 && by.starts_with("m-") && by[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /* ---------- Wire types ---------- */
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,27 +95,13 @@ pub struct ManifestFile {
     pub size: u64,
     #[serde(default)]
     pub mtime: u64,
+    /// Who last changed it — a **member id** since v3 (docs/teams-plan.md
+    /// §12), where it used to be the device's name. Empty where there is no
+    /// identity: a workspace whose domain has never said who this Mac is.
+    /// A workspace upgraded from v2 keeps the device names already in it,
+    /// and the surfaces show whatever does not resolve exactly as it stands.
     #[serde(default)]
     pub by: String,
-    /// **Deprecated since phase 6** (docs/versioning-plan.md §9). This
-    /// engine always writes an empty array; a file's past is the version
-    /// store's now. The field stays because an empty one is a valid v2
-    /// manifest to every worker and app that exists, and because an older
-    /// device on the same workspace still writes entries we have to read.
-    #[serde(default)]
-    pub hist: Vec<HistEntry>,
-}
-
-/// One earlier revision of a file: rev, hash, size, time, by. Read-only
-/// since phase 6 — see `ManifestFile::hist`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HistEntry {
-    pub r: u64,
-    pub h: String,
-    pub s: u64,
-    pub t: u64,
-    #[serde(default)]
-    pub b: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

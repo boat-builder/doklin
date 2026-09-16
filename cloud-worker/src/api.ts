@@ -5,7 +5,9 @@
 // presence and the binding) and `x-doklin-client` (the app version, for
 // the logs — nothing reads it).
 //
-//   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null}
+//   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
+//                                    you: who this bearer is, people: [{id, name}] — the directory
+//                                    a manifest's `by` is read with (docs/teams-plan.md §12)}
 //   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
 //                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
@@ -18,14 +20,6 @@
 //   GET    /api/blobs/<fid>/<hash>   the bytes
 //   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op)
 //   DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-//   GET    /api/history/<fid>        DEPRECATED {version, entries}
-//   PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, size-capped)
-//   DELETE /api/history/<fid>        drop the archive (204 whether or not one was there)
-//                                    — the three above are the retired manifest history
-//                                    (docs/versioning.md §6.5). No current app reads or writes
-//                                    one; GET and PUT stay because an app on an older release
-//                                    still does, and this API only grows. DELETE is what the
-//                                    current app's one-time clean-up calls.
 //   GET    /api/versions/index       the version store's index + x-versions-etag; 404 when none
 //   PUT    /api/versions/index       x-base-etag required ("*" creates); 412 + etag on a lost race
 //   GET    /api/versions/snapshots/<id>   the gzip'd workspace state
@@ -70,18 +64,15 @@ import {
   ID_RE,
   MANIFEST_KEY,
   MAX_FILE_BYTES,
-  MAX_HISTORY_BYTES,
-  MAX_HISTORY_ENTRIES,
   MAX_MANIFEST_BYTES,
   PRESENCE_KEY,
   WORKSPACE_KEY,
   blobKey,
   blobPrefix,
-  historyKey,
   validName,
   validPath,
 } from "./layout";
-import { emptyManifest, validateManifest, validHistoryArchive } from "./manifest";
+import { emptyManifest, validateManifest } from "./manifest";
 import {
   ENTITY_ID_RE,
   HASH_RE,
@@ -90,6 +81,8 @@ import {
   deleteInvite,
   deleteMember,
   deleteToken,
+  findOwner,
+  listDirectory,
   listInvites,
   listMembers,
   listTokens,
@@ -135,8 +128,18 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     // route every engine calls on start and on every poll, and the only one
     // that reports what it found. `d1` is the schema version, or null on a
     // deployment whose wrangler.toml has no DB binding (docs/teams-plan.md §8).
-    const [workspace, d1] = await Promise.all([readWorkspace(env), ensureSchema(env)]);
-    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace, d1 });
+    //
+    // Since v6 it also answers identity: who the caller is, and what every
+    // person here is called. Both belong on the route an engine already asks
+    // before it writes anything — a manifest it PUTs signs with `you.memberId`
+    // and every `by` it reads resolves through `people` (teams-plan.md §12).
+    const [workspace, d1, you, people] = await Promise.all([
+      readWorkspace(env),
+      ensureSchema(env),
+      whoIs(env, auth),
+      listDirectory(env),
+    ]);
+    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace, d1, you, people: people ?? [] });
   }
 
   if (section === "workspace" && parts.length === 2) {
@@ -183,12 +186,6 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     return handleVersions(request, env, url, parts);
   }
 
-  if (section === "history" && parts.length === 3) {
-    const fileId = parts[2];
-    if (!ID_RE.test(fileId)) return json({ error: "invalid file id" }, 400);
-    return history(request, env, fileId);
-  }
-
   if (section === "presence" && parts.length === 2) {
     if (method !== "PUT" && method !== "DELETE") return methodNotAllowed();
     return presence(request, env, auth);
@@ -216,6 +213,30 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
  *  gone. The sync API does not care; identity IS the database, so these
  *  routes say so instead of pretending nobody has been invited. */
 const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
+
+/**
+ * Who the bearer is, as the app has to write it down (docs/teams-plan.md §12):
+ * the id a manifest this Mac writes will carry in `by`.
+ *
+ * A member's identity came off their token already — `authenticate` resolved
+ * it in the row read that let them in — so this costs nothing. The owner's
+ * takes one read, because matching the env secret deliberately reads nothing:
+ * their *authority* is the secret and their *identity* is a row somebody
+ * adopted. An owner who never adopted one is `memberId: null`, and their app
+ * signs with the Mac's name until they do.
+ */
+async function whoIs(env: Env, auth: Auth): Promise<Record<string, unknown>> {
+  if (auth.role !== "owner") {
+    return { role: auth.role, memberId: auth.memberId, email: auth.email, name: auth.name };
+  }
+  const owner = await findOwner(env);
+  return {
+    role: "owner",
+    memberId: owner?.id ?? null,
+    email: owner?.email ?? null,
+    name: owner?.name ?? "Owner",
+  };
+}
 
 /**
  * Trade an invite code for this device's own token — the one unauthenticated
@@ -486,41 +507,6 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
   if (request.method === "DELETE") {
     await env.DATA.delete(key);
     return json({ deleted: true });
-  }
-  return methodNotAllowed();
-}
-
-/* ---------- History ---------- */
-
-async function history(request: Request, env: Env, fileId: string): Promise<Response> {
-  const key = historyKey(fileId);
-  if (request.method === "GET") {
-    const obj = await env.DATA.get(key);
-    if (!obj) return json({ error: "not found" }, 404);
-    return new Response(obj.body, {
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-    });
-  }
-  if (request.method === "PUT") {
-    // The deep archive: entries the engine rolled out of the manifest's
-    // inline tail. Advisory data — last write wins, size-capped.
-    const text = await request.text();
-    if (text.length > MAX_HISTORY_BYTES) return json({ error: "history too large" }, 413);
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return json({ error: "invalid json body" }, 400);
-    }
-    if (!validHistoryArchive(data, MAX_HISTORY_ENTRIES)) return json({ error: "invalid history" }, 400);
-    await env.DATA.put(key, text, JSON_OBJECT);
-    return json({ stored: true, entries: (data as { entries: unknown[] }).entries.length });
-  }
-  if (request.method === "DELETE") {
-    // Phase 6 of versioning retires these archives; deleting one that was
-    // already gone is the same success, so a sweep never has to check first.
-    await env.DATA.delete(key);
-    return new Response(null, { status: 204 });
   }
   return methodNotAllowed();
 }

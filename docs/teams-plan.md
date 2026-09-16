@@ -427,7 +427,7 @@ budget, for no extra freshness.
 | 2 | Identity in the worker | members, tokens, invites, the routes | 1 | **nothing** (an update badge) — **built** |
 | 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join — **built** |
 | 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable — **built** |
-| 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | history says *who*, not *which Mac* |
+| 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | what the workspace records says *who*, not *which Mac* — **built** |
 | 6 | Presence in D1, folded into the poll | the presence table, `POST /api/poll`, the beat's own request gone | 2 | **nothing** — 33% fewer requests |
 | 7 | Leases | acquire, renew on the poll, release; the editor's banner and *Take over* | 6 | §11.7 closes |
 | 8 | The manifest pointer in D1 *(optional)* | `seq` CAS, immutable manifest blobs, no R2 head on the poll | 6 | **nothing** |
@@ -736,6 +736,60 @@ for the history routes' absence; `drive-versions.mjs` for the rail.
 **Done when:** those pass, [versioning.md](versioning.md) §6.5 and
 [cloud.md](cloud.md) §5.3, §6.6 record the removal, and §11.1's downstream
 item — "`by` is a device name, never a person" — is struck.
+
+**Built.** `MANIFEST_VERSION` is 3 and `WORKER_VERSION` 6; `hist`, the three
+`/api/history/<fid>` routes, the `history/` prefix, `MAX_INLINE_HIST`,
+`MAX_HISTORY_ENTRIES`, `MAX_HISTORY_BYTES`, `validHistoryArchive` and
+`Remote::delete_history` are all deleted. Five things the sketch did not say:
+
+- **The engine resolves ids, not the frontend.** The plan had the surfaces
+  doing it from a cached member list. But a conflict copy is a *file on
+  disk*, and its name has to carry something a person can read — so the
+  engine must resolve whatever happens, and a second resolver upstairs would
+  be a second answer to the same question. `/api/meta` carries the directory,
+  the engine resolves what it emits (a published page's `by`, the conflict
+  event, the copy's filename), and the status gained `me`: what this Mac
+  signs with, in words. The frontend's entire change is that comparison and
+  one word — *Published … by this Mac* became *by you*, because a page
+  published from your other Mac is now yours rather than a stranger's.
+- **The directory rides on `/api/meta`.** Decision 4 says every route under
+  `/api/auth` is owner-only, and a directory everybody can read would have
+  been the exception that spoils it. Meta is the call every engine already
+  makes before it writes anything, so `you` (who the bearer is, and the id
+  their manifest signs with) and `people` (ids and display names, nothing
+  else) go there instead. A manifest naming somebody this engine cannot name
+  asks again, at most once every five minutes — a colleague invited an hour
+  ago should not need a restart to get a name, and an id belonging to
+  somebody since removed must not cost a request per cycle for ever.
+- **The version store keeps device names, deliberately.** The plan listed the
+  history rail among the surfaces to resolve. The rail reads the local
+  version store, whose `by` is the Mac that *captured* the snapshot — which
+  is the useful half for one person with two Macs, and the only true one for
+  a folder connected to nothing. What a workspace records about itself names
+  people; what a Mac records about a folder names the Mac.
+  [versioning.md](versioning.md) §6.3's own `by` blocker stays open and is
+  narrowed there: its bug is capture-time attribution, and renaming the field
+  would hide it rather than fix it.
+- **A schema skew is `426` in both directions.** The worker answered `400`
+  for a version *older* than its own, which reads as corruption; an app on v2
+  is not corrupt, it is old. Both directions now answer 426 with a sentence
+  naming which side is behind, which is what §2's "refuse politely" means in
+  the one place it is actually tested.
+- **The one-time clean-up kept its blob pass.** "The app's one-time cleanup
+  call" is the `delete_history` call, and that went. The pass it belonged to
+  also swept every file's retired revision *blobs*, and nothing else collects
+  those — the per-cycle GC only looks at files this device has touched, so a
+  file never edited again would keep its old revisions for ever. A device
+  that was mid-way through the archive pass when this landed starts the blob
+  sweep from the beginning rather than inheriting a bookmark into a pass that
+  no longer exists.
+
+One consequence worth recording: `by` is empty on nothing, but it is a
+*device name* on a first upload. A domain's first member row is written by
+the People panel, which needs a connected workspace — so at the moment
+`seed_upload` runs, nobody has said who this Mac is. Everything the engine
+writes afterwards is signed with the person, and the seed's entries re-sign
+themselves the first time anybody edits those files.
 
 ## 13. Phase 6 — Presence in D1, folded into the poll
 

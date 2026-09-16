@@ -38,7 +38,6 @@ export default function PublishMenu({
   cloud,
   absPath,
   rel,
-  deviceName,
   dirty,
   onConnect,
   onOpenExternal,
@@ -50,8 +49,6 @@ export default function PublishMenu({
   absPath: string;
   /** …relative to the workspace. */
   rel: string;
-  /** This Mac's name — "Published by Alice" appears only for someone else's page. */
-  deviceName: string;
   /** The tab has edits not yet on disk. */
   dirty: boolean;
   onConnect: () => void;
@@ -194,7 +191,10 @@ export default function PublishMenu({
     );
   } else {
     const url = pageUrl(cloud, page);
-    const byOther = page.by && page.by !== deviceName;
+    // Somebody else's page, or your own. `me` is what this Mac signs with —
+    // a person since manifest v3 — so a page published from your other Mac
+    // now reads as yours rather than as a stranger's.
+    const byOther = page.by && page.by !== cloud.me;
     const pending = dirty || cloud.phase !== "idle";
     body = (
       <>
@@ -213,7 +213,7 @@ export default function PublishMenu({
         <p className="publish-meta" data-testid="publish-by">
           {byOther ? `Published by ${page.by} · ` : "Published "}
           {timeAgo(page.at)}
-          {byOther ? "" : " by this Mac"}
+          {byOther ? "" : " by you"}
         </p>
         {pending && (
           <p className="cloud-hint" data-testid="publish-pending">

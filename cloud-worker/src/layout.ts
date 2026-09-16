@@ -22,7 +22,6 @@ export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";
 export const PRESENCE_KEY = "presence.json";
 export const BLOBS_PREFIX = "blobs/";
-export const HISTORY_PREFIX = "history/";
 export const VERSIONS_PREFIX = "versions/";
 export const VERSIONS_INDEX_KEY = "versions/index.json";
 export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
@@ -30,7 +29,6 @@ export const VERSION_BLOBS_PREFIX = "versions/blobs/";
 
 export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
-export const historyKey = (fileId: string): string => `${HISTORY_PREFIX}${fileId}.json`;
 export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
 export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;
 
@@ -64,11 +62,6 @@ export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 export const MAX_MANIFEST_FILES = 5000;
 export const MAX_TOMBSTONES = 10_000;
 export const MAX_PUBLIC_ENTRIES = 5000;
-/** DEPRECATED, all three: the retired manifest history. The current app writes
- *  no `hist` and no archive; these caps still bound what an older one sends. */
-export const MAX_INLINE_HIST = 12;
-export const MAX_HISTORY_ENTRIES = 200;
-export const MAX_HISTORY_BYTES = 256 * 1024;
 export const MAX_PATH_LEN = 1024;
 export const MAX_PATH_DEPTH = 12;
 export const MAX_NAME_LEN = 80;

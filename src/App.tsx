@@ -5629,7 +5629,6 @@ export default function App() {
                     cloud={cloudForRoot}
                     absPath={activeTab.path}
                     rel={relPathIn(workspaceRoot, activeTab.path) ?? ""}
-                    deviceName={deviceName}
                     dirty={dirty}
                     onConnect={() => setCloudSetup("connect")}
                     onOpenExternal={openExternal}

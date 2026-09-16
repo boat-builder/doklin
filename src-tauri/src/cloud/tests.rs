@@ -16,7 +16,8 @@ use super::config::{
     WorkspaceEntry,
 };
 use super::engine::{
-    next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, LEGACY_BATCH, POLL_INTERVAL,
+    next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, DIRECTORY_MIN_GAP,
+    LEGACY_BATCH, POLL_INTERVAL,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
@@ -42,9 +43,6 @@ struct FakeWorker {
     manifest: Manifest,
     etag: u64,
     blobs: HashMap<(String, String), (Vec<u8>, u64)>,
-    /// fileIds with a `history/<fid>.json` — all a test needs of the
-    /// retired archives now that nothing reads one (docs/versioning-plan.md §9).
-    histories: BTreeSet<String>,
     presence: BTreeMap<String, PresenceEntry>,
     offline: bool,
     reject_schema: bool,
@@ -52,6 +50,9 @@ struct FakeWorker {
     features: Vec<String>,
     racer: Option<Manifest>,
     put_manifest_calls: u64,
+    /// How many times `/api/meta` was asked — the directory rides on it, so
+    /// this is what makes "ask again, but not every cycle" testable.
+    meta_calls: u64,
     /* The version store (docs/versioning.md §6.4): its own CAS'd index,
        immutable snapshots and blobs, with an upload time per blob so the
        cloud sweep's grace period is testable. */
@@ -166,9 +167,36 @@ impl Remote for FakeRemote {
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         let this = self.clone();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            Ok(Meta { version: b.worker_version, features: b.features.clone(), workspace: b.bound.clone() })
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            b.meta_calls += 1;
+            // Identity, the way v6 answers it: a member's comes off the row
+            // their token resolved to, and the owner's off whichever row
+            // holds the role — none, on a domain where nobody adopted one.
+            let me = match caller {
+                Caller::Owner => b.members.values().find(|m| m.role == "owner").cloned(),
+                Caller::Member => {
+                    b.tokens.get(&this.token).and_then(|t| b.members.get(&t.email)).cloned()
+                }
+            };
+            let you = Some(Identity {
+                role: match caller {
+                    Caller::Owner => "owner".into(),
+                    Caller::Member => "member".into(),
+                },
+                member_id: me.as_ref().map(|m| m.id.clone()),
+                email: me.as_ref().map(|m| m.email.clone()),
+                name: me.map(|m| m.name).unwrap_or_else(|| "Owner".into()),
+            });
+            let people =
+                b.members.values().map(|m| Person { id: m.id.clone(), name: m.name.clone() }).collect();
+            Ok(Meta {
+                version: b.worker_version,
+                features: b.features.clone(),
+                workspace: b.bound.clone(),
+                you,
+                people,
+            })
         }
     }
 
@@ -292,17 +320,6 @@ impl Remote for FakeRemote {
         let key = (file_id.to_string(), hash.to_string());
         async move {
             this.be.lock().unwrap().blobs.remove(&key);
-            Ok(())
-        }
-    }
-
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let fid = file_id.to_string();
-        async move {
-            this.ready()?;
-            // The worker answers 204 whether or not one was there.
-            this.be.lock().unwrap().histories.remove(&fid);
             Ok(())
         }
     }
@@ -451,12 +468,11 @@ impl Remote for FakeRemote {
         async move {
             this.owner_only()?;
             let mut b = this.be.lock().unwrap();
-            let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64 + b.histories.len() as u64;
+            let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64;
             b.bound = None;
             b.manifest = Manifest::default();
             b.etag += 1;
             b.blobs.clear();
-            b.histories.clear();
             b.presence.clear();
             b.versions_index = None;
             b.version_snapshots.clear();
@@ -912,9 +928,10 @@ async fn initial_push_then_second_device_pulls() {
 
 /// The manifest carries the current state and nothing else. Revisions still
 /// count up — that is what tells another device its copy is behind — but a
-/// file's past is the version store's since phase 6, so `hist` never fills.
+/// file's past is the version store's, and since v3 the manifest has no
+/// field to put one in.
 #[tokio::test]
-async fn edit_propagates_and_hist_stays_empty() {
+async fn edit_propagates_and_the_manifest_keeps_no_revisions() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
@@ -932,27 +949,42 @@ async fn edit_propagates_and_hist_stays_empty() {
     let m = manifest_of(&be);
     let f = m.files.values().next().unwrap();
     assert_eq!(f.rev, 4);
-    assert!(f.hist.is_empty(), "the manifest keeps no history: {:?}", f.hist);
+    assert_eq!(m.version, MANIFEST_VERSION);
+    // The domain never said who Alice is, so her Mac signs with its own name
+    // — v3's `by` is a member id *when there is one*, not always.
+    assert_eq!(f.by, "Alice");
+    // What is on the wire, and nothing else: no `hist` to be empty.
+    let json = serde_json::to_value(f).unwrap();
+    assert_eq!(
+        json.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["by", "hash", "mtime", "path", "rev", "size"],
+    );
 }
 
-/// A manifest written by a device still on the old release — `hist` full of
-/// entries — reads, syncs, and comes back out of the next CAS without them.
-/// The entries are not migrated anywhere: the version store already holds
-/// this device's own past, and that is the trade phase 6 makes.
+/// A workspace carried over from v2 is full of `by` values that are device
+/// names. They read, they show as they stand, and nothing rewrites them:
+/// re-signing somebody else's revision would attribute their edit to
+/// whichever Mac upgraded first. Only what this device writes is its own.
 #[tokio::test]
-async fn an_old_manifest_with_hist_is_read_and_rewritten_without_it() {
+async fn an_older_devices_attribution_is_read_and_never_rewritten() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
-    a.write("doc.md", "v1 content\n");
+    a.write("theirs.md", "v1 content\n");
+    a.write("mine.md", "mine\n");
     a.cycle().await;
 
-    // An older build lands a revision, inline history and all.
-    let fid = {
+    // The other Mac's revision, signed the way its release signed things.
+    let theirs = {
         let mut b = be.lock().unwrap();
-        let (fid, f) = b.manifest.files.iter_mut().next().map(|(k, v)| (k.clone(), v)).unwrap();
+        let (fid, f) = b
+            .manifest
+            .files
+            .iter_mut()
+            .find(|(_, f)| f.path == "theirs.md")
+            .map(|(k, v)| (k.clone(), v))
+            .unwrap();
         let bytes = b"v2 from the old build\n".to_vec();
         let hash = hash16(&bytes);
-        f.hist.insert(0, HistEntry { r: f.rev, h: f.hash.clone(), s: f.size, t: f.mtime, b: f.by.clone() });
         f.rev += 1;
         f.hash = hash.clone();
         f.size = bytes.len() as u64;
@@ -963,17 +995,21 @@ async fn an_old_manifest_with_hist_is_read_and_rewritten_without_it() {
         fid
     };
 
-    // It reads: the revision lands on disk like any other.
+    // It reads like any other revision, and the attribution stays theirs
+    // through every cycle that does not touch the file.
     a.cycle().await;
-    assert_eq!(a.read("doc.md").as_deref(), Some("v2 from the old build\n"));
-    assert_eq!(manifest_of(&be).files[&fid].hist.len(), 1, "still theirs, untouched");
+    assert_eq!(a.read("theirs.md").as_deref(), Some("v2 from the old build\n"));
+    a.write("mine.md", "mine, edited\n");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files[&theirs].by, "Old Mac", "untouched, so unchanged");
 
-    // And the first thing this device publishes drops them.
-    a.write("doc.md", "v3, written here\n");
+    // Editing it is what re-signs it — as this Mac, because this domain has
+    // never said who that is.
+    a.write("theirs.md", "v3, written here\n");
     a.cycle().await;
-    let f = &manifest_of(&be).files[&fid];
+    let f = &manifest_of(&be).files[&theirs];
     assert_eq!(f.rev, 3, "the revision counter still climbs");
-    assert!(f.hist.is_empty(), "rewritten without the old history: {:?}", f.hist);
+    assert_eq!(f.by, "Alice");
 }
 
 #[tokio::test]
@@ -1005,7 +1041,6 @@ async fn concurrent_distinct_files_converge_via_cas_retry() {
                 size: bytes.len() as u64,
                 mtime: now_ms(),
                 by: "Racer".into(),
-                hist: vec![],
             },
         );
         be2.racer = Some(m);
@@ -1899,6 +1934,129 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
     assert!(alice.meta().await.is_ok());
 }
 
+/* ---------- Attribution by person (docs/teams-plan.md §12) ---------- */
+
+#[tokio::test]
+async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+
+    let mut a = device("Alice", &be);
+    // The probe is where identity arrives, and the probe is what happens
+    // before this engine writes anything.
+    a.engine.probe_worker().await;
+    a.write("doc.md", "written by a person\n");
+    a.cycle().await;
+    a.publish("doc.md", PublicKind::File, Some("the-doc")).unwrap();
+    a.cycle().await;
+
+    let m = manifest_of(&be);
+    let f = m.files.values().next().unwrap();
+    assert_eq!(f.by, ada.id, "the manifest carries the id");
+    assert!(is_member_id(&f.by), "{} is not a member id", f.by);
+    assert_eq!(m.public["the-doc"].by, ada.id, "a published page too");
+    assert!(!f.by.contains("Alice"), "and never the Mac's name");
+
+    // Nothing downstream is handed an id: the engine resolves what it emits
+    // through the directory the same probe brought, so no surface needs a
+    // second answer to "who is m-00000001".
+    let status = a.status();
+    assert_eq!(status.me, "Ada");
+    assert_eq!(status.public[0].by, "Ada");
+
+    // Deleting is attribution too.
+    a.delete("doc.md");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).tombstones.values().next().unwrap().by, ada.id);
+}
+
+#[tokio::test]
+async fn a_conflict_copy_is_named_after_the_person_not_the_id() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+
+    let mut a = device("Alice", &be);
+    let mut b = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+
+    a.write("doc.md", "shared line\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.md", "ada's take on the line\n");
+    a.cycle().await;
+    b.write("doc.md", "bob's very different take\n");
+    b.cycle().await;
+
+    // The copy is a real file with a real name: an id in it would help
+    // nobody, so this is the one place the engine has to resolve.
+    let copies: Vec<String> = b.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", b.files());
+    assert!(copies[0].contains("(conflict — Ada"), "named after a person: {}", copies[0]);
+    assert!(!copies[0].contains("m-"), "not after an id: {}", copies[0]);
+    assert_eq!(b.events.of(EV_CONFLICT)[0]["by"], "Ada");
+
+    // And the other way round, so it is the *author* being resolved rather
+    // than whoever happens to be reading.
+    b.write("doc.md", "bob again\n");
+    b.cycle().await;
+    a.write("doc.md", "ada again\n");
+    a.cycle().await;
+    let hers: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert!(hers.iter().any(|p| p.contains("(conflict — Bob Mbeki")), "got {:?}", hers);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let mut a = device("Alice", &be);
+    a.write("mine.md", "mine\n");
+    a.cycle().await;
+    let before = be.lock().unwrap().meta_calls;
+
+    // Somebody joined and wrote something. Their id means nothing here yet,
+    // and a name that only arrives on the next launch is not a name.
+    let bob = owner.adopt_owner("bob@example.com", Some("Bob")).await.unwrap();
+    let sign_as = |be: &SharedWorker, by: &str| {
+        let mut b = be.lock().unwrap();
+        let f = b.manifest.files.values_mut().next().unwrap();
+        f.rev += 1;
+        f.mtime = now_ms();
+        f.by = by.to_string();
+        b.etag += 1;
+    };
+    sign_as(&be, &bob.id);
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "the stranger is what asked");
+
+    // An id belonging to nobody — a person since removed — never resolves.
+    // That costs one ask per gap, and never one per cycle.
+    sign_as(&be, "m-deadbeef");
+    be.lock().unwrap().members.clear();
+    let asked = be.lock().unwrap().meta_calls;
+    for _ in 0..3 {
+        a.cycle().await;
+    }
+    assert_eq!(be.lock().unwrap().meta_calls, asked, "not once a cycle");
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, asked + 1, "once a gap at the very most");
+
+    // And it is shown exactly as it stands rather than becoming "someone":
+    // the app never invents an author it does not have.
+    a.write("mine.md", "mine again\n");
+    a.publish("mine.md", PublicKind::File, Some("mine")).unwrap();
+    a.cycle().await;
+    assert_eq!(a.status().me, "Alice", "this Mac still signs with its own name");
+    assert_eq!(a.status().public[0].by, "Alice");
+}
+
 /* ---------- The People panel (docs/teams-plan.md §11) ---------- */
 
 /// Invite `email`, redeem the code on `device_id`, and answer the token that
@@ -2448,7 +2606,7 @@ fn dedupe_suffixes_the_younger_id() {
     for (fid, path) in [("f-bbb", "Notes/plan.md"), ("f-aaa", "notes/Plan.md")] {
         m.files.insert(
             fid.into(),
-            ManifestFile { path: path.into(), rev: 1, hash: "0".repeat(16), size: 1, mtime: 0, by: "".into(), hist: vec![] },
+            ManifestFile { path: path.into(), rev: 1, hash: "0".repeat(16), size: 1, mtime: 0, by: "".into() },
         );
     }
     dedupe_paths(&mut m);
@@ -2893,7 +3051,7 @@ async fn read_through_caches_another_devices_snapshot() {
 /// first, because deleting the index before the data it names is the order
 /// that is safe to interrupt.
 #[tokio::test]
-async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
+async fn legacy_cleanup_sweeps_the_retired_blob_backlog_across_polls() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
@@ -2913,48 +3071,30 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     a.cycle().await;
 
     let (fids, blobs_before) = {
-        let mut b = be.lock().unwrap();
+        let b = be.lock().unwrap();
         let fids: Vec<String> =
             b.manifest.files.keys().chain(b.manifest.tombstones.keys()).cloned().collect();
-        for fid in &fids {
-            b.histories.insert(fid.clone());
-        }
         assert_eq!(fids.len(), LEGACY_BATCH + 5, "every file, the deleted one included");
         (fids, b.blobs.len())
     };
     assert_eq!(blobs_before, LEGACY_BATCH + 5 + 3, "one per file, plus three second revisions");
 
-    // Poll one: a batch of archives, and not one blob.
-    a.engine.poll_for_test().await;
-    {
-        let b = be.lock().unwrap();
-        assert_eq!(b.histories.len(), fids.len() - LEGACY_BATCH, "one batch, no more");
-        assert_eq!(b.blobs.len(), blobs_before, "the archives go first");
-    }
-    let held = serde_json::to_value(&a.engine.state).unwrap();
-    assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
-
-    // Poll two finishes the archives; poll three finds the end of the list.
-    a.engine.poll_for_test().await;
-    assert!(be.lock().unwrap().histories.is_empty(), "every archive is gone");
-    a.engine.poll_for_test().await;
-    assert!(a.engine.state.legacy_cleanup.archives_done);
-    assert!(!a.engine.state.legacy_cleanup.done, "the blobs are still to do");
-
-    // Then the inventory, the same batch at a time.
+    // A batch per poll, and the bookmark is persisted between them.
     a.engine.poll_for_test().await;
     assert!(be.lock().unwrap().blobs.len() < blobs_before, "it has started");
+    let held = serde_json::to_value(&a.engine.state).unwrap();
+    assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
     a.engine.poll_for_test().await;
     a.engine.poll_for_test().await;
 
-    assert!(a.engine.state.legacy_cleanup.done, "both passes are finished");
+    assert!(a.engine.state.legacy_cleanup.done, "the backlog is finished");
     let b = be.lock().unwrap();
-    assert!(b.histories.is_empty());
     assert_eq!(b.blobs.len(), LEGACY_BATCH + 4, "one blob per living file, and nothing for the deleted one");
     for (fid, f) in &b.manifest.files {
         assert!(b.blobs.contains_key(&(fid.clone(), f.hash.clone())), "{} lost its current bytes", f.path);
     }
     drop(b);
+    assert_eq!(fids.len(), LEGACY_BATCH + 5);
 
     // Being done is persisted like every other step of it. A device that
     // forgot would walk the whole bucket again on its next launch.
@@ -2963,7 +3103,7 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     assert!(reloaded.legacy_cleanup.done, "it must survive a restart: {}", finished["legacy_cleanup"]);
     assert!(finished["legacy_cleanup"].get("cursor").is_none(), "and drop the bookmark it no longer needs");
 
-    // A workspace connected after this phase has no history to retire, and
+    // A workspace connected after this phase has no backlog to retire, and
     // says nothing about it until the pass actually starts.
     assert!(
         serde_json::to_value(WorkspaceState::default()).unwrap().get("legacy_cleanup").is_none(),
@@ -2971,41 +3111,33 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     );
 }
 
-/// A worker older than 3 has no DELETE route for an archive. The pass waits
-/// where it is — it is not an error, and it does not sweep blobs ahead of
-/// the archives that name them — and runs after the update.
+/// A device that was still deleting archives when this release arrived has a
+/// bookmark into a pass that no longer exists. The blob sweep starts from the
+/// beginning rather than inheriting it: it is idempotent, and skipping half
+/// the backlog for ever is not.
 #[tokio::test]
-async fn legacy_cleanup_waits_on_a_worker_without_the_route() {
+async fn a_bookmark_from_the_archive_pass_does_not_carry_into_the_blob_sweep() {
     let be = fake_worker();
-    be.lock().unwrap().features = vec!["sync".into(), "wipe".into()];
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
-    a.write("doc.md", "one\n");
-    a.cycle().await;
-    a.write("doc.md", "two, and longer\n");
-    a.cycle().await;
-    let fid = manifest_of(&be).files.keys().next().unwrap().clone();
-    let blobs_before = {
-        let mut b = be.lock().unwrap();
-        b.histories.insert(fid.clone());
-        b.blobs.len()
-    };
-
-    for _ in 0..3 {
-        a.engine.poll_for_test().await;
+    for i in 0..3 {
+        a.write(&format!("n{}.md", i), "first\n");
     }
-    {
-        let b = be.lock().unwrap();
-        assert!(b.histories.contains(&fid), "nothing was deleted");
-        assert_eq!(b.blobs.len(), blobs_before, "and no blob was swept past them");
+    a.cycle().await;
+    for i in 0..3 {
+        a.write(&format!("n{}.md", i), "second, and rather longer\n");
     }
-    assert!(!a.engine.state.legacy_cleanup.archives_done);
-    assert!(!a.engine.state.legacy_cleanup.done);
-    assert_eq!(a.phase(), Phase::Idle, "waiting is not an error");
+    a.cycle().await;
+    let blobs_before = be.lock().unwrap().blobs.len();
+    assert_eq!(blobs_before, 6, "three files, two revisions each");
 
-    // The worker is updated. The pass starts where it never got to.
-    be.lock().unwrap().features = vec!["sync".into(), "wipe".into(), "versions".into()];
-    a.engine.probe_worker().await;
+    // What the older release left behind: the archive pass was mid-way.
+    let last_fid = manifest_of(&be).files.keys().next_back().unwrap().clone();
+    a.engine.state.legacy_cleanup.archives_done = false;
+    a.engine.state.legacy_cleanup.cursor = Some(last_fid);
+
     a.engine.poll_for_test().await;
-    assert!(be.lock().unwrap().histories.is_empty(), "the archive goes now");
+    assert!(a.engine.state.legacy_cleanup.archives_done, "there is only one pass now");
+    a.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().blobs.len(), 3, "every file swept, not just the ones past the old cursor");
 }

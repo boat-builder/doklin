@@ -42,9 +42,8 @@ source, and the deploy steps below are the same procedure by hand.
 ```
 workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceName}}
                             — the binding. Written once, create-only.
-manifest.json               the workspace manifest (v2, below) — CAS by etag
+manifest.json               the workspace manifest (v3, below) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-history/<fileId>.json       DEPRECATED deep revision archive — see below
 presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [...]} — the version store — CAS by etag
 versions/snapshots/<id>.json.gz   one workspace state, gzip'd; immutable. <id> is <ts13>-<deviceId>
@@ -93,18 +92,18 @@ no database read at all; losing D1 costs a workspace its people, never its
 owner. The owner's wipe empties the tables and re-runs the schema, so a
 rebound domain inherits nobody.
 
-### The manifest (v2)
+### The manifest (v3)
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "name": "Notes",
   "seq": 812,
   "files": {
     "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
-                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro", "hist": [] }
+                  "mtime": 1757000000000, "by": "m-1a2b3c4d" }
   },
-  "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "…" } },
+  "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "m-1a2b3c4d" } },
   "public": {
     "k7m2p9qx": { "kind": "file", "file": "f-3kq8x1", "path": "Projects/plan.md", "by": "…", "at": 1757000000000 },
     "roadmap":  { "kind": "dir",  "path": "Projects/Roadmap", "title": "Roadmap", "desc": "…", "by": "…", "at": 1757000000000 },
@@ -123,27 +122,39 @@ entry makes it the page at `/`.
 
 Every `PUT` is shape-checked (`src/manifest.ts`): ids, hashes, relative
 paths with no traversal, one path per file (case-insensitive), revision
-and size ranges, the inline history cap, slug grammar and reserved words,
+and size ranges, slug grammar and reserved words,
 well-formed references, one root. References are **not** checked for
 existence: a public entry outlives its file on purpose (the page 404s while
 the file is gone and comes back when the file does — stopping is explicit),
 and a folder entry may cover a folder that is empty right now. Semantics
 (which revision wins, merges, what to do with a tombstone) are the engine's.
 
-### `hist` and `history/<fid>.json` — deprecated
+`by` is a **member id** (`m-` and eight hex characters) since v3: who
+changed the file, not which Mac did. The check on it is a bounded string
+rather than the id grammar, because a workspace upgraded from v2 carries the
+device names it was written with, and refusing those would throw away the
+attribution it already has. An app puts a name to an id through
+`GET /api/meta`'s `people`.
+
+A manifest of any other version is a **`426`**, in both directions, with a
+sentence naming which side is behind — an app newer than this worker is told
+to update the worker, an older one to update itself. That is the whole
+compatibility promise ([docs/teams-plan.md](../docs/teams-plan.md) §2):
+refuse politely, never corrupt.
+
+### `hist` and `history/<fid>.json` — gone
 
 The manifest used to carry each file's last revisions inline in `hist`, with
 the overflow in a per-file `history/<fileId>.json` archive; between them they
 were the app's version history. They are not any more — the app keeps a
 version store of its own and mirrors it to `versions/` (see
-[docs/versioning.md](../docs/versioning.md)) — so the current app writes
-`hist: []`, writes no archive, and deletes the archives it finds, once.
+[docs/versioning.md](../docs/versioning.md)).
 
-The worker still **accepts** all of it, and always will: an app on an older
-release is still sending it, and this API only ever grows. `GET`/`PUT
-/api/history/<fid>` are deprecated but live; `DELETE` is what the current
-app's one-time clean-up calls; `MAX_INLINE_HIST`, `MAX_HISTORY_ENTRIES` and
-`MAX_HISTORY_BYTES` still bound what an older app can send.
+The field, the three `/api/history/<fid>` routes, the `history/` prefix and
+the caps that bounded them were all deleted in worker v6. They had been dead
+since the version store landed; what kept them was compatibility with a
+release nobody runs, and v6 is where that stopped being a reason. A bucket
+that still holds archives keeps them until it is wiped: nothing reads one.
 
 ## The API
 
@@ -154,7 +165,10 @@ logs; nothing reads it).
 
 ```
 GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
-                                 d1: <schema version> | null} — also runs the D1 migration
+                                 d1: <schema version> | null,
+                                 you: {role, memberId, email, name}, people: [{id, name}]}
+                                 — liveness, the credential, "is this domain bound", who you are and
+                                 what everyone here is called; also runs the D1 migration
 POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201 {token, tokenId, member}
                                  401 when the code is unknown or expired, which answer identically
 POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite}
@@ -165,22 +179,19 @@ POST   /api/auth/members         owner; {email, name?} — adopt or rename the o
 DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
 GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
 DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
-                                 — liveness, the credential and "is this domain bound" in one call
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
 GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
-                                 on a lost race; 400 on garbage; 426 on a newer schema; 413 past 4 MB
+                                 on a lost race; 400 on garbage; 426 on ANY other schema version;
+                                 413 past 4 MB
 GET    /api/blobs/<fid>          {blobs: [{hash, size, uploaded}]} — the inventory GC diffs
 GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
 PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
                                  {existed: true}); 413 past 25 MB
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-GET    /api/history/<fid>        DEPRECATED {version: 1, entries: [{r, h, s, t, b?}]}; 404 for none
-PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
-DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
 GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
 PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
                                  on a lost race; 400 on garbage; 413 past 1 MB

@@ -36,14 +36,48 @@ pub struct CreatedBy {
     pub device_name: String,
 }
 
-/// `GET /api/meta`: liveness, the credential and "is this domain bound".
-#[derive(Clone, Debug, Deserialize)]
+/// `GET /api/meta`: liveness, the credential, "is this domain bound" — and,
+/// since worker v6, identity: who this bearer is and what everyone here is
+/// called (docs/teams-plan.md §12). A worker older than that answers neither
+/// field, and attribution falls back to device names.
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Meta {
     pub version: u32,
     #[serde(default)]
     pub features: Vec<String>,
     #[serde(default)]
     pub workspace: Option<WorkspaceRecord>,
+    #[serde(default)]
+    pub you: Option<Identity>,
+    /// The directory: every person's id and display name, and nothing else.
+    /// The People list — addresses, devices, roles — stays the owner's.
+    #[serde(default)]
+    pub people: Vec<Person>,
+}
+
+/// Who the bearer is. `member_id` is the id this Mac's work is signed with;
+/// it is None for an owner who has never adopted an identity, whose access
+/// comes from the env secret and needs no row at all.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub member_id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// One row of the directory: an id, and what to call it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// What a won bind answers with.
@@ -233,11 +267,6 @@ pub trait Remote: Send + Sync + 'static {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    /// Drop one file's retired revision archive. Nothing reads or writes
-    /// these any more (docs/versioning-plan.md §9); the engine's one-time
-    /// clean-up calls this and treats `NotFound` as the same answer as
-    /// success.
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     /* ----- the version store (docs/versioning.md §6.4) ----- */
 
     /// The index and its etag; None when the workspace has never mirrored.
@@ -656,14 +685,6 @@ impl Remote for HttpRemote {
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let url = self.url(&format!("blobs/{}/{}", file_id, hash));
-        async move {
-            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("history/{}", file_id));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())

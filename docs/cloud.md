@@ -184,9 +184,8 @@ row (§5.4), so losing D1 costs a workspace its people, never its owner.
 ```
 workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceName}}
                             — the binding. Written once, create-only.
-manifest.json               the workspace manifest (v2, §6.6) — CAS by etag
+manifest.json               the workspace manifest (v3, §6.6) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
 presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [{id, ts, device, reason, files,
                             bytes, digest, pinned?, label?, restoredFrom?}]} — CAS by etag
@@ -218,9 +217,11 @@ the only caller.
 
 ```
 GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
-                                 d1: <schema version> | null}
-                                 — liveness, the credential, "is this domain bound" and the state of the
-                                 database in one call; also where the schema migrates itself
+                                 d1: <schema version> | null,
+                                 you: {role, memberId, email, name}, people: [{id, name}]}
+                                 — liveness, the credential, "is this domain bound", the state of the
+                                 database, who you are and what everyone here is called, in one call;
+                                 also where the schema migrates itself
 POST   /api/workspace            owner; bind: body {name, deviceName?, ownerEmail?, ownerName?}
                                  → 201 {id, name, createdAt, createdBy, manifestEtag, owner?};
                                  409 {workspace} when already bound
@@ -228,15 +229,13 @@ GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
 GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
-                                 on a lost race; 400 on garbage; 426 on a newer schema; 413 past 4 MB
+                                 on a lost race; 400 on garbage; 426 on ANY other schema version —
+                                 the sentence names which side is behind; 413 past 4 MB
 GET    /api/blobs/<fid>          {blobs: [{hash, size, uploaded}]} — the inventory GC diffs
 GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
 PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
                                  {existed: true}); 413 past 25 MB
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-GET    /api/history/<fid>        DEPRECATED {version: 1, entries: [{r, h, s, t, b?}]}; 404 for none
-PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
-DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
 GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
 PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
                                  on a lost race; 400 on garbage; 413 past 1 MB
@@ -270,12 +269,19 @@ DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
 Everything under `/api/auth` is the D1 database beside the bucket; a
 deployment that has none answers `503` there and loses nothing else.
 
-The three `/api/history/<fid>` routes are the **retired** manifest history
-([versioning.md](versioning.md) §6.5). No current app reads or writes one;
-`GET` and `PUT` stay because an app on an older release still does and this
-API only grows, and `DELETE` is what the current app's one-time clean-up
-calls (§6.9). Removing them would break a device the user has not updated,
-which is the one thing the worker contract never does.
+`/api/meta`'s `you` and `people` are that database too, and they are on
+`meta` rather than behind a route of their own for two reasons: every engine
+already calls it before it writes anything, and `/api/auth` stays exactly
+what it says — the owner's. `you.memberId` is the id this Mac's work is
+signed with (null for an owner who has adopted no identity); `people` is ids
+and display names, because a manifest names ids and every Mac has to be able
+to put a name to one. Addresses, roles and device counts stay owner-only.
+
+The three `/api/history/<fid>` routes that served the manifest's retired
+per-file history are **gone** as of worker v6, with the `history/` prefix
+they read ([versioning.md](versioning.md) §6.5,
+[teams-plan.md](teams-plan.md) §2). Nothing had written one since the version
+store landed; what kept them was compatibility with a release nobody runs.
 
 Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
 `404 {"error":"not bound"}`.
@@ -650,21 +656,21 @@ Blob GC runs every twentieth cycle over revisions older than a day that
 nothing references. `cargo test --lib cloud` runs all of it against the
 in-memory worker in `tests.rs`, timings included (tokio's paused clock).
 
-### 6.6 The manifest (v2) and the public map
+### 6.6 The manifest (v3) and the public map
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "name": "Notes",
   "seq": 812,
   "files": {
     "f-3kq8…": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
-                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro", "hist": [] }
+                  "mtime": 1757000000000, "by": "m-1a2b3c4d" }
   },
-  "tombstones": { "f-old…": { "path": "Scratch.md", "rev": 3, "ts": …, "by": "…" } },
+  "tombstones": { "f-old…": { "path": "Scratch.md", "rev": 3, "ts": …, "by": "m-1a2b3c4d" } },
   "public": {
     "k7m2p9qx": { "kind": "file", "file": "f-3kq8…", "path": "Projects/plan.md",
-                  "by": "Sherin's MacBook Pro", "at": 1757000000000 },
+                  "by": "m-1a2b3c4d", "at": 1757000000000 },
     "roadmap":  { "kind": "dir",  "path": "Projects/Roadmap", "title": "Roadmap",
                   "desc": "What we're building this quarter", "by": "…", "at": … },
     "home":     { "kind": "file", "file": "f-77a1…", "path": "Home.md", "root": true, "by": "…", "at": … }
@@ -672,12 +678,19 @@ in-memory worker in `tests.rs`, timings included (tokio's paused clock).
 }
 ```
 
-- `hist` is **deprecated and always empty** since versioning phase 6
-  ([versioning.md](versioning.md) §6.5): a file's past is the version store's
-  now, not the manifest's. The field stays because an empty array is a valid
-  v2 manifest — `MANIFEST_VERSION` did not move — and because an app on an
-  older release is still filling it. Entries this device reads are dropped
-  the next time it rewrites that file; nothing is migrated out of them.
+- **`by` is a member id** since v3 ([teams-plan.md](teams-plan.md) §12) —
+  who changed it, not which Mac did. It is empty where there is no identity
+  (a domain whose owner has adopted none), and a workspace carried over from
+  v2 keeps the device names it was written with: rewriting those would
+  attribute somebody else's revision to whoever upgraded first. The engine
+  resolves an id through the directory `/api/meta` hands it and shows
+  anything that does not resolve exactly as it stands, so a surface never
+  has to hold a second answer to "who is `m-1a2b3c4d`".
+- **`hist` is gone** with v3, and so are the `/api/history/<fid>` routes that
+  archived what rolled out of it ([versioning.md](versioning.md) §6.5): a
+  file's past has been the version store's since versioning phase 6, and what
+  kept the field was compatibility with a release nobody runs (§2 of the
+  teams plan is where that stopped being a constraint).
 - Keyed by **slug**. A file entry references the **fileId** (so a rename
   carries the page for free) and keeps a `path` snapshot (so a deleted-and-
   recreated file at the same path can be re-bound). A folder entry is keyed
@@ -754,12 +767,17 @@ type CloudStatus = {
   phase: "idle" | "syncing" | "offline" | "paused" | "pending-deletes"
        | "revoked" | "worker-outdated" | "error";
   lastSyncMs: number | null; error: string | null; pendingDeletes: number;
+  me: string;                                   // what this Mac signs with here, in words:
+                                                // the person the domain says it is, else its
+                                                // own name (§6.6)
   workerVersion: number | null;                 // what /api/meta last reported
   versions: { mirrored: number; cloud: number; lastMirrorMs: number | null } | null;
                                                 // the version store's mirror; null when the
                                                 // worker has no `versions` feature
   public: { slug: string; kind: "file" | "dir"; path: string; title: string | null;
             desc: string | null; by: string; at: number; alive: boolean; root: boolean }[];
+                                                // `by` is a name: the engine resolves the
+                                                // manifest's member id before it gets here
   presence: { deviceId: string; name: string; path: string | null; ts: number }[];
 };
 ```
@@ -870,6 +888,12 @@ version store, which every open folder has whether or not it is connected.
 The engine holds no history of its own: `cloud_history` and `cloud_revision`
 are gone, and so is the manifest's `hist` that fed them (§6.6).
 
+A snapshot's `by` is still **the device that took it**, and deliberately: a
+version store belongs to a Mac, is captured whether or not that Mac is
+connected to anything, and "which Mac" is what a person with two of them
+wants to read. `by` in the *manifest* is a person (§6.6), because that
+records what the workspace holds and who changed it.
+
 What being connected adds is **depth**, from one place — the mirrored
 version store (`cloud/versions.rs`). The engine puts this Mac's snapshots
 under `versions/`; every other device's snapshots come back the same way.
@@ -882,13 +906,20 @@ read-through commands; a downloaded snapshot is cached under
 sweep cheap.
 
 **The one-time clean-up.** What the retired system left in the bucket — the
-`history/<fid>.json` archives, and the blobs only their revisions pointed at
-— is deleted once, from the poll, 50 fileIds at a time:
-`WorkspaceState.legacy_cleanup` is the bookmark, archives first and then the
-blob inventory, so an interruption never leaves an archive naming bytes that
-are gone. It waits, silently and without erroring, on a paused workspace or
-a worker older than 3 (which has no `DELETE /api/history/<fid>`), and once
-both passes are done the workspace never looks again.
+blobs only its deep revisions pointed at — is deleted once, from the poll, 50
+fileIds at a time, with `WorkspaceState.legacy_cleanup` as the bookmark.
+Nothing else collects them: the per-cycle GC only looks at files this device
+has touched, so a file never edited again would keep its old revisions for
+ever. It waits, silently and without erroring, on a paused workspace, and
+once the pass reaches the end of the list the workspace never looks again.
+
+It used to sweep the `history/<fid>.json` archives first. Those routes are
+gone as of worker v6 ([teams-plan.md](teams-plan.md) §12) and the archives
+with them: a workspace whose first pass never finished keeps a few small
+objects nothing reads, and the wipe takes them. A device that was mid-way
+through that pass starts the blob sweep from the beginning rather than
+inheriting its bookmark — the sweep is idempotent, and skipping half a
+backlog for ever is not.
 
 The mirror itself runs in the engine: after a cycle that changed something,
 and hourly regardless (`MIRROR_EVERY`). It uploads each local snapshot the
@@ -1260,12 +1291,12 @@ walks. The cloud's own checks:
 
 ```sh
 pnpm typecheck:worker                      # the worker against the Workers runtime types
-pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (26 cases)
+pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (38 cases)
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
-cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (50 tests)
-node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (131 checks)
-node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
+cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (64 tests)
+node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (159 checks)
+node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (34 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
 node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaScript off for the board (8 steps)
@@ -1314,10 +1345,12 @@ own half of the view rather than a roster: every identity route is the
 owner's, so a Mac that joined on an invite is told as much instead of an
 error.
 
-**Blocks:** nothing of the administration itself. What is still downstream of
-it: per-person attribution (`by` is a device name, never a person) and
-§8.2's leases, which need an identity to put in "Alice is editing" —
-[teams-plan.md](teams-plan.md) phases 5 and 7.
+**Blocks:** nothing. The last thing downstream of it closed with manifest v3:
+`by` is a member id, so what the workspace records — who changed a file, who
+deleted one, who published a page — names a person rather than a Mac (§6.6),
+and a conflict copy is called after one. What is still open is §8.2's leases,
+which need an identity to put in "Alice is editing" and now have one —
+[teams-plan.md](teams-plan.md) phase 7.
 
 ### 11.2 The idle heartbeat is the free plan's real budget
 
