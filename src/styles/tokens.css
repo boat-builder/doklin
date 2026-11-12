@@ -143,9 +143,12 @@
   --board: #7c5cd6;
 
   /* Board option colours: each option name sets a hue (.dk-color-*); the
-     theme sets how dark the ink and how strong the wash. */
+     theme sets how dark a pill's ink, how strong its wash, how strongly a
+     column is tinted, and how bright a status glyph. */
   --dk-ink: 30%;
   --dk-wash: 0.15;
+  --dk-col-wash: 0.07;
+  --dk-dot: 47%;
 }
 
 /* ---------- Paper ---------- */
@@ -201,6 +204,8 @@
 
   --dk-ink: 30%;
   --dk-wash: 0.15;
+  --dk-col-wash: 0.08;
+  --dk-dot: 44%;
 }
 
 /* ---------- Dark (pitch black) ----------
@@ -261,4 +266,6 @@
 
   --dk-ink: 76%;
   --dk-wash: 0.24;
+  --dk-col-wash: 0.11;
+  --dk-dot: 62%;
 }

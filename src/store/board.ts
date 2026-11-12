@@ -42,6 +42,8 @@ export type Card = {
   props: Props;
   /** Frontmatter lines the dialect couldn't read; carried through writes. */
   opaque: string[];
+  /** The first paragraph of the body as plain text (cardExcerpt); "" for none. */
+  excerpt: string;
 };
 
 /** What a card's file is called: a markdown note, by any of its names. */
@@ -69,6 +71,78 @@ export const renamedCardPath = (path: string, title: string): string => {
   const ext = CARD_EXT_RE.exec(path.slice(slash + 1))?.[0] ?? ".md";
   return `${path.slice(0, slash)}/${clean}${ext}`;
 };
+
+/* ---------- a card's excerpt ---------- */
+
+const MAX_EXCERPT = 240;
+
+// Lines that open a block which isn't prose: a heading, a rule, a table row,
+// html, or a picture on its own.
+const NOT_PROSE_RE =
+  /^(#{1,6}(\s|$)|([-*_])(\s*\3){2,}$|\||<|!\[[^\]]*\]\([^)]*\)$)/;
+const FENCE_RE = /^(`{3,}|~{3,})/;
+// A setext heading's underline turns the paragraph above it into a heading.
+const SETEXT_RE = /^(=+|-+)$/;
+const LIST_MARK_RE = /^(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
+
+/**
+ * A card's excerpt: the first paragraph of its body, as plain text. `lead` is
+ * what read_store hands over — the first few hundred bytes after the
+ * frontmatter block — so a body that opens with a long code block or table
+ * simply has no excerpt.
+ *
+ * Headings, rules, code, tables and html are skipped on the way to the
+ * paragraph; inside it, markdown is reduced to the words a reader sees
+ * (links keep their text, a comment marker keeps its anchor). "" when there
+ * is nothing to show.
+ */
+export function cardExcerpt(lead: string): string {
+  const para: string[] = [];
+  let fence: string | null = null;
+  for (const line of lead.replace(/\r\n?/g, "\n").split("\n")) {
+    const t = line.trim();
+    if (fence) {
+      if (t.startsWith(fence)) fence = null;
+      continue;
+    }
+    const open = FENCE_RE.exec(t);
+    if (open) {
+      if (para.length > 0) break;
+      fence = open[1];
+      continue;
+    }
+    if (t === "") {
+      if (para.length > 0) break;
+      continue;
+    }
+    if (para.length > 0 && SETEXT_RE.test(t)) {
+      para.length = 0;
+      continue;
+    }
+    if (NOT_PROSE_RE.test(t)) {
+      if (para.length > 0) break;
+      continue;
+    }
+    para.push(t.replace(/^(>\s?)+/, "").replace(LIST_MARK_RE, ""));
+  }
+  const text = para
+    .join(" ")
+    .replace(/\{>>[\s\S]*?<<\}/g, "")
+    .replace(/\{==([\s\S]*?)==\}/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[\^[^\]]+\]/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
+    .replace(/<((?:https?|mailto):[^>\s]+)>/g, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/(`+)(.+?)\1/g, "$2")
+    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])[*_]([^*_\s][^*_]*?)[*_](?![\w*])/g, "$1$2")
+    .replace(/\\([\\`*_{}[\]()#+\-.!])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > MAX_EXCERPT ? `${text.slice(0, MAX_EXCERPT - 1).trimEnd()}…` : text;
+}
 
 /** The value a card carries for a field, as a single string ("" = unset). */
 export const cardValue = (card: Card, field: string): string => {
@@ -120,6 +194,53 @@ export const orderedOptions = (def: StoreDef, field: string): Option[] =>
     (o) => o.rank,
     (o) => o.name,
   );
+
+/* ---------- stages of work ---------- */
+
+/** The column names that mean "finished". */
+const DONE_RE = /^(done|complete|completed|finished|shipped|closed|resolved)$/i;
+
+/**
+ * Where a column sits in the work. `todo` hasn't started (the first option,
+ * and the empty column), `stage` is on the way — `fill` says how far, from
+ * its position before the finished column — `done` is finished, and
+ * `closed` comes after it (Cancelled, Archived): over, but not done.
+ */
+export type Stage = { kind: "todo" | "stage" | "done" | "closed"; fill: number };
+
+/** A board that tracks progress: its finished column, and every column's stage. */
+export type BoardStages = { done: string; stages: Map<string, Stage> };
+
+/**
+ * How a board's columns read as stages of work, or null when they don't.
+ *
+ * A board grouped by a select with a finished option ("Done", "Shipped"…)
+ * tracks progress: that is what puts a status glyph on each column, a check
+ * on a finished card, and a progress bar over the board. Any other board —
+ * grouped by priority, by a tag, by a date — has no stages, and claims
+ * nothing about progress. Nothing is stored for this: the option names
+ * already say it, in every tool that reads the files.
+ */
+export function boardStages(def: StoreDef, groupBy: string): BoardStages | null {
+  if (fieldOf(def, groupBy)?.type !== "select") return null;
+  const options = orderedOptions(def, groupBy);
+  const at = options.findIndex((o) => DONE_RE.test(o.name.trim()));
+  if (at < 0) return null;
+  const stages = new Map<string, Stage>([["", { kind: "todo", fill: 0 }]]);
+  options.forEach((o, i) => {
+    stages.set(
+      o.name,
+      i === at
+        ? { kind: "done", fill: 1 }
+        : i > at
+          ? { kind: "closed", fill: 0 }
+          : i === 0
+            ? { kind: "todo", fill: 0 }
+            : { kind: "stage", fill: i / at },
+    );
+  });
+  return { done: options[at].name, stages };
+}
 
 /* ---------- what a board shows ---------- */
 

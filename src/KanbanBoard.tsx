@@ -14,9 +14,27 @@
 // drag events for its own file-drop handling, which is why the sidebar's row
 // drag and the tab bar's reorder are built the same way.
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CardMenu, InlineInput, Popover } from "./storeChrome";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  CalendarIcon,
+  CardMenu,
+  InlineInput,
+  MoreIcon,
+  PlusIcon,
+  Popover,
+  StatusGlyph,
+  type ComposeHandle,
+} from "./storeChrome";
 import type { StoreModel } from "./store/model";
+import { propText } from "./store/frontmatter";
 import {
   boardColumns,
   cardChips,
@@ -25,6 +43,7 @@ import {
   orderedOptions,
   sanitizeTitle,
   type BoardColumn,
+  type BoardStages,
   type Card,
 } from "./store/board";
 import {
@@ -71,6 +90,8 @@ const DRAG_THRESHOLD = 4;
 const NO_VALUE = "";
 
 type Props = {
+  /** Lets the host's New card button open the first column's composer. */
+  ref?: React.Ref<ComposeHandle>;
   def: StoreDef;
   /** The cards this view shows — already through the view's filter. */
   cards: Card[];
@@ -84,6 +105,10 @@ type Props = {
   sort?: Sort | null;
   /** Which fields a card's face shows chips for; null = all but the group-by. */
   show?: string[] | null;
+  /** Whether a card's face shows its excerpt (the view's switch). */
+  excerpt?: boolean;
+  /** The columns as stages of work, when the board tracks progress. */
+  stages?: BoardStages | null;
   /** A published page or an unfocused pane: same DOM, no writing. */
   readOnly?: boolean;
   /** Told when a drag starts and ends, so the host can dress the whole board. */
@@ -102,6 +127,7 @@ type Props = {
 };
 
 export default function KanbanBoard({
+  ref,
   def,
   cards,
   model,
@@ -110,6 +136,8 @@ export default function KanbanBoard({
   hide,
   sort = null,
   show = null,
+  excerpt = true,
+  stages = null,
   readOnly = false,
   onDragging,
   onHideColumn,
@@ -145,11 +173,25 @@ export default function KanbanBoard({
     [def, groupBy, cards, hide, sort],
   );
 
-  // The chips a card face shows: the fields this view shows, except the one
-  // the board groups by (the column already says it).
-  const chipFields = useMemo(
-    () => chipFieldsOf(def, groupBy, show),
-    [def, groupBy, show],
+  // What a card face shows: the fields this view shows, except the one the
+  // board groups by (the column already says it). Dates read as dates in the
+  // card's foot; everything else is a pill.
+  const [pillFields, dateFields] = useMemo(() => {
+    const shown = chipFieldsOf(def, groupBy, show);
+    return [shown.filter((f) => f.type !== "date"), shown.filter((f) => f.type === "date")];
+  }, [def, groupBy, show]);
+
+  // New card lands in the first column a card is meant to start in: the
+  // first declared one, past the "No status" column.
+  useImperativeHandle(
+    ref,
+    () => ({
+      compose: () => {
+        const col = columns.find((c) => c.declared) ?? columns[0];
+        if (col) setComposing(col.key);
+      },
+    }),
+    [columns],
   );
 
   // Only a field whose values ARE options can grow a column. A board grouped
@@ -346,127 +388,147 @@ export default function KanbanBoard({
   return (
     <>
       <div className="dk-board-cols" ref={boardRef}>
-        {columns.map((col) => (
-          <section
-            key={col.key || " none"}
-            className={`dk-col ${col.declared ? "" : "is-loose"} ${
-              drop?.colKey === col.key && dragging ? "is-drop-target" : ""
-            }`}
-            data-dk-col={col.key}
-            data-dk-col-declared={col.declared ? "1" : "0"}
-          >
-            <header
-              className="dk-col-head"
-              onPointerDown={(e) => startColumnDrag(e, col)}
+        {columns.map((col) => {
+          const list = visibleCards(col, drag);
+          const target = dragging && drop?.colKey === col.key;
+          const finished = stages !== null && col.key === stages.done;
+          return (
+            <section
+              key={col.key || " none"}
+              className={`dk-col dk-color-${col.color ?? "grey"} ${
+                col.declared ? "" : "is-loose"
+              } ${target ? "is-drop-target" : ""}`}
+              data-dk-col={col.key}
+              data-dk-col-declared={col.declared ? "1" : "0"}
             >
-              <span className={`dk-col-dot dk-color-${col.color ?? "grey"}`} aria-hidden />
-              {renaming === col.key ? (
-                <InlineInput
-                  initial={col.label}
-                  ariaLabel="Rename column"
-                  onCommit={async (name) => {
-                    setRenaming(null);
-                    if (model) await model.renameOption(groupBy, col.key, name);
-                  }}
-                  onCancel={() => setRenaming(null)}
-                />
-              ) : (
-                <span className="dk-col-name" title={col.label}>
-                  {col.label}
+              <header
+                className="dk-col-head"
+                onPointerDown={(e) => startColumnDrag(e, col)}
+              >
+                <span className="dk-col-glyph">
+                  <StatusGlyph stage={stages?.stages.get(col.key) ?? null} />
                 </span>
-              )}
-              <span className="dk-col-count">{col.cards.length}</span>
-              {!readOnly && col.key !== NO_VALUE && (
-                <button
-                  className="dk-col-menu-btn"
-                  aria-label={`Column options for ${col.label}`}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    const box = e.currentTarget.getBoundingClientRect();
-                    setMenu({ key: col.key, x: box.left, y: box.bottom + 4 });
-                  }}
-                >
-                  ⋯
-                </button>
-              )}
-            </header>
-            <div className="dk-col-list">
-              {/* The card being dragged leaves its column and follows the
-                  pointer as a ghost, so the drop line indexes against what
-                  is actually left to sit between. */}
-              {visibleCards(col, drag).map((card, i) => (
-                <Fragment key={card.path}>
-                  {dragging && drop?.colKey === col.key && drop.index === i && (
-                    <div className="dk-drop-line" />
-                  )}
-                  <article
-                    className="dk-card"
-                    data-dk-card={card.path}
-                    onPointerDown={(e) => startCardDrag(e, card, col.key)}
-                    onClick={() => {
-                      if (dragRef.current?.started) return;
-                      onOpenCard(card.path);
-                    }}
-                    onContextMenu={(e) => {
-                      if (readOnly) return;
-                      e.preventDefault();
-                      setCardMenu({ path: card.path, x: e.clientX, y: e.clientY });
-                    }}
-                    title={card.path}
-                  >
-                    {renamingCard === card.path ? (
-                      <InlineInput
-                        initial={card.title}
-                        ariaLabel={`Rename ${card.title}`}
-                        onCommit={async (title) => {
-                          setRenamingCard(null);
-                          await renameCard(card, title);
-                        }}
-                        onCancel={() => setRenamingCard(null)}
-                      />
-                    ) : (
-                      <div className="dk-card-title">{card.title}</div>
-                    )}
-                    <Chips card={card} def={def} fields={chipFields} />
-                  </article>
-                </Fragment>
-              ))}
-              {dragging &&
-                drop?.colKey === col.key &&
-                drop.index >= visibleCards(col, drag).length && (
-                  <div className="dk-drop-line" />
-                )}
-              {col.adoptable && !readOnly && (
-                <button
-                  className="dk-col-adopt"
-                  onClick={() => void model?.adoptValue(groupBy, col.key)}
-                >
-                  Add “{col.label}” as an option
-                </button>
-              )}
-            </div>
-            {!readOnly && (
-              <footer className="dk-col-foot">
-                {composing === col.key ? (
+                {renaming === col.key ? (
                   <InlineInput
-                    initial=""
-                    placeholder="Card title"
-                    ariaLabel={`New card in ${col.label}`}
-                    keepOpen
-                    onCommit={async (title) => {
-                      await addCard(col, title);
+                    initial={col.label}
+                    ariaLabel="Rename column"
+                    onCommit={async (name) => {
+                      setRenaming(null);
+                      if (model) await model.renameOption(groupBy, col.key, name);
                     }}
-                    onCancel={() => setComposing(null)}
+                    onCancel={() => setRenaming(null)}
                   />
                 ) : (
-                  <button className="dk-col-add" onClick={() => setComposing(col.key)}>
-                    + New
+                  <span className="dk-col-name" title={col.label}>
+                    {col.label}
+                  </span>
+                )}
+                <span className="dk-col-count">{col.cards.length}</span>
+                {!readOnly && col.key !== NO_VALUE && (
+                  <button
+                    className="dk-col-menu-btn"
+                    aria-label={`Column options for ${col.label}`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      const box = e.currentTarget.getBoundingClientRect();
+                      setMenu({ key: col.key, x: box.left, y: box.bottom + 4 });
+                    }}
+                  >
+                    <MoreIcon />
                   </button>
                 )}
-              </footer>
-            )}
-          </section>
-        ))}
+              </header>
+              <div className="dk-col-list">
+                {/* The card being dragged leaves its column and follows the
+                    pointer as a ghost, so the drop line indexes against what
+                    is actually left to sit between. */}
+                {list.map((card, i) => (
+                  <Fragment key={card.path}>
+                    {target && drop.index === i && <div className="dk-drop-line" />}
+                    <article
+                      className={`dk-card ${finished ? "is-done" : ""}`}
+                      data-dk-card={card.path}
+                      onPointerDown={(e) => startCardDrag(e, card, col.key)}
+                      onClick={() => {
+                        if (dragRef.current?.started) return;
+                        onOpenCard(card.path);
+                      }}
+                      onContextMenu={(e) => {
+                        if (readOnly) return;
+                        e.preventDefault();
+                        setCardMenu({ path: card.path, x: e.clientX, y: e.clientY });
+                      }}
+                      title={card.path}
+                    >
+                      {renamingCard === card.path ? (
+                        <InlineInput
+                          initial={card.title}
+                          ariaLabel={`Rename ${card.title}`}
+                          onCommit={async (title) => {
+                            setRenamingCard(null);
+                            await renameCard(card, title);
+                          }}
+                          onCancel={() => setRenamingCard(null)}
+                        />
+                      ) : (
+                        <div className="dk-card-title">
+                          {finished && (
+                            <span className="dk-card-check">
+                              <StatusGlyph stage={{ kind: "done", fill: 1 }} size={14} />
+                            </span>
+                          )}
+                          {card.title}
+                        </div>
+                      )}
+                      {excerpt && card.excerpt && (
+                        <div className="dk-card-excerpt">{card.excerpt}</div>
+                      )}
+                      <Chips card={card} def={def} fields={pillFields} />
+                      <Dates card={card} fields={dateFields} finished={finished} />
+                    </article>
+                  </Fragment>
+                ))}
+                {/* An empty column is a place to put cards, and says so. */}
+                {list.length === 0 ? (
+                  <div className={`dk-col-empty ${target ? "is-target" : ""}`}>
+                    {readOnly ? "No cards" : "Drop cards here"}
+                  </div>
+                ) : (
+                  target && drop.index >= list.length && <div className="dk-drop-line" />
+                )}
+                {col.adoptable && !readOnly && (
+                  <button
+                    className="dk-col-adopt"
+                    onClick={() => void model?.adoptValue(groupBy, col.key)}
+                  >
+                    Add “{col.label}” as an option
+                  </button>
+                )}
+              </div>
+              {!readOnly && (
+                <footer className="dk-col-foot">
+                  {composing === col.key ? (
+                    <InlineInput
+                      initial=""
+                      placeholder="Card title"
+                      ariaLabel={`New card in ${col.label}`}
+                      keepOpen
+                      onCommit={async (title) => {
+                        await addCard(col, title);
+                      }}
+                      onCancel={() => setComposing(null)}
+                    />
+                  ) : (
+                    <button className="dk-col-add" onClick={() => setComposing(col.key)}>
+                      <PlusIcon size={13} />
+                      New
+                    </button>
+                  )}
+                </footer>
+              )}
+            </section>
+          );
+        })}
         {!readOnly && declaresOptions && (
           <div className="dk-col dk-col-new">
             {addingColumn ? (
@@ -482,7 +544,8 @@ export default function KanbanBoard({
               />
             ) : (
               <button className="dk-col-add" onClick={() => setAddingColumn(true)}>
-                + Add column
+                <PlusIcon size={13} />
+                Add column
               </button>
             )}
           </div>
@@ -602,6 +665,57 @@ function Chips({
       {chips.map((c) => (
         <span key={c.key} className={`dk-chip dk-color-${c.color ?? "grey"}`}>
           {c.text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// A date field that reads as a deadline — the one a card's date turns amber
+// for when it comes close. Any other date (started, shipped) is just a date.
+const DUE_RE = /\b(due|deadline)\b/i;
+const SOON_DAYS = 3;
+const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** The card's dates, in its foot: "Dec 4", amber when a deadline is close. */
+function Dates({
+  card,
+  fields,
+  finished,
+}: {
+  card: Card;
+  fields: Field[];
+  /** A finished card's deadline no longer presses. */
+  finished: boolean;
+}) {
+  const items = fields.flatMap((f) => {
+    const raw = propText(card.props[f.id]).trim();
+    if (raw === "") return [];
+    const m = ISO_DAY_RE.exec(raw);
+    if (!m) return [{ field: f, text: raw, soon: false }];
+    const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((day.getTime() - today.getTime()) / 86_400_000);
+    const text = day.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(day.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
+    });
+    const due = DUE_RE.test(f.name) || DUE_RE.test(f.id);
+    return [{ field: f, text, soon: due && !finished && days <= SOON_DAYS }];
+  });
+  if (items.length === 0) return null;
+  return (
+    <div className="dk-card-meta">
+      {items.map((d) => (
+        <span
+          key={d.field.id}
+          className={`dk-card-date ${d.soon ? "is-soon" : ""}`}
+          title={d.field.name}
+        >
+          <CalendarIcon size={12} />
+          {d.text}
         </span>
       ))}
     </div>

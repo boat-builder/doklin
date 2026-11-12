@@ -1,10 +1,11 @@
 // A datastore, shown.
 //
 // This is the shell every view of a store sits in: it holds the shared model
-// for the folder, decides WHICH saved view is on screen, draws the heading and
-// the view strip above it, and hands the cards to the board or the table. Both
-// views read the same derivation (store/board.ts) from the same model, so what
-// they show can never drift apart.
+// for the folder, decides WHICH saved view is on screen, draws the header
+// above it — the title, the view strip, how far the work has got, and the
+// Filter / Sort / View panels — and hands the cards to the board or the
+// table. Both views read the same derivation (store/board.ts) from the same
+// model, so what they show can never drift apart.
 //
 // Two hosts, two postures. A TAB owns the store — its strip switches between
 // saved views, adds them, and edits what a view filters, sorts and shows, all
@@ -13,13 +14,24 @@
 // changes nothing: the note said what it wanted to show, and a reader
 // scrolling past should not be able to rewrite that for the whole workspace.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import KanbanBoard from "./KanbanBoard";
 import TableView from "./TableView";
-import { Popover } from "./storeChrome";
+import {
+  BoardIcon,
+  FilterIcon,
+  PlusIcon,
+  Popover,
+  SlidersIcon,
+  SortIcon,
+  TableIcon,
+  type ComposeHandle,
+} from "./storeChrome";
 import { useStore } from "./store/useStore";
 import {
   applyFilter,
+  boardStages,
+  cardValue,
   orderedOptions,
   viewCards,
   visibleFields,
@@ -52,6 +64,12 @@ const OP_LABELS: Record<FilterOp, string> = {
   empty: "is empty",
   not_empty: "is not empty",
 };
+
+type ViewPatch = Partial<Omit<View, "id" | "kind">>;
+
+/** The three panels the header opens, and how wide each one is. */
+type PanelKind = "filter" | "sort" | "view";
+const PANEL_WIDTH: Record<PanelKind, number> = { filter: 340, sort: 260, view: 300 };
 
 type Props = {
   /** The store's folder. */
@@ -104,9 +122,12 @@ export default function StoreView({
   const { def, cards: allCards } = state;
   const [chosen, setChosen] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [options, setOptions] = useState<{ x: number; y: number } | null>(null);
+  const [panel, setPanel] = useState<{ kind: PanelKind; x: number; y: number } | null>(null);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [renamingView, setRenamingView] = useState(false);
+  // The header's New card button opens the composer of whichever view is
+  // showing: the board's first column, or the table's foot.
+  const composer = useRef<ComposeHandle | null>(null);
 
   useEffect(() => {
     setChosen(lastView.get(dir) ?? null);
@@ -149,8 +170,15 @@ export default function StoreView({
     [def, view],
   );
 
+  // Whether the columns are stages of work — what draws the status glyphs,
+  // checks a finished card, and puts the progress bar in the header.
+  const stages = useMemo(
+    () => (def && view?.kind === "kanban" && groupBy ? boardStages(def, groupBy) : null),
+    [def, view?.kind, groupBy],
+  );
+
   const update = useCallback(
-    (patch: Partial<Omit<View, "id" | "kind">>) => {
+    (patch: ViewPatch) => {
       if (view && model) void model.updateView(view, patch);
     },
     [view, model],
@@ -193,62 +221,120 @@ export default function StoreView({
 
   const missingGroup = view?.kind !== "table" && (!groupBy || !groupField);
 
+  const openPanel = (kind: PanelKind, e: React.MouseEvent<HTMLElement>) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    setPanel({ kind, x: Math.max(8, box.right - PANEL_WIDTH[kind]), y: box.bottom + 6 });
+  };
+
+  // How far the work has got, on a board whose columns are stages of it;
+  // everywhere else, how many cards the view holds.
+  const done = stages ? cards.filter((c) => cardValue(c, groupBy) === stages.done).length : 0;
+  const summary = stages ? (
+    <span className="dk-progress" title={`${done} of ${shown} in ${stages.done}`}>
+      <span className="dk-progress-track" aria-hidden>
+        <span
+          className="dk-progress-fill"
+          style={{ width: `${shown ? (done / shown) * 100 : 0}%` }}
+        />
+      </span>
+      {done} of {shown} done
+    </span>
+  ) : (
+    <span className="dk-board-sub">
+      {shown} {shown === 1 ? "card" : "cards"}
+    </span>
+  );
+
+  const filters = view?.filter.length ?? 0;
+
   return (
     <div
       className={`dk-board ${embedded ? "is-embed" : ""} ${dragging ? "is-dragging" : ""}`}
     >
       <header className="dk-board-head">
-        {/* An embed lives inside someone's prose, where an <h1> would join
-            the document outline and the table of contents. Only the tab —
-            where the board IS the page — gets the heading. */}
-        {embedded ? (
-          <div className="dk-board-title">{title}</div>
-        ) : (
-          <h1 className="dk-board-title">{title}</h1>
-        )}
+        <div className="dk-board-titlerow">
+          {/* The frame around an embed already carries the board's mark. */}
+          {!embedded && (
+            <span className="dk-board-icon" aria-hidden>
+              <BoardIcon size={17} />
+            </span>
+          )}
+          {/* An embed lives inside someone's prose, where an <h1> would join
+              the document outline and the table of contents. Only the tab —
+              where the board IS the page — gets the heading. */}
+          {embedded ? (
+            <div className="dk-board-title">{title}</div>
+          ) : (
+            <h1 className="dk-board-title">{title}</h1>
+          )}
+          {embedded && (
+            <>
+              <span className="dk-board-spacer" />
+              {summary}
+            </>
+          )}
+        </div>
         {!embedded && view && (
-          <div className="dk-view-tabs">
-            {def.views.map((v) => (
-              <button
-                key={v.id}
-                className={`dk-view-tab ${v.id === view.id ? "is-on" : ""}`}
-                onClick={() => pick(v.id)}
-              >
-                {v.name}
-              </button>
-            ))}
-            {def.views.length === 0 && (
-              <span className="dk-view-tab is-on">{view.name}</span>
-            )}
+          <div className="dk-board-bar">
+            <div className="dk-view-tabs" role="tablist">
+              {(def.views.length > 0 ? def.views : [view]).map((v) => (
+                <button
+                  key={v.id}
+                  role="tab"
+                  aria-selected={v.id === view.id}
+                  className={`dk-view-tab ${v.id === view.id ? "is-on" : ""}`}
+                  onClick={() => pick(v.id)}
+                >
+                  {v.kind === "table" ? <TableIcon /> : <BoardIcon />}
+                  {v.name}
+                </button>
+              ))}
+              {owns && (
+                <button
+                  className="dk-view-add"
+                  aria-label="New view"
+                  title="New view"
+                  onClick={(e) => {
+                    const box = e.currentTarget.getBoundingClientRect();
+                    setAddMenu({ x: box.left, y: box.bottom + 6 });
+                  }}
+                >
+                  <PlusIcon />
+                </button>
+              )}
+            </div>
+            <span className="dk-board-spacer" />
+            {summary}
             {owns && (
-              <button
-                className="dk-view-add"
-                aria-label="New view"
-                onClick={(e) => {
-                  const box = e.currentTarget.getBoundingClientRect();
-                  setAddMenu({ x: box.left, y: box.bottom + 4 });
-                }}
-              >
-                +
+              <>
+                <button
+                  className={`dk-bar-btn ${filters > 0 ? "is-on" : ""}`}
+                  onClick={(e) => openPanel("filter", e)}
+                >
+                  <FilterIcon />
+                  Filter
+                  {filters > 0 && <span className="dk-bar-count">{filters}</span>}
+                </button>
+                <button
+                  className={`dk-bar-btn ${view.sort ? "is-on" : ""}`}
+                  onClick={(e) => openPanel("sort", e)}
+                >
+                  <SortIcon />
+                  Sort
+                </button>
+                <button className="dk-bar-btn" onClick={(e) => openPanel("view", e)}>
+                  <SlidersIcon />
+                  View
+                </button>
+              </>
+            )}
+            {writable && !missingGroup && (
+              <button className="dk-new-card" onClick={() => composer.current?.compose()}>
+                <PlusIcon />
+                New card
               </button>
             )}
           </div>
-        )}
-        <span className="dk-board-spacer" />
-        <span className="dk-board-sub">
-          {shown} {shown === 1 ? "card" : "cards"}
-          {view?.kind !== "table" && groupField ? ` · grouped by ${groupField.name}` : ""}
-        </span>
-        {owns && view && (
-          <button
-            className="dk-view-opts"
-            onClick={(e) => {
-              const box = e.currentTarget.getBoundingClientRect();
-              setOptions({ x: Math.max(8, box.right - 300), y: box.bottom + 4 });
-            }}
-          >
-            View
-          </button>
         )}
       </header>
       {state.conflicts.length > 0 && (
@@ -271,6 +357,7 @@ export default function StoreView({
         </div>
       ) : view.kind === "table" ? (
         <TableView
+          ref={composer}
           def={def}
           cards={cards}
           fields={fields}
@@ -300,16 +387,19 @@ export default function StoreView({
         />
       ) : (
         <KanbanBoard
+          ref={composer}
           def={def}
           cards={cards}
           model={model}
           groupBy={groupBy}
           groupField={groupField!}
+          stages={stages}
           // An embed's own `hide:` is the narrower statement, made by the page
           // the reader is on, so it wins over the view's.
           hide={hide && hide.length > 0 ? hide : view.hide}
           sort={view.sort}
           show={view.show}
+          excerpt={view.excerpt}
           readOnly={readOnly}
           onDragging={setDragging}
           onHideColumn={
@@ -341,6 +431,7 @@ export default function StoreView({
               void model?.addView("kanban", "Board").then((id) => id && pick(id));
             }}
           >
+            <BoardIcon />
             New board
           </button>
           <button
@@ -350,6 +441,7 @@ export default function StoreView({
               void model?.addView("table", "Table").then((id) => id && pick(id));
             }}
           >
+            <TableIcon />
             New table
           </button>
           <div className="dk-popover-note">
@@ -358,10 +450,30 @@ export default function StoreView({
           </div>
         </Popover>
       )}
-      {options && view && def && (
-        <ViewOptions
-          x={options.x}
-          y={options.y}
+      {panel?.kind === "filter" && view && (
+        <FilterPanel
+          x={panel.x}
+          y={panel.y}
+          def={def}
+          view={view}
+          onUpdate={update}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel?.kind === "sort" && view && (
+        <SortPanel
+          x={panel.x}
+          y={panel.y}
+          def={def}
+          view={view}
+          onUpdate={update}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel?.kind === "view" && view && (
+        <ViewPanel
+          x={panel.x}
+          y={panel.y}
           def={def}
           view={view}
           groupBy={groupBy}
@@ -369,7 +481,7 @@ export default function StoreView({
           onRenaming={setRenamingView}
           onUpdate={update}
           onDelete={() => {
-            setOptions(null);
+            setPanel(null);
             void model?.deleteView(view.id);
             setChosen(null);
             lastView.delete(dir);
@@ -377,7 +489,7 @@ export default function StoreView({
           onExport={
             onExport
               ? () => {
-                  setOptions(null);
+                  setPanel(null);
                   // What the view shows, in the view's order — a board's
                   // columns flatten into one list, which is what a
                   // spreadsheet can hold.
@@ -386,16 +498,143 @@ export default function StoreView({
                 }
               : undefined
           }
-          onClose={() => setOptions(null)}
+          onClose={() => setPanel(null)}
         />
       )}
     </div>
   );
 }
 
-/* ---------- the view's own settings ---------- */
+/* ---------- the header's panels ---------- */
 
-function ViewOptions({
+type PanelProps = {
+  x: number;
+  y: number;
+  def: StoreDef;
+  view: View;
+  onUpdate: (patch: ViewPatch) => void;
+  onClose: () => void;
+};
+
+/** Which cards the view keeps: clauses, ANDed. */
+function FilterPanel({ x, y, def, view, onUpdate, onClose }: PanelProps) {
+  const setClause = (i: number, patch: Partial<Filter>) =>
+    onUpdate({ filter: view.filter.map((f, n) => (n === i ? { ...f, ...patch } : f)) });
+
+  return (
+    <Popover x={x} y={y} className="dk-view-panel is-filter" onClose={onClose}>
+      <div className="dk-view-section-head">Filter</div>
+      {view.filter.length === 0 && (
+        <div className="dk-popover-note">Every card shows. Add a filter to narrow the view.</div>
+      )}
+      {view.filter.map((clause, i) => (
+        <div className="dk-view-clause" key={i}>
+          <select
+            aria-label="Filter property"
+            value={clause.field}
+            onChange={(e) => setClause(i, { field: e.target.value })}
+          >
+            {def.fields.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter test"
+            value={clause.op}
+            onChange={(e) => setClause(i, { op: e.target.value as FilterOp })}
+          >
+            {FILTER_OPS.map((op) => (
+              <option key={op} value={op}>
+                {OP_LABELS[op]}
+              </option>
+            ))}
+          </select>
+          {clause.op !== "empty" && clause.op !== "not_empty" && (
+            <input
+              aria-label="Filter value"
+              className="dk-view-value"
+              defaultValue={clause.value}
+              placeholder="value"
+              onBlur={(e) => setClause(i, { value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              }}
+            />
+          )}
+          <button
+            className="dk-view-drop"
+            aria-label="Remove filter"
+            onClick={() => onUpdate({ filter: view.filter.filter((_, n) => n !== i) })}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button
+        className="dk-popover-item"
+        disabled={def.fields.length === 0}
+        onClick={() =>
+          onUpdate({
+            filter: [
+              ...view.filter,
+              { field: def.fields[0].id, op: "is" as FilterOp, value: "" },
+            ],
+          })
+        }
+      >
+        <PlusIcon />
+        Add filter
+      </button>
+    </Popover>
+  );
+}
+
+/** The view's order: a field and a direction, or the view's own order. */
+function SortPanel({ x, y, def, view, onUpdate, onClose }: PanelProps) {
+  return (
+    <Popover x={x} y={y} className="dk-view-panel is-sort" onClose={onClose}>
+      <div className="dk-view-section-head">Sort</div>
+      <label className="dk-popover-row">
+        By
+        <select
+          aria-label="Sort by"
+          value={view.sort?.field ?? ""}
+          onChange={(e) =>
+            onUpdate({
+              sort: e.target.value
+                ? { field: e.target.value, dir: view.sort?.dir ?? "asc" }
+                : null,
+            })
+          }
+        >
+          <option value="">{view.kind === "table" ? "Title" : "Board order"}</option>
+          {def.fields.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.name}
+            </option>
+          ))}
+        </select>
+        {view.sort && (
+          <button
+            className="dk-view-dir"
+            onClick={() =>
+              onUpdate({
+                sort: { field: view.sort!.field, dir: view.sort!.dir === "asc" ? "desc" : "asc" },
+              })
+            }
+          >
+            {view.sort.dir === "asc" ? "ascending" : "descending"}
+          </button>
+        )}
+      </label>
+    </Popover>
+  );
+}
+
+/** The rest of the view: its name, what it groups by, what a card shows. */
+function ViewPanel({
   x,
   y,
   def,
@@ -407,18 +646,12 @@ function ViewOptions({
   onDelete,
   onExport,
   onClose,
-}: {
-  x: number;
-  y: number;
-  def: StoreDef;
-  view: View;
+}: PanelProps & {
   groupBy: string;
   renaming: boolean;
   onRenaming: (v: boolean) => void;
-  onUpdate: (patch: Partial<Omit<View, "id" | "kind">>) => void;
   onDelete: () => void;
   onExport?: () => void;
-  onClose: () => void;
 }) {
   const groupable = groupableFields(def);
   const shownIds = view.show ?? def.fields.map((f) => f.id);
@@ -435,9 +668,6 @@ function ViewOptions({
     // tomorrow shows up instead of being invisible until someone ticks it.
     onUpdate({ show: next.length === def.fields.length ? null : next });
   };
-
-  const setClause = (i: number, patch: Partial<Filter>) =>
-    onUpdate({ filter: view.filter.map((f, n) => (n === i ? { ...f, ...patch } : f)) });
 
   return (
     <Popover x={x} y={y} className="dk-view-panel" onClose={onClose}>
@@ -485,105 +715,19 @@ function ViewOptions({
         </label>
       )}
 
-      <label className="dk-popover-row">
-        Sort by
-        <select
-          aria-label="Sort by"
-          value={view.sort?.field ?? ""}
-          onChange={(e) =>
-            onUpdate({
-              sort: e.target.value
-                ? { field: e.target.value, dir: view.sort?.dir ?? "asc" }
-                : null,
-            })
-          }
-        >
-          <option value="">{view.kind === "table" ? "Title" : "Board order"}</option>
-          {def.fields.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.name}
-            </option>
-          ))}
-        </select>
-        {view.sort && (
-          <button
-            className="dk-view-dir"
-            onClick={() =>
-              onUpdate({
-                sort: { field: view.sort!.field, dir: view.sort!.dir === "asc" ? "desc" : "asc" },
-              })
-            }
-          >
-            {view.sort.dir === "asc" ? "ascending" : "descending"}
-          </button>
-        )}
-      </label>
-
-      <div className="dk-view-section">
-        <div className="dk-view-section-head">Filter</div>
-        {view.filter.map((clause, i) => (
-          <div className="dk-view-clause" key={i}>
-            <select
-              aria-label="Filter property"
-              value={clause.field}
-              onChange={(e) => setClause(i, { field: e.target.value })}
-            >
-              {def.fields.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="Filter test"
-              value={clause.op}
-              onChange={(e) => setClause(i, { op: e.target.value as FilterOp })}
-            >
-              {FILTER_OPS.map((op) => (
-                <option key={op} value={op}>
-                  {OP_LABELS[op]}
-                </option>
-              ))}
-            </select>
-            {clause.op !== "empty" && clause.op !== "not_empty" && (
-              <input
-                aria-label="Filter value"
-                className="dk-view-value"
-                defaultValue={clause.value}
-                placeholder="value"
-                onBlur={(e) => setClause(i, { value: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                }}
-              />
-            )}
-            <button
-              className="dk-view-drop"
-              aria-label="Remove filter"
-              onClick={() => onUpdate({ filter: view.filter.filter((_, n) => n !== i) })}
-            >
-              ×
-            </button>
-          </div>
-        ))}
-        <button
-          className="dk-popover-item"
-          disabled={def.fields.length === 0}
-          onClick={() =>
-            onUpdate({
-              filter: [
-                ...view.filter,
-                { field: def.fields[0].id, op: "is" as FilterOp, value: "" },
-              ],
-            })
-          }
-        >
-          + Add filter
-        </button>
-      </div>
-
       <div className="dk-view-section">
         <div className="dk-view-section-head">Properties</div>
+        {view.kind === "kanban" && (
+          <label className="dk-view-check">
+            <input
+              type="checkbox"
+              aria-label="Show excerpt"
+              checked={view.excerpt}
+              onChange={() => onUpdate({ excerpt: !view.excerpt })}
+            />
+            Show excerpt
+          </label>
+        )}
         {def.fields.length === 0 && (
           <div className="dk-popover-note">
             This board has no properties yet. Add one from a card’s header.
@@ -637,17 +781,19 @@ function ViewOptions({
         </div>
       )}
 
-      {onExport && (
-        <button className="dk-popover-item" onClick={onExport}>
-          Export as CSV…
+      <div className="dk-view-section">
+        {onExport && (
+          <button className="dk-popover-item" onClick={onExport}>
+            Export as CSV…
+          </button>
+        )}
+        <button className="dk-popover-item is-danger" onClick={onDelete}>
+          Delete this view
         </button>
-      )}
-      <button className="dk-popover-item is-danger" onClick={onDelete}>
-        Delete this view
-      </button>
-      <div className="dk-popover-note">
-        Deleting a view keeps every card and every column. It forgets only this
-        way of looking at them.
+        <div className="dk-popover-note">
+          Deleting a view keeps every card and every column. It forgets only this
+          way of looking at them.
+        </div>
       </div>
     </Popover>
   );

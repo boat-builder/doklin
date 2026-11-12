@@ -224,7 +224,9 @@ const openNote = async (name) => {
   await poll(async () => (await page.locator(".dk-embed-frame").count()) === 0);
   await poll(async () => !(await fileOf(NOTE)).includes("```kanban"), 6000);
   step("Backspace removes the embed from the note", true);
-  await page.keyboard.press("Control+z");
+  // Undo is ⌘Z on a Mac and Ctrl+Z elsewhere; ControlOrMeta is whichever
+  // this browser's platform uses.
+  await page.keyboard.press("ControlOrMeta+z");
   await poll(async () => (await page.locator(".dk-embed-frame").count()) === 1);
   await poll(async () => (await fileOf(NOTE)).includes("```kanban"), 6000);
   step("undo restores it byte for byte", (await fileOf(NOTE)) === withEmbed, JSON.stringify(await fileOf(NOTE)));

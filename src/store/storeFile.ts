@@ -102,6 +102,13 @@ export type View = {
   show: string[] | null;
   /** Column values a kanban view leaves out. The cards stay where they are. */
   hide: string[];
+  /**
+   * Whether a kanban card shows its excerpt. On unless the record says
+   * `"excerpt": false` — the only value ever written, because a build that
+   * predates the switch rewrites a view from the keys it knows, and dropping
+   * the key must land on the default rather than on "off".
+   */
+  excerpt: boolean;
 };
 
 /** A view with nothing set — what every constructor starts from. */
@@ -110,7 +117,17 @@ export const newView = (
   kind: ViewKind,
   name: string,
   groupBy: string,
-): View => ({ id, kind, name, groupBy, filter: [], sort: null, show: null, hide: [] });
+): View => ({
+  id,
+  kind,
+  name,
+  groupBy,
+  filter: [],
+  sort: null,
+  show: null,
+  hide: [],
+  excerpt: true,
+});
 
 // A record this app version doesn't understand, carried through rewrites.
 export type ForeignRecord = { t: string; sortKey: string; raw: string };
@@ -251,6 +268,7 @@ export function parseStoreDef(text: string): StoreDef | null {
         sort: parseSort(parsed.sort),
         show: Array.isArray(parsed.show) ? strList(parsed.show) : null,
         hide: strList(parsed.hide),
+        excerpt: parsed.excerpt !== false,
       });
       continue;
     }
@@ -299,6 +317,7 @@ export function serializeStoreDef(def: StoreDef): string {
         ...(v.sort ? { sort: { f: v.sort.field, dir: v.sort.dir } } : {}),
         ...(v.show ? { show: v.show } : {}),
         ...(v.hide.length > 0 ? { hide: v.hide } : {}),
+        ...(v.excerpt ? {} : { excerpt: false }),
       }),
     );
   }

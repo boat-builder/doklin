@@ -29,6 +29,10 @@ pub(crate) const STORE_FILE: &str = "store.jsonl";
 /// A card whose frontmatter block is longer than this is not a card whose
 /// properties we can usefully show — read the head, not the whole note.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
+/// How much of the body after the block a board reads for a card's excerpt.
+/// The face shows two lines of the first paragraph, so this is generous; it
+/// is also small enough that a 500-card board stays one cheap read per card.
+const LEAD_BYTES: usize = 400;
 /// Reading every card's head is one IPC round trip; keep it bounded so a
 /// folder someone dropped 50k files into can't hang the window.
 const MAX_CARDS: usize = 5000;
@@ -42,6 +46,10 @@ pub(crate) struct CardHead {
     /// The leading frontmatter block VERBATIM, fences included and ending in
     /// a newline — or "" when the file has none. The frontend parses it.
     head: String,
+    /// Up to LEAD_BYTES of what follows the block (the whole start of the
+    /// file when there is none), cut on a character boundary. The frontend
+    /// finds the card's excerpt in it; "" when the block was too big to read.
+    lead: String,
 }
 
 #[derive(Serialize)]
@@ -92,40 +100,50 @@ pub(crate) fn head_len(text: &str) -> usize {
     0 // no closing fence: it was prose after all
 }
 
-/// Read at most `MAX_HEAD_BYTES` of `path` and return its frontmatter block.
-/// Reads line by line and stops at the closing fence, so a 2 MB note costs
-/// two lines of IO.
-fn read_head(path: &Path) -> std::io::Result<String> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut first = String::new();
-    if reader.read_line(&mut first)? == 0 {
-        return Ok(String::new());
+/// Read the start of a card: its frontmatter block and the lead after it.
+/// One bounded read (`MAX_HEAD_BYTES + LEAD_BYTES` at most), so a 2 MB note
+/// costs the same as a short one.
+fn read_card_start(path: &Path) -> std::io::Result<(String, String)> {
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take((MAX_HEAD_BYTES + LEAD_BYTES) as u64)
+        .read_to_end(&mut buf)?;
+    Ok(split_card_start(&buf))
+}
+
+/// The block and the lead in the first bytes of a card. A cut that lands
+/// inside a character keeps only the whole characters before it.
+///
+/// A fence with no closing fence after it is prose when the whole file was
+/// read (the dialect's rule), but when the read stopped short it may be a
+/// block too big to read — neither properties we can show nor prose to
+/// excerpt.
+fn split_card_start(buf: &[u8]) -> (String, String) {
+    let whole = buf.len() < MAX_HEAD_BYTES + LEAD_BYTES;
+    let text = match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&buf[..e.valid_up_to()]).unwrap_or_default(),
+    };
+    let len = head_len(text);
+    if len > MAX_HEAD_BYTES {
+        return (String::new(), String::new()); // too big to be properties
     }
-    if !first.ends_with('\n') || !fence_line(first.trim_end_matches('\n')) {
-        return Ok(String::new());
+    if len == 0 && !whole && text.lines().next().is_some_and(fence_line) {
+        return (String::new(), String::new());
     }
-    let mut head = first;
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(String::new()); // unterminated: not a block
-        }
-        head.push_str(&line);
-        if fence_line(line.trim_end_matches('\n')) {
-            return Ok(head);
-        }
-        if head.len() > MAX_HEAD_BYTES {
-            return Ok(String::new()); // too big to be properties
-        }
+    let rest = &text[len..];
+    let mut cut = rest.len().min(LEAD_BYTES);
+    while !rest.is_char_boundary(cut) {
+        cut -= 1;
     }
+    (text[..len].to_string(), rest[..cut].to_string())
 }
 
 /// Everything a board needs in one round trip: the definition file's text and,
-/// for every card (direct-child markdown file), its name, snapshot, and
-/// frontmatter block. Card BODIES are never read — the board doesn't show
-/// them, and a folder of long notes must stay cheap to open.
+/// for every card (direct-child markdown file), its name, snapshot,
+/// frontmatter block and the first few hundred bytes after it (the excerpt's
+/// source). The rest of a body is never read — a folder of long notes must
+/// stay cheap to open.
 #[tauri::command]
 pub(crate) fn read_store(path: String) -> Result<StoreRead, String> {
     let dir = PathBuf::from(&path);
@@ -168,12 +186,13 @@ pub(crate) fn read_store(path: String) -> Result<StoreRead, String> {
             Ok(s) => s,
             Err(_) => continue, // vanished mid-scan; the next rescan covers it
         };
-        let head = read_head(&p).unwrap_or_default();
+        let (head, lead) = read_card_start(&p).unwrap_or_default();
         cards.push(CardHead {
             name,
             path: p.to_string_lossy().to_string(),
             snapshot,
             head,
+            lead,
         });
     }
     cards.sort_by(|a, b| a.name.cmp(&b.name));
@@ -560,10 +579,49 @@ mod tests {
         let names: Vec<&str> = out.cards.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["A.md", "B.md"]);
         assert_eq!(out.cards[0].head, "---\nstatus: Done\n---\n");
+        assert_eq!(out.cards[0].lead, "body\n");
         assert_eq!(out.cards[1].head, "");
+        assert_eq!(out.cards[1].lead, "no frontmatter\n");
         assert_eq!(out.conflicts.len(), 1);
         assert!(is_store_dir(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_start_reads_a_bounded_lead() {
+        // The lead stops at LEAD_BYTES, and never inside a character.
+        let body = "é".repeat(LEAD_BYTES); // two bytes each
+        let (head, lead) = split_card_start(format!("---\nx: 1\n---\n{body}").as_bytes());
+        assert_eq!(head, "---\nx: 1\n---\n");
+        assert_eq!(lead.len(), LEAD_BYTES);
+        assert!(body.starts_with(&lead));
+
+        // A cut that splits a character keeps only the whole ones.
+        let odd = format!("a{}", "é".repeat(LEAD_BYTES));
+        let (_, lead) = split_card_start(odd.as_bytes());
+        assert_eq!(lead.len(), LEAD_BYTES - 1);
+
+        // A read that ended mid-character (the take() limit) is the same.
+        let mut cut = "---\nx: 1\n---\nné".as_bytes().to_vec();
+        cut.pop();
+        assert_eq!(
+            split_card_start(&cut),
+            (String::from("---\nx: 1\n---\n"), String::from("n"))
+        );
+
+        // A block too big to read is neither properties nor prose.
+        let big = format!("---\nnote: {}\n---\nbody\n", "x".repeat(MAX_HEAD_BYTES));
+        assert_eq!(split_card_start(big.as_bytes()), (String::new(), String::new()));
+        let cut_off = format!("---\nnote: {}", "x".repeat(MAX_HEAD_BYTES + LEAD_BYTES));
+        assert_eq!(
+            split_card_start(&cut_off.as_bytes()[..MAX_HEAD_BYTES + LEAD_BYTES]),
+            (String::new(), String::new())
+        );
+
+        // A whole file whose fence never closes is prose, the dialect's rule.
+        let (head, lead) = split_card_start(b"---\nJust a rule and some prose.\n");
+        assert_eq!(head, "");
+        assert_eq!(lead, "---\nJust a rule and some prose.\n");
     }
 }

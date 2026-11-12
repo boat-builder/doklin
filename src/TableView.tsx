@@ -10,14 +10,16 @@
 // The rows arrive already filtered and sorted (store/board.ts owns that, so
 // a published table and this one can't disagree); this file draws them.
 
-import { useState } from "react";
+import { useImperativeHandle, useState } from "react";
 import PropertyControl from "./PropertyControl";
-import { CardMenu, InlineInput } from "./storeChrome";
+import { CardMenu, InlineInput, PlusIcon, type ComposeHandle } from "./storeChrome";
 import { renamedCardPath, sanitizeTitle, type Card } from "./store/board";
 import type { PropValue } from "./store/frontmatter";
 import type { Field, Sort, StoreDef } from "./store/storeFile";
 
 type Props = {
+  /** Lets the host's New card button open the composer at the foot. */
+  ref?: React.Ref<ComposeHandle>;
   def: StoreDef;
   /** The cards this view shows, in its order. */
   cards: Card[];
@@ -44,6 +46,7 @@ const UP = "↑";
 const DOWN = "↓";
 
 export default function TableView({
+  ref,
   def,
   cards,
   fields,
@@ -65,6 +68,8 @@ export default function TableView({
   const [menu, setMenu] = useState<{ path: string; x: number; y: number } | null>(null);
   // A card's title IS its file name; renaming one edits the cell in place.
   const [renaming, setRenaming] = useState<string | null>(null);
+
+  useImperativeHandle(ref, () => ({ compose: () => setComposing(true) }), []);
 
   const renameCard = async (card: Card, title: string) => {
     if (!onRenameCard) return;
@@ -184,7 +189,8 @@ export default function TableView({
             />
           ) : (
             <button className="dk-col-add" onClick={() => setComposing(true)}>
-              + New
+              <PlusIcon size={13} />
+              New
             </button>
           )}
         </div>

@@ -4206,8 +4206,10 @@ body.tree-dragging.tree-drag-invalid * {
    The board fills its pane and scrolls sideways on its own (.editor-wrap
    deliberately never scrolls horizontally), so a wide board can't push a
    scrollbar onto the document canvas. Option colours are named, never hex in
-   anyone's files: each name sets a hue, and the theme sets how dark the ink
-   and how strong the wash are — one palette, every theme. */
+   anyone's files: each name sets a hue, and the theme sets how dark the ink,
+   how strong the wash and how bright a status glyph — one palette, every
+   theme. Colour lives on the things (a column's hue, its pills, its glyph);
+   the chrome around them stays quiet. */
 
 .dk-color-grey { --dk-h: 220; --dk-s: 6%; }
 .dk-color-brown { --dk-h: 25; --dk-s: 35%; }
@@ -4233,44 +4235,223 @@ body.tree-dragging.tree-drag-invalid * {
   user-select: none;
 }
 
+/* The header: the board's name, then one bar holding its views on the left
+   and what can be done to them on the right. */
 .dk-board-head {
   flex: 0 0 auto;
-  padding: 18px 24px 10px;
+  padding: 24px 28px 0;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dk-board-titlerow {
+  display: flex;
+  align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.dk-board-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  color: var(--board);
+  background: color-mix(in srgb, var(--board) 14%, transparent);
 }
 
 .dk-board-title {
   margin: 0;
   font-size: var(--fs-xl);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
   color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.dk-board-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dk-board-spacer {
+  flex: 1 1 auto;
+}
+
 .dk-board-sub {
   font-size: var(--fs-sm);
   color: var(--text-3);
   white-space: nowrap;
+  margin: 0 8px 4px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "5 of 14 done", over a bar in the finished colour. */
+.dk-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 4px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.dk-progress-track {
+  width: 84px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hover);
+  overflow: hidden;
+}
+
+.dk-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--live);
+  transition: width var(--dur) var(--ease);
+}
+
+.dk-view-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* A view tab sits ON the bar's rule: the open one underlines in the accent. */
+.dk-view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  margin-bottom: -1px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dk-view-tab:hover {
+  color: var(--text-1);
+}
+
+.dk-view-tab.is-on {
+  color: var(--text-1);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+.dk-view-add {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 3px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.dk-view-add:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+/* Filter, Sort, View: quiet until they hold something. */
+.dk-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin-bottom: 4px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dk-bar-btn:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+.dk-bar-btn.is-on {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.dk-bar-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  text-align: center;
+  color: var(--on-fill);
+  background: var(--accent);
+}
+
+.dk-new-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  margin: 0 0 4px 6px;
+  padding: 0 11px 0 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--on-fill);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dk-new-card:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text-1));
 }
 
 .dk-board-warn {
   flex: 0 0 auto;
-  margin: 0 24px 8px;
+  margin: 12px 28px 0;
   padding: 7px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   font-size: var(--fs-sm);
   color: var(--text-1);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
 
 .dk-board-empty {
-  padding: 40px 24px;
+  padding: 40px 28px;
   color: var(--text-3);
   font-size: var(--fs-md);
   line-height: 1.6;
@@ -4281,22 +4462,24 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1 1 auto;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 4px 24px 24px;
+  gap: 12px;
+  padding: 16px 28px 28px;
   overflow-x: auto;
   overflow-y: hidden;
   min-height: 0;
 }
 
+/* A column is washed in its own hue, so the board reads by colour before a
+   single word of it is read. */
 .dk-col {
-  flex: 0 0 260px;
+  flex: 0 0 264px;
   display: flex;
   flex-direction: column;
   max-height: 100%;
   min-height: 0;
-  border-radius: 8px;
-  padding: 6px;
-  background: color-mix(in srgb, var(--text-1) 3.5%, transparent);
+  border-radius: var(--r-lg);
+  padding: 4px 6px 6px;
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-col-wash));
 }
 
 .dk-col.is-drop-target {
@@ -4312,27 +4495,32 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-col-new {
   background: transparent;
   flex: 0 0 180px;
+  padding-top: 6px;
 }
 
 .dk-col-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 4px 8px;
+  gap: 7px;
+  height: 34px;
+  padding: 0 4px 0 6px;
   min-width: 0;
   cursor: grab;
 }
 
-.dk-col-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.dk-col-glyph {
   flex: 0 0 auto;
-  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50%);
+  display: grid;
+  place-items: center;
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-dot));
+}
+
+.dk-glyph-check {
+  stroke: var(--on-fill);
 }
 
 .dk-col-name {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text-1);
   overflow: hidden;
@@ -4342,22 +4530,30 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-col-count {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
   flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-ink));
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-wash));
 }
 
 .dk-col-menu-btn {
   margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
   border: 0;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-3);
-  border-radius: 4px;
-  padding: 0 5px;
-  font-size: var(--fs-md);
-  line-height: 18px;
   cursor: pointer;
   opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .dk-col:hover .dk-col-menu-btn,
@@ -4373,32 +4569,73 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-col-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   overflow-y: auto;
   min-height: 4px;
-  padding: 1px;
+  padding: 1px 1px 2px;
 }
 
+/* A card: raised off its column, and lifted a pixel under the pointer. The
+   lift is a translate — a scale would blur in WKWebView. */
 .dk-card {
-  border-radius: 6px;
-  background: var(--sheet);
+  border-radius: var(--r-md);
+  background: var(--raised);
   box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
-  padding: 8px 10px;
+  padding: 10px 12px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
+  transition:
+    box-shadow var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .dk-card:hover {
-  background: var(--hover);
+  box-shadow: var(--shadow-card-hover), 0 0 0 1px var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.dk-board.is-dragging .dk-card:hover {
+  transform: none;
 }
 
 .dk-card-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   font-size: var(--fs-md);
-  line-height: 1.35;
+  font-weight: 500;
+  line-height: 1.38;
   color: var(--text-1);
   overflow-wrap: anywhere;
+}
+
+/* A finished card: checked, and stepped back. */
+.dk-card.is-done .dk-card-title {
+  color: var(--text-2);
+}
+
+.dk-card-check {
+  flex: 0 0 auto;
+  display: grid;
+  margin-top: 1px;
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-dot));
+}
+
+.dk-card-excerpt {
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.dk-card.is-done .dk-card-excerpt {
+  color: var(--text-3);
 }
 
 .dk-card-chips {
@@ -4414,11 +4651,33 @@ body.tree-dragging.tree-drag-invalid * {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--fs-xs);
-  line-height: 16px;
-  padding: 0 6px;
-  border-radius: 4px;
-  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50% / var(--dk-wash));
-  color: hsl(var(--dk-h, 220) var(--dk-s, 6%) var(--dk-ink));
+  font-weight: 500;
+  line-height: 20px;
+  padding: 0 7px;
+  border-radius: var(--r-xs);
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-wash));
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-ink));
+}
+
+/* The card's foot: its dates. A deadline that is close reads amber. */
+.dk-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.dk-card-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dk-card-date.is-soon {
+  color: var(--warn-ink);
 }
 
 /* Where the card in flight would land. */
@@ -4428,16 +4687,34 @@ body.tree-dragging.tree-drag-invalid * {
   background: var(--accent);
 }
 
+/* An empty column is a place to put cards. */
+.dk-col-empty {
+  display: grid;
+  place-items: center;
+  height: 52px;
+  border-radius: var(--r-md);
+  border: 1.5px dashed color-mix(in srgb, hsl(var(--dk-h) var(--dk-s) 50%) 40%, var(--border-strong));
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.dk-col-empty.is-target {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
 .dk-drag-ghost {
   position: fixed;
   z-index: 60;
   pointer-events: none;
-  padding: 7px 10px;
-  border-radius: 6px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
   font-size: var(--fs-md);
-  background: var(--sheet);
+  font-weight: 500;
+  background: var(--raised);
   color: var(--text-1);
-  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border-strong);
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4445,25 +4722,29 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-col-foot {
-  padding-top: 6px;
+  padding-top: 4px;
 }
 
 .dk-col-add,
 .dk-col-adopt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
   text-align: left;
   border: 0;
   background: transparent;
   color: var(--text-3);
+  font: inherit;
   font-size: var(--fs-sm);
   padding: 5px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   cursor: pointer;
 }
 
 .dk-col-add:hover,
 .dk-col-adopt:hover {
-  background: var(--hover);
+  background: color-mix(in srgb, var(--text-1) 6%, transparent);
   color: var(--text-1);
 }
 
@@ -4472,15 +4753,25 @@ body.tree-dragging.tree-drag-invalid * {
   box-sizing: border-box;
   font: inherit;
   font-size: var(--fs-md);
-  padding: 6px 8px;
-  border-radius: 5px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
   border: 1px solid var(--accent);
-  background: var(--sheet);
+  background: var(--raised);
   color: var(--text-1);
   outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
-/* ---------- Small popovers (column menu, property picker) ---------- */
+/* ---------- Small popovers (column menu, property picker) ----------
+   One popover look for every store surface: a 12px radius, 30px rows at the
+   UI size, the shared pop shadow, and a short fade-and-rise on the way in. */
+
+@keyframes dk-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
 
 .dk-popover {
   position: fixed;
@@ -4488,29 +4779,35 @@ body.tree-dragging.tree-drag-invalid * {
   min-width: 180px;
   max-width: 260px;
   padding: 4px;
-  border-radius: 8px;
-  background: var(--sheet);
+  border-radius: var(--r-lg);
+  background: var(--raised);
   box-shadow: var(--shadow-pop), 0 0 0 1px var(--border);
+  animation: dk-pop-in var(--dur) var(--ease);
 }
 
 .dk-popover-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
+  min-height: 30px;
   text-align: left;
   border: 0;
   background: transparent;
   color: var(--text-1);
   font: inherit;
   font-size: var(--fs-md);
-  padding: 6px 8px;
-  border-radius: 5px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
   cursor: pointer;
 }
 
 .dk-popover-item:hover {
   background: var(--hover);
+}
+
+.dk-popover-item > svg {
+  color: var(--text-3);
 }
 
 .dk-popover-item.is-danger {
@@ -4532,21 +4829,21 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-popover-colors {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   padding: 6px 8px;
 }
 
 .dk-color-swatch {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   border: 0;
   cursor: pointer;
-  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50%);
+  background: hsl(var(--dk-h) var(--dk-s) var(--dk-dot));
 }
 
 .dk-color-swatch:hover {
-  box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3.5px var(--accent);
+  box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--accent);
 }
 
 /* ---------- A card's properties, above its note ---------- */
@@ -4602,7 +4899,7 @@ body.tree-dragging.tree-drag-invalid * {
   min-height: 26px;
   text-align: left;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: transparent;
   padding: 4px 6px;
   font: inherit;
@@ -4623,7 +4920,7 @@ body.tree-dragging.tree-drag-invalid * {
   width: 100%;
   box-sizing: border-box;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: transparent;
   padding: 4px 6px;
   font: inherit;
@@ -4678,7 +4975,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-embed-frame {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   background: var(--sheet);
   overflow: hidden;
 }
@@ -4691,20 +4988,28 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  min-height: 34px;
+  padding: 0 8px 0 12px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--text-1) 3%, transparent);
+  background: var(--sunken);
   /* The bar is the block's handle: a click here selects the node. */
   cursor: default;
   user-select: none;
 }
 
 .dk-embed-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--fs-xs);
   font-weight: 650;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-3);
+}
+
+.dk-embed-kind > svg {
+  color: var(--board);
 }
 
 .dk-embed-ref {
@@ -4721,19 +5026,26 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-embed-source {
   margin-left: auto;
   flex: 0 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--sheet);
-  color: var(--text-3);
-  font-size: var(--fs-xs);
-  padding: 2px 8px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  padding: 0 8px;
   cursor: pointer;
 }
 
-.dk-embed-source:hover,
-.dk-embed-source.is-on {
+.dk-embed-source:hover {
+  background: var(--hover);
   color: var(--text-1);
-  border-color: var(--text-3);
+}
+
+.dk-embed-source.is-on {
+  background: var(--accent-wash);
+  color: var(--accent);
 }
 
 .dk-embed-editor {
@@ -4764,7 +5076,7 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-embed-src {
   margin: 8px 0 0;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--text-1) 4%, transparent);
   font-size: var(--fs-sm);
   white-space: pre-wrap;
@@ -4800,7 +5112,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-embed-pick-item {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: var(--sheet);
   color: var(--text-1);
   font-size: var(--fs-md);
@@ -4830,7 +5142,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-embed-pick-go {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: var(--sheet);
   color: var(--text-1);
   font-size: var(--fs-md);
@@ -4844,7 +5156,8 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--error-ink);
 }
 
-/* The board itself, in the flow of a note rather than filling a pane. */
+/* The board itself, in the flow of a note rather than filling a pane: the
+   same header and columns, a size down. */
 .dk-board.is-embed {
   position: static;
   inset: auto;
@@ -4852,18 +5165,22 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-board.is-embed .dk-board-head {
-  padding: 12px 14px 6px;
+  padding: 12px 14px 0;
 }
 
 .dk-board.is-embed .dk-board-title {
   font-size: var(--fs-lg);
   font-weight: 650;
-  color: var(--text-1);
-  letter-spacing: 0;
+  letter-spacing: -0.01em;
+}
+
+.dk-board.is-embed .dk-progress,
+.dk-board.is-embed .dk-board-sub {
+  margin: 0;
 }
 
 .dk-board.is-embed .dk-board-cols {
-  padding: 2px 14px 14px;
+  padding: 12px 14px 14px;
   /* No pane to fill: the columns grow with their cards, and the row scrolls
      sideways on its own when the board is wider than the text column. */
   align-items: flex-start;
@@ -4871,69 +5188,29 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-board.is-embed .dk-col {
+  flex-basis: 248px;
   max-height: none;
 }
 
-/* ---------- Views: the strip above a store, and its settings ---------- */
+/* ---------- Views: the panels the header opens ---------- */
 
-.dk-board-spacer {
-  flex: 1 1 auto;
-}
-
-.dk-view-tabs {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  min-width: 0;
-}
-
-.dk-view-tab {
-  border: 0;
-  background: transparent;
-  color: var(--text-3);
-  font: inherit;
-  font-size: var(--fs-sm);
-  padding: 3px 8px;
-  border-radius: 5px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.dk-view-tab:hover {
-  background: var(--hover);
-}
-
-.dk-view-tab.is-on {
-  color: var(--text-1);
-  background: var(--hover);
-}
-
-.dk-view-add,
-.dk-view-opts {
-  border: 0;
-  background: transparent;
-  color: var(--text-3);
-  font: inherit;
-  font-size: var(--fs-sm);
-  padding: 3px 8px;
-  border-radius: 5px;
-  cursor: pointer;
-}
-
-.dk-view-add:hover,
-.dk-view-opts:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-/* The settings panel is wider than a menu — it holds selects and inputs. */
+/* Filter, Sort and View are wider than a menu — they hold selects and
+   inputs. StoreView places each by its width (PANEL_WIDTH). */
 .dk-popover.dk-view-panel {
   box-sizing: border-box;
   width: 300px;
-  max-width: 340px;
+  max-width: none;
   max-height: 70vh;
   overflow-y: auto;
   padding: 6px;
+}
+
+.dk-popover.dk-view-panel.is-filter {
+  width: 340px;
+}
+
+.dk-popover.dk-view-panel.is-sort {
+  width: 260px;
 }
 
 .dk-view-name {
@@ -4947,8 +5224,8 @@ body.tree-dragging.tree-drag-invalid * {
   font: inherit;
   font-size: var(--fs-md);
   font-weight: 600;
-  padding: 4px 6px;
-  border-radius: 5px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
   cursor: pointer;
   width: 100%;
   text-align: left;
@@ -4967,10 +5244,11 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-popover-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 8px;
   font-size: var(--fs-sm);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .dk-popover-row select,
@@ -4978,28 +5256,32 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-prop-type {
   flex: 1 1 auto;
   min-width: 0;
+  height: 28px;
   font: inherit;
   font-size: var(--fs-sm);
   color: var(--text-1);
   background: var(--sheet);
   border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 4px;
+  border-radius: var(--r-xs);
+  padding: 0 6px;
 }
 
 .dk-view-dir {
+  flex: 0 0 auto;
+  height: 28px;
   border: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   font: inherit;
-  font-size: var(--fs-xs);
-  padding: 2px 4px;
-  border-radius: 4px;
+  font-size: var(--fs-sm);
+  padding: 0 8px;
+  border-radius: var(--r-xs);
   cursor: pointer;
 }
 
 .dk-view-dir:hover {
   background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-view-section {
@@ -5009,10 +5291,11 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-view-section-head {
-  padding: 2px 6px 4px;
+  padding: 4px 8px;
   font-size: var(--fs-xs);
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   color: var(--text-3);
 }
 
@@ -5020,43 +5303,60 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
+  padding: 3px 6px;
 }
 
 .dk-view-value {
   flex: 1 1 60px;
   min-width: 0;
+  height: 28px;
+  box-sizing: border-box;
   font: inherit;
   font-size: var(--fs-sm);
   color: var(--text-1);
-  background: transparent;
+  background: var(--sheet);
   border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 4px;
+  border-radius: var(--r-xs);
+  padding: 0 6px;
+}
+
+.dk-view-value:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .dk-view-drop {
   flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
   border: 0;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-3);
   font: inherit;
   cursor: pointer;
-  padding: 0 4px;
 }
 
 .dk-view-drop:hover {
+  background: var(--hover);
   color: var(--text-1);
 }
 
 .dk-view-check {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 6px;
-  font-size: var(--fs-sm);
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-md);
   color: var(--text-1);
   cursor: pointer;
+}
+
+.dk-view-check:hover {
+  background: var(--hover);
 }
 
 .dk-view-check input {
@@ -5069,7 +5369,7 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 0 24px 24px;
+  padding: 12px 28px 28px;
 }
 
 .dk-table {
@@ -5086,24 +5386,27 @@ body.tree-dragging.tree-drag-invalid * {
   font-weight: 500;
   color: var(--text-3);
   background: var(--sheet);
-  border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 -1px 0 var(--border);
   padding: 0;
   white-space: nowrap;
 }
 
 .dk-th.is-title {
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .dk-th-btn {
   width: 100%;
+  height: 34px;
   text-align: left;
   border: 0;
+  border-radius: var(--r-xs);
   background: transparent;
   color: inherit;
   font: inherit;
   font-size: var(--fs-sm);
-  padding: 6px 8px;
+  font-weight: 500;
+  padding: 0 8px;
   cursor: pointer;
 }
 
@@ -5113,39 +5416,47 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-th-btn:hover:not(:disabled) {
   background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-td {
   border-bottom: 1px solid var(--border);
-  padding: 0 2px;
+  padding: 2px;
   vertical-align: middle;
   position: relative;
 }
 
 .dk-td.is-empty {
-  padding: 14px 8px;
+  padding: 18px 8px;
   color: var(--text-3);
   font-size: var(--fs-sm);
 }
 
 .dk-tr:hover .dk-td {
-  background: var(--hover);
+  background: color-mix(in srgb, var(--hover) 60%, transparent);
 }
 
 .dk-row-title {
   display: block;
   width: 100%;
+  min-height: 32px;
   text-align: left;
   border: 0;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-1);
   font: inherit;
   font-size: var(--fs-md);
-  padding: 6px 8px;
+  font-weight: 500;
+  padding: 0 8px;
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.dk-row-title:hover {
+  color: var(--accent);
 }
 
 .dk-table-foot {
@@ -5155,7 +5466,7 @@ body.tree-dragging.tree-drag-invalid * {
 /* A table inside a note takes the document's measure, and scrolls sideways
    on its own rather than widening the prose around it. */
 .dk-table-wrap.is-embed {
-  padding: 2px 14px 14px;
+  padding: 4px 14px 14px;
   overflow-y: visible;
 }
 
@@ -5170,7 +5481,7 @@ body.tree-dragging.tree-drag-invalid * {
   font-size: var(--fs-sm);
   text-align: left;
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
 }
 
 .dk-prop-label:hover:not(:disabled) {
@@ -5186,7 +5497,7 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 130px;
   box-sizing: border-box;
   border: 1px solid var(--accent);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: transparent;
   padding: 4px 6px;
   font: inherit;
@@ -5211,7 +5522,7 @@ body.tree-dragging.tree-drag-invalid * {
   font: inherit;
   font-size: var(--fs-sm);
   padding: 4px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   cursor: pointer;
 }
 
@@ -5280,8 +5591,9 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 4px;
+  min-height: 48px;
+  padding: 0 10px 0 12px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -5295,8 +5607,9 @@ body.tree-dragging.tree-drag-invalid * {
   font: inherit;
   font-size: var(--fs-lg);
   font-weight: 600;
+  letter-spacing: -0.01em;
   padding: 4px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5323,8 +5636,10 @@ body.tree-dragging.tree-drag-invalid * {
   font: inherit;
   font-size: var(--fs-lg);
   font-weight: 600;
+  letter-spacing: -0.01em;
   padding: 3px 5px;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .dk-peek-title-input:focus {
@@ -5334,14 +5649,25 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-peek-tab,
 .dk-peek-close {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
   border: 0;
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   font: inherit;
-  font-size: var(--fs-sm);
-  padding: 4px 8px;
-  border-radius: 5px;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
   cursor: pointer;
+}
+
+.dk-peek-close {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
 }
 
 .dk-peek-tab:hover,
@@ -5354,7 +5680,7 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 auto;
   margin: 8px 12px 0;
   padding: 7px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   font-size: var(--fs-sm);
   color: var(--text-1);
   background: color-mix(in srgb, var(--warn) 16%, transparent);
@@ -5385,7 +5711,7 @@ body.tree-dragging.tree-drag-invalid * {
   font: inherit;
   font-size: var(--fs-sm);
   padding: 4px 10px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   cursor: pointer;
 }
 

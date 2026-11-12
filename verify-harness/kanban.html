@@ -81,6 +81,18 @@
         return 0;
       };
 
+      // store.rs split_card_start: up to 400 bytes after the block, cut on a
+      // character. (Its "block too big to read" case needs a 16 KB card,
+      // which nothing here seeds.)
+      const LEAD_BYTES = 400;
+      const leadOf = (text) => {
+        const bytes = new TextEncoder().encode(text.slice(headLen(text)));
+        if (bytes.length <= LEAD_BYTES) return new TextDecoder().decode(bytes);
+        let cut = LEAD_BYTES;
+        while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--; // a continuation byte
+        return new TextDecoder().decode(bytes.slice(0, cut));
+      };
+
       const childrenOf = (dir) =>
         [...window.__fs.keys()].filter(
           (k) => k.startsWith(dir + "/") && !k.slice(dir.length + 1).includes("/"),
@@ -99,6 +111,7 @@
               path: p,
               snapshot: snap(text),
               head: text.slice(0, headLen(text)),
+              lead: leadOf(text),
             };
           });
         return {

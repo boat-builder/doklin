@@ -59,6 +59,8 @@ const {
   applyFilter,
   boardColumns,
   boardSnapshot,
+  boardStages,
+  cardExcerpt,
   cardChips,
   cardPasses,
   cardValue,
@@ -989,6 +991,103 @@ const eq = (a, b, msg) => {
     "the new name goes through the same sanitize a new card's does",
   );
   eq(renamedCardPath("/w/Projects/Old.md", "   "), "", "nothing to rename it to");
+}
+
+/* ==================== a card's excerpt ==================== */
+{
+  eq(cardExcerpt("The tokens are already there.\n"), "The tokens are already there.", "a one-line body is its own excerpt");
+  eq(cardExcerpt(""), "", "an empty body has none");
+  eq(
+    cardExcerpt("\n\n# Heading\n\nFirst para line one\nline two.\n\nSecond para.\n"),
+    "First para line one line two.",
+    "headings are skipped, the first paragraph joins its lines, and the second is left out",
+  );
+  eq(cardExcerpt("Title\n=====\n\nBody text.\n"), "Body text.", "a setext heading is a heading");
+  eq(cardExcerpt("```js\nconst x = 1;\n```\n\nAfter the code.\n"), "After the code.", "code is not prose");
+  eq(cardExcerpt("| a | b |\n|---|---|\n\nProse.\n"), "Prose.", "nor is a table");
+  eq(cardExcerpt("---\n\nAfter a rule.\n"), "After a rule.", "nor a rule");
+  eq(cardExcerpt("![diagram](a.png)\n\nWords.\n"), "Words.", "nor a picture on its own line");
+  eq(
+    cardExcerpt("See [the spec](https://x.y/z) and **bold** _it_ `code` ~~gone~~.\n"),
+    "See the spec and bold it code gone.",
+    "markdown reduces to the words a reader sees",
+  );
+  eq(cardExcerpt("A {==marked phrase==}{>>#t1<<} here.\n"), "A marked phrase here.", "a comment marker keeps its anchor");
+  eq(cardExcerpt("- [ ] first task\n- [x] second\n"), "first task second", "list markers and task boxes go");
+  eq(cardExcerpt("> quoted words\n"), "quoted words", "a quote keeps its words");
+  eq(cardExcerpt("snake_case_name stays\n"), "snake_case_name stays", "underscores inside a word are not emphasis");
+  eq(cardExcerpt("crlf line\r\nsecond\r\n\r\nnext"), "crlf line second", "a CRLF body reads the same");
+  eq(cardExcerpt("```\nunclosed code that runs to the end of the lead"), "", "an unclosed fence leaves nothing");
+  const capped = cardExcerpt("word ".repeat(100));
+  ok(capped.length === 240 && capped.endsWith("…"), "a long paragraph is capped with an ellipsis");
+}
+
+/* ==================== stages of work ==================== */
+{
+  const def = parseStoreDef(
+    [
+      '{"doklin":"store","v":1,"name":"P"}',
+      '{"t":"field","id":"status","name":"Status","type":"select"}',
+      '{"t":"field","id":"prio","name":"Priority","type":"select"}',
+      '{"t":"field","id":"tags","name":"Tags","type":"multi_select"}',
+      '{"t":"option","field":"status","name":"Backlog","rank":"a0"}',
+      '{"t":"option","field":"status","name":"Todo","rank":"a1"}',
+      '{"t":"option","field":"status","name":"In progress","rank":"a2"}',
+      '{"t":"option","field":"status","name":"Done","rank":"a3"}',
+      '{"t":"option","field":"status","name":"Cancelled","rank":"a4"}',
+      '{"t":"option","field":"prio","name":"High","rank":"a0"}',
+      '{"t":"option","field":"prio","name":"Low","rank":"a1"}',
+      '{"t":"option","field":"tags","name":"done","rank":"a0"}',
+    ].join("\n"),
+  );
+  const st = boardStages(def, "status");
+  eq(st.done, "Done", "the finished column is found by its name");
+  eq(st.stages.get(""), { kind: "todo", fill: 0 }, "the empty column hasn't started");
+  eq(st.stages.get("Backlog"), { kind: "todo", fill: 0 }, "nor has the first");
+  eq(st.stages.get("Todo"), { kind: "stage", fill: 1 / 3 }, "the ones between fill by position");
+  eq(st.stages.get("In progress"), { kind: "stage", fill: 2 / 3 });
+  eq(st.stages.get("Done"), { kind: "done", fill: 1 });
+  eq(st.stages.get("Cancelled"), { kind: "closed", fill: 0 }, "past the finished one is closed, not done");
+  eq(boardStages(def, "prio"), null, "a board grouped by priority claims nothing about progress");
+  eq(boardStages(def, "tags"), null, "nor a multi_select, even one with a 'done' tag");
+  eq(boardStages(defaultStoreDef("New"), "status")?.done, "Done", "a new board tracks progress from the start");
+  const shipped = parseStoreDef(
+    [
+      '{"doklin":"store","v":1,"name":"P"}',
+      '{"t":"field","id":"stage","name":"Stage","type":"select"}',
+      '{"t":"option","field":"stage","name":"Building","rank":"a0"}',
+      '{"t":"option","field":"stage","name":"shipped","rank":"a1"}',
+    ].join("\n"),
+  );
+  eq(boardStages(shipped, "stage")?.done, "shipped", "any of the finished words, in any case");
+}
+
+/* ==================== a view's excerpt switch ==================== */
+{
+  const base =
+    '{"doklin":"store","v":1,"name":"P"}\n' +
+    '{"t":"field","id":"status","name":"Status","type":"select"}\n' +
+    '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}\n';
+  const def = parseStoreDef(base);
+  eq(def.views[0].excerpt, true, "a view that says nothing about excerpts shows them");
+  eq(serializeStoreDef(def), base, "and writes nothing about them");
+  const off = serializeStoreDef({ ...def, views: [{ ...def.views[0], excerpt: false }] });
+  ok(off.includes('"excerpt":false'), "turning them off writes excerpt:false");
+  eq(parseStoreDef(off).views[0].excerpt, false, "which reads back off");
+  eq(serializeStoreDef(parseStoreDef(off)), off, "byte-identically");
+  // A build that predates the switch rewrites a view from the keys it knows.
+  eq(
+    parseStoreDef(off.replace(',"excerpt":false', "")).views[0].excerpt,
+    true,
+    "a dropped key lands on the default, never on off",
+  );
+  eq(
+    parseStoreDef(base.replace('"groupBy":"status"}', '"groupBy":"status","excerpt":"no"}')).views[0]
+      .excerpt,
+    true,
+    "anything but false is on",
+  );
+  eq(newView("v", "kanban", "V", "status").excerpt, true, "a new view starts with them on");
 }
 
 console.log(`store.test.mjs: ${checks} checks passed`);
