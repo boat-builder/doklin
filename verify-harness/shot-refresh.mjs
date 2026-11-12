@@ -6,7 +6,10 @@
 //   PORT=1437 node verify-harness/shot-refresh.mjs   (vite serving the worktree)
 //
 // Writes verify-harness/shots/refresh-*.png and prints a few computed-style
-// probes (document font, measure, popover surface) per theme.
+// probes (document font, measure, popover surface) per theme. Then the window
+// layout, in light and dark: the title row with the sidebar hidden (the lead
+// moves into the tab bar and the toggles must not move), the drafts panel
+// beside the sidebar, and a split.
 import { webkit } from "playwright";
 import { mkdirSync } from "node:fs";
 
@@ -82,5 +85,70 @@ for (const c of cases) {
   console.log(c.name.padEnd(13), JSON.stringify(probe), errors.length ? `ERRORS ${errors}` : "");
   await ctx.close();
 }
+
+// ---------- Window layout ----------
+const rect = (page, sel) =>
+  page.evaluate((s) => {
+    const r = document.querySelector(s)?.getBoundingClientRect();
+    return r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null;
+  }, sel);
+for (const theme of ["light", "dark"]) {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 2 });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(PAGE);
+  await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
+  await page.evaluate((t) => localStorage.setItem("doklin:theme", t), theme);
+  await page.reload();
+  await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
+  await page.evaluate(() => document.fonts.ready);
+
+  const withSide = {
+    toggle: await rect(page, ".title-toggle"),
+    bar: await rect(page, ".tab-bar"),
+    sheet: await rect(page, ".editor-area"),
+    firstTab: await rect(page, ".tab"),
+  };
+  await page.click('[aria-label="Toggle sidebar"]');
+  await page.waitForSelector(".tab-bar.has-lead .title-lead");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: `${OUT}refresh-layout-${theme}-nosidebar.png` });
+  const noSide = {
+    toggle: await rect(page, ".title-toggle"),
+    sheet: await rect(page, ".editor-area"),
+    firstTab: await rect(page, ".tab"),
+  };
+  await page.click('[aria-label="Toggle sidebar"]');
+  await page.click('[aria-label="Toggle drafts panel"]');
+  await page.waitForSelector(".drafts-panel");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: `${OUT}refresh-layout-${theme}-drafts.png` });
+  const drafts = { toggle: await rect(page, ".title-toggle"), sheet: await rect(page, ".editor-area") };
+  await page.click('[aria-label="Toggle drafts panel"]');
+  await page.click(".split-toggle");
+  await page.waitForSelector(".pane-header");
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: `${OUT}refresh-layout-${theme}-split.png` });
+
+  const checks = {
+    barIs40: withSide.bar?.h === 40,
+    togglesStay: withSide.toggle?.x === noSide.toggle?.x && withSide.toggle?.y === noSide.toggle?.y && drafts.toggle?.x === withSide.toggle?.x,
+    sheetInsetNoSide: noSide.sheet?.x === 8 && noSide.sheet?.y === 40,
+    sheetAgainstSidebar: withSide.sheet?.x === 240,
+    tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 3 * 28,
+    sheetAgainstDrafts: drafts.sheet?.x === 480,
+  };
+  const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
+  if (bad.length || errors.length) failed = true;
+  console.log(
+    `layout-${theme}`.padEnd(13),
+    bad.length ? `FAIL ${bad.join(",")}` : "ok",
+    JSON.stringify({ withSide, noSide, drafts }),
+    errors.length ? `ERRORS ${errors}` : "",
+  );
+  await ctx.close();
+}
+
 await browser.close();
 process.exit(failed ? 1 : 0);

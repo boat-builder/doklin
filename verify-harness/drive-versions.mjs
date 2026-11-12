@@ -343,7 +343,7 @@ step(
   "the sidebar root offers Workspace history…, and no Recently deleted while nothing is",
   rootMenu.some((t) => t.startsWith("Workspace history")) &&
     !rootMenu.some((t) => t.startsWith("Recently deleted")) &&
-    (await tid("recently-deleted-row").count()) === 0,
+    (await tid("recently-deleted-button").count()) === 0,
   rootMenu.join(" | "),
 );
 
@@ -431,19 +431,20 @@ await page.evaluate(() => {
   window.__versions.blobs["9".repeat(64)] = "# Gone\n\nthe note that was deleted\n";
   window.__emit("versions-applied", { root: "/docs", paths: [] });
 });
-await poll(async () => (await tid("recently-deleted-row").count()) === 1);
-const rowText = await tid("recently-deleted-row").innerText();
-await tid("recently-deleted-row").click();
+await poll(async () => (await tid("recently-deleted-button").count()) === 1);
+const footerLabel = await tid("recently-deleted-button").getAttribute("aria-label");
+const footerCount = await tid("recently-deleted-button").innerText();
+await tid("recently-deleted-button").click();
 await poll(async () => (await tid("recently-deleted").count()) === 1);
 const deletedRow = await tid("deleted-row").innerText();
 step(
-  "a deleted file gets a row at the foot of the sidebar, and a column listing its old folder and when it was last seen",
-  rowText.includes("Recently deleted") &&
-    rowText.includes("1") &&
+  "a deleted file gets a count in the sidebar's footer bar, and a column listing its old folder and when it was last seen",
+  footerLabel === "Recently deleted (1)" &&
+    footerCount.trim() === "1" &&
     deletedRow.includes("gone") &&
     deletedRow.includes("Projects") &&
     deletedRow.includes("last seen"),
-  `${rowText.replace(/\n/g, " ")} / ${deletedRow.replace(/\n/g, " ")}`,
+  `${footerLabel} [${footerCount.trim()}] / ${deletedRow.replace(/\n/g, " ")}`,
 );
 await page.screenshot({ path: SHOTS + "versions-06-deleted.png" });
 

@@ -58,6 +58,12 @@
 
   --row-h: 28px;
 
+  /* Window chrome. The title row holds the traffic lights, the tabs and
+     the page actions (tauri.conf.json centres the traffic lights in it);
+     the document sheet floats --inset off the window edge. */
+  --bar-h: 40px;
+  --inset: 8px;
+
   /* Constants that don't change with the theme. */
   --on-identity: #ffffff;   /* initials on a person's avatar hue */
   --knob: #ffffff;          /* a switch's thumb */
@@ -128,6 +134,13 @@
   --shadow-pop: 0 4px 12px rgba(16, 24, 40, 0.08), 0 12px 32px rgba(16, 24, 40, 0.12);
   --shadow-panel: -12px 0 30px rgba(16, 24, 40, 0.14);
   --shadow-drop: drop-shadow(0 2px 5px rgba(16, 24, 40, 0.3));
+  /* The document sheet's edge against the canvas, and the active tab that
+     reads as part of it. */
+  --shadow-sheet: 0 0 0 1px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --tab-active: #ffffff;
+
+  /* A board (datastore) wherever it is named: sidebar row, tab. */
+  --board: #7c5cd6;
 
   /* Board option colours: each option name sets a hue (.dk-color-*); the
      theme sets how dark the ink and how strong the wash. */
@@ -181,6 +194,10 @@
   --shadow-pop: 0 4px 12px rgba(57, 42, 30, 0.1), 0 12px 32px rgba(57, 42, 30, 0.14);
   --shadow-panel: -12px 0 30px rgba(57, 42, 30, 0.16);
   --shadow-drop: drop-shadow(0 2px 5px rgba(57, 42, 30, 0.3));
+  --shadow-sheet: 0 0 0 1px rgba(57, 42, 30, 0.08), 0 1px 3px rgba(57, 42, 30, 0.07);
+  --tab-active: #faf3e3;
+
+  --board: #7a55b8;
 
   --dk-ink: 30%;
   --dk-wash: 0.15;
@@ -235,6 +252,12 @@
   --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.6);
   --shadow-panel: -12px 0 30px rgba(0, 0, 0, 0.6);
   --shadow-drop: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.6));
+  /* Black on black: the sheet's edge is a hairline, and the active tab
+     steps up to the raised surface. */
+  --shadow-sheet: 0 0 0 1px #232326;
+  --tab-active: #121214;
+
+  --board: #a78bfa;
 
   --dk-ink: 76%;
   --dk-wash: 0.24;

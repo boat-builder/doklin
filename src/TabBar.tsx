@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ContextMenu from "./ContextMenu";
+import { dragWindowFromGap } from "./windowDrag";
 
 // "store" is a datastore folder shown as a kanban board — a tab whose path
 // is a directory rather than a document (see App.tsx).
@@ -29,6 +30,10 @@ type Props = {
   onDragOut?: (tabId: string, x: number, y: number) => void;
   onDragOutEnd?: (tabId: string, x: number, y: number) => void;
   onDragOutCancel?: () => void;
+  // Rendered at the bar's left edge, before the tabs. The bar is the window's
+  // title row, and with no left column showing the app puts the traffic-light
+  // lead (the panel toggles) here so the tabs start after it.
+  leading?: React.ReactNode;
   // Rendered at the bar's right edge, after the tab strip (the app puts the
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
@@ -53,6 +58,7 @@ export default function TabBar({
   onDragOut,
   onDragOutEnd,
   onDragOutCancel,
+  leading,
   trailing,
   onHistory,
 }: Props) {
@@ -204,17 +210,24 @@ export default function TabBar({
   }, [menuOpen]);
 
   return (
-    <div className="tab-bar">
-      <div className="tab-strip" role="tablist" ref={stripRef}>
+    // The bar is the window's title row: its empty stretches move the window.
+    <div className={`tab-bar ${leading ? "has-lead" : ""}`} onMouseDown={dragWindowFromGap}>
+      {leading}
+      <div
+        className="tab-strip"
+        role="tablist"
+        ref={stripRef}
+        onMouseDown={dragWindowFromGap}
+      >
         {tabs.map((t) => {
           const active = t.id === activeId;
           return (
             <div
               key={t.id}
               data-tab-id={t.id}
-              className={`tab ${active ? "is-active" : ""} ${
-                t.id === draggingId ? "is-dragging" : ""
-              } ${t.missing ? "is-missing" : ""}`}
+              className={`tab ${t.kind === "store" ? "is-board" : ""} ${
+                active ? "is-active" : ""
+              } ${t.id === draggingId ? "is-dragging" : ""} ${t.missing ? "is-missing" : ""}`}
             >
               <button
                 ref={active ? activeRef : undefined}
@@ -245,16 +258,20 @@ export default function TabBar({
                   setTabMenu({ x: e.clientX, y: e.clientY, path: t.path, kind: t.kind });
                 }}
               >
+                <span className="tab-icon">
+                  {t.kind === "store" ? <BoardIcon /> : <NoteIcon />}
+                </span>
                 <span className="tab-label">{tabLabel(t)}</span>
-                {active && dirty && (
-                  <span className="tab-dot" aria-hidden>
-                    ●
-                  </span>
-                )}
               </button>
+              {/* Unsaved changes show as a dot where the × sits (the macOS
+                  "edited" convention); hovering the tab brings the × back. */}
               <button
-                className="tab-close"
-                aria-label={`Close ${tabLabel(t)}`}
+                className={`tab-close ${active && dirty ? "is-dirty" : ""}`}
+                aria-label={
+                  active && dirty
+                    ? `Close ${tabLabel(t)} (unsaved changes)`
+                    : `Close ${tabLabel(t)}`
+                }
                 title="Close tab (⌘W)"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -262,6 +279,7 @@ export default function TabBar({
                 }}
               >
                 <CloseIcon />
+                <span className="tab-dirty-dot" aria-hidden />
               </button>
             </div>
           );
@@ -343,6 +361,46 @@ function CloseIcon() {
     >
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function NoteIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+// The same three-column mark the sidebar gives a board's row.
+function BoardIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      aria-hidden
+    >
+      <rect x="2" y="3" width="3.2" height="10" rx="1" />
+      <rect x="6.4" y="3" width="3.2" height="7" rx="1" />
+      <rect x="10.8" y="3" width="3.2" height="8.5" rx="1" />
     </svg>
   );
 }

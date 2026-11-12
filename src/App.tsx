@@ -46,6 +46,7 @@ import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted from "./RecentlyDeleted";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { dragWindowFromGap } from "./windowDrag";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
@@ -5424,6 +5425,14 @@ export default function App() {
               onExport={exportStoreCsv}
             />
           )}
+          {focused && conflict && (
+            // The open document changed on disk under unsaved edits: the
+            // question sits over the document it is about.
+            <ConflictBanner
+              onReload={() => void reloadFromDisk()}
+              onKeep={keepMyVersion}
+            />
+          )}
           {leasedHere && activeLease && showEditorHere && paneView === "md" && !previewHere && (
             <LeaseBanner lease={activeLease.lease} onTakeOver={takeOverActive} />
           )}
@@ -5597,12 +5606,15 @@ export default function App() {
     );
   };
 
+  // The left column: the sidebar, the drafts panel, or both.
+  const leftColumn = showSidebar || draftsOpen;
+
   // The gear lives in the left column's footer whenever there is a left
-  // column (sidebar or drafts), so it never sits over the file tree; with
-  // neither showing it floats bottom-left as before.
+  // column, so it never sits over the file tree; with neither showing it
+  // floats bottom-left.
   const settingsMenu = (
     <Settings
-      docked={showSidebar || draftsOpen}
+      docked={leftColumn}
       pageWide={pageWide}
       onTogglePageWide={() => setPageWide((w) => !w)}
       theme={theme}
@@ -5625,77 +5637,67 @@ export default function App() {
     />
   );
 
+  // The title row's left end: the traffic lights' clearance and the panel
+  // toggles. Over a left column (sidebar or drafts) it is that column's top
+  // row; with neither showing it rides at the start of the tab bar, so the
+  // tabs begin after it and the toggles never move. Its gaps drag the window.
+  const titleLead = (
+    <div className="title-lead" onMouseDown={dragWindowFromGap}>
+      <button
+        className="title-toggle"
+        onClick={() => setDraftsOpen((v) => !v)}
+        title={draftsOpen ? "Hide drafts (⌘⇧D)" : "Show drafts (⌘⇧D)"}
+        aria-label="Toggle drafts panel"
+        aria-pressed={draftsOpen}
+      >
+        <DraftsIcon />
+      </button>
+      {workspaceRoot && (
+        <button
+          className="title-toggle"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title={sidebarOpen ? "Hide sidebar (⌘\\)" : "Show sidebar (⌘\\)"}
+          aria-label="Toggle sidebar"
+          aria-pressed={sidebarOpen}
+        >
+          <SidebarIcon />
+        </button>
+      )}
+      {activeTab && !activeMissing && !activeIsHtmlDoc && (
+        <button
+          className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
+          onClick={() =>
+            // Dictation types into the markdown editor; from the html view,
+            // bring the editable version forward first (a session is never
+            // active there, so this is always a start). Never into a
+            // document another Mac holds — it is view-only here.
+            void (async () => {
+              if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
+              if (docViewRef.current === "html") await selectDocView("md");
+              await dictationRef.current?.toggle();
+            })()
+          }
+          disabled={leased && dictationUi.session === "idle"}
+          title={
+            dictationUi.session === "idle"
+              ? "Start dictation (⌘⇧V)"
+              : "Finish dictation (Esc)"
+          }
+          aria-label="Toggle dictation"
+          aria-pressed={dictationUi.session !== "idle"}
+        >
+          <MicIcon />
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
-      <div
-        className="drag-strip"
-        onMouseDown={(e) => {
-          // Drive the window drag ourselves rather than through the passive
-          // `data-tauri-drag-region` attribute: on macOS/WKWebView its injected
-          // mousedown handler intermittently fails to start the native drag, and
-          // a missed drag falls through to a normal content interaction — which
-          // is why dragging the strip would sometimes just select text instead
-          // of moving the window. Handling mousedown here (and preventing the
-          // default) starts the drag reliably and never selects text. A
-          // double-click zooms, matching a native title bar.
-          if (e.button !== 0) return;
-          e.preventDefault();
-          const win = getCurrentWindow();
-          if (e.detail === 2) void win.toggleMaximize();
-          else void win.startDragging();
-        }}
-      />
-      <div className="title-actions">
-        <button
-          className="title-toggle"
-          onClick={() => setDraftsOpen((v) => !v)}
-          title={draftsOpen ? "Hide drafts (⌘⇧D)" : "Show drafts (⌘⇧D)"}
-          aria-label="Toggle drafts panel"
-          aria-pressed={draftsOpen}
-        >
-          <DraftsIcon />
-        </button>
-        {workspaceRoot && (
-          <button
-            className="title-toggle"
-            onClick={() => setSidebarOpen((v) => !v)}
-            title={sidebarOpen ? "Hide sidebar (⌘\\)" : "Show sidebar (⌘\\)"}
-            aria-label="Toggle sidebar"
-            aria-pressed={sidebarOpen}
-          >
-            <SidebarIcon />
-          </button>
-        )}
-        {activeTab && !activeMissing && !activeIsHtmlDoc && (
-          <button
-            className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
-            onClick={() =>
-              // Dictation types into the markdown editor; from the html view,
-              // bring the editable version forward first (a session is never
-              // active there, so this is always a start). Never into a
-              // document another Mac holds — it is view-only here.
-              void (async () => {
-                if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-                if (docViewRef.current === "html") await selectDocView("md");
-                await dictationRef.current?.toggle();
-              })()
-            }
-            disabled={leased && dictationUi.session === "idle"}
-            title={
-              dictationUi.session === "idle"
-                ? "Start dictation (⌘⇧V)"
-                : "Finish dictation (Esc)"
-            }
-            aria-label="Toggle dictation"
-            aria-pressed={dictationUi.session !== "idle"}
-          >
-            <MicIcon />
-          </button>
-        )}
-      </div>
+      {leftColumn && titleLead}
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
@@ -5738,6 +5740,7 @@ export default function App() {
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
         onHistory={(path, kind) => void openHistory(path, kind)}
+        leading={leftColumn ? undefined : titleLead}
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
@@ -5873,12 +5876,6 @@ export default function App() {
           statuses={versionStatuses}
           cloud={cloudForRoot}
           onClose={() => setVersionsSettingsOpen(false)}
-        />
-      )}
-      {conflict && (
-        <ConflictBanner
-          onReload={() => void reloadFromDisk()}
-          onKeep={keepMyVersion}
         />
       )}
       {savePrompt && (
@@ -6034,8 +6031,27 @@ export default function App() {
         />
       )}
       <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
-      {showSidebar || draftsOpen ? (
-        <div className="side-footer">{settingsMenu}</div>
+      {leftColumn ? (
+        // The left column's footer bar: settings, and the folder's deleted
+        // files — a count that is here only when there is something in it
+        // (docs/versioning-plan.md §12.3.4). It toggles the column between
+        // the tree and the list.
+        <div className="side-footer">
+          {settingsMenu}
+          {showSidebar && workspaceRoot && deletedFiles.length > 0 && (
+            <button
+              className="side-footer-btn"
+              data-testid="recently-deleted-button"
+              aria-pressed={sidebarMode === "deleted"}
+              aria-label={`Recently deleted (${deletedFiles.length})`}
+              title="Recently deleted — files this folder's history still holds"
+              onClick={() => setSidebarMode((m) => (m === "deleted" ? "files" : "deleted"))}
+            >
+              <TrashIcon />
+              <span className="side-footer-count">{deletedFiles.length}</span>
+            </button>
+          )}
+        </div>
       ) : (
         settingsMenu
       )}
@@ -6044,6 +6060,27 @@ export default function App() {
 }
 
 /* ---------- Subviews ---------- */
+
+function TrashIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
 
 // The MD/HTML segmented toggle (right end of the tab bar, and each pane
 // header in split mode). Both sides always render so the control reads the

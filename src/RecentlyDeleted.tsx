@@ -1,7 +1,8 @@
 // Every file this folder's history holds and the folder itself does not
-// (docs/versioning-plan.md §7.2, §12.3.4). Apple Notes' shape: a row at the
-// foot of the sidebar, opening in the sidebar's own column — because
-// deletion is the moment nobody goes looking for a menu.
+// (docs/versioning-plan.md §7.2, §12.3.4). Apple Notes' shape: always in
+// sight at the foot of the sidebar — a bin and its count in the footer bar —
+// opening in the sidebar's own column, because deletion is the moment nobody
+// goes looking for a menu.
 //
 // This is the surface for the case the macOS Trash misses: a file deleted on
 // another Mac, one deleted before the Trash was emptied, or a mass-delete

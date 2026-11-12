@@ -99,22 +99,28 @@ body,
 }
 
 /* ---------- App shell ----------
-   When the sidebar is present we lay out with a column for it.
-   The drag strip spans full width as the top row. */
+   Three left-to-right slots: drafts panel | file sidebar | editor column.
+   Areas are constant; each panel's column collapses to 0 when hidden.
 
-/* Three left-to-right slots: drafts panel | file sidebar | editor column.
-   Areas are constant; each panel's column collapses to 0 when hidden. */
+   The top row is the window's title bar (--bar-h). Over the left column it
+   is the lead — the traffic lights' clearance and the panel toggles; over
+   the editor column it is the tab bar. With no left column showing, App.tsx
+   moves the lead to the start of the tab bar, so the tabs always begin
+   after the traffic lights. Every gap in the row drags the window
+   (windowDrag.ts).
+
+   Everything sits on the canvas except the document area: the one sheet,
+   inset from the window edge with rounded corners. */
 .app {
   display: grid;
   grid-template-columns: 0 0 1fr;
-  grid-template-rows: 38px 36px 1fr auto;
+  grid-template-rows: var(--bar-h) 1fr auto;
   grid-template-areas:
-    "drag   drag  drag"
-    "drafts side  tabs"
+    "lead   lead  bar"
     "drafts side  main"
     "foot   foot  main";
   height: 100vh;
-  background: var(--sheet);
+  background: var(--canvas);
   position: relative;
 }
 
@@ -130,22 +136,65 @@ body,
   grid-template-columns: 240px var(--sidebar-w, 240px) 1fr;
 }
 
-.drag-strip {
-  grid-area: drag;
-  height: 38px;
-  background: var(--sheet);
+/* ---------- Title bar: the lead and its toggles ---------- */
+
+.title-lead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  /* The traffic lights sit at x 16–70 (tauri.conf.json); the toggles start
+     after them, at the same x whether the lead is over the left column or
+     at the start of the tab bar. */
+  padding-left: 84px;
   user-select: none;
 }
 
-/* ---------- Tab bar (one row below the drag strip) ---------- */
+.app > .title-lead {
+  grid-area: lead;
+}
+
+.tab-bar > .title-lead {
+  flex: 0 0 auto;
+  padding-right: 8px;
+}
+
+.title-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.title-toggle:hover {
+  color: var(--text-1);
+  background: var(--hover);
+}
+
+.title-toggle[aria-pressed="true"] {
+  color: var(--text-1);
+}
+
+/* ---------- Tab bar (the title row over the editor column) ----------
+   Pill tabs on the canvas; the active one is lifted in the sheet's colour,
+   so it reads as joined to the document below. Page actions (publish,
+   comments, MD/HTML, split) follow the strip at the right. */
 
 .tab-bar {
-  grid-area: tabs;
+  grid-area: bar;
   display: flex;
-  align-items: stretch;
-  padding: 0 8px;
-  background: var(--sheet);
-  border-bottom: 1px solid var(--border);
+  align-items: center;
+  gap: 4px;
+  padding: 0 var(--inset);
+  user-select: none;
   /* The tab strip owns its horizontal overflow (scrolls internally, with the
      overflow menu as escape hatch). Without this, the non-shrinking tabs give
      the bar a large min-content width that pushes the 1fr track — and with it
@@ -154,11 +203,18 @@ body,
   min-width: 0;
 }
 
+/* The lead brings its own left clearance (the traffic lights). */
+.tab-bar.has-lead {
+  padding-left: 0;
+}
+
 /* The tabs scroll inside the strip; the overflow chevron (if any) stays put
-   at the bar's right edge. */
+   at the bar's right edge. The strip fills the row's height, so the stretch
+   after the last tab is a gap that drags the window. */
 .tab-strip {
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  align-self: stretch;
   gap: 2px;
   flex: 1;
   min-width: 0;
@@ -176,21 +232,21 @@ body,
   align-items: center;
   flex: 0 0 auto;
   max-width: 200px;
-  border-radius: 6px 6px 0 0;
-  color: var(--text-3);
-  align-self: flex-end;
-  margin-bottom: -1px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
 
 .tab:hover {
   background: var(--hover);
+  color: var(--text-1);
 }
 
 .tab.is-active {
-  background: var(--sheet);
+  background: var(--tab-active);
   color: var(--text-1);
-  border: 1px solid var(--border);
-  border-bottom: 1px solid var(--sheet);
+  box-shadow: var(--shadow-card);
 }
 
 .tab.is-dragging {
@@ -209,16 +265,33 @@ body,
 .tab-main {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
+  align-self: stretch;
   min-width: 0;
   max-width: 180px;
-  padding: 6px 4px 6px 10px;
+  padding: 0 4px 0 9px;
   background: transparent;
   border: none;
   color: inherit;
+  font: inherit;
   font-size: var(--fs-md);
+  font-weight: 500;
   cursor: pointer;
   touch-action: none; /* horizontal drags reorder tabs; don't pan the strip */
+}
+
+.tab-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.tab.is-active .tab-icon {
+  color: var(--accent);
+}
+
+.tab.is-board .tab-icon {
+  color: var(--board);
 }
 
 .tab-label {
@@ -227,22 +300,17 @@ body,
   white-space: nowrap;
 }
 
-.tab-dot {
-  flex-shrink: 0;
-  font-size: 9px;
-  line-height: 1;
-  color: var(--warn);
-}
-
 .tab-close {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
   margin-right: 6px;
+  padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-3);
   cursor: pointer;
@@ -259,17 +327,37 @@ body,
   color: var(--text-1);
 }
 
+/* Unsaved: a dot in the ×'s place until the tab is hovered. */
+.tab-dirty-dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.tab-close.is-dirty {
+  opacity: 1;
+}
+
+.tab:not(:hover) .tab-close.is-dirty svg {
+  display: none;
+}
+
+.tab:not(:hover) .tab-close.is-dirty .tab-dirty-dot {
+  display: block;
+}
+
 .tab-new {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  align-self: center;
+  width: 28px;
+  height: 28px;
   margin-left: 2px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
   cursor: pointer;
@@ -287,17 +375,16 @@ body,
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  margin-left: 2px;
 }
 
 .tab-overflow-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
   cursor: pointer;
@@ -436,9 +523,11 @@ body,
 
 /* ---------- Editor canvas ---------- */
 
-/* The editor grid cell. Holds one pane, or two side by side (split view)
-   with a draggable divider; the drop overlay (dragging a tab out of the bar)
-   floats over the whole area. */
+/* The editor grid cell: the document sheet. Holds one pane, or two side by
+   side (split view) with a draggable divider; the drop overlay (dragging a
+   tab out of the bar) floats over the whole area. Inset from the window's
+   right and bottom edges — and its left one too when no left column is
+   showing — with rounded corners that clip whatever it holds. */
 .editor-area {
   grid-area: main;
   position: relative;
@@ -446,7 +535,15 @@ body,
   align-items: stretch;
   min-width: 0;
   min-height: 0;
+  margin: 0 var(--inset) var(--inset) 0;
+  border-radius: var(--r-lg);
   background: var(--sheet);
+  box-shadow: var(--shadow-sheet);
+  overflow: hidden;
+}
+
+.app:not(.with-sidebar):not(.show-drafts) .editor-area {
+  margin-left: var(--inset);
 }
 
 /* One pane: an optional slim header (split mode) over the scrolling canvas. */
@@ -506,11 +603,6 @@ body,
 .pane-header-title.is-missing {
   text-decoration: line-through;
   opacity: 0.6;
-}
-
-.pane-header .view-toggle,
-.pane-header .html-view-btns {
-  margin-left: 0;
 }
 
 .pane-header-close {
@@ -588,23 +680,24 @@ body,
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-/* Tab-bar controls: the split button and the sync-scroll chain. */
+/* Tab-bar controls: the split button and the sync-scroll chain. Plain icon
+   buttons on the canvas; on, they take the accent. */
 .split-toggle,
 .sync-scroll-toggle {
   display: inline-flex;
   align-items: center;
-  align-self: center;
   justify-content: center;
   gap: 5px;
-  margin-left: 8px;
-  padding: 3px 8px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 7px;
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--sheet);
-  color: var(--text-3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
   cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
 
 .split-toggle:hover:not(:disabled),
@@ -616,14 +709,13 @@ body,
 .split-toggle.is-active,
 .sync-scroll-toggle.is-on {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--accent-wash);
 }
 
 .split-toggle.is-active:hover,
 .sync-scroll-toggle.is-on:hover {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .split-toggle:disabled {
@@ -635,7 +727,7 @@ body,
    row — trim the document's min-height so short docs don't grow a phantom
    scroll range. */
 .editor-pane.is-split .editor-wrap .milkdown .ProseMirror {
-  min-height: calc(100vh - 104px);
+  min-height: calc(100vh - var(--bar-h) - var(--inset) - 30px);
 }
 
 .editor-wrap .milkdown {
@@ -664,7 +756,7 @@ body,
   max-width: calc(var(--doc-measure) + 128px);
   margin: 0 auto;
   padding: 24px 64px 240px;
-  min-height: calc(100vh - 74px);
+  min-height: calc(100vh - var(--bar-h) - var(--inset));
   font-family: var(--doc-font);
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
   line-height: var(--doc-leading);
@@ -687,41 +779,41 @@ body,
    history, and unsaved state survive toggling) and a sandboxed iframe owns the
    canvas. */
 
+/* A 26px segmented control: a tinted track, the chosen side lifted. */
 .view-toggle {
   display: flex;
   align-items: center;
-  align-self: center;
   gap: 2px;
-  margin-left: 8px;
+  height: 26px;
   padding: 2px;
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--sheet);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--text-1) 7%, transparent);
 }
 
 .view-toggle-seg {
-  padding: 2px 9px;
+  height: 22px;
+  padding: 0 8px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
+  font: inherit;
   font-size: var(--fs-xs);
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
 
 .view-toggle-seg:hover:not(:disabled):not(.is-active) {
   color: var(--text-1);
-  background: var(--hover);
 }
 
 .view-toggle-seg.is-active {
-  background: var(--sheet);
+  background: var(--raised);
   color: var(--text-1);
-  box-shadow: 0 0 0 1px var(--border);
+  box-shadow: var(--shadow-card);
 }
 
 /* The version that doesn't exist on disk: visible but clearly inert. */
@@ -735,25 +827,24 @@ body,
 .comments-toggle {
   display: inline-flex;
   align-items: center;
-  align-self: center;
   gap: 5px;
-  margin-left: 8px;
-  padding: 3px 9px;
+  height: 28px;
+  padding: 0 8px;
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--sheet);
-  color: var(--text-3);
-  font-size: var(--fs-xs);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-sm);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
 .comments-toggle:not(.is-off) {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--accent-wash);
 }
 .comments-toggle:hover {
   color: var(--text-1);
@@ -761,7 +852,7 @@ body,
 }
 .comments-toggle:not(.is-off):hover {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .editor-wrap.is-html-view {
@@ -811,9 +902,7 @@ body,
 .html-view-btns {
   display: flex;
   align-items: center;
-  align-self: center;
   gap: 6px;
-  margin-left: 8px;
   flex-shrink: 0;
 }
 
@@ -827,18 +916,20 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 9px;
+  height: 28px;
+  padding: 0 8px;
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--sheet);
-  color: var(--text-3);
-  font-size: var(--fs-xs);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-sm);
   font-weight: 600;
   cursor: pointer;
   pointer-events: auto;
   white-space: nowrap;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
 .html-comment-btn:hover:not(:disabled) {
   color: var(--text-1);
@@ -846,12 +937,11 @@ body,
 }
 .html-comment-btn.is-on {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--accent-wash);
 }
 .html-comment-btn.is-on:hover {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 .html-comment-btn-count {
   padding: 1px 6px;
@@ -869,14 +959,19 @@ body,
 }
 
 /* Undocked fallback (a host with no chrome — the verification harness):
-   the old floating pills over the rendition's top-right corner. */
+   floating pills over the rendition's top-right corner, lifted off the
+   page they sit on. */
 .html-view-btns:not(.is-docked) {
   position: absolute;
   top: 12px;
   right: 16px;
-  margin-left: 0;
   gap: 8px;
   pointer-events: none;
+}
+
+.html-view-btns:not(.is-docked) .html-comment-btn {
+  background: var(--raised);
+  box-shadow: var(--shadow-card);
 }
 .html-view-btns:not(.is-docked) .html-comment-btn {
   padding: 6px 12px;
@@ -1524,13 +1619,48 @@ body,
   grid-area: foot;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
   height: 40px;
   padding: 0 8px;
-  background: var(--sheet);
   border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+}
+
+/* Recently deleted: a bin and its count. */
+.side-footer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.side-footer-btn:hover,
+.side-footer-btn[aria-pressed="true"] {
+  color: var(--text-1);
+  background: var(--hover);
+}
+
+.side-footer-count {
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--hover);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-footer-btn:hover .side-footer-count,
+.side-footer-btn[aria-pressed="true"] .side-footer-count {
+  background: var(--border);
 }
 
 .settings-wrap.is-docked {
@@ -1559,10 +1689,11 @@ body,
   left: -2px;
 }
 
+/* Floating (no left column): just inside the sheet's bottom-left corner. */
 .settings-wrap {
   position: fixed;
-  bottom: 16px;
-  left: 16px;
+  bottom: calc(var(--inset) + 12px);
+  left: calc(var(--inset) + 12px);
   z-index: 20;
 }
 
@@ -1820,13 +1951,16 @@ input[type="checkbox"]:focus-visible {
 
 /* ---------- Conflict banner ---------- */
 
+/* Over the top of the document it is about, and stays there as it scrolls. */
 .conflict-banner {
+  position: sticky;
+  top: 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;
-  margin: 0 12px;
+  margin: 8px 12px 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--hover);
@@ -2089,44 +2223,6 @@ input[type="checkbox"]:focus-visible {
   white-space: nowrap;
 }
 
-/* ---------- Title-bar toggles (top-left, next to traffic lights) ---------- */
-
-.title-actions {
-  position: fixed;
-  top: 9px;
-  left: 82px;
-  display: flex;
-  gap: 2px;
-  z-index: 6;
-}
-
-.title-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
-}
-
-.title-toggle:hover {
-  opacity: 1;
-  color: var(--text-1);
-  background: var(--hover);
-}
-
-.title-toggle[aria-pressed="true"] {
-  opacity: 1;
-  color: var(--text-1);
-}
-
 /* ---------- Drafts panel (left, workspace-independent) ---------- */
 
 .drafts-panel {
@@ -2134,9 +2230,13 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--sheet);
-  border-right: 1px solid var(--border);
   overflow: hidden;
+}
+
+/* Beside the sidebar, a hairline between the two columns; alone, the
+   sheet's own edge is the divide. */
+.app.with-sidebar .drafts-panel {
+  border-right: 1px solid var(--border);
 }
 
 .drafts-header {
@@ -2268,14 +2368,14 @@ input[type="checkbox"]:focus-visible {
 
 /* ---------- Sidebar ---------- */
 
+/* On the canvas, edge to edge, with no border of its own: the sheet beside
+   it carries the divide. */
 .sidebar {
   grid-area: side;
   position: relative; /* anchors the right-edge resize handle */
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--sheet);
-  border-right: 1px solid var(--border);
   overflow: hidden;
   font-size: var(--fs-md);
 }
@@ -2302,42 +2402,178 @@ body.sidebar-resizing {
   user-select: none;
 }
 
+/* The sidebar's head: the workspace switcher, the search field with New
+   file beside it, and the "Files" label over the tree. */
+.sidebar-head {
+  flex-shrink: 0;
+}
+
 .sidebar-header {
-  position: relative;
+  position: relative; /* anchors the workspace menu */
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 4px 6px 10px;
-  flex-shrink: 0;
+  padding: 0 8px 8px;
 }
 
 .sidebar-header-button {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  padding: 4px 6px;
+  height: 34px;
+  padding: 0 6px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text-1);
   cursor: pointer;
   font: inherit;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 600;
-  letter-spacing: 0.01em;
   text-align: left;
 }
 
-.sidebar-header-button:hover {
+.sidebar-header-button:hover,
+.sidebar-header-button[aria-expanded="true"] {
   background: var(--hover);
+}
+
+.sidebar-header-button > svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+/* The folder's initial on an accent tile. */
+.ws-tile {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  background: var(--accent);
+  color: var(--on-fill);
+  font-size: var(--fs-sm);
+  font-weight: 700;
 }
 
 .sidebar-header-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-tools {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+
+/* A button dressed as a field: it opens workspace search (⌘⇧F). */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: text;
+  transition: border-color var(--dur-fast);
+}
+
+.sidebar-search:hover {
+  border-color: var(--border-strong);
+}
+
+.sidebar-search > svg {
+  flex-shrink: 0;
+}
+
+.sidebar-search-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-search kbd {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.sidebar-new {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--on-fill);
+  cursor: pointer;
+  transition: background var(--dur-fast);
+}
+
+.sidebar-new:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text-1));
+}
+
+/* "Files", with the tree's own actions showing on hover. */
+.sidebar-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 24px;
+  padding: 0 10px 0 16px;
+}
+
+.sidebar-section-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.sidebar-section-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--dur-fast);
+}
+
+.sidebar:hover .sidebar-section-actions,
+.sidebar-section-actions:focus-within {
+  opacity: 1;
+}
+
+.sidebar-section-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.sidebar-section-btn:hover {
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 /* The cloud dot beside the workspace name: the engine's phase at a glance
@@ -2387,29 +2623,10 @@ body.sidebar-resizing {
   }
 }
 
-.sidebar-header-refresh {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0.7;
-}
-
-.sidebar-header-refresh:hover {
-  opacity: 1;
-  color: var(--text-1);
-  background: var(--hover);
-}
-
+/* Opens just under the switcher button (34px tall). */
 .sidebar-menu {
   position: absolute;
-  top: calc(100% - 2px);
+  top: 38px;
   left: 8px;
   min-width: 180px;
   padding: 6px;
@@ -2506,6 +2723,33 @@ body.sidebar-resizing {
   background: var(--accent-wash);
   color: var(--text-1);
   font-weight: 600;
+}
+
+.tree-row > svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.tree-row.is-active > svg {
+  color: var(--accent);
+}
+
+/* Indent guides: a hairline under each open folder's chevron, the length
+   of its children. --depth is the folder's depth (Sidebar.tsx); rows indent
+   8px + 14px a level and the chevron is 12px wide. */
+.tree ul[role="group"] {
+  position: relative;
+}
+
+.tree ul[role="group"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(14px + var(--depth) * 14px);
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 
 .tree-label {
@@ -4419,7 +4663,7 @@ body.tree-dragging.tree-drag-invalid * {
    where the chevron would, so board and folder rows still line up. */
 .tree-row.tree-board .tree-icon {
   flex: 0 0 auto;
-  color: var(--text-3);
+  color: var(--board);
 }
 
 /* ---------- A board inside a note (the ```kanban embed) ----------
@@ -5016,17 +5260,19 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-peek {
   position: fixed;
-  /* Below the window's drag strip — the panel is part of the app, not
-     something laid over its title bar. */
-  top: 38px;
-  right: 0;
-  bottom: 0;
+  /* Below the title row and on the sheet's inset — the panel is part of the
+     app, not something laid over its title bar. */
+  top: var(--bar-h);
+  right: var(--inset);
+  bottom: var(--inset);
+  border-radius: var(--r-lg);
+  overflow: hidden;
   width: min(560px, 55vw);
   z-index: 65;
   display: flex;
   flex-direction: column;
   background: var(--sheet);
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
   box-shadow: var(--shadow-panel);
 }
 
@@ -6140,8 +6386,6 @@ body.tree-dragging.tree-drag-invalid * {
   position: relative;
   display: flex;
   align-items: center;
-  align-self: center;
-  margin-left: 8px;
   flex-shrink: 0;
 }
 
@@ -6478,38 +6722,6 @@ button.published-row-name:hover {
 }
 
 /* ---------- Recently deleted (docs/versioning-plan.md §12.3.4) ----------- */
-
-/* Dimmed, at the foot of the tree, and only when there is something in it. */
-.sidebar-deleted-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  flex-shrink: 0;
-  padding: 7px 12px;
-  border: 0;
-  border-top: 1px solid var(--border);
-  background: none;
-  color: var(--text-3);
-  font: inherit;
-  font-size: var(--fs-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.sidebar-deleted-row:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-.sidebar-deleted-label {
-  flex: 1 1 auto;
-}
-
-.sidebar-deleted-count {
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-}
 
 .ws-deleted-list {
   list-style: none;

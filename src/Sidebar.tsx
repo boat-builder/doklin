@@ -126,9 +126,9 @@ type Props = {
   onHistory?: (path: string) => void;
   // The workspace's own timeline, a modal (docs/versioning-plan.md §7.2).
   onWorkspaceHistory?: () => void;
-  // Files this folder's history holds and the folder does not: the count
-  // for the row at the foot of the tree, and the switch into its column.
-  // The row is the point — the root's menu is the second way in.
+  // Files this folder's history holds and the folder does not: the root's
+  // menu offers them when there are any. The footer bar's count (App.tsx)
+  // is the main way in; this is the second.
   deletedCount?: number;
   onRecentlyDeleted?: () => void;
   // Publishing (docs/cloud.md §7.2): the folder dialog for a
@@ -1087,21 +1087,6 @@ export default function Sidebar({
           </ul>
         )}
       </div>
-      {/* Deleted files are a row, not a menu (docs/versioning-plan.md
-          §12.3.4): deletion is the moment nobody goes looking for one. It
-          is here only when there is something in it. */}
-      {deletedCount > 0 && onRecentlyDeleted && (
-        <button
-          className="sidebar-deleted-row"
-          data-testid="recently-deleted-row"
-          onClick={onRecentlyDeleted}
-          title="Files this folder's history still holds"
-        >
-          <TrashIcon />
-          <span className="sidebar-deleted-label">Recently deleted</span>
-          <span className="sidebar-deleted-count">{deletedCount}</span>
-        </button>
-      )}
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}
@@ -1135,27 +1120,6 @@ export default function Sidebar({
         </div>
       )}
     </aside>
-  );
-}
-
-function TrashIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <polyline points="3 6 5 6 21 6" />
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-      <path d="M10 11v6M14 11v6" />
-      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-    </svg>
   );
 }
 
@@ -1213,117 +1177,133 @@ function SidebarHeader({
   }, [menuOpen, setMenuOpen]);
 
   return (
-    <div ref={wrapRef} className="sidebar-header">
-      <button
-        className="sidebar-header-button"
-        onClick={() => setMenuOpen(!menuOpen)}
-        aria-expanded={menuOpen}
-        aria-haspopup="menu"
-        title="Workspace menu"
-      >
-        <span className="sidebar-header-name">{name}</span>
-        <ChevronDownIcon />
-      </button>
-      {cloud && (
+    <div className="sidebar-head">
+      {/* The workspace switcher: the folder's initial on a tile, its name,
+          and the menu of what else this window can open. */}
+      <div ref={wrapRef} className="sidebar-header">
         <button
-          className="sidebar-cloud-btn"
-          onClick={onOpenCloud}
-          title={describeCloud(cloud)}
-          aria-label={describeCloud(cloud)}
-          data-testid="sidebar-cloud-dot"
+          className="sidebar-header-button"
+          onClick={() => setMenuOpen(!menuOpen)}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          title="Workspace menu"
         >
-          <span className={`sidebar-cloud-dot phase-${cloud.phase}`} />
+          <span className="ws-tile" aria-hidden>
+            {workspaceInitial(name)}
+          </span>
+          <span className="sidebar-header-name">{name}</span>
+          <ChevronDownIcon />
         </button>
-      )}
-      <button
-        className="sidebar-header-refresh"
-        onClick={onNewFile}
-        title="New file"
-        aria-label="New file"
-      >
-        <NewFileIcon />
-      </button>
-      <button
-        className="sidebar-header-refresh"
-        onClick={onNewFolder}
-        title="New folder"
-        aria-label="New folder"
-      >
-        <NewFolderIcon />
-      </button>
-      <button
-        className="sidebar-header-refresh"
-        onClick={onSwitchToSearch}
-        title="Search in folder (⌘⇧F)"
-        aria-label="Search in folder"
-      >
-        <SearchIcon />
-      </button>
-      <button
-        className="sidebar-header-refresh"
-        onClick={onRefresh}
-        title="Refresh"
-        aria-label="Refresh file list"
-      >
-        <RefreshIcon />
-      </button>
-      {menuOpen && (
-        <div className="sidebar-menu" role="menu">
+        {cloud && (
           <button
-            role="menuitem"
-            className="sidebar-menu-item"
-            onClick={() => {
-              setMenuOpen(false);
-              onOpenFolder();
-            }}
+            className="sidebar-cloud-btn"
+            onClick={onOpenCloud}
+            title={describeCloud(cloud)}
+            aria-label={describeCloud(cloud)}
+            data-testid="sidebar-cloud-dot"
           >
-            Open folder…
+            <span className={`sidebar-cloud-dot phase-${cloud.phase}`} />
+          </button>
+        )}
+        {menuOpen && (
+          <div className="sidebar-menu" role="menu">
+            <button
+              role="menuitem"
+              className="sidebar-menu-item"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenFolder();
+              }}
+            >
+              Open folder…
+            </button>
+            <button
+              role="menuitem"
+              className="sidebar-menu-item"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenFile();
+              }}
+            >
+              Open file…
+            </button>
+            <button
+              role="menuitem"
+              className="sidebar-menu-item"
+              onClick={() => {
+                setMenuOpen(false);
+                onRevealInFinder();
+              }}
+            >
+              Reveal in Finder
+            </button>
+            <button
+              role="menuitem"
+              className="sidebar-menu-item"
+              data-testid="sidebar-menu-cloud"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenCloud?.();
+              }}
+            >
+              Cloud…
+            </button>
+            <button
+              role="menuitemcheckbox"
+              aria-checked={showAll}
+              className="sidebar-menu-item sidebar-menu-item-check"
+              onClick={() => {
+                setMenuOpen(false);
+                onToggleShowAll();
+              }}
+            >
+              <span>Show all files</span>
+              {showAll && <MenuCheckIcon />}
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="sidebar-tools">
+        <button
+          className="sidebar-search"
+          onClick={onSwitchToSearch}
+          title="Search in folder (⌘⇧F)"
+          aria-label="Search in folder"
+        >
+          <SearchIcon />
+          <span className="sidebar-search-label">Search</span>
+          <kbd>⌘⇧F</kbd>
+        </button>
+        <button
+          className="sidebar-new"
+          onClick={onNewFile}
+          title="New file"
+          aria-label="New file"
+        >
+          <PlusIcon />
+        </button>
+      </div>
+      <div className="sidebar-section">
+        <span className="sidebar-section-label">Files</span>
+        <span className="sidebar-section-actions">
+          <button
+            className="sidebar-section-btn"
+            onClick={onNewFolder}
+            title="New folder"
+            aria-label="New folder"
+          >
+            <NewFolderIcon />
           </button>
           <button
-            role="menuitem"
-            className="sidebar-menu-item"
-            onClick={() => {
-              setMenuOpen(false);
-              onOpenFile();
-            }}
+            className="sidebar-section-btn"
+            onClick={onRefresh}
+            title="Refresh"
+            aria-label="Refresh file list"
           >
-            Open file…
+            <RefreshIcon />
           </button>
-          <button
-            role="menuitem"
-            className="sidebar-menu-item"
-            onClick={() => {
-              setMenuOpen(false);
-              onRevealInFinder();
-            }}
-          >
-            Reveal in Finder
-          </button>
-          <button
-            role="menuitem"
-            className="sidebar-menu-item"
-            data-testid="sidebar-menu-cloud"
-            onClick={() => {
-              setMenuOpen(false);
-              onOpenCloud?.();
-            }}
-          >
-            Cloud…
-          </button>
-          <button
-            role="menuitemcheckbox"
-            aria-checked={showAll}
-            className="sidebar-menu-item sidebar-menu-item-check"
-            onClick={() => {
-              setMenuOpen(false);
-              onToggleShowAll();
-            }}
-          >
-            <span>Show all files</span>
-            {showAll && <MenuCheckIcon />}
-          </button>
-        </div>
-      )}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1521,7 +1501,8 @@ function TreeItem({
         </button>
       )}
       {!isCollapsed && (
-        <ul role="group">
+        // --depth places the folder's indent guide under its chevron.
+        <ul role="group" style={{ "--depth": depth } as React.CSSProperties}>
           {creatingHere && pendingCreate && (
             <NameRow
               depth={depth + 1}
@@ -1675,6 +1656,32 @@ function stripDocExt(name: string): string {
 
 /* ---------- Icons ---------- */
 
+// The workspace tile's letter: the folder name's first letter or digit,
+// skipping a leading dot or underscore.
+function workspaceInitial(name: string): string {
+  const m = name.match(/[\p{L}\p{N}]/u);
+  return m ? m[0].toUpperCase() : "·";
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function ChevronDownIcon() {
   return (
     <svg
@@ -1733,8 +1740,8 @@ function MenuCheckIcon() {
 function FileIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="15"
+      height="15"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1763,8 +1770,8 @@ function DocTypeIcon({ node }: { node: Extract<TreeNode, { kind: "file" }> }) {
 function MarkdownDocIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="15"
+      height="15"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1784,8 +1791,8 @@ function MarkdownDocIcon() {
 function HtmlDocIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="15"
+      height="15"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1805,8 +1812,8 @@ function HtmlDocIcon() {
 function BundledDocIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="15"
+      height="15"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1822,27 +1829,6 @@ function BundledDocIcon() {
   );
 }
 
-function NewFileIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
-      <line x1="12" y1="12" x2="12" y2="18" />
-      <line x1="9" y1="15" x2="15" y2="15" />
-    </svg>
-  );
-}
-
 const createRowLabel = (kind: "file" | "dir" | "board") =>
   kind === "dir" ? "Folder name" : kind === "board" ? "Board name" : "File name";
 
@@ -1854,8 +1840,8 @@ function BoardIcon() {
   return (
     <svg
       className="tree-icon"
-      width="14"
-      height="14"
+      width="15"
+      height="15"
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
@@ -1872,8 +1858,8 @@ function BoardIcon() {
 function FolderIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="15"
+      height="15"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1890,8 +1876,8 @@ function FolderIcon() {
 function NewFolderIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="14"
+      height="14"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1910,8 +1896,8 @@ function NewFolderIcon() {
 function SearchIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="14"
+      height="14"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -1929,8 +1915,8 @@ function SearchIcon() {
 function RefreshIcon() {
   return (
     <svg
-      width="12"
-      height="12"
+      width="13"
+      height="13"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
