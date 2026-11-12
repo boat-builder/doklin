@@ -1,7 +1,7 @@
 // Who is calling. Every /api route but one runs through `authenticate`: the
 // bearer is hashed, compared with the owner secret's hash in constant time,
 // and — when that is not it — resolved against the `tokens` table as the
-// person who holds it (docs/cloud.md §5.4, teams-plan.md §3.2, §9).
+// person who holds it (docs/cloud.md §5.4, §8.1).
 //
 // The order is the design, not an optimization. The owner's credential is the
 // worker's env secret and is matched with NO database read, so a D1 outage

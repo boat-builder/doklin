@@ -6140,6 +6140,13 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--app-text-muted);
 }
 
+/* A document another Mac holds (LeaseBanner, docs/cloud.md §8.2): the version
+   banner's frame, tinted with the unsaved-changes colour rather than the
+   accent — it is about somebody else having it open, not about a moment. */
+.lease-banner {
+  background: color-mix(in srgb, var(--app-dirty) 12%, var(--app-surface));
+}
+
 .version-banner-actions {
   display: flex;
   align-items: center;

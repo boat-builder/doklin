@@ -1,5 +1,5 @@
 // The D1 database beside the bucket: its schema, and the runner that owns it
-// (docs/teams-plan.md §3.5, §4.3).
+// (docs/cloud.md §5.1).
 //
 // An update ships ONE bundled JS file and no migrations directory, so
 // `wrangler d1 migrations apply` is not available to a domain being updated:
@@ -24,14 +24,14 @@
 // answer an identity route, because those ARE the database (members.ts);
 // the owner's own credential is the env secret and never reads a row, so a
 // database that is gone degrades a workspace to one credential rather than
-// locking anyone out (§3.2).
+// locking anyone out (docs/cloud.md §5.4).
 
 import type { Env } from "./env";
 
 type Step = {
   /** The schema version this step produces. */
   to: number;
-  /** The tables it creates — what a wipe empties (§4.4). */
+  /** The tables it creates — what a wipe empties (docs/cloud.md §5.7). */
   tables: readonly string[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
@@ -42,7 +42,7 @@ const BASE_VERSION = 1;
 
 const STEPS: readonly Step[] = [
   {
-    // People and the credentials they hold (docs/teams-plan.md §3.5). The
+    // People and the credentials they hold (docs/cloud.md §8.1). The
     // separation is the whole point: a *member* is permanent and keyed by
     // their email, so a new Mac re-reaches the same person; a *token* is
     // per-device and disposable; an *invite* is a token that has not been
@@ -84,13 +84,13 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // Who is here, a row per device (docs/teams-plan.md §3.3, §13). It used
-    // to be one shared R2 object read, mutated and written back with no CAS —
-    // two beats landing together lost one, and every beat was a Class A
-    // write. A row per device, upserted, is atomic by itself.
+    // Who is here, a row per device (docs/cloud.md §5.3). It used to be one
+    // shared R2 object read, mutated and written back with no CAS — two beats
+    // landing together lost one, and every beat was a Class A write. A row
+    // per device, upserted, is atomic by itself.
     //
-    // `member_id` is nullable where the plan's sketch was not: an owner who
-    // never adopted an identity is here all the same, as their Mac's name.
+    // `member_id` is nullable: an owner who never adopted an identity is here
+    // all the same, as their Mac's name.
     // No index on `ts`: the table holds one row per live device, every read
     // filters by the TTL, and an index would be a second write on every beat.
     to: 3,
@@ -102,6 +102,28 @@ const STEPS: readonly Step[] = [
          device_name TEXT NOT NULL,
          path        TEXT,                      -- what they are editing, when anything
          ts          INTEGER NOT NULL
+       )`,
+    ],
+  },
+  {
+    // Who holds which document (docs/cloud.md §8.2). Keyed by the path, so
+    // one atomic upsert is the whole of acquiring, renewing and refusing: the
+    // primary key is the lock, and the upsert's WHERE says whose it may be.
+    //
+    // Advisory, always — nothing on the sync path reads this table. Like
+    // `presence`, a lease lapses by its `until` rather than by a reaper, and
+    // `member_id` is nullable for the same owner nobody named. No index on
+    // `device_id`: the table holds one row per document somebody has open,
+    // and an index would be a second write on every renewal.
+    to: 4,
+    tables: ["leases"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS leases (
+         path        TEXT PRIMARY KEY,          -- workspace-relative, lowercased
+         device_id   TEXT NOT NULL,             -- the Mac that holds it
+         member_id   TEXT,                      -- whose Mac; null for an owner nobody named
+         device_name TEXT NOT NULL,
+         until       INTEGER NOT NULL
        )`,
     ],
   },
@@ -150,7 +172,7 @@ export async function ensureSchema(env: Env): Promise<number | null> {
 }
 
 /**
- * The D1 half of the owner's wipe (§4.4): empty every table a step created,
+ * The D1 half of the owner's wipe (docs/cloud.md §5.7): empty every table a step created,
  * so a rebound domain inherits no ghost members. The schema is brought up
  * first — a wipe of a database nobody has migrated has nothing to delete
  * from — and `meta` survives, since it holds no one's data.

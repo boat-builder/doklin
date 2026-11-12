@@ -7,16 +7,18 @@
 //
 //   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
 //                                    you: who this bearer is, people: [{id, name}] — the directory
-//                                    a manifest's `by` is read with (docs/teams-plan.md §12)}
+//                                    a manifest's `by` is read with (docs/cloud.md §6.6)}
 //   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
 //                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-//   GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll; reads only
-//   POST   /api/poll                 the same poll, carrying this device's beat (docs/teams-plan.md §13):
-//                                    body {name, path?} — "here, editing path" — or {leave: true}.
-//                                    Presence is best effort: a database that cannot answer costs
-//                                    the list ({} comes back), never the etag
+//   GET    /api/poll                 {manifestEtag, presence, leases} — the cheap 15 s poll; reads only
+//   POST   /api/poll                 the same poll, carrying this device's beat (docs/cloud.md §5.3):
+//                                    body {name, path?, take?} — "here, editing path", which claims
+//                                    its lease (take: from whoever holds it) and lets go of any
+//                                    other — or {leave: true}. Presence and leases are best effort:
+//                                    a database that cannot answer costs the lists ({} and null
+//                                    come back), never the etag
 //   GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 //   PUT    /api/manifest             x-base-etag required; 412 + current etag on a lost race;
 //                                    400 on garbage, 426 on a schema this worker predates
@@ -36,7 +38,7 @@
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
 //                                    repeat until remaining:false. Frees the domain.
 //
-//   People (docs/teams-plan.md §9). Everything here is the D1 database beside
+//   People (docs/cloud.md §5.3–5.4, §8.1). Everything here is the D1 database beside
 //   the bucket; a deployment without one answers 503 and loses nothing else.
 //
 //   POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
@@ -94,7 +96,7 @@ import {
   upsertMember,
 } from "./members";
 import { sha256Hex } from "./crypto";
-import { readPresence, recordBeat, type Beat } from "./presence";
+import { readHere, recordBeat, type Beat, type Here } from "./presence";
 import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
@@ -129,12 +131,12 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     // The probe is also where the database migrates itself: it is the one
     // route every engine calls on start and on every poll, and the only one
     // that reports what it found. `d1` is the schema version, or null on a
-    // deployment whose wrangler.toml has no DB binding (docs/teams-plan.md §8).
+    // deployment whose wrangler.toml has no DB binding (docs/cloud.md §5.1).
     //
     // Since v6 it also answers identity: who the caller is, and what every
     // person here is called. Both belong on the route an engine already asks
     // before it writes anything — a manifest it PUTs signs with `you.memberId`
-    // and every `by` it reads resolves through `people` (teams-plan.md §12).
+    // and every `by` it reads resolves through `people` (docs/cloud.md §6.6).
     const [workspace, d1, you, people] = await Promise.all([
       readWorkspace(env),
       ensureSchema(env),
@@ -210,7 +212,7 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
 const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
 
 /**
- * Who the bearer is, as the app has to write it down (docs/teams-plan.md §12):
+ * Who the bearer is, as the app has to write it down (docs/cloud.md §6.6):
  * the id a manifest this Mac writes will carry in `by`.
  *
  * A member's identity came off their token already — `authenticate` resolved
@@ -320,7 +322,7 @@ async function handleAuth(request: Request, env: Env, parts: string[]): Promise<
  * Invite someone by email, creating the person if this is the first time that
  * address has been seen. The body carries `codeHash`, never a code: the app
  * mints the 100-bit code and hashes it, so a worker log, a D1 backup and this
- * request body are all incapable of letting anyone in (teams-plan.md §6.3).
+ * request body are all incapable of letting anyone in (docs/cloud.md §5.4).
  */
 async function createInvite(request: Request, env: Env): Promise<Response> {
   const body = await readJsonObject(request);
@@ -510,20 +512,23 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
 
 /**
  * The 15-second question every engine asks — "has the manifest moved?" — and,
- * since v7, the carrier of its presence beat (docs/teams-plan.md §3.3, §13).
+ * since v7, the carrier of its presence beat; since v8, of its leases too
+ * (docs/cloud.md §5.3, §8.2).
  *
  * The method says whether anything is written. A `GET` reads; a `POST` says
  * "this device is here" (or is leaving), and the engine sends one only when a
- * beat is due — every 45 s, or the moment the edited path changes — so an
- * idle poll writes nothing and the client decides when a write happens. A
- * worker that wrote on every poll would spend 58% of D1's free daily writes
- * on freshness nobody can see (§5).
+ * beat is due — every 45 s, the moment the edited path changes, or when the
+ * document it has open is free to claim — so an idle poll writes nothing and
+ * the client decides when a write happens. A worker that wrote on every poll
+ * would spend 58% of D1's free daily writes on freshness nobody can see
+ * (docs/cloud.md §11.2).
  *
- * The etag is the poll's job and presence is not. A database that is missing,
- * broken or mid-outage answers `{}` for presence while the etag comes back as
- * it always has — so presence stays off the sync path. A beat this cannot attribute (no device
- * header) or whose path is not one is still a poll: it answers, and records
- * what it can.
+ * The etag is the poll's job; presence and leases are not. A database that is
+ * missing, broken or mid-outage answers `{}` for presence and `null` for
+ * leases while the etag comes back as it always has — so neither is ever on
+ * the sync path, and no lease is no lock. A beat this cannot attribute (no
+ * device header) or whose path is not one is still a poll: it answers, and
+ * records what it can.
  */
 async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
   let beat: Beat | null = null;
@@ -537,21 +542,24 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
             kind: "here",
             name: validName(body.name, auth.name),
             path: typeof body.path === "string" && validPath(body.path) ? body.path : null,
+            take: body.take === true,
           };
   }
+  const answer = (etag: string, here: Here | null): Response =>
+    json({ manifestEtag: etag, presence: here?.presence ?? {}, leases: here?.leases ?? null });
   const deviceId = auth.deviceId;
   if (beat && deviceId) {
     // In order, for a beat: a domain that holds no workspace answers 404 and
-    // records nobody as being in it. One poll in three carries a beat, so
-    // the round trip this costs is rare; the idle read below stays parallel.
+    // records nobody as being in it, or as holding anything. One poll in
+    // three carries a beat, so the round trip this costs is rare; the idle
+    // read below stays parallel.
     const head = await env.DATA.head(MANIFEST_KEY);
     if (!head) return notBound();
-    const presence = await recordBeat(env, auth, deviceId, beat);
-    return json({ manifestEtag: head.etag, presence: presence ?? {} });
+    return answer(head.etag, await recordBeat(env, auth, deviceId, beat));
   }
-  const [head, presence] = await Promise.all([env.DATA.head(MANIFEST_KEY), readPresence(env)]);
+  const [head, here] = await Promise.all([env.DATA.head(MANIFEST_KEY), readHere(env)]);
   if (!head) return notBound();
-  return json({ manifestEtag: head.etag, presence: presence ?? {} });
+  return answer(head.etag, here);
 }
 
 /* ---------- Wipe ---------- */
@@ -563,7 +571,7 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
  * next bind finds no workspace.json. Batched to the per-request subrequest
  * budget; the client repeats the call until `remaining` comes back false.
  *
- * The last round empties D1 as well (docs/teams-plan.md §4.4) — otherwise a
+ * The last round empties D1 as well (docs/cloud.md §5.7) — otherwise a
  * rebound domain would inherit the old workspace's people. Nothing has to be
  * saved for last any more: a wipe is owner-only, and the owner's credential
  * is the worker's env secret rather than anything in here, so the call cannot

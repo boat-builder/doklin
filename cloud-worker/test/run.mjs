@@ -168,19 +168,19 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
 
   const first = await call("/api/meta", { token: OWNER });
   assert.equal(first.status, 200);
-  assert.equal(first.json.d1, 3, "the probe reports the schema version");
+  assert.equal(first.json.d1, 4, "the probe reports the schema version");
   assert.ok(db.queries.length > 0, "…and the probe is what ran the migration");
   assert.deepEqual(
     db.tables(),
-    ["invites", "members", "meta", "presence", "tokens"],
-    "people, who is here, and the runner's own anchor",
+    ["invites", "leases", "members", "meta", "presence", "tokens"],
+    "people, who is here, what they hold, and the runner's own anchor",
   );
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 3);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 4);
   assert.equal(db.rows("SELECT * FROM meta").length, 1, "one row, and re-running never adds another");
 
   db.queries.length = 0;
   const again = await call("/api/meta", { token: OWNER });
-  assert.equal(again.json.d1, 3);
+  assert.equal(again.json.d1, 4);
   // The migration never runs twice in an isolate. Identity does run every
   // time — a probe answers who the caller is and what everyone here is
   // called — but it only ever reads.
@@ -472,6 +472,8 @@ await test("auth: /api/meta rejects a missing or wrong token; owner and member g
   assert.ok(ok.json.features.includes("wipe"));
   assert.ok(ok.json.features.includes("versions"), "this worker mirrors the version store");
   assert.ok(ok.json.features.includes("members"), "…and mints per-person tokens");
+  assert.ok(ok.json.features.includes("presence"), "…takes a beat on the poll");
+  assert.ok(ok.json.features.includes("leases"), "…and a lease on the beat");
   assert.equal(ok.json.workspace, null, "a fresh domain holds nothing");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 200);
 });
@@ -482,9 +484,10 @@ await test("unbound: poll, manifest and workspace are 404 until a workspace is b
     assert.equal(res.status, 404, p);
     assert.equal(res.json.error, "not bound", p);
   }
-  const beat = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Mac" } });
+  const beat = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Mac", path: "Home.md" } });
   assert.equal(beat.status, 404, "a poll that beats is still a poll");
   assert.deepEqual(db.rows("SELECT * FROM presence"), [], "and nobody is recorded as being in a workspace that is not there");
+  assert.deepEqual(db.rows("SELECT * FROM leases"), [], "…or as holding a document in it");
   const put = await putManifest(manifest(1, {}), "made-up-etag");
   assert.equal(put.status, 404, "a manifest PUT before binding has nothing to update");
   // The public side of a free domain: the landing page, and nothing else.
@@ -550,7 +553,7 @@ await test("identity: the owner is a person for attribution, and a secret for ac
   const moved = await call("/api/auth/members", {
     method: "POST",
     token: OWNER,
-    body: { email: "sherin@hey.example", name: "Sherin K" },
+    body: { email: "owner@second.example", name: "Owner Two" },
   });
   assert.equal(moved.status, 200);
   assert.equal(moved.json.member.role, "owner");
@@ -620,7 +623,7 @@ await test("meta: the probe says who the bearer is, and what everyone here is ca
   // The directory is everybody's — a manifest names ids, so every Mac in the
   // workspace has to be able to put a name to one — and it is names and
   // nothing else. The People list, with addresses and devices, stays the
-  // owner's (docs/teams-plan.md §6, decision 4).
+  // owner's (docs/cloud.md §5.4).
   assert.ok(mine.people.length >= 2);
   assert.deepEqual(
     [...new Set(mine.people.map((p) => Object.keys(p).sort().join(",")))],
@@ -743,7 +746,7 @@ await test("manifest: either side of a schema skew is 426, and the sentence says
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
   // An app still writing v2 — `by` a device name, `hist` an array — is not
-  // corrupt, it is old, and 426 is the status that says so (teams-plan.md §2).
+  // corrupt, it is old, and 426 is the status that says so (docs/cloud.md §5.7).
   const older = await putManifest(manifest(3, {}, { version: 2 }));
   assert.equal(older.status, 426);
   assert.match(older.json.error, /update the app/);
@@ -1033,6 +1036,9 @@ await test("versions: snapshots and blobs are immutable and create-only; the inv
 /** The presence rows, as the database holds them — what a route wrote, read
  *  without going through one. */
 const presenceRows = () => db.rows("SELECT * FROM presence ORDER BY device_id");
+/** The leases, as the database holds them. */
+const leaseRows = () => db.rows("SELECT * FROM leases ORDER BY path");
+const holder = (answer, path) => answer.json.leases.find((l) => l.path === path)?.deviceId ?? null;
 const writes = () => db.queries.filter((sql) => !/^\s*SELECT/i.test(sql));
 
 await test("poll: a GET only reads; a POST is the same poll carrying this device's beat", async () => {
@@ -1135,7 +1141,7 @@ await test("poll: last seen is the beat's to write, at most once an hour per per
   assert.equal(await seen(ALICE.id), stale);
 });
 
-await test("poll: revoking a Mac or removing a person takes them out of presence at once", async () => {
+await test("poll: revoking a Mac or removing a person takes them out of presence and their leases at once", async () => {
   const invite = async (email, body) =>
     call("/api/auth/invites", {
       method: "POST",
@@ -1147,31 +1153,136 @@ await test("poll: revoking a Mac or removing a person takes them out of presence
 
   await invite("gail@example.com", "GGGGGGGGGGGGGGGGGGGG");
   const gail = await join("GGGGGGGGGGGGGGGGGGGG", "d-gail");
-  await call("/api/poll", { method: "POST", token: gail.token, device: "d-gail", body: { name: "Air" } });
+  await call("/api/poll", { method: "POST", token: gail.token, device: "d-gail", body: { name: "Air", path: "Gail.md" } });
   assert.ok(presenceRows().some((r) => r.device_id === "d-gail"));
+  assert.ok(leaseRows().some((r) => r.device_id === "d-gail"));
   assert.equal((await call(`/api/auth/tokens/${gail.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.ok(!presenceRows().some((r) => r.device_id === "d-gail"), "not 'here now' for the TTL's minute and a half");
+  assert.ok(!leaseRows().some((r) => r.device_id === "d-gail"), "…and not holding a document anyone else wants");
 
   await invite("hal@example.com", "HHHHHHHHHHHHHHHHHHHH");
   const hal = await join("HHHHHHHHHHHHHHHHHHHH", "d-hal");
-  await call("/api/poll", { method: "POST", token: hal.token, device: "d-hal", body: { name: "Air" } });
+  await call("/api/poll", { method: "POST", token: hal.token, device: "d-hal", body: { name: "Air", path: "Hal.md" } });
   assert.ok(presenceRows().some((r) => r.member_id === hal.member.id));
+  assert.ok(leaseRows().some((r) => r.member_id === hal.member.id));
   assert.equal((await call(`/api/auth/members/${hal.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.ok(!presenceRows().some((r) => r.member_id === hal.member.id), "the person goes, and so does their row");
+  assert.ok(!leaseRows().some((r) => r.member_id === hal.member.id), "…and their lease");
   assert.ok(presenceRows().some((r) => r.device_id === DEVICE), "nobody else's");
 });
 
-await test("poll: with no database, or a broken one, the etag still comes back and only presence goes quiet", async () => {
+await test("leases: a beat that names a document claims it, and of two Macs racing for one exactly one holds it", async () => {
+  db.run("DELETE FROM leases");
+  const ownerId = (await call("/api/meta", { token: OWNER })).json.you.memberId;
+  const idle = await call("/api/poll", { token: OWNER });
+  assert.deepEqual(idle.json.leases, [], "the poll says who holds what — here, nobody");
+
+  const mine = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Projects/Plan.md" } });
+  assert.equal(mine.status, 200);
+  assert.equal(mine.json.leases.length, 1);
+  const lease = mine.json.leases[0];
+  assert.equal(lease.path, "projects/plan.md", "keyed lowercased: one file on a case-insensitive disk is one lock");
+  assert.equal(lease.deviceId, DEVICE);
+  assert.equal(lease.memberId, ownerId, "the holder is a person, resolved the way presence resolves them");
+  assert.equal(lease.name, "Studio");
+  assert.ok(lease.until > Date.now() && lease.until <= Date.now() + 90_000, "it lives as long as the beat that carries it");
+
+  // Alice opens the same document under the other spelling: refused, and the
+  // answer to her own beat says who has it.
+  const hers = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "projects/plan.md" } });
+  assert.equal(hers.status, 200, "a refused claim is still a poll");
+  assert.equal(holder(hers, "projects/plan.md"), DEVICE);
+  assert.equal(leaseRows().length, 1);
+  assert.equal(leaseRows()[0].device_id, DEVICE, "nothing moved");
+  assert.equal(hers.json.presence[OTHER_DEVICE].path, "projects/plan.md", "she is here with it open all the same");
+
+  // Two Macs arriving at a free document together: one row, one holder, and
+  // both answers name the same one.
+  const [a, b] = await Promise.all([
+    call("/api/poll", { method: "POST", token: OWNER, device: "d-laptop", body: { name: "Laptop", path: "Race.md" } }),
+    call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "Race.md" } }),
+  ]);
+  const won = leaseRows().filter((r) => r.path === "race.md");
+  assert.equal(won.length, 1, "exactly one wins");
+  assert.ok(["d-laptop", OTHER_DEVICE].includes(won[0].device_id));
+  assert.equal(holder(b, "race.md"), won[0].device_id);
+  assert.ok([null, won[0].device_id].includes(holder(a, "race.md")), "the first answer can predate the second claim, never contradict it");
+
+  // An idle poll reads them and writes nothing.
+  db.queries.length = 0;
+  const read = await call("/api/poll", { token: MEMBER, device: OTHER_DEVICE });
+  assert.equal(holder(read, "projects/plan.md"), DEVICE);
+  assert.deepEqual(writes(), []);
+});
+
+await test("leases: the holder's beat renews, a non-holder's changes nothing, and moving on lets go", async () => {
+  db.run("DELETE FROM leases");
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Notes.md" } });
+  db.run("UPDATE leases SET until = ? WHERE path = 'notes.md'", Date.now() + 10_000);
+  await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "Notes.md" } });
+  const before = leaseRows()[0].until;
+  assert.ok(before < Date.now() + 11_000, "a renewal by the non-holder does nothing");
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Notes.md" } });
+  assert.ok(leaseRows()[0].until > before + 60_000, "the holder's next beat moves it out by the TTL");
+
+  // A beat that names another document lets go of this one and claims that.
+  const moved = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Other.md" } });
+  assert.deepEqual(leaseRows().map((r) => r.path), ["other.md"], "one Mac, one document");
+  assert.equal(holder(moved, "notes.md"), null);
+  // So the Mac that was waiting gets it on its own next beat.
+  const now = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "Notes.md" } });
+  assert.equal(holder(now, "notes.md"), OTHER_DEVICE);
+
+  // A beat with nothing open lets go of everything; so does a leave.
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio" } });
+  assert.deepEqual(leaseRows().map((r) => r.device_id), [OTHER_DEVICE]);
+  await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { leave: true } });
+  assert.deepEqual(leaseRows(), []);
+});
+
+await test("leases: a lapsed one is takeable and swept, and take claims a live one", async () => {
+  db.run("DELETE FROM leases");
+  db.run(
+    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('old.md', 'd-ghost', NULL, 'Ghost', ?)",
+    Date.now() - 1000,
+  );
+  const read = await call("/api/poll", { token: OWNER });
+  assert.equal(holder(read, "old.md"), null, "past its until, nobody holds it");
+  const taken = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "Old.md" } });
+  assert.equal(holder(taken, "old.md"), OTHER_DEVICE, "a lapsed lease is free to claim, with no take");
+
+  db.run(
+    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('gone.md', 'd-ghost', NULL, 'Ghost', ?)",
+    Date.now() - 1000,
+  );
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio" } });
+  assert.ok(!leaseRows().some((r) => r.path === "gone.md"), "and the next beat sweeps one nobody wants, without a reaper");
+
+  // Live and somebody else's: a plain claim is refused, take is not.
+  const refused = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Old.md" } });
+  assert.equal(holder(refused, "old.md"), OTHER_DEVICE);
+  const took = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio", path: "Old.md", take: true } });
+  assert.equal(holder(took, "old.md"), DEVICE, "taking over is the same claim without the WHERE");
+  assert.equal(leaseRows().find((r) => r.path === "old.md").device_name, "Studio");
+  // And the Mac it was taken from cannot take it back by claiming again.
+  const back = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "Old.md" } });
+  assert.equal(holder(back, "old.md"), DEVICE);
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio" } });
+});
+
+await test("poll: with no database, or a broken one, the etag still comes back and only presence and leases go quiet", async () => {
   const etag = await currentEtag();
   for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
     const read = await call("/api/poll", { token: OWNER, bindings });
     assert.equal(read.status, 200, "presence is never on the sync path");
     assert.equal(read.json.manifestEtag, etag);
     assert.deepEqual(read.json.presence, {});
+    assert.equal(read.json.leases, null, "not 'nobody holds anything' — the database could not say");
     const beat = await call("/api/poll", { method: "POST", token: OWNER, bindings, body: { name: "Mac", path: "Home.md" } });
     assert.equal(beat.status, 200, "…not even when it carries a beat nobody can write");
     assert.equal(beat.json.manifestEtag, etag);
     assert.deepEqual(beat.json.presence, {});
+    assert.equal(beat.json.leases, null, "no lease is no lock, and never a refused poll");
   }
 });
 
@@ -1528,6 +1639,7 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal(db.value("SELECT COUNT(*) FROM tokens"), 0);
   assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0);
   assert.equal(db.value("SELECT COUNT(*) FROM presence"), 0, "and nobody is here");
+  assert.equal(db.value("SELECT COUNT(*) FROM leases"), 0, "…or holding anything");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 401);
   assert.deepEqual((await call("/api/auth/members", { token: OWNER })).json.members, []);
   const meta = await call("/api/meta", { token: OWNER });
@@ -1537,9 +1649,9 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
 
   // The database is emptied, not dropped: the schema is re-run so the next
   // binding finds a migrated database rather than a half-built one.
-  assert.deepEqual(db.tables(), ["invites", "members", "meta", "presence", "tokens"]);
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 3);
-  assert.equal(meta.json.d1, 3, "…and the probe still says so");
+  assert.deepEqual(db.tables(), ["invites", "leases", "members", "meta", "presence", "tokens"]);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 4);
+  assert.equal(meta.json.d1, 4, "…and the probe still says so");
 
   const rebound = await call("/api/workspace", {
     method: "POST",

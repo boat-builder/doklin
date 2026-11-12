@@ -57,14 +57,15 @@ worker wrote may still hold one, and nothing reads it.)
 
 A D1 database beside the bucket, bound as `DB`, for the state a blob store
 cannot hold: people, presence and file leases
-([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds the first two:
+([docs/cloud.md](../docs/cloud.md) §5.1, §8):
 
 ```sql
 meta     (key, schema_version)                   one row — the runner's anchor
 members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
 tokens   (hash, id, member_id, device_id, device_name, created_at)
 invites  (hash, id, member_id, created_at, expires_at)
-presence (device_id, member_id, device_name, path, ts)   a row per Mac here now
+presence (device_id, member_id, device_name, path, ts)    a row per Mac here now
+leases   (path, device_id, member_id, device_name, until) a row per document open somewhere
 ```
 
 An *identity* is not a *credential*, and the three tables are that sentence.
@@ -84,6 +85,17 @@ sweeps rows past the 90 s TTL, so there is no reaper; a leave deletes the
 caller's row, and revoking a Mac or removing a person deletes theirs. It is
 best effort throughout: a database that cannot answer costs the presence
 list and never the poll's etag.
+
+**Leases** (`src/presence.ts` too, since the beat writes both) are a row per
+document somebody has open, keyed by its path lowercased. A beat that names a
+path claims it with one upsert — taken when free, lapsed or already this
+Mac's, unchanged when anybody else holds it, and taken regardless with
+`take: true` — and lets go of whatever else that Mac held; a beat that names
+nothing, a leave, a revoke or a removal lets go of everything. A lease's
+`until` is the presence TTL from the beat that renewed it. Advisory: nothing
+that writes the manifest reads one, and a database that cannot answer
+returns `leases: null`, which the app reads as no lock
+([docs/cloud.md](../docs/cloud.md) §8.2).
 
 The worker owns its schema (`src/schema.ts`). An update ships one bundled
 file and no migrations directory, so `wrangler d1 migrations apply` is not
@@ -150,7 +162,7 @@ attribution it already has. An app puts a name to an id through
 A manifest of any other version is a **`426`**, in both directions, with a
 sentence naming which side is behind — an app newer than this worker is told
 to update the worker, an older one to update itself. That is the whole
-compatibility promise ([docs/teams-plan.md](../docs/teams-plan.md) §2):
+compatibility promise ([docs/cloud.md](../docs/cloud.md) §5.7):
 refuse politely, never corrupt.
 
 ### `hist` and `history/<fid>.json` — gone
@@ -193,11 +205,14 @@ DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-GET    /api/poll                 {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}}}
+GET    /api/poll                 {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}},
+                                 leases: [{path, deviceId, memberId, name, until}] | null}
                                  — the cheap 15 s poll; reads only
-POST   /api/poll                 the same poll carrying this Mac's beat: body {name, path?} or
-                                 {leave: true}; recorded when x-doklin-device names the Mac. Without
-                                 a database it is still a poll: the etag, and presence {}
+POST   /api/poll                 the same poll carrying this Mac's beat: body {name, path?, take?} —
+                                 a path claims that document's lease, take claims it from whoever
+                                 holds it — or {leave: true}; recorded when x-doklin-device names the
+                                 Mac. Without a database it is still a poll: the etag, presence {}
+                                 and leases null
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
                                  on a lost race; 400 on garbage; 426 on ANY other schema version;
@@ -315,7 +330,7 @@ npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the datab
 npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
 npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
-# → {"version":7,"features":["sync","wipe","publish","boards","versions","members","presence"],"workspace":null,"d1":3,…}
+# → {"version":8,"features":["sync","wipe","publish","boards","versions","members","presence","leases"],"workspace":null,"d1":4,…}
 ```
 
 `"d1"` is the database's schema version, or `null` on a deployment with no

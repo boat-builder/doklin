@@ -36,7 +36,7 @@ binding = "DATA"                          # the worker reads env.DATA — leave 
 bucket_name = "doklin-notes-example-com"
 
 # The database beside the bucket: people, presence and file leases
-# (docs/teams-plan.md). `wrangler d1 create` prints the id; `wrangler d1 info
+# (docs/cloud.md §5.1). `wrangler d1 create` prints the id; `wrangler d1 info
 # <name>` prints it again if the create output has scrolled away. The worker
 # migrates its own schema, so there is no migrations directory to apply.
 [[d1_databases]]

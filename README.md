@@ -155,16 +155,11 @@ Deeper docs live in dedicated files to keep this page focused:
 - **[docs/cloud.md](docs/cloud.md)** — the cloud as built: one domain per
   workspace, a single Rust engine as the only writer, publishing as a flag
   in the workspace manifest with pages rendered from synced files, the
-  agent + wrangler setup, the room left for invites and locking, the
-  decisions behind each, and the blockers a team of ten hits first — one
-  shared credential, and an idle heartbeat that spends most of Cloudflare's
-  free plan.
-- **[docs/teams-plan.md](docs/teams-plan.md)** — the plan for sharing a
-  workspace with people rather than with a second Mac: a member keyed by
-  their email that outlives every machine and token they use, an invite
-  code that is a 100-bit capability rather than a passphrase, presence and
-  file leases in a D1 database beside the bucket, and eight phases each of
-  which deploys on its own — four of them with nothing for the user to see.
+  agent + wrangler setup, a workspace shared with people (a member keyed by
+  their email, an invite code that is a 100-bit capability, presence and
+  advisory file leases riding the poll, all in a D1 database beside the
+  bucket), the decisions behind each, and what a team of ten still runs
+  into on Cloudflare's free plan.
 - **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
   contract: the bucket, the manifest, the sync API, the public routes, and
   deploying by hand.

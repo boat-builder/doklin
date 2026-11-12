@@ -17,7 +17,7 @@ use super::config::{
 };
 use super::engine::{
     next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, DIRECTORY_MIN_GAP,
-    LEGACY_BATCH, POLL_INTERVAL, PRESENCE_BEAT,
+    ACTIVITY_FRESH, LEGACY_BATCH, POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
@@ -44,6 +44,14 @@ struct FakeWorker {
     etag: u64,
     blobs: HashMap<(String, String), (Vec<u8>, u64)>,
     presence: BTreeMap<String, PresenceEntry>,
+    /// Lease key (lowercased path) -> who holds it, as the `leases` table
+    /// does: one row per document, the upsert's three ways to win spelled out
+    /// in `poll` below. `until` is on the real clock, so a test lapses one by
+    /// writing it into the past.
+    leases: BTreeMap<String, LeaseEntry>,
+    /// A database that cannot answer: the poll still answers the etag, with
+    /// no presence and `leases: null`.
+    d1_down: bool,
     offline: bool,
     reject_schema: bool,
     worker_version: u32,
@@ -67,7 +75,7 @@ struct FakeWorker {
     version_snapshots: HashMap<String, Vec<u8>>,
     version_blobs: HashMap<String, (Vec<u8>, u64)>,
     versions_racer: Option<VersionsIndex>,
-    /* People and the credentials they hold (docs/teams-plan.md §3.5). The
+    /* People and the credentials they hold (docs/cloud.md §8.1). The
        worker keeps only hashes; so does this — a code is looked up by its
        sha256 here exactly as it is there, which is what makes "the app hashes
        the canonical form" a thing a test can get wrong. */
@@ -106,7 +114,14 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 fn fake_worker() -> SharedWorker {
     Arc::new(Mutex::new(FakeWorker {
         worker_version: 1,
-        features: vec!["sync".into(), "wipe".into(), "versions".into(), "members".into(), "presence".into()],
+        features: vec![
+            "sync".into(),
+            "wipe".into(),
+            "versions".into(),
+            "members".into(),
+            "presence".into(),
+            "leases".into(),
+        ],
         owner_token: OWNER_TOKEN.into(),
         ..Default::default()
     }))
@@ -242,12 +257,19 @@ impl Remote for FakeRemote {
                 return Err(RemoteError::Other("http 405: method not allowed".into()));
             }
             b.polls.push(beat.clone());
+            if b.d1_down {
+                return Ok(PollResponse { manifest_etag: b.etag_str(), presence: BTreeMap::new(), leases: None });
+            }
+            let leasing = b.features.iter().any(|f| f == "leases");
+            let now = now_ms();
+            let me = this.device_id.clone();
             match beat {
                 None => {}
                 Some(Beat::Leave) => {
-                    b.presence.remove(&this.device_id);
+                    b.presence.remove(&me);
+                    b.leases.retain(|_, l| l.device_id != me);
                 }
-                Some(Beat::Here { name, path }) => {
+                Some(Beat::Here { name, path, take }) => {
                     // Whose Mac it is, the way the worker decides: off the
                     // token for a member, off the adopted row for the owner.
                     let member_id = match caller {
@@ -258,10 +280,31 @@ impl Remote for FakeRemote {
                             .and_then(|t| b.members.get(&t.email))
                             .map(|m| m.id.clone()),
                     };
-                    b.presence.insert(this.device_id.clone(), PresenceEntry { member_id, name, path, ts: now_ms() });
+                    b.presence.insert(
+                        me.clone(),
+                        PresenceEntry { member_id: member_id.clone(), name: name.clone(), path: path.clone(), ts: now },
+                    );
+                    if leasing {
+                        let key = path.as_deref().map(lease_key);
+                        b.leases.retain(|k, l| l.device_id != me || Some(k) == key.as_ref());
+                        if let Some(key) = key {
+                            let free = b
+                                .leases
+                                .get(&key)
+                                .map(|l| l.device_id == me || l.until <= now || take)
+                                .unwrap_or(true);
+                            if free {
+                                b.leases.insert(
+                                    key.clone(),
+                                    LeaseEntry { path: key, device_id: me, member_id, name, until: now + 90_000 },
+                                );
+                            }
+                        }
+                    }
                 }
             }
-            Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone() })
+            let leases = leasing.then(|| b.leases.values().filter(|l| l.until > now).cloned().collect());
+            Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone(), leases })
         }
     }
 
@@ -498,7 +541,7 @@ impl Remote for FakeRemote {
             b.versions_index = None;
             b.version_snapshots.clear();
             b.version_blobs.clear();
-            // The wipe empties the database too (teams-plan.md §4.4): the
+            // The wipe empties the database too (docs/cloud.md §5.7): the
             // domain is free for a new binding, and nobody is left on it.
             b.members.clear();
             b.invites.clear();
@@ -1724,7 +1767,7 @@ async fn resume_in_place_converges_without_conflict_copies() {
     assert_eq!(a.files().len(), 4);
 }
 
-/* ---------- The invite code and the redeem flow (teams-plan.md §10) ---------- */
+/* ---------- The invite code and the redeem flow (docs/cloud.md §8.1) ---------- */
 
 #[test]
 fn a_minted_code_reads_back_the_way_it_was_written() {
@@ -1955,7 +1998,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
     assert!(alice.meta().await.is_ok());
 }
 
-/* ---------- Attribution by person (docs/teams-plan.md §12) ---------- */
+/* ---------- Attribution by person (docs/cloud.md §6.6) ---------- */
 
 #[tokio::test]
 async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
@@ -2078,7 +2121,7 @@ async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
     assert_eq!(a.status().public[0].by, "Alice");
 }
 
-/* ---------- The People panel (docs/teams-plan.md §11) ---------- */
+/* ---------- The People panel (docs/cloud.md §7.2) ---------- */
 
 /// Invite `email`, redeem the code on `device_id`, and answer the token that
 /// Mac now holds — the whole of "somebody joined", as the two commands behind
@@ -2595,7 +2638,7 @@ async fn the_beat_rides_every_third_poll_and_a_new_path_brings_the_poll_forward(
     drop(root_dir);
 }
 
-/// The budget this phase exists for (docs/teams-plan.md §5): an idle Mac is
+/// The budget this phase exists for (docs/cloud.md §11.2): an idle Mac is
 /// four polls a minute and nothing else. The beat used to be two more.
 #[tokio::test(start_paused = true)]
 async fn an_idle_device_makes_exactly_four_requests_a_minute() {
@@ -2694,7 +2737,7 @@ async fn a_worker_without_presence_is_polled_and_never_beaten_at_until_it_is_upd
     drop(root_dir);
 }
 
-/// "Who else is here" names people (docs/teams-plan.md §13): the worker says
+/// "Who else is here" names people (docs/cloud.md §5.3): the worker says
 /// whose Mac each one is and the engine puts the directory's name to it —
 /// except your own other Mac, which is named as a Mac, because "Ada is
 /// editing" tells Ada nothing.
@@ -2792,6 +2835,311 @@ async fn a_beat_lost_with_its_poll_rides_the_next_one() {
     cmd_tx.send(EngineCmd::Shutdown).unwrap();
     task.await.unwrap();
     drop(root_dir);
+}
+
+/* ---------- Leases (docs/cloud.md §8.2) ---------- */
+
+/// Two Macs with a document between them, both synced and probed.
+async fn two_with_a_doc(be: &SharedWorker) -> (Device, Device) {
+    let mut a = device("Alice", be);
+    let mut b = device("Bob", be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    b.cycle().await;
+    (a, b)
+}
+
+fn open(d: &mut Device, rel: &str) {
+    let abs = d.abs(rel).to_string_lossy().to_string();
+    d.engine.set_activity(Some(abs));
+}
+
+fn beats(be: &SharedWorker) -> Vec<Beat> {
+    be.lock().unwrap().polls.iter().flatten().cloned().collect()
+}
+
+/// Opening a document claims it on the beat its new path is owed — there is
+/// no request of its own — and a second Mac opening it is refused and told
+/// who has it, whatever case it spells the path in.
+#[tokio::test]
+async fn opening_a_document_claims_it_and_another_mac_sees_it_held() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"), "the beat that names it claims it");
+    assert!(a.status().leases.is_empty(), "your own lease is not a lock on you");
+
+    open(&mut b, "DOC.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"), "refused: one document is one lock, in any case");
+    assert_eq!(be.lock().unwrap().leases["doc.md"].device_id, "d-alice", "nothing moved");
+    let held = b.status().leases;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].path, "doc.md");
+    assert_eq!(held[0].device_id, "d-alice");
+    assert_eq!(held[0].name, "Alice");
+    assert!(!held[0].own);
+
+    // Refused is not owed: Bob's next polls are plain GETs until it frees.
+    be.lock().unwrap().polls.clear();
+    b.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().polls.iter().all(Option::is_none), "{:?}", be.lock().unwrap().polls);
+}
+
+/// Moving on is letting go: the beat that names another document releases
+/// this one, and the Mac that was waiting for it claims it on the poll after
+/// it hears — while a Mac with nothing open holds nothing.
+#[tokio::test]
+async fn moving_on_lets_go_and_the_mac_waiting_claims_it_next() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    open(&mut b, "doc.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"));
+
+    open(&mut a, "other.md");
+    a.engine.poll_for_test().await;
+    assert!(!a.engine.holds_for_test("doc.md"), "released by the beat that named something else");
+    assert!(a.engine.holds_for_test("other.md"));
+
+    be.lock().unwrap().polls.clear();
+    b.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().polls, vec![None], "nothing was owed when it asked");
+    assert!(b.status().leases.iter().all(|l| l.path != "doc.md"), "and now it knows: free");
+    b.engine.poll_for_test().await;
+    assert!(
+        matches!(be.lock().unwrap().polls.last(), Some(Some(Beat::Here { path: Some(p), take: false, .. })) if p == "doc.md"),
+        "a free document it has open is owed a claim, and the next poll carries it"
+    );
+    assert!(b.engine.holds_for_test("doc.md"));
+
+    a.engine.set_activity(None);
+    a.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().leases.values().all(|l| l.device_id != "d-alice"), "nothing open, nothing held");
+}
+
+/// *Take over* claims a document somebody else holds, once — the flag rides
+/// one beat and is spent — and the Mac it was taken from finds out on its
+/// next poll and cannot take it back by merely having it open.
+#[tokio::test(start_paused = true)]
+async fn take_over_claims_a_held_document_once_and_the_holder_hears_on_its_next_poll() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    open(&mut b, "doc.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"));
+
+    b.engine.take_over(b.abs("doc.md").to_string_lossy().to_string());
+    b.engine.poll_for_test().await;
+    assert!(matches!(beats(&be).last(), Some(Beat::Here { take: true, .. })));
+    assert!(b.engine.holds_for_test("doc.md"), "taken");
+    assert!(b.status().leases.is_empty());
+
+    a.engine.poll_for_test().await;
+    let held = a.status().leases;
+    assert_eq!(held.iter().map(|l| l.device_id.as_str()).collect::<Vec<_>>(), ["d-bob"], "Alice hears on her next poll");
+    assert!(!a.engine.holds_for_test("doc.md"));
+
+    // A beat later, both renew what they have: Bob his lease, Alice nothing.
+    tokio::time::advance(PRESENCE_BEAT).await;
+    a.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    let last_two: Vec<Beat> = beats(&be).into_iter().rev().take(2).collect();
+    assert!(last_two.iter().all(|b| matches!(b, Beat::Here { take: false, .. })), "take is spent once carried: {last_two:?}");
+    assert_eq!(be.lock().unwrap().leases["doc.md"].device_id, "d-bob", "and having it open does not take it back");
+}
+
+/// Typing is what keeps a document yours. Each write the app makes to the
+/// document being edited renews the editing, so the lease is carried on beat
+/// after beat for as long as somebody types; a Mac left with it open lets go
+/// `ACTIVITY_FRESH` after the last keystroke, and a write to some other file
+/// does not count.
+#[tokio::test(start_paused = true)]
+async fn typing_keeps_a_document_and_walking_away_lets_it_go() {
+    let be = fake_worker();
+    let (mut a, _b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"));
+
+    for _ in 0..4 {
+        tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
+        a.engine.touch_activity("doc.md");
+        a.engine.poll_for_test().await;
+    }
+    assert!(a.engine.holds_for_test("doc.md"), "sixteen minutes of typing, still Alice's");
+    assert!(matches!(beats(&be).last(), Some(Beat::Here { path: Some(p), .. }) if p == "doc.md"));
+
+    tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
+    a.engine.touch_activity("doc.meta.jsonl");
+    a.engine.touch_activity("other.md");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    a.engine.poll_for_test().await;
+    assert!(!a.engine.holds_for_test("doc.md"), "walked away: let go");
+    assert!(be.lock().unwrap().leases.is_empty());
+    assert_eq!(be.lock().unwrap().presence["d-alice"].path, None, "and here, idle");
+}
+
+/// A lock nobody can confirm is no lock. A poll that fails takes the leases
+/// it was showing with it, and an engine that is not hearing the domain —
+/// paused here — shows none, so nothing it last heard keeps an editor
+/// view-only.
+#[tokio::test]
+async fn a_lock_this_mac_cannot_hear_about_is_no_lock() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    assert_eq!(b.status().leases.len(), 1);
+
+    be.lock().unwrap().offline = true;
+    b.engine.poll_for_test().await;
+    assert!(b.status().leases.is_empty(), "dropped with the poll that failed");
+    be.lock().unwrap().offline = false;
+    b.engine.poll_for_test().await;
+    assert_eq!(b.status().leases.len(), 1, "and back with the next one");
+
+    b.engine.set_paused(true);
+    assert!(b.status().leases.is_empty(), "a paused engine is not listening");
+    b.engine.set_paused(false);
+    assert_eq!(b.status().leases.len(), 1);
+}
+
+/// A worker before v8, or one whose database cannot answer, has no lock to
+/// give: the app shows none, and — the part that would cost — is never left
+/// owing a claim, so an editing Mac still beats one poll in three.
+#[tokio::test]
+async fn a_worker_without_leases_or_a_database_shows_no_lock_and_is_not_claimed_at() {
+    for older in [true, false] {
+        let be = fake_worker();
+        if older {
+            be.lock().unwrap().features.retain(|f| f != "leases");
+        }
+        let (mut a, mut b) = two_with_a_doc(&be).await;
+        be.lock().unwrap().d1_down = !older;
+        open(&mut a, "doc.md");
+        a.engine.poll_for_test().await;
+        open(&mut b, "doc.md");
+        b.engine.poll_for_test().await;
+        assert!(b.status().leases.is_empty());
+        assert!(be.lock().unwrap().leases.is_empty());
+
+        be.lock().unwrap().polls.clear();
+        for _ in 0..3 {
+            a.engine.poll_for_test().await;
+            b.engine.poll_for_test().await;
+        }
+        assert!(be.lock().unwrap().polls.iter().all(Option::is_none), "older={older}: nothing owed");
+    }
+}
+
+/// A lease names whoever holds it the way presence does: the person, and your
+/// own other Mac by its name — flagged, so the editor can say "open on your
+/// other Mac" rather than name you to yourself.
+#[tokio::test]
+async fn a_lease_names_the_person_and_your_own_other_mac() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+    let mut studio = device("Studio", &be);
+    let mut air = device("Air", &be);
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    for d in [&mut studio, &mut air, &mut bob] {
+        d.engine.probe_worker().await;
+        d.cycle().await;
+    }
+    open(&mut air, "a.md");
+    air.engine.poll_for_test().await;
+    open(&mut bob, "b.md");
+    bob.engine.poll_for_test().await;
+    studio.engine.poll_for_test().await;
+
+    let held = studio.status().leases;
+    let on_air = held.iter().find(|l| l.path == "a.md").unwrap();
+    assert!(on_air.own, "Ada's other Mac");
+    assert_eq!(on_air.name, "Air");
+    let on_bob = held.iter().find(|l| l.path == "b.md").unwrap();
+    assert!(!on_bob.own);
+    assert_eq!(on_bob.name, "Bob Mbeki");
+    assert_eq!(on_bob.device, "Bob");
+
+    bob.engine.poll_for_test().await;
+    let theirs = bob.status().leases;
+    assert_eq!(theirs.len(), 1);
+    assert_eq!((theirs[0].name.as_str(), theirs[0].own), ("Ada", false), "to Bob, it is Ada's");
+}
+
+/// The budget holds while somebody edits: holding a lease is renewing it on
+/// the beat that was going out anyway, so a Mac with a document open is the
+/// same four requests a minute as an idle one — and quitting lets go of it.
+#[tokio::test(start_paused = true)]
+async fn an_editing_mac_holding_its_document_still_makes_four_requests_a_minute() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    let doc = a.abs("doc.md").to_string_lossy().to_string();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    cmd_tx.send(EngineCmd::SetActivity(Some(doc))).unwrap();
+
+    tokio::time::sleep(Duration::from_secs(120) + Duration::from_millis(100)).await;
+    assert_eq!(be.lock().unwrap().leases.get("doc.md").map(|l| l.device_id.as_str()), Some("d-alice"));
+    let before = be.lock().unwrap().requests;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(be.lock().unwrap().requests - before, 4, "the renewal rides the beat");
+    assert!(be.lock().unwrap().leases.contains_key("doc.md"), "and keeps it");
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    assert!(be.lock().unwrap().leases.is_empty(), "a quitting Mac's leave lets go of it");
+    drop(root_dir);
+}
+
+/// A worker that takes beats but holds no leases (v7) still claims nothing
+/// for an app that knows it, and the app owes it no claim — until it is
+/// updated. The hourly pass that waits for `versions` and `presence` waits
+/// for `leases` too, so a Mac that is already running learns it within the
+/// hour, and stops asking once it has.
+#[tokio::test(start_paused = true)]
+async fn the_hourly_pass_asks_again_until_the_worker_holds_leases() {
+    let be = fake_worker();
+    be.lock().unwrap().features.retain(|f| f != "leases");
+    let mut a = device("Alice", &be);
+    a.engine.probe_worker().await;
+    a.cycle().await;
+    a.engine.mirror_versions().await;
+
+    let asks = |be: &SharedWorker| be.lock().unwrap().meta_calls;
+    tokio::time::advance(MIRROR_EVERY).await;
+    let before = asks(&be);
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 1, "a worker without leases is asked again on the hour");
+
+    be.lock().unwrap().features.push("leases".into());
+    tokio::time::advance(MIRROR_EVERY).await;
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 2, "which is how the update is noticed");
+
+    // Known now: a free document it has open is owed a claim at once.
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"));
+    tokio::time::advance(MIRROR_EVERY).await;
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 2, "and nothing is missing, so nothing is asked");
 }
 
 /* ---------- The bus, the wake, the grammars, the config ---------- */

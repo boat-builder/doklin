@@ -1,4 +1,4 @@
-// The Cloud panel's People view — docs/cloud.md §7.2, teams-plan.md §11.
+// The Cloud panel's People view — docs/cloud.md §7.2, §8.1.
 // Who is on this workspace, what each of them holds, and the two things an
 // owner does about it: let somebody in by email, and take access away again.
 //

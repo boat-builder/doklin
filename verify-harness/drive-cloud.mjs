@@ -4,7 +4,8 @@
 // (a fresh domain, a domain that already holds a workspace, a folder that
 // carries that workspace's marker), the panel's phases, sync now / pause,
 // the held mass-deletion (toast → panel → confirm), a conflict copy's toast,
-// `cloud-applied` refreshing the tree, presence chips, the worker update
+// `cloud-applied` refreshing the tree, presence chips, a document another
+// Mac holds opening view-only under its banner and Take over, the worker update
 // card and its badge, the version rail reading a cloud-only revision
 // through the manifest and restoring it, "Connect
 // another Mac", disconnect, the wipe → teardown prompt, the join flow
@@ -116,6 +117,7 @@ const status = (over = {}) => ({
   versions: null,
   public: [],
   presence: [],
+  leases: [],
   ...over,
 });
 const openPanelFromGear = async () => {
@@ -305,7 +307,7 @@ await poll(async () => (await page.evaluate(() => navigator.clipboard.readText()
 
 // Attribution is by person since manifest v3: the same page, published by
 // somebody else, names them — and one published from another Mac of your own
-// reads as yours, because `me` is a person rather than a Mac (§12).
+// reads as yours, because `me` is a person rather than a Mac (docs/cloud.md §6.6).
 await page.evaluate(() => {
   const s = window.__cloud.statuses[0];
   window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: "Bob" })) }]);
@@ -570,6 +572,51 @@ step(
     !hereNow.includes("on Studio"),
 );
 
+/* 16b — leases: a document another Mac holds opens view-only under a banner,
+   and Take over is one command that hands the lease here. The engine names
+   the holder the way presence does — your own other Mac as a Mac, flagged —
+   and the path is the lease's lowercased key. */
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+await page.locator('[data-tree-path="/docs/other.md"]').click();
+await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Other"));
+const editable = () => page.locator(".milkdown .ProseMirror").first().getAttribute("contenteditable");
+await poll(async () => (await editable()) === "true");
+const bobsLease = { path: "other.md", deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", own: false, until: Date.now() + 90_000 };
+await setStatuses([status({ leases: [bobsLease] })]);
+await poll(async () => (await tid("lease-banner").count()) === 1);
+await poll(async () => (await editable()) === "false");
+const leaseText = await tid("lease-banner-text").textContent();
+await page.screenshot({ path: SHOTS + "cloud-16-lease.png" });
+const before16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+await page.locator(".milkdown .ProseMirror").first().click();
+await page.keyboard.type("typed while held");
+await page.waitForTimeout(900);
+const after16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+await tid("lease-take-over").click();
+await poll(async () => (await tid("lease-banner").count()) === 0);
+await poll(async () => (await editable()) === "true");
+const take = await lastCall("cloud_take_over");
+// Your own other Mac: the same banner, saying so rather than naming you.
+await setStatuses([status({ leases: [{ ...bobsLease, deviceId: "d-studio", memberId: "m-00000001", name: "Studio", device: "Studio", own: true }] })]);
+await poll(async () => (await tid("lease-banner").count()) === 1);
+const ownText = await tid("lease-banner-text").textContent();
+// A lease on some other document is not a lock on this one.
+await setStatuses([status({ leases: [{ ...bobsLease, path: "notes.md" }] })]);
+await poll(async () => (await tid("lease-banner").count()) === 0);
+step(
+  "leases: Bob's document opens view-only ('Bob Mbeki is editing — view only'), typing writes nothing, Take over hands it here; your own other Mac is named as one",
+  leaseText === "Bob Mbeki is editing — view only" &&
+    before16b === after16b &&
+    take?.args.root === "/docs" &&
+    take?.args.path === "/docs/other.md" &&
+    ownText === "Open on your other Mac, Studio — view only" &&
+    (await editable()) === "true",
+);
+await setStatuses([status()]);
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await dialog("Cloud").count()) === 1);
+
 /* 17 — Connect another Mac: endpoint + token shown */
 await tid("another-mac").click();
 await poll(async () => (await tid("creds-token").inputValue()) === TOKEN);
@@ -815,7 +862,7 @@ await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 
 /* 24 — People: the panel adopts an identity for a domain that has none,
    lists everyone with the Macs they hold, and mints a code that is on screen
-   once (docs/teams-plan.md §11) */
+   once (docs/cloud.md §7.2) */
 await tid("sidebar-cloud-dot").click();
 await poll(async () => (await tid("people-open").count()) === 1);
 await tid("people-open").click();

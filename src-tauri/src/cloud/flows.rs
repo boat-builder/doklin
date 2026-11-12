@@ -132,7 +132,7 @@ pub async fn seed_upload<R: Remote>(
                 // People panel, which needs a connected workspace — so at
                 // the moment a folder is uploaded nobody has said who this
                 // is yet. Everything the engine writes afterwards is signed
-                // with the person (docs/teams-plan.md §12).
+                // with the person (docs/cloud.md §6.6).
                 by: device_name.to_string(),
             },
         );

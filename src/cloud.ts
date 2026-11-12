@@ -62,7 +62,25 @@ export type PresenceDevice = {
   ts: number;
 };
 
-/** The whole model for one connected workspace. */
+/** A document another Mac holds (docs/cloud.md §8.2) — open there, so it
+ *  opens view-only here. Mirrors `LeaseHolder` in status.rs — change both. */
+export type LeaseHolder = {
+  /** The lease's key: workspace-relative and lowercased, so match it with
+   *  `leaseFor` rather than comparing a path to it. */
+  path: string;
+  deviceId: string;
+  memberId: string | null;
+  /** Who holds it, in words — resolved like a presence row: the person, or
+   *  the Mac when it is your own other one or nobody the workspace can name. */
+  name: string;
+  /** The holder's Mac. */
+  device: string;
+  /** True when the holder is you, on another Mac. */
+  own: boolean;
+  /** When it lapses unless renewed, by the domain's clock. */
+  until: number;
+};
+
 /** How much of this Mac's version history is in the bucket, and how much is
  *  up there in total. Mirrored by src-tauri/src/cloud/status.rs. */
 export type VersionsMirror = {
@@ -96,6 +114,10 @@ export type CloudStatus = {
   versions: VersionsMirror | null;
   public: PublicPage[];
   presence: PresenceDevice[];
+  /** The documents another Mac holds. Empty when the engine cannot hear the
+   *  domain, or the worker predates leases: a lock nobody can confirm is no
+   *  lock. */
+  leases: LeaseHolder[];
 };
 
 export type CloudWorkspaceRecord = {
@@ -281,8 +303,14 @@ export const cloudSyncNow = (root: string) => invoke<void>("cloud_sync_now", { r
 export const cloudPause = (root: string, paused: boolean) => invoke<void>("cloud_pause", { root, paused });
 export const cloudConfirmDeletes = (root: string) => invoke<void>("cloud_confirm_deletes", { root });
 
-/** Which document this window is editing (absolute path), or none — presence. */
+/** Which document this window is editing (absolute path), or none — what
+ *  presence reports, and the document this Mac claims the lease on. */
 export const cloudSetActivity = (path: string | null) => invoke<void>("cloud_set_activity", { path });
+
+/** *Take over* a document another Mac holds (absolute path): the engine claims
+ *  it on its next beat, and the Mac it is taken from goes view-only on its
+ *  next poll. The banner clears when the status says the lease moved. */
+export const cloudTakeOver = (root: string, path: string) => invoke<void>("cloud_take_over", { root, path });
 
 /** Publish a file or a folder (the path decides); resolves to the slug. */
 export const cloudPublish = (path: string, opts: { slug?: string; title?: string; desc?: string } = {}) =>
@@ -318,6 +346,30 @@ export const onCloudProgress = (cb: (e: CloudProgressEvent) => void) =>
 export function cloudForWorkspace(statuses: CloudStatus[], root: string | null): CloudStatus | null {
   if (!root) return null;
   return statuses.find((s) => s.root === root) ?? null;
+}
+
+/** The lease another Mac holds on the document at `absPath`, with the status
+ *  of the workspace it is in — or null when nobody else holds it, which is
+ *  also the answer for a document in no connected workspace. Paths are
+ *  compared lowercased, as the worker keys them (presence.ts `leaseKey`). */
+export function leaseFor(
+  statuses: CloudStatus[],
+  absPath: string | null,
+): { status: CloudStatus; lease: LeaseHolder } | null {
+  if (!absPath) return null;
+  for (const status of statuses) {
+    const prefix = status.root.endsWith("/") ? status.root : `${status.root}/`;
+    if (!absPath.startsWith(prefix)) continue;
+    const key = absPath.slice(prefix.length).toLowerCase();
+    const lease = (status.leases ?? []).find((l) => l.path === key);
+    if (lease) return { status, lease };
+  }
+  return null;
+}
+
+/** What the view-only banner says about a lease. */
+export function leaseLine(lease: LeaseHolder): string {
+  return lease.own ? `Open on your other Mac, ${lease.name} — view only` : `${lease.name} is editing — view only`;
 }
 
 /** "just now", "2 min ago", "3 h ago", "12 d ago". */

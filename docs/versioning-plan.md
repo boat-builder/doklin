@@ -1161,7 +1161,7 @@ So the clean-up can be checked as complete rather than assumed:
 | `cloudHistory` / `cloudRevision` / `CloudRevision` | `src/cloud.ts` | deleted | 6 |
 | The read-through branch | `versions/mod.rs` `versions_history`, `history.rs` `merge_cloud`, `VersionPreview.tsx`'s `manifest` case | deleted | 6 |
 | `HistoryPanel.tsx` (the modal) | `src/` | replaced by the rail and the preview | 2 |
-| `GET/PUT /api/history/<fid>`, `MAX_INLINE_HIST`, `MAX_HISTORY_*`, `validHistoryArchive` | the worker | kept and marked deprecated here; **deleted** later, with `hist` itself, by [teams-plan.md](teams-plan.md) §12 | 6 (docs only) |
+| `GET/PUT /api/history/<fid>`, `MAX_INLINE_HIST`, `MAX_HISTORY_*`, `validHistoryArchive` | the worker | kept and marked deprecated here; **deleted** later, with `hist` itself, by manifest v3 ([cloud.md](cloud.md) §6.6) | 6 (docs only) |
 | `Remote::get_history` / `put_history`, `HistoryArchive`, `HISTORY_VERSION`, Rust's `MAX_INLINE_HIST` | `cloud/{remote,manifest}.rs` | deleted; `delete_history` added | 6 |
 | The engine tests that pin history | `cloud/tests.rs` | replaced (below) | 6 |
 
@@ -1191,7 +1191,7 @@ So the clean-up can be checked as complete rather than assumed:
 - The worker keeps accepting `hist` and keeps `/api/history/<fid>` — old apps
   still send both; mark them *deprecated* in the README and cloud.md rather
   than removing wire surface. (Both were deleted outright a plan later, when
-  [teams-plan.md](teams-plan.md) §2 gave up on released builds and
+  [cloud.md](cloud.md) §5.7's compatibility rule gave up on released builds and
   `MANIFEST_VERSION` went to 3; the one-time clean-up lost its archive pass
   with them and kept its blob pass, which is the part nothing else collects.)
 - Tests: `edit_propagates_and_builds_history` becomes

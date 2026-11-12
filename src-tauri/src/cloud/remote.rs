@@ -38,7 +38,7 @@ pub struct CreatedBy {
 
 /// `GET /api/meta`: liveness, the credential, "is this domain bound" — and,
 /// since worker v6, identity: who this bearer is and what everyone here is
-/// called (docs/teams-plan.md §12). A worker older than that answers neither
+/// called (docs/cloud.md §6.6). A worker older than that answers neither
 /// field, and attribution falls back to device names.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Meta {
@@ -89,7 +89,7 @@ pub struct Bound {
     pub manifest_etag: String,
 }
 
-/* ---------- Who the workspace's people are (teams-plan.md §3.5) ---------- */
+/* ---------- Who the workspace's people are (docs/cloud.md §8.1) ---------- */
 
 /// A person, as the identity routes describe one. Never a credential: the
 /// app is told who holds one, never what it is.
@@ -237,7 +237,7 @@ pub trait Remote: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = RemoteResult<Bound>> + Send;
     /// The 15-second poll. With no beat it is a `GET` and writes nothing;
     /// with one it is a `POST` that also says this Mac is here, or leaving
-    /// (worker v7, docs/teams-plan.md §13). The engine only hands it a beat
+    /// (worker v7, docs/cloud.md §5.3). The engine only hands it a beat
     /// when the worker lists `presence`.
     fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
     fn fetch_manifest(
@@ -311,7 +311,7 @@ pub trait Remote: Send + Sync + 'static {
 
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
 
-    /* ----- people (docs/cloud.md §5.4, teams-plan.md §3.1) ----- */
+    /* ----- people (docs/cloud.md §5.4, §8.1) ----- */
 
     /// `POST /api/auth/invites` (owner): put a pending invite on `email`,
     /// creating that person if the address is new, and replacing whatever

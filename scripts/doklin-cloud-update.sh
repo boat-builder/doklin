@@ -17,7 +17,7 @@
 # It is a code-only redeploy in every respect but one: the R2 bucket binding,
 # the OWNER_TOKEN secret and the domain routing all survive a same-name deploy,
 # so nothing in this file is secret. The exception is the D1 database the
-# worker now binds (docs/teams-plan.md §4.2) — a domain set up before Doklin
+# worker now binds (docs/cloud.md §7.4) — a domain set up before Doklin
 # had one has none, and this is where it gets one: an empty database, free,
 # named after the worker. Nothing else on the account is touched.
 #

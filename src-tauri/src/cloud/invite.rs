@@ -1,4 +1,4 @@
-//! The invite code and the paste blob (docs/teams-plan.md §3.1, §10): the
+//! The invite code and the paste blob (docs/cloud.md §5.4, §8.1): the
 //! grammar both ends of an invite agree on, and the only place this app ever
 //! holds a code in the clear.
 //!
@@ -37,7 +37,7 @@ const GROUP: usize = 5;
 const PREFIX: &str = "dkln";
 /// The word a blob opens with. Deliberately not a URL scheme: nothing is
 /// registered to open it, and a link that goes nowhere is worse than a line
-/// of text that says what it is (§10 — a `doklin://` link is not the route).
+/// of text that says what it is.
 const KEYWORD: &str = "doklin-invite";
 
 /// How long a fresh invite is good for when nobody says otherwise.

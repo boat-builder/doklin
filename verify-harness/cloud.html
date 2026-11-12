@@ -81,7 +81,7 @@
         pickedDir: "/Users/me/Downloads",
         token: "ab".repeat(32),
         // Who this Mac is on the scripted domain — what the engine resolved
-        // its own signature to (docs/teams-plan.md §12).
+        // its own signature to (docs/cloud.md §6.6).
         me: "Sherin",
         // What a deployed worker reports; the drive sets it to the version
         // the app was built against (parsed from cloud-worker/src/version.ts).
@@ -104,8 +104,8 @@
         },
         // What the owner's own invite mints, in the clear, once.
         mintedCode: "dkln-9F4TR-2QWXM-7NBKD-5HGVZ",
-        // Who the scripted domain says is on the workspace (teams-plan.md
-        // §11). The stub keeps this as real state — an invite adds a row, a
+        // Who the scripted domain says is on the workspace (docs/cloud.md
+        // §7.2). The stub keeps this as real state — an invite adds a row, a
         // revoke takes one away — so a drive watches the list move rather
         // than watching a call be made.
         people: {
@@ -281,12 +281,13 @@
         error: null,
         pendingDeletes: 0,
         // What this Mac signs with here: the person the domain says it is
-        // (docs/teams-plan.md §12), or its own name when it has not said.
+        // (docs/cloud.md §6.6), or its own name when it has not said.
         me: window.__cloud.me,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
         public: [],
         presence: [],
+        leases: [],
       });
 
       // The listener registry the app's listen() lands in (see the
@@ -549,6 +550,15 @@
               return Promise.resolve(window.__cloud.wipeResult);
             case "cloud_set_activity":
               return Promise.resolve(null);
+            case "cloud_take_over": {
+              // The engine claims it on its next beat, and the status after
+              // that has nobody else holding it (docs/cloud.md §8.2).
+              record(cmd, args);
+              const s = window.__cloud.statuses.find((s) => s.root === args.root);
+              const key = args.path.slice(args.root.length + 1).toLowerCase();
+              patchStatus(args.root, { leases: (s?.leases ?? []).filter((l) => l.path !== key) });
+              return Promise.resolve(null);
+            }
 
             /* ----- the version store ----- */
             case "versions_status":

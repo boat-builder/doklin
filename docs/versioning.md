@@ -449,7 +449,7 @@ appeared, never who wrote it.
 
 The identity this needed exists now: manifest v3 signs every revision,
 tombstone and published page with a member id
-([teams-plan.md](teams-plan.md) §12), so *sync* attribution names a person.
+([cloud.md](cloud.md) §6.6), so *sync* attribution names a person.
 The version store was deliberately left out of that change. A snapshot is
 something a Mac did to a folder — connected or not, invited or not — and for
 one person with two Macs "which Mac" is the more useful half; the wrong-name
@@ -514,11 +514,10 @@ second index to keep agreeing with the first.
 
 `MANIFEST_VERSION` did not move *then*: an empty `hist` was a valid v2
 manifest to every worker and app that existed, so the change was invisible
-on the wire and forced no worker update. It moved later, when the teams plan
-gave up on compatibility with released builds
-([teams-plan.md](teams-plan.md) §2, §12): `MANIFEST_VERSION` is 3, the field
-and its routes are deleted outright, and a skewed app and worker refuse each
-other politely with a `426` instead. Nothing was ever seeded from the old
+on the wire and forced no worker update. It moved later, when compatibility
+with released builds was given up ([cloud.md](cloud.md) §5.7, §6.6):
+`MANIFEST_VERSION` is 3, the field and its routes are deleted outright, and a
+skewed app and worker refuse each other politely with a `426` instead. Nothing was ever seeded from the old
 `hist` — by the time it went, the snapshots reached far past the hours it
 ever held.
 
@@ -529,7 +528,7 @@ ever held.
 - `build_manifest` wrote `hist: []` and nothing else ever touched it. The
   field, `HistEntry` and the worker's shape check stayed while an older
   release on the same workspace was still filling it. **All of it is gone**
-  as of manifest v3 ([teams-plan.md](teams-plan.md) §12): no field, no type,
+  as of manifest v3 ([cloud.md](cloud.md) §6.6): no field, no type,
   no check, and a manifest that carries one is simply a manifest from a
   version this worker refuses. Nothing was migrated out of the entries — the
   version store already holds this Mac's own past, which is the trade this

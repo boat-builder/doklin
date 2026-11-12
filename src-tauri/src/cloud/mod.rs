@@ -797,6 +797,20 @@ pub(crate) fn cloud_set_activity(
     })
 }
 
+/// *Take over* on a document another Mac holds (docs/cloud.md §8.2): the
+/// engine for `root` claims it on its next beat, from whoever has it. Advisory
+/// like the lease itself — the Mac it is taken from goes view-only on its next
+/// poll, and anything both typed in between merges as any overlap does.
+#[tauri::command]
+pub(crate) fn cloud_take_over(app: AppHandle, root: String, path: String) -> Result<(), String> {
+    with_inner(&app, |inner| {
+        if let Some(h) = inner.engines.get(&root) {
+            let _ = h.tx.send(EngineCmd::TakeOver(path));
+        }
+        Ok(())
+    })
+}
+
 /// Publish a file or a folder (`path` decides which — a directory publishes
 /// as a folder page). Answers the slug; the page is queued and rides the
 /// next won CAS, so publishing works offline.

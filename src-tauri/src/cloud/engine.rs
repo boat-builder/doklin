@@ -33,8 +33,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::manifest::{
-    clean_text, dedupe_paths, files_under, is_member_id, random_slug, unique_slug, valid_rel_path,
-    valid_slug, Beat, Manifest, ManifestFile, PollResponse, PublicEntry, PublicKind, Target, Tombstone,
+    clean_text, dedupe_paths, files_under, is_member_id, lease_key, random_slug, unique_slug,
+    valid_rel_path, valid_slug, Beat, LeaseEntry, Manifest, ManifestFile, PollResponse, PublicEntry,
+    PublicKind, Target, Tombstone,
     MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
@@ -45,7 +46,7 @@ use super::scan::{
     stat_pair, write_atomic, write_json, ScanEntry,
 };
 use super::status::{
-    emit_statuses, CloudStatus, Events, Phase, PresenceDevice, PublicPage, StatusTable,
+    emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, StatusTable,
     VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_DELETES,
 };
 // The cloud half of versioning. `crate::versions` is the local versioner —
@@ -66,13 +67,18 @@ pub const FS_SETTLE: Duration = Duration::from_millis(5000);
 /// touch — autosave is already debounced 600 ms upstream, so an edit reaches
 /// the cloud about two seconds after the keystroke.
 pub const TOUCH_SETTLE: Duration = Duration::from_millis(1500);
-/// Presence heartbeat cadence + how recent activity must be to count as
-/// "editing". The beat rides the poll (docs/teams-plan.md §13): it goes out
-/// on the first poll at least this long after the last one landed — every
-/// third, at a 15 s poll — and well inside the worker's 90 s TTL, so one
-/// lost beat is survivable and two are not.
+/// Presence heartbeat cadence. The beat rides the poll (docs/cloud.md §6.4):
+/// it goes out on the first poll at least this long after the last one landed
+/// — every third, at a 15 s poll — and well inside the worker's 90 s TTL, so
+/// one lost beat is survivable and two are not. It is also what renews a
+/// lease, which lives exactly as long as presence does.
 pub(crate) const PRESENCE_BEAT: Duration = Duration::from_secs(45);
-const ACTIVITY_FRESH: Duration = Duration::from_secs(90);
+/// How long a document counts as being edited here after it was last opened
+/// or typed in: what presence reports as "editing <path>", and how long this
+/// Mac keeps the document's lease (docs/cloud.md §8.2). Long enough to stop
+/// and think without the document going to somebody else; short enough that a
+/// Mac left on with a note open lets go of it by the time anyone minds.
+pub(crate) const ACTIVITY_FRESH: Duration = Duration::from_secs(5 * 60);
 /// Tombstones older than this get dropped from the manifest by whoever
 /// writes it next.
 const TOMBSTONE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -83,7 +89,7 @@ const MASS_DELETE_PCT: usize = 30;
 const MASS_DELETE_MIN: usize = 5;
 /// What an engine asks `/api/meta` about again, hourly, while the worker
 /// lacks it — so updating the worker reaches a Mac that is already running.
-const ASKED_AGAIN_FOR: [&str; 2] = ["versions", "presence"];
+const ASKED_AGAIN_FOR: [&str; 3] = ["versions", "presence", "leases"];
 /// Blob GC runs opportunistically on this fraction of cycles.
 const GC_EVERY_N_CYCLES: u64 = 20;
 /// A blob must be at least this old before GC may take it (a racing pusher
@@ -179,7 +185,7 @@ pub struct WorkspaceState {
 /// The bookmark of the one-time clean-up that phase 6 leaves behind
 /// (docs/versioning-plan.md §9.1): every file's retired revision blobs. It
 /// had a first pass over the `history/<fid>.json` archives too, until the
-/// routes it called were deleted (docs/teams-plan.md §12).
+/// routes it called were deleted (docs/cloud.md §6.6).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LegacyCleanup {
     /// What an older release wrote here when it finished deleting archives.
@@ -230,6 +236,9 @@ pub enum EngineCmd {
     Touched(String),
     /// The absolute path the user is editing, or nothing.
     SetActivity(Option<String>),
+    /// The user chose *Take over* on a document another Mac holds (absolute
+    /// path): the next beat claims it from whoever has it.
+    TakeOver(String),
     Pause(bool),
     ConfirmDeletes,
     Publish {
@@ -300,7 +309,7 @@ pub struct Engine<R: Remote> {
     /// to not at all — and says so in the status.
     worker_features: Vec<String>,
     /// The member id this Mac signs with here, as `/api/meta` last said it
-    /// (docs/teams-plan.md §12). None on a domain that has not been asked
+    /// (docs/cloud.md §6.6). None on a domain that has not been asked
     /// yet, or one whose owner has never adopted an identity — then work is
     /// signed with the Mac's name, exactly as it was before v3.
     me: Option<String>,
@@ -323,6 +332,11 @@ pub struct Engine<R: Remote> {
     last_beat: Option<Instant>,
     beaconed: Option<String>,
     presence: Vec<PresenceDevice>,
+    /// Every live lease, from the last poll that answered; `None` before one
+    /// has, after one failed, and from a worker or database that cannot say.
+    leases: Option<Vec<LeaseEntry>>,
+    /// A *Take over* waiting for the beat that carries it (workspace-relative).
+    take_over: Option<String>,
     /// Deletions held back by the mass-delete valve, waiting for a user go.
     held_deletes: Vec<String>,
     allow_mass_delete: bool,
@@ -396,6 +410,8 @@ impl<R: Remote> Engine<R> {
             last_beat: None,
             beaconed: None,
             presence: Vec::new(),
+            leases: None,
+            take_over: None,
             held_deletes: Vec::new(),
             allow_mass_delete: false,
             cycles: 0,
@@ -544,6 +560,7 @@ impl<R: Remote> Engine<R> {
             }),
             public: self.public_pages(),
             presence: self.presence.clone(),
+            leases: self.lease_holders(),
         };
         if let Ok(mut table) = self.statuses.lock() {
             table.insert(self.root_key(), status);
@@ -561,7 +578,7 @@ impl<R: Remote> Engine<R> {
             // before this engine writes anything: `me` is what a manifest it
             // publishes signs with, and `people` is what the `by` in one it
             // reads is shown as. A worker older than v6 answers neither, and
-            // everything falls back to device names (docs/teams-plan.md §12).
+            // everything falls back to device names (docs/cloud.md §6.6).
             self.me = meta.you.and_then(|you| you.member_id).filter(|id| !id.is_empty());
             self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
             self.people_at = Some(Instant::now());
@@ -1429,7 +1446,7 @@ impl<R: Remote> Engine<R> {
     /// persisted, so it survives a restart and is never done twice.
     ///
     /// This used to sweep the `history/<fid>.json` archives first. Those
-    /// routes are gone (docs/teams-plan.md §12), and the archives with them:
+    /// routes are gone (docs/cloud.md §6.6), and the archives with them:
     /// a workspace whose first pass never finished keeps a few small objects
     /// nothing reads, and the wipe takes them. The blobs are the part that
     /// was worth the walk — a deep revision of a large file is megabytes —
@@ -1489,9 +1506,10 @@ impl<R: Remote> Engine<R> {
         if hourly && ASKED_AGAIN_FOR.iter().any(|f| !self.worker_has(f)) {
             // Either `/api/meta` never answered (the app started offline) or
             // the worker predates something this app can use — the version
-            // store, or the poll that carries a beat. Ask again on the hourly
-            // pass: both are meant to start the moment the worker is updated,
-            // on every Mac and without a restart — but never once per cycle.
+            // store, the poll that carries a beat, the beat that claims a
+            // lease. Ask again on the hourly pass: each is meant to start the
+            // moment the worker is updated, on every Mac and without a restart
+            // — but never once per cycle.
             self.probe_worker().await;
             self.refresh_status();
         }
@@ -1684,6 +1702,27 @@ impl<R: Remote> Engine<R> {
         self.activity = abs_path.map(|p| (p, Instant::now()));
     }
 
+    /// The app just wrote `rel`. When that is the document being edited, the
+    /// editing is fresh again — typing is what keeps a document yours, not
+    /// only having opened it.
+    pub(crate) fn touch_activity(&mut self, rel: &str) {
+        let Some((abs, at)) = self.activity.as_mut() else { return };
+        if rel_path(&self.cfg.root, Path::new(abs.as_str())).as_deref() == Some(rel) {
+            *at = Instant::now();
+        }
+    }
+
+    /// *Take over*: the document is the one being edited from this moment —
+    /// asking for it is touching it — and the next beat claims it from
+    /// whoever holds it. A path outside this workspace is not this engine's.
+    pub(crate) fn take_over(&mut self, abs_path: String) {
+        let Some(rel) = rel_path(&self.cfg.root, Path::new(&abs_path)).filter(|r| !r.is_empty()) else {
+            return;
+        };
+        self.activity = Some((abs_path, Instant::now()));
+        self.take_over = Some(rel);
+    }
+
     pub(crate) fn confirm_deletes(&mut self) {
         self.allow_mass_delete = true;
         self.held_deletes.clear();
@@ -1705,9 +1744,10 @@ impl<R: Remote> Engine<R> {
     }
 
     /// Is a beat owed — "this Mac is here (editing <path>)"? On a cadence,
-    /// and at once when the edited path changes. Every device beats, editing
-    /// or idle, so the others see who is around; one that goes quiet falls
-    /// out of presence by the worker's TTL.
+    /// at once when the edited path changes, and at once when the document
+    /// being edited is there to claim. Every device beats, editing or idle,
+    /// so the others see who is around; one that goes quiet falls out of
+    /// presence by the worker's TTL, and out of its lease with it.
     ///
     /// Never to a worker without `presence`: before v7 the poll was `GET`
     /// only, and the beat a route this app no longer speaks. Such a Mac polls
@@ -1716,20 +1756,41 @@ impl<R: Remote> Engine<R> {
     fn beat_due(&self) -> bool {
         self.worker_has("presence")
             && (self.last_beat.map(|t| t.elapsed() >= PRESENCE_BEAT).unwrap_or(true)
-                || self.beaconed != self.activity_rel())
+                || self.beaconed != self.activity_rel()
+                || self.claim_owed())
     }
 
     /// When the next beat is owed: now, when the edited path has moved since
-    /// the last one, and a beat's length after it otherwise. None when this
-    /// worker takes no beat.
+    /// the last one or its document is free to claim, and a beat's length
+    /// after the last one otherwise. None when this worker takes no beat.
     fn beat_deadline(&self) -> Option<Instant> {
         if !self.worker_has("presence") {
             return None;
         }
-        if self.beaconed != self.activity_rel() {
+        if self.beaconed != self.activity_rel() || self.claim_owed() {
             return Some(Instant::now());
         }
         Some(self.last_beat.map(|t| t + PRESENCE_BEAT).unwrap_or_else(Instant::now))
+    }
+
+    /// The document being edited is owed a claim now rather than at the next
+    /// beat: the user asked to take it over, or the last poll said nobody
+    /// holds it — this Mac included, which is what a lease another Mac has
+    /// just let go of looks like from here. Not while somebody else holds it
+    /// (the poll will say when they stop), and not when the domain could not
+    /// say who holds what: then there is no lock to claim.
+    fn claim_owed(&self) -> bool {
+        if !self.worker_has("leases") {
+            return false;
+        }
+        // A path the worker would not take records no claim, so it could
+        // never stop being owed one.
+        let Some(rel) = self.activity_rel().filter(|r| valid_rel_path(r)) else { return false };
+        if self.take_over.as_deref() == Some(rel.as_str()) {
+            return true;
+        }
+        let key = lease_key(&rel);
+        self.leases.as_ref().is_some_and(|all| !all.iter().any(|l| l.path == key))
     }
 
     /// When to poll next, after anything that was not itself a poll: the
@@ -1783,16 +1844,32 @@ impl<R: Remote> Engine<R> {
     /// others' presence comes back in the answer and only re-emits when it
     /// changed.
     async fn poll_and_maybe_cycle(&mut self) -> RemoteResult<()> {
-        let beat = self
-            .beat_due()
-            .then(|| Beat::Here { name: self.cfg.device_name.clone(), path: self.activity_rel() });
+        let beat = self.beat_due().then(|| {
+            let path = self.activity_rel();
+            let take = path.is_some() && self.take_over == path;
+            Beat::Here { name: self.cfg.device_name.clone(), path, take }
+        });
         let sent = Instant::now();
-        let poll = self.remote.poll(beat.as_ref()).await?;
-        if let Some(Beat::Here { path, .. }) = beat {
+        let poll = match self.remote.poll(beat.as_ref()).await {
+            Ok(poll) => poll,
+            Err(e) => {
+                // A lock nobody can confirm is no lock: an editor kept
+                // view-only by a lease this Mac can no longer hear about
+                // would be the one way a lease could get in anybody's way.
+                if self.leases.take().is_some_and(|l| !l.is_empty()) {
+                    self.refresh_status();
+                }
+                return Err(e);
+            }
+        };
+        if let Some(Beat::Here { path, take, .. }) = beat {
             // From when it was sent, not when it was answered: the next beat
             // is then owed a little early rather than a poll late.
             self.last_beat = Some(sent);
             self.beaconed = path;
+            if take {
+                self.take_over = None;
+            }
         }
         self.learn_people_here(&poll).await;
         let presence = self.presence_of(&poll);
@@ -1801,18 +1878,58 @@ impl<R: Remote> Engine<R> {
                 a.device_id != b.device_id || a.path != b.path || a.name != b.name || a.device != b.device
             });
         self.presence = presence;
+        let holders = self.lease_holders();
+        self.leases = poll.leases.clone();
+        let leases_changed = self.lease_holders() != holders;
         if Some(poll.manifest_etag.as_str()) != self.state.manifest_etag.as_deref() {
             self.cycle().await?;
-        } else if presence_changed {
+        } else if presence_changed || leases_changed {
             self.refresh_status();
         }
         self.legacy_cleanup().await;
         Ok(())
     }
 
+    /// The documents another Mac holds, in words — resolved the way presence
+    /// is. None at all while this engine is not hearing the domain: a paused
+    /// or outdated engine is not polling, and a lease it last heard about may
+    /// have lapsed a minute ago.
+    fn lease_holders(&self) -> Vec<LeaseHolder> {
+        if self.paused || self.outdated.is_some() {
+            return Vec::new();
+        }
+        let Some(leases) = &self.leases else { return Vec::new() };
+        leases
+            .iter()
+            .filter(|l| l.device_id != self.cfg.device_id)
+            .map(|l| {
+                let own = l.member_id.is_some() && l.member_id == self.me;
+                let person = l.member_id.as_deref().filter(|_| !own).and_then(|m| self.people.get(m));
+                LeaseHolder {
+                    path: l.path.clone(),
+                    device_id: l.device_id.clone(),
+                    member_id: l.member_id.clone(),
+                    name: person.cloned().unwrap_or_else(|| l.name.clone()),
+                    device: l.name.clone(),
+                    own,
+                    until: l.until,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether this Mac holds `rel`'s lease, by the last poll.
+    #[cfg(test)]
+    pub(crate) fn holds_for_test(&self, rel: &str) -> bool {
+        let key = lease_key(rel);
+        self.leases
+            .as_ref()
+            .is_some_and(|all| all.iter().any(|l| l.path == key && l.device_id == self.cfg.device_id))
+    }
+
     /// Everybody else here, in words. The worker says whose Mac each one is;
     /// the directory says what they are called — the same resolution every
-    /// `by` gets (docs/teams-plan.md §12). Your own other Mac is named as a
+    /// `by` gets (docs/cloud.md §6.6). Your own other Mac is named as a
     /// Mac, and so is one whose person the directory cannot name yet.
     fn presence_of(&self, poll: &PollResponse) -> Vec<PresenceDevice> {
         let mut presence: Vec<PresenceDevice> = poll
@@ -1905,6 +2022,7 @@ impl<R: Remote> Engine<R> {
                         }
                     }
                     Some(EngineCmd::Touched(rel)) => {
+                        self.touch_activity(&rel);
                         self.dirty.insert(rel);
                         touch_dirty_at = Some(Instant::now());
                     }
@@ -1915,6 +2033,12 @@ impl<R: Remote> Engine<R> {
                         // type, so this is one request per switch — what the
                         // beat's own route used to cost.
                         self.set_activity(p);
+                        next_poll = next_poll.min(self.next_poll_after_cycle());
+                    }
+                    Some(EngineCmd::TakeOver(p)) => {
+                        // The claim is the beat's, and the beat is the poll's:
+                        // bring it forward, as a new path does.
+                        self.take_over(p);
                         next_poll = next_poll.min(self.next_poll_after_cycle());
                     }
                     Some(EngineCmd::Pause(p)) => self.set_paused(p),

@@ -2020,6 +2020,7 @@ pub fn run() {
             cloud::cloud_pause,
             cloud::cloud_confirm_deletes,
             cloud::cloud_set_activity,
+            cloud::cloud_take_over,
             cloud::cloud_publish,
             cloud::cloud_unpublish,
             cloud::cloud_set_root,

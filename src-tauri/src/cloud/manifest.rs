@@ -95,8 +95,8 @@ pub struct ManifestFile {
     pub size: u64,
     #[serde(default)]
     pub mtime: u64,
-    /// Who last changed it — a **member id** since v3 (docs/teams-plan.md
-    /// §12), where it used to be the device's name. Empty where there is no
+    /// Who last changed it — a **member id** since v3 (docs/cloud.md
+    /// §6.6), where it used to be the device's name. Empty where there is no
     /// identity: a workspace whose domain has never said who this Mac is.
     /// A workspace upgraded from v2 keeps the device names already in it,
     /// and the surfaces show whatever does not resolve exactly as it stands.
@@ -162,22 +162,27 @@ impl PublicEntry {
 }
 
 /// `GET /api/poll`, or the `POST` that carries a beat: whether the manifest
-/// moved, and who else is here.
+/// moved, who else is here, and which documents they hold.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PollResponse {
     #[serde(rename = "manifestEtag")]
     pub manifest_etag: String,
     #[serde(default)]
     pub presence: BTreeMap<String, PresenceEntry>,
+    /// Every live lease (worker v8, docs/cloud.md §8.2). `None` from an older
+    /// worker, and from one whose database could not answer — both mean
+    /// "nobody is known to hold anything", which is what no lock looks like.
+    #[serde(default)]
+    pub leases: Option<Vec<LeaseEntry>>,
 }
 
 /// One device, keyed by its id in `PollResponse::presence`: here, and
 /// editing `path` when set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresenceEntry {
-    /// Whose Mac it is (worker v7, docs/teams-plan.md §13). Absent from an
-    /// older worker, and null for an owner who never adopted an identity —
-    /// both are shown by the Mac's name, which is what `name` is.
+    /// Whose Mac it is (worker v7). Absent from an older worker, and null for
+    /// an owner who never adopted an identity — both are shown by the Mac's
+    /// name, which is what `name` is.
     #[serde(rename = "memberId", default)]
     pub member_id: Option<String>,
     #[serde(default)]
@@ -188,13 +193,38 @@ pub struct PresenceEntry {
     pub ts: u64,
 }
 
+/// One held document. `path` is the lease's key: workspace-relative and
+/// lowercased, so compare it with [`lease_key`] of a path, never directly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeaseEntry {
+    pub path: String,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    #[serde(rename = "memberId", default)]
+    pub member_id: Option<String>,
+    /// The holder's Mac.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub until: u64,
+}
+
+/// The key a path is leased under — the worker's `leaseKey` (presence.ts):
+/// lowercased, so two spellings of one file on a case-insensitive disk are one
+/// lock. Change both.
+pub fn lease_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
 /// What a poll carries when the engine has a beat to send (`POST /api/poll`).
 /// No beat at all is a `GET`, which writes nothing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Beat {
     /// "This Mac is here" — editing `path` when set, idle otherwise. `name`
-    /// is the Mac's; the worker knows whose it is from the bearer.
-    Here { name: String, path: Option<String> },
+    /// is the Mac's; the worker knows whose it is from the bearer. A path
+    /// claims that document's lease and lets go of any other; `take` claims
+    /// it from whoever holds it.
+    Here { name: String, path: Option<String>, take: bool },
     /// The last poll a quitting engine makes.
     Leave,
 }
@@ -203,8 +233,11 @@ impl Beat {
     /// The request body, exactly as the worker reads it.
     pub fn body(&self) -> serde_json::Value {
         match self {
-            Beat::Here { name, path: Some(path) } => serde_json::json!({ "name": name, "path": path }),
-            Beat::Here { name, path: None } => serde_json::json!({ "name": name }),
+            Beat::Here { name, path: Some(path), take: true } => {
+                serde_json::json!({ "name": name, "path": path, "take": true })
+            }
+            Beat::Here { name, path: Some(path), take: false } => serde_json::json!({ "name": name, "path": path }),
+            Beat::Here { name, path: None, .. } => serde_json::json!({ "name": name }),
             Beat::Leave => serde_json::json!({ "leave": true }),
         }
     }

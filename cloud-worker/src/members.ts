@@ -1,22 +1,22 @@
-// People, and the credentials they hold (docs/teams-plan.md §3, §9).
+// People, and the credentials they hold (docs/cloud.md §5.4, §8.1).
 //
 // The shape everything here rests on is a separation the old design did not
 // make: an *identity* is not a *credential*.
 //
 //   member   permanent, one row per person, keyed by their normalized email.
-//            What the manifest, presence and leases will name. Survives every
+//            What the manifest, presence and leases name. Survives every
 //            Mac they ever use — lose the laptop, get invited again, same row.
 //   token    one per device, disposable, 256 bits. Stored only as
 //            sha256(token): the database is not a list of credentials, and
 //            revoking one is deleting one row.
 //   invite   a token that has not been claimed yet. Stored only as
 //            sha256(code), one-time, and deleted the moment it is redeemed or
-//            found expired (§6.6) — no cron trigger, no reaper.
+//            found expired (docs/cloud.md §8.1) — no cron trigger, no reaper.
 //
 // The owner is not in here on the authenticating path. `OWNER_TOKEN` stays
 // the worker's env secret, compared with no database read, so a D1 outage
 // degrades a workspace to one credential instead of locking its owner out
-// (§3.2). The owner gets a member row all the same — for attribution and for
+// (docs/cloud.md §5.4). The owner gets a member row all the same — for attribution and for
 // the People list — and `adoptOwner` is what writes it.
 
 import { randomHex, sha256Hex } from "./crypto";
@@ -44,7 +44,7 @@ export type MemberWithDevices = Member & { devices: number };
  * secret. Note what is NOT here: a role. The `members.role` column describes
  * a *person* — it is what the People list shows — and a token is never
  * evidence of it. Owner authority comes from exactly one place, the env
- * secret, so no row anybody can write grants it (§3.2). Inviting the owner's
+ * secret, so no row anybody can write grants it (docs/cloud.md §5.4). Inviting the owner's
  * own address therefore mints an ordinary member credential, which is what
  * it should be: their second Mac already has the real one.
  */
@@ -125,7 +125,7 @@ export const HASH_RE = /^[a-f0-9]{64}$/;
 
 /** The ids this module mints: `m-` a member, `t-` a token, `i-` an invite.
  *  Short on purpose — a member id is what the manifest, presence and leases
- *  will carry, and an email must never enter any of them (§6.2). */
+ *  carry, and an email must never enter any of them (docs/cloud.md §8.1). */
 export const ENTITY_ID_RE = /^[mti]-[a-f0-9]{8}$/;
 
 /* ---------- The database, or nothing ---------- */
@@ -179,7 +179,7 @@ const memberId = (): string => `m-${randomHex(4)}`;
  *
  * Deliberately NOT written here: `last_seen_at`. A write on every request is
  * 57,600 writes a day for ten Macs; the presence beat carries it instead,
- * at most once an hour per person (presence.ts, decision 7).
+ * at most once an hour per person (presence.ts; docs/cloud.md §8.1).
  */
 export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | null> {
   return withDb(env, async (db) => {
@@ -214,7 +214,7 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
 
 /**
  * Everyone's id and display name, and nothing else — what a `by` in the
- * manifest is read with (docs/teams-plan.md §12).
+ * manifest is read with (docs/cloud.md §6.6).
  *
  * This is the one piece of the identity tables that is not the owner's, and
  * it is served by `GET /api/meta` rather than a route of its own, so decision
@@ -307,13 +307,15 @@ export async function adoptOwner(env: Env, email: string, name: string | null): 
  * Remove a person and everything they can sign in with, atomically: their
  * tokens, their pending invite, then the row itself. The cascade is declared
  * in the schema too, but spelling it out means revocation does not depend on
- * whether foreign keys are being enforced. Their presence goes with them, so
- * nobody keeps seeing a person who is no longer here.
+ * whether foreign keys are being enforced. Their presence and their leases go
+ * with them, so nobody keeps seeing — or being kept out of a document by — a
+ * person who is no longer here.
  */
 export async function deleteMember(env: Env, id: string): Promise<boolean | null> {
   return withDb(env, async (db) => {
     const results = await db.batch([
       db.prepare("DELETE FROM presence WHERE member_id = ?").bind(id),
+      db.prepare("DELETE FROM leases WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM tokens WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM invites WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM members WHERE id = ?").bind(id),
@@ -325,7 +327,7 @@ export async function deleteMember(env: Env, id: string): Promise<boolean | null
 /* ---------- Tokens ---------- */
 
 /** Every signed-in device. Never the hash: the owner does not get to hold
- *  anyone's credential, only to name it (§6.5). */
+ *  anyone's credential, only to name it (docs/cloud.md §8.1). */
 export async function listTokens(env: Env): Promise<TokenRow[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
@@ -355,14 +357,16 @@ export async function listTokens(env: Env): Promise<TokenRow[] | null> {
 
 /** Revoke one device. Takes effect on that device's very next request: the
  *  bearer resolves through this table, so there is no session to expire.
- *  Its presence row goes in the same batch — a Mac that has just been shown
- *  the door should not stay "here now" for the TTL's minute and a half. */
+ *  Its presence row and its lease go in the same batch — a Mac that has just
+ *  been shown the door should not stay "here now", or keep a document
+ *  view-only for everyone else, for the TTL's minute and a half. */
 export async function deleteToken(env: Env, id: string): Promise<boolean | null> {
   return withDb(env, async (db) => {
     const results = await db.batch([
       db
         .prepare("DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)")
         .bind(id),
+      db.prepare("DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)").bind(id),
       db.prepare("DELETE FROM tokens WHERE id = ?").bind(id),
     ]);
     return (results.at(-1)?.meta.changes ?? 0) > 0;
@@ -379,7 +383,7 @@ export async function deleteToken(env: Env, id: string): Promise<boolean | null>
  * new one is made.
  *
  * `codeHash` is sha256 of the canonical code and arrives from the app — the
- * worker never sees the plaintext at this end (§6.3).
+ * worker never sees the plaintext at this end (docs/cloud.md §8.1).
  */
 export async function putInvite(
   env: Env,

@@ -27,7 +27,7 @@ export type ManifestFile = {
   hash: string;
   size: number;
   mtime?: number;
-  /** Who last changed it: a member id since v3 (docs/teams-plan.md §12).
+  /** Who last changed it: a member id since v3 (docs/cloud.md §6.6).
    *  Checked as a bounded string rather than as an id, because a workspace
    *  upgraded from v2 carries the device names it was written with and
    *  refusing those would throw away the attribution it already has. */
@@ -171,7 +171,7 @@ export function validateManifest(data: unknown): ManifestProblem | null {
   if (!isObject(data)) return bad("manifest must be an object");
   if (!Number.isInteger(data.version)) return bad("manifest version must be an integer");
   // A skew is 426 in both directions — "upgrade required" is what it is, and
-  // the sentence says which side (docs/teams-plan.md §2). A 400 here would
+  // the sentence says which side (docs/cloud.md §5.7). A 400 here would
   // read as corruption, which a version older than this worker's is not.
   if (data.version !== MANIFEST_VERSION) {
     return {

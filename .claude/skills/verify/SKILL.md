@@ -110,7 +110,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 34 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 35 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -123,6 +123,9 @@ node verify-harness/drive-cloud.mjs        # 34 steps: boots the REAL <App/> (cl
                                            # copy's toast opening the copy, cloud-applied refreshing
                                            # the tree, presence chips (a person named, their
                                            # Mac beside them, your own other Mac as a Mac),
+                                           # a document another Mac holds (a lease) opening
+                                           # view-only under its banner, typing writing
+                                           # nothing, and Take over handing it here,
                                            # Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
                                            # the teardown prompt, the join flow opening the
@@ -342,7 +345,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 42 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 45 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh
@@ -368,7 +371,14 @@ node cloud-worker/test/run.mjs             # 42 cases against an in-memory R2 fa
                                            # lastSeenAt at most hourly and never from auth;
                                            # revoking a Mac or removing a person clearing their
                                            # row; a beat to an unbound domain recording nobody;
-                                           # the etag answering with the DB removed), the statics /
+                                           # the etag answering with the DB removed), the leases
+                                           # that ride the same beat (a path claims, keyed
+                                           # lowercased; of two Macs racing exactly one holds;
+                                           # the holder renews and a non-holder changes nothing;
+                                           # another path, no path or a leave lets go; a lapsed
+                                           # one is free and swept; take claims a live one; the
+                                           # poll answering leases: null with no database),
+                                           # the statics /
                                            # OG image / an empty folder page / 404s, then the seed
                                            # workspace loaded through the API and the renderer: a
                                            # note (title, description, noindex, HEAD), a rendition
@@ -404,7 +414,7 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 71 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 80 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
@@ -418,7 +428,15 @@ hold the poll clock off, a beat lost with its poll riding the next one rather
 than a retry, a worker without `presence` polled and never beaten at until
 the hourly re-probe sees it updated, a leave as the last poll, and the
 person named — your own other Mac by its name, a stranger here asking the
-directory once), the invite code and the redeem flow (a minted code reading back the
+directory once), leases on that same beat (opening a document claims it and
+another Mac sees it held in any case; moving on lets go and the Mac waiting
+claims it on its next poll; *Take over* claims once and the holder hears on
+its next poll; typing keeps a document and walking away lets it go; a lock
+this Mac cannot hear about — a failed poll, a paused engine — is no lock; an
+older worker or a dead database shows none and is never left owing a claim;
+the holder named like presence; an editing Mac still four requests a minute,
+and its leave letting go; the hourly pass asking again until the worker holds
+leases, and not after), the invite code and the redeem flow (a minted code reading back the
 way it was written and surviving what a chat client does to it, one paste
 filling both of the wizard's boxes — an address never read as a code though
 its letters spell one — a code traded once for a token of that Mac's own, a

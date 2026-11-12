@@ -7,7 +7,9 @@ import {
   cloudPublish,
   cloudSetActivity,
   cloudStatus,
+  cloudTakeOver,
   cloudUnpublish,
+  leaseFor,
   onCloudApplied,
   onCloudConflict,
   onCloudPendingDeletes,
@@ -18,6 +20,7 @@ import {
   type PublicPage,
 } from "./cloud";
 import CloudPanel from "./CloudPanel";
+import { LeaseBanner } from "./LeaseBanner";
 import {
   onVersionsApplied,
   onVersionsStatus,
@@ -4795,6 +4798,8 @@ export default function App() {
         // session is never active — entering the view stops it — so this
         // toggle can only be a start.)
         e.preventDefault();
+        // Not into a document another Mac holds: it is view-only here.
+        if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
         void (async () => {
           if (docViewRef.current === "html") await selectDocView("md");
           await dictationRef.current?.toggle();
@@ -4941,6 +4946,24 @@ export default function App() {
   // Rust side decides which connected workspace, if any, it concerns.
   useEffect(() => {
     void cloudSetActivity(activeFilePath).catch(() => {});
+  }, [activeFilePath]);
+  // Leases (docs/cloud.md §8.2): the same report is this Mac's claim on the
+  // document, and the status says which documents another Mac holds. One of
+  // those opens view-only under a banner with *Take over*; it is advisory, so
+  // nothing here refuses a write — the editor simply stops taking input, and
+  // goes live again the moment the status says the lease moved.
+  const activeLease = useMemo(() => leaseFor(cloudStatuses, activeFilePath), [cloudStatuses, activeFilePath]);
+  const activeLeaseRef = useRef(activeLease);
+  activeLeaseRef.current = activeLease;
+  const leased = activeLease != null;
+  useEffect(() => {
+    // Dictation types into the document: a lease that lands mid-session ends
+    // it, its pending chunks flushing the way leaving for the html view does.
+    if (leased && dictationSessionRef.current !== "idle") void dictationRef.current?.stop();
+  }, [leased]);
+  const takeOverActive = useCallback(() => {
+    const held = activeLeaseRef.current;
+    if (held && activeFilePath) void cloudTakeOver(held.status.root, activeFilePath).catch(() => {});
   }, [activeFilePath]);
   // Sync wrote files: the tree refreshes (open tabs already reload through
   // the file watcher). A merge that left a conflict copy, or a mass
@@ -5257,6 +5280,10 @@ export default function App() {
       focused &&
       versionPreview != null &&
       (versionPreview.docPath === paneTab?.path || versionPreview.detached === true);
+    // Another Mac holds this document: view-only, under the banner. Only the
+    // focused pane can be held against — an unfocused one is read-only
+    // already, and promoting it makes it the document this Mac claims.
+    const leasedHere = focused && leased && paneTab?.kind === "file";
 
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
@@ -5338,6 +5365,9 @@ export default function App() {
               onExport={exportStoreCsv}
             />
           )}
+          {leasedHere && activeLease && showEditorHere && paneView === "md" && !previewHere && (
+            <LeaseBanner lease={activeLease.lease} onTakeOver={takeOverActive} />
+          )}
           {focused && showEditorHere && paneTab?.kind === "file" && (
             // This note's properties, above it. Changing a pill writes the
             // frontmatter block and nothing else — the body never moves. Every
@@ -5349,6 +5379,7 @@ export default function App() {
               props={cardProps}
               order={cardOrder}
               opaqueCount={cardOpaque.length}
+              readOnly={leasedHere}
               onChange={setCardProperty}
               onAddField={
                 activeCardDef && cardModel
@@ -5402,7 +5433,7 @@ export default function App() {
               commentsVisible={commentsVisible && !isMirror}
               onCommentsCount={focused ? setCommentCount : undefined}
               onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
-              readOnly={!focused}
+              readOnly={!focused || leasedHere}
               orphans={focused ? mdOrphanOps : undefined}
               // A mirror shows the active document, so it renders the active
               // widths; a two-document companion carries its own. Only the
@@ -5557,12 +5588,15 @@ export default function App() {
             onClick={() =>
               // Dictation types into the markdown editor; from the html view,
               // bring the editable version forward first (a session is never
-              // active there, so this is always a start).
+              // active there, so this is always a start). Never into a
+              // document another Mac holds — it is view-only here.
               void (async () => {
+                if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
                 if (docViewRef.current === "html") await selectDocView("md");
                 await dictationRef.current?.toggle();
               })()
             }
+            disabled={leased && dictationUi.session === "idle"}
             title={
               dictationUi.session === "idle"
                 ? "Start dictation (⌘⇧V)"

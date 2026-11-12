@@ -50,7 +50,7 @@ pub struct CloudStatus {
     pub pending_deletes: u32,
     /// What this Mac signs work with here, in words: the person the domain
     /// says it is, and this Mac's own name when the domain has not said
-    /// (docs/teams-plan.md §12). What a surface compares a `by` against to
+    /// (docs/cloud.md §6.6). What a surface compares a `by` against to
     /// know whether somebody *else* did a thing.
     pub me: String,
     /// What `/api/meta` last reported; null until the worker answered once.
@@ -64,6 +64,10 @@ pub struct CloudStatus {
     pub public: Vec<PublicPage>,
     /// Every other device here, from the last poll.
     pub presence: Vec<PresenceDevice>,
+    /// The documents another Mac holds, from the same poll (docs/cloud.md
+    /// §8.2). An editor showing one of these opens view-only. Empty when this
+    /// Mac cannot hear the domain — a lock nobody can confirm is no lock.
+    pub leases: Vec<LeaseHolder>,
 }
 
 /// How much of this device's version history is in the bucket, and how much
@@ -111,13 +115,31 @@ pub struct PresenceDevice {
     /// never said who they are.
     pub member_id: Option<String>,
     /// Who is here, in words: the person — or, when it is *your* other Mac,
-    /// or nobody the directory can name, the Mac. "Sherin is editing" says
-    /// nothing to Sherin; "MacBook Air is editing" does.
+    /// or nobody the directory can name, the Mac. "Ada is editing" says
+    /// nothing to Ada; "MacBook Air is editing" does.
     pub name: String,
     /// The Mac's own name, whoever's it is.
     pub device: String,
     pub path: Option<String>,
     pub ts: u64,
+}
+
+/// A document another Mac holds. Resolved like a `PresenceDevice`: the
+/// person when the directory can name them, the Mac when it is your own
+/// other one (`own`) or nobody it can.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseHolder {
+    /// The lease's key: workspace-relative and lowercased.
+    pub path: String,
+    pub device_id: String,
+    pub member_id: Option<String>,
+    pub name: String,
+    pub device: String,
+    /// True when the holder is you, on another Mac.
+    pub own: bool,
+    /// When it lapses unless renewed, by the domain's clock.
+    pub until: u64,
 }
 
 /// `cloud_probe`: what a domain answered before anything is touched.
