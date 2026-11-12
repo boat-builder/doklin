@@ -19,7 +19,7 @@ export type VersionsBytes = { blobs: number; snapshots: number };
 
 /** The whole model for one folder's version store. */
 export type VersionsStatus = {
-  /** The display root; the drafts folder for drafts. */
+  /** The display root. */
   root: string;
   key: string;
   phase: VersionsPhase;
@@ -120,7 +120,7 @@ export type RestoreReport = {
  *  of *Other folders* in the Versions settings. Mirrored by
  *  src-tauri/src/versions/stores.rs — change both. */
 export type StoreInfo = {
-  /** The store directory's name: `r-<16 hex>`, or `drafts`. */
+  /** The store directory's name: `r-<16 hex>`. */
   key: string;
   /** The folder it versions, as the store recorded it. */
   root: string;

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Untitled notes harness</title>
+  </head>
+  <body>
+    <script>
+      // Boots the REAL <App/> over an in-memory backend that keeps what the
+      // real one keeps across a quit: the files (untitled buffers included)
+      // and each window's last report to the registry. So a page reload is a
+      // relaunch — which is exactly what an untitled note has to survive.
+      //
+      //   ?win=spawned   boot as a restored non-main window (its tabs come
+      //                  from the registry, the way session.json feeds one)
+      //   ?bare=1        no workspace: Save goes through the native dialog
+      const params = new URLSearchParams(location.search);
+      const SPAWNED = params.get("win") === "spawned";
+      const LABEL = SPAWNED ? "win-1" : "main";
+      const UNTITLED = "/untitled";
+      const META = ".meta.jsonl";
+
+      const stored = (key, fallback) => {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      };
+      const fsSeed = [
+        ["/docs/notes.md", "# Notes\n\nA saved file.\n"],
+        ["/docs/other.md", "# Other\n\nAnother saved file.\n"],
+      ];
+      window.__fs = new Map(stored("harness:fs", fsSeed));
+      window.__registry = stored("harness:registry", {});
+      const persist = () => {
+        localStorage.setItem("harness:fs", JSON.stringify([...window.__fs]));
+        localStorage.setItem("harness:registry", JSON.stringify(window.__registry));
+      };
+      window.__persist = persist;
+
+      window.__mtime = 1000;
+      window.__writes = [];
+      window.__discarded = [];
+      window.__reports = 0;
+      window.__destroyed = 0;
+      window.__saveAnswer = null; // what the native Save dialog answers
+      window.__openAnswer = null; // what the native Open (folder) dialog answers
+      window.__slow = new Map(); // path → ms a read of it takes (a big file, a slow disk)
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+      const blank = (c) => /^(?:\s|<br\s*\/?>)*$/.test(c);
+
+      window.__listeners = new Map(); // event → [{ id, handler }]
+      let nextListenerId = 1;
+      window.__emit = (event, payload) => {
+        for (const { id, handler } of window.__listeners.get(event) ?? []) {
+          handler({ event, id, payload });
+        }
+      };
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: LABEL },
+          currentWebview: { label: LABEL, windowLabel: LABEL },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          switch (cmd) {
+            case "take_window_init": {
+              const seed = window.__registry[LABEL] ?? { folder: null, tabs: [], activeId: null };
+              return Promise.resolve({
+                isMain: !SPAWNED,
+                folder: SPAWNED ? seed.folder : null,
+                file: null,
+                tabs: SPAWNED ? seed.tabs : [],
+                activeId: SPAWNED ? seed.activeId : null,
+                restored: SPAWNED,
+              });
+            }
+            case "take_pending_folder":
+              return Promise.resolve(null);
+            case "register_window_content":
+              window.__reports++;
+              window.__registry[LABEL] = args;
+              persist();
+              return Promise.resolve(null);
+            case "untitled_dir":
+              return Promise.resolve(UNTITLED);
+            // untitled.rs's orphan pass: the notes no window has open — the
+            // caller's own list, plus every OTHER window's registry entry —
+            // with empty buffers swept on the way.
+            case "orphaned_untitled": {
+              const held = new Set(args.open);
+              for (const [label, content] of Object.entries(window.__registry)) {
+                if (label === LABEL) continue;
+                for (const t of content.tabs) if (t.kind === "untitled") held.add(t.path);
+              }
+              const out = [];
+              for (const [path, contents] of [...window.__fs]) {
+                if (!path.startsWith(UNTITLED + "/") || !path.endsWith(".md") || held.has(path)) continue;
+                if (blank(contents)) window.__fs.delete(path);
+                else out.push(path);
+              }
+              persist();
+              return Promise.resolve(out);
+            }
+            case "discard_untitled": {
+              if (!args.path.startsWith(UNTITLED + "/")) {
+                return Promise.reject(`not an untitled note: ${args.path}`);
+              }
+              window.__discarded.push(args.path);
+              window.__fs.delete(args.path);
+              window.__fs.delete(args.path.replace(/\.md$/, "") + META);
+              persist();
+              return Promise.resolve(null);
+            }
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              const answer = () =>
+                c === undefined
+                  ? Promise.reject(`no such file: ${args.path}`)
+                  : Promise.resolve({ contents: c, snapshot: snap(c) });
+              const ms = window.__slow.get(args.path);
+              return ms ? new Promise((r) => setTimeout(r, ms)).then(answer) : answer();
+            }
+            case "write_file": {
+              if (args.path.startsWith("/readonly/")) {
+                return Promise.reject({ kind: "io", message: "read-only volume" });
+              }
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              persist();
+              return Promise.resolve(snap(args.contents));
+            }
+            case "path_exists":
+              return Promise.resolve(
+                args.path === "/docs" || args.path === "/elsewhere" || window.__fs.has(args.path),
+              );
+            case "list_md_tree": {
+              const root = args.path;
+              const children = [...window.__fs.keys()]
+                .filter((p) => p.startsWith(root + "/") && p.endsWith(".md"))
+                .sort()
+                .map((p) => ({ kind: "file", name: p.slice(root.length + 1), path: p }));
+              return Promise.resolve({ kind: "dir", name: root.slice(1), path: root, children });
+            }
+            case "watch_file": {
+              const c = window.__fs.get(args.path) ?? "";
+              window.__watched = [args.path, ...(args.extras ?? [])];
+              return Promise.resolve(snap(c));
+            }
+            case "unwatch_file":
+              window.__watched = [];
+              return Promise.resolve(null);
+            case "cloud_status":
+            case "versions_status":
+            case "versions_deleted":
+              return Promise.resolve([]);
+            case "device_name":
+              return Promise.resolve("Test Mac");
+            case "plugin:dialog|save":
+              return Promise.resolve(window.__saveAnswer);
+            case "plugin:dialog|open":
+              return Promise.resolve(window.__openAnswer);
+            case "plugin:window|destroy":
+              window.__destroyed++;
+              return Promise.resolve(null);
+            case "plugin:window|set_title":
+              window.__title = args.value;
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:event|listen": {
+              const id = nextListenerId++;
+              const list = window.__listeners.get(args.event) ?? [];
+              list.push({ id, handler: args.handler });
+              window.__listeners.set(args.event, list);
+              return Promise.resolve(id);
+            }
+            case "plugin:event|unlisten": {
+              const list = (window.__listeners.get(args.event) ?? []).filter(
+                (l) => l.id !== args.eventId,
+              );
+              window.__listeners.set(args.event, list);
+              return Promise.resolve(null);
+            }
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: (event, id) => {
+          const list = (window.__listeners.get(event) ?? []).filter((l) => l.id !== id);
+          window.__listeners.set(event, list);
+        },
+      };
+
+      // Seeded ONCE per browser context — a reload must keep what the app
+      // itself persisted, or it would not be a relaunch. The main window
+      // starts on the /docs workspace with one file open (or on nothing at
+      // all, for ?bare=1).
+      if (!localStorage.getItem("doklin:harness-seeded")) {
+        localStorage.clear();
+        localStorage.setItem("doklin:harness-seeded", "1");
+        if (!params.get("bare")) {
+          localStorage.setItem(
+            "doklin:session",
+            JSON.stringify({
+              version: 2,
+              lastRoot: "/docs",
+              sessions: {
+                "/docs": {
+                  tabs: [{ id: "t-notes", kind: "file", path: "/docs/notes.md" }],
+                  activeId: "t-notes",
+                },
+              },
+            }),
+          );
+        }
+        persist();
+      }
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./untitled.tsx"></script>
+  </body>
+</html>

@@ -2,26 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import ContextMenu from "./ContextMenu";
 import { LiveGlyph, useLivePages } from "./livePages";
 import { dragWindowFromGap } from "./windowDrag";
+import { isUnsaved, tabLabel, type Tab } from "./tabs";
 
-// "store" is a datastore folder shown as a kanban board — a tab whose path
-// is a directory rather than a document (see App.tsx).
-type TabKind = "draft" | "file" | "store";
-type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
-
-const basename = (p: string) => p.split(/[\\/]/).pop() || p;
-const stripDocExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
-const tabLabel = (t: Tab) =>
-  t.kind === "draft" ? t.title ?? "Untitled" : stripDocExt(basename(t.path));
+// What hovering a tab says: where a file is, or that a note isn't one yet.
+const tabHint = (t: Tab) =>
+  t.kind === "file" ? t.path : t.kind === "untitled" ? "Not saved to a file yet" : tabLabel(t);
 
 type Props = {
   tabs: Tab[];
   activeId: string | null;
-  // The active document's dirty state — inactive tabs autosave, so only the
-  // active tab can transiently show a dirty dot.
+  // The active document's pending-autosave state. A file's tab shows the
+  // edited dot only for that moment — inactive tabs have already autosaved —
+  // while an untitled note's shows it for as long as the note has text: it
+  // is unsaved until it is given a file.
   dirty: boolean;
   onSwitch: (id: string) => void;
   onClose: (id: string) => void;
-  onNewDraft: () => void;
+  onNewNote: () => void;
   onReorder: (tabs: Tab[]) => void;
   // Dragging a tab DOWN out of the bar hands the gesture to the host (the
   // split-view drop zones): `onDragOut` streams pointer positions while the
@@ -38,10 +35,11 @@ type Props = {
   // Rendered at the bar's right edge, after the tab strip (the app puts the
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
-  // Version history for this tab's document — the tab's right-click menu is
-  // one of the four ways in (docs/versioning-plan.md §12.3.6). A board has
-  // no document to version, so it has no item.
-  onHistory?: (path: string, kind: "draft" | "file") => void;
+  // Version history for this tab's file — the tab's right-click menu is one
+  // of the ways in (docs/versioning-plan.md §12.3.6). A board has no
+  // document to version and an untitled note no history, so neither has the
+  // item.
+  onHistory?: (path: string) => void;
 };
 
 // A press only becomes a drag after moving this far, so plain clicks (switch
@@ -54,7 +52,7 @@ export default function TabBar({
   dirty,
   onSwitch,
   onClose,
-  onNewDraft,
+  onNewNote,
   onReorder,
   onDragOut,
   onDragOutEnd,
@@ -66,9 +64,7 @@ export default function TabBar({
   const activeRef = useRef<HTMLButtonElement>(null);
   // Tabs whose note (or board) has a page of its own carry the live glyph.
   const live = useLivePages();
-  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; path: string; kind: "draft" | "file" } | null>(
-    null,
-  );
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const stripRef = useRef<HTMLDivElement>(null);
 
   // Keep the active tab in view when switching (e.g. via ⌘N or the sidebar).
@@ -224,6 +220,7 @@ export default function TabBar({
       >
         {tabs.map((t) => {
           const active = t.id === activeId;
+          const edited = isUnsaved(t) || (active && dirty);
           return (
             <div
               key={t.id}
@@ -237,7 +234,7 @@ export default function TabBar({
                 role="tab"
                 aria-selected={active}
                 className="tab-main"
-                title={t.kind === "file" ? t.path : tabLabel(t)}
+                title={tabHint(t)}
                 onClick={() => {
                   if (suppressClickRef.current) {
                     suppressClickRef.current = false;
@@ -256,16 +253,16 @@ export default function TabBar({
                   }
                 }}
                 onContextMenu={(e) => {
-                  if (!onHistory || t.kind === "store") return;
+                  if (!onHistory || t.kind !== "file") return;
                   e.preventDefault();
-                  setTabMenu({ x: e.clientX, y: e.clientY, path: t.path, kind: t.kind });
+                  setTabMenu({ x: e.clientX, y: e.clientY, path: t.path });
                 }}
               >
                 <span className="tab-icon">
                   {t.kind === "store" ? <BoardIcon /> : <NoteIcon />}
                 </span>
                 <span className="tab-label">{tabLabel(t)}</span>
-                {t.kind !== "draft" && live.has(t.path) && (
+                {t.kind !== "untitled" && live.has(t.path) && (
                   <span className="tab-live" title="Live on the web" data-testid="tab-live">
                     <LiveGlyph />
                   </span>
@@ -274,11 +271,9 @@ export default function TabBar({
               {/* Unsaved changes show as a dot where the × sits (the macOS
                   "edited" convention); hovering the tab brings the × back. */}
               <button
-                className={`tab-close ${active && dirty ? "is-dirty" : ""}`}
+                className={`tab-close ${edited ? "is-dirty" : ""}`}
                 aria-label={
-                  active && dirty
-                    ? `Close ${tabLabel(t)} (unsaved changes)`
-                    : `Close ${tabLabel(t)}`
+                  edited ? `Close ${tabLabel(t)} (unsaved changes)` : `Close ${tabLabel(t)}`
                 }
                 title="Close tab (⌘W)"
                 onClick={(e) => {
@@ -294,7 +289,7 @@ export default function TabBar({
         })}
         <button
           className="tab-new"
-          onClick={onNewDraft}
+          onClick={onNewNote}
           aria-label="New note"
           title="New note (⌘N / ⌘T)"
         >
@@ -305,7 +300,7 @@ export default function TabBar({
         <ContextMenu
           x={tabMenu.x}
           y={tabMenu.y}
-          items={[{ label: "Version history…", onClick: () => onHistory(tabMenu.path, tabMenu.kind) }]}
+          items={[{ label: "Version history…", onClick: () => onHistory(tabMenu.path) }]}
           onClose={() => setTabMenu(null)}
         />
       )}
@@ -332,7 +327,7 @@ export default function TabBar({
                     className={`tab-overflow-item ${active ? "is-active" : ""} ${
                       t.missing ? "is-missing" : ""
                     }`}
-                    title={t.kind === "file" ? t.path : tabLabel(t)}
+                    title={tabHint(t)}
                     onClick={() => {
                       setMenuOpen(false);
                       onSwitch(t.id);

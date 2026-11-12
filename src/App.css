@@ -31,7 +31,7 @@ body,
   padding: 0;
   background: var(--sheet);
   /* Fixed-window app shell: the document itself never scrolls — every pane
-     (editor canvas, tab strip, sidebar, drafts) owns its own overflow. Clip
+     (editor canvas, tab strip, sidebar) owns its own overflow. Clip
      here so a stray pixel from a grid track or a fixed overlay can't leak out
      into a window-level scrollbar. */
   overflow: hidden;
@@ -99,41 +99,32 @@ body,
 }
 
 /* ---------- App shell ----------
-   Three left-to-right slots: drafts panel | file sidebar | editor column.
-   Areas are constant; each panel's column collapses to 0 when hidden.
+   Two left-to-right slots: file sidebar | editor column. Areas are
+   constant; the sidebar's column collapses to 0 when hidden.
 
-   The top row is the window's title bar (--bar-h). Over the left column it
-   is the lead — the traffic lights' clearance and the panel toggles; over
-   the editor column it is the tab bar. With no left column showing, App.tsx
-   moves the lead to the start of the tab bar, so the tabs always begin
-   after the traffic lights. Every gap in the row drags the window
-   (windowDrag.ts).
+   The top row is the window's title bar (--bar-h). Over the sidebar it is
+   the lead — the traffic lights' clearance and the toggles; over the editor
+   column it is the tab bar. With no sidebar showing, App.tsx moves the lead
+   to the start of the tab bar, so the tabs always begin after the traffic
+   lights. Every gap in the row drags the window (windowDrag.ts).
 
    Everything sits on the canvas except the document area: the one sheet,
    inset from the window edge with rounded corners. */
 .app {
   display: grid;
-  grid-template-columns: 0 0 1fr;
+  grid-template-columns: 0 1fr;
   grid-template-rows: var(--bar-h) 1fr auto;
   grid-template-areas:
-    "lead   lead  bar"
-    "drafts side  main"
-    "foot   foot  main";
+    "lead bar"
+    "side main"
+    "foot main";
   height: 100vh;
   background: var(--canvas);
   position: relative;
 }
 
-.app.show-drafts {
-  grid-template-columns: 240px 0 1fr;
-}
-
 .app.with-sidebar {
-  grid-template-columns: 0 var(--sidebar-w, 240px) 1fr;
-}
-
-.app.show-drafts.with-sidebar {
-  grid-template-columns: 240px var(--sidebar-w, 240px) 1fr;
+  grid-template-columns: var(--sidebar-w, 240px) 1fr;
 }
 
 /* ---------- Title bar: the lead and its toggles ---------- */
@@ -144,8 +135,8 @@ body,
   gap: 2px;
   min-width: 0;
   /* The traffic lights sit at x 16–70 (tauri.conf.json); the toggles start
-     after them, at the same x whether the lead is over the left column or
-     at the start of the tab bar. */
+     after them, at the same x whether the lead is over the sidebar or at
+     the start of the tab bar. */
   padding-left: 84px;
   user-select: none;
 }
@@ -550,7 +541,7 @@ body,
   overflow: hidden;
 }
 
-.app:not(.with-sidebar):not(.show-drafts) .editor-area {
+.app:not(.with-sidebar) .editor-area {
   margin-left: var(--inset);
 }
 
@@ -1676,8 +1667,8 @@ body,
 }
 
 /* ---------- Settings (bottom-left) ----------
-   Docked (.is-docked) in the left column's footer when a sidebar or the
-   drafts panel is showing; floating bottom-left when neither is. */
+   Docked (.is-docked) in the sidebar's footer when the sidebar is showing;
+   floating bottom-left when it isn't. */
 
 .side-footer {
   grid-area: foot;
@@ -2498,149 +2489,6 @@ input[type="checkbox"]:focus-visible {
   white-space: nowrap;
 }
 
-/* ---------- Drafts panel (left, workspace-independent) ---------- */
-
-.drafts-panel {
-  grid-area: drafts;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* Beside the sidebar, a hairline between the two columns; alone, the
-   sheet's own edge is the divide. */
-.app.with-sidebar .drafts-panel {
-  border-right: 1px solid var(--border);
-}
-
-.drafts-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 8px 6px 12px;
-  flex-shrink: 0;
-}
-
-.drafts-header-title {
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-3);
-}
-
-.drafts-header-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.drafts-header-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.drafts-header-button:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-.drafts-body {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.drafts-empty {
-  padding: 8px 12px;
-  font-size: var(--fs-sm);
-  color: var(--text-3);
-}
-
-.drafts-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 6px;
-}
-
-.draft-row {
-  display: flex;
-  align-items: stretch;
-  border-radius: 6px;
-}
-
-.draft-row:hover {
-  background: var(--hover);
-}
-
-.draft-row.is-active {
-  background: var(--accent-wash);
-}
-
-.draft-open {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border: none;
-  background: transparent;
-  color: var(--text-1);
-  cursor: pointer;
-  text-align: left;
-}
-
-.draft-title {
-  font-size: var(--fs-md);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-row.is-active .draft-title {
-  font-weight: 600;
-}
-
-.draft-preview {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-discard {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 26px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0;
-}
-
-.draft-row:hover .draft-discard {
-  opacity: 1;
-}
-
-.draft-discard:hover {
-  background: var(--border);
-  color: var(--text-1);
-}
-
 /* ---------- Sidebar ---------- */
 
 /* On the canvas, edge to edge, with no border of its own: the sheet beside
@@ -3169,6 +3017,39 @@ body.tree-dragging.tree-drag-invalid * {
   position: fixed;
   inset: 0;
   z-index: 40;
+}
+
+/* ---------- Unsaved note prompt (an untitled note's tab closing) ----------
+   A real modal, unlike the quick input above: the note behind it is about to
+   be saved or lost, so nothing else answers until this does. */
+
+.unsaved-prompt {
+  max-width: 400px;
+  padding: 16px;
+}
+
+.unsaved-prompt-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.unsaved-prompt-body {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.unsaved-prompt-buttons {
+  flex-wrap: nowrap;
+  margin-top: 16px;
+}
+
+/* Don't Save sits apart from the two safe answers. */
+.unsaved-prompt-gap {
+  flex: 1;
 }
 
 .saveas-panel {

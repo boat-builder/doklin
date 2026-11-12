@@ -373,8 +373,7 @@ Local, per workspace, outside the folder:
 
 `key` is derived from the folder's path (a prefix of the sha256 of its
 canonical path), so no marker is written into a folder that is not
-connected; the drafts directory is a root of its own under the key
-`drafts`. A snapshot is keyed by *path*, not by the sync's file ids — it is
+connected. A snapshot is keyed by *path*, not by the sync's file ids — it is
 produced by scanning the disk, which is what lets it exist for a folder no
 engine has ever seen. Renames are followed by content: a path that vanished
 and a path that appeared with the same hash between two snapshots is one
@@ -427,7 +426,7 @@ folder's marker `wsId` as the key is a later refinement.
 ```
 
 `key` is `r-` and the first 16 hex of the sha256 of the folder's canonical
-path; the drafts directory is `drafts`. An index row is `{ts, reason, files,
+path. An index row is `{ts, reason, files,
 bytes, digest, pinned, label, restoredFrom}`, where `digest` is the sha256
 over `<path>\0<hash>\n` in path order — equal digests mean the same
 workspace, which is how a capture with nothing to record writes nothing. A
@@ -497,8 +496,10 @@ second index to keep agreeing with the first.
 - **Deleted files** — fids present in some retained snapshot and absent from
   the newest. Closing gap 2 needs no new storage at all; the blobs are
   already surviving in R2 today, just unreachable.
-- **Drafts** — capture them into the same store under a reserved id, so the
-  one thing with no versioning today gets it for free.
+- **Untitled notes** — none, on purpose. (Drafts once had a store of their
+  own under a reserved key. That went with the Drafts panel: a note that has
+  not been saved to a file is unsaved, and gone when its tab closes, so there
+  is nothing for a history to be of. Its history starts when it is saved.)
 
 ### 6.5 What this removes
 

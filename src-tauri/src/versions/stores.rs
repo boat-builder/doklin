@@ -42,9 +42,9 @@ pub struct ExportReport {
     pub files: u64,
 }
 
-/// A store key is a directory name this code builds (`r-<16 hex>`, or
-/// `drafts`); anything else came from somewhere it shouldn't have, and is
-/// never joined onto a path.
+/// A store key is a directory name this code builds (`r-<16 hex>`);
+/// anything else came from somewhere it shouldn't have, and is never joined
+/// onto a path.
 pub fn valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 64

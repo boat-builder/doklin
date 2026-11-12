@@ -9,8 +9,7 @@
 // probes (document font, measure, popover surface) per theme and document
 // font. Then Settings → Appearance (swatches from each theme's own tokens,
 // live choices, persistence), and the window layout, in light and dark: the title row with the sidebar hidden (the lead
-// moves into the tab bar and the toggles must not move), the drafts panel
-// beside the sidebar, and a split.
+// moves into the tab bar and the toggles must not move), and a split.
 import { webkit } from "playwright";
 import { mkdirSync } from "node:fs";
 
@@ -195,12 +194,6 @@ for (const theme of ["light", "dark"]) {
     firstTab: await rect(page, ".tab"),
   };
   await page.click('[aria-label="Toggle sidebar"]');
-  await page.click('[aria-label="Toggle drafts panel"]');
-  await page.waitForSelector(".drafts-panel");
-  await page.waitForTimeout(250);
-  await page.screenshot({ path: `${OUT}refresh-layout-${theme}-drafts.png` });
-  const drafts = { toggle: await rect(page, ".title-toggle"), sheet: await rect(page, ".editor-area") };
-  await page.click('[aria-label="Toggle drafts panel"]');
   await page.click(".split-toggle");
   await page.waitForSelector(".pane-header");
   await page.waitForTimeout(400);
@@ -208,18 +201,17 @@ for (const theme of ["light", "dark"]) {
 
   const checks = {
     barIs40: withSide.bar?.h === 40,
-    togglesStay: withSide.toggle?.x === noSide.toggle?.x && withSide.toggle?.y === noSide.toggle?.y && drafts.toggle?.x === withSide.toggle?.x,
+    togglesStay: withSide.toggle?.x === noSide.toggle?.x && withSide.toggle?.y === noSide.toggle?.y,
     sheetInsetNoSide: noSide.sheet?.x === 8 && noSide.sheet?.y === 40,
     sheetAgainstSidebar: withSide.sheet?.x === 240,
-    tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 3 * 28,
-    sheetAgainstDrafts: drafts.sheet?.x === 480,
+    tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 2 * 28,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
   if (bad.length || errors.length) failed = true;
   console.log(
     `layout-${theme}`.padEnd(13),
     bad.length ? `FAIL ${bad.join(",")}` : "ok",
-    JSON.stringify({ withSide, noSide, drafts }),
+    JSON.stringify({ withSide, noSide }),
     errors.length ? `ERRORS ${errors}` : "",
   );
   await ctx.close();

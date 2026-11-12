@@ -26,8 +26,8 @@ const isOpenable = (node: TreeNode) => node.kind !== "file" || node.supported !=
 // a list — ⌘-click toggles rows in and out, ⇧-click extends over the visible
 // range — whose LAST entry is the primary one (the row acted on most
 // recently). Owned by App — the primary entry doubles as the creation context
-// for saving drafts (the save dialog defaults into the selected folder / next
-// to the selected file).
+// for saving an untitled note (it defaults into the selected folder / next to
+// the selected file).
 export type SidebarSelection = { path: string; kind: "file" | "dir" };
 
 // Mirror of the app-wide file clipboard (it lives in the Rust backend — see

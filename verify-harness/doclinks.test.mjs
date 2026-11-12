@@ -74,7 +74,7 @@ const NOTE = "/Users/me/notes/projects/plan.md";
   ]) {
     assert.equal(linkTargetPath(href, NOTE), null, href);
   }
-  // Nothing to resolve against: a relative link inside an unsaved draft.
+  // Nothing to resolve against: a relative link inside an untitled note.
   assert.equal(linkTargetPath("./other.md", null), null);
   // Empty / fragment-only hrefs (in-document anchors never get here anyway).
   assert.equal(linkTargetPath("", NOTE), null);
