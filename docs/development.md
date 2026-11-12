@@ -147,8 +147,10 @@ the restore set; quitting (⌘Q) preserves everything.
 - **dark** — pitch black (`#000000`), raised surfaces stepping up in lightness.
 
 Every palette, the type scale, radii and motion live in `src/styles/tokens.css`;
-components consume those tokens and carry no theme-specific literals. The
-document font is Newsreader (bundled, OFL) at 18px in a 68ch measure, with a
+components consume those tokens and carry no theme-specific literals — code
+blocks included: their syntax colours are CodeMirror's own roles repainted in
+`--code-*` tokens (`src/codeTheme.ts`) in place of the One Dark theme Crepe
+ships. The document font is Newsreader (bundled, OFL) at 18px in a 68ch measure, with a
 "Wide page" setting (`doklin:page-wide`) for the 1080px canvas.
 
 Settings → Appearance picks the theme from four swatches (each painted from

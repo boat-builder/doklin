@@ -1215,11 +1215,67 @@ body,
   border-radius: var(--r-md);
 }
 
-/* Crepe's CodeMirror runs the One Dark theme, whose active-line gutter is a
-   dark slab on every theme — and line 1 counts as active even unfocused. */
+/* The code editor's chrome on the theme's tokens; the syntax colours are
+   codeTheme.ts's. CodeMirror's base theme assumes a light page, and gives
+   line 1 an active-line slab even unfocused. */
+.editor-wrap .milkdown .milkdown-code-block .cm-editor,
+.editor-wrap .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
+  color: var(--code-ink);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-gutters {
+  color: var(--text-3);
+}
+
 .editor-wrap .milkdown .milkdown-code-block .cm-activeLineGutter,
 .editor-wrap .milkdown .milkdown-code-block .cm-activeLine {
   background-color: transparent;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-content {
+  caret-color: var(--text-1);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-cursor {
+  border-left-color: var(--text-1);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-selectionLayer .cm-selectionBackground,
+.editor-wrap .milkdown .milkdown-code-block .cm-editor.cm-focused .cm-selectionLayer .cm-selectionBackground {
+  background: var(--selection);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-scroller .cm-matchingBracket,
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-selectionMatch {
+  background: var(--accent-wash);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-searchMatch {
+  background: var(--mark);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-foldPlaceholder {
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--text-3);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-panels {
+  background: var(--sunken);
+  color: var(--text-1);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-tooltip {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--text-1);
+  box-shadow: var(--shadow-pop);
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent-wash);
+  color: var(--text-1);
 }
 
 .editor-wrap .milkdown .ProseMirror code {

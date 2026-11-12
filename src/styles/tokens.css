@@ -129,6 +129,14 @@
 
   --code-ink: #1c222c;
   --code-bg: #f1f4f9;
+  /* Syntax roles in a code block (codeTheme.ts), each ≥4.5:1 on --code-bg. */
+  --code-keyword: #8a2fb8;
+  --code-string: #1d7a3a;
+  --code-number: #a8560a;
+  --code-def: #1a5fd0;
+  --code-type: #0a7580;
+  --code-comment: #636a77;
+  --code-special: #c0392b;
   --quote-bar: #ced3db;
   --mark: rgba(255, 214, 0, 0.4);
   --mark-current: rgba(255, 145, 0, 0.55);
@@ -189,6 +197,13 @@
 
   --code-ink: #392a1e;
   --code-bg: #f1e6d0;
+  --code-keyword: #86307c;
+  --code-string: #3c6b1e;
+  --code-number: #94500a;
+  --code-def: #2a58b5;
+  --code-type: #1f6b70;
+  --code-comment: #715f4e;
+  --code-special: #ad3326;
   --quote-bar: #cfbfa6;
   --mark: rgba(240, 190, 40, 0.38);
   --mark-current: rgba(230, 130, 0, 0.5);
@@ -246,6 +261,13 @@
 
   --code-ink: #ededef;
   --code-bg: #141416;
+  --code-keyword: #d19bf5;
+  --code-string: #9fd27f;
+  --code-number: #f0ae73;
+  --code-def: #7cb3ff;
+  --code-type: #62cfd9;
+  --code-comment: #8b8f98;
+  --code-special: #f38a7f;
   --quote-bar: #3a3a3f;
   --mark: rgba(255, 214, 0, 0.28);
   --mark-current: rgba(255, 145, 0, 0.5);
