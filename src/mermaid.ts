@@ -12,7 +12,7 @@
 //     a lazy vite chunk.
 //   - theming: no stock mermaid theme — the palette is derived at render time
 //     from the app's own tokens (mermaidTheme.ts), so diagrams read as part
-//     of the document in all four themes. A theme flip re-renders every live
+//     of the document in every theme. A theme flip re-renders every live
 //     diagram in place (the preview panel only redraws on edits, so this
 //     module patches the DOM it produced itself).
 //   - pacing: the preview hook fires on every keystroke inside the block. A
@@ -265,9 +265,9 @@ function ensureDomHooks() {
     attributes: true,
     attributeFilter: ["data-theme"],
   });
-  // The "system" theme follows the OS — a live OS appearance change moves
-  // the palette without touching DOM.
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", onThemeChange);
+  // No prefers-color-scheme listener: App.tsx resolves "system" and writes
+  // the resolved theme to data-theme, so an OS flip arrives as the attribute
+  // change above.
 
   /* The diagram ⇄ source switch (see queueMermaidPreview). Delegated: the
      buttons are innerHTML'd through a sanitizer, so they carry no handlers of

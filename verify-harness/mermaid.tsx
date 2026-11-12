@@ -4,7 +4,7 @@
 // flips, and the read-only (preview-only) presentation. Not part of the app.
 //
 //   ?ro=1        → read-only mount (a preview-only host, like a mirror pane)
-//   ?theme=dark  → sets [data-theme] on <html> before mounting (light/sepia/dark)
+//   ?theme=dark  → sets [data-theme] on <html> before mounting (light/paper/dark)
 //   ?doc=one     → a single small flowchart (for edit-interaction steps)
 //
 // window.__md carries the live serialized markdown (round-trip checks);

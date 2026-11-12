@@ -504,7 +504,7 @@ cloud worker draws from that same derivation.
   above).
 - **Read-only** boards (the unfocused split pane's mirror) render the same
   DOM with drag and inputs off, like `readOnly` on the editor.
-- Themed from the `--app-*` tokens in `App.css`, all four themes; option
+- Themed from the tokens in `src/styles/tokens.css`, every theme; option
   colours are a small named palette mapped per theme, never raw hex in the
   files.
 

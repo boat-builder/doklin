@@ -14,7 +14,7 @@ const browser = await chromium.launch({
   args: ["--no-sandbox"],
 });
 
-for (const theme of ["light", "sepia", "dark"]) {
+for (const theme of ["light", "paper", "dark"]) {
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
   page.on("console", (m) => {
     if (m.type() === "error") console.log(`[${theme}] console.error:`, m.text());

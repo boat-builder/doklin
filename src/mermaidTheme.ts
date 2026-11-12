@@ -3,7 +3,7 @@
 // than wearing a stock mermaid theme.
 //
 // Written for two consumers with different CSS around them — the editor
-// (App.css --app-* tokens) and a public page's static reading view (its own
+// (styles/tokens.css) and a public page's static reading view (its own
 // --bg/--text/--link tokens; the cloud worker picks this up again, see
 // docs/cloud.md) — so tokens are read through a fallback chain that
 // ends at the body's computed colors: any page with sane text/background
@@ -128,18 +128,18 @@ export function mermaidThemeVariables(): Record<string, string> {
   const styles = getComputedStyle(document.documentElement);
   const bodyStyles = getComputedStyle(document.body);
   const bg =
-    readToken(styles, ["--app-bg", "--bg"], parseColor(bodyStyles.backgroundColor)?.rgb ??
+    readToken(styles, ["--sheet", "--bg"], parseColor(bodyStyles.backgroundColor)?.rgb ??
       { r: 255, g: 255, b: 255 });
   const dark = luminance(bg) < 0.5;
   const ink = readToken(
     styles,
-    ["--app-text", "--text"],
+    ["--text-1", "--text"],
     parseColor(bodyStyles.color)?.rgb ?? (dark ? { r: 235, g: 235, b: 235 } : { r: 55, g: 53, b: 47 }),
     bg,
   );
   const accent = readToken(
     styles,
-    ["--app-accent", "--link"],
+    ["--accent", "--link"],
     dark ? { r: 92, g: 150, b: 242 } : { r: 47, g: 111, b: 221 },
     bg,
   );

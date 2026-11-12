@@ -334,8 +334,8 @@ function suggestDraftFileName(md: string, fallback: string): string {
   return cleaned || fallback;
 }
 
-type Theme = "system" | "light" | "sepia" | "dark";
-const THEMES: Theme[] = ["system", "light", "sepia", "dark"];
+type Theme = "system" | "light" | "paper" | "dark";
+const THEMES: Theme[] = ["system", "light", "paper", "dark"];
 const THEME_STORAGE_KEY = "doklin:theme";
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
@@ -346,6 +346,20 @@ const DRAFT_SEQ_STORAGE_KEY = "doklin:draft-seq";
 const DRAFTS_META_STORAGE_KEY = "doklin:drafts-meta";
 const DRAFTS_OPEN_STORAGE_KEY = "doklin:drafts-open";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
+const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
+
+/* "Wide page": the document column normally holds a reading measure
+   (--doc-measure, 68ch — tokens.css); wide trades it for the 1080px canvas
+   for tables, boards and diagrams. Per app, like zoom: it's about how the
+   reader likes to read, not about the file. Applied as data-page-width on
+   <html>, which App.css keys the measure on. */
+function readStoredPageWide(): boolean {
+  try {
+    return localStorage.getItem(PAGE_WIDE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
    One factor scales BOTH versions of a document, so switching MD↔HTML never
@@ -425,13 +439,20 @@ type DeletedRecord = {
 const THEME_LABEL: Record<Theme, string> = {
   system: "System",
   light: "Light",
-  sepia: "Sepia",
+  paper: "Paper",
   dark: "Dark",
 };
 
 function readStoredTheme(): Theme {
   try {
-    const v = localStorage.getItem(THEME_STORAGE_KEY);
+    let v = localStorage.getItem(THEME_STORAGE_KEY);
+    // Builds before 0.1.87 stored the paper theme as "sepia". Rewritten in
+    // place, so this keeps a reader's choice across the rename and then
+    // never matches again.
+    if (v === "sepia") {
+      v = "paper";
+      localStorage.setItem(THEME_STORAGE_KEY, v);
+    }
     if (v && (THEMES as string[]).includes(v)) return v as Theme;
   } catch {
     // localStorage may be unavailable; fall through
@@ -439,9 +460,32 @@ function readStoredTheme(): Theme {
   return "system";
 }
 
-function applyTheme(t: Theme) {
-  document.documentElement.dataset.theme = t;
+// The theme that actually paints: "system" resolves here, once, against the
+// OS appearance. <html data-theme> only ever carries a resolved name, so
+// tokens.css writes each palette exactly once — no prefers-color-scheme
+// copies to drift — and an OS flip is the same attribute change as a menu
+// pick (mermaid.ts re-renders diagrams off that attribute). The stored
+// choice rides along on data-theme-pref for anything that needs it.
+type ResolvedTheme = Exclude<Theme, "system">;
+const darkSchemeQuery =
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+function resolveTheme(t: Theme): ResolvedTheme {
+  if (t !== "system") return t;
+  return darkSchemeQuery?.matches ? "dark" : "light";
 }
+
+function applyTheme(t: Theme) {
+  const root = document.documentElement;
+  const resolved = resolveTheme(t);
+  if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
+  root.dataset.themePref = t;
+}
+
+// Paint the stored theme before the first render, not after it.
+if (typeof document !== "undefined") applyTheme(readStoredTheme());
 
 function isWriteError(e: unknown): e is WriteErrorPayload {
   return (
@@ -715,6 +759,7 @@ export default function App() {
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+  const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -1249,7 +1294,21 @@ export default function App() {
     } catch {
       // ignore
     }
+    // "System" follows a live OS appearance change.
+    if (theme !== "system" || !darkSchemeQuery) return;
+    const onScheme = () => applyTheme("system");
+    darkSchemeQuery.addEventListener("change", onScheme);
+    return () => darkSchemeQuery.removeEventListener("change", onScheme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.pageWidth = pageWide ? "wide" : "normal";
+    try {
+      localStorage.setItem(PAGE_WIDE_STORAGE_KEY, pageWide ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [pageWide]);
 
   // The markdown editor reads the factor straight off <html> (App.css); the
   // html rendition gets it as a prop, since only the bridge can reach inside
@@ -5538,6 +5597,34 @@ export default function App() {
     );
   };
 
+  // The gear lives in the left column's footer whenever there is a left
+  // column (sidebar or drafts), so it never sits over the file tree; with
+  // neither showing it floats bottom-left as before.
+  const settingsMenu = (
+    <Settings
+      docked={showSidebar || draftsOpen}
+      pageWide={pageWide}
+      onTogglePageWide={() => setPageWide((w) => !w)}
+      theme={theme}
+      onChange={setTheme}
+      recents={recents}
+      onNewNote={() => void newDraft()}
+      onOpenFile={openFilePicker}
+      onOpenFolder={openFolderPicker}
+      onOpenFileNewWindow={() => void openFileInNewWindow()}
+      onOpenFolderNewWindow={() => void openFolderInNewWindow()}
+      onOpenRecent={openRecent}
+      canCopyWithComments={activeTab != null}
+      onCopyWithComments={() => void copyWithComments()}
+      onOpenDictationSetup={() => setDictationSetupOpen(true)}
+      update={update}
+      onOpenExternal={openExternal}
+      onOpenCloud={() => setCloudPanelOpen(true)}
+      cloudAttention={cloudNeedsAttention(cloudStatuses)}
+      onOpenVersions={() => setVersionsSettingsOpen(true)}
+    />
+  );
+
   return (
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
@@ -5947,25 +6034,11 @@ export default function App() {
         />
       )}
       <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
-      <Settings
-        theme={theme}
-        onChange={setTheme}
-        recents={recents}
-        onNewNote={() => void newDraft()}
-        onOpenFile={openFilePicker}
-        onOpenFolder={openFolderPicker}
-        onOpenFileNewWindow={() => void openFileInNewWindow()}
-        onOpenFolderNewWindow={() => void openFolderInNewWindow()}
-        onOpenRecent={openRecent}
-        canCopyWithComments={activeTab != null}
-        onCopyWithComments={() => void copyWithComments()}
-        onOpenDictationSetup={() => setDictationSetupOpen(true)}
-        update={update}
-        onOpenExternal={openExternal}
-        onOpenCloud={() => setCloudPanelOpen(true)}
-        cloudAttention={cloudNeedsAttention(cloudStatuses)}
-        onOpenVersions={() => setVersionsSettingsOpen(true)}
-      />
+      {showSidebar || draftsOpen ? (
+        <div className="side-footer">{settingsMenu}</div>
+      ) : (
+        settingsMenu
+      )}
     </div>
   );
 }
@@ -6365,6 +6438,9 @@ function ConflictBanner({
 }
 
 function Settings({
+  docked,
+  pageWide,
+  onTogglePageWide,
   theme,
   onChange,
   recents,
@@ -6383,6 +6459,10 @@ function Settings({
   cloudAttention,
   onOpenVersions,
 }: {
+  /** In the left column's footer (true) or floating bottom-left. */
+  docked: boolean;
+  pageWide: boolean;
+  onTogglePageWide: () => void;
   theme: Theme;
   onChange: (t: Theme) => void;
   recents: RecentEntry[];
@@ -6459,7 +6539,7 @@ function Settings({
       : "Settings";
 
   return (
-    <div ref={wrapRef} className="settings-wrap">
+    <div ref={wrapRef} className={`settings-wrap${docked ? " is-docked" : ""}`}>
       {open && (
         <div className="settings-popover" role="menu" aria-label="Settings">
           <div className="settings-section-label">File</div>
@@ -6628,6 +6708,21 @@ function Settings({
               <span className="settings-option-label">{THEME_LABEL[t]}</span>
             </button>
           ))}
+          <button
+            role="menuitemcheckbox"
+            aria-checked={pageWide}
+            className={`settings-option ${pageWide ? "is-active" : ""}`}
+            title="Use the full 1080px canvas instead of a reading-width column"
+            onClick={() => {
+              onTogglePageWide();
+              setOpen(false);
+            }}
+          >
+            <span className="settings-option-check">
+              {pageWide ? <CheckIcon /> : null}
+            </span>
+            <span className="settings-option-label">Wide page</span>
+          </button>
           <div className="settings-divider" />
           <div className="settings-section-label">Updates</div>
           {updateAvailable ? (

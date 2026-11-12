@@ -1,83 +1,19 @@
-/* ---------- Theme palettes ----------
+/* ---------- Theme ----------
+   Colour, type, radius, shadow and motion live in styles/tokens.css, one
+   block per resolved theme (App.tsx resolves "system" and sets data-theme to
+   light | paper | dark). Rules here consume tokens; a theme-specific literal
+   in this file is a bug — add or reuse a token instead. */
 
-  Four modes, applied via [data-theme] on <html>:
-    - "system"  → follows prefers-color-scheme (default vars are light; the
-                  media query at the bottom swaps to dark when the OS is dark)
-    - "light"   → Notion-style pure white + warm-dark text
-    - "sepia"   → cream / paper feel à la iA Writer, Solarized Light, Kindle
-    - "dark"    → low-contrast dark grays (kept as the previous dark mode)
-
-  Each theme sets two layers:
-    1. App-level tokens (--app-*)
-    2. Crepe editor variables on .milkdown (--crepe-*)
-*/
-
-:root,
-[data-theme="system"],
-[data-theme="light"] {
-  --app-bg: #ffffff;
-  --app-surface: #ffffff;
-  --app-text: #37352f;
-  --app-text-muted: rgba(55, 53, 47, 0.5);
-  --app-border: rgba(55, 53, 47, 0.09);
-  --app-hover: rgba(55, 53, 47, 0.06);
-  --app-accent: #2f6fdd;
-  --app-dirty: #d29922;
-  --app-toast-bg: rgba(55, 53, 47, 0.85);
-  --app-toast-fg: #ffffff;
-}
-
-[data-theme="sepia"] {
-  --app-bg: #faf5ed;
-  --app-surface: #faf5ed;
-  --app-text: #3c3835;
-  --app-text-muted: rgba(60, 56, 53, 0.55);
-  --app-border: rgba(60, 56, 53, 0.1);
-  --app-hover: rgba(60, 56, 53, 0.06);
-  --app-accent: #8a6b3d;
-  --app-dirty: #c08a3a;
-  --app-toast-bg: rgba(60, 56, 53, 0.85);
-  --app-toast-fg: #faf5ed;
-}
-
-[data-theme="dark"] {
-  --app-bg: #191919;
-  --app-surface: #191919;
-  --app-text: #ebebeb;
-  --app-text-muted: rgba(255, 255, 255, 0.45);
-  --app-border: rgba(255, 255, 255, 0.08);
-  --app-hover: rgba(255, 255, 255, 0.06);
-  --app-accent: #5c96f2;
-  --app-dirty: #d29922;
-  --app-toast-bg: rgba(0, 0, 0, 0.7);
-  --app-toast-fg: #ebebeb;
-}
-
-/* "system" mode follows the OS when the OS is dark. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]),
-  [data-theme="system"] {
-    --app-bg: #191919;
-    --app-surface: #191919;
-    --app-text: #ebebeb;
-    --app-text-muted: rgba(255, 255, 255, 0.45);
-    --app-border: rgba(255, 255, 255, 0.08);
-    --app-hover: rgba(255, 255, 255, 0.06);
-    --app-accent: #5c96f2;
-    --app-dirty: #d29922;
-    --app-toast-bg: rgba(0, 0, 0, 0.7);
-    --app-toast-fg: #ebebeb;
-  }
-}
+@import "./styles/fonts.css";
+@import "./styles/tokens.css";
 
 /* ---------- Base ---------- */
 
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text",
-    "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   font-size: 16px;
-  color: var(--app-text);
-  background-color: var(--app-bg);
+  color: var(--text-1);
+  background-color: var(--sheet);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -93,7 +29,7 @@ body,
   height: 100%;
   margin: 0;
   padding: 0;
-  background: var(--app-bg);
+  background: var(--sheet);
   /* Fixed-window app shell: the document itself never scrolls — every pane
      (editor canvas, tab strip, sidebar, drafts) owns its own overflow. Clip
      here so a stray pixel from a grid track or a fixed overlay can't leak out
@@ -130,26 +66,26 @@ body,
 }
 
 :hover::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--app-text) 22%, transparent);
+  background-color: color-mix(in srgb, var(--text-1) 22%, transparent);
 }
 
 ::-webkit-scrollbar-thumb:hover,
 ::-webkit-scrollbar-thumb:active {
-  background-color: color-mix(in srgb, var(--app-text) 38%, transparent);
+  background-color: color-mix(in srgb, var(--text-1) 38%, transparent);
 }
 
 /* The document canvas keeps its thumb visible without hover. */
 .editor-wrap::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--app-text) 16%, transparent);
+  background-color: color-mix(in srgb, var(--text-1) 16%, transparent);
 }
 
 .editor-wrap:hover::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--app-text) 22%, transparent);
+  background-color: color-mix(in srgb, var(--text-1) 22%, transparent);
 }
 
 .editor-wrap::-webkit-scrollbar-thumb:hover,
 .editor-wrap::-webkit-scrollbar-thumb:active {
-  background-color: color-mix(in srgb, var(--app-text) 38%, transparent);
+  background-color: color-mix(in srgb, var(--text-1) 38%, transparent);
 }
 
 /* Modal bodies scroll without showing a bar: their content is short and the
@@ -171,13 +107,14 @@ body,
 .app {
   display: grid;
   grid-template-columns: 0 0 1fr;
-  grid-template-rows: 38px 36px 1fr;
+  grid-template-rows: 38px 36px 1fr auto;
   grid-template-areas:
     "drag   drag  drag"
     "drafts side  tabs"
-    "drafts side  main";
+    "drafts side  main"
+    "foot   foot  main";
   height: 100vh;
-  background: var(--app-bg);
+  background: var(--sheet);
   position: relative;
 }
 
@@ -196,7 +133,7 @@ body,
 .drag-strip {
   grid-area: drag;
   height: 38px;
-  background: var(--app-bg);
+  background: var(--sheet);
   user-select: none;
 }
 
@@ -207,8 +144,8 @@ body,
   display: flex;
   align-items: stretch;
   padding: 0 8px;
-  background: var(--app-bg);
-  border-bottom: 1px solid var(--app-border);
+  background: var(--sheet);
+  border-bottom: 1px solid var(--border);
   /* The tab strip owns its horizontal overflow (scrolls internally, with the
      overflow menu as escape hatch). Without this, the non-shrinking tabs give
      the bar a large min-content width that pushes the 1fr track — and with it
@@ -240,20 +177,20 @@ body,
   flex: 0 0 auto;
   max-width: 200px;
   border-radius: 6px 6px 0 0;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   align-self: flex-end;
   margin-bottom: -1px;
 }
 
 .tab:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .tab.is-active {
-  background: var(--app-surface);
-  color: var(--app-text);
-  border: 1px solid var(--app-border);
-  border-bottom: 1px solid var(--app-surface);
+  background: var(--sheet);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  border-bottom: 1px solid var(--sheet);
 }
 
 .tab.is-dragging {
@@ -279,7 +216,7 @@ body,
   background: transparent;
   border: none;
   color: inherit;
-  font-size: 12px;
+  font-size: var(--fs-md);
   cursor: pointer;
   touch-action: none; /* horizontal drags reorder tabs; don't pan the strip */
 }
@@ -294,7 +231,7 @@ body,
   flex-shrink: 0;
   font-size: 9px;
   line-height: 1;
-  color: var(--app-dirty);
+  color: var(--warn);
 }
 
 .tab-close {
@@ -307,7 +244,7 @@ body,
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   opacity: 0;
 }
@@ -318,8 +255,8 @@ body,
 }
 
 .tab-close:hover {
-  background: var(--app-border);
-  color: var(--app-text);
+  background: var(--border);
+  color: var(--text-1);
 }
 
 .tab-new {
@@ -334,13 +271,13 @@ body,
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .tab-new:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* Overflow menu: shown only when the strip actually scrolls. */
@@ -362,14 +299,14 @@ body,
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .tab-overflow-btn:hover,
 .tab-overflow-btn[aria-expanded="true"] {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .tab-overflow-menu {
@@ -381,29 +318,12 @@ body,
   max-height: 60vh;
   overflow-y: auto;
   padding: 6px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   z-index: 30;
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .tab-overflow-menu {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .tab-overflow-menu,
-  [data-theme="system"] .tab-overflow-menu {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 .tab-overflow-item {
@@ -413,17 +333,17 @@ body,
   width: 100%;
   padding: 6px 10px;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
 }
 
 .tab-overflow-item:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .tab-overflow-item.is-active .tab-overflow-label {
@@ -437,7 +357,7 @@ body,
   flex-shrink: 0;
   width: 13px;
   height: 13px;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .tab-overflow-label {
@@ -450,7 +370,7 @@ body,
 
 .tab-overflow-item.is-missing .tab-overflow-label {
   text-decoration: line-through;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* ---------- Missing-file (ghost tab) state ---------- */
@@ -474,21 +394,21 @@ body,
 }
 
 .missing-file-title {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .missing-file-path {
-  font-size: 12px;
-  color: var(--app-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 
 .missing-file-hint {
-  font-size: 13px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
 }
 
 .missing-file-actions {
@@ -501,17 +421,17 @@ body,
 .missing-file-btn {
   padding: 8px 14px;
   font: inherit;
-  font-size: 13px;
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-md);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
 
 .missing-file-btn:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 /* ---------- Editor canvas ---------- */
@@ -526,7 +446,7 @@ body,
   align-items: stretch;
   min-width: 0;
   min-height: 0;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 /* One pane: an optional slim header (split mode) over the scrolling canvas. */
@@ -550,7 +470,7 @@ body,
      Wide inner blocks (code, tables) scroll within themselves — nothing pushes
      a horizontal scrollbar onto the canvas. */
   overflow-x: hidden;
-  background: var(--app-surface);
+  background: var(--sheet);
   min-width: 0;
   min-height: 0;
 }
@@ -562,8 +482,8 @@ body,
   align-items: center;
   gap: 8px;
   padding: 3px 8px 3px 12px;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-bg);
+  border-bottom: 1px solid var(--border);
+  background: var(--sheet);
   min-width: 0;
   flex: 0 0 auto;
 }
@@ -574,12 +494,12 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .pane-header.is-focused .pane-header-title {
-  color: var(--app-text);
+  color: var(--text-1);
   font-weight: 600;
 }
 
@@ -603,29 +523,29 @@ body,
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .pane-header-close:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* The unfocused pane reads slightly recessed; its header carries the cue. */
 .editor-pane.is-split:not(.is-focused) > .pane-header {
-  background: color-mix(in srgb, var(--app-bg) 92%, var(--app-border));
+  background: color-mix(in srgb, var(--sheet) 92%, var(--border));
 }
 
 .editor-pane.is-split.is-focused > .pane-header {
-  box-shadow: inset 0 2px 0 var(--app-accent);
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 
 .split-divider {
   flex: 0 0 5px;
   cursor: col-resize;
-  background: var(--app-border);
+  background: var(--border);
   background-clip: padding-box;
   border-left: 2px solid transparent;
   border-right: 2px solid transparent;
@@ -634,7 +554,7 @@ body,
 }
 
 .split-divider:hover {
-  background-color: var(--app-accent);
+  background-color: var(--accent);
 }
 
 /* Drop zones while a tab is dragged over the editor area. */
@@ -664,8 +584,8 @@ body,
 }
 
 .split-drop-half.is-active {
-  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 /* Tab-bar controls: the split button and the sync-scroll chain. */
@@ -679,31 +599,31 @@ body,
   margin-left: 8px;
   padding: 3px 8px;
   flex-shrink: 0;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
-  color: var(--app-text-muted);
+  background: var(--sheet);
+  color: var(--text-3);
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 
 .split-toggle:hover:not(:disabled),
 .sync-scroll-toggle:hover {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .split-toggle.is-active,
 .sync-scroll-toggle.is-on {
-  color: var(--app-accent);
-  border-color: color-mix(in srgb, var(--app-accent) 35%, transparent);
-  background: color-mix(in srgb, var(--app-accent) 8%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .split-toggle.is-active:hover,
 .sync-scroll-toggle.is-on:hover {
-  color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .split-toggle:disabled {
@@ -720,7 +640,7 @@ body,
 
 .editor-wrap .milkdown {
   background: transparent !important;
-  color: var(--app-text);
+  color: var(--text-1);
   min-height: 100%;
 }
 
@@ -734,14 +654,25 @@ body,
    headings are in em, and crepe leaves the rest (lists, quotes, table cells,
    CodeMirror content) inheriting. Keep it that way — a px font-size added
    anywhere inside .ProseMirror silently opts that element out of zoom.
-   The canvas padding stays fixed: zoom is about type size, not margins. */
+   The canvas padding stays fixed: zoom is about type size, not margins.
+
+   The measure is --doc-measure (68ch of the document font, so it follows
+   both the font choice and zoom) plus the fixed side padding; "Wide page"
+   (data-page-width on <html>) trades it for the old 1080px canvas for
+   tables, boards and diagrams. */
 .editor-wrap .milkdown .ProseMirror {
-  max-width: 1080px;
+  max-width: calc(var(--doc-measure) + 128px);
   margin: 0 auto;
   padding: 24px 64px 240px;
   min-height: calc(100vh - 74px);
-  font-size: calc(16px * var(--doc-zoom, 1));
-  line-height: 1.6;
+  font-family: var(--doc-font);
+  font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
+  line-height: var(--doc-leading);
+  color: var(--text-1);
+}
+
+:root[data-page-width="wide"] .editor-wrap .milkdown .ProseMirror {
+  max-width: var(--doc-measure-wide);
 }
 
 @media (max-width: 720px) {
@@ -764,9 +695,9 @@ body,
   margin-left: 8px;
   padding: 2px;
   flex-shrink: 0;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
+  background: var(--sheet);
 }
 
 .view-toggle-seg {
@@ -774,8 +705,8 @@ body,
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
-  font-size: 10.5px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   cursor: pointer;
@@ -783,14 +714,14 @@ body,
 }
 
 .view-toggle-seg:hover:not(:disabled):not(.is-active) {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .view-toggle-seg.is-active {
-  background: var(--app-surface);
-  color: var(--app-text);
-  box-shadow: 0 0 0 1px var(--app-border);
+  background: var(--sheet);
+  color: var(--text-1);
+  box-shadow: 0 0 0 1px var(--border);
 }
 
 /* The version that doesn't exist on disk: visible but clearly inert. */
@@ -809,28 +740,28 @@ body,
   margin-left: 8px;
   padding: 3px 9px;
   flex-shrink: 0;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
-  color: var(--app-text-muted);
-  font-size: 11px;
+  background: var(--sheet);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .comments-toggle:not(.is-off) {
-  color: var(--app-accent);
-  border-color: color-mix(in srgb, var(--app-accent) 35%, transparent);
-  background: color-mix(in srgb, var(--app-accent) 8%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .comments-toggle:hover {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 .comments-toggle:not(.is-off):hover {
-  color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .editor-wrap.is-html-view {
@@ -860,7 +791,7 @@ body,
   height: 100%;
   border: 0;
   /* Most generated documents assume a white canvas; let them own the look. */
-  background: #ffffff;
+  background: var(--html-page);
 }
 
 /* The comment layer over the iframe: never eats clicks itself — only its
@@ -898,11 +829,11 @@ body,
   gap: 5px;
   padding: 3px 9px;
   flex-shrink: 0;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
-  color: var(--app-text-muted);
-  font-size: 11px;
+  background: var(--sheet);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
   cursor: pointer;
   pointer-events: auto;
@@ -910,31 +841,31 @@ body,
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .html-comment-btn:hover:not(:disabled) {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 .html-comment-btn.is-on {
-  color: var(--app-accent);
-  border-color: color-mix(in srgb, var(--app-accent) 35%, transparent);
-  background: color-mix(in srgb, var(--app-accent) 8%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .html-comment-btn.is-on:hover {
-  color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .html-comment-btn-count {
   padding: 1px 6px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
-  color: var(--app-accent);
-  font-size: 10.5px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
 .html-pdf-btn:disabled {
   cursor: default;
 }
 .html-pdf-btn.is-busy {
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 /* Undocked fallback (a host with no chrome — the verification harness):
@@ -950,12 +881,12 @@ body,
 .html-view-btns:not(.is-docked) .html-comment-btn {
   padding: 6px 12px;
   border-radius: 999px;
-  background: var(--app-surface);
-  font-size: 12px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  background: var(--sheet);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-card-hover);
 }
 .html-view-btns:not(.is-docked) .html-comment-btn.is-on {
-  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface));
+  background: color-mix(in srgb, var(--accent) 10%, var(--sheet));
 }
 
 /* The export gate's refusal: which check failed, on which page. Persistent
@@ -966,13 +897,13 @@ body,
   right: 16px;
   width: min(420px, calc(100% - 32px));
   padding: 10px 12px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--app-surface);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+  background: var(--sheet);
+  box-shadow: var(--shadow-pop);
   pointer-events: auto;
-  font-size: 12px;
-  color: var(--app-text);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
 }
 /* Docked controls leave that corner empty, so the card takes it — reading as
    a drop-down from the export button now sitting in the bar above. */
@@ -990,17 +921,17 @@ body,
 .html-pdf-error-x {
   border: none;
   background: none;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   line-height: 1;
   padding: 0 2px;
 }
 .html-pdf-error-x:hover {
-  color: var(--app-text);
+  color: var(--text-1);
 }
 .html-pdf-error-msg {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -1014,13 +945,13 @@ body,
   background: transparent;
   cursor: pointer;
   pointer-events: auto;
-  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.3));
+  filter: var(--shadow-drop);
 }
 .html-comment-pin .comment-avatar {
   width: 24px;
   height: 24px;
-  font-size: 10px;
-  border: 2px solid #ffffff;
+  font-size: var(--fs-xs);
+  border: 2px solid var(--html-page);
   border-radius: 999px 999px 999px 3px; /* speech-bubble tail */
   transition: transform 0.12s ease;
 }
@@ -1034,8 +965,8 @@ body,
   min-width: 14px;
   padding: 1px 3px;
   border-radius: 999px;
-  background: var(--app-accent);
-  color: #ffffff;
+  background: var(--accent);
+  color: var(--on-fill);
   font-size: 9px;
   font-weight: 700;
   line-height: 1.3;
@@ -1057,7 +988,7 @@ body,
   position: static;
   width: 100%;
   overflow-y: auto;
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--shadow-pop);
 }
 
 /* Threads whose anchor no longer exists in the regenerated rendition: a
@@ -1078,10 +1009,10 @@ body,
 /* A thread whose anchor no longer exists in the regenerated rendition. */
 .comment-orphan-note {
   margin-bottom: 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   font-style: italic;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .editor-wrap .milkdown .ProseMirror h1,
@@ -1091,24 +1022,27 @@ body,
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
   font-family: inherit;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--text-1);
 }
 
-/* Sizes are em (of the 16px-at-100% base above) so document zoom carries
-   them: 2em = 32px, 1.5em = 24px, 1.1875em = 19px, 1em = 16px. */
+/* Sizes are em of the document base (--doc-size; 18px serif at 100%) so
+   zoom and the font choice carry them: 2em = 36px, 1.389em = 25px,
+   1.111em = 20px, 1em = 18px. */
 .editor-wrap .milkdown .ProseMirror h1 {
   font-size: 2em;
-  line-height: 1.25;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
   margin-top: 28px;
 }
 .editor-wrap .milkdown .ProseMirror h2 {
-  font-size: 1.5em;
-  line-height: 1.3;
-  margin-top: 24px;
+  font-size: 1.389em;
+  line-height: 1.28;
+  margin-top: 26px;
 }
 .editor-wrap .milkdown .ProseMirror h3 {
-  font-size: 1.1875em;
+  font-size: 1.111em;
   line-height: 1.35;
   margin-top: 20px;
 }
@@ -1121,12 +1055,12 @@ body,
 
 .editor-wrap .milkdown .ProseMirror p {
   font-size: 1em;
-  line-height: 1.6;
+  line-height: var(--doc-leading);
   padding: 3px 0;
 }
 
 .editor-wrap .milkdown .crepe-placeholder::before {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font-style: normal;
 }
 
@@ -1136,6 +1070,83 @@ body,
    them the underline; hovering brings up Crepe's tooltip with the URL. */
 .editor-wrap .milkdown .ProseMirror a {
   cursor: pointer;
+  color: var(--accent);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: text-decoration-color var(--dur-fast) var(--ease);
+}
+
+.editor-wrap .milkdown .ProseMirror a:hover {
+  text-decoration-color: var(--accent);
+}
+
+/* Quotes: a quiet bar and the secondary ink, not a tinted slab. */
+.editor-wrap .milkdown .ProseMirror blockquote {
+  padding-left: 22px;
+  color: var(--text-2);
+}
+
+.editor-wrap .milkdown .ProseMirror blockquote::before {
+  width: 3px;
+  background: var(--quote-bar);
+}
+
+/* Code: the mono face, a size step down from the prose so a serif page
+   doesn't shout in 18px monospace. Applied to exactly the two elements the
+   placeholder parity rule (below) pairs — the live CodeMirror and its static
+   placeholder — never to the whole block: the tools row and the mermaid
+   preview must keep their geometry (sizing the block broke the mermaid
+   live-edit drive). */
+.editor-wrap .milkdown .milkdown-code-block .cm-editor,
+.editor-wrap .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
+  font-size: 0.85em;
+}
+
+.editor-wrap .milkdown .milkdown-code-block {
+  /* Crepe paints the block, its gutter and panels from "surface", which is
+     the floating-menu surface elsewhere (--raised: white on light, so the
+     block vanished). Scope it to the code tint here. */
+  --crepe-color-surface: var(--code-bg);
+  border-radius: var(--r-md);
+}
+
+/* Crepe's CodeMirror runs the One Dark theme, whose active-line gutter is a
+   dark slab on every theme — and line 1 counts as active even unfocused. */
+.editor-wrap .milkdown .milkdown-code-block .cm-activeLineGutter,
+.editor-wrap .milkdown .milkdown-code-block .cm-activeLine {
+  background-color: transparent;
+}
+
+.editor-wrap .milkdown .ProseMirror code {
+  font-family: var(--font-mono);
+}
+
+.editor-wrap .milkdown .ProseMirror hr {
+  background-color: var(--border);
+}
+
+/* Tables: hairlines from the theme, a sunken header row. */
+.editor-wrap .milkdown .milkdown-table-block th,
+.editor-wrap .milkdown .milkdown-table-block td {
+  border-color: var(--border);
+}
+
+.editor-wrap .milkdown .milkdown-table-block th {
+  background: var(--sunken);
+  font-weight: 600;
+}
+
+/* Task lists: the checked box takes the accent. */
+.editor-wrap .milkdown .milkdown-list-item-block li .label-wrapper .checked,
+.editor-wrap .milkdown .milkdown-list-item-block li .label-wrapper .checked svg {
+  color: var(--accent);
+  fill: var(--accent);
+}
+
+.editor-wrap .milkdown .ProseMirror ::selection {
+  background: var(--selection);
 }
 
 /* Table column drag-resize (tableResize.ts). prosemirror-tables' stock css
@@ -1143,7 +1154,7 @@ body,
    cursor; this restyles its hardcoded #adf to the app accent. Widths are
    session-only — markdown can't store them. */
 .editor-wrap .milkdown .ProseMirror .column-resize-handle {
-  background: var(--app-accent);
+  background: var(--accent);
   width: 3px;
   right: -2px;
 }
@@ -1175,7 +1186,7 @@ body,
 .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
   margin: 0;
   padding: 34px 0 4px; /* 30px tools row + 4px cm-content top; 4px bottom */
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: inherit;
   line-height: 1.4;
   white-space: pre;
@@ -1195,7 +1206,7 @@ body,
 /* ---------- Mermaid diagrams (```mermaid code blocks) ----------
    The SVG itself is colored from the app tokens at render time
    (src/mermaid.ts) — this is layout and framing only. The diagram sits on
-   its own paper canvas (--app-bg) inside the code block's tinted card, like
+   its own paper canvas (--sheet) inside the code block's tinted card, like
    a mounted figure; wide charts scroll sideways within it.
 
    A diagram block is two-state, never both at once: reading (nothing in the
@@ -1237,7 +1248,7 @@ body,
   position: relative;
   display: flex;
   justify-content: safe center;
-  background: var(--app-bg);
+  background: var(--sheet);
   border-radius: 8px;
   padding: 20px 16px;
   overflow-x: auto;
@@ -1255,12 +1266,12 @@ body,
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   font-family: inherit;
-  color: var(--app-text-muted);
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  color: var(--text-3);
+  background: var(--sheet);
+  border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
   opacity: 0;
@@ -1284,8 +1295,8 @@ body,
 
 .milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:hover,
 .milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand:hover {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .milkdown .milkdown-code-block .preview .dk-mermaid svg {
@@ -1305,8 +1316,8 @@ body,
 
 .milkdown .milkdown-code-block .preview .dk-mermaid-loading {
   justify-content: center;
-  font-size: 12.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
   padding: 14px 16px;
 }
 
@@ -1322,17 +1333,17 @@ body,
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .milkdown .milkdown-code-block .preview .dk-mermaid-error-msg {
   margin: 8px 0 0;
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--app-text-muted);
+  font-family: var(--font-mono);
+  color: var(--text-3);
   white-space: pre-wrap;
   overflow-x: auto;
 }
@@ -1356,7 +1367,7 @@ body,
   inset: 0;
   z-index: 200;
   display: flex;
-  background: var(--app-bg);
+  background: var(--sheet);
   animation: dk-zoom-fade 0.12s ease-out;
 }
 
@@ -1366,8 +1377,8 @@ body,
   overflow: hidden;
   cursor: grab;
   touch-action: none;
-  background-color: var(--app-bg);
-  background-image: radial-gradient(circle, var(--app-border) 1px, transparent 1.2px);
+  background-color: var(--sheet);
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1.2px);
 }
 
 .dk-zoom-stage:active {
@@ -1399,27 +1410,10 @@ body,
   align-items: center;
   gap: 2px;
   padding: 4px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 8px 24px rgba(0, 0, 0, 0.1);
-}
-
-[data-theme="dark"] .dk-zoom-toolbar {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 8px 24px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .dk-zoom-toolbar,
-  [data-theme="system"] .dk-zoom-toolbar {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 8px 24px rgba(0, 0, 0, 0.6);
-  }
+  box-shadow: var(--shadow-pop);
 }
 
 .dk-zoom-btn {
@@ -1432,7 +1426,7 @@ body,
   border: none;
   border-radius: 7px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font-size: 16px;
   font-family: inherit;
   line-height: 1;
@@ -1440,8 +1434,8 @@ body,
 }
 
 .dk-zoom-btn:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-zoom-pct {
@@ -1451,8 +1445,8 @@ body,
   border: none;
   border-radius: 7px;
   background: transparent;
-  color: var(--app-text);
-  font-size: 12.5px;
+  color: var(--text-1);
+  font-size: var(--fs-md);
   font-weight: 600;
   font-family: inherit;
   font-variant-numeric: tabular-nums;
@@ -1460,14 +1454,14 @@ body,
 }
 
 .dk-zoom-pct:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-zoom-sep {
   width: 1px;
   height: 18px;
   margin: 0 4px;
-  background: var(--app-border);
+  background: var(--border);
 }
 
 .dk-zoom-hint {
@@ -1476,10 +1470,10 @@ body,
   left: 50%;
   transform: translateX(-50%);
   padding: 5px 12px;
-  font-size: 11.5px;
-  color: var(--app-text-muted);
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  background: var(--sheet);
+  border: 1px solid var(--border);
   border-radius: 20px;
   pointer-events: none;
   opacity: 0.9;
@@ -1490,99 +1484,80 @@ body,
    We override them per theme so the slash menu, drag handles, toolbar, etc.
    match the surrounding surface. */
 
-:root .milkdown,
-[data-theme="system"] .milkdown,
-[data-theme="light"] .milkdown {
-  --crepe-color-background: #ffffff;
-  --crepe-color-on-background: #37352f;
-  --crepe-color-surface: #f7f6f3;
-  --crepe-color-surface-low: #efeeea;
-  --crepe-color-on-surface: #37352f;
-  --crepe-color-on-surface-variant: rgba(55, 53, 47, 0.65);
-  --crepe-color-outline: rgba(55, 53, 47, 0.2);
-  --crepe-color-primary: #37352f;
-  --crepe-color-secondary: #e9e7e1;
-  --crepe-color-on-secondary: #37352f;
-  --crepe-color-inverse: #37352f;
-  --crepe-color-on-inverse: #ffffff;
-  --crepe-color-inline-code: #b45309;
-  --crepe-color-error: #b91c1c;
-  --crepe-color-hover: rgba(55, 53, 47, 0.06);
-  --crepe-color-selected: rgba(35, 131, 226, 0.18);
-  --crepe-color-inline-area: rgba(55, 53, 47, 0.08);
+:root .milkdown {
+  --crepe-color-background: var(--sheet);
+  --crepe-color-on-background: var(--text-1);
+  --crepe-color-surface: var(--raised);
+  --crepe-color-surface-low: var(--sunken);
+  --crepe-color-on-surface: var(--text-1);
+  --crepe-color-on-surface-variant: var(--text-2);
+  --crepe-color-outline: var(--border-strong);
+  --crepe-color-primary: var(--accent);
+  --crepe-color-secondary: var(--hover);
+  --crepe-color-on-secondary: var(--text-1);
+  --crepe-color-inverse: var(--text-1);
+  --crepe-color-on-inverse: var(--sheet);
+  --crepe-color-inline-code: var(--code-ink);
+  --crepe-color-error: var(--error-ink);
+  --crepe-color-hover: var(--hover);
+  --crepe-color-selected: var(--selection);
+  --crepe-color-inline-area: var(--code-bg);
+
+  --crepe-shadow-1: var(--shadow-card);
+  --crepe-shadow-2: var(--shadow-pop);
+
+  /* Crepe's frame theme asks for Noto Sans / Noto Serif / Space Mono, none of
+     which macOS ships, so without these the document fell back to Arial.
+     "default" is Crepe's own chrome (slash menu, toolbars, code-block tools)
+     and takes the UI face; the document text itself is set on .ProseMirror
+     from --doc-font. */
+  --crepe-font-default: var(--font-ui);
+  --crepe-font-title: var(--doc-font);
+  --crepe-font-code: var(--font-mono);
 }
 
-[data-theme="sepia"] .milkdown {
-  --crepe-color-background: #faf5ed;
-  --crepe-color-on-background: #3c3835;
-  --crepe-color-surface: #f4ecd9;
-  --crepe-color-surface-low: #ebe1c8;
-  --crepe-color-on-surface: #3c3835;
-  --crepe-color-on-surface-variant: rgba(60, 56, 53, 0.65);
-  --crepe-color-outline: rgba(60, 56, 53, 0.22);
-  --crepe-color-primary: #3c3835;
-  --crepe-color-secondary: #e8dec5;
-  --crepe-color-on-secondary: #3c3835;
-  --crepe-color-inverse: #3c3835;
-  --crepe-color-on-inverse: #faf5ed;
-  --crepe-color-inline-code: #b25237;
-  --crepe-color-error: #b25237;
-  --crepe-color-hover: rgba(60, 56, 53, 0.07);
-  --crepe-color-selected: rgba(60, 56, 53, 0.14);
-  --crepe-color-inline-area: rgba(60, 56, 53, 0.08);
+/* ---------- Settings (bottom-left) ----------
+   Docked (.is-docked) in the left column's footer when a sidebar or the
+   drafts panel is showing; floating bottom-left when neither is. */
+
+.side-footer {
+  grid-area: foot;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 8px;
+  background: var(--sheet);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
 }
 
-[data-theme="dark"] .milkdown {
-  --crepe-color-background: #191919;
-  --crepe-color-on-background: #ebebeb;
-  --crepe-color-surface: #1f1f1f;
-  --crepe-color-surface-low: #242424;
-  --crepe-color-on-surface: #ebebeb;
-  --crepe-color-on-surface-variant: rgba(255, 255, 255, 0.6);
-  --crepe-color-outline: rgba(255, 255, 255, 0.18);
-  --crepe-color-primary: #ffffff;
-  --crepe-color-secondary: #3a3a3a;
-  --crepe-color-on-secondary: #ebebeb;
-  --crepe-color-inverse: #ebebeb;
-  --crepe-color-on-inverse: #1a1a1a;
-  --crepe-color-inline-code: #f59e9e;
-  --crepe-color-error: #f87171;
-  --crepe-color-hover: rgba(255, 255, 255, 0.07);
-  --crepe-color-selected: rgba(255, 255, 255, 0.12);
-  --crepe-color-inline-area: rgba(255, 255, 255, 0.08);
-
-  --crepe-shadow-1:
-    0 1px 2px 0 rgba(0, 0, 0, 0.6),
-    0 1px 3px 1px rgba(0, 0, 0, 0.5);
-  --crepe-shadow-2:
-    0 1px 2px 0 rgba(0, 0, 0, 0.7),
-    0 2px 6px 2px rgba(0, 0, 0, 0.5);
+.settings-wrap.is-docked {
+  position: relative;
+  bottom: auto;
+  left: auto;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .milkdown,
-  [data-theme="system"] .milkdown {
-    --crepe-color-background: #191919;
-    --crepe-color-on-background: #ebebeb;
-    --crepe-color-surface: #1f1f1f;
-    --crepe-color-surface-low: #242424;
-    --crepe-color-on-surface: #ebebeb;
-    --crepe-color-on-surface-variant: rgba(255, 255, 255, 0.6);
-    --crepe-color-outline: rgba(255, 255, 255, 0.18);
-    --crepe-color-primary: #ffffff;
-    --crepe-color-secondary: #3a3a3a;
-    --crepe-color-on-secondary: #ebebeb;
-    --crepe-color-inverse: #ebebeb;
-    --crepe-color-on-inverse: #1a1a1a;
-    --crepe-color-inline-code: #f59e9e;
-    --crepe-color-error: #f87171;
-    --crepe-color-hover: rgba(255, 255, 255, 0.07);
-    --crepe-color-selected: rgba(255, 255, 255, 0.12);
-    --crepe-color-inline-area: rgba(255, 255, 255, 0.08);
-  }
+.settings-wrap.is-docked .settings-fab {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-3);
+  opacity: 1;
 }
 
-/* ---------- Settings (bottom-left) ---------- */
+.settings-wrap.is-docked .settings-fab:hover,
+.settings-wrap.is-docked .settings-fab[aria-expanded="true"] {
+  color: var(--text-1);
+  background: var(--hover);
+}
+
+.settings-wrap.is-docked .settings-popover {
+  bottom: 36px;
+  left: -2px;
+}
 
 .settings-wrap {
   position: fixed;
@@ -1599,10 +1574,10 @@ body,
   width: 32px;
   height: 32px;
   padding: 0;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-bg);
-  color: var(--app-text-muted);
+  background: var(--sheet);
+  color: var(--text-3);
   cursor: pointer;
   opacity: 0.7;
   transition: opacity 0.12s, color 0.12s, background 0.12s, border-color 0.12s;
@@ -1611,8 +1586,8 @@ body,
 .settings-fab:hover,
 .settings-fab[aria-expanded="true"] {
   opacity: 1;
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .settings-popover {
@@ -1622,29 +1597,12 @@ body,
   min-width: 168px;
   width: max-content;
   padding: 6px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   z-index: 21;
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .settings-popover {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .settings-popover,
-  [data-theme="system"] .settings-popover {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 @keyframes settings-popover-in {
@@ -1654,11 +1612,11 @@ body,
 
 .settings-section-label {
   padding: 6px 10px 4px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .settings-option {
@@ -1668,17 +1626,17 @@ body,
   width: 100%;
   padding: 7px 10px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
 }
 
 .settings-option:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .settings-option-check {
@@ -1687,7 +1645,7 @@ body,
   justify-content: center;
   width: 14px;
   height: 14px;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .settings-option.is-active .settings-option-label {
@@ -1707,7 +1665,7 @@ body,
   min-width: 0;
   border: none;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -1723,25 +1681,25 @@ body,
 
 .select-trigger-chevron {
   flex: none;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* Bordered field look — settings rows (the dictation models). */
 .select-trigger--field {
   padding: 4px 9px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-bg);
-  font-size: 12.5px;
+  background: var(--sheet);
+  font-size: var(--fs-md);
   transition: border-color 0.12s, background 0.12s;
 }
 
 .select-trigger--field:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .select-trigger--field:focus-visible {
-  border-color: var(--crepe-color-selected, var(--app-text-muted));
+  border-color: var(--accent);
 }
 
 /* The menu is portaled to <body> with fixed coordinates (never clipped by a
@@ -1755,32 +1713,15 @@ body,
   overflow-y: auto;
   scrollbar-width: none;
   padding: 5px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   animation: settings-popover-in 0.1s ease-out;
 }
 
 .select-menu::-webkit-scrollbar {
   display: none;
-}
-
-[data-theme="dark"] .select-menu {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .select-menu,
-  [data-theme="system"] .select-menu {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 /* Rows mirror .settings-option; "active" tracks pointer/arrow keys since
@@ -1791,13 +1732,13 @@ body,
   gap: 7px;
   padding: 6px 10px 6px 7px;
   border-radius: 6px;
-  font-size: 13px;
-  color: var(--app-text);
+  font-size: var(--fs-md);
+  color: var(--text-1);
   cursor: pointer;
 }
 
 .select-option.is-active {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .select-option-check {
@@ -1807,7 +1748,7 @@ body,
   width: 13px;
   flex: none;
   margin-top: 3px;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .select-option-text {
@@ -1822,9 +1763,9 @@ body,
 }
 
 .select-option-detail {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.45;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* ---------- Custom checkbox ----------
@@ -1841,9 +1782,9 @@ input[type="checkbox"] {
   margin: 0;
   display: inline-grid;
   place-content: center;
-  border: 1px solid color-mix(in srgb, var(--app-text) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-1) 30%, transparent);
   border-radius: 4px;
-  background: var(--app-surface);
+  background: var(--sheet);
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
@@ -1854,18 +1795,18 @@ input[type="checkbox"]::before {
   height: 9px;
   transform: scale(0);
   transition: transform 0.1s ease;
-  background: #ffffff;
+  background: var(--on-fill);
   clip-path: polygon(13% 47%, 34% 68%, 87% 12%, 100% 25%, 34% 93%, 0 60%);
 }
 
 input[type="checkbox"]:hover:not(:checked):not(:indeterminate) {
-  border-color: color-mix(in srgb, var(--app-text) 45%, transparent);
+  border-color: color-mix(in srgb, var(--text-1) 45%, transparent);
 }
 
 input[type="checkbox"]:checked,
 input[type="checkbox"]:indeterminate {
-  background: var(--app-accent);
-  border-color: var(--app-accent);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 input[type="checkbox"]:checked::before {
@@ -1874,7 +1815,7 @@ input[type="checkbox"]:checked::before {
 
 input[type="checkbox"]:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--app-bg), 0 0 0 3.5px var(--app-accent);
+  box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3.5px var(--accent);
 }
 
 /* ---------- Conflict banner ---------- */
@@ -1886,11 +1827,11 @@ input[type="checkbox"]:focus-visible {
   gap: 16px;
   padding: 10px 16px;
   margin: 0 12px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-hover);
-  color: var(--app-text);
-  font-size: 13px;
+  background: var(--hover);
+  color: var(--text-1);
+  font-size: var(--fs-md);
   z-index: 4;
 }
 
@@ -1908,23 +1849,23 @@ input[type="checkbox"]:focus-visible {
 .conflict-banner-btn {
   padding: 5px 10px;
   font: inherit;
-  font-size: 12px;
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-sm);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 
 .conflict-banner-btn:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .conflict-banner-btn.is-primary {
-  background: var(--app-text);
-  color: var(--app-bg);
-  border-color: var(--app-text);
+  background: var(--text-1);
+  color: var(--sheet);
+  border-color: var(--text-1);
 }
 
 .conflict-banner-btn.is-primary:hover {
@@ -1933,8 +1874,8 @@ input[type="checkbox"]:focus-visible {
 
 .settings-option-kbd {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   font-feature-settings: "tnum" 1;
 }
 
@@ -1945,7 +1886,7 @@ input[type="checkbox"]:focus-visible {
 
 .settings-divider {
   height: 1px;
-  background: var(--app-border);
+  background: var(--border);
   margin: 4px 0;
 }
 
@@ -1955,7 +1896,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .settings-recents .settings-option-check {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .settings-option:disabled {
@@ -1970,7 +1911,7 @@ input[type="checkbox"]:focus-visible {
 /* The "Update to vX.Y.Z" row, shown when a newer release is available. */
 .settings-option--update .settings-option-check,
 .settings-option--update .settings-option-label {
-  color: var(--app-accent);
+  color: var(--accent);
 }
 
 .settings-option--update .settings-option-label {
@@ -1980,15 +1921,15 @@ input[type="checkbox"]:focus-visible {
 /* Footer line under the Updates section: current version / up-to-date / error. */
 .settings-update-status {
   padding: 4px 10px 2px;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   font-feature-settings: "tnum" 1;
 }
 
 /* Non-interactive row shown while a download/install is in flight. */
 .settings-option.is-progress {
   cursor: default;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .settings-option.is-progress:hover {
@@ -2000,7 +1941,7 @@ input[type="checkbox"]:focus-visible {
   height: 4px;
   margin: 2px 10px 4px;
   border-radius: 2px;
-  background: var(--app-hover);
+  background: var(--hover);
   overflow: hidden;
 }
 
@@ -2008,7 +1949,7 @@ input[type="checkbox"]:focus-visible {
   display: block;
   height: 100%;
   min-width: 2px;
-  background: var(--app-accent);
+  background: var(--accent);
   border-radius: 2px;
   transition: width 0.15s ease-out;
 }
@@ -2021,8 +1962,8 @@ input[type="checkbox"]:focus-visible {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--app-accent);
-  border: 1.5px solid var(--app-bg);
+  background: var(--accent);
+  border: 1.5px solid var(--sheet);
   pointer-events: none;
 }
 
@@ -2050,8 +1991,8 @@ input[type="checkbox"]:focus-visible {
 }
 
 .scratch-empty-hint {
-  font-size: 13px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
   text-align: center;
 }
 
@@ -2068,17 +2009,17 @@ input[type="checkbox"]:focus-visible {
   flex: 1;
   padding: 9px 12px;
   font: inherit;
-  font-size: 13px;
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-md);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
 
 .scratch-empty-button:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .scratch-empty-button span:nth-of-type(1) {
@@ -2088,8 +2029,8 @@ input[type="checkbox"]:focus-visible {
 }
 
 .scratch-empty-kbd {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   font-feature-settings: "tnum" 1;
 }
 
@@ -2109,11 +2050,11 @@ input[type="checkbox"]:focus-visible {
 
 .scratch-empty-recents-label {
   padding: 4px 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .scratch-empty-recent {
@@ -2124,21 +2065,21 @@ input[type="checkbox"]:focus-visible {
   width: 100%;
   padding: 7px 8px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
 }
 
 .scratch-empty-recent:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .scratch-empty-recent svg {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   flex-shrink: 0;
 }
 
@@ -2169,7 +2110,7 @@ input[type="checkbox"]:focus-visible {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   opacity: 0.7;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
@@ -2177,13 +2118,13 @@ input[type="checkbox"]:focus-visible {
 
 .title-toggle:hover {
   opacity: 1;
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .title-toggle[aria-pressed="true"] {
   opacity: 1;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 /* ---------- Drafts panel (left, workspace-independent) ---------- */
@@ -2193,8 +2134,8 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--app-bg);
-  border-right: 1px solid var(--app-border);
+  background: var(--sheet);
+  border-right: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -2207,11 +2148,11 @@ input[type="checkbox"]:focus-visible {
 }
 
 .drafts-header-title {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .drafts-header-actions {
@@ -2228,13 +2169,13 @@ input[type="checkbox"]:focus-visible {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .drafts-header-button:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .drafts-body {
@@ -2245,8 +2186,8 @@ input[type="checkbox"]:focus-visible {
 
 .drafts-empty {
   padding: 8px 12px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .drafts-list {
@@ -2262,11 +2203,11 @@ input[type="checkbox"]:focus-visible {
 }
 
 .draft-row:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .draft-row.is-active {
-  background: var(--crepe-color-selected, var(--app-hover));
+  background: var(--accent-wash);
 }
 
 .draft-open {
@@ -2278,13 +2219,13 @@ input[type="checkbox"]:focus-visible {
   padding: 6px 8px;
   border: none;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
 }
 
 .draft-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2295,8 +2236,8 @@ input[type="checkbox"]:focus-visible {
 }
 
 .draft-preview {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2311,7 +2252,7 @@ input[type="checkbox"]:focus-visible {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   opacity: 0;
 }
@@ -2321,8 +2262,8 @@ input[type="checkbox"]:focus-visible {
 }
 
 .draft-discard:hover {
-  background: var(--app-border);
-  color: var(--app-text);
+  background: var(--border);
+  color: var(--text-1);
 }
 
 /* ---------- Sidebar ---------- */
@@ -2333,10 +2274,10 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--app-surface);
-  border-right: 1px solid var(--app-border);
+  background: var(--sheet);
+  border-right: 1px solid var(--border);
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 /* Right-edge drag handle: an invisible grab strip over the border (same
@@ -2353,7 +2294,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .sidebar-resize:hover {
-  background: color-mix(in srgb, var(--app-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 body.sidebar-resizing {
@@ -2380,17 +2321,17 @@ body.sidebar-resizing {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   letter-spacing: 0.01em;
   text-align: left;
 }
 
 .sidebar-header-button:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .sidebar-header-name {
@@ -2409,30 +2350,30 @@ body.sidebar-resizing {
   height: 7px;
   margin: 0 2px;
   border-radius: 50%;
-  background: var(--app-text-muted);
+  background: var(--text-3);
   opacity: 0.6;
 }
 
 .sidebar-cloud-dot.phase-idle {
-  background: #34c759;
+  background: var(--live);
   opacity: 1;
 }
 
 .sidebar-cloud-dot.phase-syncing {
-  background: var(--app-accent);
+  background: var(--accent);
   opacity: 1;
   animation: sidebar-cloud-pulse 1.2s ease-in-out infinite;
 }
 
 .sidebar-cloud-dot.phase-pending-deletes,
 .sidebar-cloud-dot.phase-worker-outdated {
-  background: #f0a020;
+  background: var(--warn);
   opacity: 1;
 }
 
 .sidebar-cloud-dot.phase-revoked,
 .sidebar-cloud-dot.phase-error {
-  background: #e5484d;
+  background: var(--error);
   opacity: 1;
 }
 
@@ -2455,15 +2396,15 @@ body.sidebar-resizing {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   opacity: 0.7;
 }
 
 .sidebar-header-refresh:hover {
   opacity: 1;
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .sidebar-menu {
@@ -2472,29 +2413,12 @@ body.sidebar-resizing {
   left: 8px;
   min-width: 180px;
   padding: 6px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   z-index: 22;
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .sidebar-menu {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .sidebar-menu,
-  [data-theme="system"] .sidebar-menu {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 .sidebar-menu-item {
@@ -2504,15 +2428,15 @@ body.sidebar-resizing {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 .sidebar-menu-item:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 /* A menu item that toggles a view preference: label left, tick right. */
 .sidebar-menu-item-check {
@@ -2522,7 +2446,7 @@ body.sidebar-resizing {
   gap: 12px;
 }
 .sidebar-menu-item-check svg {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   flex: none;
 }
 
@@ -2541,12 +2465,12 @@ body.sidebar-resizing {
 
 .sidebar-message {
   padding: 8px 10px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .sidebar-message-error {
-  color: var(--crepe-color-error, #b91c1c);
+  color: var(--error-ink);
 }
 
 .tree,
@@ -2561,25 +2485,26 @@ body.sidebar-resizing {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 3px 6px;
+  min-height: var(--row-h);
+  padding: 4px 8px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.4;
 }
 
 .tree-row:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .tree-row.is-active {
-  background: var(--crepe-color-selected, var(--app-hover));
-  color: var(--app-text);
+  background: var(--accent-wash);
+  color: var(--text-1);
   font-weight: 600;
 }
 
@@ -2592,7 +2517,7 @@ body.sidebar-resizing {
 
 .tree-dir-label {
   font-weight: 500;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .tree-chevron {
@@ -2601,7 +2526,7 @@ body.sidebar-resizing {
   justify-content: center;
   width: 12px;
   height: 12px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   transition: transform 0.12s;
   transform: rotate(90deg);
 }
@@ -2611,7 +2536,7 @@ body.sidebar-resizing {
 }
 
 .tree-file .tree-label {
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 /* Files Doklin can't open, listed only in "Show all files": greyed out and
@@ -2619,7 +2544,7 @@ body.sidebar-resizing {
    reads as "this exists on disk" rather than "this is a document". */
 .tree-row.is-unsupported,
 .tree-row.is-unsupported .tree-label {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: default;
 }
 .tree-row.is-unsupported {
@@ -2629,7 +2554,7 @@ body.sidebar-resizing {
 /* Explorer selection (click / right-click): a quieter highlight than the
    active document, which keeps its stronger is-active treatment. */
 .tree-row.is-selected:not(.is-active) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 /* ---------- Sidebar: inline create + context menu ---------- */
@@ -2639,31 +2564,31 @@ body.sidebar-resizing {
   align-items: center;
   gap: 6px;
   padding: 2px 6px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .tree-create-input {
   flex: 1;
   min-width: 0;
   padding: 2px 5px;
-  border: 1px solid var(--crepe-color-selected, var(--app-border));
+  border: 1px solid var(--accent);
   border-radius: 4px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.4;
   outline: none;
 }
 
 .tree-create-input[aria-invalid="true"] {
-  border-color: var(--crepe-color-error, #b91c1c);
+  border-color: var(--error-ink);
 }
 
 .tree-create-error {
   padding: 3px 6px 4px;
-  font-size: 11px;
-  color: var(--crepe-color-error, #b91c1c);
+  font-size: var(--fs-xs);
+  color: var(--error-ink);
 }
 
 /* Same visual language as .sidebar-menu, but positioned at the cursor. */
@@ -2671,33 +2596,16 @@ body.sidebar-resizing {
   position: fixed;
   min-width: 170px;
   padding: 6px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   z-index: 30;
   animation: settings-popover-in 0.1s ease-out;
 }
 
-[data-theme="dark"] .tree-context-menu {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .tree-context-menu,
-  [data-theme="system"] .tree-context-menu {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
-}
-
 .sidebar-menu-item.is-danger {
-  color: var(--crepe-color-error, #b91c1c);
+  color: var(--error-ink);
 }
 
 /* ---------- Sidebar: drag-to-move ---------- */
@@ -2714,21 +2622,21 @@ body.sidebar-resizing {
 
 /* Destination folder: a ring + tint on the folder row itself… */
 .tree-row.is-drop-target {
-  background: var(--app-hover);
-  box-shadow: inset 0 0 0 1.5px var(--app-accent, #4c8ffb);
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
 /* …and a soft wash over the rows already inside it, so the whole drop
    container reads as one region (VS Code-style). */
 .tree-row.is-drop-within {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 /* Dropping on empty space = move to the workspace root: ring the whole tree. */
 .sidebar-body.is-drop-root {
-  box-shadow: inset 0 0 0 1.5px var(--app-accent, #4c8ffb);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
   border-radius: 8px;
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 /* The pill that follows the pointer: what's being moved, and where it lands. */
@@ -2742,15 +2650,13 @@ body.sidebar-resizing {
   gap: 6px;
   max-width: 260px;
   padding: 4px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--app-bg);
-  color: var(--app-text);
-  font-size: 12px;
+  background: var(--raised);
+  color: var(--text-1);
+  font-size: var(--fs-sm);
   line-height: 1.4;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.12),
-    0 12px 32px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--shadow-pop);
   pointer-events: none; /* never block elementFromPoint hit-testing */
   will-change: transform;
 }
@@ -2767,23 +2673,8 @@ body.sidebar-resizing {
 
 .tree-drag-ghost-dest {
   flex-shrink: 0;
-  color: var(--app-accent, #4c8ffb);
+  color: var(--accent);
   font-weight: 600;
-}
-
-[data-theme="dark"] .tree-drag-ghost {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .tree-drag-ghost,
-  [data-theme="system"] .tree-drag-ghost {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 /* While a tree drag is live the cursor speaks for the whole app: grabbing over
@@ -2815,41 +2706,24 @@ body.tree-dragging.tree-drag-invalid * {
   transform: translateX(-50%);
   width: min(440px, calc(100vw - 32px));
   padding: 10px 12px 8px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .saveas-panel {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .saveas-panel,
-  [data-theme="system"] .saveas-panel {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 .saveas-title {
   margin-bottom: 8px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .saveas-dir {
-  color: var(--app-text);
+  color: var(--text-1);
   font-weight: 600;
 }
 
@@ -2858,9 +2732,9 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 4px;
   padding: 5px 8px;
-  border: 1px solid var(--crepe-color-selected, var(--app-border));
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .saveas-input {
@@ -2868,25 +2742,25 @@ body.tree-dragging.tree-drag-invalid * {
   min-width: 0;
   border: none;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
 .saveas-input[aria-invalid="true"] {
-  color: var(--crepe-color-error, #b91c1c);
+  color: var(--error-ink);
 }
 
 .saveas-ext {
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .saveas-error {
   padding: 5px 2px 0;
-  font-size: 11px;
-  color: var(--crepe-color-error, #b91c1c);
+  font-size: var(--fs-xs);
+  color: var(--error-ink);
 }
 
 .saveas-footer {
@@ -2897,8 +2771,8 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .saveas-hint {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .saveas-browse {
@@ -2906,41 +2780,35 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .saveas-browse:hover {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 /* ---------- In-file find (⌘F) ---------- */
 
 /* Search match highlights painted by the ProseMirror decoration plugin. */
 .editor-wrap .milkdown .ProseMirror .search-match {
-  background: rgba(255, 214, 0, 0.32);
+  background: var(--mark);
   border-radius: 2px;
 }
 
 .editor-wrap .milkdown .ProseMirror .search-match-current {
-  background: rgba(255, 145, 0, 0.55);
-  box-shadow: 0 0 0 1px rgba(255, 145, 0, 0.85);
+  background: var(--mark-current);
+  box-shadow: 0 0 0 1px var(--mark-ring);
 }
 
-[data-theme="dark"] .editor-wrap .milkdown .ProseMirror .search-match {
-  background: rgba(255, 214, 0, 0.28);
-}
-[data-theme="dark"] .editor-wrap .milkdown .ProseMirror .search-match-current {
-  background: rgba(255, 145, 0, 0.5);
-}
 
 /* ---------- CriticMarkup editorial comments ----------
 
    The comment layer follows the app palette: anchors are tinted with the
-   theme's accent (blue in light/dark, warm brown in sepia) instead of a
+   theme's accent instead of a
    hard-coded highlighter yellow, and cards read like the rest of the chrome
    (surface, hairline border, small radius). */
 
@@ -2948,21 +2816,21 @@ body.tree-dragging.tree-drag-invalid * {
    (<span class="critic-anchor">), so the highlight is part of the document
    model — delete the text and the highlight (and its thread) go with it. */
 .editor-wrap .milkdown .ProseMirror .critic-anchor {
-  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
-  border-bottom: 2px solid color-mix(in srgb, var(--app-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 2px 2px 0 0;
   cursor: pointer;
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 .editor-wrap .milkdown .ProseMirror .critic-anchor:hover {
-  background: color-mix(in srgb, var(--app-accent) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 /* The anchor runs of the thread whose card is selected in the rail (painted
    by the criticActivePlugin decoration). */
 .editor-wrap .milkdown .ProseMirror .critic-anchor-active {
-  background: color-mix(in srgb, var(--app-accent) 27%, transparent);
-  border-bottom-color: var(--app-accent);
+  background: color-mix(in srgb, var(--accent) 27%, transparent);
+  border-bottom-color: var(--accent);
 }
 
 /* Comments hidden: the document reads clean — no tint, no pointer. */
@@ -2996,36 +2864,29 @@ body.tree-dragging.tree-drag-invalid * {
   width: 276px;
   box-sizing: border-box;
   padding: 10px 12px 11px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
+  background: var(--sheet);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-card);
   pointer-events: auto;
   cursor: pointer;
   transition: box-shadow 0.15s ease, border-color 0.15s ease, top 0.18s ease;
 }
 .comment-card:hover {
-  border-color: color-mix(in srgb, var(--app-text) 16%, transparent);
+  border-color: color-mix(in srgb, var(--text-1) 16%, transparent);
 }
 .comment-card.is-active {
-  border-color: color-mix(in srgb, var(--app-accent) 45%, var(--app-border));
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.1);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-pop);
   cursor: default;
   z-index: 2;
 }
-[data-theme="dark"] .comment-card {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-[data-theme="dark"] .comment-card.is-active {
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
-}
-
 /* One entry (the opener or a reply): avatar + author + time header, body
    below, delete on hover. Replies get a hairline separator. */
 .comment-entry.is-reply {
   margin-top: 9px;
   padding-top: 9px;
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border);
 }
 
 .comment-entry-head {
@@ -3046,11 +2907,11 @@ body.tree-dragging.tree-drag-invalid * {
   font-size: 8px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: #fff;
+  color: var(--on-identity);
   user-select: none;
 }
 .comment-avatar.is-unknown {
-  background: var(--app-text-muted);
+  background: var(--text-3);
 }
 
 .comment-entry-author {
@@ -3058,15 +2919,15 @@ body.tree-dragging.tree-drag-invalid * {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .comment-entry-when {
   flex: none;
-  font-size: 10.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 /* Hover-revealed entry actions: Edit (only on the looker's own entries) and
@@ -3095,36 +2956,36 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
 }
 .comment-entry-edit:hover,
 .comment-entry-delete:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .comment-entry-body {
   margin: 3px 0 0 24px;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   line-height: 1.5;
-  color: var(--app-text);
+  color: var(--text-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .comment-entry-empty {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font-style: italic;
 }
 
 /* "N replies" teaser on a collapsed card; the full thread shows on select. */
 .comment-replies-hint {
   margin: 5px 0 0 24px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  color: var(--app-accent);
+  color: var(--accent);
 }
 
 /* Shared textarea for writing and editing entries; grows with content. */
@@ -3133,15 +2994,15 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   outline: none;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   padding: 0;
   overflow: hidden;
 }
 .comment-input::placeholder {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 .comment-entry .comment-input {
   display: block;
@@ -3152,13 +3013,13 @@ body.tree-dragging.tree-drag-invalid * {
 .comment-reply-composer {
   margin-top: 9px;
   padding: 5px 9px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
+  background: var(--sheet);
   transition: border-color 0.12s ease;
 }
 .comment-reply-composer:focus-within {
-  border-color: color-mix(in srgb, var(--app-accent) 50%, var(--app-border));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
 }
 .comment-reply-composer .comment-input {
   display: block;
@@ -3177,51 +3038,34 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 4px;
   padding: 5px 6px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .find-bar {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .find-bar,
-  [data-theme="system"] .find-bar {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 .find-input {
   width: 180px;
   padding: 4px 8px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
 .find-input:focus {
-  border-color: var(--crepe-color-selected, var(--app-text-muted));
+  border-color: var(--accent);
 }
 
 .find-count {
   min-width: 38px;
   padding: 0 2px;
-  font-size: 11.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   text-align: center;
   font-feature-settings: "tnum" 1;
 }
@@ -3236,15 +3080,15 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .find-btn:hover:not(:disabled) {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .find-btn:disabled {
@@ -3258,8 +3102,8 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .find-btn.is-active {
-  background: var(--crepe-color-selected, var(--app-hover));
-  color: var(--app-text);
+  background: var(--accent-wash);
+  color: var(--text-1);
 }
 
 /* ---------- Workspace search (⌘⇧F) ---------- */
@@ -3276,17 +3120,17 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1;
   min-width: 0;
   padding: 5px 8px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
 .ws-search-input:focus {
-  border-color: var(--crepe-color-selected, var(--app-text-muted));
+  border-color: var(--accent);
 }
 
 .ws-search-case {
@@ -3299,27 +3143,27 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
 .ws-search-case:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .ws-search-case.is-active {
-  background: var(--crepe-color-selected, var(--app-hover));
-  color: var(--app-text);
+  background: var(--accent-wash);
+  color: var(--text-1);
 }
 
 .ws-search-summary {
   padding: 2px 10px 6px;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .ws-result-list {
@@ -3341,16 +3185,16 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
   text-align: left;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
 .ws-result-file-header:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .ws-result-file-name {
@@ -3365,9 +3209,9 @@ body.tree-dragging.tree-drag-invalid * {
   min-width: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: var(--app-hover);
-  color: var(--app-text-muted);
-  font-size: 10.5px;
+  background: var(--hover);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
   font-weight: 600;
   text-align: center;
   font-feature-settings: "tnum" 1;
@@ -3388,23 +3232,23 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
   text-align: left;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
 }
 
 .ws-result-row:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .ws-result-line {
   flex-shrink: 0;
   min-width: 20px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font-feature-settings: "tnum" 1;
   text-align: right;
 }
@@ -3417,7 +3261,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .ws-result-hit {
-  background: rgba(255, 214, 0, 0.32);
+  background: var(--mark);
   color: inherit;
   border-radius: 2px;
 }
@@ -3427,17 +3271,17 @@ body.tree-dragging.tree-drag-invalid * {
 .modal-btn {
   padding: 5px 10px;
   font: inherit;
-  font-size: 12px;
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-sm);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s;
 }
 
 .modal-btn:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .modal-btn:disabled {
@@ -3446,20 +3290,20 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .modal-btn.is-primary {
-  background: var(--app-text);
-  color: var(--app-bg);
-  border-color: var(--app-text);
+  background: var(--text-1);
+  color: var(--sheet);
+  border-color: var(--text-1);
 }
 
 .modal-btn.is-primary:hover:not(:disabled) {
-  background: var(--app-text);
+  background: var(--text-1);
   opacity: 0.9;
 }
 
 .modal-error {
   margin-top: 8px;
-  font-size: 12px;
-  color: var(--crepe-color-error, #b91c1c);
+  font-size: var(--fs-sm);
+  color: var(--error-ink);
 }
 
 .modal-overlay {
@@ -3469,7 +3313,7 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: flex-start;
   justify-content: center;
   padding: 96px 24px 24px;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--scrim);
   z-index: 30;
 }
 
@@ -3480,28 +3324,11 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   padding: 14px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   animation: settings-popover-in 0.1s ease-out;
-}
-
-[data-theme="dark"] .modal {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .modal,
-  [data-theme="system"] .modal {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.5),
-      0 12px 32px rgba(0, 0, 0, 0.6);
-  }
 }
 
 .modal-header {
@@ -3512,9 +3339,9 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .modal-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .modal-close {
@@ -3527,20 +3354,20 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .modal-close:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* ---------- Voice dictation ---------- */
 
 /* Titlebar mic: red pulse while a session is live. */
 .dictation-mic.is-dictating {
-  color: #e5484d;
+  color: var(--error);
 }
 
 .dictation-mic.is-dictating svg {
@@ -3561,11 +3388,11 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .editor-wrap.is-dictating.is-listening {
-  box-shadow: inset 0 0 0 2px rgba(229, 72, 77, 0.55);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--error) 55%, transparent);
 }
 
 .editor-wrap.is-dictating.is-paused {
-  box-shadow: inset 0 0 0 2px rgba(210, 153, 34, 0.5);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--warn) 50%, transparent);
 }
 
 /* Ghost text — the uncommitted transcript at the anchor. */
@@ -3574,12 +3401,12 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-ghost-seg.is-listening {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   animation: dictation-shimmer 1.4s ease-in-out infinite;
 }
 
 .dictation-ghost-seg.is-polishing {
-  color: var(--app-accent);
+  color: var(--accent);
   opacity: 0.75;
 }
 
@@ -3602,11 +3429,11 @@ body.tree-dragging.tree-drag-invalid * {
   max-width: min(720px, calc(100% - 48px));
   padding: 8px 12px;
   border-radius: 12px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
-  font-size: 12.5px;
-  color: var(--app-text);
+  background: var(--sheet);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-md);
+  color: var(--text-1);
 }
 
 .dictation-dot {
@@ -3617,12 +3444,12 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-hud.is-listening .dictation-dot {
-  background: #e5484d;
+  background: var(--error);
   animation: dictation-pulse 1.2s ease-in-out infinite;
 }
 
 .dictation-hud.is-paused .dictation-dot {
-  background: var(--app-dirty);
+  background: var(--warn);
 }
 
 .dictation-meter {
@@ -3642,11 +3469,11 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-hud.is-listening .dictation-meter {
-  color: #e5484d;
+  color: var(--error);
 }
 
 .dictation-hud.is-paused .dictation-meter {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-status {
@@ -3655,11 +3482,11 @@ body.tree-dragging.tree-drag-invalid * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-status.is-error {
-  color: #e5484d;
+  color: var(--error-ink);
 }
 
 /* Last utterance was changed by polish; clicking restores the raw words. */
@@ -3670,16 +3497,16 @@ body.tree-dragging.tree-drag-invalid * {
   flex-shrink: 0;
   padding: 2px 7px;
   border-radius: 7px;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .dictation-revert:hover {
-  border-color: var(--app-border);
-  background: var(--app-hover);
-  color: var(--app-text);
+  border-color: var(--border);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* Chunks waiting on polish; clicking commits them as-is right now. */
@@ -3690,14 +3517,14 @@ body.tree-dragging.tree-drag-invalid * {
   flex-shrink: 0;
   padding: 2px 7px;
   border-radius: 7px;
-  font-size: 11px;
-  color: var(--app-accent);
+  font-size: var(--fs-xs);
+  color: var(--accent);
   cursor: pointer;
 }
 
 .dictation-pending:hover {
-  border-color: var(--app-border);
-  background: var(--app-hover);
+  border-color: var(--border);
+  background: var(--hover);
 }
 
 .dictation-close {
@@ -3710,13 +3537,13 @@ body.tree-dragging.tree-drag-invalid * {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .dictation-close:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* Dictation settings modal — a compact preferences card in the modal
@@ -3747,13 +3574,13 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .dictation-back:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dictation-setup-body {
@@ -3763,15 +3590,15 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-intro {
   margin: 0 0 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.55;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-rows {
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .dictation-row {
@@ -3783,7 +3610,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-row + .dictation-row {
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border);
 }
 
 .dictation-row--toggle {
@@ -3804,7 +3631,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-row--nav:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dictation-row-value {
@@ -3812,22 +3639,22 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 3px;
   justify-self: end;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .dictation-row-label {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 500;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .dictation-row-caption {
   grid-column: 1 / -1;
   margin-top: 3px;
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-select {
@@ -3838,7 +3665,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-select .select-trigger {
   max-width: 100%;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* Inspector toggle switch. */
@@ -3869,7 +3696,7 @@ body.tree-dragging.tree-drag-invalid * {
   width: 100%;
   height: 100%;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-text) 16%, transparent);
+  background: color-mix(in srgb, var(--text-1) 16%, transparent);
   transition: background 0.15s;
   pointer-events: none;
 }
@@ -3882,13 +3709,13 @@ body.tree-dragging.tree-drag-invalid * {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  background: var(--knob);
+  box-shadow: var(--shadow-card);
   transition: transform 0.15s ease;
 }
 
 .dictation-switch input:checked + .dictation-switch-track {
-  background: var(--app-accent);
+  background: var(--accent);
 }
 
 .dictation-switch input:checked + .dictation-switch-track::after {
@@ -3896,14 +3723,14 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-switch input:focus-visible + .dictation-switch-track {
-  box-shadow: 0 0 0 2px var(--app-bg), 0 0 0 3.5px var(--app-accent);
+  box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3.5px var(--accent);
 }
 
 .dictation-footnote {
   margin: 10px 2px 0;
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* Polish-instructions subview: the editable system prompt above a read-only
@@ -3915,18 +3742,18 @@ body.tree-dragging.tree-drag-invalid * {
   min-height: 120px;
   resize: vertical;
   padding: 10px 12px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
+  background: var(--sheet);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
   line-height: 1.6;
   outline: none;
 }
 
 .dictation-prompt-editor:focus {
-  border-color: var(--crepe-color-selected, var(--app-text-muted));
+  border-color: var(--accent);
 }
 
 .dictation-prompt-meta {
@@ -3935,8 +3762,8 @@ body.tree-dragging.tree-drag-invalid * {
   justify-content: space-between;
   margin-top: 6px;
   min-height: 18px;
-  font-size: 11.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .dictation-prompt-reset {
@@ -3944,8 +3771,8 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   background: transparent;
   font: inherit;
-  font-size: 11.5px;
-  color: var(--app-accent);
+  font-size: var(--fs-sm);
+  color: var(--accent);
   cursor: pointer;
 }
 
@@ -3959,11 +3786,11 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-template-title {
   margin-bottom: 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-template-body {
@@ -3971,34 +3798,34 @@ body.tree-dragging.tree-drag-invalid * {
   flex-direction: column;
   gap: 9px;
   padding: 10px 12px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-surface);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  background: var(--sheet);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
   line-height: 1.7;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-template-var {
   margin: 0 1px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
-  color: var(--app-accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
   font-family: inherit;
   white-space: nowrap;
 }
 
 .dictation-template-lit {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-template-note {
   margin-top: 6px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-footer {
@@ -4020,10 +3847,10 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   border-radius: 10px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.24);
-  font-size: 11.5px;
+  background: var(--sheet);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-sm);
 }
 
 .dictation-inspector-head {
@@ -4031,13 +3858,13 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
 }
 
 .dictation-inspector-title {
   flex: 1;
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .dictation-inspector-btn {
@@ -4046,14 +3873,14 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
   padding: 2px 7px;
   border-radius: 5px;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .dictation-inspector-btn:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dictation-inspector-body {
@@ -4063,7 +3890,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-inspector-empty {
   padding: 14px 12px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   line-height: 1.5;
 }
 
@@ -4077,18 +3904,18 @@ body.tree-dragging.tree-drag-invalid * {
   width: 100%;
   padding: 4px 10px;
   text-align: left;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
 }
 
 .dictation-inspector-row:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dictation-inspector-time {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-inspector-label {
@@ -4097,12 +3924,12 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dictation-inspector-entry.kind-event .dictation-inspector-label {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-inspector-caret {
   flex-shrink: 0;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-inspector-detail {
@@ -4111,21 +3938,21 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dictation-inspector-key {
   margin-top: 6px;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dictation-inspector-pre {
   margin: 2px 0 0;
   padding: 6px 8px;
   border-radius: 6px;
-  background: var(--app-hover);
+  background: var(--hover);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.45;
   max-height: 180px;
   overflow-y: auto;
@@ -4136,28 +3963,7 @@ body.tree-dragging.tree-drag-invalid * {
    deliberately never scrolls horizontally), so a wide board can't push a
    scrollbar onto the document canvas. Option colours are named, never hex in
    anyone's files: each name sets a hue, and the theme sets how dark the ink
-   and how strong the wash are — one palette, four themes. */
-
-:root,
-[data-theme="system"],
-[data-theme="light"],
-[data-theme="sepia"] {
-  --dk-ink: 30%;
-  --dk-wash: 0.15;
-}
-
-[data-theme="dark"] {
-  --dk-ink: 76%;
-  --dk-wash: 0.24;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]),
-  [data-theme="system"] {
-    --dk-ink: 76%;
-    --dk-wash: 0.24;
-  }
-}
+   and how strong the wash are — one palette, every theme. */
 
 .dk-color-grey { --dk-h: 220; --dk-s: 6%; }
 .dk-color-brown { --dk-h: 25; --dk-s: 35%; }
@@ -4175,7 +3981,7 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .dk-board.is-dragging {
@@ -4194,18 +4000,18 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-board-title {
   margin: 0;
-  font-size: 22px;
+  font-size: var(--fs-xl);
   font-weight: 650;
   letter-spacing: -0.01em;
-  color: var(--app-text);
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .dk-board-sub {
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   white-space: nowrap;
 }
 
@@ -4214,15 +4020,15 @@ body.tree-dragging.tree-drag-invalid * {
   margin: 0 24px 8px;
   padding: 7px 10px;
   border-radius: 6px;
-  font-size: 12px;
-  color: var(--app-text);
-  background: hsl(45 80% 50% / 0.16);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
 
 .dk-board-empty {
   padding: 40px 24px;
-  color: var(--app-text-muted);
-  font-size: 13px;
+  color: var(--text-3);
+  font-size: var(--fs-md);
   line-height: 1.6;
   max-width: 46ch;
 }
@@ -4246,17 +4052,17 @@ body.tree-dragging.tree-drag-invalid * {
   min-height: 0;
   border-radius: 8px;
   padding: 6px;
-  background: color-mix(in srgb, var(--app-text) 3.5%, transparent);
+  background: color-mix(in srgb, var(--text-1) 3.5%, transparent);
 }
 
 .dk-col.is-drop-target {
-  box-shadow: inset 0 0 0 1.5px var(--app-accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
 /* A value no option declares: shown, never silently normalized. */
 .dk-col.is-loose {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--app-border);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .dk-col-new {
@@ -4282,9 +4088,9 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-col-name {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4292,8 +4098,8 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-col-count {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   flex: 0 0 auto;
 }
 
@@ -4301,10 +4107,10 @@ body.tree-dragging.tree-drag-invalid * {
   margin-left: auto;
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   border-radius: 4px;
   padding: 0 5px;
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 18px;
   cursor: pointer;
   opacity: 0;
@@ -4316,8 +4122,8 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-col-menu-btn:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-col-list {
@@ -4331,8 +4137,8 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-card {
   border-radius: 6px;
-  background: var(--app-surface);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.09), 0 0 0 1px var(--app-border);
+  background: var(--sheet);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
   padding: 8px 10px;
   cursor: pointer;
   display: flex;
@@ -4341,13 +4147,13 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-card:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-card-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   line-height: 1.35;
-  color: var(--app-text);
+  color: var(--text-1);
   overflow-wrap: anywhere;
 }
 
@@ -4363,7 +4169,7 @@ body.tree-dragging.tree-drag-invalid * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 16px;
   padding: 0 6px;
   border-radius: 4px;
@@ -4375,7 +4181,7 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-drop-line {
   height: 2px;
   border-radius: 2px;
-  background: var(--app-accent);
+  background: var(--accent);
 }
 
 .dk-drag-ghost {
@@ -4384,10 +4190,10 @@ body.tree-dragging.tree-drag-invalid * {
   pointer-events: none;
   padding: 7px 10px;
   border-radius: 6px;
-  font-size: 13px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22), 0 0 0 1px var(--app-border);
+  font-size: var(--fs-md);
+  background: var(--sheet);
+  color: var(--text-1);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border);
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4404,8 +4210,8 @@ body.tree-dragging.tree-drag-invalid * {
   text-align: left;
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
-  font-size: 12px;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
   padding: 5px 6px;
   border-radius: 5px;
   cursor: pointer;
@@ -4413,20 +4219,20 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-col-add:hover,
 .dk-col-adopt:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-inline-input {
   width: 100%;
   box-sizing: border-box;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 6px 8px;
   border-radius: 5px;
-  border: 1px solid var(--app-accent);
-  background: var(--app-surface);
-  color: var(--app-text);
+  border: 1px solid var(--accent);
+  background: var(--sheet);
+  color: var(--text-1);
   outline: none;
 }
 
@@ -4439,8 +4245,8 @@ body.tree-dragging.tree-drag-invalid * {
   max-width: 260px;
   padding: 4px;
   border-radius: 8px;
-  background: var(--app-surface);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--app-border);
+  background: var(--sheet);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border);
 }
 
 .dk-popover-item {
@@ -4451,32 +4257,32 @@ body.tree-dragging.tree-drag-invalid * {
   text-align: left;
   border: 0;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 6px 8px;
   border-radius: 5px;
   cursor: pointer;
 }
 
 .dk-popover-item:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-popover-item.is-danger {
-  color: #d9534f;
+  color: var(--error-ink);
 }
 
 .dk-popover-tick {
   margin-left: auto;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dk-popover-note {
   padding: 6px 8px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.45;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dk-popover-colors {
@@ -4496,7 +4302,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-color-swatch:hover {
-  box-shadow: 0 0 0 2px var(--app-surface), 0 0 0 3.5px var(--app-accent);
+  box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3.5px var(--accent);
 }
 
 /* ---------- A card's properties, above its note ---------- */
@@ -4529,8 +4335,8 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-prop-label {
   flex: 0 0 130px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   padding: 5px 6px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4556,17 +4362,17 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
   padding: 4px 6px;
   font: inherit;
-  color: var(--app-text);
+  color: var(--text-1);
   cursor: pointer;
 }
 
 .dk-prop-trigger:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-prop-empty {
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .dk-prop-input {
@@ -4577,23 +4383,23 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
   padding: 4px 6px;
   font: inherit;
-  font-size: 13px;
-  color: var(--app-text);
+  font-size: var(--fs-md);
+  color: var(--text-1);
 }
 
 .dk-prop-input:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-prop-input:focus {
   outline: none;
-  background: var(--app-hover);
-  box-shadow: inset 0 0 0 1px var(--app-accent);
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .dk-prop-check {
   margin: 6px;
-  accent-color: var(--app-accent);
+  accent-color: var(--accent);
 }
 
 .dk-prop-popover {
@@ -4604,16 +4410,16 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-prop-note {
   padding: 6px 6px 0;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.45;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* A board row in the sidebar carries no disclosure triangle; its icon sits
    where the chevron would, so board and folder rows still line up. */
 .tree-row.tree-board .tree-icon {
   flex: 0 0 auto;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* ---------- A board inside a note (the ```kanban embed) ----------
@@ -4627,14 +4433,14 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-embed-frame {
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--app-surface);
+  background: var(--sheet);
   overflow: hidden;
 }
 
 .dk-embed.is-selected .dk-embed-frame {
-  box-shadow: 0 0 0 2px var(--app-accent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 .dk-embed-bar {
@@ -4642,27 +4448,27 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-text) 3%, transparent);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text-1) 3%, transparent);
   /* The bar is the block's handle: a click here selects the node. */
   cursor: default;
   user-select: none;
 }
 
 .dk-embed-kind {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dk-embed-ref {
   flex: 1 1 auto;
   min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4671,19 +4477,19 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-embed-source {
   margin-left: auto;
   flex: 0 0 auto;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 5px;
-  background: var(--app-surface);
-  color: var(--app-text-muted);
-  font-size: 11px;
+  background: var(--sheet);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
   padding: 2px 8px;
   cursor: pointer;
 }
 
 .dk-embed-source:hover,
 .dk-embed-source.is-on {
-  color: var(--app-text);
-  border-color: var(--app-text-muted);
+  color: var(--text-1);
+  border-color: var(--text-3);
 }
 
 .dk-embed-editor {
@@ -4695,16 +4501,16 @@ body.tree-dragging.tree-drag-invalid * {
   resize: vertical;
   padding: 10px 12px;
   background: transparent;
-  color: var(--app-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12.5px;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 
 .dk-embed-note {
   padding: 14px 16px;
-  color: var(--app-text-muted);
-  font-size: 13px;
+  color: var(--text-3);
+  font-size: var(--fs-md);
 }
 
 .dk-embed-note p {
@@ -4715,8 +4521,8 @@ body.tree-dragging.tree-drag-invalid * {
   margin: 8px 0 0;
   padding: 8px 10px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--app-text) 4%, transparent);
-  font-size: 12px;
+  background: color-mix(in srgb, var(--text-1) 4%, transparent);
+  font-size: var(--fs-sm);
   white-space: pre-wrap;
   overflow-x: auto;
 }
@@ -4731,15 +4537,15 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-embed-pick-head {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .dk-embed-pick-none {
   margin: 0;
-  font-size: 13px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
 }
 
 .dk-embed-pick-list {
@@ -4749,17 +4555,17 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-embed-pick-item {
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  font-size: 13px;
+  background: var(--sheet);
+  color: var(--text-1);
+  font-size: var(--fs-md);
   padding: 5px 10px;
   cursor: pointer;
 }
 
 .dk-embed-pick-item:hover:not(:disabled) {
-  border-color: var(--app-accent);
+  border-color: var(--accent);
 }
 
 .dk-embed-pick-item:disabled {
@@ -4769,7 +4575,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-embed-pick-item.is-new {
   align-self: flex-start;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dk-embed-pick-new {
@@ -4779,19 +4585,19 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-embed-pick-go {
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  font-size: 13px;
+  background: var(--sheet);
+  color: var(--text-1);
+  font-size: var(--fs-md);
   padding: 5px 10px;
   cursor: pointer;
 }
 
 .dk-embed-pick-error {
   margin: 0;
-  font-size: 12px;
-  color: var(--crepe-color-error, #b91c1c);
+  font-size: var(--fs-sm);
+  color: var(--error-ink);
 }
 
 /* The board itself, in the flow of a note rather than filling a pane. */
@@ -4806,9 +4612,9 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-board.is-embed .dk-board-title {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 650;
-  color: var(--app-text);
+  color: var(--text-1);
   letter-spacing: 0;
 }
 
@@ -4840,9 +4646,9 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-view-tab {
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 3px 8px;
   border-radius: 5px;
   cursor: pointer;
@@ -4850,21 +4656,21 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-view-tab:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-view-tab.is-on {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .dk-view-add,
 .dk-view-opts {
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 3px 8px;
   border-radius: 5px;
   cursor: pointer;
@@ -4872,8 +4678,8 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-view-add:hover,
 .dk-view-opts:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* The settings panel is wider than a menu — it holds selects and inputs. */
@@ -4893,9 +4699,9 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-view-rename {
   border: 0;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
   padding: 4px 6px;
   border-radius: 5px;
@@ -4905,13 +4711,13 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-view-rename:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-view-kind {
   font-weight: 400;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .dk-popover-row {
@@ -4919,8 +4725,8 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .dk-popover-row select,
@@ -4929,10 +4735,10 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1 1 auto;
   min-width: 0;
   font: inherit;
-  font-size: 12px;
-  color: var(--app-text);
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
+  background: var(--sheet);
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 2px 4px;
 }
@@ -4940,30 +4746,30 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-view-dir {
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: 2px 4px;
   border-radius: 4px;
   cursor: pointer;
 }
 
 .dk-view-dir:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-view-section {
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border);
   margin-top: 6px;
   padding-top: 6px;
 }
 
 .dk-view-section-head {
   padding: 2px 6px 4px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .dk-view-clause {
@@ -4977,10 +4783,10 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1 1 60px;
   min-width: 0;
   font: inherit;
-  font-size: 12px;
-  color: var(--app-text);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
   background: transparent;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 2px 4px;
 }
@@ -4989,14 +4795,14 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 auto;
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
   cursor: pointer;
   padding: 0 4px;
 }
 
 .dk-view-drop:hover {
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .dk-view-check {
@@ -5004,13 +4810,13 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 6px;
   padding: 3px 6px;
-  font-size: 12px;
-  color: var(--app-text);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
   cursor: pointer;
 }
 
 .dk-view-check input {
-  accent-color: var(--app-accent);
+  accent-color: var(--accent);
 }
 
 /* ---------- The table view ---------- */
@@ -5025,7 +4831,7 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 
 .dk-th {
@@ -5034,9 +4840,9 @@ body.tree-dragging.tree-drag-invalid * {
   z-index: 1;
   text-align: left;
   font-weight: 500;
-  color: var(--app-text-muted);
-  background: var(--app-surface);
-  border-bottom: 1px solid var(--app-border);
+  color: var(--text-3);
+  background: var(--sheet);
+  border-bottom: 1px solid var(--border);
   padding: 0;
   white-space: nowrap;
 }
@@ -5052,7 +4858,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 6px 8px;
   cursor: pointer;
 }
@@ -5062,11 +4868,11 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-th-btn:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-td {
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
   padding: 0 2px;
   vertical-align: middle;
   position: relative;
@@ -5074,12 +4880,12 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-td.is-empty {
   padding: 14px 8px;
-  color: var(--app-text-muted);
-  font-size: 12px;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
 }
 
 .dk-tr:hover .dk-td {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-row-title {
@@ -5088,9 +4894,9 @@ body.tree-dragging.tree-drag-invalid * {
   text-align: left;
   border: 0;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 6px 8px;
   cursor: pointer;
   overflow: hidden;
@@ -5117,15 +4923,15 @@ body.tree-dragging.tree-drag-invalid * {
   border: 0;
   background: transparent;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-align: left;
   cursor: pointer;
   border-radius: 5px;
 }
 
 .dk-prop-label:hover:not(:disabled) {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-prop-label:disabled {
@@ -5135,13 +4941,13 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-prop-name-input {
   flex: 0 0 130px;
   box-sizing: border-box;
-  border: 1px solid var(--app-accent);
+  border: 1px solid var(--accent);
   border-radius: 5px;
   background: transparent;
   padding: 4px 6px;
   font: inherit;
-  font-size: 12px;
-  color: var(--app-text);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
 }
 
 .dk-prop-add-row {
@@ -5157,17 +4963,17 @@ body.tree-dragging.tree-drag-invalid * {
 .dk-prop-add {
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 4px 6px;
   border-radius: 5px;
   cursor: pointer;
 }
 
 .dk-prop-add:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* A note with no properties gets no visible header until you go looking for
@@ -5193,12 +4999,12 @@ body.tree-dragging.tree-drag-invalid * {
   width: 100%;
   box-sizing: border-box;
   border: 0;
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
   background: transparent;
   padding: 6px 8px;
   font: inherit;
-  font-size: 13px;
-  color: var(--app-text);
+  font-size: var(--fs-md);
+  color: var(--text-1);
   margin-bottom: 4px;
 }
 
@@ -5219,9 +5025,9 @@ body.tree-dragging.tree-drag-invalid * {
   z-index: 65;
   display: flex;
   flex-direction: column;
-  background: var(--app-surface);
-  border-left: 1px solid var(--app-border);
-  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.16);
+  background: var(--sheet);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-panel);
 }
 
 .dk-peek-head {
@@ -5230,7 +5036,7 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
 }
 
 .dk-peek-title {
@@ -5239,9 +5045,9 @@ body.tree-dragging.tree-drag-invalid * {
   text-align: left;
   border: 0;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   padding: 4px 6px;
   border-radius: 5px;
@@ -5252,7 +5058,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-peek-title:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .dk-peek-title:disabled {
@@ -5265,11 +5071,11 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
-  border: 1px solid var(--app-accent);
-  background: var(--app-surface);
-  color: var(--app-text);
+  border: 1px solid var(--accent);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   padding: 3px 5px;
   border-radius: 5px;
@@ -5284,9 +5090,9 @@ body.tree-dragging.tree-drag-invalid * {
   flex: 0 0 auto;
   border: 0;
   background: transparent;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 4px 8px;
   border-radius: 5px;
   cursor: pointer;
@@ -5294,8 +5100,8 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-peek-tab:hover,
 .dk-peek-close:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .dk-peek-warn {
@@ -5303,9 +5109,9 @@ body.tree-dragging.tree-drag-invalid * {
   margin: 8px 12px 0;
   padding: 7px 10px;
   border-radius: 6px;
-  font-size: 12px;
-  color: var(--app-text);
-  background: hsl(45 80% 50% / 0.16);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
 
 .dk-peek-body {
@@ -5328,18 +5134,18 @@ body.tree-dragging.tree-drag-invalid * {
 
 .dk-prop-add-go {
   border: 0;
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 4px 10px;
   border-radius: 5px;
   cursor: pointer;
 }
 
 .dk-prop-add-go:hover {
-  background: var(--app-accent);
-  color: #fff;
+  background: var(--accent);
+  color: var(--on-fill);
 }
 
 /* An unset date input draws the browser's own "mm/dd/yyyy" and a calendar
@@ -5353,7 +5159,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .dk-popover-item:disabled {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: default;
 }
 
@@ -5379,37 +5185,37 @@ body.tree-dragging.tree-drag-invalid * {
 
 .modal-field-label {
   margin-bottom: 4px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .modal-field-input {
   width: 100%;
   padding: 6px 8px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
 .modal-field-input:focus {
-  border-color: var(--app-accent);
+  border-color: var(--accent);
 }
 
 .modal-field-input:disabled,
 .modal-field-input[readonly] {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .modal-field-token {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
 }
 
 .cloud-modal {
@@ -5436,37 +5242,37 @@ body.tree-dragging.tree-drag-invalid * {
 .cloud-intro,
 .cloud-hint {
   margin: 0;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   line-height: 1.55;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .cloud-intro {
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-hint code,
 .cloud-step-note code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
-  color: var(--app-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-1);
 }
 
 .cloud-warn {
-  color: #b7791f;
+  color: var(--warn-ink);
 }
 
 .cloud-section-label {
   margin-top: 4px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .cloud-danger-label {
-  color: #e5484d;
+  color: var(--error-ink);
 }
 
 .cloud-doors,
@@ -5491,9 +5297,9 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-head-name {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-head-domain {
@@ -5501,8 +5307,8 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   background: none;
   font: inherit;
-  font-size: 12.5px;
-  color: var(--app-accent);
+  font-size: var(--fs-md);
+  color: var(--accent);
   cursor: pointer;
 }
 
@@ -5515,16 +5321,16 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .cloud-phase-text {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
-  color: var(--app-text);
+  font-size: var(--fs-md);
+  color: var(--text-1);
 }
 
 .cloud-phase-actions {
@@ -5539,54 +5345,54 @@ body.tree-dragging.tree-drag-invalid * {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--app-text-muted);
+  background: var(--text-3);
   opacity: 0.6;
 }
 
 .cloud-dot.phase-idle {
-  background: #34c759;
+  background: var(--live);
   opacity: 1;
 }
 
 .cloud-dot.phase-syncing {
-  background: var(--app-accent);
+  background: var(--accent);
   opacity: 1;
   animation: sidebar-cloud-pulse 1.2s ease-in-out infinite;
 }
 
 .cloud-dot.phase-pending-deletes,
 .cloud-dot.phase-worker-outdated {
-  background: #f0a020;
+  background: var(--warn);
   opacity: 1;
 }
 
 .cloud-dot.phase-revoked,
 .cloud-dot.phase-error {
-  background: #e5484d;
+  background: var(--error);
   opacity: 1;
 }
 
 .cloud-card {
   padding: 10px 12px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .cloud-card--attention {
-  border-color: rgba(240, 160, 32, 0.5);
-  background: rgba(240, 160, 32, 0.08);
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 
 .cloud-card--ok {
-  border-color: rgba(52, 199, 89, 0.45);
-  background: rgba(52, 199, 89, 0.08);
+  border-color: color-mix(in srgb, var(--live) 45%, transparent);
+  background: color-mix(in srgb, var(--live) 8%, transparent);
 }
 
 .cloud-card-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-card .cloud-hint {
@@ -5600,9 +5406,9 @@ body.tree-dragging.tree-drag-invalid * {
 .cloud-paths {
   margin: 6px 0 0;
   padding: 0 0 0 16px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  color: var(--app-text);
+  color: var(--text-1);
   max-height: 140px;
   overflow: auto;
 }
@@ -5610,7 +5416,7 @@ body.tree-dragging.tree-drag-invalid * {
 .cloud-paths-more {
   list-style: none;
   margin-left: -16px;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .cloud-presence {
@@ -5626,16 +5432,16 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
 }
 
 .cloud-presence-name {
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-presence-what {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5657,7 +5463,7 @@ body.tree-dragging.tree-drag-invalid * {
   gap: 4px;
   align-items: flex-start;
   padding: 8px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
@@ -5669,24 +5475,24 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-person-name {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-person-tag {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 999px;
-  border: 1px solid var(--app-border);
-  color: var(--app-text-muted);
+  border: 1px solid var(--border);
+  color: var(--text-3);
 }
 
 .cloud-person-email {
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .cloud-macs {
@@ -5697,7 +5503,7 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-left: 1px solid var(--app-border);
+  border-left: 1px solid var(--border);
 }
 
 .cloud-mac-row {
@@ -5705,12 +5511,12 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
 }
 
 .cloud-mac-name {
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 /* A minted invite code: shown once, so it is set out to be read aloud. */
@@ -5718,12 +5524,12 @@ body.tree-dragging.tree-drag-invalid * {
   margin: 6px 0 0;
   padding: 8px 10px;
   border-radius: 8px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 14px;
+  background: var(--sheet);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
   letter-spacing: 0.06em;
-  color: var(--app-text);
+  color: var(--text-1);
   user-select: all;
   overflow-x: auto;
 }
@@ -5740,14 +5546,14 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .modal-btn.is-danger-outline {
-  color: #e5484d;
-  border-color: rgba(229, 72, 77, 0.5);
+  color: var(--error-ink);
+  border-color: color-mix(in srgb, var(--error) 50%, transparent);
 }
 
 .modal-btn.is-danger-solid {
-  background: #e5484d;
-  border-color: #e5484d;
-  color: #fff;
+  background: var(--error);
+  border-color: var(--error);
+  color: var(--on-fill);
 }
 
 /* The wizard's numbered steps. A step the earlier ones haven't unlocked
@@ -5763,7 +5569,7 @@ body.tree-dragging.tree-drag-invalid * {
   counter-increment: cloud-step;
   position: relative;
   padding: 12px 2px 14px 36px;
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border);
 }
 
 .cloud-step:first-child {
@@ -5782,9 +5588,9 @@ body.tree-dragging.tree-drag-invalid * {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--app-text);
-  color: var(--app-bg);
-  font-size: 11.5px;
+  background: var(--text-1);
+  color: var(--sheet);
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
@@ -5797,16 +5603,16 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-step-title {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
 }
 
 .cloud-step-note {
   margin-top: 3px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .cloud-choices {
@@ -5822,28 +5628,28 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: flex-start;
   gap: 2px;
   padding: 8px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-surface);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .cloud-choice.is-active {
-  border-color: var(--app-accent);
-  box-shadow: 0 0 0 1px var(--app-accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .cloud-choice-name {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
 }
 
 .cloud-choice-sub {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .cloud-prompt {
@@ -5851,13 +5657,13 @@ body.tree-dragging.tree-drag-invalid * {
   padding: 8px 10px;
   max-height: 200px;
   overflow: auto;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10.5px;
+  background: var(--sheet);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
   line-height: 1.5;
-  color: var(--app-text);
+  color: var(--text-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
@@ -5875,11 +5681,11 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-version-from {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .cloud-version-arrow {
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font-weight: 400;
 }
 
@@ -5888,15 +5694,15 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-progress-text {
-  font-size: 12.5px;
-  color: var(--app-text);
+  font-size: var(--fs-md);
+  color: var(--text-1);
 }
 
 .cloud-progress-bar {
   height: 4px;
   margin-top: 6px;
   border-radius: 2px;
-  background: var(--app-hover);
+  background: var(--hover);
   overflow: hidden;
 }
 
@@ -5904,7 +5710,7 @@ body.tree-dragging.tree-drag-invalid * {
   display: block;
   height: 100%;
   min-width: 2px;
-  background: var(--app-accent);
+  background: var(--accent);
   border-radius: 2px;
   transition: width 0.15s ease-out;
 }
@@ -5919,8 +5725,8 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--app-border);
-  background: var(--app-surface);
+  border-left: 1px solid var(--border);
+  background: var(--sheet);
 }
 
 .history-rail-head {
@@ -5932,7 +5738,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .history-rail-title {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -5947,21 +5753,21 @@ body.tree-dragging.tree-drag-invalid * {
   border: 0;
   border-radius: 6px;
   background: none;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   cursor: pointer;
 }
 
 .history-rail-close:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 /* The trust line: how far back this document reaches, and where it lives. */
 .history-rail-trust {
   padding: 0 14px 10px;
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.45;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .history-rail-name {
@@ -5972,17 +5778,17 @@ body.tree-dragging.tree-drag-invalid * {
   width: 100%;
   box-sizing: border-box;
   padding: 6px 9px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--app-bg);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
 }
 
 .history-rail-name-input:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .history-rail-list {
@@ -5994,13 +5800,13 @@ body.tree-dragging.tree-drag-invalid * {
 
 .history-rail-hint {
   padding: 10px 6px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .history-rail-error {
-  color: var(--app-dirty);
+  color: var(--warn);
 }
 
 .history-day-head {
@@ -6014,22 +5820,22 @@ body.tree-dragging.tree-drag-invalid * {
   border: 0;
   border-radius: 6px;
   background: none;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   text-align: left;
   cursor: pointer;
 }
 
 .history-day-head:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .history-day-count {
   font-weight: 400;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .history-versions {
@@ -6049,19 +5855,19 @@ body.tree-dragging.tree-drag-invalid * {
   border-left: 2px solid transparent;
   border-radius: 0 7px 7px 0;
   background: none;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .history-version:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .history-version.is-active {
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
-  border-left-color: var(--app-accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-left-color: var(--accent);
 }
 
 .history-version-line {
@@ -6071,33 +5877,33 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .history-version-time {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 500;
 }
 
 .history-version-pin {
   display: inline-flex;
-  color: var(--app-accent);
+  color: var(--accent);
 }
 
 .history-version-now {
   padding: 0 5px;
   border-radius: 4px;
-  background: var(--app-hover);
-  font-size: 10px;
+  background: var(--hover);
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .history-version-label {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
 .history-version-meta {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 /* The preview stands in the document area; the live editor is hidden, not
@@ -6131,20 +5937,20 @@ body.tree-dragging.tree-drag-invalid * {
   flex-wrap: wrap;
   gap: 8px;
   padding: 9px 16px;
-  border-bottom: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-accent) 8%, var(--app-surface));
-  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 8%, var(--sheet));
+  font-size: var(--fs-md);
 }
 
 .version-banner-was {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 /* A document another Mac holds (LeaseBanner, docs/cloud.md §8.2): the version
    banner's frame, tinted with the unsaved-changes colour rather than the
    accent — it is about somebody else having it open, not about a moment. */
 .lease-banner {
-  background: color-mix(in srgb, var(--app-dirty) 12%, var(--app-surface));
+  background: color-mix(in srgb, var(--warn) 12%, var(--sheet));
 }
 
 .version-banner-actions {
@@ -6155,17 +5961,17 @@ body.tree-dragging.tree-drag-invalid * {
 
 .version-banner-btn {
   padding: 4px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-text);
+  background: var(--sheet);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
 .version-banner-btn:hover:not(:disabled) {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .version-banner-btn:disabled {
@@ -6175,13 +5981,13 @@ body.tree-dragging.tree-drag-invalid * {
 
 .version-banner-btn.is-primary {
   border-color: transparent;
-  background: var(--app-accent);
-  color: #fff;
+  background: var(--accent);
+  color: var(--on-fill);
 }
 
 .version-banner-btn.is-on {
-  border-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
-  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .version-preview-body {
@@ -6190,8 +5996,8 @@ body.tree-dragging.tree-drag-invalid * {
 
 .version-preview-hint {
   padding: 22px 26px;
-  font-size: 13px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
 }
 
 /* A unified patch, coloured by line. The rendered block-level diff inside
@@ -6199,7 +6005,7 @@ body.tree-dragging.tree-drag-invalid * {
 .version-diff {
   margin: 0;
   padding: 14px 18px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -6207,15 +6013,15 @@ body.tree-dragging.tree-drag-invalid * {
 
 .version-diff-line.is-file,
 .version-diff-line.is-hunk {
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .version-diff-line.is-add {
-  background: color-mix(in srgb, #3fb950 18%, transparent);
+  background: color-mix(in srgb, var(--live) 18%, transparent);
 }
 
 .version-diff-line.is-del {
-  background: color-mix(in srgb, #f85149 16%, transparent);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
 }
 
 /* Toasts: bottom-right, above the editor. */
@@ -6236,11 +6042,11 @@ body.tree-dragging.tree-drag-invalid * {
   gap: 10px;
   padding: 9px 10px 9px 14px;
   border-radius: 10px;
-  background: var(--app-toast-bg);
-  color: var(--app-toast-fg);
-  font-size: 12.5px;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  font-size: var(--fs-md);
   line-height: 1.4;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-pop);
 }
 
 .cloud-toast-text {
@@ -6251,17 +6057,17 @@ body.tree-dragging.tree-drag-invalid * {
 .cloud-toast-btn {
   flex-shrink: 0;
   padding: 4px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid color-mix(in srgb, var(--toast-fg) 35%, transparent);
   border-radius: 6px;
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
 .cloud-toast-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--toast-fg) 12%, transparent);
 }
 
 .cloud-toast-close {
@@ -6281,7 +6087,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .cloud-toast-close:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--toast-fg) 12%, transparent);
 }
 
 /* The sidebar: the dot is a button now (it opens the panel), and a file
@@ -6301,7 +6107,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .sidebar-cloud-btn:hover {
-  background: var(--app-hover);
+  background: var(--hover);
 }
 
 .tree-presence {
@@ -6309,9 +6115,9 @@ body.tree-dragging.tree-drag-invalid * {
   max-width: 80px;
   padding: 0 6px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--app-accent) 16%, transparent);
-  color: var(--app-accent);
-  font-size: 10.5px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 16px;
   overflow: hidden;
@@ -6325,7 +6131,7 @@ body.tree-dragging.tree-drag-invalid * {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--app-accent);
+  background: var(--accent);
 }
 
 /* ---- Publishing (docs/cloud.md §7.2): the pill in the tab bar and
@@ -6344,12 +6150,12 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 5px;
   padding: 3px 9px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--app-bg);
-  color: var(--app-text-muted);
+  background: var(--sheet);
+  color: var(--text-3);
   font: inherit;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   cursor: pointer;
@@ -6357,14 +6163,14 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .publish-pill:hover {
-  color: var(--app-text);
-  background: var(--app-hover);
+  color: var(--text-1);
+  background: var(--hover);
 }
 
 .publish-pill.is-published {
-  color: var(--app-accent);
-  border-color: color-mix(in srgb, var(--app-accent) 45%, transparent);
-  background: color-mix(in srgb, var(--app-accent) 10%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .publish-pill-dot {
@@ -6384,25 +6190,17 @@ body.tree-dragging.tree-drag-invalid * {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.08),
-    0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-pop);
   animation: settings-popover-in 0.1s ease-out;
 }
 
-[data-theme="dark"] .publish-pop {
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.5),
-    0 12px 32px rgba(0, 0, 0, 0.6);
-}
-
 .publish-heading {
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6421,8 +6219,8 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   background: none;
   font: inherit;
-  font-size: 12px;
-  color: var(--app-accent);
+  font-size: var(--fs-sm);
+  color: var(--accent);
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6437,20 +6235,20 @@ body.tree-dragging.tree-drag-invalid * {
 .publish-address {
   display: flex;
   align-items: center;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--app-surface);
+  background: var(--sheet);
   overflow: hidden;
 }
 
 .publish-address:focus-within {
-  border-color: var(--app-accent);
+  border-color: var(--accent);
 }
 
 .publish-prefix {
   padding: 6px 0 6px 8px;
-  font-size: 12px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   white-space: nowrap;
 }
 
@@ -6460,15 +6258,15 @@ body.tree-dragging.tree-drag-invalid * {
   padding: 6px 8px 6px 2px;
   border: none;
   background: transparent;
-  color: var(--app-text);
+  color: var(--text-1);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
 .publish-meta {
-  font-size: 11.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .publish-link {
@@ -6477,8 +6275,8 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   background: none;
   font: inherit;
-  font-size: 12px;
-  color: var(--app-accent);
+  font-size: var(--fs-sm);
+  color: var(--accent);
   cursor: pointer;
 }
 
@@ -6493,7 +6291,7 @@ body.tree-dragging.tree-drag-invalid * {
   height: 6px;
   margin-left: 4px;
   border-radius: 50%;
-  background: var(--app-accent);
+  background: var(--accent);
   opacity: 0.85;
 }
 
@@ -6511,9 +6309,9 @@ body.tree-dragging.tree-drag-invalid * {
   flex-direction: column;
   gap: 4px;
   padding: 8px 10px;
-  border: 1px solid var(--app-border);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--app-surface);
+  background: var(--sheet);
 }
 
 .published-row-main {
@@ -6524,7 +6322,7 @@ body.tree-dragging.tree-drag-invalid * {
 
 .published-row-icon {
   flex-shrink: 0;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   display: inline-flex;
 }
 
@@ -6535,9 +6333,9 @@ body.tree-dragging.tree-drag-invalid * {
   border: none;
   background: none;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--app-text);
+  color: var(--text-1);
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6553,8 +6351,8 @@ button.published-row-name:hover {
 }
 
 .published-row-sub {
-  font-size: 11.5px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6564,16 +6362,16 @@ button.published-row-name:hover {
   flex-shrink: 0;
   padding: 0 6px;
   border-radius: 8px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 16px;
-  background: color-mix(in srgb, var(--app-accent) 16%, transparent);
-  color: var(--app-accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
 }
 
 .published-badge.is-warn {
-  background: rgba(240, 160, 32, 0.16);
-  color: #b7791f;
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn-ink);
 }
 
 .published-row-actions {
@@ -6600,7 +6398,7 @@ button.published-row-name:hover {
   max-height: 52vh;
   overflow-y: auto;
   padding-right: 4px;
-  border-right: 1px solid var(--app-border);
+  border-right: 1px solid var(--border);
 }
 
 .ws-history-plan {
@@ -6614,9 +6412,9 @@ button.published-row-name:hover {
 /* "+2 −1 ~5" — what the moment changed, beside the time it happened. */
 .ws-delta {
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--app-text-muted);
+  color: var(--text-3);
 }
 
 .ws-file-list {
@@ -6632,7 +6430,7 @@ button.published-row-name:hover {
   align-items: center;
   gap: 8px;
   padding: 3px 2px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
@@ -6648,22 +6446,22 @@ button.published-row-name:hover {
   flex-shrink: 0;
   padding: 0 6px;
   border-radius: 8px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 16px;
-  background: var(--app-hover);
-  color: var(--app-text-muted);
+  background: var(--hover);
+  color: var(--text-3);
 }
 
 /* Green for what comes back, red for what goes — the diff's own colours. */
 .ws-file-kind.is-missing {
-  background: rgba(34, 139, 84, 0.14);
-  color: #1f7a4c;
+  background: color-mix(in srgb, var(--live) 14%, transparent);
+  color: var(--live-ink);
 }
 
 .ws-file-kind.is-added {
-  background: rgba(200, 60, 60, 0.14);
-  color: #b3261e;
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error-ink);
 }
 
 .ws-actions {
@@ -6675,7 +6473,7 @@ button.published-row-name:hover {
 
 .ws-confirm-text {
   flex: 1 1 auto;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
 }
 
@@ -6690,18 +6488,18 @@ button.published-row-name:hover {
   flex-shrink: 0;
   padding: 7px 12px;
   border: 0;
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--border);
   background: none;
-  color: var(--app-text-muted);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-align: left;
   cursor: pointer;
 }
 
 .sidebar-deleted-row:hover {
-  background: var(--app-hover);
-  color: var(--app-text);
+  background: var(--hover);
+  color: var(--text-1);
 }
 
 .sidebar-deleted-label {
@@ -6709,7 +6507,7 @@ button.published-row-name:hover {
 }
 
 .sidebar-deleted-count {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
 
@@ -6724,11 +6522,11 @@ button.published-row-name:hover {
   flex-direction: column;
   gap: 3px;
   padding: 8px 8px 10px;
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
 }
 
 .ws-deleted-name {
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6736,8 +6534,8 @@ button.published-row-name:hover {
 }
 
 .ws-deleted-sub {
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6773,7 +6571,7 @@ button.published-row-name:hover {
   align-items: center;
   gap: 2px 10px;
   padding: 8px 2px;
-  border-bottom: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--border);
 }
 
 .vs-store:last-child {
@@ -6782,7 +6580,7 @@ button.published-row-name:hover {
 
 .vs-store-name {
   grid-area: name;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6791,8 +6589,8 @@ button.published-row-name:hover {
 
 .vs-store-sub {
   grid-area: sub;
-  font-size: 11px;
-  color: var(--app-text-muted);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
