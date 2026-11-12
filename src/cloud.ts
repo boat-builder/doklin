@@ -36,6 +36,9 @@ export type PublicPage = {
   path: string;
   title: string | null;
   desc: string | null;
+  /** Who published it, in words. The engine resolves the manifest's member
+   *  id through the workspace's directory before this gets here, so nothing
+   *  in the frontend holds a second answer to "who is m-1a2b3c4d". */
   by: string;
   at: number;
   /** False when the file is gone (the page 404s until stopped or the file
@@ -44,15 +47,40 @@ export type PublicPage = {
   root: boolean;
 };
 
+/** Another Mac here now. Mirrors `PresenceDevice` in status.rs — change both. */
 export type PresenceDevice = {
   deviceId: string;
+  /** Whose Mac it is; null from a worker before v7, or an owner nobody named. */
+  memberId: string | null;
+  /** Who is here, in words: the person — or the Mac, when it is your own
+   *  other Mac or nobody the workspace can name yet. The engine resolves it. */
   name: string;
+  /** The Mac's own name, whoever's it is. */
+  device: string;
   /** Workspace-relative path being edited; null = here, idle. */
   path: string | null;
   ts: number;
 };
 
-/** The whole model for one connected workspace. */
+/** A document another Mac holds (docs/cloud.md §8.2) — open there, so it
+ *  opens view-only here. Mirrors `LeaseHolder` in status.rs — change both. */
+export type LeaseHolder = {
+  /** The lease's key: workspace-relative and lowercased, so match it with
+   *  `leaseFor` rather than comparing a path to it. */
+  path: string;
+  deviceId: string;
+  memberId: string | null;
+  /** Who holds it, in words — resolved like a presence row: the person, or
+   *  the Mac when it is your own other one or nobody the workspace can name. */
+  name: string;
+  /** The holder's Mac. */
+  device: string;
+  /** True when the holder is you, on another Mac. */
+  own: boolean;
+  /** When it lapses unless renewed, by the domain's clock. */
+  until: number;
+};
+
 /** How much of this Mac's version history is in the bucket, and how much is
  *  up there in total. Mirrored by src-tauri/src/cloud/status.rs. */
 export type VersionsMirror = {
@@ -75,6 +103,10 @@ export type CloudStatus = {
   lastSyncMs: number | null;
   error: string | null;
   pendingDeletes: number;
+  /** What this Mac signs work with here, in words: the person the domain
+   *  says it is, or this Mac's own name when it has not said. What a `by` is
+   *  compared against to know whether somebody *else* did a thing. */
+  me: string;
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
   /** The version store's mirror; null when the worker predates it — which
@@ -82,6 +114,10 @@ export type CloudStatus = {
   versions: VersionsMirror | null;
   public: PublicPage[];
   presence: PresenceDevice[];
+  /** The documents another Mac holds. Empty when the engine cannot hear the
+   *  domain, or the worker predates leases: a lock nobody can confirm is no
+   *  lock. */
+  leases: LeaseHolder[];
 };
 
 export type CloudWorkspaceRecord = {
@@ -107,7 +143,82 @@ export type CloudMarker = { domain: string; wsId: string };
  *  "Connect another Mac…", never part of a status. */
 export type CloudCredentials = { endpoint: string; token: string };
 
+/** The two halves of an invite found in one paste — either may be missing,
+ *  and the redeem screen fills what it finds. */
+export type CloudPastedInvite = { endpoint: string | null; code: string | null };
+
+/** What a redeemed code answers with: this Mac's own credential, and who the
+ *  domain says the person holding it is. The token goes straight into
+ *  `cloudJoin` — an invitee's flow is the second Mac's flow from there on. */
+export type CloudRedeemed = {
+  endpoint: string;
+  token: string;
+  memberId: string;
+  email: string;
+  name: string;
+};
+
+/** A pending invite, as the domain holds it. The code is not in it: the
+ *  worker keeps only `sha256(code)` and cannot hand one back. */
+export type CloudInvite = {
+  id: string;
+  memberId: string;
+  email: string;
+  name: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+/** `cloudInvite`: the invite the domain now holds, plus the code itself —
+ *  the one moment it exists in the clear. Show it once; nothing can produce
+ *  it again. */
+export type CloudInvited = { code: string; blob: string; invite: CloudInvite };
+
+/** A person on a workspace. Never a credential: the app is told who holds
+ *  one, never what it is. */
+export type CloudMember = {
+  id: string;
+  email: string;
+  name: string;
+  /** What the People list shows — never authority. The owner's credential is
+   *  the domain's env secret, so no row anybody can write confers it. */
+  role: "owner" | "member";
+  createdAt: number;
+  /** When this person's Mac last beat, to the hour — the poll that carries
+   *  presence writes it (worker v7). Null until they have been here since. */
+  lastSeenAt: number | null;
+  disabled: boolean;
+  /** How many Macs this person is signed in on. */
+  devices: number;
+};
+
+/** One signed-in Mac. The owner's own are not among them: their credential is
+ *  the domain's env secret, which has no row to list and none to revoke. */
+export type CloudDevice = {
+  id: string;
+  memberId: string;
+  email: string;
+  deviceId: string | null;
+  deviceName: string | null;
+  createdAt: number;
+};
+
+/** `cloudPeople`: everything the People view draws. `role` is how *this Mac*
+ *  authenticates, and it is asked rather than remembered — the members route
+ *  answers the owner's credential and refuses every other, so a member's
+ *  lists are empty because they were never asked for. */
+export type CloudPeople = {
+  role: "owner" | "member";
+  /** This Mac's own device id, so the list can mark which Mac is this one. */
+  deviceId: string;
+  members: CloudMember[];
+  invites: CloudInvite[];
+  devices: CloudDevice[];
+};
+
 export type CloudAppliedEvent = { root: string; paths: string[] };
+/** `by` is a name, not an id: the engine resolves it, because the conflict
+ *  copy it names is a real file on disk and had to be called something. */
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };
@@ -133,6 +244,44 @@ export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_m
 /** The endpoint and owner token of a connected workspace. */
 export const cloudToken = (root: string) => invoke<CloudCredentials>("cloud_token", { root });
 
+/** Split one paste into the address and the code. Pure — no domain is touched. */
+export const cloudParseInvite = (text: string) =>
+  invoke<CloudPastedInvite>("cloud_parse_invite", { text });
+
+/** Trade an invite code for this Mac's own credential. The order is inverted
+ *  from every other entrance — redeem first, probe with what it minted —
+ *  because an invitee cannot ask a domain anything until they hold a token. */
+export const cloudRedeem = (endpoint: string, code: string) =>
+  invoke<CloudRedeemed>("cloud_redeem", { endpoint, code });
+
+/** Invite someone to a connected workspace by email (owner only). The code is
+ *  minted and hashed on this Mac; only its sha256 goes up. */
+export const cloudInvite = (root: string, email: string, name: string | null, days: number | null) =>
+  invoke<CloudInvited>("cloud_invite", { root, email, name, days });
+
+/** Who is on this workspace and what each of them holds — the People view's
+ *  whole answer, this Mac's own role included. */
+export const cloudPeople = (root: string) => invoke<CloudPeople>("cloud_people", { root });
+
+/** The owner saying who they are. Identity, never authority: the domain's
+ *  token authenticates them either way. */
+export const cloudAdoptOwner = (root: string, email: string, name: string | null) =>
+  invoke<CloudMember>("cloud_adopt_owner", { root, email, name });
+
+/** Take a person off the workspace: their row, their pending invite and every
+ *  Mac they signed in on. */
+export const cloudRevokePerson = (root: string, memberId: string) =>
+  invoke<void>("cloud_revoke_person", { root, memberId });
+
+/** Revoke one Mac, leaving the person and their other Macs alone. It takes
+ *  effect on that Mac's very next request. */
+export const cloudRevokeDevice = (root: string, tokenId: string) =>
+  invoke<void>("cloud_revoke_device", { root, tokenId });
+
+/** Withdraw a code nobody has traded in yet. The person's row stays. */
+export const cloudWithdrawInvite = (root: string, inviteId: string) =>
+  invoke<void>("cloud_withdraw_invite", { root, inviteId });
+
 /** Ask the domain's worker what it is again ("Check again" after an update);
  *  the fresh version arrives in the next status. */
 export const cloudCheckWorker = (root: string) => invoke<void>("cloud_check_worker", { root });
@@ -154,8 +303,14 @@ export const cloudSyncNow = (root: string) => invoke<void>("cloud_sync_now", { r
 export const cloudPause = (root: string, paused: boolean) => invoke<void>("cloud_pause", { root, paused });
 export const cloudConfirmDeletes = (root: string) => invoke<void>("cloud_confirm_deletes", { root });
 
-/** Which document this window is editing (absolute path), or none — presence. */
+/** Which document this window is editing (absolute path), or none — what
+ *  presence reports, and the document this Mac claims the lease on. */
 export const cloudSetActivity = (path: string | null) => invoke<void>("cloud_set_activity", { path });
+
+/** *Take over* a document another Mac holds (absolute path): the engine claims
+ *  it on its next beat, and the Mac it is taken from goes view-only on its
+ *  next poll. The banner clears when the status says the lease moved. */
+export const cloudTakeOver = (root: string, path: string) => invoke<void>("cloud_take_over", { root, path });
 
 /** Publish a file or a folder (the path decides); resolves to the slug. */
 export const cloudPublish = (path: string, opts: { slug?: string; title?: string; desc?: string } = {}) =>
@@ -193,6 +348,30 @@ export function cloudForWorkspace(statuses: CloudStatus[], root: string | null):
   return statuses.find((s) => s.root === root) ?? null;
 }
 
+/** The lease another Mac holds on the document at `absPath`, with the status
+ *  of the workspace it is in — or null when nobody else holds it, which is
+ *  also the answer for a document in no connected workspace. Paths are
+ *  compared lowercased, as the worker keys them (presence.ts `leaseKey`). */
+export function leaseFor(
+  statuses: CloudStatus[],
+  absPath: string | null,
+): { status: CloudStatus; lease: LeaseHolder } | null {
+  if (!absPath) return null;
+  for (const status of statuses) {
+    const prefix = status.root.endsWith("/") ? status.root : `${status.root}/`;
+    if (!absPath.startsWith(prefix)) continue;
+    const key = absPath.slice(prefix.length).toLowerCase();
+    const lease = (status.leases ?? []).find((l) => l.path === key);
+    if (lease) return { status, lease };
+  }
+  return null;
+}
+
+/** What the view-only banner says about a lease. */
+export function leaseLine(lease: LeaseHolder): string {
+  return lease.own ? `Open on your other Mac, ${lease.name} — view only` : `${lease.name} is editing — view only`;
+}
+
 /** "just now", "2 min ago", "3 h ago", "12 d ago". */
 export function timeAgo(ms: number, now = Date.now()): string {
   const secs = Math.max(0, Math.round((now - ms) / 1000));
@@ -202,6 +381,19 @@ export function timeAgo(ms: number, now = Date.now()): string {
   const hours = Math.round(mins / 60);
   if (hours < 24) return `${hours} h ago`;
   return `${Math.round(hours / 24)} d ago`;
+}
+
+/** How long something has left: "6 days", "3 h", "12 min", "any moment now".
+ *  What a pending invite's expiry is written with. */
+export function timeUntil(ms: number, now = Date.now()): string {
+  const secs = Math.round((ms - now) / 1000);
+  if (secs < 60) return "any moment now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `${hours} h`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 /** The phase in words, lowercase: "synced 2 min ago", "paused", "offline — synced 3 h ago". */

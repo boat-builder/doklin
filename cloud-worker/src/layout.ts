@@ -5,24 +5,22 @@
 //   workspace.json              the binding: one domain, one workspace (written create-only)
 //   manifest.json               the workspace manifest, updated by compare-and-swap on its etag
 //   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-//   history/<fileId>.json       DEPRECATED deep revision archive (docs/versioning.md §6.5) —
-//                               written only by an app on a release before the version store
-//                               replaced it; the current app deletes these once and never again
-//   presence.json               {devices: {<deviceId>: {name, path?, ts}}}, TTL'd, best effort
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
-//   auth/tokens/<sha256>.json   per-person tokens (minted by invites — not built; the lookup is)
-//   auth/invites/<sha256>.json  pending invites (not built)
 //
-// Nothing public is stored here: public pages are rendered from blobs/.
+// Nothing public is stored here: public pages are rendered from blobs/. And
+// nobody is stored here: people, their tokens and their invites live in the
+// D1 database beside the bucket (schema.ts, members.ts) — a blob store cannot
+// hold a UNIQUE email or delete a credential atomically. Since v7 so does
+// presence (presence.ts): it was `presence.json`, one object every device
+// read and rewrote with no CAS. A bucket written by an older worker may still
+// hold one, or `history/<fileId>.json` archives from before v6; nothing reads
+// either, and a wipe takes them with everything else.
 
 export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";
-export const PRESENCE_KEY = "presence.json";
 export const BLOBS_PREFIX = "blobs/";
-export const HISTORY_PREFIX = "history/";
-export const TOKENS_PREFIX = "auth/tokens/";
 export const VERSIONS_PREFIX = "versions/";
 export const VERSIONS_INDEX_KEY = "versions/index.json";
 export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
@@ -30,8 +28,6 @@ export const VERSION_BLOBS_PREFIX = "versions/blobs/";
 
 export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
-export const historyKey = (fileId: string): string => `${HISTORY_PREFIX}${fileId}.json`;
-export const tokenKey = (hash: string): string => `${TOKENS_PREFIX}${hash}.json`;
 export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
 export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;
 
@@ -65,16 +61,15 @@ export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 export const MAX_MANIFEST_FILES = 5000;
 export const MAX_TOMBSTONES = 10_000;
 export const MAX_PUBLIC_ENTRIES = 5000;
-/** DEPRECATED, all three: the retired manifest history. The current app writes
- *  no `hist` and no archive; these caps still bound what an older one sends. */
-export const MAX_INLINE_HIST = 12;
-export const MAX_HISTORY_ENTRIES = 200;
-export const MAX_HISTORY_BYTES = 256 * 1024;
 export const MAX_PATH_LEN = 1024;
 export const MAX_PATH_DEPTH = 12;
 export const MAX_NAME_LEN = 80;
+/** An address is allowed to be long; RFC 5321 caps a path at 254 characters. */
+export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
+/** How long a beat keeps a device "here". The engine beats every 45 s, so
+ *  one lost beat is survivable and two are not. */
 export const PRESENCE_TTL_MS = 90_000;
 /* The version store's caps. A snapshot is a gzip'd map of the whole
    workspace, so it is bounded by the manifest's own file ceiling; a version

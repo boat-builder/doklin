@@ -80,6 +80,9 @@
         // What the folder picker answers.
         pickedDir: "/Users/me/Downloads",
         token: "ab".repeat(32),
+        // Who this Mac is on the scripted domain — what the engine resolved
+        // its own signature to (docs/cloud.md §6.6).
+        me: "Sherin",
         // What a deployed worker reports; the drive sets it to the version
         // the app was built against (parsed from cloud-worker/src/version.ts).
         workerVersion: 1,
@@ -87,6 +90,56 @@
         // mirror, or null for a worker too old to hold one.
         versionsMirror: null,
         wipeResult: 42,
+        // The invite the redeem door is scripted with. The engine does the
+        // real parsing and the real trade (src-tauri/src/cloud/invite.rs);
+        // this only answers the way it would for the line pasted below.
+        invite: {
+          endpoint: "https://notes.example.com",
+          code: "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+          // Not the owner's token: that is the whole point of redeeming.
+          token: "cd".repeat(32),
+          member: { memberId: "m-1a2b3c4d", email: "bob@example.com", name: "Bob" },
+          /** A string here is what cloud_redeem rejects with. */
+          error: null,
+        },
+        // What the owner's own invite mints, in the clear, once.
+        mintedCode: "dkln-9F4TR-2QWXM-7NBKD-5HGVZ",
+        // Who the scripted domain says is on the workspace (docs/cloud.md
+        // §7.2). The stub keeps this as real state — an invite adds a row, a
+        // revoke takes one away — so a drive watches the list move rather
+        // than watching a call be made.
+        people: {
+          role: "owner",
+          // This Mac. A Mac only appears in the list below under its own id
+          // if it redeemed a code before it was handed the domain's own
+          // token — rare, and exactly when "this Mac" is worth saying.
+          deviceId: "d-this-mac",
+          // No owner row yet: a domain bound by an app that never asked who
+          // was binding it. Adopting one is the panel's job.
+          members: [
+            {
+              id: "m-bob",
+              email: "bob@example.com",
+              name: "Bob",
+              role: "member",
+              createdAt: Date.now() - 6 * 86400000,
+              lastSeenAt: Date.now() - 3600000,
+              disabled: false,
+              devices: 1,
+            },
+          ],
+          invites: [],
+          devices: [
+            {
+              id: "t-bob-1",
+              memberId: "m-bob",
+              email: "bob@example.com",
+              deviceId: "d-bob",
+              deviceName: "Bob’s MacBook",
+              createdAt: Date.now() - 5 * 86400000,
+            },
+          ],
+        },
         calls: [],
       };
       // The version store, scripted the same way (docs/versioning-plan.md
@@ -227,10 +280,14 @@
         lastSyncMs: Date.now(),
         error: null,
         pendingDeletes: 0,
+        // What this Mac signs with here: the person the domain says it is
+        // (docs/cloud.md §6.6), or its own name when it has not said.
+        me: window.__cloud.me,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
         public: [],
         presence: [],
+        leases: [],
       });
 
       // The listener registry the app's listen() lands in (see the
@@ -386,6 +443,104 @@
             case "cloud_check_worker":
               patchStatus(args.root, { phase: "idle", workerVersion: window.__cloud.workerVersion, error: null });
               return Promise.resolve(null);
+            case "cloud_parse_invite": {
+              const text = String(args.text ?? "");
+              const inv = window.__cloud.invite;
+              return Promise.resolve({
+                endpoint: text.includes(inv.endpoint) ? inv.endpoint : null,
+                code: text.includes(inv.code) ? inv.code : null,
+              });
+            }
+            case "cloud_redeem": {
+              const inv = window.__cloud.invite;
+              if (typeof inv.error === "string") return Promise.reject(inv.error);
+              if (args.code !== inv.code) {
+                return Promise.reject(
+                  "that invite code doesn't work \u2014 it may have been used already, or run out. Ask for a fresh one.",
+                );
+              }
+              return Promise.resolve({ endpoint: inv.endpoint, token: inv.token, ...inv.member });
+            }
+            case "cloud_people":
+              record(cmd, args);
+              // A copy: the view must not be able to edit the domain's answer.
+              return Promise.resolve(JSON.parse(JSON.stringify(window.__cloud.people)));
+            case "cloud_adopt_owner": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              const owner = {
+                id: "m-owner",
+                email: args.email,
+                name: args.name || args.email,
+                role: "owner",
+                createdAt: Date.now(),
+                lastSeenAt: null,
+                disabled: false,
+                devices: 0,
+              };
+              // Exactly one row carries the role, and the old one keeps its
+              // place as an ordinary person.
+              p.members = [owner, ...p.members.map((m) => ({ ...m, role: "member" }))];
+              return Promise.resolve(owner);
+            }
+            case "cloud_invite": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              const email = String(args.email).trim().toLowerCase();
+              // One bump per invite, so a drive can name the rows it made.
+              const n = (p.seq = (p.seq ?? 0) + 1);
+              let member = p.members.find((m) => m.email === email);
+              if (!member) {
+                member = {
+                  id: `m-new-${n}`,
+                  email,
+                  name: args.name || email,
+                  role: "member",
+                  createdAt: Date.now(),
+                  lastSeenAt: null,
+                  disabled: false,
+                  devices: 0,
+                };
+                p.members = [...p.members, member];
+              }
+              const invite = {
+                id: `i-new-${n}`,
+                memberId: member.id,
+                email,
+                name: member.name,
+                createdAt: Date.now(),
+                expiresAt: Date.now() + (args.days ?? 7) * 86400000,
+              };
+              // One pending invite per person: a new code kills the old one.
+              p.invites = [...p.invites.filter((i) => i.memberId !== member.id), invite];
+              const code = window.__cloud.mintedCode;
+              const endpoint = window.__cloud.statuses.find((s) => s.root === args.root)?.endpoint ?? "";
+              return Promise.resolve({ code, blob: `doklin-invite ${endpoint} ${code}`, invite });
+            }
+            case "cloud_revoke_device": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              const gone = p.devices.find((d) => d.id === args.tokenId);
+              p.devices = p.devices.filter((d) => d.id !== args.tokenId);
+              p.members = p.members.map((m) =>
+                gone && m.id === gone.memberId ? { ...m, devices: Math.max(0, m.devices - 1) } : m,
+              );
+              return Promise.resolve(null);
+            }
+            case "cloud_revoke_person": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              p.members = p.members.filter((m) => m.id !== args.memberId);
+              p.devices = p.devices.filter((d) => d.memberId !== args.memberId);
+              p.invites = p.invites.filter((i) => i.memberId !== args.memberId);
+              return Promise.resolve(null);
+            }
+            case "cloud_withdraw_invite": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              p.invites = p.invites.filter((i) => i.id !== args.inviteId);
+              return Promise.resolve(null);
+            }
             case "cloud_token": {
               const s = window.__cloud.statuses.find((s) => s.root === args.root);
               return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });
@@ -395,6 +550,15 @@
               return Promise.resolve(window.__cloud.wipeResult);
             case "cloud_set_activity":
               return Promise.resolve(null);
+            case "cloud_take_over": {
+              // The engine claims it on its next beat, and the status after
+              // that has nobody else holding it (docs/cloud.md §8.2).
+              record(cmd, args);
+              const s = window.__cloud.statuses.find((s) => s.root === args.root);
+              const key = args.path.slice(args.root.length + 1).toLowerCase();
+              patchStatus(args.root, { leases: (s?.leases ?? []).filter((l) => l.path !== key) });
+              return Promise.resolve(null);
+            }
 
             /* ----- the version store ----- */
             case "versions_status":
@@ -550,7 +714,9 @@
                 path: rel,
                 title: args.title ?? null,
                 desc: args.desc ?? null,
-                by: "Test Mac",
+                // Signed the way the engine signs it: with whoever this Mac
+                // is on this domain, resolved to a name before it gets here.
+                by: window.__cloud.me,
                 at: Date.now(),
                 alive: true,
                 root: existing?.root ?? false,

@@ -5,11 +5,20 @@
 // presence and the binding) and `x-doklin-client` (the app version, for
 // the logs — nothing reads it).
 //
-//   GET    /api/meta                 {version, features, workspace|null}
-//   POST   /api/workspace            owner; bind this domain: body {name, deviceName?} → 201
+//   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
+//                                    you: who this bearer is, people: [{id, name}] — the directory
+//                                    a manifest's `by` is read with (docs/cloud.md §6.6)}
+//   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
+//                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-//   GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+//   GET    /api/poll                 {manifestEtag, presence, leases} — the cheap 15 s poll; reads only
+//   POST   /api/poll                 the same poll, carrying this device's beat (docs/cloud.md §5.3):
+//                                    body {name, path?, take?} — "here, editing path", which claims
+//                                    its lease (take: from whoever holds it) and lets go of any
+//                                    other — or {leave: true}. Presence and leases are best effort:
+//                                    a database that cannot answer costs the lists ({} and null
+//                                    come back), never the etag
 //   GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 //   PUT    /api/manifest             x-base-etag required; 412 + current etag on a lost race;
 //                                    400 on garbage, 426 on a schema this worker predates
@@ -17,14 +26,6 @@
 //   GET    /api/blobs/<fid>/<hash>   the bytes
 //   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op)
 //   DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-//   GET    /api/history/<fid>        DEPRECATED {version, entries}
-//   PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, size-capped)
-//   DELETE /api/history/<fid>        drop the archive (204 whether or not one was there)
-//                                    — the three above are the retired manifest history
-//                                    (docs/versioning.md §6.5). No current app reads or writes
-//                                    one; GET and PUT stay because an app on an older release
-//                                    still does, and this API only grows. DELETE is what the
-//                                    current app's one-time clean-up calls.
 //   GET    /api/versions/index       the version store's index + x-versions-etag; 404 when none
 //   PUT    /api/versions/index       x-base-etag required ("*" creates); 412 + etag on a lost race
 //   GET    /api/versions/snapshots/<id>   the gzip'd workspace state
@@ -34,13 +35,32 @@
 //   GET    /api/versions/blobs/<hash>     the bytes
 //   PUT    /api/versions/blobs/<hash>     create-only
 //   DELETE /api/versions/blobs/<hash>     garbage-collect an unreferenced version
-//   PUT    /api/presence             body {name?, path?} — "this device is here (editing path)"
-//   DELETE /api/presence             this device left
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
 //                                    repeat until remaining:false. Frees the domain.
+//
+//   People (docs/cloud.md §5.3–5.4, §8.1). Everything here is the D1 database beside
+//   the bucket; a deployment without one answers 503 and loses nothing else.
+//
+//   POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
+//                                    {token, tokenId, member}; 401 when the code is unknown or
+//                                    expired (the row goes either way). The ONE route above the
+//                                    authenticate gate, matched on method AND path exactly,
+//                                    because answering it is how a Mac gets a bearer at all.
+//   POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite};
+//                                    creates the member if the email is new, and replaces any
+//                                    invite they already had. The worker never sees the code.
+//   GET    /api/auth/invites         owner; the pending, unexpired ones
+//   DELETE /api/auth/invites/<id>    owner; withdraw one (204)
+//   GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
+//   POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own
+//                                    identity, for attribution and the People list
+//   DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+//   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
+//   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
 
-import { authenticate, randomHex, type Auth } from "./auth";
-import { prunePresence, readManifestTotals, readPresence, readWorkspace, type WorkspaceRecord } from "./bucket";
+import { authenticate, type Auth } from "./auth";
+import { randomHex } from "./crypto";
+import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
 import {
@@ -48,18 +68,36 @@ import {
   ID_RE,
   MANIFEST_KEY,
   MAX_FILE_BYTES,
-  MAX_HISTORY_BYTES,
-  MAX_HISTORY_ENTRIES,
   MAX_MANIFEST_BYTES,
-  PRESENCE_KEY,
   WORKSPACE_KEY,
   blobKey,
   blobPrefix,
-  historyKey,
   validName,
   validPath,
 } from "./layout";
-import { emptyManifest, validateManifest, validHistoryArchive } from "./manifest";
+import { emptyManifest, validateManifest } from "./manifest";
+import {
+  ENTITY_ID_RE,
+  HASH_RE,
+  MAX_INVITE_TTL_MS,
+  adoptOwner,
+  deleteInvite,
+  deleteMember,
+  deleteToken,
+  findOwner,
+  listDirectory,
+  listInvites,
+  listMembers,
+  listTokens,
+  normalizeCode,
+  normalizeEmail,
+  putInvite,
+  redeemInvite,
+  upsertMember,
+} from "./members";
+import { sha256Hex } from "./crypto";
+import { readHere, recordBeat, type Beat, type Here } from "./presence";
+import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
 
@@ -71,6 +109,15 @@ const notBound = (): Response => json({ error: "not bound" }, 404);
 
 export async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const parts = url.pathname.split("/").filter(Boolean); // ["api", section, …]
+
+  // The one route above the gate. Redeeming an invite is how a Mac GETS a
+  // bearer, so it cannot be behind one — and the carve-out is method AND
+  // path, exactly, so `GET /api/auth/join`, `POST /api/auth/joinx` and every
+  // other route under /api/auth still meet `authenticate` below.
+  if (request.method === "POST" && parts.length === 3 && parts[1] === "auth" && parts[2] === "join") {
+    return joinWithInvite(request, env);
+  }
+
   const auth = await authenticate(request, env);
   if (!auth) return json({ error: "unauthorized" }, 401);
 
@@ -81,7 +128,22 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   // bound" in one call — what the setup wizard asks before touching anything.
   if (section === "meta" && parts.length === 2) {
     if (method !== "GET") return methodNotAllowed();
-    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace: await readWorkspace(env) });
+    // The probe is also where the database migrates itself: it is the one
+    // route every engine calls on start and on every poll, and the only one
+    // that reports what it found. `d1` is the schema version, or null on a
+    // deployment whose wrangler.toml has no DB binding (docs/cloud.md §5.1).
+    //
+    // Since v6 it also answers identity: who the caller is, and what every
+    // person here is called. Both belong on the route an engine already asks
+    // before it writes anything — a manifest it PUTs signs with `you.memberId`
+    // and every `by` it reads resolves through `people` (docs/cloud.md §6.6).
+    const [workspace, d1, you, people] = await Promise.all([
+      readWorkspace(env),
+      ensureSchema(env),
+      whoIs(env, auth),
+      listDirectory(env),
+    ]);
+    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace, d1, you, people: people ?? [] });
   }
 
   if (section === "workspace" && parts.length === 2) {
@@ -98,10 +160,8 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   }
 
   if (section === "poll" && parts.length === 2) {
-    if (method !== "GET") return methodNotAllowed();
-    const [head, devices] = await Promise.all([env.DATA.head(MANIFEST_KEY), readPresence(env)]);
-    if (!head) return notBound();
-    return json({ manifestEtag: head.etag, presence: prunePresence(devices) });
+    if (method !== "GET" && method !== "POST") return methodNotAllowed();
+    return poll(request, env, auth);
   }
 
   if (section === "manifest" && parts.length === 2) {
@@ -128,15 +188,9 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     return handleVersions(request, env, url, parts);
   }
 
-  if (section === "history" && parts.length === 3) {
-    const fileId = parts[2];
-    if (!ID_RE.test(fileId)) return json({ error: "invalid file id" }, 400);
-    return history(request, env, fileId);
-  }
-
-  if (section === "presence" && parts.length === 2) {
-    if (method !== "PUT" && method !== "DELETE") return methodNotAllowed();
-    return presence(request, env, auth);
+  if (section === "auth" && (parts.length === 3 || parts.length === 4)) {
+    if (auth.role !== "owner") return ownerOnly();
+    return handleAuth(request, env, parts);
   }
 
   if (section === "admin" && parts[2] === "wipe" && parts.length === 3) {
@@ -144,10 +198,165 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
     if (auth.role !== "owner") return ownerOnly();
     const body = await readJsonObject(request);
     if (body?.confirm !== "wipe") return json({ error: 'body must be {"confirm":"wipe"}' }, 400);
-    return wipeBucket(env, auth);
+    return wipeBucket(env);
   }
 
   return json({ error: "not found" }, 404);
+}
+
+/* ---------- People ---------- */
+
+/** A deployment whose wrangler.toml has no `DB` binding, or whose database is
+ *  gone. The sync API does not care; identity IS the database, so these
+ *  routes say so instead of pretending nobody has been invited. */
+const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
+
+/**
+ * Who the bearer is, as the app has to write it down (docs/cloud.md §6.6):
+ * the id a manifest this Mac writes will carry in `by`.
+ *
+ * A member's identity came off their token already — `authenticate` resolved
+ * it in the row read that let them in — so this costs nothing. The owner's
+ * takes one read, because matching the env secret deliberately reads nothing:
+ * their *authority* is the secret and their *identity* is a row somebody
+ * adopted. An owner who never adopted one is `memberId: null`, and their app
+ * signs with the Mac's name until they do.
+ */
+async function whoIs(env: Env, auth: Auth): Promise<Record<string, unknown>> {
+  if (auth.role !== "owner") {
+    return { role: auth.role, memberId: auth.memberId, email: auth.email, name: auth.name };
+  }
+  const owner = await findOwner(env);
+  return {
+    role: "owner",
+    memberId: owner?.id ?? null,
+    email: owner?.email ?? null,
+    name: owner?.name ?? "Owner",
+  };
+}
+
+/**
+ * Trade an invite code for this device's own token — the one unauthenticated
+ * route (see the carve-out in `handleApi`).
+ *
+ * The plaintext code crosses the wire here, where every *other* part of the
+ * design sends a hash. That is deliberate and it is the point of hashing: the
+ * owner's app sends `sha256(code)` when it creates the invite, so what the
+ * database stores is not itself redeemable. If redeeming took the hash too,
+ * the stored value would be the credential and hashing it would buy nothing.
+ *
+ * Unknown and expired answer identically. A caller learns whether a code
+ * works, never whether it once existed or whom it was for.
+ */
+async function joinWithInvite(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const code = normalizeCode(body.code);
+  if (!code) return json({ error: "that is not a Doklin invite code" }, 400);
+  const deviceId = typeof body.deviceId === "string" && ID_RE.test(body.deviceId) ? body.deviceId : null;
+  const deviceName = typeof body.deviceName === "string" ? body.deviceName : null;
+
+  const redeemed = await redeemInvite(env, await sha256Hex(code), deviceId, deviceName);
+  if (redeemed === null) return noDatabase();
+  if (redeemed === "unknown" || redeemed === "expired") return json({ error: "that code is not valid" }, 401);
+  return json({ token: redeemed.token, tokenId: redeemed.tokenId, member: redeemed.member }, 201);
+}
+
+/** Everything else under /api/auth — owner-only, checked by the caller. */
+async function handleAuth(request: Request, env: Env, parts: string[]): Promise<Response> {
+  const kind = parts[2];
+  const id = parts[3];
+  const method = request.method;
+
+  if (kind === "invites") {
+    if (id === undefined) {
+      if (method === "GET") {
+        const invites = await listInvites(env);
+        return invites === null ? noDatabase() : json({ invites });
+      }
+      if (method === "POST") return createInvite(request, env);
+      return methodNotAllowed();
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid invite id" }, 400);
+    const gone = await deleteInvite(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such invite" }, 404);
+  }
+
+  if (kind === "members") {
+    if (id === undefined) {
+      if (method === "GET") {
+        const members = await listMembers(env);
+        return members === null ? noDatabase() : json({ members });
+      }
+      if (method === "POST") return adoptOwnerIdentity(request, env);
+      return methodNotAllowed();
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid member id" }, 400);
+    const gone = await deleteMember(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such member" }, 404);
+  }
+
+  if (kind === "tokens") {
+    if (id === undefined) {
+      if (method !== "GET") return methodNotAllowed();
+      const tokens = await listTokens(env);
+      return tokens === null ? noDatabase() : json({ tokens });
+    }
+    if (method !== "DELETE") return methodNotAllowed();
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid token id" }, 400);
+    const gone = await deleteToken(env, id);
+    if (gone === null) return noDatabase();
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such token" }, 404);
+  }
+
+  // `join` only ever answers POST, and that one is handled above the gate.
+  if (kind === "join" && id === undefined) return methodNotAllowed();
+  return json({ error: "not found" }, 404);
+}
+
+/**
+ * Invite someone by email, creating the person if this is the first time that
+ * address has been seen. The body carries `codeHash`, never a code: the app
+ * mints the 100-bit code and hashes it, so a worker log, a D1 backup and this
+ * request body are all incapable of letting anyone in (docs/cloud.md §5.4).
+ */
+async function createInvite(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ error: "a valid email address is required" }, 400);
+  const codeHash = typeof body.codeHash === "string" ? body.codeHash.trim().toLowerCase() : "";
+  if (!HASH_RE.test(codeHash)) return json({ error: "codeHash must be the sha256 of the code, in hex" }, 400);
+
+  const now = Date.now();
+  const expiresAt =
+    typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? Math.floor(body.expiresAt) : 0;
+  if (expiresAt <= now || expiresAt > now + MAX_INVITE_TTL_MS) {
+    const days = MAX_INVITE_TTL_MS / 86_400_000;
+    return json({ error: `expiresAt must be a time within the next ${days} days` }, 400);
+  }
+
+  // The role is only used when the row is new: inviting the owner by their own
+  // address must not demote them.
+  const member = await upsertMember(env, email, typeof body.name === "string" ? body.name : null, "member");
+  if (!member) return noDatabase();
+  const invite = await putInvite(env, member, codeHash, expiresAt);
+  return invite === null ? noDatabase() : json({ invite }, 201);
+}
+
+/** The owner saying who they are. Identity, not authority — `OWNER_TOKEN`
+ *  keeps authenticating them either way (auth.ts). */
+async function adoptOwnerIdentity(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ error: "a valid email address is required" }, 400);
+  const member = await adoptOwner(env, email, typeof body.name === "string" ? body.name : null);
+  return member === null ? noDatabase() : json({ member });
 }
 
 /* ---------- The binding ---------- */
@@ -193,7 +402,16 @@ async function bindWorkspace(request: Request, env: Env, auth: Auth): Promise<Re
     onlyIf: { etagDoesNotMatch: "*" },
   });
   if (!put) return json({ error: "already bound", workspace: await readWorkspace(env) }, 409);
-  return json({ ...record, manifestEtag }, 201);
+
+  // Who bound it, as a person. Best effort on purpose: the owner's access is
+  // the env secret, so a domain whose database is missing must still bind —
+  // `POST /api/auth/members` adopts an identity afterwards. An owner row is
+  // reported when there is one and simply absent when there is not.
+  const ownerEmail = normalizeEmail(body.ownerEmail);
+  const owner = ownerEmail
+    ? await adoptOwner(env, ownerEmail, typeof body.ownerName === "string" ? body.ownerName : null)
+    : null;
+  return json({ ...record, manifestEtag, ...(owner ? { owner } : {}) }, 201);
 }
 
 /* ---------- The manifest ---------- */
@@ -290,68 +508,58 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
   return methodNotAllowed();
 }
 
-/* ---------- History ---------- */
-
-async function history(request: Request, env: Env, fileId: string): Promise<Response> {
-  const key = historyKey(fileId);
-  if (request.method === "GET") {
-    const obj = await env.DATA.get(key);
-    if (!obj) return json({ error: "not found" }, 404);
-    return new Response(obj.body, {
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-    });
-  }
-  if (request.method === "PUT") {
-    // The deep archive: entries the engine rolled out of the manifest's
-    // inline tail. Advisory data — last write wins, size-capped.
-    const text = await request.text();
-    if (text.length > MAX_HISTORY_BYTES) return json({ error: "history too large" }, 413);
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return json({ error: "invalid json body" }, 400);
-    }
-    if (!validHistoryArchive(data, MAX_HISTORY_ENTRIES)) return json({ error: "invalid history" }, 400);
-    await env.DATA.put(key, text, JSON_OBJECT);
-    return json({ stored: true, entries: (data as { entries: unknown[] }).entries.length });
-  }
-  if (request.method === "DELETE") {
-    // Phase 6 of versioning retires these archives; deleting one that was
-    // already gone is the same success, so a sweep never has to check first.
-    await env.DATA.delete(key);
-    return new Response(null, { status: 204 });
-  }
-  return methodNotAllowed();
-}
-
-/* ---------- Presence ---------- */
+/* ---------- The poll ---------- */
 
 /**
- * "This device is here, editing <path>." Ephemeral and self-healing (the next
- * heartbeat repaints it, the TTL sweeps the silent), so plain last-write-wins
- * is fine — no CAS ceremony. The device is the request's `x-doklin-device`.
+ * The 15-second question every engine asks — "has the manifest moved?" — and,
+ * since v7, the carrier of its presence beat; since v8, of its leases too
+ * (docs/cloud.md §5.3, §8.2).
+ *
+ * The method says whether anything is written. A `GET` reads; a `POST` says
+ * "this device is here" (or is leaving), and the engine sends one only when a
+ * beat is due — every 45 s, the moment the edited path changes, or when the
+ * document it has open is free to claim — so an idle poll writes nothing and
+ * the client decides when a write happens. A worker that wrote on every poll
+ * would spend 58% of D1's free daily writes on freshness nobody can see
+ * (docs/cloud.md §11.2).
+ *
+ * The etag is the poll's job; presence and leases are not. A database that is
+ * missing, broken or mid-outage answers `{}` for presence and `null` for
+ * leases while the etag comes back as it always has — so neither is ever on
+ * the sync path, and no lease is no lock. A beat this cannot attribute (no
+ * device header) or whose path is not one is still a poll: it answers, and
+ * records what it can.
  */
-async function presence(request: Request, env: Env, auth: Auth): Promise<Response> {
-  const deviceId = auth.deviceId;
-  if (!deviceId) return json({ error: "x-doklin-device header required" }, 400);
-  const devices = prunePresence(await readPresence(env));
-  if (request.method === "DELETE") {
-    delete devices[deviceId];
-  } else {
+async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
+  let beat: Beat | null = null;
+  if (request.method === "POST") {
     const body = await readJsonObject(request);
     if (!body) return json({ error: "invalid json body" }, 400);
-    if (body.path !== undefined && body.path !== null && !validPath(body.path)) {
-      return json({ error: "invalid path" }, 400);
-    }
-    devices[deviceId] = {
-      name: validName(body.name, auth.name),
-      ...(typeof body.path === "string" ? { path: body.path } : {}),
-      ts: Date.now(),
-    };
+    beat =
+      body.leave === true
+        ? { kind: "leave" }
+        : {
+            kind: "here",
+            name: validName(body.name, auth.name),
+            path: typeof body.path === "string" && validPath(body.path) ? body.path : null,
+            take: body.take === true,
+          };
   }
-  await env.DATA.put(PRESENCE_KEY, JSON.stringify({ devices }), JSON_OBJECT);
-  return json({ presence: devices });
+  const answer = (etag: string, here: Here | null): Response =>
+    json({ manifestEtag: etag, presence: here?.presence ?? {}, leases: here?.leases ?? null });
+  const deviceId = auth.deviceId;
+  if (beat && deviceId) {
+    // In order, for a beat: a domain that holds no workspace answers 404 and
+    // records nobody as being in it, or as holding anything. One poll in
+    // three carries a beat, so the round trip this costs is rare; the idle
+    // read below stays parallel.
+    const head = await env.DATA.head(MANIFEST_KEY);
+    if (!head) return notBound();
+    return answer(head.etag, await recordBeat(env, auth, deviceId, beat));
+  }
+  const [head, here] = await Promise.all([env.DATA.head(MANIFEST_KEY), readHere(env)]);
+  if (!head) return notBound();
+  return answer(head.etag, here);
 }
 
 /* ---------- Wipe ---------- */
@@ -362,21 +570,22 @@ async function presence(request: Request, env: Env, auth: Auth): Promise<Respons
  * delete` (which refuses a non-empty bucket) can finish the job, and so the
  * next bind finds no workspace.json. Batched to the per-request subrequest
  * budget; the client repeats the call until `remaining` comes back false.
- * The caller's own token object (a minted token, once invites exist) goes
- * last, so a wipe can't cut itself off half-done.
+ *
+ * The last round empties D1 as well (docs/cloud.md §5.7) — otherwise a
+ * rebound domain would inherit the old workspace's people. Nothing has to be
+ * saved for last any more: a wipe is owner-only, and the owner's credential
+ * is the worker's env secret rather than anything in here, so the call cannot
+ * cut itself off half-done. Members lose theirs, which is the intent.
  */
-async function wipeBucket(env: Env, auth: Auth): Promise<Response> {
+async function wipeBucket(env: Env): Promise<Response> {
   let deleted = 0;
   const finish = async (): Promise<Response> => {
-    if (auth.key) {
-      await env.DATA.delete(auth.key);
-      deleted += 1;
-    }
+    await wipeSchema(env);
     return json({ wiped: true, purged: deleted, remaining: false });
   };
   for (let round = 0; round < 20; round += 1) {
     const batch = await env.DATA.list({ limit: 1000 });
-    const keys = batch.objects.map((o) => o.key).filter((k) => k !== auth.key);
+    const keys = batch.objects.map((o) => o.key);
     if (keys.length === 0) return finish();
     await env.DATA.delete(keys);
     deleted += keys.length;

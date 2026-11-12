@@ -90,6 +90,7 @@ eq(endpointOf({ kind: "workers-dev", name: "sherin-notes" }), null, "only wrangl
   const d = deploymentNames("https://doklin-sherin-notes.sherin.workers.dev");
   eq(d.worker, "doklin-sherin-notes");
   eq(d.bucket, "doklin-sherin-notes");
+  eq(d.database, "doklin-sherin-notes");
   eq(d.domain, null);
   eq(d.certain, true, "the hostname carries the name");
 }
@@ -97,6 +98,7 @@ eq(endpointOf({ kind: "workers-dev", name: "sherin-notes" }), null, "only wrangl
   const d = deploymentNames("https://notes.example.com");
   eq(d.worker, "doklin-notes-example-com");
   eq(d.bucket, "doklin-notes-example-com");
+  eq(d.database, "doklin-notes-example-com");
   eq(d.domain, "notes.example.com");
   eq(d.certain, false, "a convention, to be verified");
 }
@@ -126,27 +128,39 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
     workerVersion: 1,
     compatibilityDate: DATE,
   });
-  skeleton(p, { steps: 9, secret: true });
+  skeleton(p, { steps: 10, secret: true });
   ok(p.includes('workspace "Notes"'), "names the workspace");
   ok(p.includes(`curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-cloud-worker.js`), "fetches the bundle");
   ok(p.includes("scripts/bundle-worker.mjs"), "…with the clone-and-bundle fallback");
   ok(p.includes("deployments list --name doklin-notes-example-com"), "verifies the worker name is free");
   ok(p.includes("r2 bucket list"), "verifies the bucket name is free");
+  ok(p.includes("d1 list"), "…and the database name too");
   ok(p.includes('name = "doklin-notes-example-com"'), "the worker name, verbatim");
   ok(p.includes('main = "doklin-cloud-worker.js"'));
   ok(p.includes(`compatibility_date = "${DATE}"`), "the runtime date, from the worker's source");
-  ok(p.includes('account_id = "<from whoami>"'), "the one fill-in");
+  ok(p.includes('account_id = "<from whoami>"'), "the first fill-in");
   ok(p.includes("workers_dev = false"), "a custom domain turns workers.dev off");
   ok(p.includes('routes = [{ pattern = "notes.example.com", custom_domain = true }]'), "the route");
   ok(p.includes('binding = "DATA"'), "the binding the worker reads");
   ok(p.includes('bucket_name = "doklin-notes-example-com"'));
+  ok(p.includes('binding = "DB"'), "…and the database binding beside it");
+  ok(p.includes('database_name = "doklin-notes-example-com"'));
+  ok(p.includes('database_id = "<from d1 create>"'), "the second fill-in");
   ok(p.includes("r2 bucket create doklin-notes-example-com"), "creates the bucket before the deploy");
+  ok(p.includes("d1 create doklin-notes-example-com"), "…and the database, before the config that names its id");
+  ok(
+    p.indexOf("d1 create doklin-notes-example-com") < p.indexOf('database_id = "<from d1 create>"'),
+    "an id can't be written down before it exists",
+  );
+  ok(p.includes("d1 info doklin-notes-example-com"), "how to read the id back if it scrolled away");
+  ok(/never make one up/.test(p), "…and that inventing one is not a fallback");
   ok(p.includes("secret put OWNER_TOKEN"), "the secret's name");
   ok(p.includes(`\n${TOKEN}\n`), "the token on its own line");
   ok(p.includes("npx -y wrangler@4 deploy"), "deploys");
   ok(/zone/.test(p), "names the custom-domain failure");
   ok(p.includes("https://notes.example.com/api/meta"), "verifies from the endpoint");
   ok(p.includes('"workspace" is null'), "…and that the domain holds nothing yet");
+  ok(/"d1" is a number/.test(p), "…and that the database binding took");
   ok(p.includes("ENDPOINT: https://notes.example.com"), "prints the endpoint line");
   ok(!p.includes("SHARE_TOKEN"), "nothing from the old stack");
 }
@@ -160,8 +174,9 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
     workerVersion: 1,
     compatibilityDate: DATE,
   });
-  skeleton(p, { steps: 9, secret: true });
+  skeleton(p, { steps: 10, secret: true });
   ok(p.includes('name = "doklin-sherin-notes"'));
+  ok(p.includes('database_name = "doklin-sherin-notes"'), "the database follows the same name");
   ok(p.includes("workers_dev = true"), "the free address");
   ok(!p.includes("routes ="), "…and no route");
   ok(p.includes("doklin-sherin-notes.<this account's subdomain>.workers.dev"), "says what the address looks like");
@@ -259,18 +274,45 @@ eq(
     const ts = deploymentNames(endpoint);
     eq(shell.worker, ts.worker, `${endpoint}: the script and the app agree on the worker`);
     eq(shell.bucket, ts.bucket, `${endpoint}: …and on the bucket`);
+    eq(shell.database, ts.database, `${endpoint}: …and on the database`);
     eq(shell.domain, ts.domain ?? "", `${endpoint}: …and on the routing`);
     eq(shell.certain, ts.certain ? "1" : "0", `${endpoint}: …and on how sure they are`);
   }
+
+  // The overrides are the no-terminal escape hatch each confirmation loop
+  // points at, so each one has to actually reach the name it claims to set.
+  const overridden = Object.fromEntries(
+    execFileSync("sh", [script, "--names", "https://notes.example.com"], {
+      encoding: "utf8",
+      env: { ...process.env, WORKER_NAME: "w", BUCKET_NAME: "b", D1_NAME: "d" },
+    })
+      .trim()
+      .split("\n")
+      .map((line) => line.split("=")),
+  );
+  eq(overridden.worker, "w", "WORKER_NAME= overrides the worker");
+  eq(overridden.bucket, "b", "BUCKET_NAME= overrides the bucket");
+  eq(overridden.database, "d", "D1_NAME= overrides the database");
+
+  // The binding the whole phase exists to deploy, and the one resource the
+  // script may create: a domain set up before Doklin had a database has none.
+  ok(text.includes('binding = "DB"'), "the script writes the D1 binding");
+  ok(text.includes('database_name = "$DATABASE"'), "…with the name it confirmed");
+  ok(text.includes('database_id = "$DATABASE_ID"'), "…and the id it read off the account");
+  ok(text.includes("d1 list --json"), "the id comes from the account, never from a guess");
+  ok(/d1 create/.test(text), "a missing database is created rather than refused");
+  ok(/D1_NAME= names one that already exists/.test(text), "…except when the name was given by hand");
 }
 
 /* ---------- teardown ---------- */
 {
   const p = buildTeardownPrompt({ endpoint: "https://notes.example.com" });
-  skeleton(p, { steps: 5, secret: false });
+  skeleton(p, { steps: 6, secret: false });
   ok(p.includes("deployments list --name doklin-notes-example-com"), "confirms before deleting");
   ok(p.includes("wrangler@4 delete --name doklin-notes-example-com"), "deletes the worker");
+  ok(p.includes("d1 delete doklin-notes-example-com"), "deletes the database");
   ok(p.includes("r2 bucket delete doklin-notes-example-com"), "deletes the bucket");
+  ok(/found no such database/.test(p), "a domain set up before the database is not an error");
   ok(/isn't empty, STOP/.test(p), "a non-empty bucket stops the agent");
   ok(p.includes("TORN DOWN: https://notes.example.com"));
   ok(!p.includes("curl -fsSL"), "nothing to download for a teardown");

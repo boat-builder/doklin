@@ -4,11 +4,16 @@
 // (a fresh domain, a domain that already holds a workspace, a folder that
 // carries that workspace's marker), the panel's phases, sync now / pause,
 // the held mass-deletion (toast → panel → confirm), a conflict copy's toast,
-// `cloud-applied` refreshing the tree, presence chips, the worker update
+// `cloud-applied` refreshing the tree, presence chips, a document another
+// Mac holds opening view-only under its banner and Take over, the worker update
 // card and its badge, the version rail reading a cloud-only revision
 // through the manifest and restoring it, "Connect
-// another Mac", disconnect, the wipe → teardown prompt, and the join flow
-// opening the downloaded folder — and publishing: the pill's not-connected
+// another Mac", disconnect, the wipe → teardown prompt, the join flow
+// opening the downloaded folder, the invite door: one paste filling both
+// boxes, a refused code spending nothing, a download on the member's own
+// credential, the People view: adopting an identity, inviting somebody, the
+// code shown once, and the three ways access goes away — and publishing:
+// the pill's not-connected
 // door, publishing a note at a random then a chosen address, the sidebar's
 // dots, the folder dialog, the published list (home page, stop), and the
 // sidebar's undoable stop.
@@ -63,6 +68,30 @@ await page.evaluate((v) => {
   window.__cloud.workerVersion = v;
 }, WORKER_VERSION);
 
+// The invite the stub is scripted with, plus the line an owner would send.
+const INVITE = {
+  endpoint: "https://notes.example.com",
+  code: "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+  token: "cd".repeat(32),
+  member: { memberId: "m-1a2b3c4d", email: "bob@example.com", name: "Bob" },
+  error: null,
+};
+INVITE.blob = `doklin-invite ${INVITE.endpoint} ${INVITE.code}`;
+
+/** A real paste into a field: React's onPaste is what fills both boxes, so
+ *  typing the text in would test nothing. */
+const paste = (testid, text) =>
+  page.evaluate(
+    ([id, t]) => {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      el.focus();
+      const data = new DataTransfer();
+      data.setData("text", t);
+      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    },
+    [testid, text],
+  );
+
 const calls = (cmd) => page.evaluate((c) => window.__cloud.calls.filter((x) => x.cmd === c), cmd);
 const lastCall = async (cmd) => (await calls(cmd)).at(-1) ?? null;
 const emit = (event, payload) => page.evaluate(([e, p]) => window.__emit(e, p), [event, payload]);
@@ -83,10 +112,12 @@ const status = (over = {}) => ({
   lastSyncMs: Date.now(),
   error: null,
   pendingDeletes: 0,
+  me: "Sherin",
   workerVersion: WORKER_VERSION,
   versions: null,
   public: [],
   presence: [],
+  leases: [],
   ...over,
 });
 const openPanelFromGear = async () => {
@@ -260,7 +291,7 @@ step(
   firstPublish.args.path === "/docs/notes.md" &&
     firstPublish.args.slug === null &&
     /^notes\.example\.com\/[a-z0-9]{8}$/.test(publishedUrl) &&
-    (await tid("publish-by").textContent()).includes("by this Mac") &&
+    (await tid("publish-by").textContent()).includes("by you") &&
     (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1,
   publishedUrl,
 );
@@ -273,11 +304,30 @@ await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-not
 await poll(async () => (await tid("publish-url").textContent()) === "notes.example.com/team-notes");
 await tid("publish-copy").click();
 await poll(async () => (await page.evaluate(() => navigator.clipboard.readText())) === "https://notes.example.com/team-notes");
+
+// Attribution is by person since manifest v3: the same page, published by
+// somebody else, names them — and one published from another Mac of your own
+// reads as yours, because `me` is a person rather than a Mac (docs/cloud.md §6.6).
+await page.evaluate(() => {
+  const s = window.__cloud.statuses[0];
+  window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: "Bob" })) }]);
+});
+await poll(async () => (await tid("publish-by").textContent()).includes("Published by Bob"));
+const byOther = await tid("publish-by").textContent();
+await page.evaluate(() => {
+  const s = window.__cloud.statuses[0];
+  window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: window.__cloud.me })) }]);
+});
+await poll(async () => (await tid("publish-by").textContent()).includes("by you"));
+
 await tid("publish-slug").fill("AB");
 await poll(async () => (await tid("publish-pop").locator(".modal-error").count()) === 1);
 step(
-  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it",
-  (await tid("publish-rename").isDisabled()) && (await calls("cloud_publish")).length === 2,
+  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it; a page names the person who published it",
+  (await tid("publish-rename").isDisabled()) &&
+    (await calls("cloud_publish")).length === 2 &&
+    byOther.includes("Published by Bob") &&
+    !byOther.includes("by you"),
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await tid("publish-pop").count()) === 0);
@@ -496,28 +546,86 @@ await emit("cloud-applied", { root: "/docs", paths: ["fresh.md"] });
 await poll(async () => (await page.locator('[data-tree-path="/docs/fresh.md"]').count()) === 1);
 step("cloud-applied: the tree picks up the file sync wrote", true);
 
-/* 16 — presence: a chip on the row being edited, and the panel's list */
+/* 16 — presence: a chip on the row being edited, and the panel's list. The
+   engine names people (worker v7): Bob is a person on his Mac, and your own
+   other Mac is named as a Mac, since "you are editing" would say nothing. */
 await setStatuses([
-  status({ presence: [{ deviceId: "d-bob", name: "Bob", path: "other.md", ts: Date.now() }] }),
+  status({
+    presence: [
+      { deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", path: "other.md", ts: Date.now() },
+      { deviceId: "d-studio", memberId: "m-00000001", name: "Studio", device: "Studio", path: null, ts: Date.now() },
+    ],
+  }),
 ]);
 await poll(async () => (await tid("tree-presence").count()) === 1);
 const chipRow = await tid("tree-presence").locator("xpath=ancestor::button").getAttribute("data-tree-path");
 await tid("sidebar-cloud-dot").click();
 await poll(async () => (await tid("presence-list").count()) === 1);
+const hereNow = await tid("presence-list").textContent();
 step(
-  "presence: 'Bob' on other.md's row, 'Bob editing other.md' in the panel",
-  (await tid("tree-presence").textContent()) === "Bob" &&
+  "presence: 'Bob Mbeki' on other.md's row; the panel names the person, his Mac, and your own other Mac once",
+  (await tid("tree-presence").textContent()) === "Bob Mbeki" &&
     chipRow === "/docs/other.md" &&
-    (await tid("presence-list").textContent()).includes("editing other.md"),
+    hereNow.includes("Bob Mbeki") &&
+    hereNow.includes("on Bob's Air · editing other.md") &&
+    hereNow.includes("Studio") &&
+    !hereNow.includes("on Studio"),
 );
+
+/* 16b — leases: a document another Mac holds opens view-only under a banner,
+   and Take over is one command that hands the lease here. The engine names
+   the holder the way presence does — your own other Mac as a Mac, flagged —
+   and the path is the lease's lowercased key. */
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+await page.locator('[data-tree-path="/docs/other.md"]').click();
+await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Other"));
+const editable = () => page.locator(".milkdown .ProseMirror").first().getAttribute("contenteditable");
+await poll(async () => (await editable()) === "true");
+const bobsLease = { path: "other.md", deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", own: false, until: Date.now() + 90_000 };
+await setStatuses([status({ leases: [bobsLease] })]);
+await poll(async () => (await tid("lease-banner").count()) === 1);
+await poll(async () => (await editable()) === "false");
+const leaseText = await tid("lease-banner-text").textContent();
+await page.screenshot({ path: SHOTS + "cloud-16-lease.png" });
+const before16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+await page.locator(".milkdown .ProseMirror").first().click();
+await page.keyboard.type("typed while held");
+await page.waitForTimeout(900);
+const after16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+await tid("lease-take-over").click();
+await poll(async () => (await tid("lease-banner").count()) === 0);
+await poll(async () => (await editable()) === "true");
+const take = await lastCall("cloud_take_over");
+// Your own other Mac: the same banner, saying so rather than naming you.
+await setStatuses([status({ leases: [{ ...bobsLease, deviceId: "d-studio", memberId: "m-00000001", name: "Studio", device: "Studio", own: true }] })]);
+await poll(async () => (await tid("lease-banner").count()) === 1);
+const ownText = await tid("lease-banner-text").textContent();
+// A lease on some other document is not a lock on this one.
+await setStatuses([status({ leases: [{ ...bobsLease, path: "notes.md" }] })]);
+await poll(async () => (await tid("lease-banner").count()) === 0);
+step(
+  "leases: Bob's document opens view-only ('Bob Mbeki is editing — view only'), typing writes nothing, Take over hands it here; your own other Mac is named as one",
+  leaseText === "Bob Mbeki is editing — view only" &&
+    before16b === after16b &&
+    take?.args.root === "/docs" &&
+    take?.args.path === "/docs/other.md" &&
+    ownText === "Open on your other Mac, Studio — view only" &&
+    (await editable()) === "true",
+);
+await setStatuses([status()]);
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await dialog("Cloud").count()) === 1);
 
 /* 17 — Connect another Mac: endpoint + token shown */
 await tid("another-mac").click();
 await poll(async () => (await tid("creds-token").inputValue()) === TOKEN);
+const credsWarning = await dialog("Connect another Mac").textContent();
 step(
-  "Connect another Mac: the endpoint and the owner token, with the warning",
+  "Connect another Mac: the endpoint and this Mac's token, warned about and pointed away from for anyone else",
   (await tid("creds-endpoint").inputValue()) === "https://notes.example.com" &&
-    (await dialog("Connect another Mac").textContent()).includes("owner credential"),
+    credsWarning.includes("Share it only with Macs you own") &&
+    credsWarning.includes("invite them under People"),
 );
 await page.keyboard.press("Escape"); // back to main
 await poll(async () => (await dialog("Cloud").count()) === 1);
@@ -708,6 +816,138 @@ step(
     (await tid("sidebar-cloud-dot").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-08-joined.png" });
+
+/* 23 — redeem: one paste fills both boxes, a bad code costs nothing, and the
+   download rides the credential the redeem minted, never the owner's */
+await setStatuses([]); // back to a Mac with nothing connected
+await setCloud({ marker: null, invite: { ...INVITE, error: "that invite code doesn't work." } });
+await openPanelFromGear();
+await tid("join-with-invite").click();
+await poll(async () => (await dialog("Join with an invite").count()) === 1);
+// The line as it arrives in a chat client, pasted into the code box alone.
+await paste("code-input", `Come and join us:\n\n  ${INVITE.blob}  .`);
+await poll(async () => (await tid("endpoint-input").inputValue()) === INVITE.endpoint);
+const pasteFilledBoth = (await tid("code-input").inputValue()) === INVITE.code;
+
+await tid("redeem-button").click();
+await poll(async () => (await tid("setup-error").count()) === 1);
+const refusedKindly =
+  (await tid("setup-error").textContent()).includes("doesn't work") &&
+  (await tid("redeem-button").count()) === 1 &&
+  (await tid("redeemed-as").count()) === 0 &&
+  (await tid("code-input").isEnabled());
+
+await setCloud({ invite: INVITE });
+await tid("redeem-button").click();
+await poll(async () => (await tid("probe-outcome").count()) === 1);
+const redeemedAs = await tid("redeemed-as").textContent();
+await page.screenshot({ path: SHOTS + "cloud-09-invite.png" });
+await tid("download-here").click();
+await poll(async () => (await tid("setup-done").count()) === 1);
+const redeemJoin = await lastCall("cloud_join");
+await page.locator(".modal-btn", { hasText: "Open the folder" }).click();
+await poll(async () => (await dialog("Join with an invite").count()) === 0);
+step(
+  "redeem: one paste fills both boxes, a refused code spends nothing, and the download carries the member's own token",
+  pasteFilledBoth &&
+    refusedKindly &&
+    redeemedAs.includes("Bob") &&
+    (await lastCall("cloud_redeem")).args.code === INVITE.code &&
+    redeemJoin.args.token === INVITE.token &&
+    redeemJoin.args.token !== TOKEN &&
+    (await tid("sidebar-cloud-dot").count()) === 1,
+  redeemedAs.trim(),
+);
+await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
+
+/* 24 — People: the panel adopts an identity for a domain that has none,
+   lists everyone with the Macs they hold, and mints a code that is on screen
+   once (docs/cloud.md §7.2) */
+await tid("sidebar-cloud-dot").click();
+await poll(async () => (await tid("people-open").count()) === 1);
+await tid("people-open").click();
+await poll(async () => (await dialog("People").count()) === 1);
+await poll(async () => (await tid("people-list").count()) === 1);
+const adoptAsked = (await tid("adopt-owner").count()) === 1;
+await tid("adopt-email").fill("ada@example.com");
+await tid("adopt-name").fill("Ada");
+await tid("adopt-save").click();
+await poll(async () => (await tid("person-m-owner").count()) === 1);
+const adoptCall = await lastCall("cloud_adopt_owner");
+const ownerRow = await tid("person-m-owner").textContent();
+const bobRow = await tid("person-m-bob").textContent();
+
+await tid("invite-open").click();
+await poll(async () => (await tid("invite-form").count()) === 1);
+await tid("invite-email").fill("carol@example.com");
+await tid("invite-name").fill("Carol");
+await tid("invite-days").selectOption("30");
+await tid("invite-send").click();
+await poll(async () => (await tid("minted-invite").count()) === 1);
+const shownCode = (await tid("invite-code").textContent()).trim();
+const inviteCall = await lastCall("cloud_invite");
+await tid("copy-invite-line").click();
+const copiedLine = await poll(async () => await page.evaluate(() => navigator.clipboard.readText()));
+await page.screenshot({ path: SHOTS + "cloud-10-people.png" });
+step(
+  "People: a domain with no owner row asks for one; the list names everyone and the code is shown once, with the line to send",
+  adoptAsked &&
+    (await tid("adopt-owner").count()) === 0 &&
+    adoptCall.args.email === "ada@example.com" &&
+    ownerRow.includes("Ada") &&
+    ownerRow.includes("owner") &&
+    bobRow.includes("bob@example.com") &&
+    (await tid("mac-t-bob-1").textContent()).includes("Bob\u2019s MacBook") &&
+    inviteCall.args.days === 30 &&
+    shownCode === "dkln-9F4TR-2QWXM-7NBKD-5HGVZ" &&
+    copiedLine === `doklin-invite https://notes.example.com ${shownCode}` &&
+    (await tid("invite-list").textContent()).includes("carol@example.com"),
+  shownCode,
+);
+
+/* 24b — and each way of taking access away takes exactly one thing */
+await tid("minted-done").click();
+await tid("revoke-mac-t-bob-1").click();
+await tid("revoke-mac-yes-t-bob-1").click();
+await poll(async () => (await tid("mac-t-bob-1").count()) === 0);
+const bobKept = (await tid("person-m-bob").count()) === 1;
+const bobRevoked = await lastCall("cloud_revoke_device");
+
+await tid("withdraw-i-new-1").click();
+await tid("withdraw-yes-i-new-1").click();
+await poll(async () => (await tid("invite-list").count()) === 0);
+const carolKept = (await tid("person-m-new-1").count()) === 1;
+
+await tid("remove-person-m-new-1").click();
+await tid("remove-person-yes-m-new-1").click();
+await poll(async () => (await tid("person-m-new-1").count()) === 0);
+step(
+  "People: revoking a Mac leaves the person, withdrawing a code leaves them too, and removing a person takes their row away",
+  bobKept &&
+    bobRevoked.args.tokenId === "t-bob-1" &&
+    (await tid("person-m-bob").textContent()).includes("No Mac signed in") &&
+    carolKept &&
+    (await lastCall("cloud_withdraw_invite")).args.inviteId === "i-new-1" &&
+    (await lastCall("cloud_revoke_person")).args.memberId === "m-new-1" &&
+    (await tid("person-m-owner").count()) === 1,
+);
+
+/* 25 — the same view on a Mac that joined with an invite: the list is the
+   owner's to see, so a member is shown their own half instead of an error */
+await page.keyboard.press("Escape"); // back to the panel's main view
+await poll(async () => (await dialog("Cloud").count()) === 1);
+await setCloud({ people: { role: "member", deviceId: "d-this-mac", members: [], invites: [], devices: [] } });
+await tid("people-open").click();
+await poll(async () => (await tid("people-member").count()) === 1);
+const memberCard = await tid("people-member").textContent();
+step(
+  "People (a member): no list, no invite door — their own credential and how to get another code",
+  memberCard.includes("invite") &&
+    (await tid("invite-open").count()) === 0 &&
+    (await tid("people-list").count()) === 0 &&
+    (await dialog("People").locator(".modal-error").count()) === 0,
+);
+await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
 
 await browser.close();
 const failed = results.filter((r) => !r.ok);

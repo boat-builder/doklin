@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use super::manifest::PublicKind;
-use super::remote::WorkspaceRecord;
+use super::remote::{InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -48,6 +48,11 @@ pub struct CloudStatus {
     pub last_sync_ms: Option<u64>,
     pub error: Option<String>,
     pub pending_deletes: u32,
+    /// What this Mac signs work with here, in words: the person the domain
+    /// says it is, and this Mac's own name when the domain has not said
+    /// (docs/cloud.md §6.6). What a surface compares a `by` against to
+    /// know whether somebody *else* did a thing.
+    pub me: String,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
     /// The version store's mirror — null when this worker has no `versions`
@@ -59,6 +64,10 @@ pub struct CloudStatus {
     pub public: Vec<PublicPage>,
     /// Every other device here, from the last poll.
     pub presence: Vec<PresenceDevice>,
+    /// The documents another Mac holds, from the same poll (docs/cloud.md
+    /// §8.2). An editor showing one of these opens view-only. Empty when this
+    /// Mac cannot hear the domain — a lock nobody can confirm is no lock.
+    pub leases: Vec<LeaseHolder>,
 }
 
 /// How much of this device's version history is in the bucket, and how much
@@ -84,6 +93,9 @@ pub struct PublicPage {
     pub path: String,
     pub title: Option<String>,
     pub desc: Option<String>,
+    /// Who published it, in words: the engine resolves the manifest's member
+    /// id through the workspace's directory before it gets here, so no
+    /// surface has to hold a second answer to "who is m-1a2b3c4d".
     pub by: String,
     pub at: u64,
     /// False when the page's file is gone (its page 404s until stopped or
@@ -93,13 +105,41 @@ pub struct PublicPage {
     pub root: bool,
 }
 
+/// Another Mac here now. Resolved by the engine like every other `by`: the
+/// worker says whose Mac it is, the directory says what they are called.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresenceDevice {
     pub device_id: String,
+    /// Whose Mac it is; null from a worker before v7, or for an owner who
+    /// never said who they are.
+    pub member_id: Option<String>,
+    /// Who is here, in words: the person — or, when it is *your* other Mac,
+    /// or nobody the directory can name, the Mac. "Ada is editing" says
+    /// nothing to Ada; "MacBook Air is editing" does.
     pub name: String,
+    /// The Mac's own name, whoever's it is.
+    pub device: String,
     pub path: Option<String>,
     pub ts: u64,
+}
+
+/// A document another Mac holds. Resolved like a `PresenceDevice`: the
+/// person when the directory can name them, the Mac when it is your own
+/// other one (`own`) or nobody it can.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseHolder {
+    /// The lease's key: workspace-relative and lowercased.
+    pub path: String,
+    pub device_id: String,
+    pub member_id: Option<String>,
+    pub name: String,
+    pub device: String,
+    /// True when the holder is you, on another Mac.
+    pub own: bool,
+    /// When it lapses unless renewed, by the domain's clock.
+    pub until: u64,
 }
 
 /// `cloud_probe`: what a domain answered before anything is touched.
@@ -120,6 +160,54 @@ pub struct Probe {
 pub struct Credentials {
     pub endpoint: String,
     pub token: String,
+}
+
+/// `cloud_redeem`: this Mac's own credential, and who the domain says the
+/// person holding it is. The token goes straight into `cloud_join` — the
+/// invitee's flow is the second Mac's flow from here on.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Redeemed {
+    /// Normalized, so the caller probes the address the worker answered on.
+    pub endpoint: String,
+    pub token: String,
+    pub member_id: String,
+    pub email: String,
+    pub name: String,
+}
+
+/// `cloud_invite`: the invite the domain now holds, plus the code itself —
+/// the one moment it exists in the clear. The panel shows it once; nothing
+/// on this Mac or on the domain can produce it again.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invited {
+    pub code: String,
+    /// The one line to send: address and code together (`cloud/invite.rs`).
+    pub blob: String,
+    pub invite: InviteRecord,
+}
+
+/// `cloud_people`: everything the People view shows (docs/cloud.md §7.2).
+///
+/// `role` is how *this Mac* authenticates, and it is asked rather than
+/// remembered: the members route answers the owner's credential and refuses
+/// every other, so the `403` a member's token gets is itself the answer.
+/// Nothing on disk records which door a Mac came in by, and nothing needs to.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct People {
+    /// `owner` or `member`.
+    pub role: String,
+    /// This Mac's own device id, so the list can mark which Mac is this one.
+    pub device_id: String,
+    /// Everyone, newest last. Empty for a member: the list is the owner's.
+    pub members: Vec<MemberRecord>,
+    /// The pending, unexpired invites.
+    pub invites: Vec<InviteRecord>,
+    /// Every signed-in Mac. The owner's own are not among them — their
+    /// credential is the domain's env secret, which has no row (remote.rs).
+    pub devices: Vec<TokenRecord>,
 }
 
 /* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */

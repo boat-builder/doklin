@@ -2,14 +2,15 @@
 // the public pages of the seed workspace (cloud-worker/test/seed.mjs) —
 // what drive-public.mjs drives. The worker is bundled in-process the way
 // the release asset is (the mermaid module spliced in, about a minute)
-// unless --no-mermaid; the bucket and the cache are the in-memory fakes the
-// worker tests use; state resets on restart.
+// unless --no-mermaid; the bucket, the database and the cache are the
+// in-memory fakes the worker tests use; state resets on restart.
 //
 //   node verify-harness/serve-worker.mjs [--no-mermaid]   # http://localhost:8787, owner token "owner-secret"
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { FakeCache, FakeR2 } from "../cloud-worker/test/fake-r2.mjs";
+import { FakeD1 } from "../cloud-worker/test/fake-d1.mjs";
 import { seedThroughApi } from "../cloud-worker/test/seed.mjs";
 import { bundleWorker } from "../scripts/bundle-worker.mjs";
 
@@ -25,7 +26,7 @@ const out = new URL("serve-worker.js", distDir);
 writeFileSync(out, code);
 const { default: worker } = await import(`${pathToFileURL(out.pathname).href}?t=${Date.now()}`);
 
-const env = { OWNER_TOKEN: OWNER, DATA: new FakeR2() };
+const env = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: new FakeD1() };
 // The runtime's cache, so the harness exercises the same path a deploy does.
 globalThis.caches = { default: new FakeCache() };
 const etag = await seedThroughApi(worker, env, { token: OWNER });

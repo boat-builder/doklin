@@ -27,19 +27,78 @@
 //       reference, plus DELETE on a per-file history archive. Where 1's
 //       history is one file's revisions, this is the folder's — what every
 //       device keeps locally, mirrored so it outlives the laptop.
-export const WORKER_VERSION = 3;
+//   4 = a D1 database beside the bucket (docs/cloud.md §5.1): the binding,
+//       the worker's own migration runner, a schema version reported by
+//       /api/meta as `d1`, and a wipe that empties it. Nothing reads or
+//       writes a table yet — the bump exists so the update badge lands the
+//       plumbing before any feature rides on it, and a worker still running 3
+//       has no binding and answers `d1: null`.
+//   5 = people (docs/cloud.md §8.1): members keyed by a normalized email,
+//       per-device tokens stored as their own sha256, one-time invites, and
+//       the /api/auth routes that mint, list and revoke them. A member's
+//       bearer now resolves through D1; the owner's is still the env secret
+//       and still reads no row, so a database that is gone costs a workspace
+//       its people and never its owner.
+//   6 = attribution by person (docs/cloud.md §6.6): a manifest's `by` is
+//       a member id rather than a device name (MANIFEST_VERSION 3), and
+//       /api/meta says who the bearer is and what this workspace's people are
+//       called, so any Mac can put a name to an id without being the owner.
+//       The three deprecated /api/history/<fid> routes go with it: the
+//       manifest has carried no revisions since the version store landed, and
+//       what reads them is a release nobody is running.
+//   7 = presence in D1, folded into the poll (docs/cloud.md §5.3): a row
+//       per device instead of one shared presence.json, written by
+//       `POST /api/poll` when the engine has a beat to send and never by a
+//       `GET`, which still only reads. Entries carry the member id, so "who
+//       else is here" names people. PUT and DELETE /api/presence are gone,
+//       and with them the separate beat request and nearly every R2 write an
+//       idle workspace made. A revoked device or a removed person leaves
+//       presence at once rather than at the end of the TTL.
+//   8 = leases (docs/cloud.md §8.2): a beat that names a document claims it
+//       — one atomic upsert on a `leases` table keyed by the path, which
+//       acquires a free or lapsed lease, renews this Mac's own and refuses
+//       anybody else's — and a beat that names another document, or none,
+//       lets go. `take` claims it from whoever holds it. The poll answers the
+//       live leases beside presence, so every Mac knows within one poll which
+//       documents are open elsewhere. Advisory: nothing that writes the
+//       manifest reads a lease, and a database that cannot answer costs the
+//       warning, never the edit.
+export const WORKER_VERSION = 8;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
 // is served) and "boards" (embedded stores render) joined when the renderer
 // landed, not before.
-export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions"];
+export const WORKER_FEATURES: readonly string[] = [
+  "sync",
+  "wipe",
+  "publish",
+  "boards",
+  "versions",
+  "members",
+  "presence",
+  "leases",
+];
+// "members" is a promise the app can act on: this worker mints and resolves
+// per-person tokens, so the People panel has something to talk to.
+// "presence" is the promise that `POST /api/poll` carries a beat. Every
+// worker has had presence of some kind; before this one it was a route of its
+// own, and an app that beats into a worker without the name would be POSTing
+// to a poll that answers 405 — so it polls with GET and stays quiet instead.
+// "leases" is the promise that a beat's path claims the document and that the
+// poll says who holds what. Without it the app opens every document as it
+// always has and shows no lock — which is exactly what an older worker can
+// honestly offer. A bare
+// "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
+// reports it more precisely than a name in this list could.
 
 // The manifest schema this worker understands (docs/cloud.md §6.6).
-// A PUT with a lower version is a plain 400 (nothing older exists); one with a
-// higher version comes from a newer app: the worker answers 426 and the
-// engine pauses with phase `worker-outdated` until the worker is updated.
-export const MANIFEST_VERSION = 2;
+// A PUT carrying any other version is a 426 in both directions, with a
+// sentence naming which side is behind: an app newer than this worker pauses
+// in `worker-outdated` until the worker is updated, and an app older than it
+// is told to update itself (docs/cloud.md §5.7 — refuse politely, never
+// corrupt). Version 3 is where `by` became a member id.
+export const MANIFEST_VERSION = 3;
 
 // The Workers runtime compatibility date wrangler.toml pins — the app writes
 // that file verbatim into the setup prompt, so this is its one source.

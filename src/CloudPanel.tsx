@@ -3,12 +3,14 @@
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
 //
-// Not connected: two doors — connect this folder to a domain, or open a
-// workspace another Mac connected. Connected: the domain and its phase,
-// sync now / pause, who else is here, the held mass-deletion waiting for a
-// word, the worker's version against this app's, the credentials a second
-// Mac needs, disconnect, and the danger zone: erase everything on the
-// domain (which frees it), then the teardown prompt for the agent.
+// Not connected: three doors — connect this folder to a domain, open a
+// workspace another Mac of yours connected, or join one somebody invited you
+// to with the line they sent. Connected: the domain and its phase,
+// sync now / pause, who else is here, the people on the workspace (their own
+// view, CloudPeople.tsx), the held mass-deletion waiting for a word, the
+// worker's version against this app's, the credentials a second Mac needs,
+// disconnect, and the danger zone: erase everything on the domain (which
+// frees it), then the teardown prompt for the agent.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -27,6 +29,7 @@ import {
   type CloudCredentials,
   type CloudStatus,
 } from "./cloud";
+import CloudPeople from "./CloudPeople";
 import { buildTeardownPrompt } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
 
@@ -51,7 +54,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
-type View = "main" | "another" | "wipe" | "teardown";
+type View = "main" | "people" | "another" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
@@ -60,6 +63,7 @@ export default function CloudPanel({
   onClose,
   onConnect,
   onJoin,
+  onRedeem,
   onUpdateWorker,
   onOpenPublished,
   onOpenExternal,
@@ -75,6 +79,8 @@ export default function CloudPanel({
   onClose: () => void;
   onConnect: () => void;
   onJoin: () => void;
+  /** Somebody invited this Mac: the wizard's third mode (CloudSetup.tsx). */
+  onRedeem: () => void;
   onUpdateWorker: () => void;
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
@@ -165,13 +171,15 @@ export default function CloudPanel({
   }, [cloud]);
 
   const title =
-    view === "another"
-      ? "Connect another Mac"
-      : view === "wipe"
-        ? `Delete everything on ${cloud?.domain ?? "the domain"}`
-        : view === "teardown"
-          ? "Tear down"
-          : "Cloud";
+    view === "people"
+      ? "People"
+      : view === "another"
+        ? "Connect another Mac"
+        : view === "wipe"
+          ? `Delete everything on ${cloud?.domain ?? "the domain"}`
+          : view === "teardown"
+            ? "Tear down"
+            : "Cloud";
 
   let body: React.ReactNode;
   if (view === "teardown" && tornDown) {
@@ -187,7 +195,7 @@ export default function CloudPanel({
             untouched; other Macs keep their copies and stop syncing.
           </p>
         </div>
-        <div className="cloud-step-title">Remove the worker and bucket from Cloudflare</div>
+        <div className="cloud-step-title">Remove the worker, bucket and database from Cloudflare</div>
         <p className="cloud-hint">
           Nothing on the domain is needed any more. Hand this to your agent — no secret in it —
           or leave the empty worker in place: it serves the landing page and costs nothing.
@@ -209,8 +217,8 @@ export default function CloudPanel({
     body = (
       <>
         <p className="cloud-intro">
-          Sync this folder to a domain of your own — one Cloudflare Worker and one bucket on your
-          account, set up by an agent from a prompt this app writes. Every Mac with the token
+          Sync this folder to a domain of your own — one Cloudflare Worker, one bucket and one
+          database on your account, set up by an agent from a prompt this app writes. Every Mac with the token
           stays in step, and publishing a note is one click once it is there.
         </p>
         <div className="cloud-doors">
@@ -225,10 +233,20 @@ export default function CloudPanel({
           <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
             Open a workspace from a domain…
           </button>
+          <button className="modal-btn" data-testid="join-with-invite" onClick={onRedeem}>
+            Join with an invite…
+          </button>
         </div>
         {!root && <p className="cloud-hint">Open a folder first to connect it.</p>}
+        <p className="cloud-hint">
+          The second door is for another Mac of your own — it wants that domain’s token. The third
+          is for a workspace somebody else runs: paste the line they sent and this Mac gets a
+          credential of its own.
+        </p>
       </>
     );
+  } else if (view === "people" && cloud) {
+    body = <CloudPeople root={cloud.root} domain={cloud.domain} copy={(k, t) => void copy(k, t)} copied={copied} />;
   } else if (view === "another") {
     body = (
       <>
@@ -261,8 +279,9 @@ export default function CloudPanel({
           </div>
         </div>
         <p className="cloud-hint cloud-warn">
-          The token is the owner credential for {cloud.domain}: whoever holds it can read, write
-          and erase everything there. Share it only with Macs you own.
+          This is the credential this Mac syncs with: whoever holds it can read and write everything
+          on {cloud.domain}. Share it only with Macs you own — to let somebody <em>else</em> in,
+          invite them under People and they get a credential of their own, which you can take back.
         </p>
         {error && <div className="modal-error">{error}</div>}
       </>
@@ -274,8 +293,8 @@ export default function CloudPanel({
           This erases every file, every revision and every published page on{" "}
           <strong>{cloud.domain}</strong>, and this Mac forgets the workspace. The folder on this
           Mac stays exactly as it is; other Macs keep their copies but stop syncing. The domain is
-          free for a new workspace afterwards — and the worker and bucket can then be removed from
-          Cloudflare with a prompt you get next.
+          free for a new workspace afterwards — and the worker, bucket and database can then be
+          removed from Cloudflare with a prompt you get next.
         </p>
         <div className="modal-field">
           <div className="modal-field-label">Type the domain to confirm</div>
@@ -442,12 +461,22 @@ export default function CloudPanel({
               <li key={p.deviceId} className="cloud-presence-row">
                 <span className="cloud-presence-name">{p.name}</span>
                 <span className="cloud-presence-what">
+                  {/* A person with two Macs open is two rows; the Mac tells them apart. */}
+                  {p.device && p.device !== p.name && `on ${p.device} · `}
                   {p.path ? `editing ${p.path}` : "here, idle"} · {timeAgo(p.ts, now)}
                 </span>
               </li>
             ))}
           </ul>
         )}
+        <div className="cloud-section-label">People</div>
+        <div className="cloud-actions">
+          <button className="modal-btn" data-testid="people-open" onClick={() => setView("people")}>
+            People…
+          </button>
+          <span className="cloud-hint">Invite someone by email, or take a Mac’s access away.</span>
+        </div>
+
         <div className="cloud-section-label">Public</div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="published-pages" onClick={onOpenPublished}>

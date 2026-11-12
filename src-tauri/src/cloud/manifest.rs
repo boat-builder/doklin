@@ -45,6 +45,17 @@ const SLUG_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 pub const RANDOM_SLUG_LEN: usize = 8;
 const MAX_SLUG_LEN: usize = 64;
 
+/// The shape of a member id — `m-` and eight hex characters, `ENTITY_ID_RE`
+/// in cloud-worker/src/members.ts narrowed to the one prefix a manifest can
+/// carry. **Change both.**
+///
+/// What tells a `by` that can be looked up from one written before v3, when
+/// it was a device's name: the engine resolves the first through the
+/// workspace's directory and shows the second exactly as it stands.
+pub fn is_member_id(by: &str) -> bool {
+    by.len() == 10 && by.starts_with("m-") && by[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /* ---------- Wire types ---------- */
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,27 +95,13 @@ pub struct ManifestFile {
     pub size: u64,
     #[serde(default)]
     pub mtime: u64,
+    /// Who last changed it — a **member id** since v3 (docs/cloud.md
+    /// §6.6), where it used to be the device's name. Empty where there is no
+    /// identity: a workspace whose domain has never said who this Mac is.
+    /// A workspace upgraded from v2 keeps the device names already in it,
+    /// and the surfaces show whatever does not resolve exactly as it stands.
     #[serde(default)]
     pub by: String,
-    /// **Deprecated since phase 6** (docs/versioning-plan.md §9). This
-    /// engine always writes an empty array; a file's past is the version
-    /// store's now. The field stays because an empty one is a valid v2
-    /// manifest to every worker and app that exists, and because an older
-    /// device on the same workspace still writes entries we have to read.
-    #[serde(default)]
-    pub hist: Vec<HistEntry>,
-}
-
-/// One earlier revision of a file: rev, hash, size, time, by. Read-only
-/// since phase 6 — see `ManifestFile::hist`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HistEntry {
-    pub r: u64,
-    pub h: String,
-    pub s: u64,
-    pub t: u64,
-    #[serde(default)]
-    pub b: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,24 +161,86 @@ impl PublicEntry {
     }
 }
 
-/// `GET /api/poll`.
+/// `GET /api/poll`, or the `POST` that carries a beat: whether the manifest
+/// moved, who else is here, and which documents they hold.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PollResponse {
     #[serde(rename = "manifestEtag")]
     pub manifest_etag: String,
     #[serde(default)]
     pub presence: BTreeMap<String, PresenceEntry>,
+    /// Every live lease (worker v8, docs/cloud.md §8.2). `None` from an older
+    /// worker, and from one whose database could not answer — both mean
+    /// "nobody is known to hold anything", which is what no lock looks like.
+    #[serde(default)]
+    pub leases: Option<Vec<LeaseEntry>>,
 }
 
-/// One device in `presence.json`: here, and editing `path` when set.
+/// One device, keyed by its id in `PollResponse::presence`: here, and
+/// editing `path` when set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresenceEntry {
+    /// Whose Mac it is (worker v7). Absent from an older worker, and null for
+    /// an owner who never adopted an identity — both are shown by the Mac's
+    /// name, which is what `name` is.
+    #[serde(rename = "memberId", default)]
+    pub member_id: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub ts: u64,
+}
+
+/// One held document. `path` is the lease's key: workspace-relative and
+/// lowercased, so compare it with [`lease_key`] of a path, never directly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeaseEntry {
+    pub path: String,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    #[serde(rename = "memberId", default)]
+    pub member_id: Option<String>,
+    /// The holder's Mac.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub until: u64,
+}
+
+/// The key a path is leased under — the worker's `leaseKey` (presence.ts):
+/// lowercased, so two spellings of one file on a case-insensitive disk are one
+/// lock. Change both.
+pub fn lease_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
+/// What a poll carries when the engine has a beat to send (`POST /api/poll`).
+/// No beat at all is a `GET`, which writes nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Beat {
+    /// "This Mac is here" — editing `path` when set, idle otherwise. `name`
+    /// is the Mac's; the worker knows whose it is from the bearer. A path
+    /// claims that document's lease and lets go of any other; `take` claims
+    /// it from whoever holds it.
+    Here { name: String, path: Option<String>, take: bool },
+    /// The last poll a quitting engine makes.
+    Leave,
+}
+
+impl Beat {
+    /// The request body, exactly as the worker reads it.
+    pub fn body(&self) -> serde_json::Value {
+        match self {
+            Beat::Here { name, path: Some(path), take: true } => {
+                serde_json::json!({ "name": name, "path": path, "take": true })
+            }
+            Beat::Here { name, path: Some(path), take: false } => serde_json::json!({ "name": name, "path": path }),
+            Beat::Here { name, path: None, .. } => serde_json::json!({ "name": name }),
+            Beat::Leave => serde_json::json!({ "leave": true }),
+        }
+    }
 }
 
 /* ---------- Grammars ---------- */

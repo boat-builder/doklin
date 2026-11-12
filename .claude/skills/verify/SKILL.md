@@ -110,7 +110,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 35 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -121,12 +121,29 @@ node verify-harness/drive-cloud.mjs        # 30 steps: boots the REAL <App/> (cl
                                            # update card (a prompt with no secret, Check again), a
                                            # held mass-deletion's toast → panel → confirm, a conflict
                                            # copy's toast opening the copy, cloud-applied refreshing
-                                           # the tree, presence chips, Connect another Mac, the
+                                           # the tree, presence chips (a person named, their
+                                           # Mac beside them, your own other Mac as a Mac),
+                                           # a document another Mac holds (a lease) opening
+                                           # view-only under its banner, typing writing
+                                           # nothing, and Take over handing it here,
+                                           # Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
-                                           # the teardown prompt, and the join flow opening the
-                                           # downloaded folder — and publishing: the pill's
+                                           # the teardown prompt, the join flow opening the
+                                           # downloaded folder, the invite door (one paste
+                                           # filling both boxes, a refused code spending nothing,
+                                           # the download riding the member's own token rather
+                                           # than the owner's), and the People view (a domain with
+                                           # no owner row asking for one, an invite's code shown
+                                           # once with the line to send, and the three ways access
+                                           # ends — one Mac, one code, one person — each taking
+                                           # exactly one thing away; then the same view on a Mac
+                                           # that joined on an invite, where the list is the
+                                           # owner's and the member is told so, not errored at)
+                                           # — and publishing: the pill's
                                            # not-connected door, a note published at a random then
-                                           # a chosen address (Copy, a bad slug refused), the
+                                           # a chosen address (Copy, a bad slug refused, the page
+                                           # naming the person who published it and reading as
+                                           # yours when that person is you), the
                                            # sidebar's dots, the folder dialog, a note inside a
                                            # published folder knowing its nested address, the
                                            # published list (home page, stop), the sidebar's
@@ -284,7 +301,10 @@ node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) a
                                            # and that no bare $var sits before a multibyte
                                            # character (bash 3.2 — macOS's /bin/sh — eats its
                                            # first byte into the name and dies under set -u)
-                                           # (131 checks)
+                                           # — plus the D1 resources: setup creates the database
+                                           # before the config that names its id, teardown deletes
+                                           # it, and the script writes the binding, discovers the
+                                           # uuid and takes a D1_NAME= override (159 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
@@ -325,13 +345,40 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 23 cases against an in-memory R2 fake (test/fake-r2.mjs,
-                                           # shared with serve-worker.mjs), the sources compiled
-                                           # in-process through vite: auth, meta, bind-once (409),
+node cloud-worker/test/run.mjs             # 45 cases against an in-memory R2 fake (test/fake-r2.mjs,
+                                           # shared with serve-worker.mjs) and a D1 over node:sqlite
+                                           # (test/fake-d1.mjs — real SQL), the sources compiled
+                                           # in-process through vite: the schema runner (a fresh
+                                           # database migrates on the first /api/meta and the
+                                           # isolate never asks again; no binding and a broken
+                                           # binding both leave every route working — asserted
+                                           # first, since a cold start is only visible before a
+                                           # migration), identity end to end (the suite's own
+                                           # member token comes from a real invite and redeem —
+                                           # one-time, expiring, swept only when used; one email
+                                           # is one person through case and spacing; a code
+                                           # survives autocorrect; revoking a device and removing
+                                           # a person; the POST /api/auth/join carve-out and
+                                           # nothing else; a member writes but does not
+                                           # administer; the owner authenticating with the DB
+                                           # binding removed), auth, meta, bind-once (409),
                                            # the unbound 404s + landing page, manifest CAS (304 /
                                            # 412 / 428), validation + the public map, 426 on a
                                            # newer schema, blobs (a re-put is a no-op), history,
-                                           # presence (device header, prune, leave), the statics /
+                                           # the poll and the presence it carries (a GET writes
+                                           # nothing; a POST beat upserts a row naming the Mac and
+                                           # the person; the sweep without a reaper; a leave;
+                                           # lastSeenAt at most hourly and never from auth;
+                                           # revoking a Mac or removing a person clearing their
+                                           # row; a beat to an unbound domain recording nobody;
+                                           # the etag answering with the DB removed), the leases
+                                           # that ride the same beat (a path claims, keyed
+                                           # lowercased; of two Macs racing exactly one holds;
+                                           # the holder renews and a non-holder changes nothing;
+                                           # another path, no path or a leave lets go; a lapsed
+                                           # one is free and swept; take claims a live one; the
+                                           # poll answering leases: null with no database),
+                                           # the statics /
                                            # OG image / an empty folder page / 404s, then the seed
                                            # workspace loaded through the API and the renderer: a
                                            # note (title, description, noindex, HEAD), a rendition
@@ -342,7 +389,8 @@ node cloud-worker/test/run.mjs             # 23 cases against an in-memory R2 fa
                                            # the app's table identity, comment stripping, the
                                            # mermaid hydrator, link rewriting, the root page, the
                                            # cache keyed by manifest etag (a fake caches.default),
-                                           # the landing fallback; wipe freeing the domain last
+                                           # the landing fallback; wipe freeing the domain and
+                                           # leaving D1 migrated, last
 node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
                                            # mermaid module spliced in; ~40 s); prints raw +
                                            # gzipped size, fails past 3 MB gzipped
@@ -366,20 +414,51 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 50 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 80 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, the edit bus routing, cloud.json and the marker, the retirement of
-the manifest's history (four revisions leaving `hist` empty while `rev`
-climbs, a manifest an older build wrote read and then rewritten without its
-entries, and the one-time bucket clean-up — archives before blobs, more
+presence folded into the poll (a beat on every third poll and none in
+between, a new path bringing the poll forward, an idle Mac making exactly
+four requests a minute, a Mac being typed on still beating while its cycles
+hold the poll clock off, a beat lost with its poll riding the next one rather
+than a retry, a worker without `presence` polled and never beaten at until
+the hourly re-probe sees it updated, a leave as the last poll, and the
+person named — your own other Mac by its name, a stranger here asking the
+directory once), leases on that same beat (opening a document claims it and
+another Mac sees it held in any case; moving on lets go and the Mac waiting
+claims it on its next poll; *Take over* claims once and the holder hears on
+its next poll; typing keeps a document and walking away lets it go; a lock
+this Mac cannot hear about — a failed poll, a paused engine — is no lock; an
+older worker or a dead database shows none and is never left owing a claim;
+the holder named like presence; an editing Mac still four requests a minute,
+and its leave letting go; the hourly pass asking again until the worker holds
+leases, and not after), the invite code and the redeem flow (a minted code reading back the
+way it was written and surviving what a chat client does to it, one paste
+filling both of the wizard's boxes — an address never read as a code though
+its letters spell one — a code traded once for a token of that Mac's own, a
+second try and an expired one refused the same way, and an invited Mac
+downloading and writing with its own credential while `bind`, `wipe` and
+inviting answer it `403`), the People panel behind it (the owner's list with a
+device count per person and never a credential, a Mac revoked mid-sync landing
+that engine in `revoked` on its very next cycle while the owner's own carries
+on, removing a person taking every Mac and the code they had, a code withdrawn
+before anybody trades it in, one owner row at a time however often it is
+adopted, and the `403` that tells a member which door it came in by being an
+answer rather than a failure), the edit bus routing, cloud.json and the marker,
+attribution by person (a manifest signed with the member id `/api/meta`
+gave this Mac and a status that says who that is in words, a `by` an older
+build wrote read and never rewritten, a conflict copy named after a person
+rather than an id, and a manifest naming somebody this engine cannot name
+asking the domain once — not once a cycle — who they are),
+the retirement of the manifest's history (four revisions leaving no
+revisions behind while `rev` climbs, and the one-time bucket clean-up — more
 fileIds than one batch, its bookmark persisted between polls, one blob per
-living file and nothing for a deleted one at the end, and a worker without
-the DELETE route stopping the pass rather than failing it), and the
+living file and nothing for a deleted one at the end, and a bookmark from the
+archive pass that no longer exists not carrying into the blob sweep), and the
 version store's mirror: a device's snapshots and blobs reaching the bucket,
 content another device already put there skipped by digest while a NAMED
 version is never skipped, a lost index CAS re-read and re-landed, the cloud

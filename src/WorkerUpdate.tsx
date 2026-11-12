@@ -7,7 +7,8 @@
 // The update is a fixed sequence, so it is a script — two commands to run in
 // a terminal — and the agent prompt below them only asks an agent to run that
 // same script. Neither carries a secret: the token, the bucket and the domain
-// all survive a same-name redeploy.
+// all survive a same-name redeploy. The one thing the script may add is the
+// D1 database a worker deployed before it existed has never had.
 //
 // A worker that is NEWER than this app is the other way round — the card
 // says so and points at the Doklin release instead.
@@ -140,7 +141,8 @@ export default function WorkerUpdate({
                 Two commands. The script downloads the worker published with the latest Doklin
                 release, signs you into Cloudflare if you aren't already, confirms the worker and
                 its bucket against your account, and deploys the new code over the same name — so
-                your data, your token and your domain are untouched. Nothing here is secret.
+                your data, your token and your domain are untouched. Nothing here is secret. If
+                your domain has no database yet, it creates an empty one, named after the worker.
               </p>
               <pre className="cloud-prompt" data-testid="update-commands">
                 {commands}

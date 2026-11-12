@@ -16,9 +16,11 @@ use super::config::{
     WorkspaceEntry,
 };
 use super::engine::{
-    next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, LEGACY_BATCH, POLL_INTERVAL,
+    next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, DIRECTORY_MIN_GAP,
+    ACTIVITY_FRESH, LEGACY_BATCH, POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
+use super::invite;
 use super::manifest::*;
 use super::remote::*;
 use super::scan::{hash16, now_ms, scan_local};
@@ -32,7 +34,7 @@ use crate::versions::store::{
 
 /// A stand-in for the worker: the binding, a manifest with CAS-by-etag,
 /// content-addressed blobs (each with the time it landed, so a grace period
-/// is testable), the retired history archives, presence. `racer` lets a test
+/// is testable), presence and the polls that carry it. `racer` lets a test
 /// inject "another device won the CAS between your fetch and your put";
 /// `reject_schema` plays a worker that predates the app's manifest.
 #[derive(Default)]
@@ -41,16 +43,30 @@ struct FakeWorker {
     manifest: Manifest,
     etag: u64,
     blobs: HashMap<(String, String), (Vec<u8>, u64)>,
-    /// fileIds with a `history/<fid>.json` — all a test needs of the
-    /// retired archives now that nothing reads one (docs/versioning-plan.md §9).
-    histories: BTreeSet<String>,
     presence: BTreeMap<String, PresenceEntry>,
+    /// Lease key (lowercased path) -> who holds it, as the `leases` table
+    /// does: one row per document, the upsert's three ways to win spelled out
+    /// in `poll` below. `until` is on the real clock, so a test lapses one by
+    /// writing it into the past.
+    leases: BTreeMap<String, LeaseEntry>,
+    /// A database that cannot answer: the poll still answers the etag, with
+    /// no presence and `leases: null`.
+    d1_down: bool,
     offline: bool,
     reject_schema: bool,
     worker_version: u32,
     features: Vec<String>,
     racer: Option<Manifest>,
     put_manifest_calls: u64,
+    /// Every request that reached the worker — what "an idle Mac makes four
+    /// requests a minute" is counted in.
+    requests: u64,
+    /// Every poll, with the beat it carried: `None` is a `GET`, which writes
+    /// nothing. Since v7 there is no other way for a beat to arrive.
+    polls: Vec<Option<Beat>>,
+    /// How many times `/api/meta` was asked — the directory rides on it, so
+    /// this is what makes "ask again, but not every cycle" testable.
+    meta_calls: u64,
     /* The version store (docs/versioning.md §6.4): its own CAS'd index,
        immutable snapshots and blobs, with an upload time per blob so the
        cloud sweep's grace period is testable. */
@@ -59,6 +75,32 @@ struct FakeWorker {
     version_snapshots: HashMap<String, Vec<u8>>,
     version_blobs: HashMap<String, (Vec<u8>, u64)>,
     versions_racer: Option<VersionsIndex>,
+    /* People and the credentials they hold (docs/cloud.md §8.1). The
+       worker keeps only hashes; so does this — a code is looked up by its
+       sha256 here exactly as it is there, which is what makes "the app hashes
+       the canonical form" a thing a test can get wrong. */
+    owner_token: String,
+    /// By normalized email — a person is found by their address, so
+    /// re-inviting one reaches the same row.
+    members: BTreeMap<String, MemberRecord>,
+    /// sha256(code) -> the pending invite. One per person, at most.
+    invites: BTreeMap<String, InviteRecord>,
+    /// token -> the row that resolves it. Deleting the entry is revoking it,
+    /// and it bites on that Mac's next call because every call comes through
+    /// `ready` — which is the whole of what a session would have been.
+    tokens: BTreeMap<String, TokenRecord>,
+    next_id: u64,
+}
+
+/// The owner's env secret, as the fake holds it: matched with no row read,
+/// so it keeps working whatever happens to the people above.
+const OWNER_TOKEN: &str = "owner-secret-token";
+
+/// Who a bearer is, the way the worker decides it (docs/cloud.md §5.4).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Caller {
+    Owner,
+    Member,
 }
 
 impl FakeWorker {
@@ -72,7 +114,15 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 fn fake_worker() -> SharedWorker {
     Arc::new(Mutex::new(FakeWorker {
         worker_version: 1,
-        features: vec!["sync".into(), "wipe".into(), "versions".into()],
+        features: vec![
+            "sync".into(),
+            "wipe".into(),
+            "versions".into(),
+            "members".into(),
+            "presence".into(),
+            "leases".into(),
+        ],
+        owner_token: OWNER_TOKEN.into(),
         ..Default::default()
     }))
 }
@@ -81,19 +131,58 @@ fn fake_worker() -> SharedWorker {
 struct FakeRemote {
     be: SharedWorker,
     device_id: String,
+    /// The bearer this device speaks with — the owner secret unless a test
+    /// says otherwise, which is what most of them are.
+    token: String,
 }
 
 impl FakeRemote {
     fn new(be: &SharedWorker, device_id: &str) -> Self {
-        FakeRemote { be: be.clone(), device_id: device_id.to_string() }
+        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: OWNER_TOKEN.to_string() }
+    }
+
+    /// A device holding a token somebody redeemed, rather than the secret.
+    fn with_token(be: &SharedWorker, device_id: &str, token: &str) -> Self {
+        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string() }
     }
 
     fn check_offline(&self) -> RemoteResult<()> {
-        if self.be.lock().unwrap().offline {
+        let mut be = self.be.lock().unwrap();
+        be.requests += 1;
+        if be.offline {
             Err(RemoteError::Offline("fake worker down".into()))
         } else {
             Ok(())
         }
+    }
+
+    /// Offline, then the bearer. Every gated route goes through here, so a
+    /// token nobody minted is refused everywhere at once — and the secret is
+    /// matched first, with no row read, exactly as the worker matches it.
+    fn ready(&self) -> RemoteResult<Caller> {
+        self.check_offline()?;
+        let be = self.be.lock().unwrap();
+        if self.token == be.owner_token {
+            return Ok(Caller::Owner);
+        }
+        if be.tokens.contains_key(&self.token) {
+            return Ok(Caller::Member);
+        }
+        Err(RemoteError::Unauthorized)
+    }
+
+    /// The owner-only routes: bind, wipe, and everything under /api/auth.
+    fn owner_only(&self) -> RemoteResult<()> {
+        match self.ready()? {
+            Caller::Owner => Ok(()),
+            Caller::Member => Err(RemoteError::Forbidden),
+        }
+    }
+
+    /// The next `<prefix>-<n>` id this fake hands out.
+    fn mint_id(be: &mut FakeWorker, prefix: &str) -> String {
+        be.next_id += 1;
+        format!("{}-{:08x}", prefix, be.next_id)
     }
 }
 
@@ -101,9 +190,36 @@ impl Remote for FakeRemote {
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
-            let b = this.be.lock().unwrap();
-            Ok(Meta { version: b.worker_version, features: b.features.clone(), workspace: b.bound.clone() })
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            b.meta_calls += 1;
+            // Identity, the way v6 answers it: a member's comes off the row
+            // their token resolved to, and the owner's off whichever row
+            // holds the role — none, on a domain where nobody adopted one.
+            let me = match caller {
+                Caller::Owner => b.members.values().find(|m| m.role == "owner").cloned(),
+                Caller::Member => {
+                    b.tokens.get(&this.token).and_then(|t| b.members.get(&t.email)).cloned()
+                }
+            };
+            let you = Some(Identity {
+                role: match caller {
+                    Caller::Owner => "owner".into(),
+                    Caller::Member => "member".into(),
+                },
+                member_id: me.as_ref().map(|m| m.id.clone()),
+                email: me.as_ref().map(|m| m.email.clone()),
+                name: me.map(|m| m.name).unwrap_or_else(|| "Owner".into()),
+            });
+            let people =
+                b.members.values().map(|m| Person { id: m.id.clone(), name: m.name.clone() }).collect();
+            Ok(Meta {
+                version: b.worker_version,
+                features: b.features.clone(),
+                workspace: b.bound.clone(),
+                you,
+                people,
+            })
         }
     }
 
@@ -112,7 +228,7 @@ impl Remote for FakeRemote {
         let name = name.to_string();
         let device_name = device_name.to_string();
         async move {
-            this.check_offline()?;
+            this.owner_only()?;
             let mut b = this.be.lock().unwrap();
             if let Some(w) = &b.bound {
                 return Err(RemoteError::AlreadyBound(w.clone()));
@@ -130,12 +246,65 @@ impl Remote for FakeRemote {
         }
     }
 
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
         let this = self.clone();
+        let beat = beat.cloned();
         async move {
-            this.check_offline()?;
-            let b = this.be.lock().unwrap();
-            Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone() })
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            if beat.is_some() && !b.features.iter().any(|f| f == "presence") {
+                // A worker before v7: the poll is GET-only.
+                return Err(RemoteError::Other("http 405: method not allowed".into()));
+            }
+            b.polls.push(beat.clone());
+            if b.d1_down {
+                return Ok(PollResponse { manifest_etag: b.etag_str(), presence: BTreeMap::new(), leases: None });
+            }
+            let leasing = b.features.iter().any(|f| f == "leases");
+            let now = now_ms();
+            let me = this.device_id.clone();
+            match beat {
+                None => {}
+                Some(Beat::Leave) => {
+                    b.presence.remove(&me);
+                    b.leases.retain(|_, l| l.device_id != me);
+                }
+                Some(Beat::Here { name, path, take }) => {
+                    // Whose Mac it is, the way the worker decides: off the
+                    // token for a member, off the adopted row for the owner.
+                    let member_id = match caller {
+                        Caller::Owner => b.members.values().find(|m| m.role == "owner").map(|m| m.id.clone()),
+                        Caller::Member => b
+                            .tokens
+                            .get(&this.token)
+                            .and_then(|t| b.members.get(&t.email))
+                            .map(|m| m.id.clone()),
+                    };
+                    b.presence.insert(
+                        me.clone(),
+                        PresenceEntry { member_id: member_id.clone(), name: name.clone(), path: path.clone(), ts: now },
+                    );
+                    if leasing {
+                        let key = path.as_deref().map(lease_key);
+                        b.leases.retain(|k, l| l.device_id != me || Some(k) == key.as_ref());
+                        if let Some(key) = key {
+                            let free = b
+                                .leases
+                                .get(&key)
+                                .map(|l| l.device_id == me || l.until <= now || take)
+                                .unwrap_or(true);
+                            if free {
+                                b.leases.insert(
+                                    key.clone(),
+                                    LeaseEntry { path: key, device_id: me, member_id, name, until: now + 90_000 },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let leases = leasing.then(|| b.leases.values().filter(|l| l.until > now).cloned().collect());
+            Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone(), leases })
         }
     }
 
@@ -146,7 +315,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let since = since.map(String::from);
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             if since.as_deref() == Some(b.etag_str().as_str()) {
                 return Ok(None);
@@ -164,7 +333,7 @@ impl Remote for FakeRemote {
         let manifest = manifest.clone();
         let base = base_etag.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.put_manifest_calls += 1;
             if b.reject_schema {
@@ -190,7 +359,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
@@ -206,7 +375,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.check_offline()?;
+            this.ready()?;
             this.be.lock().unwrap().blobs.entry(key).or_insert((bytes, 0));
             Ok(())
         }
@@ -216,7 +385,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let fid = file_id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(b.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
         }
@@ -226,18 +395,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.be.lock().unwrap().blobs.remove(&key);
-            Ok(())
-        }
-    }
-
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let fid = file_id.to_string();
-        async move {
-            this.check_offline()?;
-            // The worker answers 204 whether or not one was there.
-            this.be.lock().unwrap().histories.remove(&fid);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.blobs.remove(&key);
             Ok(())
         }
     }
@@ -249,7 +409,7 @@ impl Remote for FakeRemote {
     ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             Ok(b.versions_index.clone().map(|i| (i, format!("v{}", b.versions_etag))))
         }
@@ -264,7 +424,7 @@ impl Remote for FakeRemote {
         let base = base_etag.to_string();
         let index = index.clone();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let mut b = this.be.lock().unwrap();
             // "Another device landed between your read and your write."
             if let Some(theirs) = b.versions_racer.take() {
@@ -287,7 +447,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
         }
@@ -297,7 +457,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             // Immutable and create-only, exactly as the worker stores them.
             this.be.lock().unwrap().version_snapshots.entry(id).or_insert(gz);
             Ok(())
@@ -308,7 +468,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.be.lock().unwrap().version_snapshots.remove(&id);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.version_snapshots.remove(&id);
             Ok(())
         }
     }
@@ -320,7 +482,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let at: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             // A deliberately tiny page, so the caller's paging is exercised
             // by every sweep rather than by one test with a thousand blobs.
@@ -338,7 +500,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             let b = this.be.lock().unwrap();
             b.version_blobs.get(&hash).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
@@ -348,7 +510,7 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.check_offline()?;
+            this.ready()?;
             this.be.lock().unwrap().version_blobs.entry(hash).or_insert((gz, now_ms()));
             Ok(())
         }
@@ -358,25 +520,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.be.lock().unwrap().version_blobs.remove(&hash);
-            Ok(())
-        }
-    }
-
-    fn put_presence(&self, name: &str, path: Option<&str>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let entry = PresenceEntry { name: name.to_string(), path: path.map(String::from), ts: now_ms() };
-        async move {
-            this.check_offline()?;
-            this.be.lock().unwrap().presence.insert(this.device_id.clone(), entry);
-            Ok(())
-        }
-    }
-
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        async move {
-            this.be.lock().unwrap().presence.remove(&this.device_id);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.version_blobs.remove(&hash);
             Ok(())
         }
     }
@@ -384,19 +530,232 @@ impl Remote for FakeRemote {
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
         let this = self.clone();
         async move {
-            this.check_offline()?;
+            this.owner_only()?;
             let mut b = this.be.lock().unwrap();
-            let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64 + b.histories.len() as u64;
+            let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64;
             b.bound = None;
             b.manifest = Manifest::default();
             b.etag += 1;
             b.blobs.clear();
-            b.histories.clear();
             b.presence.clear();
             b.versions_index = None;
             b.version_snapshots.clear();
             b.version_blobs.clear();
+            // The wipe empties the database too (docs/cloud.md §5.7): the
+            // domain is free for a new binding, and nobody is left on it.
+            b.members.clear();
+            b.invites.clear();
+            b.tokens.clear();
             Ok(WipeRound { purged, remaining: false })
+        }
+    }
+
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send {
+        let this = self.clone();
+        let email = email.trim().to_lowercase();
+        let name = name.map(|n| n.to_string());
+        let code_hash = code_hash.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let id = FakeRemote::mint_id(&mut b, "m");
+            let member = b.members.entry(email.clone()).or_insert(MemberRecord {
+                id,
+                email: email.clone(),
+                name: String::new(),
+                role: "member".into(),
+                created_at: now_ms(),
+                ..Default::default()
+            });
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                member.name = n.to_string();
+            }
+            let member = member.clone();
+            // One pending invite per person: the old one stops working the
+            // moment a new one is made.
+            b.invites.retain(|_, held| held.email != email);
+            let id = FakeRemote::mint_id(&mut b, "i");
+            let record = InviteRecord {
+                id,
+                member_id: member.id,
+                email,
+                name: member.name,
+                created_at: now_ms(),
+                expires_at,
+            };
+            b.invites.insert(code_hash, record.clone());
+            Ok(record)
+        }
+    }
+
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send {
+        let this = self.clone();
+        // The fake looks a code up by its sha256, as the worker does — so a
+        // canonical form the app got wrong would miss here too.
+        let hash = hash_full(code.as_bytes());
+        let device_name = device_name.to_string();
+        async move {
+            // No bearer: this is the route above the gate.
+            this.check_offline()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(invited) = b.invites.remove(&hash) else {
+                return Err(RemoteError::Unauthorized);
+            };
+            // Removed either way — redeemed or found expired — which is what
+            // makes "one-time" and "expiring" true without a reaper. Unknown
+            // and expired answer identically: a caller learns whether a code
+            // works, never whether it once existed.
+            if invited.expires_at <= now_ms() {
+                return Err(RemoteError::Unauthorized);
+            }
+            let member = b.members.get(&invited.email).cloned().unwrap_or_default();
+            let token = format!("member-token-{}", FakeRemote::mint_id(&mut b, "k"));
+            let token_id = FakeRemote::mint_id(&mut b, "t");
+            b.tokens.insert(
+                token.clone(),
+                TokenRecord {
+                    id: token_id.clone(),
+                    member_id: member.id.clone(),
+                    email: invited.email,
+                    device_id: Some(this.device_id.clone()),
+                    device_name: Some(device_name),
+                    created_at: now_ms(),
+                },
+            );
+            Ok(RedeemedToken { token, token_id, member })
+        }
+    }
+
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            Ok(b.members
+                .values()
+                .map(|m| MemberRecord {
+                    // Counted, not stored: a device count that could disagree
+                    // with the tokens beside it would be a second truth.
+                    devices: b.tokens.values().filter(|t| t.member_id == m.id).count() as u32,
+                    ..m.clone()
+                })
+                .collect())
+        }
+    }
+
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let this = self.clone();
+        let email = email.trim().to_lowercase();
+        let name = name.map(str::to_string);
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let id = FakeRemote::mint_id(&mut b, "m");
+            let member = b.members.entry(email.clone()).or_insert(MemberRecord {
+                id,
+                email: email.clone(),
+                name: String::new(),
+                role: "member".into(),
+                created_at: now_ms(),
+                ..Default::default()
+            });
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                member.name = n.to_string();
+            }
+            member.role = "owner".into();
+            let adopted = member.clone();
+            // Exactly one row carries the role: adopting a new address demotes
+            // the old one rather than deleting it, because that row may
+            // already be named in a manifest.
+            for other in b.members.values_mut() {
+                if other.id != adopted.id {
+                    other.role = "member".into();
+                }
+            }
+            Ok(adopted)
+        }
+    }
+
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(email) = b.members.values().find(|m| m.id == id).map(|m| m.email.clone()) else {
+                return Err(RemoteError::NotFound);
+            };
+            // The person and everything they can sign in with, together.
+            b.tokens.retain(|_, t| t.member_id != id);
+            b.invites.retain(|_, held| held.email != email);
+            b.members.remove(&email);
+            Ok(())
+        }
+    }
+
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            // Expired ones are filtered rather than swept: a row past its date
+            // is dead on redeem, so listing it would be a lie.
+            Ok(b.invites.values().filter(|i| i.expires_at > now_ms()).cloned().collect())
+        }
+    }
+
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let before = b.invites.len();
+            b.invites.retain(|_, held| held.id != id);
+            if b.invites.len() == before {
+                return Err(RemoteError::NotFound);
+            }
+            Ok(())
+        }
+    }
+
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            this.owner_only()?;
+            let b = this.be.lock().unwrap();
+            // The rows, never the keys they are filed under: the owner is told
+            // who holds a credential, never what it is.
+            Ok(b.tokens.values().cloned().collect())
+        }
+    }
+
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            this.owner_only()?;
+            let mut b = this.be.lock().unwrap();
+            let before = b.tokens.len();
+            b.tokens.retain(|_, t| t.id != id);
+            if b.tokens.len() == before {
+                return Err(RemoteError::NotFound);
+            }
+            Ok(())
         }
     }
 }
@@ -437,6 +796,18 @@ fn device(name: &str, be: &SharedWorker) -> Device {
 }
 
 fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: tempfile::TempDir) -> Device {
+    device_as(name, be, root, state, OWNER_TOKEN)
+}
+
+/// A device speaking with `token` rather than the owner's secret — an
+/// invited Mac, once it has redeemed.
+fn device_as(
+    name: &str,
+    be: &SharedWorker,
+    root: tempfile::TempDir,
+    state: tempfile::TempDir,
+    token: &str,
+) -> Device {
     std::fs::create_dir_all(state.path().join("base")).unwrap();
     let data = tempfile::tempdir().unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
@@ -454,7 +825,7 @@ fn device_at(name: &str, be: &SharedWorker, root: tempfile::TempDir, state: temp
             device_name: name.to_string(),
             use_trash: false,
         },
-        Arc::new(FakeRemote::new(be, &format!("d-{}", name.to_lowercase()))),
+        Arc::new(FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)),
         events.clone(),
         statuses.clone(),
     );
@@ -621,9 +992,10 @@ async fn initial_push_then_second_device_pulls() {
 
 /// The manifest carries the current state and nothing else. Revisions still
 /// count up — that is what tells another device its copy is behind — but a
-/// file's past is the version store's since phase 6, so `hist` never fills.
+/// file's past is the version store's, and since v3 the manifest has no
+/// field to put one in.
 #[tokio::test]
-async fn edit_propagates_and_hist_stays_empty() {
+async fn edit_propagates_and_the_manifest_keeps_no_revisions() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
@@ -641,27 +1013,42 @@ async fn edit_propagates_and_hist_stays_empty() {
     let m = manifest_of(&be);
     let f = m.files.values().next().unwrap();
     assert_eq!(f.rev, 4);
-    assert!(f.hist.is_empty(), "the manifest keeps no history: {:?}", f.hist);
+    assert_eq!(m.version, MANIFEST_VERSION);
+    // The domain never said who Alice is, so her Mac signs with its own name
+    // — v3's `by` is a member id *when there is one*, not always.
+    assert_eq!(f.by, "Alice");
+    // What is on the wire, and nothing else: no `hist` to be empty.
+    let json = serde_json::to_value(f).unwrap();
+    assert_eq!(
+        json.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["by", "hash", "mtime", "path", "rev", "size"],
+    );
 }
 
-/// A manifest written by a device still on the old release — `hist` full of
-/// entries — reads, syncs, and comes back out of the next CAS without them.
-/// The entries are not migrated anywhere: the version store already holds
-/// this device's own past, and that is the trade phase 6 makes.
+/// A workspace carried over from v2 is full of `by` values that are device
+/// names. They read, they show as they stand, and nothing rewrites them:
+/// re-signing somebody else's revision would attribute their edit to
+/// whichever Mac upgraded first. Only what this device writes is its own.
 #[tokio::test]
-async fn an_old_manifest_with_hist_is_read_and_rewritten_without_it() {
+async fn an_older_devices_attribution_is_read_and_never_rewritten() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
-    a.write("doc.md", "v1 content\n");
+    a.write("theirs.md", "v1 content\n");
+    a.write("mine.md", "mine\n");
     a.cycle().await;
 
-    // An older build lands a revision, inline history and all.
-    let fid = {
+    // The other Mac's revision, signed the way its release signed things.
+    let theirs = {
         let mut b = be.lock().unwrap();
-        let (fid, f) = b.manifest.files.iter_mut().next().map(|(k, v)| (k.clone(), v)).unwrap();
+        let (fid, f) = b
+            .manifest
+            .files
+            .iter_mut()
+            .find(|(_, f)| f.path == "theirs.md")
+            .map(|(k, v)| (k.clone(), v))
+            .unwrap();
         let bytes = b"v2 from the old build\n".to_vec();
         let hash = hash16(&bytes);
-        f.hist.insert(0, HistEntry { r: f.rev, h: f.hash.clone(), s: f.size, t: f.mtime, b: f.by.clone() });
         f.rev += 1;
         f.hash = hash.clone();
         f.size = bytes.len() as u64;
@@ -672,17 +1059,21 @@ async fn an_old_manifest_with_hist_is_read_and_rewritten_without_it() {
         fid
     };
 
-    // It reads: the revision lands on disk like any other.
+    // It reads like any other revision, and the attribution stays theirs
+    // through every cycle that does not touch the file.
     a.cycle().await;
-    assert_eq!(a.read("doc.md").as_deref(), Some("v2 from the old build\n"));
-    assert_eq!(manifest_of(&be).files[&fid].hist.len(), 1, "still theirs, untouched");
+    assert_eq!(a.read("theirs.md").as_deref(), Some("v2 from the old build\n"));
+    a.write("mine.md", "mine, edited\n");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files[&theirs].by, "Old Mac", "untouched, so unchanged");
 
-    // And the first thing this device publishes drops them.
-    a.write("doc.md", "v3, written here\n");
+    // Editing it is what re-signs it — as this Mac, because this domain has
+    // never said who that is.
+    a.write("theirs.md", "v3, written here\n");
     a.cycle().await;
-    let f = &manifest_of(&be).files[&fid];
+    let f = &manifest_of(&be).files[&theirs];
     assert_eq!(f.rev, 3, "the revision counter still climbs");
-    assert!(f.hist.is_empty(), "rewritten without the old history: {:?}", f.hist);
+    assert_eq!(f.by, "Alice");
 }
 
 #[tokio::test]
@@ -714,7 +1105,6 @@ async fn concurrent_distinct_files_converge_via_cas_retry() {
                 size: bytes.len() as u64,
                 mtime: now_ms(),
                 by: "Racer".into(),
-                hist: vec![],
             },
         );
         be2.racer = Some(m);
@@ -1377,6 +1767,604 @@ async fn resume_in_place_converges_without_conflict_copies() {
     assert_eq!(a.files().len(), 4);
 }
 
+/* ---------- The invite code and the redeem flow (docs/cloud.md §8.1) ---------- */
+
+#[test]
+fn a_minted_code_reads_back_the_way_it_was_written() {
+    // The round trip that matters: what the app hashes when it mints an
+    // invite has to be what it hashes when somebody types the code back in.
+    for _ in 0..500 {
+        let canonical = invite::random_code();
+        assert_eq!(canonical.len(), 20, "100 bits, five to a character");
+        assert!(
+            !canonical.contains(['I', 'L', 'O', 'U']),
+            "Crockford's alphabet drops the letters that read as digits: {}",
+            canonical
+        );
+        let written = invite::format_code(&canonical);
+        let groups: Vec<&str> = written.split('-').collect();
+        assert_eq!(groups[0], "dkln", "self-identifying: {}", written);
+        assert_eq!(groups.len(), 5, "the prefix and four groups: {}", written);
+        assert!(groups[1..].iter().all(|g| g.len() == 5), "five to a group: {}", written);
+        assert_eq!(invite::normalize_code(&written).as_deref(), Some(canonical.as_str()));
+    }
+
+    // Two codes in a row are two codes. (At 100 bits a collision here would
+    // mean the randomness is not random, not that we got unlucky.)
+    let mint: Vec<String> = (0..200).map(|_| invite::random_code()).collect();
+    assert_eq!(mint.iter().collect::<BTreeSet<_>>().len(), 200);
+    // Every character of the alphabet turns up: a mask that lost a bit would
+    // still pass everything above while halving the entropy.
+    let seen: BTreeSet<char> = mint.iter().flat_map(|c| c.chars()).collect();
+    assert_eq!(seen.len(), 32, "all 32 Crockford characters, in 4000 of them");
+
+    // Everything a chat client, a keyboard or a spreadsheet does to it.
+    let canonical = "K7QM29XVR48TBHN3WGYD";
+    for typed in [
+        "dkln-K7QM2-9XVR4-8TBHN-3WGYD",
+        "  dkln-k7qm2-9xvr4-8tbhn-3wgyd  ",
+        "dkln k7qm2 9xvr4 8tbhn 3wgyd",
+        "DKLN—K7QM2—9XVR4—8TBHN—3WGYD",
+        "K7QM29XVR48TBHN3WGYD",
+        "k7qm2-9xvr4-8tbhn-3wgyd",
+    ] {
+        assert_eq!(invite::normalize_code(typed).as_deref(), Some(canonical), "{}", typed);
+    }
+    // The confusables land where Crockford says they land.
+    assert_eq!(invite::normalize_code("dkln-IL0M2-9XVR4-8TBHN-3WGYD").as_deref(), Some("110M29XVR48TBHN3WGYD"));
+    assert_eq!(invite::normalize_code("dkln-o1om2-9xvr4-8tbhn-3wgyd").as_deref(), Some("010M29XVR48TBHN3WGYD"));
+
+    // And what is not a code is not a code.
+    for junk in ["", "dkln-", "K7QM29XVR48TBHN3WGY", "K7QM29XVR48TBHN3WGYDD", "K7QM29XVR48TBHN3WGY!", "hello"] {
+        assert_eq!(invite::normalize_code(junk), None, "{:?} is not a code", junk);
+    }
+    // U is the one letter that is neither in the alphabet nor a confusable.
+    assert_eq!(invite::normalize_code("dkln-U7QM2-9XVR4-8TBHN-3WGYD"), None);
+}
+
+#[test]
+fn one_paste_fills_both_boxes() {
+    let canonical = invite::random_code();
+    let code = invite::format_code(&canonical);
+    let line = invite::blob("https://notes.example.com", &code);
+    assert_eq!(line, format!("doklin-invite https://notes.example.com {}", code));
+
+    let both = invite::Pasted {
+        endpoint: Some("https://notes.example.com".into()),
+        code: Some(code.clone()),
+    };
+    assert_eq!(invite::parse_pasted(&line), both);
+    // The line as a chat client delivers it: wrapped in a sentence, on its
+    // own paragraph, with the full stop somebody typed after it.
+    assert_eq!(
+        invite::parse_pasted(&format!("Come and join us:\n\n  {}  .\n", line)),
+        both,
+        "a whole message carrying the line still parses"
+    );
+    // Either half on its own is worth filling in.
+    assert_eq!(invite::parse_pasted(&code), invite::Pasted { endpoint: None, code: Some(code.clone()) });
+    assert_eq!(
+        invite::parse_pasted("notes.example.com"),
+        invite::Pasted { endpoint: Some("https://notes.example.com".into()), code: None }
+    );
+    // The trap this design walks past: strip the punctuation out of
+    // "https://notes.example.com" and what is left is twenty characters that
+    // are every one of them in Crockford's alphabet — a perfectly good code.
+    // Punctuation is what tells an address from a code, so the address never
+    // lands in the code box.
+    assert_eq!(invite::normalize_code("https://notes.example.com").as_deref(), Some("HTTPSN0TESEXAMP1EC0M"));
+    assert_eq!(invite::parse_pasted("https://notes.example.com").code, None);
+    // Nothing usable in, nothing out — the wizard leaves what was typed.
+    assert_eq!(invite::parse_pasted("see you tomorrow"), invite::Pasted::default());
+}
+
+#[tokio::test]
+async fn a_code_is_traded_for_a_token_of_this_macs_own() {
+    let be = fake_worker();
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let canonical = invite::random_code();
+    let invited = alice
+        .create_invite("  Bob@Example.com ", Some("Bob"), &invite::code_hash(&canonical), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    // The person is keyed by their address, normalized — inviting
+    // "Bob@Example.com" again reaches this same row.
+    assert_eq!(invited.email, "bob@example.com");
+    assert_eq!(invited.name, "Bob");
+    assert!(invited.expires_at > now_ms());
+
+    // Bob's Mac has no credential at all, which is the point of the route.
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", ""));
+    let redeemed = bob.redeem(&canonical, "Bob's Mac").await.expect("the code works once");
+    assert_eq!(redeemed.member.email, "bob@example.com");
+    assert_eq!(redeemed.member.id, invited.member_id, "the same person the invite named");
+    assert_eq!(redeemed.member.role, "member");
+    assert!(!redeemed.token.is_empty());
+    assert_ne!(redeemed.token, OWNER_TOKEN, "a member's credential is not the owner's");
+
+    // The formatted code redeems too: both ends canonicalize first.
+    let canonical2 = invite::random_code();
+    alice
+        .create_invite("carol@example.com", None, &invite::code_hash(&canonical2), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let typed = invite::normalize_code(&format!("  {}  ", invite::format_code(&canonical2))).unwrap();
+    assert!(bob.redeem(&typed, "Carol's Mac").await.is_ok());
+}
+
+#[tokio::test]
+async fn a_code_works_once_and_a_stale_one_not_at_all() {
+    let be = fake_worker();
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", ""));
+
+    let first = invite::random_code();
+    alice
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&first), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert!(bob.redeem(&first, "Bob's Mac").await.is_ok());
+    // One-time: the row went with the redeem, so the second try cannot tell
+    // itself apart from a code that never existed.
+    assert!(matches!(bob.redeem(&first, "Bob's other Mac").await, Err(RemoteError::Unauthorized)));
+    assert!(matches!(bob.redeem(&invite::random_code(), "Nobody's Mac").await, Err(RemoteError::Unauthorized)));
+
+    // A second invite for the same person kills the one they had: a second
+    // Mac never needs an invite, so a second invite is always "lost the code".
+    let second = invite::random_code();
+    let third = invite::random_code();
+    alice
+        .create_invite("dana@example.com", None, &invite::code_hash(&second), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    alice
+        .create_invite("dana@example.com", None, &invite::code_hash(&third), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert!(matches!(bob.redeem(&second, "Dana's Mac").await, Err(RemoteError::Unauthorized)));
+    assert!(bob.redeem(&third, "Dana's Mac").await.is_ok());
+
+    // Expiring, and expired reads exactly like unknown.
+    let stale = invite::random_code();
+    alice
+        .create_invite("erin@example.com", None, &invite::code_hash(&stale), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    for held in be.lock().unwrap().invites.values_mut() {
+        held.expires_at = now_ms() - 1;
+    }
+    assert!(matches!(bob.redeem(&stale, "Erin's Mac").await, Err(RemoteError::Unauthorized)));
+    // And it is gone: the only row time can delete is one somebody tried to
+    // use, which is what makes "expiring" true without a reaper.
+    assert!(be.lock().unwrap().invites.is_empty());
+
+    // An invite may not be dated past what the worker accepts, whatever is
+    // asked for.
+    let far = invite::expires_at(now_ms(), Some(365));
+    assert!(far <= now_ms() + u64::from(invite::MAX_DAYS) * 24 * 60 * 60 * 1000);
+}
+
+#[tokio::test]
+async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
+    let be = fake_worker();
+    let events: Arc<dyn Events> = Arc::new(Collected::default());
+    let a_root = tempfile::tempdir().unwrap();
+    let a_state = tempfile::tempdir().unwrap();
+    std::fs::write(a_root.path().join("readme.md"), "root doc\n").unwrap();
+
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let bound = bind_domain(&alice, "Notes", "Alice's Mac").await.unwrap();
+    seed_upload(&alice, a_root.path(), a_state.path(), "Notes", &bound.manifest_etag, "Alice's Mac", &events, "a")
+        .await
+        .unwrap();
+
+    let canonical = invite::random_code();
+    alice
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&canonical), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let redeemed = Arc::new(FakeRemote::with_token(&be, "d-bob", ""))
+        .redeem(&canonical, "Bob's Mac")
+        .await
+        .unwrap();
+
+    // From here the invitee's flow IS the second Mac's flow: the token goes
+    // into the same download the panel's "Connect another Mac…" feeds.
+    let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", &redeemed.token));
+    let parent = tempfile::tempdir().unwrap();
+    let dest = parent.path().join("Notes");
+    let b_state = tempfile::tempdir().unwrap();
+    let state = seed_download(&bob, &dest, b_state.path(), &events).await.unwrap();
+    assert_eq!(state.files.len(), 1);
+    assert_eq!(std::fs::read_to_string(dest.join("readme.md")).unwrap(), "root doc\n");
+
+    // And it writes: a member is not a limited account (docs/cloud.md §5.4).
+    // What it cannot do is administer the domain.
+    let (manifest, etag) = bob.fetch_manifest(None).await.unwrap().unwrap();
+    assert!(bob.put_manifest(&manifest, &etag).await.is_ok(), "the manifest is not role-gated");
+    assert!(matches!(bob.wipe().await, Err(RemoteError::Forbidden)));
+    assert!(matches!(
+        bob.create_invite("eve@example.com", None, &invite::code_hash(&invite::random_code()), invite::expires_at(now_ms(), None))
+            .await,
+        Err(RemoteError::Forbidden)
+    ));
+
+    // A token nobody minted is refused outright, wherever it is presented.
+    let nobody = FakeRemote::with_token(&be, "d-eve", "not-a-token");
+    assert!(matches!(nobody.meta().await, Err(RemoteError::Unauthorized)));
+    assert!(matches!(nobody.fetch_manifest(None).await, Err(RemoteError::Unauthorized)));
+
+    // The owner's secret never went near the database, so it still works.
+    assert!(alice.meta().await.is_ok());
+}
+
+/* ---------- Attribution by person (docs/cloud.md §6.6) ---------- */
+
+#[tokio::test]
+async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+
+    let mut a = device("Alice", &be);
+    // The probe is where identity arrives, and the probe is what happens
+    // before this engine writes anything.
+    a.engine.probe_worker().await;
+    a.write("doc.md", "written by a person\n");
+    a.cycle().await;
+    a.publish("doc.md", PublicKind::File, Some("the-doc")).unwrap();
+    a.cycle().await;
+
+    let m = manifest_of(&be);
+    let f = m.files.values().next().unwrap();
+    assert_eq!(f.by, ada.id, "the manifest carries the id");
+    assert!(is_member_id(&f.by), "{} is not a member id", f.by);
+    assert_eq!(m.public["the-doc"].by, ada.id, "a published page too");
+    assert!(!f.by.contains("Alice"), "and never the Mac's name");
+
+    // Nothing downstream is handed an id: the engine resolves what it emits
+    // through the directory the same probe brought, so no surface needs a
+    // second answer to "who is m-00000001".
+    let status = a.status();
+    assert_eq!(status.me, "Ada");
+    assert_eq!(status.public[0].by, "Ada");
+
+    // Deleting is attribution too.
+    a.delete("doc.md");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).tombstones.values().next().unwrap().by, ada.id);
+}
+
+#[tokio::test]
+async fn a_conflict_copy_is_named_after_the_person_not_the_id() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+
+    let mut a = device("Alice", &be);
+    let mut b = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+
+    a.write("doc.md", "shared line\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.md", "ada's take on the line\n");
+    a.cycle().await;
+    b.write("doc.md", "bob's very different take\n");
+    b.cycle().await;
+
+    // The copy is a real file with a real name: an id in it would help
+    // nobody, so this is the one place the engine has to resolve.
+    let copies: Vec<String> = b.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", b.files());
+    assert!(copies[0].contains("(conflict — Ada"), "named after a person: {}", copies[0]);
+    assert!(!copies[0].contains("m-"), "not after an id: {}", copies[0]);
+    assert_eq!(b.events.of(EV_CONFLICT)[0]["by"], "Ada");
+
+    // And the other way round, so it is the *author* being resolved rather
+    // than whoever happens to be reading.
+    b.write("doc.md", "bob again\n");
+    b.cycle().await;
+    a.write("doc.md", "ada again\n");
+    a.cycle().await;
+    let hers: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert!(hers.iter().any(|p| p.contains("(conflict — Bob Mbeki")), "got {:?}", hers);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let mut a = device("Alice", &be);
+    a.write("mine.md", "mine\n");
+    a.cycle().await;
+    let before = be.lock().unwrap().meta_calls;
+
+    // Somebody joined and wrote something. Their id means nothing here yet,
+    // and a name that only arrives on the next launch is not a name.
+    let bob = owner.adopt_owner("bob@example.com", Some("Bob")).await.unwrap();
+    let sign_as = |be: &SharedWorker, by: &str| {
+        let mut b = be.lock().unwrap();
+        let f = b.manifest.files.values_mut().next().unwrap();
+        f.rev += 1;
+        f.mtime = now_ms();
+        f.by = by.to_string();
+        b.etag += 1;
+    };
+    sign_as(&be, &bob.id);
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "the stranger is what asked");
+
+    // An id belonging to nobody — a person since removed — never resolves.
+    // That costs one ask per gap, and never one per cycle.
+    sign_as(&be, "m-deadbeef");
+    be.lock().unwrap().members.clear();
+    let asked = be.lock().unwrap().meta_calls;
+    for _ in 0..3 {
+        a.cycle().await;
+    }
+    assert_eq!(be.lock().unwrap().meta_calls, asked, "not once a cycle");
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, asked + 1, "once a gap at the very most");
+
+    // And it is shown exactly as it stands rather than becoming "someone":
+    // the app never invents an author it does not have.
+    a.write("mine.md", "mine again\n");
+    a.publish("mine.md", PublicKind::File, Some("mine")).unwrap();
+    a.cycle().await;
+    assert_eq!(a.status().me, "Alice", "this Mac still signs with its own name");
+    assert_eq!(a.status().public[0].by, "Alice");
+}
+
+/* ---------- The People panel (docs/cloud.md §7.2) ---------- */
+
+/// Invite `email`, redeem the code on `device_id`, and answer the token that
+/// Mac now holds — the whole of "somebody joined", as the two commands behind
+/// the panel run it.
+async fn invite_and_redeem(be: &SharedWorker, owner: &FakeRemote, email: &str, name: &str, device_id: &str) -> String {
+    let code = invite::random_code();
+    owner
+        .create_invite(email, Some(name), &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    FakeRemote::with_token(be, device_id, "")
+        .redeem(&code, &format!("{}'s Mac", name))
+        .await
+        .unwrap()
+        .token
+}
+
+#[tokio::test]
+async fn the_owner_sees_everyone_and_what_each_of_them_holds() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+
+    let bob_token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    // Bob lost the code for his second Mac and asked again: one more invite,
+    // one more credential, the same person.
+    invite_and_redeem(&be, &owner, "Bob@example.com", "Bob", "d-bob-2").await;
+    // Carol was invited and has not redeemed yet.
+    let carol_code = invite::random_code();
+    let carol_invite = owner
+        .create_invite("carol@example.com", Some("Carol"), &invite::code_hash(&carol_code), invite::expires_at(now_ms(), Some(3)))
+        .await
+        .unwrap();
+
+    let members = owner.list_members().await.unwrap();
+    let bob = members.iter().find(|m| m.email == "bob@example.com").expect("Bob is a person here");
+    let carol = members.iter().find(|m| m.email == "carol@example.com").expect("Carol is too");
+    assert_eq!(bob.devices, 2, "one row per Mac, counted from the tokens");
+    assert_eq!(carol.devices, 0, "invited is not signed in");
+    assert_eq!(bob.role, "member");
+
+    // The pending list is what has not been traded in. Bob's two codes are
+    // both spent, so neither is on it.
+    let invites = owner.list_invites().await.unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].id, carol_invite.id);
+    assert_eq!(invites[0].email, "carol@example.com");
+
+    // Every signed-in Mac, named — and never the credential that names it.
+    let devices = owner.list_tokens().await.unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|t| t.member_id == bob.id));
+    assert!(devices.iter().any(|t| t.device_id.as_deref() == Some("d-bob") && t.device_name.as_deref() == Some("Bob's Mac")));
+    assert!(
+        devices.iter().all(|t| t.id != bob_token),
+        "the list names a credential; it does not carry one"
+    );
+    // The owner's own Macs are not in it at all: they authenticate with the
+    // domain's env secret, which is matched against no row, so there is
+    // nothing here to list and nothing to revoke but the secret itself.
+    assert!(devices.iter().all(|t| t.device_id.as_deref() != Some("d-alice")));
+}
+
+#[tokio::test]
+async fn people_tells_a_mac_which_door_it_came_in_by() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+
+    let seen = super::people_of(&owner, "d-alice", "notes.example.com").await.unwrap();
+    assert_eq!(seen.role, "owner");
+    assert_eq!(seen.device_id, "d-alice");
+    assert_eq!(seen.members.len(), 1);
+    assert_eq!(seen.devices.len(), 1);
+
+    // A member is refused the list, and that refusal IS the answer — the
+    // panel shows them their own half instead of an error. Nothing on disk
+    // said which door this Mac came in by; the domain did.
+    let bob = FakeRemote::with_token(&be, "d-bob", &token);
+    let mine = super::people_of(&bob, "d-bob", "notes.example.com").await.unwrap();
+    assert_eq!(mine.role, "member");
+    assert_eq!(mine.device_id, "d-bob");
+    assert!(mine.members.is_empty() && mine.invites.is_empty() && mine.devices.is_empty());
+
+    // A credential nobody minted is a failure, not a door.
+    let nobody = FakeRemote::with_token(&be, "d-eve", "not-a-token");
+    let err = super::people_of(&nobody, "d-eve", "notes.example.com").await.unwrap_err();
+    assert!(err.contains("rejected this token"), "{}", err);
+
+    // The trap in the sentences: a worker predating the identity routes has
+    // no /api/auth to miss, so it 404s — which must not come back as "that
+    // domain holds no workspace yet".
+    let old = super::describe_people("notes.example.com", RemoteError::NotFound);
+    assert!(old.contains("too old to hold people"), "{}", old);
+    // And on the way back out, a 404 from a revoke is success: the row is
+    // gone, which is what was asked for.
+    assert!(super::revoked("notes.example.com", Err(RemoteError::NotFound)).is_ok());
+}
+
+#[tokio::test]
+async fn a_revoked_mac_stops_syncing_on_its_very_next_call() {
+    let be = fake_worker();
+    let mut alice = device("Alice", &be);
+    alice.write("readme.md", "root doc\n");
+    alice.cycle().await;
+
+    let owner = FakeRemote::new(&be, "d-alice");
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    bob.cycle().await;
+    assert_eq!(bob.read("readme.md").as_deref(), Some("root doc\n"));
+
+    // The owner finds that Mac in the list and takes it away.
+    let row = owner
+        .list_tokens()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.device_id.as_deref() == Some("d-bob"))
+        .expect("Bob's Mac is listed");
+    owner.delete_token(&row.id).await.unwrap();
+
+    // It bites on the very next call: the bearer resolves through the table
+    // the delete emptied, so there is no session to wait out.
+    bob.write("late.md", "written after the revoke\n");
+    let _ = bob.engine.cycle().await;
+    assert_eq!(bob.phase(), Phase::Revoked);
+    assert!(!manifest_of(&be).files.values().any(|f| f.path == "late.md"));
+    // The person stays: a Mac was revoked, not a colleague.
+    assert_eq!(owner.list_members().await.unwrap().len(), 1);
+    assert!(owner.list_tokens().await.unwrap().is_empty());
+
+    // And the owner's own sync never noticed any of it.
+    alice.write("after.md", "still fine\n");
+    alice.cycle().await;
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "after.md"));
+}
+
+#[tokio::test]
+async fn revoking_a_person_takes_every_mac_and_the_code_they_had() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let first = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    let second = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob-2").await;
+    invite_and_redeem(&be, &owner, "carol@example.com", "Carol", "d-carol").await;
+    // A third code, minted and never used — it has to go with the person too.
+    let pending = invite::random_code();
+    owner
+        .create_invite("bob@example.com", None, &invite::code_hash(&pending), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+
+    let bob = owner.list_members().await.unwrap().into_iter().find(|m| m.email == "bob@example.com").unwrap();
+    owner.delete_member(&bob.id).await.unwrap();
+
+    let left = owner.list_members().await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].email, "carol@example.com");
+    assert_eq!(left[0].devices, 1, "Carol kept her Mac");
+    // Both of Bob's Macs, and the code he never used.
+    for token in [&first, &second] {
+        let mac = FakeRemote::with_token(&be, "d-bob", token);
+        assert!(matches!(mac.meta().await, Err(RemoteError::Unauthorized)));
+    }
+    assert!(owner.list_invites().await.unwrap().is_empty());
+    assert!(matches!(
+        FakeRemote::with_token(&be, "d-bob", "").redeem(&pending, "Bob's third Mac").await,
+        Err(RemoteError::Unauthorized)
+    ));
+    // Asking twice is not an error the panel should show: the row is gone,
+    // which is what was asked for.
+    assert!(super::revoked("notes.example.com", owner.delete_member(&bob.id).await).is_ok());
+}
+
+#[tokio::test]
+async fn an_invite_can_be_withdrawn_before_anybody_trades_it_in() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let code = invite::random_code();
+    let invite = owner
+        .create_invite("bob@example.com", Some("Bob"), &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert_eq!(owner.list_invites().await.unwrap().len(), 1);
+
+    owner.delete_invite(&invite.id).await.unwrap();
+    assert!(owner.list_invites().await.unwrap().is_empty());
+    assert!(matches!(
+        FakeRemote::with_token(&be, "d-bob", "").redeem(&code, "Bob's Mac").await,
+        Err(RemoteError::Unauthorized)
+    ));
+
+    // The person stays: they were invited, not signed in, and inviting them
+    // again reaches the same row rather than making a second Bob.
+    let people = owner.list_members().await.unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].devices, 0);
+    let again = invite::random_code();
+    let re = owner
+        .create_invite("bob@example.com", None, &invite::code_hash(&again), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    assert_eq!(re.member_id, people[0].id);
+    assert_eq!(re.name, "Bob", "a re-invite without a name does not rename anybody");
+}
+
+#[tokio::test]
+async fn the_owner_adopts_an_identity_and_only_one_row_holds_it() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    // Before it: a domain bound by an app that never asked who was binding it.
+    assert!(owner.list_members().await.unwrap().iter().all(|m| m.role != "owner"));
+
+    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    assert_eq!(ada.role, "owner");
+    assert_eq!(ada.name, "Ada");
+    // Saying it again renames rather than duplicating: the address is the key.
+    let renamed = owner.adopt_owner("  Ada@Example.com ", Some("Ada Lovelace")).await.unwrap();
+    assert_eq!(renamed.id, ada.id);
+    assert_eq!(renamed.name, "Ada Lovelace");
+    assert_eq!(owner.list_members().await.unwrap().len(), 1);
+
+    // Inviting the owner's own address must not demote them — the role
+    // describes a person, and a member token would never confer it anyway.
+    let code = invite::random_code();
+    owner
+        .create_invite("ada@example.com", None, &invite::code_hash(&code), invite::expires_at(now_ms(), None))
+        .await
+        .unwrap();
+    let redeemed = FakeRemote::with_token(&be, "d-ada-2", "").redeem(&code, "Ada's other Mac").await.unwrap();
+    assert_eq!(redeemed.member.role, "owner", "the row is unchanged");
+    let mine = super::people_of(&FakeRemote::with_token(&be, "d-ada-2", &redeemed.token), "d-ada-2", "d").await.unwrap();
+    assert_eq!(mine.role, "member", "but the credential it minted is an ordinary one");
+
+    // A new address takes the role and the old row keeps its place: it may
+    // already be named in a manifest.
+    let grace = owner.adopt_owner("grace@example.com", Some("Grace")).await.unwrap();
+    let all = owner.list_members().await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.iter().filter(|m| m.role == "owner").count(), 1);
+    assert_eq!(all.iter().find(|m| m.role == "owner").unwrap().id, grace.id);
+    assert_eq!(all.iter().find(|m| m.id == ada.id).unwrap().role, "member");
+}
+
 /* ---------- Timing, the worker-outdated state, presence ---------- */
 
 #[tokio::test(start_paused = true)]
@@ -1416,10 +2404,12 @@ async fn touched_path_settles_faster_than_a_watched_one() {
     tokio::time::sleep(Duration::from_millis(3600)).await;
     assert!(has("external.md"), "pushed 5 s after the event");
 
-    // Shutdown leaves presence.
+    // Shutdown leaves presence: the last poll says so.
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"), "here, while it runs");
     cmd_tx.send(EngineCmd::Shutdown).unwrap();
     task.await.unwrap();
     assert!(be.lock().unwrap().presence.get("d-alice").is_none());
+    assert_eq!(be.lock().unwrap().polls.last(), Some(&Some(Beat::Leave)));
     drop(root_dir);
 }
 
@@ -1560,12 +2550,16 @@ async fn presence_reports_the_edited_path_and_the_others() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
     a.write("doc.md", "# doc\n");
     a.cycle().await;
     b.cycle().await;
 
+    // The beat is the poll's: a new path makes one due, and the poll that
+    // follows carries it.
     a.engine.set_activity(Some(a.abs("doc.md").to_string_lossy().to_string()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
     {
         let p = &be.lock().unwrap().presence;
         assert_eq!(p["d-alice"].name, "Alice");
@@ -1573,19 +2567,579 @@ async fn presence_reports_the_edited_path_and_the_others() {
     }
     // A path outside the workspace reads as idle.
     a.engine.set_activity(Some("/elsewhere/x.md".into()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
     assert_eq!(be.lock().unwrap().presence["d-alice"].path, None);
     a.engine.set_activity(Some(a.abs("doc.md").to_string_lossy().to_string()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
 
     // Bob's poll shows Alice, never Bob himself.
-    b.engine.presence_tick().await;
     b.engine.poll_for_test().await;
     let seen = b.status().presence;
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].device_id, "d-alice");
     assert_eq!(seen[0].name, "Alice");
+    assert_eq!(seen[0].device, "Alice");
     assert_eq!(seen[0].path.as_deref(), Some("doc.md"));
+}
+
+/// Three polls, one beat. The beat has no request of its own any more: it
+/// rides the first poll at least `PRESENCE_BEAT` after the last one, and a
+/// path that changes brings the poll forward rather than waiting for it.
+#[tokio::test(start_paused = true)]
+async fn the_beat_rides_every_third_poll_and_a_new_path_brings_the_poll_forward() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let doc = a.abs("doc.md").to_string_lossy().to_string();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    let settle = || async {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    };
+    settle().await;
+
+    // A Mac that has never beaten owes one, so it shows up once it has
+    // synced instead of a poll later.
+    assert_eq!(be.lock().unwrap().polls.len(), 1, "the first poll follows the first cycle");
+    assert!(matches!(be.lock().unwrap().polls[0], Some(Beat::Here { path: None, .. })));
+
+    // Idle: a poll every 15 s, a beat on every third.
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL * 6 + Duration::from_millis(100)).await;
+    let polls = be.lock().unwrap().polls.clone();
+    assert_eq!(polls.len(), 6, "{polls:?}");
+    let beats = polls.iter().filter(|p| p.is_some()).count();
+    assert_eq!(beats, 2, "one in three: {polls:?}");
+    assert!(polls[..2].iter().all(Option::is_none), "nothing owed for 45 s: {polls:?}");
+    assert!(polls[2].is_some());
+
+    // Opening a document is owed a beat at once, and gets one.
+    be.lock().unwrap().polls.clear();
+    cmd_tx.send(EngineCmd::SetActivity(Some(doc))).unwrap();
+    settle().await;
+    let polls = be.lock().unwrap().polls.clone();
+    assert_eq!(polls.len(), 1, "the poll came forward: {polls:?}");
+    assert!(matches!(&polls[0], Some(Beat::Here { path: Some(p), .. }) if p == "doc.md"));
+    assert_eq!(be.lock().unwrap().presence["d-alice"].path.as_deref(), Some("doc.md"));
+
+    // …and it does not restart the cadence from scratch: the next beat is a
+    // whole beat later, not on the next poll.
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL * 2 + Duration::from_millis(100)).await;
+    assert!(be.lock().unwrap().polls.iter().all(Option::is_none));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    assert_eq!(be.lock().unwrap().polls.last(), Some(&Some(Beat::Leave)), "it says goodbye");
+    assert!(!be.lock().unwrap().presence.contains_key("d-alice"));
+    drop(root_dir);
+}
+
+/// The budget this phase exists for (docs/cloud.md §11.2): an idle Mac is
+/// four polls a minute and nothing else. The beat used to be two more.
+#[tokio::test(start_paused = true)]
+async fn an_idle_device_makes_exactly_four_requests_a_minute() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+
+    // First contact, the first mirror and the one-time clean-up all happen in
+    // the first minute or so; the window starts once they are behind it.
+    tokio::time::sleep(Duration::from_secs(120) + Duration::from_millis(100)).await;
+    let (before, beats_before) = {
+        let b = be.lock().unwrap();
+        (b.requests, b.polls.iter().filter(|p| p.is_some()).count())
+    };
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let b = be.lock().unwrap();
+    assert_eq!(b.requests - before, 4, "four polls a minute, the beat folded into them");
+    let beats = b.polls.iter().filter(|p| p.is_some()).count() - beats_before;
+    assert!((1..=2).contains(&beats), "and still beating, {beats} times");
+    drop(b);
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// Every settled edit runs a cycle, and a cycle pushes the poll clock back
+/// — so a Mac someone is typing on used to poll rarely, and a beat that only
+/// rode the clock would go quiet exactly while they were editing. An owed
+/// beat brings the poll forward after a cycle instead.
+#[tokio::test(start_paused = true)]
+async fn a_mac_being_typed_on_keeps_beating_while_its_cycles_hold_off_the_poll() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let root = a.root.path().to_path_buf();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    // A save every 4 s for three minutes: each settles 1.5 s later into a
+    // cycle, so the 15 s poll clock never runs out on its own.
+    be.lock().unwrap().polls.clear();
+    for i in 0..45 {
+        std::fs::write(root.join("typed.md"), format!("draft {i}\n")).unwrap();
+        cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    }
+    let beats = be.lock().unwrap().polls.iter().filter(|p| p.is_some()).count();
+    // 180 s at one beat per 45 s, give or take where the window cuts.
+    assert!(beats >= 3, "only {beats} beats in three minutes of typing — the TTL is 90 s");
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// A worker before v7 has no beat to take: its poll is GET-only, and a POST
+/// would be a 405 every 45 s. The app polls quietly instead — this Mac is
+/// invisible, the others are not, and sync is untouched — and the hourly
+/// pass that waits for the version store waits for this too, so updating the
+/// worker reaches a Mac that is already running.
+#[tokio::test(start_paused = true)]
+async fn a_worker_without_presence_is_polled_and_never_beaten_at_until_it_is_updated() {
+    let be = fake_worker();
+    be.lock().unwrap().features.retain(|f| f != "presence");
+    let a = device("Alice", &be);
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    tokio::time::sleep(POLL_INTERVAL * 8).await;
+    {
+        let b = be.lock().unwrap();
+        assert!(b.polls.len() >= 7, "it polls: {}", b.polls.len());
+        assert!(b.polls.iter().all(Option::is_none), "and never sends a beat this worker would refuse");
+        assert!(b.presence.is_empty());
+    }
+
+    // The worker is updated; within the hour this Mac notices, unprompted.
+    be.lock().unwrap().features.push("presence".into());
+    tokio::time::sleep(MIRROR_EVERY + POLL_INTERVAL * 2).await;
+    assert!(be.lock().unwrap().polls.iter().any(Option::is_some), "beating, without a restart");
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// "Who else is here" names people (docs/cloud.md §5.3): the worker says
+/// whose Mac each one is and the engine puts the directory's name to it —
+/// except your own other Mac, which is named as a Mac, because "Ada is
+/// editing" tells Ada nothing.
+#[tokio::test]
+async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+
+    let mut studio = device("Studio", &be);
+    let mut air = device("Air", &be); // Ada's second Mac: the owner's secret too
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    for d in [&mut studio, &mut air, &mut bob] {
+        d.engine.probe_worker().await;
+        d.cycle().await;
+        d.engine.poll_for_test().await;
+    }
+    studio.engine.poll_for_test().await;
+
+    let seen = studio.status().presence;
+    let bob_here = seen.iter().find(|p| p.device_id == "d-bob").unwrap();
+    assert_eq!(bob_here.name, "Bob Mbeki", "a person, not a Mac");
+    assert_eq!(bob_here.device, "Bob");
+    assert!(bob_here.member_id.as_deref().map(is_member_id).unwrap_or(false));
+    let air_here = seen.iter().find(|p| p.device_id == "d-air").unwrap();
+    assert_eq!(air_here.name, "Air", "your own other Mac is told apart by its name");
+    assert_eq!(air_here.member_id, studio.engine.me_for_test().map(String::from));
+
+    // Bob sees Ada, twice, as Ada — once per Mac, each with its name.
+    bob.engine.poll_for_test().await;
+    let theirs = bob.status().presence;
+    assert_eq!(theirs.iter().filter(|p| p.name == "Ada").count(), 2);
+    assert_eq!(
+        theirs.iter().map(|p| p.device.as_str()).collect::<BTreeSet<_>>(),
+        ["Air", "Studio"].into_iter().collect()
+    );
+}
+
+/// Someone who joined after this engine last probed is here before they are
+/// in its directory. Their Mac's name stands in for them, and the engine asks
+/// who they are — once, under the same gap as a stranger in the manifest.
+#[tokio::test(start_paused = true)]
+async fn a_stranger_here_is_shown_as_their_mac_and_asked_about_once() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let mut studio = device("Studio", &be);
+    studio.engine.probe_worker().await;
+    studio.cycle().await;
+
+    let token = invite_and_redeem(&be, &owner, "cy@example.com", "Cy", "d-cy").await;
+    let mut cy = device_as("Laptop", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    cy.engine.probe_worker().await;
+    cy.cycle().await;
+    cy.engine.poll_for_test().await;
+
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    let before = be.lock().unwrap().meta_calls;
+    studio.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "a Mac here nobody can name is what asked");
+    let here = &studio.status().presence[0];
+    assert_eq!(here.name, "Cy", "and the answer names them on the same poll");
+    assert_eq!(here.device, "Laptop");
+    for _ in 0..3 {
+        studio.engine.poll_for_test().await;
+    }
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "not once a poll");
+}
+
+/// The beat is presence, not sync: a poll that fails takes its beat with it
+/// and the next poll owes it again — no retry loop, no extra request.
+#[tokio::test(start_paused = true)]
+async fn a_beat_lost_with_its_poll_rides_the_next_one() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    tokio::time::sleep(PRESENCE_BEAT - Duration::from_secs(1)).await;
+
+    be.lock().unwrap().offline = true;
+    let before = be.lock().unwrap().requests;
+    tokio::time::sleep(POLL_INTERVAL * 2).await;
+    assert_eq!(be.lock().unwrap().requests - before, 2, "two polls refused, nothing hammering behind them");
+    be.lock().unwrap().offline = false;
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL).await;
+    assert!(
+        matches!(be.lock().unwrap().polls.first(), Some(Some(Beat::Here { .. }))),
+        "the first poll back carries the beat it owed"
+    );
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/* ---------- Leases (docs/cloud.md §8.2) ---------- */
+
+/// Two Macs with a document between them, both synced and probed.
+async fn two_with_a_doc(be: &SharedWorker) -> (Device, Device) {
+    let mut a = device("Alice", be);
+    let mut b = device("Bob", be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    b.cycle().await;
+    (a, b)
+}
+
+fn open(d: &mut Device, rel: &str) {
+    let abs = d.abs(rel).to_string_lossy().to_string();
+    d.engine.set_activity(Some(abs));
+}
+
+fn beats(be: &SharedWorker) -> Vec<Beat> {
+    be.lock().unwrap().polls.iter().flatten().cloned().collect()
+}
+
+/// Opening a document claims it on the beat its new path is owed — there is
+/// no request of its own — and a second Mac opening it is refused and told
+/// who has it, whatever case it spells the path in.
+#[tokio::test]
+async fn opening_a_document_claims_it_and_another_mac_sees_it_held() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"), "the beat that names it claims it");
+    assert!(a.status().leases.is_empty(), "your own lease is not a lock on you");
+
+    open(&mut b, "DOC.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"), "refused: one document is one lock, in any case");
+    assert_eq!(be.lock().unwrap().leases["doc.md"].device_id, "d-alice", "nothing moved");
+    let held = b.status().leases;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].path, "doc.md");
+    assert_eq!(held[0].device_id, "d-alice");
+    assert_eq!(held[0].name, "Alice");
+    assert!(!held[0].own);
+
+    // Refused is not owed: Bob's next polls are plain GETs until it frees.
+    be.lock().unwrap().polls.clear();
+    b.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().polls.iter().all(Option::is_none), "{:?}", be.lock().unwrap().polls);
+}
+
+/// Moving on is letting go: the beat that names another document releases
+/// this one, and the Mac that was waiting for it claims it on the poll after
+/// it hears — while a Mac with nothing open holds nothing.
+#[tokio::test]
+async fn moving_on_lets_go_and_the_mac_waiting_claims_it_next() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    open(&mut b, "doc.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"));
+
+    open(&mut a, "other.md");
+    a.engine.poll_for_test().await;
+    assert!(!a.engine.holds_for_test("doc.md"), "released by the beat that named something else");
+    assert!(a.engine.holds_for_test("other.md"));
+
+    be.lock().unwrap().polls.clear();
+    b.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().polls, vec![None], "nothing was owed when it asked");
+    assert!(b.status().leases.iter().all(|l| l.path != "doc.md"), "and now it knows: free");
+    b.engine.poll_for_test().await;
+    assert!(
+        matches!(be.lock().unwrap().polls.last(), Some(Some(Beat::Here { path: Some(p), take: false, .. })) if p == "doc.md"),
+        "a free document it has open is owed a claim, and the next poll carries it"
+    );
+    assert!(b.engine.holds_for_test("doc.md"));
+
+    a.engine.set_activity(None);
+    a.engine.poll_for_test().await;
+    assert!(be.lock().unwrap().leases.values().all(|l| l.device_id != "d-alice"), "nothing open, nothing held");
+}
+
+/// *Take over* claims a document somebody else holds, once — the flag rides
+/// one beat and is spent — and the Mac it was taken from finds out on its
+/// next poll and cannot take it back by merely having it open.
+#[tokio::test(start_paused = true)]
+async fn take_over_claims_a_held_document_once_and_the_holder_hears_on_its_next_poll() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    open(&mut b, "doc.md");
+    b.engine.poll_for_test().await;
+    assert!(!b.engine.holds_for_test("doc.md"));
+
+    b.engine.take_over(b.abs("doc.md").to_string_lossy().to_string());
+    b.engine.poll_for_test().await;
+    assert!(matches!(beats(&be).last(), Some(Beat::Here { take: true, .. })));
+    assert!(b.engine.holds_for_test("doc.md"), "taken");
+    assert!(b.status().leases.is_empty());
+
+    a.engine.poll_for_test().await;
+    let held = a.status().leases;
+    assert_eq!(held.iter().map(|l| l.device_id.as_str()).collect::<Vec<_>>(), ["d-bob"], "Alice hears on her next poll");
+    assert!(!a.engine.holds_for_test("doc.md"));
+
+    // A beat later, both renew what they have: Bob his lease, Alice nothing.
+    tokio::time::advance(PRESENCE_BEAT).await;
+    a.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    let last_two: Vec<Beat> = beats(&be).into_iter().rev().take(2).collect();
+    assert!(last_two.iter().all(|b| matches!(b, Beat::Here { take: false, .. })), "take is spent once carried: {last_two:?}");
+    assert_eq!(be.lock().unwrap().leases["doc.md"].device_id, "d-bob", "and having it open does not take it back");
+}
+
+/// Typing is what keeps a document yours. Each write the app makes to the
+/// document being edited renews the editing, so the lease is carried on beat
+/// after beat for as long as somebody types; a Mac left with it open lets go
+/// `ACTIVITY_FRESH` after the last keystroke, and a write to some other file
+/// does not count.
+#[tokio::test(start_paused = true)]
+async fn typing_keeps_a_document_and_walking_away_lets_it_go() {
+    let be = fake_worker();
+    let (mut a, _b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"));
+
+    for _ in 0..4 {
+        tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
+        a.engine.touch_activity("doc.md");
+        a.engine.poll_for_test().await;
+    }
+    assert!(a.engine.holds_for_test("doc.md"), "sixteen minutes of typing, still Alice's");
+    assert!(matches!(beats(&be).last(), Some(Beat::Here { path: Some(p), .. }) if p == "doc.md"));
+
+    tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
+    a.engine.touch_activity("doc.meta.jsonl");
+    a.engine.touch_activity("other.md");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    a.engine.poll_for_test().await;
+    assert!(!a.engine.holds_for_test("doc.md"), "walked away: let go");
+    assert!(be.lock().unwrap().leases.is_empty());
+    assert_eq!(be.lock().unwrap().presence["d-alice"].path, None, "and here, idle");
+}
+
+/// A lock nobody can confirm is no lock. A poll that fails takes the leases
+/// it was showing with it, and an engine that is not hearing the domain —
+/// paused here — shows none, so nothing it last heard keeps an editor
+/// view-only.
+#[tokio::test]
+async fn a_lock_this_mac_cannot_hear_about_is_no_lock() {
+    let be = fake_worker();
+    let (mut a, mut b) = two_with_a_doc(&be).await;
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    b.engine.poll_for_test().await;
+    assert_eq!(b.status().leases.len(), 1);
+
+    be.lock().unwrap().offline = true;
+    b.engine.poll_for_test().await;
+    assert!(b.status().leases.is_empty(), "dropped with the poll that failed");
+    be.lock().unwrap().offline = false;
+    b.engine.poll_for_test().await;
+    assert_eq!(b.status().leases.len(), 1, "and back with the next one");
+
+    b.engine.set_paused(true);
+    assert!(b.status().leases.is_empty(), "a paused engine is not listening");
+    b.engine.set_paused(false);
+    assert_eq!(b.status().leases.len(), 1);
+}
+
+/// A worker before v8, or one whose database cannot answer, has no lock to
+/// give: the app shows none, and — the part that would cost — is never left
+/// owing a claim, so an editing Mac still beats one poll in three.
+#[tokio::test]
+async fn a_worker_without_leases_or_a_database_shows_no_lock_and_is_not_claimed_at() {
+    for older in [true, false] {
+        let be = fake_worker();
+        if older {
+            be.lock().unwrap().features.retain(|f| f != "leases");
+        }
+        let (mut a, mut b) = two_with_a_doc(&be).await;
+        be.lock().unwrap().d1_down = !older;
+        open(&mut a, "doc.md");
+        a.engine.poll_for_test().await;
+        open(&mut b, "doc.md");
+        b.engine.poll_for_test().await;
+        assert!(b.status().leases.is_empty());
+        assert!(be.lock().unwrap().leases.is_empty());
+
+        be.lock().unwrap().polls.clear();
+        for _ in 0..3 {
+            a.engine.poll_for_test().await;
+            b.engine.poll_for_test().await;
+        }
+        assert!(be.lock().unwrap().polls.iter().all(Option::is_none), "older={older}: nothing owed");
+    }
+}
+
+/// A lease names whoever holds it the way presence does: the person, and your
+/// own other Mac by its name — flagged, so the editor can say "open on your
+/// other Mac" rather than name you to yourself.
+#[tokio::test]
+async fn a_lease_names_the_person_and_your_own_other_mac() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+    let mut studio = device("Studio", &be);
+    let mut air = device("Air", &be);
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    for d in [&mut studio, &mut air, &mut bob] {
+        d.engine.probe_worker().await;
+        d.cycle().await;
+    }
+    open(&mut air, "a.md");
+    air.engine.poll_for_test().await;
+    open(&mut bob, "b.md");
+    bob.engine.poll_for_test().await;
+    studio.engine.poll_for_test().await;
+
+    let held = studio.status().leases;
+    let on_air = held.iter().find(|l| l.path == "a.md").unwrap();
+    assert!(on_air.own, "Ada's other Mac");
+    assert_eq!(on_air.name, "Air");
+    let on_bob = held.iter().find(|l| l.path == "b.md").unwrap();
+    assert!(!on_bob.own);
+    assert_eq!(on_bob.name, "Bob Mbeki");
+    assert_eq!(on_bob.device, "Bob");
+
+    bob.engine.poll_for_test().await;
+    let theirs = bob.status().leases;
+    assert_eq!(theirs.len(), 1);
+    assert_eq!((theirs[0].name.as_str(), theirs[0].own), ("Ada", false), "to Bob, it is Ada's");
+}
+
+/// The budget holds while somebody edits: holding a lease is renewing it on
+/// the beat that was going out anyway, so a Mac with a document open is the
+/// same four requests a minute as an idle one — and quitting lets go of it.
+#[tokio::test(start_paused = true)]
+async fn an_editing_mac_holding_its_document_still_makes_four_requests_a_minute() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    let doc = a.abs("doc.md").to_string_lossy().to_string();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    cmd_tx.send(EngineCmd::SetActivity(Some(doc))).unwrap();
+
+    tokio::time::sleep(Duration::from_secs(120) + Duration::from_millis(100)).await;
+    assert_eq!(be.lock().unwrap().leases.get("doc.md").map(|l| l.device_id.as_str()), Some("d-alice"));
+    let before = be.lock().unwrap().requests;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(be.lock().unwrap().requests - before, 4, "the renewal rides the beat");
+    assert!(be.lock().unwrap().leases.contains_key("doc.md"), "and keeps it");
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    assert!(be.lock().unwrap().leases.is_empty(), "a quitting Mac's leave lets go of it");
+    drop(root_dir);
+}
+
+/// A worker that takes beats but holds no leases (v7) still claims nothing
+/// for an app that knows it, and the app owes it no claim — until it is
+/// updated. The hourly pass that waits for `versions` and `presence` waits
+/// for `leases` too, so a Mac that is already running learns it within the
+/// hour, and stops asking once it has.
+#[tokio::test(start_paused = true)]
+async fn the_hourly_pass_asks_again_until_the_worker_holds_leases() {
+    let be = fake_worker();
+    be.lock().unwrap().features.retain(|f| f != "leases");
+    let mut a = device("Alice", &be);
+    a.engine.probe_worker().await;
+    a.cycle().await;
+    a.engine.mirror_versions().await;
+
+    let asks = |be: &SharedWorker| be.lock().unwrap().meta_calls;
+    tokio::time::advance(MIRROR_EVERY).await;
+    let before = asks(&be);
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 1, "a worker without leases is asked again on the hour");
+
+    be.lock().unwrap().features.push("leases".into());
+    tokio::time::advance(MIRROR_EVERY).await;
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 2, "which is how the update is noticed");
+
+    // Known now: a free document it has open is owed a claim at once.
+    open(&mut a, "doc.md");
+    a.engine.poll_for_test().await;
+    assert!(a.engine.holds_for_test("doc.md"));
+    tokio::time::advance(MIRROR_EVERY).await;
+    a.engine.mirror_versions().await;
+    assert_eq!(asks(&be), before + 2, "and nothing is missing, so nothing is asked");
 }
 
 /* ---------- The bus, the wake, the grammars, the config ---------- */
@@ -1682,7 +3236,7 @@ fn dedupe_suffixes_the_younger_id() {
     for (fid, path) in [("f-bbb", "Notes/plan.md"), ("f-aaa", "notes/Plan.md")] {
         m.files.insert(
             fid.into(),
-            ManifestFile { path: path.into(), rev: 1, hash: "0".repeat(16), size: 1, mtime: 0, by: "".into(), hist: vec![] },
+            ManifestFile { path: path.into(), rev: 1, hash: "0".repeat(16), size: 1, mtime: 0, by: "".into() },
         );
     }
     dedupe_paths(&mut m);
@@ -2127,7 +3681,7 @@ async fn read_through_caches_another_devices_snapshot() {
 /// first, because deleting the index before the data it names is the order
 /// that is safe to interrupt.
 #[tokio::test]
-async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
+async fn legacy_cleanup_sweeps_the_retired_blob_backlog_across_polls() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
@@ -2147,48 +3701,30 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     a.cycle().await;
 
     let (fids, blobs_before) = {
-        let mut b = be.lock().unwrap();
+        let b = be.lock().unwrap();
         let fids: Vec<String> =
             b.manifest.files.keys().chain(b.manifest.tombstones.keys()).cloned().collect();
-        for fid in &fids {
-            b.histories.insert(fid.clone());
-        }
         assert_eq!(fids.len(), LEGACY_BATCH + 5, "every file, the deleted one included");
         (fids, b.blobs.len())
     };
     assert_eq!(blobs_before, LEGACY_BATCH + 5 + 3, "one per file, plus three second revisions");
 
-    // Poll one: a batch of archives, and not one blob.
-    a.engine.poll_for_test().await;
-    {
-        let b = be.lock().unwrap();
-        assert_eq!(b.histories.len(), fids.len() - LEGACY_BATCH, "one batch, no more");
-        assert_eq!(b.blobs.len(), blobs_before, "the archives go first");
-    }
-    let held = serde_json::to_value(&a.engine.state).unwrap();
-    assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
-
-    // Poll two finishes the archives; poll three finds the end of the list.
-    a.engine.poll_for_test().await;
-    assert!(be.lock().unwrap().histories.is_empty(), "every archive is gone");
-    a.engine.poll_for_test().await;
-    assert!(a.engine.state.legacy_cleanup.archives_done);
-    assert!(!a.engine.state.legacy_cleanup.done, "the blobs are still to do");
-
-    // Then the inventory, the same batch at a time.
+    // A batch per poll, and the bookmark is persisted between them.
     a.engine.poll_for_test().await;
     assert!(be.lock().unwrap().blobs.len() < blobs_before, "it has started");
+    let held = serde_json::to_value(&a.engine.state).unwrap();
+    assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
     a.engine.poll_for_test().await;
     a.engine.poll_for_test().await;
 
-    assert!(a.engine.state.legacy_cleanup.done, "both passes are finished");
+    assert!(a.engine.state.legacy_cleanup.done, "the backlog is finished");
     let b = be.lock().unwrap();
-    assert!(b.histories.is_empty());
     assert_eq!(b.blobs.len(), LEGACY_BATCH + 4, "one blob per living file, and nothing for the deleted one");
     for (fid, f) in &b.manifest.files {
         assert!(b.blobs.contains_key(&(fid.clone(), f.hash.clone())), "{} lost its current bytes", f.path);
     }
     drop(b);
+    assert_eq!(fids.len(), LEGACY_BATCH + 5);
 
     // Being done is persisted like every other step of it. A device that
     // forgot would walk the whole bucket again on its next launch.
@@ -2197,7 +3733,7 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     assert!(reloaded.legacy_cleanup.done, "it must survive a restart: {}", finished["legacy_cleanup"]);
     assert!(finished["legacy_cleanup"].get("cursor").is_none(), "and drop the bookmark it no longer needs");
 
-    // A workspace connected after this phase has no history to retire, and
+    // A workspace connected after this phase has no backlog to retire, and
     // says nothing about it until the pass actually starts.
     assert!(
         serde_json::to_value(WorkspaceState::default()).unwrap().get("legacy_cleanup").is_none(),
@@ -2205,41 +3741,33 @@ async fn legacy_cleanup_deletes_archives_then_sweeps_old_blobs_across_polls() {
     );
 }
 
-/// A worker older than 3 has no DELETE route for an archive. The pass waits
-/// where it is — it is not an error, and it does not sweep blobs ahead of
-/// the archives that name them — and runs after the update.
+/// A device that was still deleting archives when this release arrived has a
+/// bookmark into a pass that no longer exists. The blob sweep starts from the
+/// beginning rather than inheriting it: it is idempotent, and skipping half
+/// the backlog for ever is not.
 #[tokio::test]
-async fn legacy_cleanup_waits_on_a_worker_without_the_route() {
+async fn a_bookmark_from_the_archive_pass_does_not_carry_into_the_blob_sweep() {
     let be = fake_worker();
-    be.lock().unwrap().features = vec!["sync".into(), "wipe".into()];
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
-    a.write("doc.md", "one\n");
-    a.cycle().await;
-    a.write("doc.md", "two, and longer\n");
-    a.cycle().await;
-    let fid = manifest_of(&be).files.keys().next().unwrap().clone();
-    let blobs_before = {
-        let mut b = be.lock().unwrap();
-        b.histories.insert(fid.clone());
-        b.blobs.len()
-    };
-
-    for _ in 0..3 {
-        a.engine.poll_for_test().await;
+    for i in 0..3 {
+        a.write(&format!("n{}.md", i), "first\n");
     }
-    {
-        let b = be.lock().unwrap();
-        assert!(b.histories.contains(&fid), "nothing was deleted");
-        assert_eq!(b.blobs.len(), blobs_before, "and no blob was swept past them");
+    a.cycle().await;
+    for i in 0..3 {
+        a.write(&format!("n{}.md", i), "second, and rather longer\n");
     }
-    assert!(!a.engine.state.legacy_cleanup.archives_done);
-    assert!(!a.engine.state.legacy_cleanup.done);
-    assert_eq!(a.phase(), Phase::Idle, "waiting is not an error");
+    a.cycle().await;
+    let blobs_before = be.lock().unwrap().blobs.len();
+    assert_eq!(blobs_before, 6, "three files, two revisions each");
 
-    // The worker is updated. The pass starts where it never got to.
-    be.lock().unwrap().features = vec!["sync".into(), "wipe".into(), "versions".into()];
-    a.engine.probe_worker().await;
+    // What the older release left behind: the archive pass was mid-way.
+    let last_fid = manifest_of(&be).files.keys().next_back().unwrap().clone();
+    a.engine.state.legacy_cleanup.archives_done = false;
+    a.engine.state.legacy_cleanup.cursor = Some(last_fid);
+
     a.engine.poll_for_test().await;
-    assert!(be.lock().unwrap().histories.is_empty(), "the archive goes now");
+    assert!(a.engine.state.legacy_cleanup.archives_done, "there is only one pass now");
+    a.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().blobs.len(), 3, "every file swept, not just the ones past the old cursor");
 }

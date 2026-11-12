@@ -7,8 +7,9 @@ folder is backed up and kept in sync on every Mac that holds it, with
 per-file history; publishing a note or a folder is one flag in the synced
 manifest, and the worker renders the public page from the synced files on
 request. This document is how it is built: the vocabulary, the invariants,
-the worker, the engine, the app's surfaces, the room left for invites and
-locking, and the decisions behind each. The wire contract on its own is
+the worker, the engine, the app's surfaces, the people a workspace is shared
+with and the leases that keep two of them out of one document, and the
+decisions behind each. The wire contract on its own is
 [cloud-worker/README.md](../cloud-worker/README.md); how to verify any of it
 is `.claude/skills/verify/SKILL.md`.
 
@@ -107,7 +108,8 @@ flowchart LR
     WATCH[fs watcher] -- external edits --> ENG
   end
   subgraph cf[notes.example.com — the user's Cloudflare account]
-    W[cloud worker] --- R2[(R2 bucket<br/>workspace.json · manifest.json<br/>blobs · history · presence)]
+    W[cloud worker] --- R2[(R2 bucket<br/>workspace.json · manifest.json<br/>blobs · versions)]
+    W --- D1[(D1 database<br/>people · presence · leases)]
   end
   ENG <-- HTTPS, bearer OWNER_TOKEN --> W
   V[visitor's browser] -- GET /slug --> W
@@ -115,7 +117,7 @@ flowchart LR
 
 Three parties, two contracts:
 
-- **Engine ⇄ worker**: the sync API (manifest CAS, blobs, history, presence)
+- **Engine ⇄ worker**: the sync API (manifest CAS, blobs, the version store, the poll and the presence and leases it carries)
   plus three small admin routes (meta, bind, wipe). JSON over HTTPS, bearer
   auth. Written down in [cloud-worker/README.md](../cloud-worker/README.md).
 - **UI ⇄ engine**: Tauri commands in, events out. Typed in one file
@@ -139,38 +141,79 @@ https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-wor
 
 ### 5.1 Resources and names
 
-One domain = one worker + one bucket + one secret, named from the domain so
-two setups can never collide:
+One domain = one worker + one bucket + one D1 database + one secret, all
+named from the domain so two setups can never collide:
 
-| Domain | Worker | Bucket | Endpoint |
-| --- | --- | --- | --- |
-| `notes.example.com` (a zone on the same account) | `doklin-notes-example-com` | `doklin-notes-example-com` | `https://notes.example.com` |
-| free `workers.dev`, chosen name `sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `https://doklin-sherin-notes.<account>.workers.dev` (the agent reports it) |
+| Domain | Worker | Bucket | Database | Endpoint |
+| --- | --- | --- | --- | --- |
+| `notes.example.com` (a zone on the same account) | `doklin-notes-example-com` | `doklin-notes-example-com` | `doklin-notes-example-com` | `https://notes.example.com` |
+| free `workers.dev`, chosen name `sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `doklin-sherin-notes` | `https://doklin-sherin-notes.<account>.workers.dev` (the agent reports it) |
 
 Secret: `OWNER_TOKEN` (32 random bytes, hex; the app mints it). R2 binding:
-`DATA`. `wrangler.toml` is written verbatim into the prompt (§7.4);
-`cloud-worker/wrangler.toml.example` is the same file for doing it by hand.
-The naming rule is one function, `resourceName` in `src/cloudPrompts.ts`.
+`DATA`; D1 binding: `DB`. `wrangler.toml` is written verbatim into the
+prompt (§7.4); `cloud-worker/wrangler.toml.example` is the same file for
+doing it by hand. The naming rule is one function, `resourceName` in
+`src/cloudPrompts.ts`.
+
+The database is where people, presence and leases live — everything a blob
+store cannot hold: a `UNIQUE` email, a credential deleted atomically, a row
+per device upserted without a lost update, a lock acquired in one statement:
+
+```sql
+meta     (key, schema_version)                   the migration runner's anchor
+members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
+tokens   (hash, id, member_id, device_id, device_name, created_at)
+invites  (hash, id, member_id, created_at, expires_at)
+presence (device_id, member_id, device_name, path, ts)    a row per Mac here now (§5.3's poll)
+leases   (path, device_id, member_id, device_name, until) a row per document open somewhere (§8.2)
+```
+
+Two columns carry a name beside an id — `tokens.device_name`, and the Mac's
+name on `presence` and `leases` — so authenticating and answering a poll each
+stay single-row lookups rather than joins. `member_id` is nullable on the
+last two: an owner who never adopted an identity is here, and holds
+documents, as their Mac. The database is single-primary: D1's read replicas
+(the Sessions API) trade strong consistency for locality, and a lease that
+two Macs might both believe they hold is worse than none.
+
+The worker builds and migrates that schema itself
+(`cloud-worker/src/schema.ts`): an update ships one bundled file and no
+migrations directory, so `wrangler d1 migrations apply` is not available to
+a domain being updated. An ordered list of steps runs on the `/api/meta`
+probe, at most once per isolate, with idempotent `CREATE TABLE IF NOT
+EXISTS` statements and a guarded `UPDATE meta SET schema_version = <to>
+WHERE schema_version = <to-1>`, so two isolates reaching a fresh database
+converge instead of colliding.
+
+A domain deployed before the binding existed has no `DB` at all, and the
+whole sync API works exactly as it did — `/api/meta` answers `"d1": null`.
+What it cannot do is resolve a member's token or answer an identity route,
+because those *are* the database. The owner's own credential never reads a
+row (§5.4), so losing D1 costs a workspace its people, never its owner.
 
 ### 5.2 R2 layout
 
 ```
 workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceName}}
                             — the binding. Written once, create-only.
-manifest.json               the workspace manifest (v2, §6.6) — CAS by etag
+manifest.json               the workspace manifest (v3, §6.6) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-history/<fileId>.json       deep revision archive (entries rolled out of the manifest's hist)
-presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [{id, ts, device, reason, files,
                             bytes, digest, pinned?, label?, restoredFrom?}]} — CAS by etag
 versions/snapshots/<id>.json.gz   one whole workspace state, gzip'd; immutable.
                             <id> is <ts13>-<deviceId> — when it was taken and by whom
 versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its FULL sha256
-auth/tokens/<sha256>.json   {id, name, email?, role, createdAt, lastSeenAt}   ← empty until invites exist
-auth/invites/<sha256>.json  {email, role, createdAt, expiresAt}               ← empty until invites exist
 ```
 
 Nothing public is stored here: public pages are *rendered* from `blobs/`.
+And nobody is stored here: people, their tokens and their invites are rows
+in the D1 database beside the bucket (§5.1), because a blob store cannot
+hold a `UNIQUE` email or delete a credential atomically. Neither is who is
+here: presence was `presence.json` until worker v7, one object every device
+read, changed and wrote back with no CAS — a lost update whenever two beats
+crossed, and an R2 write per beat (§11.2). It is a row per device now. A
+bucket an older worker wrote may still hold that object, or `history/`
+archives from before v6; nothing reads either, and a wipe takes both.
 The layout and the grammar of its ids live in `cloud-worker/src/layout.ts`.
 
 `versions/` is the cloud half of versioning ([versioning.md](versioning.md)
@@ -189,23 +232,31 @@ logs; nothing reads it). There is no CORS and no preflight — the engine is
 the only caller.
 
 ```
-GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null}
-                                 — liveness, the credential and "is this domain bound" in one call
-POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
-                                 createdBy, manifestEtag}; 409 {workspace} when already bound
+GET    /api/meta                 {version, features, workspace: {id, name, createdAt, createdBy} | null,
+                                 d1: <schema version> | null,
+                                 you: {role, memberId, email, name}, people: [{id, name}]}
+                                 — liveness, the credential, "is this domain bound", the state of the
+                                 database, who you are and what everyone here is called, in one call;
+                                 also where the schema migrates itself
+POST   /api/workspace            owner; bind: body {name, deviceName?, ownerEmail?, ownerName?}
+                                 → 201 {id, name, createdAt, createdBy, manifestEtag, owner?};
+                                 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+GET    /api/poll                 {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}},
+                                 leases: [{path, deviceId, memberId, name, until}] | null}
+                                 — the cheap 15 s poll; reads only
+POST   /api/poll                 the same poll carrying this Mac's beat: body {name, path?, take?} —
+                                 "here, editing path", which claims that document's lease (§8.2) —
+                                 or {leave: true}; needs x-doklin-device to record it
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
-                                 on a lost race; 400 on garbage; 426 on a newer schema; 413 past 4 MB
+                                 on a lost race; 400 on garbage; 426 on ANY other schema version —
+                                 the sentence names which side is behind; 413 past 4 MB
 GET    /api/blobs/<fid>          {blobs: [{hash, size, uploaded}]} — the inventory GC diffs
 GET    /api/blobs/<fid>/<hash>   the bytes (content-type as uploaded)
 PUT    /api/blobs/<fid>/<hash>   store bytes (immutable: a re-PUT of a stored hash is a no-op,
                                  {existed: true}); 413 past 25 MB
 DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
-GET    /api/history/<fid>        DEPRECATED {version: 1, entries: [{r, h, s, t, b?}]}; 404 for none
-PUT    /api/history/<fid>        DEPRECATED replace the archive (advisory, ≤ 200 entries, ≤ 256 KB)
-DELETE /api/history/<fid>        drop the archive; 204 whether or not one was there
 GET    /api/versions/index       the version store's index + x-versions-etag; 404 when there is none
 PUT    /api/versions/index       header x-base-etag required (428 without), "*" creates; 412 + etag
                                  on a lost race; 400 on garbage; 413 past 1 MB
@@ -216,24 +267,72 @@ GET    /api/versions/blobs[?cursor=c] {blobs: [{hash, size, uploaded}], cursor?}
 GET    /api/versions/blobs/<hash>     the bytes
 PUT    /api/versions/blobs/<hash>     store bytes (immutable, {existed: true} on a re-PUT); 413 past 25 MB
 DELETE /api/versions/blobs/<hash>     collect a version no retained snapshot references
-PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
-                                 (path absent or null: here, idle); needs x-doklin-device
-DELETE /api/presence             this device left
 POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
                                  repeat until remaining:false. Frees the domain for a new binding.
+
+POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
+                                 {token, tokenId, member}; 401 when the code is unknown or
+                                 expired, which answer identically
+POST   /api/auth/invites         owner; {email, name?, codeHash, expiresAt} → 201 {invite};
+                                 creates the member if the email is new, replaces their pending one
+GET    /api/auth/invites         owner; the pending, unexpired ones
+DELETE /api/auth/invites/<id>    owner; withdraw one (204)
+GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
+POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own identity
+DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
+DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
 ```
 
-The three `/api/history/<fid>` routes are the **retired** manifest history
-([versioning.md](versioning.md) §6.5). No current app reads or writes one;
-`GET` and `PUT` stay because an app on an older release still does and this
-API only grows, and `DELETE` is what the current app's one-time clean-up
-calls (§6.9). Removing them would break a device the user has not updated,
-which is the one thing the worker contract never does.
+Everything under `/api/auth` is the D1 database beside the bucket; a
+deployment that has none answers `503` there and loses nothing else.
 
-Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
-`404 {"error":"not bound"}`. Reserved for invites (§8.1), not built:
-`POST /api/auth/join`, `GET/POST/DELETE /api/auth/invites`,
-`GET/DELETE /api/auth/tokens`.
+`/api/meta`'s `you` and `people` are that database too, and they are on
+`meta` rather than behind a route of their own for two reasons: every engine
+already calls it before it writes anything, and `/api/auth` stays exactly
+what it says — the owner's. `you.memberId` is the id this Mac's work is
+signed with (null for an owner who has adopted no identity); `people` is ids
+and display names, because a manifest names ids and every Mac has to be able
+to put a name to one. Addresses, roles and device counts stay owner-only.
+
+The three `/api/history/<fid>` routes that served the manifest's retired
+per-file history are **gone** as of worker v6, with the `history/` prefix
+they read ([versioning.md](versioning.md) §6.5, and §5.7's compatibility
+rule). Nothing had written one since the version store landed; what kept
+them was compatibility with a release nobody runs.
+
+**The poll carries presence** (worker v7). The beat used to be a request of its own — `PUT /api/presence` every
+other poll — and an R2 write each time; now the engine attaches it to the
+poll it was going to make anyway, and the method says whether anything is
+written: a `GET` only reads, and a `POST` upserts the caller's row (or, for a
+leave, deletes it), sweeps rows past the 90 s TTL and answers with what is
+left, in one D1 batch. The engine sends a `POST` only when a beat is due —
+every 45 s, or the moment the edited path changes — so two polls in three
+write nothing. Each entry names the Mac (`name`) and whose it is
+(`memberId`; the owner's is the adopted row, null when there is none), and
+the person's `lastSeenAt` moves with it, at most once an hour. Revoking a
+Mac or removing a person deletes their row in the same batch, so neither
+lingers in *Here now* for the TTL.
+
+**…and leases** (worker v8). A beat that names a path also claims that
+document: one upsert on `leases`, keyed by the path lowercased, that takes
+the row when it is free, lapsed or already this Mac's — renewing it — and
+changes nothing when somebody else holds it; `take: true` drops that last
+condition, which is the whole of *Take over*. The same batch lets go of
+anything else this Mac held, so a beat naming another document, or none,
+releases, and a leave releases everything. The answer lists every live lease
+beside presence. Nothing about a lease touches sync: §8.2 is the design.
+
+Presence and leases are never on the sync path: with no database, a broken
+one, or a D1 query that throws, the poll still answers the etag, with
+`presence: {}` and `leases: null` — "the domain could not say", which every
+editor reads as no lock. A beat it cannot attribute (no `x-doklin-device`)
+or whose path is not one is a poll all the same — it answers, and records
+what it can.
+
+Not bound yet? `/api/poll` (either method — a beat to an empty domain
+records nobody, and claims nothing), `/api/manifest` and `/api/workspace` answer
+`404 {"error":"not bound"}`.
 
 Public (no auth, `GET`/`HEAD` only; anything else is a 405):
 
@@ -259,16 +358,40 @@ Every page carries `<meta name="robots" content="noindex">` and the
 
 ### 5.4 Auth
 
-- `OWNER_TOKEN` is compared by SHA-256 in constant time. Role `owner`.
-- `auth/tokens/<sha256(token)>.json` — per-person tokens an invite will mint,
-  role `member`. The set is empty today; the lookup exists so *resolving* a
-  member token is an addition, not a change. The route that mints one is
-  not: it must answer without a bearer, so it carves out of the gate above
-  (§8.1). Members may sync and publish; only the owner may bind, wipe,
-  invite, or revoke. Revocation is deleting the object.
+- `OWNER_TOKEN` is compared by SHA-256 in constant time against the worker's
+  env secret, **with no database read**. The order is the design, not an
+  optimization: a D1 outage degrades a workspace to one credential rather
+  than locking its owner out of their own domain. Role `owner`.
+- Only a bearer that is *not* the owner's costs a row read —
+  `tokens.hash = sha256(bearer)`, joined to the member holding it: one
+  primary-key lookup. Revoking is deleting that row, and it takes effect on
+  that device's very next request; there is no session, so there is nothing
+  to expire.
+- **A token always authenticates as `member`**, whatever `members.role`
+  says. That column describes a *person* — it is what the People list shows
+  — and is never evidence of authority: owner comes from the env secret and
+  from nowhere else, so no row anybody can write confers it. Inviting the
+  owner's own address mints an ordinary member credential, which is right:
+  their second Mac already has the real one.
+- **A member is not a limited account.** `PUT /api/manifest` is not
+  role-gated: any valid bearer rewrites the manifest wholesale, tombstones
+  included. What a member cannot do is *administer* the domain — bind,
+  wipe, invite, list people and revoke are owner-only. Identity buys
+  attribution and per-person revocation, not read-only access and not
+  per-folder scope.
+- `POST /api/auth/join` is the one route above the gate, matched on method
+  **and** path exactly, because answering it is how a Mac gets a bearer at
+  all. Everything else under `/api/auth` is owner-only and inside it.
+- Guessing is off the table rather than throttled: an invite code is 100
+  bits of Crockford base32, so there is no attempt cap, no lockout and no
+  counter to store. Entropy is free; a counter is not.
+- Neither secret is ever stored in the clear: a token is its own sha256, an
+  invite is `sha256(code)`, so the database is a list of people rather than
+  a list of credentials. The plaintext code crosses the wire only at
+  redeem, which is precisely what makes the stored hash useless to anyone
+  who reads it.
 - No cookies, no gate, no sessions, no rate limiter for visitors — there is
-  nothing to unlock. A join route would be the first thing worth guessing,
-  which is why §8.1 leaves throttling open rather than assumed.
+  nothing to unlock.
 
 ### 5.5 The binding
 
@@ -385,14 +508,28 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (3 — the sync API was 1; publishing
-  made it 2; the version store made it 3), `WORKER_FEATURES`
-  (`["sync", "wipe", "publish", "boards", "versions"]`; a feature name is a
-  promise about behaviour, listed only once the behaviour exists — the
-  engine mirrors nothing to a worker that does not list `versions`),
-  `MANIFEST_VERSION` (2) and `COMPATIBILITY_DATE` (the Workers
+  the worker (§7.1): `WORKER_VERSION` (8 — the sync API was 1; publishing
+  made it 2; the version store made it 3; the D1 binding made it 4; people
+  made it 5; attribution by person made it 6; presence in D1, folded into
+  the poll, made it 7; leases made it 8), `WORKER_FEATURES`
+  (`["sync", "wipe", "publish", "boards", "versions", "members", "presence",
+  "leases"]`; a feature name is a promise about behaviour, listed only once
+  the behaviour exists — the engine mirrors nothing to a worker that does
+  not list `versions`, sends no beat to one that does not list `presence`,
+  and owes no claim to one that does not list `leases`),
+  `MANIFEST_VERSION` (3) and `COMPATIBILITY_DATE` (the Workers
   runtime date `wrangler.toml` pins; moving it changes every new deploy's
   runtime, so it is moved on purpose).
+- **The compatibility rule.** No released app and no deployed worker has
+  to keep working with the other side's next release — what they owe each
+  other is narrower: a skewed pair **refuses politely and never corrupts**.
+  Every change to the wire bumps `WORKER_VERSION`, so a pair that disagrees
+  says so (the update badge, `worker-outdated`, a `426` naming which side is
+  behind) instead of misbehaving. That rule is what let the `/api/history`
+  routes, the manifest's `hist` and `presence.json` simply go rather than
+  linger as dead routes, and what made `by` a member id outright, with no
+  parallel field. What it does not buy is skipping the bumps: an app updated
+  before its worker is a normal Tuesday, not a broken install.
 - The engine probes `/api/meta` on start and on every poll and reports
   `workerVersion` in its status; the frontend compares with the bundled
   integer and shows the update badge. A worker that receives a manifest
@@ -400,7 +537,33 @@ decision 7).
   reports as phase `worker-outdated` — the one case where sync pauses — and
   it resumes on its own the moment a newer version answers the probe.
 - `POST /api/admin/wipe` is batched, owner-only, repeated until done; it is
-  the erase step of teardown and the only way to free a domain.
+  the erase step of teardown and the only way to free a domain. Its last
+  round also empties the D1 tables and re-runs the schema, so a rebound
+  domain inherits nobody from the old one.
+- Version 4 carried no new behaviour of its own — it was the update badge
+  doing its job, so the `DB` binding reached deployed domains before
+  anything depended on it. Version 5 is what depends on it, and it adds the
+  feature name `"members"`: a promise the app can act on, that this worker
+  mints and resolves per-person tokens. A bare `d1` is still deliberately
+  not a feature name — that is plumbing, and `/api/meta`'s `d1` reports it
+  more precisely than a name in a list could.
+- `"presence"` (version 7) is the promise that `POST /api/poll` takes a
+  beat. Every worker has had presence of some kind; before 7 it was a route
+  of its own, and the poll answered `GET` only. So an app that finds the
+  name missing polls with `GET` and sends nothing — its Mac goes unseen, sync
+  is untouched — and an app a release behind keeps polling with the `GET`
+  that still answers, its own beats going to a route that is gone. Neither
+  side corrupts anything; each is waiting on an update it is already being
+  shown. While a worker lacks `versions`, `presence` or `leases` the engine
+  asks `/api/meta` again hourly, so an update reaches Macs that are already
+  running.
+- `"leases"` (version 8) is the promise that a beat's path claims the
+  document and that the poll says who holds what. A worker without it
+  answers no `leases`, and the app opens every document as it always has.
+  An app a release behind, on a worker with it, still beats with a path —
+  so it holds leases it cannot see: the others are warned about it, and it
+  is the one Mac not warned about them. Both are the honest answer to what
+  each side can offer.
 
 ### 5.8 Size and tests
 
@@ -412,10 +575,21 @@ empty so the tests compile the worker without building mermaid; the bundle
 script splices the module in.
 
 `node cloud-worker/test/run.mjs` (plain node; an in-memory R2 and cache in
-`test/fake-r2.mjs`; the worker compiled in-process through vite) covers
-auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
+`test/fake-r2.mjs`, and a D1 over node's own SQLite in `test/fake-d1.mjs`,
+so the schema runner's `IF NOT EXISTS` and its guarded version bump run as
+real SQL; the worker compiled in-process through vite) covers the migration
+and the two ways a database can be absent, identity end to end (invite →
+redeem → sync → revoke, the one-time and expiring invite, one email as one
+person, the carve-out, and the owner authenticating with the binding
+removed), auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
 (304 / 412 / 428), validation and the public map, 426 on a newer schema,
-blobs, history, presence, the statics, and then loads a seed workspace
+blobs, the retired history routes, the poll and the presence it carries
+(a `GET` that writes nothing, a beat, the sweep, a leave, `lastSeenAt` to
+the hour, revocation clearing a row, and the etag answering with the
+database removed), the leases riding the same beat (a claim, two Macs racing
+one document and exactly one holding it, a renewal by the holder and nothing
+by anyone else, letting go, a lapsed lease free to claim, *Take over*), the
+statics, and then loads a seed workspace
 through the API (`test/seed.mjs` — a note, a note with an html rendition, a
 folder, a store with cards, a card with properties, a note with tables and
 widths, a note with comments, a diagram) and renders it: a note, a
@@ -452,9 +626,11 @@ opens a connection to the worker.
 src-tauri/src/cloud/
   mod.rs        the manager (one engine per root), the Tauri commands, init at boot
   engine.rs     Engine<R>: the cycle, fold_public, presence, history, status
-  manifest.rs   the wire types (manifest v2, the public map) + their grammar
+  manifest.rs   the wire types (manifest v3, the public map, the poll and its beat) + their grammar
   remote.rs     the Remote trait; HttpRemote (the real worker)
   flows.rs      bind + upload, download, wipe — generic over Remote, so the tests run them
+  invite.rs     the invite code and the paste blob — the grammar, and the only
+                place a code is ever in the clear
   merge.rs      the three-way merge and conflict copies
   scan.rs       the local walk, hashing, atomic writes
   bus.rs        the edit bus (every write command → the engine)
@@ -531,17 +707,40 @@ reconcile) or a *poll* (etag + presence).
    no inotify left, a filesystem without watch support, a root that vanished
    before it started — keeps syncing on the other three inputs; only an edit
    made by another program waits for one of them.
-3. **The poll** — every 15 s: `GET /api/poll`; a changed etag triggers a
-   cycle; presence rides along, and so does the version probe (§5.7).
-4. **Commands** — `SyncNow`, `Probe`, `Touched`, `SetActivity`, `Pause`,
-   `ConfirmDeletes`, `Publish` / `Unpublish` / `SetRoot`, `History` /
-   `Revision`, `Shutdown`.
+3. **The poll** — every 15 s: `GET /api/poll`, or a `POST` when this Mac
+   owes a beat; a changed etag triggers a cycle; the others' presence comes
+   back in the answer, and the version probe rides along too (§5.7).
+4. **Commands** — `SyncNow`, `Probe`, `Touched`, `SetActivity`, `TakeOver`,
+   `Pause`, `ConfirmDeletes`, `Publish` / `Unpublish` / `SetRoot`, the
+   version store's read-throughs, `Shutdown`.
 
 The dirty set is a *hint about when*, never a substitute for the scan: the
 cycle still walks the whole tree and decides from content what changed
 (that is what makes rename detection and external edits correct). A hint
-only shortens the settle. Presence beats every 25 s — the edited path, or
-idle — and leaves with `DELETE /api/presence` on shutdown.
+only shortens the settle.
+
+**The beat rides the poll.** It is owed every 45 s (`PRESENCE_BEAT`, inside
+the worker's 90 s TTL) and at once when the edited path changes, and it has
+no request of its own: the next poll carries it. Two things bring that poll
+forward rather than letting the beat wait. A new path does — the frontend
+reports one per tab switch, not per keystroke, so that is one request per
+switch, what the beat's own route used to cost. And a cycle does: every
+settled edit runs one and pushes the poll clock back, so a Mac somebody is
+typing on would otherwise go quiet exactly while they are editing. A poll
+that fails leaves its beat owed for the next one and never retries it
+early. A quitting engine's last poll is a leave. A worker without the
+`presence` feature (before v7) gets plain `GET` polls and no beat at all —
+this Mac is simply not shown until the worker is updated, which the hourly
+re-probe notices without a restart (§5.7).
+
+**The beat is also the claim.** "Editing" means the document was opened or
+typed in within the last five minutes (`ACTIVITY_FRESH`): a `Touched` for the
+document being edited renews it, so typing keeps a document and having
+walked away lets it go. The beat names that path, and naming it claims the
+lease (§8.2); a third reason brings the poll forward — the last poll said the
+document being edited is free (somebody else just let go of it), or the user
+asked to take it over — and nothing else costs a request. A refused claim is
+not retried: the poll says when the holder lets go.
 
 ### 6.5 The cycle
 
@@ -564,21 +763,21 @@ Blob GC runs every twentieth cycle over revisions older than a day that
 nothing references. `cargo test --lib cloud` runs all of it against the
 in-memory worker in `tests.rs`, timings included (tokio's paused clock).
 
-### 6.6 The manifest (v2) and the public map
+### 6.6 The manifest (v3) and the public map
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "name": "Notes",
   "seq": 812,
   "files": {
     "f-3kq8…": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
-                  "mtime": 1757000000000, "by": "Sherin's MacBook Pro", "hist": [] }
+                  "mtime": 1757000000000, "by": "m-1a2b3c4d" }
   },
-  "tombstones": { "f-old…": { "path": "Scratch.md", "rev": 3, "ts": …, "by": "…" } },
+  "tombstones": { "f-old…": { "path": "Scratch.md", "rev": 3, "ts": …, "by": "m-1a2b3c4d" } },
   "public": {
     "k7m2p9qx": { "kind": "file", "file": "f-3kq8…", "path": "Projects/plan.md",
-                  "by": "Sherin's MacBook Pro", "at": 1757000000000 },
+                  "by": "m-1a2b3c4d", "at": 1757000000000 },
     "roadmap":  { "kind": "dir",  "path": "Projects/Roadmap", "title": "Roadmap",
                   "desc": "What we're building this quarter", "by": "…", "at": … },
     "home":     { "kind": "file", "file": "f-77a1…", "path": "Home.md", "root": true, "by": "…", "at": … }
@@ -586,12 +785,18 @@ in-memory worker in `tests.rs`, timings included (tokio's paused clock).
 }
 ```
 
-- `hist` is **deprecated and always empty** since versioning phase 6
-  ([versioning.md](versioning.md) §6.5): a file's past is the version store's
-  now, not the manifest's. The field stays because an empty array is a valid
-  v2 manifest — `MANIFEST_VERSION` did not move — and because an app on an
-  older release is still filling it. Entries this device reads are dropped
-  the next time it rewrites that file; nothing is migrated out of them.
+- **`by` is a member id** since v3 — who changed it, not which Mac did. It is empty where there is no identity
+  (a domain whose owner has adopted none), and a workspace carried over from
+  v2 keeps the device names it was written with: rewriting those would
+  attribute somebody else's revision to whoever upgraded first. The engine
+  resolves an id through the directory `/api/meta` hands it and shows
+  anything that does not resolve exactly as it stands, so a surface never
+  has to hold a second answer to "who is `m-1a2b3c4d`".
+- **`hist` is gone** with v3, and so are the `/api/history/<fid>` routes that
+  archived what rolled out of it ([versioning.md](versioning.md) §6.5): a
+  file's past has been the version store's since versioning phase 6, and what
+  kept the field was compatibility with a release nobody runs (§5.7's
+  compatibility rule is where that stopped being a constraint).
 - Keyed by **slug**. A file entry references the **fileId** (so a rename
   carries the page for free) and keeps a `path` snapshot (so a deleted-and-
   recreated file at the same path can be re-bound). A folder entry is keyed
@@ -630,13 +835,22 @@ cloud_mint_token()                                -> token              32 rando
 cloud_probe(endpoint, token)                      -> CloudProbe         {workerVersion, bundledVersion, features, workspace|null}
 cloud_marker(root)                                -> CloudMarker|null   the folder's hidden marker
 cloud_token(root)                                 -> {endpoint, token}  behind "Connect another Mac…"; never in a status
+cloud_parse_invite(text)                          -> {endpoint, code}   one paste, split into the wizard's two boxes (pure)
+cloud_redeem(endpoint, code)                      -> CloudRedeemed      {endpoint, token, memberId, email, name} — no bearer sent
+cloud_invite(root, email, name?, days?)           -> CloudInvited       owner; {code, blob, invite} — the code, once
+cloud_people(root)                                -> CloudPeople        {role, deviceId, members, invites, devices} — role is asked, not stored
+cloud_adopt_owner(root, email, name?)             -> CloudMember        owner; identity, never authority
+cloud_revoke_person(root, memberId)                                     owner; the person, their invite and every Mac they hold
+cloud_revoke_device(root, tokenId)                                      owner; one Mac, effective on its next request
+cloud_withdraw_invite(root, inviteId)                                   owner; a code nobody traded in
 cloud_check_worker(root)                                                "Check again": an EngineCmd::Probe
 cloud_connect(root, endpoint, token, name)        -> wsId               bind + initial upload (progress events)
 cloud_join(endpoint, token, destParent)           -> root               download into a fresh folder
 cloud_resume(root, endpoint, token)               -> wsId               marker matches: adopt this folder in place
 cloud_disconnect(root)                                                  forget locally; files stay; cloud stays
 cloud_sync_now(root) · cloud_pause(root, paused) · cloud_confirm_deletes(root)
-cloud_set_activity(path | null)                                         presence ("editing Projects/plan.md")
+cloud_set_activity(path | null)                                         presence ("editing Projects/plan.md"), and the claim on its lease
+cloud_take_over(root, path)                                             claim a document another Mac holds, on the next beat
 cloud_publish(path, {slug?, title?, desc?})       -> slug               file or folder (decided by the path); queued op
 cloud_unpublish(root, slug) · cloud_set_root(root, slug | null)        slugs are per domain, so the root comes first
 cloud_wipe(root)                                  -> purged             owner; disconnects once the bucket is empty
@@ -660,13 +874,27 @@ type CloudStatus = {
   phase: "idle" | "syncing" | "offline" | "paused" | "pending-deletes"
        | "revoked" | "worker-outdated" | "error";
   lastSyncMs: number | null; error: string | null; pendingDeletes: number;
+  me: string;                                   // what this Mac signs with here, in words:
+                                                // the person the domain says it is, else its
+                                                // own name (§6.6)
   workerVersion: number | null;                 // what /api/meta last reported
   versions: { mirrored: number; cloud: number; lastMirrorMs: number | null } | null;
                                                 // the version store's mirror; null when the
                                                 // worker has no `versions` feature
   public: { slug: string; kind: "file" | "dir"; path: string; title: string | null;
             desc: string | null; by: string; at: number; alive: boolean; root: boolean }[];
-  presence: { deviceId: string; name: string; path: string | null; ts: number }[];
+                                                // `by` is a name: the engine resolves the
+                                                // manifest's member id before it gets here
+  presence: { deviceId: string; memberId: string | null; name: string; device: string;
+              path: string | null; ts: number }[];
+                                                // `name` is the person, resolved like a `by` —
+                                                // or the Mac (`device`), when it is your own
+                                                // other one or nobody the directory can name
+  leases: { path: string; deviceId: string; memberId: string | null; name: string;
+            device: string; own: boolean; until: number }[];
+                                                // documents another Mac holds; `path` is the
+                                                // lowercased key, `own` is you on another Mac.
+                                                // Empty while the engine cannot hear the domain
 };
 ```
 
@@ -674,9 +902,10 @@ type CloudStatus = {
 Mac's not-yet-synced ops — sorted folders first, then by path; `alive` is
 false when the file is gone, or when no synced file lives under a folder
 page. The frontend keeps the array in state and derives everything from it:
-the sidebar's cloud dot and "Alice is editing" chips, the published dots on
-files and folders, the Publish pill's state for the active document, the
-Published pages list, the update badge, the pending-deletes prompt.
+the sidebar's cloud dot and "Alice is editing" chips, the view-only banner
+over a document somebody else holds, the published dots on files and
+folders, the Publish pill's state for the active document, the Published
+pages list, the update badge, the pending-deletes prompt.
 
 ### 6.8 Flows
 
@@ -717,6 +946,38 @@ manifest and blobs into `<parent>/<name>` (four in flight, progress
 events), writes the marker and `cloud.json`, spawns the engine, and the app
 opens the folder as a workspace.
 
+**Redeem an invite** (an invited Mac) — the entrance runs backwards, and
+has to: `/api/meta` is inside the worker's auth gate, so an invitee cannot
+ask the domain anything until they hold a token.
+
+```mermaid
+sequenceDiagram
+  participant O as Owner's Mac
+  participant B as Invitee (wizard)
+  participant E as Engine
+  participant W as Worker
+  O->>E: cloud_invite(root, "bob@example.com")
+  E->>E: mint 100 bits, Crockford base32
+  E->>W: POST /api/auth/invites {email, codeHash, expiresAt}
+  W-->>E: 201 {invite}
+  E-->>O: the code, once, and the line to send
+  O->>B: doklin-invite https://notes.example.com dkln-…
+  B->>E: cloud_parse_invite(the pasted line)
+  E-->>B: {endpoint, code} — both boxes fill
+  B->>E: cloud_redeem(endpoint, code)
+  E->>W: POST /api/auth/join {code, deviceId} — NO bearer
+  W-->>E: 201 {token, member}
+  E-->>B: this Mac's own credential, and who it says you are
+  B->>E: cloud_probe(endpoint, token) → cloud_join(endpoint, token, parent)
+```
+
+Only `sha256(code)` ever leaves the owner's Mac, and the code is spent the
+moment the redeem answers — so a probe that fails afterwards offers another
+look, never another redeem. From the download on, the invitee's flow **is**
+the second Mac's flow: same probe, same `cloud_join`, same engine. What
+differs is the credential in `cloud.json` — theirs, revocable on its own,
+and not the owner's.
+
 **Resume in place** — the marker's `wsId` matches; the engine starts with
 empty state, so every local file reads as new and every remote file as new:
 `stage_local` adopts a remote fileId for a path that exists in the
@@ -744,6 +1005,12 @@ version store, which every open folder has whether or not it is connected.
 The engine holds no history of its own: `cloud_history` and `cloud_revision`
 are gone, and so is the manifest's `hist` that fed them (§6.6).
 
+A snapshot's `by` is still **the device that took it**, and deliberately: a
+version store belongs to a Mac, is captured whether or not that Mac is
+connected to anything, and "which Mac" is what a person with two of them
+wants to read. `by` in the *manifest* is a person (§6.6), because that
+records what the workspace holds and who changed it.
+
 What being connected adds is **depth**, from one place — the mirrored
 version store (`cloud/versions.rs`). The engine puts this Mac's snapshots
 under `versions/`; every other device's snapshots come back the same way.
@@ -756,13 +1023,20 @@ read-through commands; a downloaded snapshot is cached under
 sweep cheap.
 
 **The one-time clean-up.** What the retired system left in the bucket — the
-`history/<fid>.json` archives, and the blobs only their revisions pointed at
-— is deleted once, from the poll, 50 fileIds at a time:
-`WorkspaceState.legacy_cleanup` is the bookmark, archives first and then the
-blob inventory, so an interruption never leaves an archive naming bytes that
-are gone. It waits, silently and without erroring, on a paused workspace or
-a worker older than 3 (which has no `DELETE /api/history/<fid>`), and once
-both passes are done the workspace never looks again.
+blobs only its deep revisions pointed at — is deleted once, from the poll, 50
+fileIds at a time, with `WorkspaceState.legacy_cleanup` as the bookmark.
+Nothing else collects them: the per-cycle GC only looks at files this device
+has touched, so a file never edited again would keep its old revisions for
+ever. It waits, silently and without erroring, on a paused workspace, and
+once the pass reaches the end of the list the workspace never looks again.
+
+It used to sweep the `history/<fid>.json` archives first. Those routes are
+gone as of worker v6 (§5.3) and the archives
+with them: a workspace whose first pass never finished keeps a few small
+objects nothing reads, and the wipe takes them. A device that was mid-way
+through that pass starts the blob sweep from the beginning rather than
+inheriting its bookmark — the sweep is idempotent, and skipping half a
+backlog for ever is not.
 
 The mirror itself runs in the engine: after a cycle that changed something,
 and hourly regardless (`MIRROR_EVERY`). It uploads each local snapshot the
@@ -800,13 +1074,15 @@ every blob no retained snapshot references and older than an hour's grace.
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…* and *Open a workspace from a domain…*. Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *Connect another Mac…* (the endpoint and the owner token), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
-| **Setup wizard** (`CloudSetup.tsx`) | the panel's two entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* (the view below), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Setup wizard** (`CloudSetup.tsx`) | the panel's three entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear. The third mode is *redeem*: paste the line an owner sent — into either box, both fill — trade the code for this Mac's own credential, then the same *Download it here* (§6.8) |
+| **People** (`CloudPeople.tsx`) | the Cloud panel, *People…* | Everything `cloud_people` answers, this Mac's own role included — and the role is asked rather than remembered: only the owner's credential is answered by the members route, so a `403` is the member branch, not an error. Owner: every person with their address, role and the Macs they hold, each Mac revocable on its own; *Remove from notes.example.com…* for the person, their invite and every Mac at once; the pending codes with what is left of their life, *New code…* and *Withdraw*; *Invite someone…* (address, an optional name, 1 / 7 / 30 days) and then the code, once, with the line to send beside it. The owner's own Macs are not listed: their credential is the domain's env secret, which has no row to revoke. A domain with no owner row asks for an address once — identity, never authority. Member: no list and no invite door, because both are the owner's — their own credential for a second Mac is behind *Connect another Mac…* |
 | **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
 | **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item — and so are the root's *Workspace history…* and the *Recently deleted* row at the foot of the tree |
+| **Lease banner** (`LeaseBanner.tsx`) | over a document another Mac holds | "Bob Mbeki is editing — view only", or "Open on your other Mac, Studio — view only"; the editor and the note's properties stop taking input, dictation will not start (and a session under way ends), and *Take over* claims it — the banner clears when the status says the lease moved. Nothing refuses a write: the lock is the editor's, and it lifts the moment the status stops naming one (§8.2) |
 | **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the versions other Macs mirrored folded into the same walk (§6.9); the trust line counts what is here against what is in the cloud. The selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
 | **Workspace history** (`WorkspaceHistory.tsx`) | the sidebar root's menu, the Cloud panel | The folder's retained moments by day, each with what it changed ("+2 −1 ~5"); the selected one's `changed` / `missing` / `added` with per-file ticks, *Restore selected* and *Restore all*, and an inline confirm stating the counts. A snapshot of now is taken first, so the toast's *Undo* is another restore. Not gated on the cloud |
 | **Recently deleted** (`RecentlyDeleted.tsx`) | the dimmed row at the foot of the sidebar (only when there is something in it), and the root's menu | Every file the store holds and the folder does not: name, old folder, when it was last seen, *Open* (the last content, read-only, in the version preview) and *Restore* (its old path, or beside it when that is taken). Not gated on the cloud |
@@ -847,8 +1123,9 @@ only asks an agent to run those same two.
 nothing to invent, and holds the script to the app's naming rule (through
 its `--names` mode) and to the worker's own compatibility date.
 
-**Setup** (`buildSetupPrompt`): *one Worker in front of one R2 bucket,
-serving Doklin's cloud for the workspace "Notes" at `notes.example.com`* (or
+**Setup** (`buildSetupPrompt`): *one Worker in front of one R2 bucket and
+one D1 database, serving Doklin's cloud for the workspace "Notes" at
+`notes.example.com`* (or
 *at a free workers.dev address — the worker is named `doklin-<name>`, so it
 will answer at …*). Then:
 
@@ -858,11 +1135,18 @@ will answer at …*). Then:
 2. `npx -y wrangler@4 whoami`; if not logged in, `wrangler login` and *ask
    me to finish the sign-in in the browser*; note the account id.
 3. Verify the names are free: `wrangler deployments list --name
-   doklin-notes-example-com` must fail, `wrangler r2 bucket list` must not
-   show the bucket. *If either exists, stop and ask me — a same-name deploy
-   silently replaces the existing worker and a shared bucket serves two
-   sites.*
-4. `wrangler.toml`, verbatim, the account id the only fill-in:
+   doklin-notes-example-com` must fail, and neither `wrangler r2 bucket
+   list` nor `wrangler d1 list` may show the name. *If any of them exists,
+   stop and ask me — a same-name deploy silently replaces the existing
+   worker, and a shared bucket or database serves two sites.*
+4. `wrangler r2 bucket create …` — with the pause for an account that has
+   never enabled R2.
+5. `wrangler d1 create …`, which prints the `database_id` the next step
+   needs; confirm with `wrangler d1 list`, and *if the id has scrolled away,
+   `wrangler d1 info …` prints it again — never make one up.* Resources
+   before config: an id cannot be written down before it exists.
+6. `wrangler.toml`, verbatim, with two fill-ins — the account id from step 2
+   and the database id from step 5:
    ```toml
    name = "doklin-notes-example-com"
    main = "doklin-cloud-worker.js"
@@ -873,19 +1157,23 @@ will answer at …*). Then:
    [[r2_buckets]]
    binding = "DATA"
    bucket_name = "doklin-notes-example-com"
+   [[d1_databases]]
+   binding = "DB"
+   database_name = "doklin-notes-example-com"
+   database_id = "<from d1 create>"
    ```
    (`workers_dev = true` and no `routes` for the free address.)
-5. `wrangler r2 bucket create …` — with the pause for an account that has
-   never enabled R2.
-6. `wrangler secret put OWNER_TOKEN` with the token on the next line.
-7. `wrangler deploy` — with the custom-domain pause (*if deploy says the
+7. `wrangler secret put OWNER_TOKEN` with the token on the next line.
+8. `wrangler deploy` — with the custom-domain pause (*if deploy says the
    zone isn't on this account, ask me to add the domain to Cloudflare and
    point the nameservers at it*) and the TLS-minute caveat.
-8. Verify: `curl` `<endpoint>/api/meta` with the bearer must answer 200 with
-   `"workspace": null` and a version at least the bundled one; on a custom
-   domain, retry for up to five minutes while the certificate is issued.
-9. Print exactly `ENDPOINT: https://…`. *Do not commit `wrangler.toml`
-   anywhere; do not create or modify any other Cloudflare resources.*
+9. Verify: `curl` `<endpoint>/api/meta` with the bearer must answer 200 with
+   `"workspace": null`, a version at least the bundled one, and a `"d1"`
+   that is a number rather than null — *null means the database binding
+   didn't take, so re-check the id and deploy again*; on a custom domain,
+   retry for up to five minutes while the certificate is issued.
+10. Print exactly `ENDPOINT: https://…`. *Do not commit `wrangler.toml`
+    anywhere; do not create or modify any other Cloudflare resources.*
 
 **Update** — the script (`scripts/doklin-cloud-update.sh`, no secret):
 
@@ -894,116 +1182,163 @@ curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/dokli
 sh doklin-cloud-update.sh https://notes.example.com
 ```
 
-It reads the worker and bucket names off the endpoint by the same rule as
-`deploymentNames` (certain for a workers.dev address — the hostname's first
-label; the convention, to be verified, for a custom domain), fetches the
-bundle, signs in through `wrangler login` if `whoami` names no account,
-picks the account (`CLOUDFLARE_ACCOUNT_ID` when the login has several),
-**confirms the worker and its bucket exist on that account**, writes
+It reads the worker, bucket and database names off the endpoint by the same
+rule as `deploymentNames` (certain for a workers.dev address — the
+hostname's first label; the convention, to be verified, for a custom
+domain), fetches the bundle, signs in through `wrangler login` if `whoami`
+names no account, picks the account (`CLOUDFLARE_ACCOUNT_ID` when the login
+has several), **confirms the worker and its bucket exist on that account**,
+resolves the database's uuid out of `wrangler d1 list --json`, writes
 `wrangler.toml` in a temp directory, deploys over the same name, then polls
 `/api/meta` for the `401` that means the new worker is serving (the script
 holds no token; the app checks the version itself) and prints
 `UPDATED: <endpoint>`.
 
 The one hazard is a name that doesn't exist: deploying it would CREATE a
-second worker rather than update the intended one. So the two confirmations
-are hard preconditions — with a terminal the script asks for the real name
-and retries; without one (`curl … | sh`) it stops and names the
-`WORKER_NAME=` / `BUCKET_NAME=` override to re-run with. Nothing else on
-the account is touched, and the temp directory goes on exit, so no
-`wrangler.toml` is left anywhere.
+second worker rather than update the intended one. So the confirmations are
+hard preconditions — with a terminal the script asks for the real name and
+retries; without one (`curl … | sh`) it stops and names the `WORKER_NAME=`
+/ `BUCKET_NAME=` / `D1_NAME=` override to re-run with.
+
+The database is the one exception, and the one resource the script may
+create: a domain set up before Doklin bound one simply has none, and the
+update is how it gets one. So a miss under the conventional name is created
+rather than refused — an empty D1 database, free, holding nothing until
+people are invited — while a name given by hand with `D1_NAME=` is a
+pointer at something that already exists, so a miss there is a typo and
+stops the script. Nothing else on the account is touched, and the temp
+directory goes on exit, so no `wrangler.toml` is left anywhere.
 
 **Update** (`buildUpdatePrompt`, no secret): which domain, which version it
 runs against which the app expects, the two commands above (with the
 clone-the-repo fallback should the download 404), *let the script do the
-work and show me its output — if it asks for a worker or bucket name, ask
-me, and never give it one you invented*, print `UPDATED: <endpoint>`, and
+work and show me its output — if it asks for a worker, bucket or database
+name, ask me, and never give it one you invented*, print
+`UPDATED: <endpoint>`, and
 the negative scope: don't deploy by hand, the script is the whole job.
 
 **Teardown** (`buildTeardownPrompt`, no secret; run only after the app's
-wipe emptied the bucket): `whoami`, confirm the names, `wrangler delete
---name …`, `wrangler r2 bucket delete …` (*if it refuses because the bucket
-isn't empty, STOP — never force it*), verify the endpoint no longer answers
-200, print `TORN DOWN: <endpoint>`.
+wipe emptied the bucket and the database): `whoami`, confirm the names,
+`wrangler delete --name …`, `wrangler d1 delete …` (skipped when step 2
+found no database — a domain set up before Doklin had one), `wrangler r2
+bucket delete …` (*if it refuses because the bucket isn't empty, STOP —
+never force it*), verify the endpoint no longer answers 200, print
+`TORN DOWN: <endpoint>`.
 
 ---
 
-## 8. Room to grow
+## 8. Teams — people and leases
 
-Neither feature is built; both are shaped for. Both are also blockers the
-moment a workspace is shared with people rather than with a second Mac of
-one's own — §11.1 and §11.7 say what each one blocks.
+Everything up to §7 works for one person with two Macs. These two are what
+make a workspace something a team can share: §8.1 gives the domain people
+rather than one credential, and §8.2 gives a document a holder, so two people
+find out *before* they both type into it. Both were shaped in this document
+first, planned in a document of their own, and built in seven releasable
+phases (§12); what follows is how they are.
 
-### 8.1 Invites — email + code
+### 8.1 People — a person is not a token
 
-- The owner mints an invite in the Cloud panel: an email and a code the app
-  generates (`amber-canyon-lantern-42`). The worker stores
-  `auth/invites/<sha256(email + code)>.json` `{email, role: "member",
-  expiresAt}`. The owner shares the code however they like — no email is
-  sent, no web page is involved.
-- The invitee installs Doklin, chooses *Open a workspace from a domain…*,
-  and enters the domain, their email and the code. `POST /api/auth/join`
-  {email, code, device} → a per-person token stored hashed under
-  `auth/tokens/`, role `member`. The app then runs the **join** flow of
-  §6.8 exactly as the owner's second Mac does; `cloud.json` gets the same
-  shape of entry with that token.
-- Revocation = deleting the token record (the engine reports `revoked` on
-  its next request). Members sync and publish; the owner alone binds,
-  wipes, invites, revokes.
-- What is already there for it: the token lookup in `authenticate` beside
-  the owner secret, the `by` attribution on every revision, the join flow
-  as an engine command, and a `cloud.json` entry that does not care which
-  kind of token it holds. Revocation needs nothing new either — a 401
-  already becomes `Phase::Revoked` in the engine — and the wipe already
-  deletes every key, `auth/` included.
-- **A member is not a limited account.** `PUT /api/manifest` is not
-  role-gated: any valid bearer can rewrite the manifest wholesale,
-  tombstones included, and sync carries that to every device. Invites buy
-  attribution and per-person revocation — not read-only access, not
-  per-folder scope. Owner-only is exactly bind and wipe.
-- What is *not* settled, and wants deciding before this is built:
-  - **`POST /api/auth/join` answers without a bearer** — the invitee has no
-    credential yet — so it carves out above the `authenticate` gate in
-    `handleApi`. That part is a change, not an addition, and it is the one
-    change to the entry point every other route trusts: match on method
-    *and* path exactly.
-  - **Nothing throttles it.** §5.4's "no rate limiter" holds only while
-    there is nothing to unlock. A join route mints a credential from a
-    guessable string — three words and two digits is about 31 bits. The
-    wordlist size, an attempt cap and a lockout are all open, and R2 is a
-    poor counter: a cap likely means KV or a Durable Object.
-  - **`expiresAt` has no reaper.** The `wrangler.toml` the setup prompt
-    writes carries no cron trigger, and adding one changes deploy config
-    every existing domain would have to re-apply. Checking expiry at redeem
-    and filtering the list is the cheaper answer.
-  - **The wizard needs a third mode.** `CloudSetupMode` is `connect | join`,
-    and both hand a token to `cloud_probe`. An invitee has an email and a
-    code, so the order inverts: redeem to a token first, then probe. That is
-    a new engine command ahead of `cloud_join`, plus an owner-side members
-    view — the first stateful screen in the Cloud panel.
-  - **`lastSeenAt` in the token record is a trap.** Taken literally it is an
-    R2 put on every authenticated request, and the sync loop polls. Drop it,
-    or derive it from presence, which already tracks liveness.
-- These routes are a `WORKER_VERSION` bump and a feature name of their own,
-  so every existing domain goes through the update of §7.2 before an invite
-  works anywhere.
+Three records, three lifetimes, all in the D1 database beside the bucket
+(§5.1):
 
-### 8.2 Locking — leases on files
+| Record | Keyed by | Lives | Holds |
+| --- | --- | --- | --- |
+| **Member** | normalized email (trimmed, lowercased), `m-` + 8 hex | permanent | who this person is |
+| **Token** | `sha256(token)`, named by `t-` + 8 hex | one Mac, until revoked | the credential |
+| **Invite** | `sha256(code)`, named by `i-` + 8 hex | until redeemed or expired | a pending token |
 
-- A *lease* is a presence entry with a `lock`: `{deviceId, name, path,
-  until}`. The engine acquires one when a document gains editing focus (it
-  already reports activity per path), renews it on each presence beat, and
-  drops it on blur/close. A lease that stops being renewed expires.
-- Other devices see `lockedBy` on that path in `cloud-status`; the editor
-  opens read-only with a banner ("Alice is editing — view only") and a
-  *Take over* that waits for the lease to lapse or breaks a stale one. The
-  three-way merge stays as the fallback for the window a lease can't cover.
-- What is already there for it: presence keyed by device with a path and a
-  timestamp, the activity command on focus, and a status event the editor
-  can gate on. The lease table is either a field in `presence.json` or its
-  own `locks.json` — a worker-side detail.
+A member is found by their address, so **inviting the same address again
+reaches the same person**: a lost Mac is revoking that Mac and sending a new
+code, and everything that names the member — a revision's `by`, a published
+page, a presence row, a lease — keeps naming the same person across every
+Mac they ever use. The member id is what the manifest carries; an email
+never enters it.
 
----
+- **The code is a capability, not a passphrase.** 100 bits of Crockford
+  base32 (`dkln-XXXXX-XXXXX-XXXXX-XXXXX`), minted on the owner's Mac, which
+  sends only its sha256 — the worker never sees a plaintext code until the
+  one moment it is redeemed. It is one-time and expires at redeem: the row is
+  deleted on use and on being found expired, the owner's list filters
+  expired ones, and there is no reaper and no cron trigger. At 100 bits there
+  is nothing to throttle (§5.4). The email is the identity and never the
+  secret; the code is the secret and never the identity.
+- **Redeeming inverts the wizard's order.** Every other entrance probes with
+  a token it already holds; an invitee redeems first — `POST /api/auth/join`,
+  the one route above the bearer gate — and probes with the credential that
+  minted, then downloads exactly as the owner's second Mac does (§6.8).
+- **The owner authenticates without the database.** `OWNER_TOKEN` is the env
+  secret and never reads a row (§5.4), so a D1 outage degrades a team
+  workspace to one credential and never locks its owner out. The owner gets
+  a member row — adopted at bind, or later from the People view — for
+  attribution only: identity, never authority.
+- **Revoking names a token id, not a hash.** The owner never holds anyone's
+  token, so the list answers ids and the delete finds the row by id. Removing
+  a person removes their invite and every Mac they hold, in one batch, with
+  their presence and their leases.
+- **A member is not a limited account** (§5.4): invites buy attribution and
+  per-person revocation. Owner-only is exactly bind, wipe and administer.
+- **`lastSeenAt` is the beat's to write**, at most once an hour per person,
+  and never `authenticate`'s, which would be a write on every request
+  (§11.1).
+
+### 8.2 Leases — who has a document open
+
+A lease is a row in `leases`: a document (its path, lowercased, so one file
+on a case-insensitive disk is one lock), the Mac that holds it, whose Mac
+that is, and `until`. It exists so that the first a team hears of two
+people in one note is a banner, not a conflict copy.
+
+**The beat is the lease.** There is no lease route. A beat that names a
+path claims that document, in the same D1 batch that writes presence (§5.3):
+
+```sql
+INSERT INTO leases (path, device_id, member_id, device_name, until)
+VALUES (?path, ?device, (SELECT member_id FROM presence WHERE device_id = ?device), ?name, ?now + ttl)
+ON CONFLICT(path) DO UPDATE SET device_id = excluded.device_id, member_id = excluded.member_id,
+                                device_name = excluded.device_name, until = excluded.until
+WHERE leases.device_id = excluded.device_id OR leases.until <= ?now;
+```
+
+Free, lapsed or already this Mac's: the row is this Mac's for another TTL —
+acquiring and renewing are the same statement. Anybody else's, live: the
+`WHERE` is false and nothing changes, and the poll's answer says who has
+it. *Take over* is the same statement without the `WHERE`. The batch also
+deletes whatever else this Mac held, so a beat that names another document
+releases this one, a beat that names none releases everything, and a leave
+releases it all at once. There is no reaper: reads filter `until > now`, and
+every beat sweeps what has lapsed.
+
+**It lives as long as the presence that carries it.** The TTL is presence's
+90 s, renewed by the beat every 45 s, so one lost beat is survivable and two
+are not. A Mac that quits says so; one that crashes lets go within a minute
+and a half; one left on with a note open lets go five minutes after the last
+keystroke, because "editing" is the document having been opened or typed in
+within `ACTIVITY_FRESH` (§6.4) and a beat that names nothing releases. A
+revoked Mac or a removed person loses theirs in the same batch as the
+credential.
+
+**Advisory, always.** Nothing that writes the manifest reads a lease; a
+lease never refuses a write. It changes what an *editor* does: the status
+lists the documents another Mac holds (§6.7), and one of those opens
+view-only under "Bob Mbeki is editing — view only" — "Open on your other Mac,
+Studio" when the holder is you — with *Take over* beside it (§7.2). Taking
+over moves the lease at once; the Mac it was taken from hears on its next
+poll and goes view-only in turn. What both typed in that window merges three
+ways like any overlap (§6.5), which is the fallback the lease was always
+going to need for the moments it cannot cover: a Mac offline, a claim racing
+a keystroke, an app a release behind that holds leases it cannot see.
+
+**A lock nobody can confirm is no lock.** A worker without `leases`, a
+database that cannot answer (`leases: null`), a poll that failed, a paused
+or outdated engine: every one of them shows no lease, and the editor opens
+as it always has. A D1 outage costs the warning, never the edit.
+
+**What it costs.** No requests: claiming and renewing ride the beat that was
+going out anyway, and the only poll a lease brings forward is the one after
+another Mac lets go of the document you have open (§6.4), or a *Take over*.
+In D1 it is one more row written per beat while a document is open — at most
+19,200 a day for ten Macs editing around the clock, which no team does
+(§11.2).
 
 ## 9. Decisions, and what was rejected
 
@@ -1048,10 +1383,11 @@ one's own — §11.1 and §11.7 say what each one blocks.
    external tools do and what "restore from Trash" means. The one softening:
    the domain root falls back to the landing page while the root page's
    file is gone, rather than 404ing the site.
-8. **The owner token is the only credential for now**, stored in
-   `cloud.json`. Rejected for now: minting per-device tokens at connect
-   (that is the invite feature's job, §8.1), the Keychain (a later
-   refinement of one file, not a design question).
+8. **The owner token is one credential among a member's tokens**, stored
+   in `cloud.json` like any other. The owner's own Macs share the env secret
+   — per-device tokens are what an invite mints (§8.1), and the owner's
+   second Mac already holds the real one. Rejected for now: the Keychain (a
+   later refinement of one file, not a design question).
 9. **Static OG image.** Rejected: rendering one in the worker (no canvas
    there) or in the engine (it would be the one thing the engine pushes
    that isn't a file). `og:title` carries the words that matter.
@@ -1075,8 +1411,54 @@ one's own — §11.1 and §11.7 say what each one blocks.
 16. **A board reads at most 40 cards on a public page.** The free plan's
     50-subrequest budget would fail a large board outright; a counted
     remainder is the honest rendering.
-17. **Members (once invites exist) may publish**, Notion-style; only the
-    owner administers.
+17. **Members may publish**, Notion-style; only the owner administers.
+18. **People, presence and leases live in D1, beside the bucket.** A blob
+    store cannot hold a `UNIQUE` email, delete a credential atomically, or
+    upsert a row per device without a lost update. Rejected: a Durable
+    Object (it would also have given a push channel, §11.3 — but it is a
+    second kind of resource for every setup and update to create, and
+    presence and leases are two tables and a handful of statements that
+    could move to one later without changing the engine's contract); R2
+    objects for people (the lost update presence.json had, for credentials).
+    What D1 cost is the deployment story: `wrangler.toml` needs a
+    per-deployment `database_id` the app cannot know, so setup has the agent
+    capture it, the update script discovers it — creating it, under the
+    conventional name only, for a domain set up before it existed — and the
+    worker migrates its own schema, because an update ships no migrations
+    directory (§5.1, §7.4).
+19. **A skewed app and worker refuse politely and never corrupt** — and
+    that is all they owe each other (§5.7). Rejected: keeping every released
+    app and deployed worker working with the next (the route list, the
+    manifest and presence would each have carried a dead copy of their old
+    shape).
+20. **Presence and leases ride the poll.** The beat is a `POST` of the poll
+    the engine was making anyway, and the lease is the beat's path. Rejected:
+    a beat request of its own (a third of an idle Mac's traffic, §11.2);
+    lease routes of their own (a request per document opened, renewed and
+    closed, where the beat already carries the path); writing presence on
+    every poll (more than half of D1's free daily writes, for freshness
+    nobody could see).
+21. **Leases are advisory and lapse on their own.** A lease never gates
+    `PUT /api/manifest`; it makes an editor view-only and offers *Take over*,
+    and the three-way merge stays the answer for the window it cannot cover.
+    A lock that could wedge a document — a Mac left on overnight, a crash, a
+    database outage — would be worse than no lock. Rejected: a write-gating
+    lock; a *Take over* that only waits for the holder to let go (the lease
+    already moves the moment they do; the button is for when they will not).
+22. **The manifest stays an R2 object with an etag CAS.** Considered, and
+    deferred: an immutable content-addressed manifest blob
+    (`manifests/<hash>`) behind a D1 pointer — a `workspace` row holding
+    `manifest_hash` and a monotonic `seq`, swapped by `UPDATE … WHERE seq =
+    ?` with `changes == 1` as the verdict, blob first and pointer second so
+    a crash leaves only a collectable orphan. It would turn `x-base-etag`
+    into `x-base-seq` (a counter says *how far* behind a Mac is, not only
+    *that* it is) and take the poll off R2 entirely, about 1.7 M Class B
+    reads a month for ten always-on Macs. What it costs is the reason it is
+    not built: it puts D1 on the sync path. Today a D1 outage costs people,
+    presence and leases and never a byte of sync; after it, nothing would
+    know which manifest is current. Trading that for 17 % of a budget that
+    sits at 17 % is the wrong trade — revisit it if blob reads ever crowd
+    Class B.
 
 ---
 
@@ -1087,12 +1469,12 @@ walks. The cloud's own checks:
 
 ```sh
 pnpm typecheck:worker                      # the worker against the Workers runtime types
-pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (26 cases)
+pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (45 cases)
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
-cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (50 tests)
-node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (131 checks)
-node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (30 steps)
+cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (80 tests)
+node verify-harness/cloudprompts.test.mjs  # the prompts + the update script (159 checks)
+node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (35 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
 node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaScript off for the board (8 steps)
@@ -1100,7 +1482,8 @@ node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaS
 
 The one thing a Linux runner cannot do is the real thing: the wizard
 against a deployed worker, an edit reaching the bucket, a second Mac
-joining. That is a manual pass on macOS with `pnpm tauri dev`.
+joining, two Macs seeing each other's lease. That is a manual pass on macOS
+with `pnpm tauri dev`.
 
 ---
 
@@ -1119,43 +1502,80 @@ administration.
 
 ### 11.1 There is one credential, so there are no people
 
-§8.1 is not built. `authenticate` (`auth.ts:61`) matches the bearer against
-the `OWNER_TOKEN` secret and answers `role: "owner"`; anything else falls
-through to a token record under `auth/tokens/` that no flow mints. Ten people
-therefore means ten copies of one secret, ten owners, and ten
-`POST /api/admin/wipe` buttons — the route's own guard is
-`auth.role !== "owner"` (`api.ts:139`), which every caller passes. Removing
-one person means rotating the secret and reconnecting every other Mac.
+**Closed.** The worker holds people: `authenticate` still matches the
+`OWNER_TOKEN` secret first and answers `role: "owner"`, but a bearer that is
+not it resolves through the `tokens` table to the member who holds it, and
+`/api/auth/*` mints, lists and revokes those (§5.3–5.4). A member reaching
+`POST /api/admin/wipe` gets a `403`, because their role is `member` rather
+than everyone's `owner`.
 
-**Blocks:** sharing a workspace with *people* rather than with a second Mac
-of your own — which is the team case entirely. Downstream of it: per-person
-attribution (`by` is a device name, never a person) and §8.2's leases, which
-need an identity to put in "Alice is editing".
+The app drives it end to end. `cloud_invite` mints a 100-bit code, sends only
+its sha256 and hands the code over once; the wizard's third mode trades it
+for a credential of that Mac's own (§6.8); and the Cloud panel's People view
+(§7.2) is where an owner sees who is in the workspace, which Macs each of
+them is signed in on, and which codes are still outstanding — and where any
+of those goes away again, one row at a time. Putting somebody out is now
+deleting one row rather than rotating the secret and reconnecting everybody.
 
-### 11.2 The idle heartbeat is the free plan's real budget
+Two smaller things the surface inherits. `lastSeenAt` is written by the
+presence beat, never by authenticating, and only when the stored one is an
+hour stale — so the People list says when somebody was last here to the
+hour, at the cost of one row a person an hour (§11.2). And a member is shown
+their own half of the view rather than a roster: every identity route is the
+owner's, so a Mac that joined on an invite is told as much instead of an
+error.
 
-Every connected device sends `GET /api/poll` every 15 s (`POLL_INTERVAL`,
-`engine.rs:66`) and `PUT /api/presence` every 30 s — `PRESENCE_BEAT` is 25 s
-(`engine.rs:76`) but is only tested on the poll tick (`engine.rs:1784`), so it
-fires on every second poll. That is **six requests a minute per device,
-forever, with nobody typing**. Ten devices at ten hours is not ten times one
-device at one hour; it is a floor that never drops.
+**Blocks:** nothing. The last thing downstream of it closed with manifest v3:
+`by` is a member id, so what the workspace records — who changed a file, who
+deleted one, who published a page — names a person rather than a Mac (§6.6),
+and a conflict copy is called after one — and the leases of §8.2, which
+needed an identity to put in "Alice is editing", name one too.
 
-| Free-plan budget | Ten Macs, app left open | Ten Macs, eight hours a day |
-| --- | --- | --- |
-| Workers, 100,000 requests/day | 86,400 — **86 %** | 28,800 — 29 % |
-| R2 Class A, 1 M/month (the presence `put`, `api.ts:348`) | 864,000 — **86 %** | 288,000 — 29 % |
-| R2 Class B, 10 M/month (the poll's `head` + `get`, `api.ts:97`) | 4.3 M — 43 % | 1.4 M — 14 % |
-| R2 storage, 10 GB | well under 1 % | well under 1 % |
+### 11.2 The idle heartbeat — no longer the free plan's real budget
 
-The heartbeat, not the content and not the version store, is what spends the
-free plan. `PRESENCE_TTL_MS` is 90 s (`layout.ts:75`), so a 60 s beat would
-still be well inside the TTL and would cut the dominant Class A consumer by
-2.4× — the headroom is there, it is simply not taken.
+*Was a blocker; closed by worker v7, which folded the beat into the poll and
+moved presence into D1 (§5.3). What follows is the arithmetic as built.*
 
-**Blocks:** ten Macs left running on the free plan. It does *not* block ten
-Macs used during working hours and quit at the end of the day, which is the
-difference between comfortable and over the cap.
+Every connected device polls every 15 s (`POLL_INTERVAL`), and that is now
+the whole of its idle traffic: **four requests a minute**, where it used to
+be six. The beat that said "this Mac is here" was a `PUT /api/presence` of
+its own on every second poll, and each one rewrote a shared R2 object — so
+the dominant cost of a team leaving the app open was an R2 write nobody
+could see, made 28,800 times a day for ten Macs. It now rides the poll it
+was going to make anyway: every third poll is a `POST` carrying it, the
+other two are a `GET` that writes nothing, and the row it upserts is in D1
+(§5.3).
+
+| Free-plan budget | Ten Macs, app left open | Ten Macs, eight hours a day | Before v7, left open |
+| --- | --- | --- | --- |
+| Workers, 100,000 requests/day | 57,600 — **58 %** | 19,200 — 19 % | 86,400 — 86 % |
+| R2 Class A, 1 M/month | ~0 — an idle Mac writes nothing | ~0 | 864,000 — 86 % |
+| R2 Class B, 10 M/month (the poll's manifest `head`) | 1.7 M — 17 % | 0.6 M — 6 % | 4.3 M — 43 % |
+| D1 rows read, 5 M/day (the presence and lease reads, and the beat's sweep) | ~0.85 M — 17 % | ~0.3 M — 6 % | — |
+| D1 rows written, 100,000/day (one per beat, plus last-seen hourly) | ~19,500 — 20 % | ~6,500 — 7 % | — |
+| R2 storage, 10 GB | well under 1 % | well under 1 % | well under 1 % |
+
+The beat is 10 Macs × 86,400 s / 45 s ≈ 19,200 rows a day, plus at most one
+`lastSeenAt` a person an hour. D1's free daily limits are enforced — queries
+past them fail rather than slow — and that is why a write is the client's
+decision rather than every poll's: writing on every poll would be 57,600
+rows, more than half the budget, for freshness nobody could see. A D1 that
+does fail costs presence and leases and nothing else; the poll still answers
+the etag.
+
+Leases (worker v8) add no requests and one row per beat while a document is
+open: ten people editing eight hours a day is about 6,400 rows more, 6 %. A
+Mac merely left open with a note showing holds nothing — the lease goes five
+minutes after the last keystroke (§8.2) — so the left-open column does not
+move.
+
+What does not move is the binding constraint: **Workers requests**, set by
+the poll interval alone. Going lower than 58 % means a longer poll (sync
+latency) or a push channel (a much larger change).
+
+**Blocks:** nothing, for ten Macs on the free plan with the app left open —
+58 % of the request budget is the ceiling, and it leaves §11.3's fan-out
+the remaining 42,000 requests a day where it used to leave 14,000.
 
 ### 11.3 One edit fans out to everyone
 
@@ -1164,7 +1584,8 @@ sees it and runs a full cycle: `GET /api/manifest` plus a blob `GET` per
 changed file. One person's save therefore costs the author about three
 requests and the rest of the team about two each — roughly `2(N−1) + 3`. At
 N = 10 and a modest 2,000 team edits a day that is some 42,000 requests on
-top of §11.2's floor, which is what carries a left-open team past 100,000.
+top of §11.2's floor — and 57,600 + 42,000 is a left-open team at the edge
+of 100,000.
 
 **Blocks:** the free plan for an actively editing team of ten. The shape is
 right — a poll that only costs a `head` when nothing moved is the cheap
@@ -1176,7 +1597,7 @@ bursts of edits from one author into one wake for everyone else.
 `next_poll` is reset to `now + POLL_INTERVAL` on every path
 (`engine.rs:1788`), and a 429 arrives as `RemoteError::Other("http 429: …")`
 (`remote.rs:282`) — an error phase, not a signal to slow down. Past the daily
-cap ten devices keep asking six times a minute until midnight UTC.
+cap ten devices keep asking four times a minute until midnight UTC.
 
 **Blocks:** degrading gracefully. Over quota the team does not get slower, it
 gets errors and keeps hammering — and burns the next day's allowance on the
@@ -1208,16 +1629,17 @@ cap does not move with it.
 
 ### 11.7 Two people on one file find out afterwards
 
-§8.2 is not built, and there is no lock anywhere in the engine or the worker.
-Overlapping edits are merged three ways against the stored base, and where
-that fails they land as `Meeting notes (conflict — Alice, Jul 11 14.32).md`
-(`engine.rs:812`). Nothing is lost and nothing is blocked — but the first the
-team hears of a collision is a second file in the sidebar, after the fact.
-Presence already reports who is editing which path; nothing reads it in the
-editor.
+**Closed** by worker v8's leases (§8.2). Opening a document claims it on the
+beat; a second Mac opening it gets it view-only under "Alice is editing —
+view only", with *Take over* for when Alice has walked away and will not be
+back. Overlapping edits still merge three ways against the stored base, and
+where that fails still land as `Meeting notes (conflict — Alice, Jul 11
+14.32).md` — the lease is advisory, so that is what covers a Mac offline, a
+take-over mid-sentence, or an app a release behind — but it is now the
+exception a lease could not cover, not the first the team hears of a
+collision.
 
-**Blocks:** nothing structurally. This is the UX floor a team notices on day
-one, and the reason §8.2 is shaped for.
+**Blocks:** nothing.
 
 ---
 
@@ -1234,3 +1656,14 @@ connect / update / teardown surfaces, and publishing. The design document
 that planned it, with the reasoning for each choice and an as-built note
 per step, is in the git history as `docs/cloud-redesign.md`; this file is
 that document settled into how it is.
+
+People, presence and leases came after, the same way. A plan of their own
+put all three in a D1 database beside the bucket and built them in seven
+phases, each releasable on its own and four of them invisible by design: D1
+in the deployment; members, tokens and invites in the worker; the 100-bit
+code and the redeem flow; the People panel; attribution by person (manifest
+v3); presence in D1, folded into the poll; and leases. An eighth — the
+manifest pointer in D1 — was designed and deliberately not built (§9,
+decision 22). That plan, with each phase's *as built* note and what it
+departed from, is in the git history as `docs/teams-plan.md`; §5.1, §5.3–5.4,
+§5.7, §6.4, §6.6, §8 and §11 are where it settled.

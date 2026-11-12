@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Manifest, PollResponse};
+use super::manifest::{Beat, Manifest, PollResponse};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -36,14 +36,48 @@ pub struct CreatedBy {
     pub device_name: String,
 }
 
-/// `GET /api/meta`: liveness, the credential and "is this domain bound".
-#[derive(Clone, Debug, Deserialize)]
+/// `GET /api/meta`: liveness, the credential, "is this domain bound" — and,
+/// since worker v6, identity: who this bearer is and what everyone here is
+/// called (docs/cloud.md §6.6). A worker older than that answers neither
+/// field, and attribution falls back to device names.
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Meta {
     pub version: u32,
     #[serde(default)]
     pub features: Vec<String>,
     #[serde(default)]
     pub workspace: Option<WorkspaceRecord>,
+    #[serde(default)]
+    pub you: Option<Identity>,
+    /// The directory: every person's id and display name, and nothing else.
+    /// The People list — addresses, devices, roles — stays the owner's.
+    #[serde(default)]
+    pub people: Vec<Person>,
+}
+
+/// Who the bearer is. `member_id` is the id this Mac's work is signed with;
+/// it is None for an owner who has never adopted an identity, whose access
+/// comes from the env secret and needs no row at all.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub member_id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// One row of the directory: an id, and what to call it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// What a won bind answers with.
@@ -53,6 +87,92 @@ pub struct Bound {
     /// The etag of the empty manifest the bind created — the base of the
     /// first real manifest.
     pub manifest_etag: String,
+}
+
+/* ---------- Who the workspace's people are (docs/cloud.md §8.1) ---------- */
+
+/// A person, as the identity routes describe one. Never a credential: the
+/// app is told who holds one, never what it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRecord {
+    pub id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    /// `owner` or `member` — what the People list shows. Never authority:
+    /// the owner's credential is the worker's env secret, so no row anybody
+    /// can write confers it (docs/cloud.md §5.4).
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
+    #[serde(default)]
+    pub disabled: bool,
+    /// How many Macs this person is signed in on, counted by the members
+    /// route. Zero on a record that came from somewhere else — a redeem
+    /// answers with the person, not with a census of them.
+    #[serde(default)]
+    pub devices: u32,
+}
+
+/// A pending invite, as `POST /api/auth/invites` answers. The code is not in
+/// it and never comes back from the worker — the app is the only place it
+/// ever exists in the clear.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteRecord {
+    pub id: String,
+    #[serde(default)]
+    pub member_id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+}
+
+/// What a redeemed code answers with: this device's own token, handed over
+/// exactly once — the domain keeps only its sha256 from here on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemedToken {
+    pub token: String,
+    #[serde(default)]
+    pub token_id: String,
+    #[serde(default)]
+    pub member: MemberRecord,
+}
+
+/// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
+/// credential: the owner is told who holds one and may take it away, never
+/// what it is — a list of tokens would be a list of keys (docs/cloud.md §5.4).
+///
+/// The owner's own Macs are not in here at all. They authenticate with the
+/// domain's env secret, which is matched against no row, so there is nothing
+/// to list and nothing to revoke but the secret itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRecord {
+    pub id: String,
+    #[serde(default)]
+    pub member_id: String,
+    #[serde(default)]
+    pub email: String,
+    /// The `x-doklin-device` id that redeemed it — how a Mac recognizes its
+    /// own row in the list. Null on a token minted before the app sent one.
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
@@ -115,7 +235,11 @@ pub trait Remote: Send + Sync + 'static {
         name: &str,
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Bound>> + Send;
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
+    /// The 15-second poll. With no beat it is a `GET` and writes nothing;
+    /// with one it is a `POST` that also says this Mac is here, or leaving
+    /// (worker v7, docs/cloud.md §5.3). The engine only hands it a beat
+    /// when the worker lists `presence`.
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -147,11 +271,6 @@ pub trait Remote: Send + Sync + 'static {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    /// Drop one file's retired revision archive. Nothing reads or writes
-    /// these any more (docs/versioning-plan.md §9); the engine's one-time
-    /// clean-up calls this and treats `NotFound` as the same answer as
-    /// success.
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     /* ----- the version store (docs/versioning.md §6.4) ----- */
 
     /// The index and its etag; None when the workspace has never mirrored.
@@ -190,14 +309,65 @@ pub trait Remote: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// "This device is here" — editing `path` when given, idle otherwise.
-    fn put_presence(
-        &self,
-        name: &str,
-        path: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
+
+    /* ----- people (docs/cloud.md §5.4, §8.1) ----- */
+
+    /// `POST /api/auth/invites` (owner): put a pending invite on `email`,
+    /// creating that person if the address is new, and replacing whatever
+    /// invite they had. Only `sha256(code)` goes up — the code itself never
+    /// leaves the app.
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send;
+
+    /// `POST /api/auth/join`: trade a code for this device's own token. The
+    /// one call made with **no bearer at all**, because answering it is how
+    /// a Mac gets one — so it is also the one call whose `Unauthorized` says
+    /// "that code is no good", not "that token is".
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send;
+
+    /// `GET /api/auth/members` (owner): everyone, with a device count and a
+    /// last-seen. This is also what tells a Mac which door it came in by —
+    /// only the owner's credential is answered, so a `Forbidden` here is the
+    /// People panel's member branch, not a failure (docs/cloud.md §7.2).
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
+
+    /// `POST /api/auth/members` (owner): the owner saying who they are.
+    /// Identity, never authority — the env secret keeps authenticating them
+    /// either way, and losing this row costs a name, not access.
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
+
+    /// `DELETE /api/auth/members/<id>` (owner): the person and every
+    /// credential they hold, in one batch.
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `GET /api/auth/invites` (owner): the pending, unexpired ones.
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send;
+
+    /// `DELETE /api/auth/invites/<id>` (owner): withdraw a code before
+    /// anybody trades it in.
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `GET /api/auth/tokens` (owner): every signed-in Mac.
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send;
+
+    /// `DELETE /api/auth/tokens/<id>` (owner): revoke one Mac. It takes
+    /// effect on that Mac's very next request — the bearer resolves through
+    /// the table, so there is no session to expire.
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
 /* ---------- HTTP remote (the real worker) ---------- */
@@ -223,13 +393,45 @@ impl HttpRemote {
         format!("{}/api/{}", self.endpoint, tail)
     }
 
-    /// The bearer plus the two attribution headers every request carries:
-    /// which device speaks (presence, the binding's `createdBy`) and which
-    /// app version (the logs).
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        req.header("authorization", format!("Bearer {}", self.token))
-            .header("x-doklin-device", &self.device_id)
+    /// The two attribution headers every request carries: which device
+    /// speaks (presence, the binding's `createdBy`) and which app version
+    /// (the logs). Never authority — `redeem` sends these and nothing else,
+    /// because it has nothing else to send.
+    fn tags(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req.header("x-doklin-device", &self.device_id)
             .header("x-doklin-client", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The bearer, plus the attribution headers.
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.tags(req).header("authorization", format!("Bearer {}", self.token))
+    }
+}
+
+impl HttpRemote {
+    /// `DELETE /api/auth/<kind>/<id>` — the shape all three revocations
+    /// take. A `404` is left as it is: the caller decides whether "already
+    /// gone" is the same as done (mod.rs — it is, once the list has proved
+    /// the routes are there).
+    fn revoke<'a>(&'a self, kind: &str, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send + 'a {
+        let url = self.url(&format!("auth/{}/{}", kind, id));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    /// One of the identity lists, by its route and the key its body carries.
+    fn list_of<'a, T: serde::de::DeserializeOwned + 'a>(
+        &'a self,
+        kind: &'static str,
+    ) -> impl std::future::Future<Output = RemoteResult<Vec<T>>> + Send + 'a {
+        let url = self.url(&format!("auth/{}", kind));
+        async move {
+            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            read_list(res, kind).await
+        }
     }
 }
 
@@ -249,9 +451,29 @@ fn body_error(v: &serde_json::Value) -> Option<String> {
     v.get("error").and_then(|e| e.as_str()).map(String::from)
 }
 
+/// The worker's own sentence for a status whose body carries one, so what
+/// the user reads is what the worker said ("this domain has no database —
+/// update the worker") rather than a code with a sentence stapled to it.
+async fn worker_sentence(res: reqwest::Response, fallback: &str) -> RemoteError {
+    let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+    RemoteError::Other(body_error(&v).unwrap_or_else(|| fallback.to_string()))
+}
+
+/// `{ "<key>": [...] }` — the shape every identity list answers with. A key
+/// that is missing reads as an empty list: a domain with nobody on it and a
+/// domain that named the array differently are not worth telling apart here,
+/// because the routes that answer this are the ones `list_members` already
+/// proved exist.
+async fn read_list<T: serde::de::DeserializeOwned>(res: reqwest::Response, key: &str) -> RemoteResult<Vec<T>> {
+    let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+    serde_json::from_value(v.get(key).cloned().unwrap_or_else(|| json!([])))
+        .map_err(|e| RemoteError::Other(format!("the domain's {} didn't parse: {}", key, e)))
+}
+
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
     match res.status().as_u16() {
         200..=299 | 304 => Ok(res),
+        400 => Err(worker_sentence(res, "the domain refused that").await),
         401 => Err(RemoteError::Unauthorized),
         403 => Err(RemoteError::Forbidden),
         404 => Err(RemoteError::NotFound),
@@ -269,6 +491,9 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
                 body_error(&v).unwrap_or_else(|| "the worker predates this app's manifest".into()),
             ))
         }
+        // Identity is the database, so a deployment with no `DB` binding says
+        // so here rather than pretending nobody has been invited.
+        503 => Err(worker_sentence(res, "the domain is unavailable").await),
         code => {
             let body = res.text().await.unwrap_or_default();
             let detail = serde_json::from_str::<serde_json::Value>(&body)
@@ -327,9 +552,18 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+        let body = beat.map(Beat::body);
         async move {
-            let res = self.auth(self.client.get(self.url("poll"))).send().await.map_err(transport_err)?;
+            let req = match &body {
+                None => self.client.get(self.url("poll")),
+                Some(body) => self
+                    .client
+                    .post(self.url("poll"))
+                    .header("content-type", "application/json")
+                    .body(serde_json::to_vec(body).unwrap_or_default()),
+            };
+            let res = self.auth(req).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
             res.json::<PollResponse>().await.map_err(transport_err)
         }
@@ -457,14 +691,6 @@ impl Remote for HttpRemote {
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let url = self.url(&format!("blobs/{}/{}", file_id, hash));
-        async move {
-            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn delete_history(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("history/{}", file_id));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -621,38 +847,6 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn put_presence(
-        &self,
-        name: &str,
-        path: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let body = match path {
-            Some(p) => json!({ "name": name, "path": p }),
-            None => json!({ "name": name }),
-        };
-        async move {
-            let res = self
-                .auth(self.client.put(self.url("presence")))
-                .header("content-type", "application/json")
-                .body(serde_json::to_vec(&body).unwrap_or_default())
-                .send()
-                .await
-                .map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        async move {
-            let res = self
-                .auth(self.client.delete(self.url("presence")))
-                .send()
-                .await
-                .map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
         async move {
             let res = self
@@ -665,5 +859,108 @@ impl Remote for HttpRemote {
             let res = expect_status(res).await?;
             res.json::<WipeRound>().await.map_err(transport_err)
         }
+    }
+
+    fn create_invite(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<InviteRecord>> + Send {
+        let body = json!({ "email": email, "name": name, "codeHash": code_hash, "expiresAt": expires_at });
+        async move {
+            let res = self
+                .auth(self.client.post(self.url("auth/invites")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("invite").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't an invite: {}", e)))
+        }
+    }
+
+    fn redeem(
+        &self,
+        code: &str,
+        device_name: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send {
+        // No bearer: this is the route above the worker's auth gate. The
+        // device id rides in the body rather than the header it usually
+        // does, because nothing has authenticated it to read a header from.
+        let body = json!({ "code": code, "deviceId": self.device_id, "deviceName": device_name });
+        async move {
+            let res = self
+                .tags(self.client.post(self.url("auth/join")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            if res.status().as_u16() == 401 {
+                // A worker that predates the identity routes has no carve-out
+                // above its gate, so a bearer-less POST comes back as the
+                // gate's own bare `unauthorized` — the one error in the
+                // worker that is a code word rather than a sentence. The join
+                // route answers a sentence, so the body is what tells "this
+                // code is no good" from "this worker has never heard of
+                // invites".
+                let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+                return Err(match body_error(&v).as_deref() {
+                    Some("unauthorized") => RemoteError::Outdated("the worker predates invites".into()),
+                    _ => RemoteError::Unauthorized,
+                });
+            }
+            let res = expect_status(res).await?;
+            res.json::<RedeemedToken>().await.map_err(transport_err)
+        }
+    }
+    fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send {
+        self.list_of("members")
+    }
+
+    fn adopt_owner(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let body = json!({ "email": email, "name": name });
+        async move {
+            let res = self
+                .auth(self.client.post(self.url("auth/members")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("member").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a person: {}", e)))
+        }
+    }
+
+    fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("members", id)
+    }
+
+    fn list_invites(&self) -> impl std::future::Future<Output = RemoteResult<Vec<InviteRecord>>> + Send {
+        self.list_of("invites")
+    }
+
+    fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("invites", id)
+    }
+
+    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
+        self.list_of("tokens")
+    }
+
+    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("tokens", id)
     }
 }

@@ -79,9 +79,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   answer to "what if the cloud goes away".
 - **Cloud** — connect a folder to a domain of your own and it is backed up and
   kept in sync on every Mac that opens it, with version history for every
-  note. The cloud is one Cloudflare Worker and one bucket on your own account,
-  set up by an agent from a prompt the app writes — no dashboard, no
-  terminal, no account with anyone else. Publishing is one click: a note, a
+  note. The cloud is one Cloudflare Worker with one bucket and one database
+  on your own account, set up by an agent from a prompt the app writes — no
+  dashboard, no terminal, no account with anyone else. Publishing is one click: a note, a
   folder, or the whole workspace gets an address on your domain, rendered
   from the synced files — boards, properties, diagrams, table widths and html
   renditions included — read-only and `noindex`, exactly as fresh as the
@@ -155,10 +155,11 @@ Deeper docs live in dedicated files to keep this page focused:
 - **[docs/cloud.md](docs/cloud.md)** — the cloud as built: one domain per
   workspace, a single Rust engine as the only writer, publishing as a flag
   in the workspace manifest with pages rendered from synced files, the
-  agent + wrangler setup, the room left for invites and locking, the
-  decisions behind each, and the blockers a team of ten hits first — one
-  shared credential, and an idle heartbeat that spends most of Cloudflare's
-  free plan.
+  agent + wrangler setup, a workspace shared with people (a member keyed by
+  their email, an invite code that is a 100-bit capability, presence and
+  advisory file leases riding the poll, all in a D1 database beside the
+  bucket), the decisions behind each, and what a team of ten still runs
+  into on Cloudflare's free plan.
 - **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
   contract: the bucket, the manifest, the sync API, the public routes, and
   deploying by hand.
