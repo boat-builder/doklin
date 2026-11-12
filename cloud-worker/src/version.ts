@@ -63,7 +63,14 @@
 //       documents are open elsewhere. Advisory: nothing that writes the
 //       manifest reads a lease, and a database that cannot answer costs the
 //       warning, never the edit.
-export const WORKER_VERSION = 8;
+//   9 = the public pages wear the app's look (theme.ts): its own tokens,
+//       light and pitch-black dark from the reader's preference, the
+//       Newsreader serif the app bundles (served at /__web/fonts/), the
+//       reading measure, and boards drawn as the app's embed draws them —
+//       tinted columns with their stage glyphs, progress, card excerpts and
+//       dates. No API change: the bump is how the new look reaches a deployed
+//       domain, through the update badge.
+export const WORKER_VERSION = 9;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map

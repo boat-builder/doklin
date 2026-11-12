@@ -113,6 +113,60 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   await page.screenshot({ path: SHOTS + "kanban-board.png" });
 }
 
+/* ---------- 3b. a card shows its first paragraph; the board its stages ---------- */
+{
+  const excerptOf = (title) =>
+    page.locator(".dk-card", { hasText: title }).locator(".dk-card-excerpt").textContent();
+  step(
+    "a card shows the first paragraph of its body",
+    (await excerptOf("Ship dark mode"))?.trim() === "The tokens are already there.",
+    await excerptOf("Ship dark mode"),
+  );
+  step(
+    "so does a card with no properties at all",
+    (await excerptOf("Write onboarding docs"))?.trim() ===
+      "A card that arrived from another tool: no properties at all.",
+  );
+  // The columns are stages of work (the store has a Done), so the header
+  // says how far it has got and each column wears a status glyph.
+  const progress = (await page.locator(".dk-board-head .dk-progress").textContent())?.trim();
+  step("the header says how far the work has got", progress === "0 of 3 done", progress);
+  step(
+    "every column wears a status glyph",
+    (await page.locator(".dk-col-glyph svg").count()) === 4,
+  );
+}
+
+/* ---------- 3c. a card with a page of its own carries the live glyph ---------- */
+{
+  // The engine's status names the pages (src/livePages.tsx feeds the board);
+  // the board's tab is live too when the folder itself is published.
+  const statusWith = (pub) => [
+    {
+      root: "/docs", domain: "notes.example.com", endpoint: "https://notes.example.com", wsId: "w",
+      name: "docs", phase: "idle", lastSyncMs: Date.now(), error: null, pendingDeletes: 0, me: "Test Mac",
+      workerVersion: null, versions: null, presence: [], leases: [],
+      public: pub.map(([slug, kind, path]) => ({
+        slug, kind, path, title: null, desc: null, by: "Test Mac", at: Date.now(), alive: true, root: false,
+      })),
+    },
+  ];
+  const glyphOn = (title) =>
+    page.locator(".dk-card", { hasText: title }).locator('[data-testid="card-live"]').count();
+  await page.evaluate((s) => window.__emit("cloud-status", s), statusWith([["dark-mode", "file", "Projects/Ship dark mode.md"]]));
+  await poll(async () => (await glyphOn("Ship dark mode")) === 1);
+  const others = (await page.locator('[data-testid="card-live"]').count()) - 1;
+  const boardTabBefore = await page.locator('.tab.is-board [data-testid="tab-live"]').count();
+  await page.evaluate((s) => window.__emit("cloud-status", s), statusWith([["dark-mode", "file", "Projects/Ship dark mode.md"], ["projects", "dir", "Projects"]]));
+  await poll(async () => (await page.locator('.tab.is-board [data-testid="tab-live"]').count()) === 1);
+  await page.evaluate(() => window.__emit("cloud-status", []));
+  await poll(async () => (await page.locator('[data-testid="card-live"]').count()) === 0);
+  step(
+    "a published card carries the live glyph, no other card does; a published board's tab does too, and both go when the page does",
+    others === 0 && boardTabBefore === 0 && (await page.locator('[data-testid="tab-live"]').count()) === 0,
+  );
+}
+
 /* ---------- 4. a drag writes one card's properties, not its body ---------- */
 {
   const bodyBefore = await bodyOf(CARD_A);
@@ -127,10 +181,12 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
     steps: 8,
   });
   await settle(120);
-  const line = await page.locator(".dk-drop-line").count();
+  // Done is empty, so its dashed drop zone lights up; a column with cards in
+  // it shows a line between them instead.
+  const marked = await page.locator(".dk-drop-line, .dk-col-empty.is-target").count();
   await page.mouse.up();
   await poll(async () => (await cardsIn("Done")).includes("Fix login redirect"));
-  step("a drop line marks where the card would land", line > 0);
+  step("the drop target marks where the card would land", marked > 0);
   step("the card moved column on screen", (await cardsIn("Done")).includes("Fix login redirect"));
   step(
     "its status is rewritten on disk",
@@ -146,6 +202,14 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
     "no other card was written",
     (await bodyOf(CARD_B)) === "The tokens are already there.\n",
   );
+}
+
+/* ---------- 4b. a card in the finished column is checked ---------- */
+{
+  const done = page.locator(".dk-card.is-done", { hasText: "Fix login redirect" });
+  step("a card dropped in Done is checked and stepped back", (await done.count()) === 1);
+  const progress = (await page.locator(".dk-board-head .dk-progress").textContent())?.trim();
+  step("and the progress moves with it", progress === "1 of 3 done", progress);
 }
 
 /* ---------- 5. a card is created from the column it lands in ---------- */
@@ -182,6 +246,42 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
     (await cardsIn("Blocked")).length === 0 &&
       (await page.locator(".dk-col-name").allTextContents()).includes("Blocked"),
   );
+}
+
+/* ---------- 6b. excerpts are the view's to show ---------- */
+{
+  const before = await fileOf("/docs/Projects/store.jsonl");
+  await page.locator(".dk-bar-btn", { hasText: "View" }).click();
+  await page.getByLabel("Show excerpt").uncheck();
+  await poll(async () => (await fileOf("/docs/Projects/store.jsonl")).includes('"excerpt":false'));
+  step(
+    "turning excerpts off writes excerpt:false on the view, and only that",
+    (await fileOf("/docs/Projects/store.jsonl")) ===
+      before.replace('"groupBy":"status"}', '"groupBy":"status","excerpt":false}'),
+  );
+  await poll(async () => (await page.locator(".dk-card-excerpt").count()) === 0);
+  step("and the cards drop them", true);
+  await page.getByLabel("Show excerpt").check();
+  await poll(async () => (await fileOf("/docs/Projects/store.jsonl")) === before);
+  step("turning them back on puts the view's bytes back", true);
+  await page.keyboard.press("Escape");
+  await poll(async () => (await page.locator(".dk-card-excerpt").count()) > 0);
+}
+
+/* ---------- 6c. New card in the header starts one in the first column ---------- */
+{
+  await page.locator(".dk-new-card").click();
+  const input = column("Backlog").locator(".dk-inline-input");
+  await poll(async () => (await input.count()) === 1);
+  step("the header's New card opens the first column's composer", true);
+  await input.fill("Card from the header");
+  await page.keyboard.press("Enter");
+  await poll(async () => (await cardsIn("Backlog")).includes("Card from the header"));
+  step(
+    "and the card it makes carries that column's value",
+    /status: Backlog/.test((await fileOf("/docs/Projects/Card from the header.md")) ?? ""),
+  );
+  await page.keyboard.press("Escape");
 }
 
 /* ---------- 7. a card PEEKS, then opens as an ordinary note ---------- */

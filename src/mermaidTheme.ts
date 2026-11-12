@@ -2,12 +2,11 @@
 // mermaid themeVariables set, so diagrams read as part of the document rather
 // than wearing a stock mermaid theme.
 //
-// Written for two consumers with different CSS around them — the editor
-// (App.css --app-* tokens) and a public page's static reading view (its own
-// --bg/--text/--link tokens; the cloud worker picks this up again, see
-// docs/cloud.md) — so tokens are read through a fallback chain that
-// ends at the body's computed colors: any page with sane text/background
-// gets a sane palette.
+// Two consumers read it, both on the app's own tokens (styles/tokens.css):
+// the editor, and a public page, which the cloud worker themes from that
+// same file and hydrates with this module (cloud-worker/src/theme.ts). A
+// token that doesn't parse falls back to the body's computed colors, so any
+// page with sane text and background still gets a sane palette.
 
 type Rgb = { r: number; g: number; b: number };
 
@@ -99,25 +98,22 @@ export function bodyFontStack(): string {
   );
 }
 
-// First token in the chain that parses as a color wins; alpha composites onto
+// A token's color, or `fallback` when it doesn't parse; alpha composites onto
 // `base` when given (muted tokens are rgba over the page).
 function readToken(
   styles: CSSStyleDeclaration,
-  names: string[],
+  name: string,
   fallback: Rgb,
   base?: Rgb,
 ): Rgb {
-  for (const name of names) {
-    const parsed = parseColor(styles.getPropertyValue(name));
-    if (!parsed) continue;
-    if (parsed.a >= 1 || !base) return parsed.rgb;
-    return {
-      r: parsed.rgb.r * parsed.a + base.r * (1 - parsed.a),
-      g: parsed.rgb.g * parsed.a + base.g * (1 - parsed.a),
-      b: parsed.rgb.b * parsed.a + base.b * (1 - parsed.a),
-    };
-  }
-  return fallback;
+  const parsed = parseColor(styles.getPropertyValue(name));
+  if (!parsed) return fallback;
+  if (parsed.a >= 1 || !base) return parsed.rgb;
+  return {
+    r: parsed.rgb.r * parsed.a + base.r * (1 - parsed.a),
+    g: parsed.rgb.g * parsed.a + base.g * (1 - parsed.a),
+    b: parsed.rgb.b * parsed.a + base.b * (1 - parsed.a),
+  };
 }
 
 // Everything mermaid needs to draw like a Doklin document: near-paper node
@@ -128,18 +124,18 @@ export function mermaidThemeVariables(): Record<string, string> {
   const styles = getComputedStyle(document.documentElement);
   const bodyStyles = getComputedStyle(document.body);
   const bg =
-    readToken(styles, ["--app-bg", "--bg"], parseColor(bodyStyles.backgroundColor)?.rgb ??
+    readToken(styles, "--sheet", parseColor(bodyStyles.backgroundColor)?.rgb ??
       { r: 255, g: 255, b: 255 });
   const dark = luminance(bg) < 0.5;
   const ink = readToken(
     styles,
-    ["--app-text", "--text"],
+    "--text-1",
     parseColor(bodyStyles.color)?.rgb ?? (dark ? { r: 235, g: 235, b: 235 } : { r: 55, g: 53, b: 47 }),
     bg,
   );
   const accent = readToken(
     styles,
-    ["--app-accent", "--link"],
+    "--accent",
     dark ? { r: 92, g: 150, b: 242 } : { r: 47, g: 111, b: 221 },
     bg,
   );

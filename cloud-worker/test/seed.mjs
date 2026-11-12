@@ -44,6 +44,7 @@ const ROADMAP_STORE = [
   '{"t":"field","id":"status","name":"Status","type":"select"}',
   '{"t":"field","id":"owner","name":"Owner","type":"select"}',
   '{"t":"field","id":"tags","name":"Tags","type":"multi_select"}',
+  '{"t":"field","id":"due","name":"Due","type":"date"}',
   '{"t":"option","field":"status","name":"Backlog","rank":"a0","color":"grey"}',
   '{"t":"option","field":"status","name":"In progress","rank":"a1","color":"blue"}',
   '{"t":"option","field":"status","name":"Done","rank":"a2","color":"green"}',
@@ -105,6 +106,7 @@ The hull is done.
   "Projects/Roadmap/Paint it.md": `---
 status: Backlog
 tags: [paint, hull]
+due: 2026-12-04
 rank: a1
 ---
 After the hull.

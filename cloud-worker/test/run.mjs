@@ -17,6 +17,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
@@ -1332,6 +1333,18 @@ await test(`public: the landing page, robots, icons, the OG image, the mermaid a
     assert.equal(mermaid.status, 503, "this compile carries no assets; the bundle script splices them in");
   }
 
+  // The Newsreader the app bundles, byte for byte, from the worker itself.
+  const vendored = readFileSync(path.join(workerDir, "..", "src", "assets", "fonts", "newsreader", "newsreader-latin-opsz-normal.woff2"));
+  const font = await rawGet("/__web/fonts/newsreader-latin-opsz-normal.woff2");
+  assert.equal(font.status, 200);
+  assert.equal(font.headers.get("content-type"), "font/woff2");
+  assert.match(font.headers.get("cache-control"), /immutable/);
+  assert.ok(font.bytes.equals(vendored), "the app's own file");
+  assert.equal((await rawGet("/__web/fonts/newsreader-latin-opsz-normal.woff2", { method: "HEAD" })).bytes.length, 0);
+  for (const p of ["/__web/fonts/nope.woff2", "/__web/fonts/", "/__web/fonts/x/newsreader-latin-opsz-normal.woff2"]) {
+    assert.equal((await pub(p)).status, 404, p);
+  }
+
   // The map the validation test left: a folder page over a folder with
   // nothing in it, and a note whose blob was never uploaded.
   const empty = await pub("/roadmap");
@@ -1476,22 +1489,39 @@ await test("public: boards and tables derive from the synced datastore; cards li
   assert.equal(page.status, 200);
   assert.ok(!page.text.includes("language-kanban") && !page.text.includes("language-table"), "the fences became views");
   assert.ok(!page.text.includes("store: ./Roadmap"), "config text never shows");
-  assert.ok(page.text.includes('<span class="dk-board-kind">Board</span>') && page.text.includes('<span class="dk-board-kind">Table</span>'));
-  assert.ok(page.text.includes('<span class="dk-board-name">Roadmap</span>'));
-  assert.ok(
-    page.text.includes('<span class="dk-col-dot dk-color-blue"></span><span class="dk-col-name">In progress</span><span class="dk-col-count">1</span>'),
-    "a column with its option's colour and its count",
-  );
-  assert.ok(page.text.includes('<span class="dk-col-name">Done</span>'));
+  assert.match(page.text, /<span class="dk-embed-kind"><svg[^>]*>.*?<\/svg>Board<\/span>/, "the embed's bar names its kind");
+  assert.match(page.text, /<span class="dk-embed-kind"><svg[^>]*>.*?<\/svg>Table<\/span>/);
+  assert.ok(page.text.includes('<span class="dk-board-title">Roadmap</span>'));
+  // The board part of the page, before the table view of the same store.
+  const board = page.text.slice(0, page.text.indexOf('<table class="dk-table">'));
+  const column = (color, name, count) =>
+    new RegExp(
+      `<section class="dk-col dk-color-${color}"><header class="dk-col-head"><span class="dk-col-glyph"><svg[^>]*>(.*?)</svg></span><span class="dk-col-name">${name}</span><span class="dk-col-count">${count}</span>`,
+    );
+  // A board grouped by a select with a finished option tracks progress: each
+  // column wears its stage — not started, on the way, done — as the app's glyph.
+  assert.match(board, column("grey", "Backlog", 1), "a column with its option's colour and its count");
+  assert.match(board.match(column("grey", "Backlog", 1))[1], /stroke-dasharray/, "the first stage hasn't started: a dashed ring");
+  assert.match(board.match(column("blue", "In progress", 1))[1], /A3\.5 3\.5 0 0 1 /, "a stage on the way: a ring filling");
+  assert.match(board.match(column("green", "Done", 1))[1], /class="dk-glyph-check"/, "the finished column: a check");
+  assert.ok(board.includes('done</span>') && board.includes("1 of 3 done") && board.includes('style="width:33%"'), "progress over the board");
   assert.ok(
     page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Ship%20the%20boat">Ship the boat</a>'),
     "a card inside the published folder links to its nested page, not its own slug",
   );
   assert.ok(page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Paint%20it">Paint it</a>'));
+  assert.match(
+    board,
+    /<li class="dk-card is-done"><a class="dk-card-title" href="\/projects\/Roadmap\/Launch"><span class="dk-card-check"><svg[^>]*>.*?<\/svg><\/span>Launch<\/a>/,
+    "a card in the finished column is checked",
+  );
+  assert.ok(board.includes('<div class="dk-card-excerpt">The hull is done.</div>'), "a card shows its excerpt, as the view does in the app");
+  assert.match(board, /<span class="dk-card-date(?: is-soon)?" title="Due"><svg[^>]*>.*?<\/svg>Dec 4(?:, 2026)?<\/span>/, "a date sits in the card's foot");
+  assert.ok(!board.includes(">2026-12-04<"), "…not as a pill");
   assert.ok(page.text.includes('<span class="dk-chip dk-color-green">Ada</span>'), "a chip takes the option's colour");
   assert.ok(page.text.includes('<span class="dk-chip dk-color-red">paint</span>'));
-  assert.ok(page.text.includes('<span class="dk-board-sub">3 cards</span>'));
-  assert.ok(page.text.includes('<th class="dk-th">Status</th>') && page.text.includes('<th class="dk-th">Owner</th>'));
+  assert.ok(page.text.includes('<span class="dk-board-sub">3 cards</span>'), "the table counts its cards");
+  assert.ok(page.text.includes('<th class="dk-th">Status</th>') && page.text.includes('<th class="dk-th">Due</th>'));
   assert.ok(page.text.includes('<a class="dk-row-title" href="/projects/Roadmap/Launch">Launch</a>'));
   assert.ok(page.text.includes("Everything after the board is ordinary prose."));
 
@@ -1500,7 +1530,12 @@ await test("public: boards and tables derive from the synced datastore; cards li
   const ideas = await pub("/ideas");
   assert.equal(ideas.status, 200);
   assert.ok(ideas.text.includes('<span class="dk-card-title">Teleporter</span>'), "not a link");
-  assert.ok(ideas.text.includes('<span class="dk-col-dot dk-color-yellow"></span><span class="dk-col-name">New</span>'));
+  assert.match(
+    ideas.text,
+    /<section class="dk-col dk-color-yellow"><header class="dk-col-head"><span class="dk-col-glyph"><svg[^>]*><circle cx="8" cy="8" r="3.75" fill="currentColor" stroke="none"\/><\/svg><\/span><span class="dk-col-name">New<\/span>/,
+    "a board with no finished option tracks nothing: a plain dot in the column's colour",
+  );
+  assert.ok(ideas.text.includes('<span class="dk-board-sub">2 cards</span>') && !ideas.text.includes('<span class="dk-progress"'), "no progress claimed");
   assert.ok(ideas.text.includes('<span class="dk-card-title">Jetpack</span>'), "a note without frontmatter is a card too");
   assert.ok(!ideas.text.includes('href="/Ideas/'), "no dead links");
 
@@ -1515,6 +1550,30 @@ await test("public: boards and tables derive from the synced datastore; cards li
   assert.ok(between(card.text, '<main class="doc">', '<div class="dk-props">') && between(card.text, '<div class="dk-props">', "<p>The hull is done.</p>"), "properties sit above the body, inside the document");
   const launch = await pub("/projects/Roadmap/Launch");
   assert.ok(launch.text.includes('dk-color-green">Done</span>') && !launch.text.includes('dk-prop-label">Owner'), "unset values are left out");
+});
+
+await test("public: every page wears the app's own theme — its tokens light and dark, its Newsreader — with nothing the browser can't ask for", async () => {
+  const tokens = readFileSync(path.join(workerDir, "..", "src", "styles", "tokens.css"), "utf8");
+  const block = (selector) => tokens.slice(tokens.indexOf(`${selector} {`)).split("}")[0];
+  const value = (selector, name) => block(selector).match(new RegExp(`${name}: ([^;]+);`))[1];
+  const light = { sheet: value('[data-theme="light"]', "--sheet"), accent: value('[data-theme="light"]', "--accent") };
+  const dark = { sheet: value('[data-theme="dark"]', "--sheet"), accent: value('[data-theme="dark"]', "--accent") };
+  const paper = value('[data-theme="paper"]', "--sheet");
+  assert.notEqual(light.accent, dark.accent, "the file's two palettes differ, so the checks below mean something");
+  for (const p of ["/home", "/projects", "/plan", "/nope", "/"]) {
+    const res = await pub(p);
+    const css = res.text.slice(res.text.indexOf("<style>"), res.text.indexOf("</style>"));
+    const media = css.indexOf("@media (prefers-color-scheme: dark)");
+    assert.ok(media > 0, `${p}: the dark palette answers the reader's preference`);
+    assert.ok(css.slice(0, media).includes(`--accent: ${light.accent}`) && css.slice(0, media).includes(`--sheet: ${light.sheet}`), `${p}: light is :root`);
+    assert.ok(css.slice(media).includes(`--accent: ${dark.accent}`) && css.slice(media).includes(`--sheet: ${dark.sheet}`), `${p}: dark under the media query`);
+    assert.ok(!css.includes("data-theme") && !css.includes(paper) && !css.includes("data-doc-font"), `${p}: no palette a browser can't ask for`);
+    assert.ok(css.includes('url("/__web/fonts/newsreader-latin-opsz-normal.woff2")') && !css.includes("../assets"), `${p}: the faces point at the worker`);
+    assert.ok(!css.includes("Design tokens") && !css.includes("SIL Open Font License"), `${p}: the app's comments stay in its files`);
+  }
+  const note = await pub("/home");
+  assert.ok(note.text.includes('<link rel="preload" href="/__web/fonts/newsreader-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin>'), "a page set in the serif asks for it early");
+  assert.ok(!(await pub("/plan")).text.includes('rel="preload"'), "a framed rendition sets no serif of its own, so fetches none");
 });
 
 await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the hydrator rides only pages with a diagram", async () => {

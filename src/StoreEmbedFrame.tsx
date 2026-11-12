@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import StoreView from "./StoreView";
+import { BoardIcon, TableIcon } from "./storeChrome";
 import type { ViewKind } from "./store/storeFile";
 import { linkTargetPath, relativeLinkPath } from "./docLinks";
 import {
@@ -97,7 +98,10 @@ export default function StoreEmbedFrame({
       data-dk-embed=""
     >
       <div className="dk-embed-bar">
-        <span className="dk-embed-kind">{kind === "table" ? "Table" : "Board"}</span>
+        <span className="dk-embed-kind">
+          {kind === "table" ? <TableIcon size={13} /> : <BoardIcon size={13} />}
+          {kind === "table" ? "Table" : "Board"}
+        </span>
         {cfg.store && <span className="dk-embed-ref">{cfg.store}</span>}
         {!readOnly && (
           <button

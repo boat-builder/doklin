@@ -178,8 +178,8 @@ await poll(async () => (await tid("version-preview").count()) === 1);
 await tid("restore-version").click();
 await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe first text\n");
 const restoreCall = await lastVersionCall("versions_restore_file");
-await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
-const toast = await page.locator(".cloud-toast-text").textContent();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const toast = await page.locator(".toast-text").textContent();
 step(
   "Restore is one command: the version's hash and its ts, and the file is written",
   restoreCall.args.path === "/docs/other.md" &&
@@ -203,7 +203,7 @@ step(
 await page.screenshot({ path: SHOTS + "versions-03-restored.png" });
 
 /* 12 — Undo is another restore, of the state the first one left (§12.3.8). */
-await page.locator(".cloud-toast-btn", { hasText: "Undo" }).click();
+await page.locator(".toast-btn", { hasText: "Undo" }).click();
 await poll(async () => (await versionCalls("versions_restore_file")).length === 2);
 const undo = await lastVersionCall("versions_restore_file");
 await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe current text\n");
@@ -343,7 +343,7 @@ step(
   "the sidebar root offers Workspace history…, and no Recently deleted while nothing is",
   rootMenu.some((t) => t.startsWith("Workspace history")) &&
     !rootMenu.some((t) => t.startsWith("Recently deleted")) &&
-    (await tid("recently-deleted-row").count()) === 0,
+    (await tid("recently-deleted-button").count()) === 0,
   rootMenu.join(" | "),
 );
 
@@ -404,7 +404,7 @@ await poll(async () => (await page.evaluate(() => window.__versions.restores.len
 const whole = await page.evaluate(() => window.__versions.restores.at(-1));
 const refreshed = await poll(async () => (await page.evaluate(() => window.__treeCalls)) > 0);
 const undoToast = await poll(async () =>
-  (await page.locator(".cloud-toast").last().innerText()).includes("moved to the Trash"),
+  (await page.locator(".toast").last().innerText()).includes("moved to the Trash"),
 );
 step(
   "Restore all says what it will do, does it, and the tree refreshes with an Undo offered",
@@ -414,7 +414,7 @@ step(
     whole.trashed.length === 1 &&
     refreshed &&
     undoToast &&
-    (await page.locator(".cloud-toast").last().innerText()).includes("Undo"),
+    (await page.locator(".toast").last().innerText()).includes("Undo"),
   `${allText} → ${JSON.stringify(whole)}`,
 );
 
@@ -431,19 +431,20 @@ await page.evaluate(() => {
   window.__versions.blobs["9".repeat(64)] = "# Gone\n\nthe note that was deleted\n";
   window.__emit("versions-applied", { root: "/docs", paths: [] });
 });
-await poll(async () => (await tid("recently-deleted-row").count()) === 1);
-const rowText = await tid("recently-deleted-row").innerText();
-await tid("recently-deleted-row").click();
+await poll(async () => (await tid("recently-deleted-button").count()) === 1);
+const footerLabel = await tid("recently-deleted-button").getAttribute("aria-label");
+const footerCount = await tid("recently-deleted-button").innerText();
+await tid("recently-deleted-button").click();
 await poll(async () => (await tid("recently-deleted").count()) === 1);
 const deletedRow = await tid("deleted-row").innerText();
 step(
-  "a deleted file gets a row at the foot of the sidebar, and a column listing its old folder and when it was last seen",
-  rowText.includes("Recently deleted") &&
-    rowText.includes("1") &&
+  "a deleted file gets a count in the sidebar's footer bar, and a column listing its old folder and when it was last seen",
+  footerLabel === "Recently deleted (1)" &&
+    footerCount.trim() === "1" &&
     deletedRow.includes("gone") &&
     deletedRow.includes("Projects") &&
     deletedRow.includes("last seen"),
-  `${rowText.replace(/\n/g, " ")} / ${deletedRow.replace(/\n/g, " ")}`,
+  `${footerLabel} [${footerCount.trim()}] / ${deletedRow.replace(/\n/g, " ")}`,
 );
 await page.screenshot({ path: SHOTS + "versions-06-deleted.png" });
 

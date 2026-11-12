@@ -113,7 +113,7 @@ and useful on its own.
 | **Card** | one `.md` file directly inside a store folder; its frontmatter holds the properties, its body is the card's page | database page |
 | **Field** | a named, typed property every card may carry (`status: select`, `due: date`, …), declared in `store.jsonl` | property |
 | **Option** | one allowed value of a `select` / `multi_select` field; for the group-by field of a board, one option = one column | select option |
-| **View** | a saved way of showing a store: a `kind` (`kanban` / `table`), what it groups by, and its own `filter`, `sort`, `show` and `hide` | view |
+| **View** | a saved way of showing a store: a `kind` (`kanban` / `table`), what it groups by, and its own `filter`, `sort`, `show`, `hide` and `excerpt` | view |
 | **Board** | the kanban view, as the user sees it: a tab, or an embed inside a note | board view |
 | **Embed** | a ` ```kanban ` or ` ```table ` block in a note that shows a view of a store | linked database |
 
@@ -253,7 +253,8 @@ Same shape and same rules as the entity meta file, for the same reason:
   described below.
 - **Views** hold what is view-specific: the `kind` (`kanban` or `table`),
   `groupBy`, `filter`, `sort`, `show` (which fields the card face or the
-  table shows) and `hide` (which columns a board leaves out). A store can
+  table shows), `hide` (which columns a board leaves out) and `excerpt`
+  (whether a board's cards show the first paragraph of their body). A store can
   have several; the tab's strip switches between them and an embed names one
   by `id`. Only what a view actually carries is written, so a view nobody
   has filtered or sorted keeps the bytes it has always had.
@@ -262,8 +263,11 @@ Same shape and same rules as the entity meta file, for the same reason:
   list carries it" on a multi_select and "the text contains it" on anything
   else, because a person filtering a board means the same thing either way.
   A clause whose value is still empty passes everything: half a filter,
-  typed into the View panel, must not blank the board under the person
-  building it.
+  typed into the Filter panel, must not blank the board under the person
+  building it. `excerpt` is the one key written only as `false`: absent
+  means on, because a build that predates the switch rewrites a view from
+  the keys it knows, and dropping the key must land on the default rather
+  than on "off".
 
 Field types: `select`, `multi_select`, `text`, `number`, `date`, `checkbox`.
 A kanban view can group by a `select`, a `multi_select` (a card is then in a
@@ -313,11 +317,17 @@ tab; a folder that vanished becomes a ghost tab.
 
 `StoreView` is the shell every view sits in, in a tab or in a note: it holds
 the store's model, decides which saved view is on screen, and draws the
-heading, the **view strip** (one chip per saved view, plus `+` for a new
-board or table) and the **View** panel — group-by, sort, filter, which
+header — the board's name, then one bar with the **view strip** (a tab per
+saved view, plus `+` for a new board or table) on the left and, on the
+right, how far the work has got ("5 of 14 done", on a board whose columns
+are stages — see below; otherwise the card count), three panels and
+**New card**. **Filter** holds the clauses, **Sort** the field and
+direction, and **View** the rest: group-by, *Show excerpt* and which
 properties show, which columns are hidden, *Export as CSV…*, and *Delete
-this view*. Everything in that panel is one line of `store.jsonl`, which is
-to say everyone's; so only a TAB offers it. An embed shows the one view its
+this view*. Everything in those panels is one line of `store.jsonl`, which
+is to say everyone's; so only a TAB offers them. New card opens the
+composer where a card would start: the board's first declared column, or
+the table's foot. An embed shows the one view its
 fence names and changes nothing: the note said what it wanted to show, and
 a reader scrolling past should not be able to rewrite that for the whole
 workspace.
@@ -471,8 +481,8 @@ flushed yet.
 
 ## The views
 
-`src/StoreView.tsx` is the shell (the model, the view strip, the View panel,
-the empty states); `src/KanbanBoard.tsx` and `src/TableView.tsx` draw what is
+`src/StoreView.tsx` is the shell (the model, the header, its panels, the
+empty states); `src/KanbanBoard.tsx` and `src/TableView.tsx` draw what is
 under it. Both read the same derivation in `src/store/board.ts`, so what they
 show can never drift apart — and neither can a published page, which the
 cloud worker draws from that same derivation.
@@ -487,9 +497,26 @@ cloud worker draws from that same derivation.
   options, not derived from data. A `date` group-by is the exception that
   proves it: it has no options, so its columns ARE the dates the cards
   carry, and there is nothing to declare or to add.
-- **Cards** show the title and a chip per non-empty field the view shows
-  (all of them, by default). A click peeks the card beside the board; in an
-  embed the peek opens the same way.
+- **Columns** are washed in their option's colour, with a count pill and a
+  **status glyph**. A board grouped by a `select` that has a finished option
+  — named Done, Complete(d), Finished, Shipped, Closed or Resolved, in any
+  case — tracks progress (`boardStages` in `store/board.ts`): the empty
+  column and the first option are a dashed ring (not started), the options
+  before the finished one fill a ring by their position, the finished one
+  is a solid check, and any after it (Cancelled, Archived) a slashed ring —
+  closed, not done. Its cards are checked and stepped back, and the header
+  shows the progress bar. Any other board — by priority, by a tag, by a
+  date — claims nothing about progress: its columns get a plain dot.
+  Nothing is stored for this; the option names already say it, in every
+  tool that reads the files. An empty column shows a dashed drop zone.
+- **Cards** show the title, the **excerpt** — the first paragraph of the
+  body as plain text (headings, code, tables, rules and html skipped,
+  markdown reduced to its words; `cardExcerpt`), clamped to two lines, and
+  only where the view's `excerpt` is on — a pill per non-empty field the
+  view shows (all of them, by default), and the card's dates in its foot. A
+  date field named like a deadline (`due`, `deadline`) turns amber within
+  three days, overdue included, unless the card is finished. A click peeks
+  the card beside the board; in an embed the peek opens the same way.
 - **Drag** is pointer-based, like the sidebar's row drag (Tauri intercepts
   HTML5 drag events; `Sidebar.tsx` explains). Dropping writes one card's
   `status` + `rank`. On a `multi_select` board a card is in a column for
@@ -504,7 +531,7 @@ cloud worker draws from that same derivation.
   above).
 - **Read-only** boards (the unfocused split pane's mirror) render the same
   DOM with drag and inputs off, like `readOnly` on the editor.
-- Themed from the `--app-*` tokens in `App.css`, all four themes; option
+- Themed from the tokens in `src/styles/tokens.css`, every theme; option
   colours are a small named palette mapped per theme, never raw hex in the
   files.
 
@@ -599,7 +626,7 @@ flowchart LR
 
 | Command | Does |
 | --- | --- |
-| `read_store(path)` | one round-trip for a whole board: `store.jsonl` raw text plus, for every direct-child `.md`, its name, snapshot, and the **frontmatter block only** (first few KB, fences located by line scan — Rust never parses the dialect). Hundreds of cards are one IPC call. |
+| `read_store(path)` | one round-trip for a whole board: `store.jsonl` raw text plus, for every direct-child `.md`, its name, snapshot, the **frontmatter block** and the **lead** — up to 400 bytes after it, cut on a character, which the excerpt is read from. One bounded read per card (a block over 16 KB is neither properties nor prose); fences located by line scan — Rust never parses the dialect. Hundreds of cards are one IPC call, and the model re-parses only the cards whose bytes moved. |
 | `write_frontmatter(path, head, expected)` | replaces the file's leading frontmatter block (or inserts one) keeping the body bytes identical, under the same `expected` snapshot guard as `write_file`; same `conflict` error. |
 | `write_body(path, body, expected)` | the mirror image: replaces the body, keeping the leading frontmatter block byte for byte, under the same guard. A card has two halves and two kinds of writer (a board or a header owns the block, a peek owns the body); one splice per half means neither can clobber the other's. |
 | `create_card(path, head)` | new file with a frontmatter block and empty body; refuses to clobber (`create_file`'s rule). |

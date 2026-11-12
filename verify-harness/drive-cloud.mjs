@@ -13,10 +13,12 @@
 // boxes, a refused code spending nothing, a download on the member's own
 // credential, the People view: adopting an identity, inviting somebody, the
 // code shown once, and the three ways access goes away — and publishing:
-// the pill's not-connected
-// door, publishing a note at a random then a chosen address, the sidebar's
-// dots, the folder dialog, the published list (home page, stop), and the
-// sidebar's undoable stop.
+// the Live chip's not-connected
+// door, publishing a note at a random then a chosen address, the chip's five
+// states and the tab's live glyph, the sidebar's live dots, the folder
+// dialog, the published list (home page, stop), and the sidebar's undoable
+// stop — and the sidebar footer's sync line, the title row's facepile and
+// the faces on a row somebody is editing.
 import { chromium } from "playwright";
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -129,14 +131,15 @@ const openPanelFromGear = async () => {
 /* 1 — boot: a plain workspace, no dot, the gear's Cloud… item without a badge */
 await poll(async () => (await page.locator(".milkdown .ProseMirror").count()) === 1);
 await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
-/* 1b — the pill on a note of an unconnected workspace: Publish, and the door to the wizard */
-await poll(async () => (await tid("publish-pill").count()) === 1);
-const pillBefore = await tid("publish-pill").textContent();
-await tid("publish-pill").click();
+/* 1b — the chip on a note of an unconnected workspace: Publish, and the door to the wizard */
+await poll(async () => (await tid("live-chip").count()) === 1);
+const pillBefore = await tid("live-chip").textContent();
+await tid("live-chip").click();
 await poll(async () => (await tid("publish-pop").count()) === 1);
 step(
-  "pill (not connected): reads Publish, its popover explains and offers Connect a domain…",
+  "chip (not connected): reads Publish, its popover explains and offers Connect a domain…",
   pillBefore === "Publish" &&
+    (await tid("live-chip").getAttribute("data-state")) === "publish" &&
     (await tid("publish-connect").count()) === 1 &&
     (await tid("publish-pop").textContent()).includes("connected to a domain"),
   pillBefore,
@@ -146,8 +149,8 @@ await poll(async () => (await tid("publish-pop").count()) === 0);
 await page.locator(".settings-fab").click();
 await poll(async () => (await tid("settings-cloud").count()) === 1);
 step(
-  "boots: /docs listed, no cloud dot, Cloud… in the gear menu without a badge",
-  (await tid("sidebar-cloud-dot").count()) === 0 &&
+  "boots: /docs listed, no sync line in the footer, Cloud… in the gear menu without a badge",
+  (await tid("sync-status").count()) === 0 &&
     (await tid("settings-cloud").locator(".settings-option-dot").count()) === 0 &&
     (await page.locator(".settings-fab-badge").count()) === 0,
 );
@@ -246,16 +249,18 @@ step(
 await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Connect a domain").count()) === 0);
 
-/* 8 — the sidebar dot is green and names the domain */
-await poll(async () => (await tid("sidebar-cloud-dot").count()) === 1);
+/* 8 — the footer says Synced, in green, and its tooltip names the domain */
+await poll(async () => (await tid("sync-status").count()) === 1);
 step(
-  "sidebar dot: phase-idle, tooltip names the domain",
-  (await page.locator(".sidebar-cloud-dot.phase-idle").count()) === 1 &&
-    (await tid("sidebar-cloud-dot").getAttribute("title")).includes("notes.example.com"),
+  "footer: the sync line reads Synced (green), its tooltip names the domain",
+  (await tid("sync-status").getAttribute("data-phase")) === "idle" &&
+    (await tid("sync-status").textContent()) === "Synced" &&
+    (await tid("sync-status").getAttribute("class")).includes("is-live") &&
+    (await tid("sync-status").getAttribute("title")).includes("notes.example.com"),
 );
 
 /* 9 — the panel, connected: phase line, sync now, pause / resume */
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const phaseText = await tid("phase-text").textContent();
 await tid("sync-now").click();
@@ -279,15 +284,15 @@ await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 
 /* 9a — publish the open note at a random address */
-await tid("publish-pill").click();
+await tid("live-chip").click();
 await poll(async () => (await tid("publish-go").count()) === 1);
 await tid("publish-go").click();
 await poll(async () => (await calls("cloud_publish")).length === 1);
-await poll(async () => (await tid("publish-pill").textContent()) === "Published");
+await poll(async () => (await tid("live-chip").getAttribute("data-state")) === "live");
 const firstPublish = await lastCall("cloud_publish");
 const publishedUrl = await tid("publish-url").textContent();
 step(
-  "pill: Publish sends the note's path with no slug; the pill reads Published, the link is a random address, the sidebar row gets a dot",
+  "chip: Publish sends the note's path with no slug; the chip reads Live, the link is a random address, the sidebar row gets a dot",
   firstPublish.args.path === "/docs/notes.md" &&
     firstPublish.args.slug === null &&
     /^notes\.example\.com\/[a-z0-9]{8}$/.test(publishedUrl) &&
@@ -298,6 +303,7 @@ step(
 await page.screenshot({ path: SHOTS + "cloud-09-published.png" });
 
 /* 9b — a chosen address, and Copy */
+await tid("publish-change").click();
 await tid("publish-slug").fill("team-notes");
 await tid("publish-rename").click();
 await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-notes");
@@ -320,17 +326,84 @@ await page.evaluate(() => {
 });
 await poll(async () => (await tid("publish-by").textContent()).includes("by you"));
 
+// A rename that landed folds the address away; Change address opens it again.
+const foldedAfterRename = (await tid("publish-slug").count()) === 0;
+await tid("publish-change").click();
 await tid("publish-slug").fill("AB");
 await poll(async () => (await tid("publish-pop").locator(".modal-error").count()) === 1);
 step(
-  "pill: Change re-publishes under the chosen slug, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it; a page names the person who published it",
+  "chip: Change address re-publishes under the chosen slug and folds away, Copy puts the link on the clipboard, a bad slug is refused before the engine sees it; a page names the person who published it",
   (await tid("publish-rename").isDisabled()) &&
+    foldedAfterRename &&
     (await calls("cloud_publish")).length === 2 &&
     byOther.includes("Published by Bob") &&
     !byOther.includes("by you"),
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await tid("publish-pop").count()) === 0);
+
+/* 9b2 — the chip's five states, in words: Live with its address (and the
+   tab's glyph), Not updating while sync is stopped short of the page, Page
+   offline when the page itself is down, and Updating while an edit made here
+   is on its way — which lasts past the save, until a sync completes after it */
+const currentStatus = () => page.evaluate(() => window.__cloud.statuses[0]);
+const patchStatus = async (over) => setStatuses([{ ...(await currentStatus()), ...over }]);
+const chipState = () => tid("live-chip").getAttribute("data-state");
+const chipText = () => tid("live-chip").textContent();
+const reasonOf = async () => {
+  await tid("live-chip").click();
+  await poll(async () => (await tid("publish-pop").count()) === 1);
+  const reason = (await tid("publish-state").count()) === 1 ? await tid("publish-state").textContent() : "";
+  const heading = await tid("publish-pop").locator(".live-pop-head").textContent();
+  await page.keyboard.press("Escape");
+  await poll(async () => (await tid("publish-pop").count()) === 0);
+  return { reason, heading };
+};
+const liveText = await chipText();
+const liveTitle = await tid("live-chip").getAttribute("title");
+const liveHead = await reasonOf();
+const tabGlyph = await page.locator('.tab.is-active [data-testid="tab-live"]').count();
+await patchStatus({ phase: "paused" });
+await poll(async () => (await chipState()) === "stale");
+const staleText = await chipText();
+const stale = await reasonOf();
+await patchStatus({ phase: "revoked" });
+await poll(async () => (await chipState()) === "offline");
+const revokedText = await chipText();
+const livePublic = (await currentStatus()).public;
+await patchStatus({ phase: "idle", public: livePublic.map((p) => ({ ...p, alive: false })) });
+await poll(async () => (await chipState()) === "offline");
+const gone = await reasonOf();
+await patchStatus({ public: livePublic });
+await poll(async () => (await chipState()) === "live");
+await page.locator(".milkdown .ProseMirror").first().click();
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type(" Edited here.");
+await poll(async () => (await chipState()) === "updating");
+const updatingText = await chipText();
+await poll(async () => (await page.locator(".tab.is-active .tab-close.is-dirty").count()) === 0);
+const updating = await reasonOf();
+const updatingAfterSave = (await chipState()) === "updating";
+await patchStatus({ lastSyncMs: Date.now() });
+await poll(async () => (await chipState()) === "live");
+step(
+  "chip states: Live /team-notes (the address its tooltip, the tab's glyph); paused → Not updating and why; revoked, or a page whose note isn't synced → Page offline; an edit → Updating, past the save, until a sync completes after it",
+  liveText === "Live/team-notes" &&
+    liveTitle === "https://notes.example.com/team-notes" &&
+    liveHead.heading.includes("“notes” is live") &&
+    liveHead.reason === "" &&
+    tabGlyph === 1 &&
+    staleText === "Not updating" &&
+    stale.reason.includes("paused") &&
+    stale.heading.includes("isn’t updating") &&
+    revokedText === "Page offline" &&
+    gone.reason.includes("Not found") &&
+    updatingText === "Updating" &&
+    updating.reason === "Your latest changes appear once synced." &&
+    updatingAfterSave,
+  `${liveText} · ${staleText} · ${revokedText} · ${updatingText}`,
+);
+await page.screenshot({ path: SHOTS + "cloud-09b-chip.png" });
 
 /* 9c — the folder dialog from the sidebar */
 await page.locator('[data-tree-path="/docs/Projects"]').click({ button: "right" });
@@ -359,11 +432,11 @@ step(
 /* 9d — a note inside the published folder: the pill knows its nested address */
 await page.locator('[data-tree-path="/docs/Projects/plan.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Plan"));
-await poll(async () => (await tid("publish-pill").textContent()) === "Publish");
-await tid("publish-pill").click();
+await poll(async () => (await tid("live-chip").getAttribute("data-state")) === "publish");
+await tid("live-chip").click();
 await poll(async () => (await tid("publish-nested").count()) === 1);
 step(
-  "pill (inside a published folder): not published on its own, but 'Already public inside Projects' at the nested address",
+  "chip (inside a published folder): not published on its own, but 'Already public inside Projects' at the nested address",
   (await tid("publish-nested").textContent()).includes("notes.example.com/projects/plan"),
 );
 await page.keyboard.press("Escape");
@@ -371,7 +444,7 @@ await poll(async () => (await tid("publish-pop").count()) === 0);
 await page.screenshot({ path: SHOTS + "cloud-10-folder-published.png" });
 
 /* 9e — the published list: folders first, home page, stop */
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("published-pages").count()) === 1);
 const doorText = await tid("published-pages").textContent();
 await tid("published-pages").click();
@@ -401,9 +474,9 @@ await page.locator('[data-tree-path="/docs/notes.md"]').click({ button: "right" 
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).click();
 await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "team-notes");
-await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
-const stopToast = await page.locator(".cloud-toast").textContent();
-await page.locator(".cloud-toast-btn", { hasText: "Undo" }).click();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const stopToast = await page.locator(".toast").textContent();
+await page.locator(".toast-btn", { hasText: "Undo" }).click();
 await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-notes");
 await poll(async () => (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1);
 step(
@@ -414,25 +487,46 @@ step(
 );
 await page.locator('[data-tree-path="/docs/notes.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Notes"));
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 
-/* 10 — every phase reaches the phase line and the dot */
+/* 10 — every phase reaches the panel's line and dot, and the footer's words.
+   A sync pass shows as Syncing… only once it has run a moment: the engine
+   passes through "syncing" every 15 s, and most passes end in a blink. */
 const phases = [
-  ["offline", "Offline"],
-  ["syncing", "Syncing"],
-  ["revoked", "Access revoked"],
-  ["error", "disk full"],
-  ["worker-outdated", "Waiting on a worker update"],
+  ["offline", "Offline", "Offline"],
+  ["syncing", "Syncing", "Syncing…"],
+  ["revoked", "Access revoked", "Access revoked"],
+  ["error", "disk full", "Can't sync"],
+  ["pending-deletes", "deletions waiting", "3 deletions to confirm"],
+  // Last: step 11 reads the worker-outdated status this leaves.
+  ["worker-outdated", "Waiting on a worker update", "Worker update needed"],
 ];
+// A pass that ends within the moment never says Syncing…
+await setStatuses([status()]);
+await poll(async () => (await tid("sync-status").getAttribute("data-phase")) === "idle");
+await setStatuses([status({ phase: "syncing" })]);
+await settle(300);
+await setStatuses([status()]);
+await settle(900);
+const blinkStayedSynced = (await tid("sync-status").textContent()) === "Synced";
 let phasesOk = true;
-for (const [phase, words] of phases) {
-  await setStatuses([status({ phase, error: phase === "error" ? "disk full" : null })]);
+const footerWords = [];
+for (const [phase, words, footer] of phases) {
+  await setStatuses([
+    status({ phase, error: phase === "error" ? "disk full" : null, pendingDeletes: phase === "pending-deletes" ? 3 : 0 }),
+  ]);
   await poll(async () => (await tid("phase-text").textContent()).toLowerCase().includes(words.toLowerCase()));
   phasesOk &&= (await page.locator(`.cloud-dot.phase-${phase}`).count()) === 1;
-  phasesOk &&= (await page.locator(`.sidebar-cloud-dot.phase-${phase}`).count()) === 1;
+  phasesOk &&= await poll(async () => (await tid("sync-status").getAttribute("data-phase")) === phase).catch(() => false);
+  footerWords.push(await tid("sync-status").textContent());
+  phasesOk &&= footerWords.at(-1) === footer;
 }
-step("phases: offline / syncing / revoked / error / worker-outdated reach the line and both dots", phasesOk);
+step(
+  "phases: each reaches the panel's line and dot, and the footer says it in words; a pass that ends in a blink never says Syncing…",
+  phasesOk && blinkStayedSynced,
+  footerWords.join(" / "),
+);
 
 /* 11 — worker behind: the card in the panel, the badge on the gear and its menu item */
 const behindCard = (await tid("worker-behind").count()) === 1;
@@ -448,7 +542,7 @@ step("worker behind: the panel's card, the gear badge, the menu item's dot", beh
 /* 11b — the version store's line: how much of this Mac's history the domain
    holds, and what a worker one version behind says instead of it */
 await setStatuses([status({ versions: { mirrored: 12, cloud: 30, lastMirrorMs: Date.now() - 5 * 60000 } })]);
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const mirrorLine = await tid("versions-line").textContent();
 await setStatuses([status({ workerVersion: WORKER_VERSION - 1, versions: null })]);
@@ -467,7 +561,7 @@ step(
 /* 12 — the update card: v→v, the script commands and a prompt that runs them
    (neither carrying the token), Check again */
 await setStatuses([status({ phase: "worker-outdated", workerVersion: 0 })]);
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("update-worker").count()) === 1);
 await tid("update-worker").click();
 await poll(async () => (await dialog("Update the worker").count()) === 1);
@@ -501,9 +595,10 @@ await emit("cloud-pending-deletes", {
   total: 12,
   paths: ["a.md", "b.md", "c.md", "d.md", "e.md", "f.md"],
 });
-await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
-const deletesToast = await page.locator(".cloud-toast").textContent();
-await page.locator(".cloud-toast-btn", { hasText: "Review" }).click();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const deletesToast = await page.locator(".toast").textContent();
+const deletesTone = await page.locator(".toast").getAttribute("class");
+await page.locator(".toast-btn", { hasText: "Review" }).click();
 await poll(async () => (await tid("pending-deletes").count()) === 1);
 const listed = await tid("pending-deletes").locator(".cloud-paths li").count();
 await tid("confirm-deletes").click();
@@ -514,7 +609,8 @@ step(
   deletesToast.includes("6 files disappeared") &&
     listed === 6 &&
     (await tid("phase-text").textContent()).startsWith("Synced") &&
-    (await page.locator(".cloud-toast").count()) === 0,
+    deletesTone.includes("is-warn") &&
+    (await page.locator(".toast").count()) === 0,
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
@@ -529,15 +625,15 @@ await emit("cloud-conflict", {
   by: "Bob",
   conflictPath: "/docs/notes (conflict — Bob, Jul 11 14.32).md",
 });
-await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
-const conflictToast = await page.locator(".cloud-toast").textContent();
-await page.locator(".cloud-toast-btn", { hasText: "Open the copy" }).click();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const conflictToast = await page.locator(".toast").textContent();
+await page.locator(".toast-btn", { hasText: "Open the copy" }).click();
 await poll(async () =>
   (await page.locator(".ProseMirror h1").first().textContent())?.includes("Conflict copy"),
 );
 step(
   "conflict: the toast names who and what, Open the copy opens the conflict file",
-  conflictToast.includes("Bob") && conflictToast.includes("notes.md") && (await page.locator(".cloud-toast").count()) === 0,
+  conflictToast.includes("Bob") && conflictToast.includes("notes.md") && (await page.locator(".toast").count()) === 0,
 );
 
 /* 15 — cloud-applied refreshes the tree */
@@ -559,17 +655,51 @@ await setStatuses([
 ]);
 await poll(async () => (await tid("tree-presence").count()) === 1);
 const chipRow = await tid("tree-presence").locator("xpath=ancestor::button").getAttribute("data-tree-path");
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("presence-list").count()) === 1);
 const hereNow = await tid("presence-list").textContent();
 step(
-  "presence: 'Bob Mbeki' on other.md's row; the panel names the person, his Mac, and your own other Mac once",
-  (await tid("tree-presence").textContent()) === "Bob Mbeki" &&
+  "presence: Bob Mbeki's face on other.md's row; the panel names the person, his Mac, and your own other Mac once",
+  (await tid("tree-presence").textContent()) === "BM" &&
+    (await tid("tree-presence").getAttribute("title")) === "Bob Mbeki — editing now" &&
     chipRow === "/docs/other.md" &&
     hereNow.includes("Bob Mbeki") &&
     hereNow.includes("on Bob's Air · editing other.md") &&
     hereNow.includes("Studio") &&
     !hereNow.includes("on Studio"),
+);
+
+/* 16a — the title row's facepile: who is in the open note, up to three faces
+   and then +N, the same person on two Macs once, the names on hover */
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+await page.locator('[data-tree-path="/docs/notes.md"]').click();
+await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "notes");
+const noFacesAlone = (await tid("note-facepile").count()) === 0;
+const here = (deviceId, name) => ({ deviceId, memberId: null, name, device: `${name}'s Mac`, path: "notes.md", ts: Date.now() });
+await setStatuses([
+  status({
+    presence: [
+      here("d-bob", "Bob Mbeki"),
+      here("d-bob-2", "Bob Mbeki"),
+      here("d-ana", "Ana Lima"),
+      here("d-cy", "Cy"),
+      here("d-dee", "Dee"),
+      { ...here("d-eve", "Eve"), path: "other.md" },
+    ],
+  }),
+]);
+await poll(async () => (await tid("note-facepile").count()) === 1);
+const faces = await tid("note-facepile").locator(".avatar").allTextContents();
+const facesTitle = await tid("note-facepile").getAttribute("title");
+await setStatuses([status()]);
+await poll(async () => (await tid("note-facepile").count()) === 0);
+step(
+  "facepile: nobody else here, no faces; four people in this note (Bob on two Macs) → BM, AL, +2, the names on hover; somebody in another note isn't counted",
+  noFacesAlone &&
+    faces.join(",") === "BM,AL,+2" &&
+    facesTitle === "In this note: Bob Mbeki, Ana Lima, Cy, Dee",
+  `${faces.join(",")} · ${facesTitle}`,
 );
 
 /* 16b — leases: a document another Mac holds opens view-only under a banner,
@@ -614,7 +744,7 @@ step(
     (await editable()) === "true",
 );
 await setStatuses([status()]);
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 
 /* 17 — Connect another Mac: endpoint + token shown */
@@ -717,7 +847,7 @@ await page.locator(".history-rail-close").click();
 await poll(async () => (await tid("history-rail").count()) === 0);
 
 /* 19 — disconnect: inline confirm, then the panel is back to its two doors, no dot */
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("disconnect").count()) === 1);
 await tid("disconnect").click();
 await poll(async () => (await tid("disconnect-confirm").count()) === 1);
@@ -726,7 +856,7 @@ await poll(async () => (await calls("cloud_disconnect")).length === 1);
 await poll(async () => (await tid("connect-domain").count()) === 1);
 step(
   "disconnect: asks inline, then the workspace is local again",
-  (await lastCall("cloud_disconnect")).args.root === "/docs" && (await tid("sidebar-cloud-dot").count()) === 0,
+  (await lastCall("cloud_disconnect")).args.root === "/docs" && (await tid("sync-status").count()) === 0,
 );
 
 /* 20 — the bound outcome with this folder's marker: Resume syncing this folder */
@@ -766,10 +896,10 @@ step(
 );
 await page.screenshot({ path: SHOTS + "cloud-06-wizard-bound.png" });
 await page.locator(".modal-btn", { hasText: "Done" }).click();
-await poll(async () => (await tid("sidebar-cloud-dot").count()) === 1);
+await poll(async () => (await tid("sync-status").count()) === 1);
 
 /* 21 — the danger zone: erase needs the domain typed, then the teardown prompt */
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("wipe-open").count()) === 1);
 await tid("wipe-open").click();
 await poll(async () => (await tid("wipe-button").count()) === 1);
@@ -786,7 +916,7 @@ step(
     teardownPrompt.includes("wrangler@4 delete --name doklin-notes-example-com") &&
     teardownPrompt.includes("r2 bucket delete doklin-notes-example-com") &&
     !teardownPrompt.includes(TOKEN) &&
-    (await tid("sidebar-cloud-dot").count()) === 0,
+    (await tid("sync-status").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "cloud-07-teardown.png" });
 await page.locator(".modal-btn", { hasText: "Done" }).click();
@@ -813,7 +943,7 @@ step(
   joinOutcome &&
     joinCall.args.destParent === "/Users/me/Downloads" &&
     joinCall.args.token === TOKEN &&
-    (await tid("sidebar-cloud-dot").count()) === 1,
+    (await tid("sync-status").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-08-joined.png" });
 
@@ -855,7 +985,7 @@ step(
     (await lastCall("cloud_redeem")).args.code === INVITE.code &&
     redeemJoin.args.token === INVITE.token &&
     redeemJoin.args.token !== TOKEN &&
-    (await tid("sidebar-cloud-dot").count()) === 1,
+    (await tid("sync-status").count()) === 1,
   redeemedAs.trim(),
 );
 await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
@@ -863,7 +993,7 @@ await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 /* 24 — People: the panel adopts an identity for a domain that has none,
    lists everyone with the Macs they hold, and mints a code that is on screen
    once (docs/cloud.md §7.2) */
-await tid("sidebar-cloud-dot").click();
+await tid("sync-status").click();
 await poll(async () => (await tid("people-open").count()) === 1);
 await tid("people-open").click();
 await poll(async () => (await dialog("People").count()) === 1);

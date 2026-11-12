@@ -1,0 +1,293 @@
+/* ---------- Design tokens ----------
+   The one place Doklin's colour, type, space, radius, shadow and motion are
+   defined. Components (App.css) use these names; nothing else should carry a
+   theme-specific literal.
+
+   Themes: App.tsx resolves the user's choice ("system" follows the OS) and
+   sets the RESOLVED theme on <html> as data-theme = light | paper | dark
+   (the stored choice is mirrored on data-theme-pref). So each palette is
+   written exactly once below, with no prefers-color-scheme copies: an OS
+   appearance flip is a JS attribute change, like any other theme change.
+   Before App.tsx runs, :root (light) applies — the window stays hidden until
+   the app is ready, so that frame is never seen. A palette also scopes to
+   any element carrying data-theme: Settings → Appearance draws each theme's
+   swatch that way.
+
+   Published pages wear these same tokens: the cloud worker reads this file
+   when it is built (cloud-worker/src/theme.ts) and takes the theme-independent
+   :root, the light block and the dark block by their selectors, the dark one
+   under prefers-color-scheme. Keep those three selectors as they are, and the
+   file a flat list of rules (no @media or nesting): the worker's tests fail
+   on a block it can't find.
+
+   Keep colour values hex or rgb()/rgba(): mermaidTheme.ts parses tokens with
+   a hex/rgb reader, and an oklch() or color-mix() VALUE here would make
+   diagrams silently fall back to body colours. (color-mix() is fine in
+   component rules that consume tokens — just not as a token's value.)
+
+   One accent (Doklin Blue). Everything keyed to it reads --accent, so an
+   accent picker stays possible later without touching components. */
+
+/* ---------- Type, radius, motion, sizing (theme-independent) ---------- */
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
+  --font-serif: "Newsreader", ui-serif, "New York", Georgia, "Times New Roman", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Chrome type scale: five steps, nothing in between.
+     xs  meta, counts, captions      sm  secondary labels, buttons
+     md  the UI default: tabs, rows, menus
+     lg  panel and card titles       xl  page titles (board name) */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 24px;
+
+  /* The document. Size is the 100% rung — --doc-zoom multiplies it. The
+     measure is in ch of the document font, so it tracks font and zoom. */
+  --doc-font: var(--font-serif);
+  --doc-size: 18px;
+  --doc-leading: 1.6;
+  --doc-measure: 68ch;
+  --doc-measure-wide: 1080px;
+
+  --r-xs: 5px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  --row-h: 28px;
+
+  /* Window chrome. The title row holds the traffic lights, the tabs and
+     the page actions (tauri.conf.json centres the traffic lights in it);
+     the document sheet floats --inset off the window edge. */
+  --bar-h: 40px;
+  --inset: 8px;
+
+  /* Constants that don't change with the theme. */
+  --on-identity: #ffffff;   /* initials on a person's avatar hue */
+  --knob: #ffffff;          /* a switch's thumb */
+  --html-page: #ffffff;     /* an html rendition paints its own page on white */
+}
+
+/* Document font choice (Settings → Appearance). Sans and mono run a little
+   smaller than the serif so the three read at the same optical size. */
+:root[data-doc-font="sans"] {
+  --doc-font: var(--font-sans);
+  --doc-size: 17px;
+}
+
+:root[data-doc-font="mono"] {
+  --doc-font: var(--font-mono);
+  --doc-size: 15px;
+  --doc-leading: 1.65;
+}
+
+/* ---------- Light ---------- */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #eef3fa;
+  --sheet: #ffffff;
+  --raised: #ffffff;
+  --sunken: #f4f7fb;
+  --hover: #e5eaf2;
+  --border: #dee2e9;
+  --border-strong: #ced3db;
+
+  --text-1: #1c222c;
+  --text-2: #4f5662;
+  --text-3: #686e79;
+
+  --accent: #2267ee;
+  --on-fill: #ffffff;
+  --accent-wash: rgba(34, 103, 238, 0.1);
+  --accent-ring: rgba(34, 103, 238, 0.35);
+  --selection: rgba(34, 103, 238, 0.18);
+
+  /* Status: the dot (fill) and the ink (text on the sheet). Green is live
+     or in sync, amber needs you, red is broken. Working is the accent.
+     Tinted backgrounds mix the dot into transparent in the rule itself.
+     --on-fill is text or a glyph on any saturated fill (accent or status). */
+  --live: #0fa44d;
+  --live-ink: #137738;
+  --warn: #e89d00;
+  --warn-ink: #945a00;
+  --error: #d33b36;
+  --error-ink: #be2e31;
+
+  --code-ink: #1c222c;
+  --code-bg: #f1f4f9;
+  /* Syntax roles in a code block (codeTheme.ts), each ≥4.5:1 on --code-bg. */
+  --code-keyword: #8a2fb8;
+  --code-string: #1d7a3a;
+  --code-number: #a8560a;
+  --code-def: #1a5fd0;
+  --code-type: #0a7580;
+  --code-comment: #636a77;
+  --code-special: #c0392b;
+  --quote-bar: #ced3db;
+  --mark: rgba(255, 214, 0, 0.4);
+  --mark-current: rgba(255, 145, 0, 0.55);
+  --mark-ring: rgba(255, 145, 0, 0.85);
+  --scrim: rgba(16, 24, 40, 0.32);
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.07);
+  --shadow-card-hover: 0 2px 4px rgba(16, 24, 40, 0.06), 0 6px 16px rgba(16, 24, 40, 0.09);
+  --shadow-pop: 0 4px 12px rgba(16, 24, 40, 0.08), 0 12px 32px rgba(16, 24, 40, 0.12);
+  --shadow-panel: -12px 0 30px rgba(16, 24, 40, 0.14);
+  --shadow-drop: drop-shadow(0 2px 5px rgba(16, 24, 40, 0.3));
+  /* The document sheet's edge against the canvas, and the active tab that
+     reads as part of it. */
+  --shadow-sheet: 0 0 0 1px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --tab-active: #ffffff;
+
+  /* A board (datastore) wherever it is named: sidebar row, tab. */
+  --board: #7c5cd6;
+
+  /* Board option colours: each option name sets a hue (.dk-color-*); the
+     theme sets how dark a pill's ink, how strong its wash, how strongly a
+     column is tinted, and how bright a status glyph. */
+  --dk-ink: 30%;
+  --dk-wash: 0.15;
+  --dk-col-wash: 0.07;
+  --dk-dot: 47%;
+}
+
+/* ---------- Paper ---------- */
+
+[data-theme="paper"] {
+  color-scheme: light;
+
+  --canvas: #eee1cc;
+  --sheet: #faf3e3;
+  --raised: #fffaf0;
+  --sunken: #f3e9d6;
+  --hover: #e7d9c2;
+  --border: #ddcfba;
+  --border-strong: #cfbfa6;
+
+  --text-1: #392a1e;
+  --text-2: #5e4d3e;
+  --text-3: #776554;
+
+  --accent: #285cc2;
+  --on-fill: #ffffff;
+  --accent-wash: rgba(40, 92, 194, 0.1);
+  --accent-ring: rgba(40, 92, 194, 0.35);
+  --selection: rgba(40, 92, 194, 0.18);
+
+  --live: #0f9a48;
+  --live-ink: #1d6e36;
+  --warn: #d98f00;
+  --warn-ink: #8a5300;
+  --error: #c8382f;
+  --error-ink: #b02c2a;
+
+  --code-ink: #392a1e;
+  --code-bg: #f1e6d0;
+  --code-keyword: #86307c;
+  --code-string: #3c6b1e;
+  --code-number: #94500a;
+  --code-def: #2a58b5;
+  --code-type: #1f6b70;
+  --code-comment: #715f4e;
+  --code-special: #ad3326;
+  --quote-bar: #cfbfa6;
+  --mark: rgba(240, 190, 40, 0.38);
+  --mark-current: rgba(230, 130, 0, 0.5);
+  --mark-ring: rgba(230, 130, 0, 0.8);
+  --scrim: rgba(57, 42, 30, 0.32);
+
+  --shadow-card: 0 1px 2px rgba(57, 42, 30, 0.06), 0 1px 3px rgba(57, 42, 30, 0.08);
+  --shadow-card-hover: 0 2px 4px rgba(57, 42, 30, 0.07), 0 6px 16px rgba(57, 42, 30, 0.1);
+  --shadow-pop: 0 4px 12px rgba(57, 42, 30, 0.1), 0 12px 32px rgba(57, 42, 30, 0.14);
+  --shadow-panel: -12px 0 30px rgba(57, 42, 30, 0.16);
+  --shadow-drop: drop-shadow(0 2px 5px rgba(57, 42, 30, 0.3));
+  --shadow-sheet: 0 0 0 1px rgba(57, 42, 30, 0.08), 0 1px 3px rgba(57, 42, 30, 0.07);
+  --tab-active: #faf3e3;
+
+  --board: #7a55b8;
+
+  --dk-ink: 30%;
+  --dk-wash: 0.15;
+  --dk-col-wash: 0.08;
+  --dk-dot: 44%;
+}
+
+/* ---------- Dark (pitch black) ----------
+   True black canvas and sheet. On black, shadows can't show elevation, so
+   raised surfaces step up in lightness and carry a border instead. Text on
+   accent fills is black: the bright blue holds 7:1 against it. */
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #000000;
+  --sheet: #000000;
+  --raised: #121214;
+  --sunken: #0c0c0e;
+  --hover: #18181b;
+  --border: #232326;
+  --border-strong: #303034;
+
+  --text-1: #ededef;
+  --text-2: #a8a8ae;
+  --text-3: #7d7d84;
+
+  --accent: #4d94ff;
+  --on-fill: #000000;
+  --accent-wash: rgba(77, 148, 255, 0.14);
+  --accent-ring: rgba(77, 148, 255, 0.45);
+  --selection: rgba(77, 148, 255, 0.3);
+
+  --live: #47c86e;
+  --live-ink: #75d78d;
+  --warn: #edb345;
+  --warn-ink: #f0ba59;
+  --error: #f66d67;
+  --error-ink: #fb817a;
+
+  --code-ink: #ededef;
+  --code-bg: #141416;
+  --code-keyword: #d19bf5;
+  --code-string: #9fd27f;
+  --code-number: #f0ae73;
+  --code-def: #7cb3ff;
+  --code-type: #62cfd9;
+  --code-comment: #8b8f98;
+  --code-special: #f38a7f;
+  --quote-bar: #3a3a3f;
+  --mark: rgba(255, 214, 0, 0.28);
+  --mark-current: rgba(255, 145, 0, 0.5);
+  --mark-ring: rgba(255, 145, 0, 0.85);
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.6);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-panel: -12px 0 30px rgba(0, 0, 0, 0.6);
+  --shadow-drop: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.6));
+  /* Black on black: the sheet's edge is a hairline, and the active tab
+     steps up to the raised surface. */
+  --shadow-sheet: 0 0 0 1px #232326;
+  --tab-active: #121214;
+
+  --board: #a78bfa;
+
+  --dk-ink: 76%;
+  --dk-wash: 0.24;
+  --dk-col-wash: 0.11;
+  --dk-dot: 62%;
+}

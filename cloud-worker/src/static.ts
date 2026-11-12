@@ -6,6 +6,7 @@ import { WEB_ASSETS } from "./assets";
 import { APPLE_TOUCH_PNG_B64, FAVICON_ICO_B64 } from "./favicons";
 import { escapeHtml } from "./http";
 import { OG_PNG_B64 } from "./og";
+import { FONT_PRELOAD, PAGE_THEME, fontBytes } from "./theme";
 
 const DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
@@ -19,29 +20,33 @@ const OG_PNG = decode(OG_PNG_B64);
 const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
 
-// The page chrome's tokens — the same values the app's reading view uses,
-// so the landing page and a rendered note read as one site.
-const SHELL_CSS = `
-:root { --bg: #ffffff; --text: #37352f; --muted: rgba(55, 53, 47, 0.55); --border: rgba(55, 53, 47, 0.12); --accent: #2383e2; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #191919; --text: #ebebeb; --muted: rgba(255, 255, 255, 0.5); --border: rgba(255, 255, 255, 0.14); --accent: #529cca; }
-}
+// The landing and 404 pages wear the same theme as a rendered note
+// (theme.ts: the app's own tokens and Newsreader), so the domain reads as
+// one site.
+const SHELL_CSS = `${PAGE_THEME}
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); }
+html, body { margin: 0; padding: 0; background: var(--sheet); }
 body {
-  min-height: 100dvh; display: flex; flex-direction: column; color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
-  font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  min-height: 100dvh; display: flex; flex-direction: column; color: var(--text-1);
+  font-family: var(--font-ui); font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
 }
+::selection { background: var(--selection); }
 main { width: 100%; max-width: 640px; margin: auto; padding: 64px 24px; }
-h1 { font-size: 32px; line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 8px; }
+h1 {
+  margin: 0 0 12px; font-family: var(--font-serif); font-size: 42px; font-weight: 650;
+  line-height: 1.12; letter-spacing: -0.02em;
+}
 p { margin: 0; padding: 4px 0; }
-.eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
-.muted { color: var(--muted); }
+.eyebrow { color: var(--text-3); font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.muted { color: var(--text-2); }
 .actions { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding-top: 20px; }
-.button { display: inline-block; padding: 9px 16px; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
-.quiet { color: var(--muted); text-decoration: none; border-bottom: 1px solid var(--border); }
-.quiet:hover, .button:hover { filter: brightness(1.08); }
+.button {
+  display: inline-block; padding: 9px 16px; border-radius: var(--r-md); background: var(--accent);
+  color: var(--on-fill); text-decoration: none; font-weight: 600;
+}
+.button:hover { filter: brightness(1.08); }
+.quiet { color: var(--text-2); text-decoration: none; border-bottom: 1px solid var(--border-strong); }
+.quiet:hover { color: var(--text-1); }
 `;
 
 function shell(title: string, body: string, status = 200): Response {
@@ -53,6 +58,7 @@ ${FAVICON_LINKS}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
+${FONT_PRELOAD}
 <style>${SHELL_CSS}</style>
 </head>
 <body>
@@ -99,16 +105,25 @@ export function robotsTxt(): Response {
   });
 }
 
-function iconResponse(bytes: Uint8Array, contentType: string): Response {
+function assetResponse(bytes: Uint8Array, contentType: string): Response {
   return new Response(bytes, {
     headers: { "content-type": contentType, "cache-control": "public, max-age=604800, immutable" },
   });
 }
 
-export const favicon = (): Response => iconResponse(FAVICON_ICO, "image/x-icon");
-export const appleTouchIcon = (): Response => iconResponse(APPLE_TOUCH, "image/png");
+export const favicon = (): Response => assetResponse(FAVICON_ICO, "image/x-icon");
+export const appleTouchIcon = (): Response => assetResponse(APPLE_TOUCH, "image/png");
 /** One static Open Graph image for the whole site — og:title carries the words. */
-export const ogImage = (): Response => iconResponse(OG_PNG, "image/png");
+export const ogImage = (): Response => assetResponse(OG_PNG, "image/png");
+
+/**
+ * A Newsreader file at /__web/fonts/<file> — the very files the app bundles
+ * (theme.ts). Addressed by name like the icons, so cached for the same week.
+ */
+export function fontFile(file: string): Response | null {
+  const bytes = fontBytes(file);
+  return bytes ? assetResponse(bytes, "font/woff2") : null;
+}
 
 /**
  * The standalone mermaid module at /__web/<tag>/mermaid.js. Any tag serves

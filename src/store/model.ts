@@ -46,6 +46,7 @@ import { rankBetween } from "./rank";
 // pages included, so they live apart from Tauri.
 import {
   CARD_EXT_RE,
+  cardExcerpt,
   cardRank,
   cardValue,
   orderedOptions,
@@ -62,7 +63,10 @@ type CardHead = {
   name: string;
   path: string;
   snapshot: FileSnapshot;
+  /** The frontmatter block, verbatim ("" for none). */
   head: string;
+  /** The first few hundred bytes after it — where the excerpt comes from. */
+  lead: string;
 };
 
 type StoreRead = {
@@ -94,8 +98,15 @@ const cardOf = (head: CardHead): Card => {
     snapshot: head.snapshot,
     props: fm.props,
     opaque: fm.opaque,
+    excerpt: cardExcerpt(head.lead),
   };
 };
+
+const sameSnapshot = (a: FileSnapshot, b: FileSnapshot) =>
+  a.mtime_ms === b.mtime_ms && a.size === b.size;
+
+/** What a card was read from, so an unchanged one is never parsed twice. */
+type ParsedCard = { head: string; lead: string; card: Card };
 
 type WriteErrorShape = { kind: "io" | "conflict"; message?: string; current?: FileSnapshot };
 const isWriteError = (e: unknown): e is WriteErrorShape =>
@@ -108,6 +119,13 @@ export class StoreModel {
   private state: StoreState;
   private defSnapshot: FileSnapshot | null = null;
   private listeners = new Set<(s: StoreState) => void>();
+  /**
+   * Every card as it was last parsed, by path. A rescan re-parses only the
+   * cards whose bytes moved; the rest keep their object, so a 500-card board
+   * that changed one card does one card's work, and the views below can
+   * tell at a glance which cards are the same.
+   */
+  private parsed = new Map<string, ParsedCard>();
   private pendingWrites = 0;
   private reloadTimer: number | null = null;
   private disposed = false;
@@ -155,6 +173,7 @@ export class StoreModel {
       });
       if (!exists) {
         this.defSnapshot = null;
+        this.parsed.clear();
         this.emit({ def: null, cards: [], conflicts: [], loading: false, error: null });
         return;
       }
@@ -175,7 +194,7 @@ export class StoreModel {
       this.defSnapshot = read.defSnapshot;
       this.emit({
         def: read.def === null ? null : parseStoreDef(read.def),
-        cards: read.cards.map(cardOf),
+        cards: this.parseCards(read.cards),
         conflicts: read.conflicts,
         truncated: read.truncated,
         loading: false,
@@ -185,6 +204,30 @@ export class StoreModel {
       if (this.disposed) return;
       this.emit({ loading: false, error: e instanceof Error ? e.message : String(e) });
     }
+  }
+
+  /**
+   * The cards of a rescan. Compared by the bytes that were read rather than
+   * by snapshot alone: two writes inside one millisecond can leave the same
+   * mtime and size, and a board must never show the older of them.
+   */
+  private parseCards(heads: CardHead[]): Card[] {
+    const next = new Map<string, ParsedCard>();
+    const cards = heads.map((h) => {
+      const prev = this.parsed.get(h.path);
+      let card: Card;
+      if (prev && prev.head === h.head && prev.lead === h.lead) {
+        card = sameSnapshot(prev.card.snapshot, h.snapshot)
+          ? prev.card
+          : { ...prev.card, snapshot: h.snapshot };
+      } else {
+        card = cardOf(h);
+      }
+      next.set(h.path, { head: h.head, lead: h.lead, card });
+      return card;
+    });
+    this.parsed = next;
+    return cards;
   }
 
   /** Coalesce the bursts a folder watcher produces into one rescan. */

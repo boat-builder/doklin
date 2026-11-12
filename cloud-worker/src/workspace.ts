@@ -12,7 +12,7 @@ import { MANIFEST_KEY, blobKey, validPath } from "./layout";
 import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
 import { MANIFEST_VERSION } from "./version";
 import { META_SUFFIX, parseEntityMeta, type EntityMeta } from "../../src/metaFile";
-import type { Card } from "../../src/store/board";
+import { cardExcerpt, type Card } from "../../src/store/board";
 import { parseFrontmatter } from "../../src/store/frontmatter";
 import { STORE_FILE, parseStoreDef, type StoreDef } from "../../src/store/storeFile";
 
@@ -250,6 +250,7 @@ export class Workspace {
         snapshot: { mtime_ms: loc.file.mtime ?? 0, size: loc.file.size },
         props: fm.props,
         opaque: fm.opaque,
+        excerpt: cardExcerpt(fm.body),
       });
     });
     return { def, cards, unread: notes.length - read.length };

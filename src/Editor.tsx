@@ -42,6 +42,7 @@ import { resizableTableView, enableColumnResizing } from "./tableResize";
 import { linkOpenPlugin, openInBrowserTab } from "./linkOpen";
 import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
+import { codeTheme } from "./codeTheme";
 import {
   criticCommentSchema,
   criticRemark,
@@ -461,6 +462,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       root,
       defaultValue: initialMarkdown,
       featureConfigs: {
+        // Syntax colours from the theme's tokens instead of One Dark (codeTheme.ts).
+        [Crepe.Feature.CodeMirror]: { theme: codeTheme },
         placeholder: {
           text: "Type / for commands…",
           mode: "doc",

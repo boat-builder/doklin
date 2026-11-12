@@ -27,6 +27,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor, { type EditorHandle } from "./Editor";
 import PropertiesHeader from "./PropertiesHeader";
+import { CloseIcon, OpenTabIcon } from "./storeChrome";
 import { useStore } from "./store/useStore";
 import { parseFrontmatter, type PropValue } from "./store/frontmatter";
 import { CARD_EXT_RE, renamedCardPath, sanitizeTitle, type FileSnapshot } from "./store/board";
@@ -232,10 +233,11 @@ export default function CardPeek({
           onOpenTab(path);
           onClose();
         }}>
+          <OpenTabIcon size={13} />
           Open in a tab
         </button>
-        <button className="dk-peek-close" aria-label="Close" onClick={onClose}>
-          ×
+        <button className="dk-peek-close" aria-label="Close" title="Close" onClick={onClose}>
+          <CloseIcon size={14} />
         </button>
       </header>
       {error && <div className="dk-peek-warn">{error}</div>}

@@ -12,6 +12,7 @@
 //                                rendition at …/raw, or an image / PDF / html file by exact path
 //   GET /og.png · /<slug>/og.png the site's static Open Graph image
 //   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
+//   GET /__web/fonts/<file>      the Newsreader files the app bundles (theme.ts)
 //   robots.txt, favicon.ico, apple-touch-icon.png
 //
 // Every page carries <meta name="robots" content="noindex">.
@@ -23,12 +24,14 @@ import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
 import {
   appleTouchIcon,
   favicon,
+  fontFile,
   landingPage,
   mermaidModule,
   notFoundPage,
   ogImage,
   robotsTxt,
 } from "./static";
+import { FONT_PATH } from "./theme";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
 /* ---------- The cache ----------
@@ -84,6 +87,9 @@ export async function handlePublic(
   if (path === "/apple-touch-icon.png") return deliver(appleTouchIcon(), request.method);
   if (path === "/og.png" || /^\/[^/]+\/og\.png$/.test(path)) return deliver(ogImage(), request.method);
   if (/^\/__web\/[a-z0-9]+\/mermaid\.js$/.test(path)) return deliver(mermaidModule(), request.method);
+  if (path.startsWith(FONT_PATH)) {
+    return deliver(fontFile(path.slice(FONT_PATH.length)) ?? notFoundPage(), request.method);
+  }
 
   const ws = await openWorkspace(env);
   if (!ws) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);

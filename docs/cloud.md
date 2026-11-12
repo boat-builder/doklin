@@ -350,6 +350,7 @@ GET /<dirSlug>/<rel/path>      a note inside it (markdown extension dropped, seg
 GET /og.png · /<slug>/og.png   the site's static Open Graph image
 GET /robots.txt · /favicon.ico · /apple-touch-icon.png
 GET /__web/<tag>/mermaid.js    the standalone mermaid module (immutable, content-tagged)
+GET /__web/fonts/<file>        the Newsreader files the app bundles (a week, like the icons)
 everything else                a 404 page — an unpublished path, a slug whose file is gone
 ```
 
@@ -407,7 +408,7 @@ reports the binding so the setup wizard can tell "fresh domain" from
 
 ### 5.6 Public rendering — from synced files
 
-Five modules, each a question:
+Six modules, each a question:
 
 - **`workspace.ts` — what is in the synced tree.** `openWorkspace(env)` does
   one `head(manifest.json)` per request and fetches the body only when the
@@ -446,8 +447,25 @@ Five modules, each a question:
   `link` and `image` for the rewriting), the page chrome (`noindex`, the
   `og:*` and twitter meta, the MD/HTML pill, the "← Folder" crumb), the
   table-of-contents layouts, the mermaid hydrator (the diagram takes the
-  page's palette in light and in dark, as in the app), and the stylesheet —
-  ported from the desktop and inlined in every page.
+  page's palette in light and in dark, as in the app), and the stylesheet,
+  inlined in every page. A board or table is drawn as the app's embed draws
+  it — the bar naming its kind, the board's name over its progress ("1 of 3
+  done") or its count, columns tinted in their hue with the stage glyph,
+  cards with their excerpt (when the view shows them), pills and dates, a
+  finished card checked — and a card with a page is a link over the whole
+  card.
+- **`theme.ts` — the app's look.** The page's tokens and type are not
+  restated: the worker imports `src/styles/tokens.css` and
+  `src/styles/fonts.css` as text, and the Newsreader files as bytes, when it
+  is built. The theme-independent `:root`, the light palette and the dark
+  palette are taken by selector — light as `:root`, dark under
+  `prefers-color-scheme`, so a page reads right with scripts off — and
+  paper and the document-font variants are left out (they are choices made
+  inside the app; no browser can ask for them). The `@font-face` rules point
+  at `/__web/fonts/`, and a page set in the serif preloads its latin face.
+  A palette change in the app reaches published pages with the next worker
+  build — and, like any change to what a page looks like, with a
+  `WORKER_VERSION` bump, which is how a deployed domain learns to update.
 - **`public.ts` — routing and the cache.** `caches.default` under the
   synthetic key `https://cache.doklin/<manifestEtag><pathname><search>`,
   filled with `ctx.waitUntil`; the cached copy is good for a day, the
@@ -455,8 +473,8 @@ Five modules, each a question:
   assets bypass. A manifest change gives every URL a new key, so a page is
   never served stale past one `head`; old entries age out. Steady state per
   public request: one `head`, one cache hit. `static.ts` holds the landing
-  page, the 404 page, robots, the icons, the OG image (`og.ts`) and the
-  mermaid module.
+  page, the 404 page (both in the same theme), robots, the icons, the OG
+  image (`og.ts`), the fonts and the mermaid module.
 
 | Input | Where it comes from |
 | --- | --- |
@@ -508,10 +526,11 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (8 — the sync API was 1; publishing
+  the worker (§7.1): `WORKER_VERSION` (9 — the sync API was 1; publishing
   made it 2; the version store made it 3; the D1 binding made it 4; people
   made it 5; attribution by person made it 6; presence in D1, folded into
-  the poll, made it 7; leases made it 8), `WORKER_FEATURES`
+  the poll, made it 7; leases made it 8; public pages in the app's own look
+  made it 9, with no API change), `WORKER_FEATURES`
   (`["sync", "wipe", "publish", "boards", "versions", "members", "presence",
   "leases"]`; a feature name is a promise about behaviour, listed only once
   the behaviour exists — the engine mirrors nothing to a worker that does
@@ -902,9 +921,10 @@ type CloudStatus = {
 Mac's not-yet-synced ops — sorted folders first, then by path; `alive` is
 false when the file is gone, or when no synced file lives under a folder
 page. The frontend keeps the array in state and derives everything from it:
-the sidebar's cloud dot and "Alice is editing" chips, the view-only banner
-over a document somebody else holds, the published dots on files and
-folders, the Publish pill's state for the active document, the Published
+the sidebar footer's sync line, the faces on rows people are editing and in
+the title row's facepile, the view-only banner over a document somebody else
+holds, the live dots on files and folders and the live glyph on their tabs
+and cards, the Live chip's state for the active document, the Published
 pages list, the update badge, the pending-deletes prompt.
 
 ### 6.8 Flows
@@ -1074,26 +1094,27 @@ every blob no retained snapshot references and older than an hour's grace.
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, and the dot beside the workspace name in the sidebar header | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* (the view below), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, the workspace menu's *Cloud…*, and the sync line in the sidebar's footer | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* (the view below), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
 | **Setup wizard** (`CloudSetup.tsx`) | the panel's three entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear. The third mode is *redeem*: paste the line an owner sent — into either box, both fill — trade the code for this Mac's own credential, then the same *Download it here* (§6.8) |
 | **People** (`CloudPeople.tsx`) | the Cloud panel, *People…* | Everything `cloud_people` answers, this Mac's own role included — and the role is asked rather than remembered: only the owner's credential is answered by the members route, so a `403` is the member branch, not an error. Owner: every person with their address, role and the Macs they hold, each Mac revocable on its own; *Remove from notes.example.com…* for the person, their invite and every Mac at once; the pending codes with what is left of their life, *New code…* and *Withdraw*; *Invite someone…* (address, an optional name, 1 / 7 / 30 days) and then the code, once, with the line to send beside it. The owner's own Macs are not listed: their credential is the domain's env secret, which has no row to revoke. A domain with no owner row asks for an address once — identity, never authority. Member: no list and no invite door, because both are the owner's — their own credential for a second Mac is behind *Connect another Mac…* |
 | **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
-| **Publish pill** (`PublishMenu.tsx`) | the tab bar, for a note inside the workspace | *Publish* / *Published*. Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the link, *Copy* / *Open*, the address — editable, the engine re-keys the page — "Published by Alice · 3 days ago" when someone else did it, a quiet line while local edits are still on their way ("your latest changes appear once synced"), the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
+| **Live chip** (`LiveChip.tsx`) | the title row, for a note inside the workspace | Five states (`pageState` in `src/cloud.ts`): *Publish* (an outline, no page of its own), *Live · /slug* (green, a still dot), *Updating* (the accent and a turning ring: an edit made here is on its way, from the first keystroke until a sync completes after the save), *Not updating* (amber: sync is offline, paused, holding a deletion, waiting on the worker or failing, so the page keeps what it had) and *Page offline* (red: access revoked, or the note isn't in the sync, so the address answers Not found). Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the state in words with why, the address in a well with *Copy*, *Open*, *Change address* (the engine re-keys the page), "Published by Alice · 3 days ago" when someone else did it, the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
+| **Facepile** (`Avatar.tsx`) | the title row, beside the Live chip | Who else is in the open note: up to three faces, then *+N*; the same person on two Macs is one face; the names on hover |
 | **Publish folder** (`PublishFolder.tsx`) | the sidebar's folder menu (*Publish folder…*, or *Publish the whole workspace…* on the root; *Edit publishing…* once published) | How many notes become public, the slug (suggested from the folder's name), a public title and a description, a preview of the address scheme; *Save changes* and *Stop publishing* on a published folder. No membership list: publishing a folder publishes every note in it (§9, decision 4) |
 | **Published pages** (`PublishedPages.tsx`) | the Cloud panel, the popover | Folders above files; name · path · slug · by · when; *Home page* and *file missing* / *empty folder* badges; *Copy link*, *Open*, *Edit…* (folders), *Use as home page* / *Unset as home page*, *Stop* (confirmed inline); a live note opens in a tab |
-| **Sidebar** (`Sidebar.tsx`) | rows and menus | The cloud dot in the header, presence chips on the rows people are editing, a published dot on files and folders with a page of their own; *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item — and so are the root's *Workspace history…* and the *Recently deleted* row at the foot of the tree |
+| **Sidebar** (`Sidebar.tsx`, and the footer bar in `App.tsx`) | rows, menus and the footer | Faces on the rows people are editing (two, then *+N*), a green live dot on files and folders with a page of their own (blue stays "selected"), and in the footer the sync in words (`SyncStatus.tsx`: *Synced*, *Syncing…*, *Offline*, *2 deletions to confirm*, *Can't sync*…, the full line as the tooltip, a click opens the panel; a pass shorter than 800 ms never says *Syncing…*, since the engine passes through it every 15 s); *Copy public link*, *Stop publishing* (immediate, undoable from the toast). *Version history…* is here too, ungated — it is no longer a cloud item — and so are the root's *Workspace history…* and *Recently deleted* (also the bin and count in the footer bar under the tree) |
 | **Lease banner** (`LeaseBanner.tsx`) | over a document another Mac holds | "Bob Mbeki is editing — view only", or "Open on your other Mac, Studio — view only"; the editor and the note's properties stop taking input, dictation will not start (and a session under way ends), and *Take over* claims it — the banner clears when the status says the lease moved. Nothing refuses a write: the lock is the editor's, and it lifts the moment the status stops naming one (§8.2) |
 | **Version rail** (`HistoryRail.tsx`) | the sidebar's file menu, the tab's menu, the drafts panel, `⌘⌥H` | Every version of the document from the local store, with the versions other Macs mirrored folded into the same walk (§6.9); the trust line counts what is here against what is in the cloud. The selected one shows in place, read-only, with *Restore*, *Make a copy* and *Show changes*. Not gated on the cloud |
 | **Workspace history** (`WorkspaceHistory.tsx`) | the sidebar root's menu, the Cloud panel | The folder's retained moments by day, each with what it changed ("+2 −1 ~5"); the selected one's `changed` / `missing` / `added` with per-file ticks, *Restore selected* and *Restore all*, and an inline confirm stating the counts. A snapshot of now is taken first, so the toast's *Undo* is another restore. Not gated on the cloud |
-| **Recently deleted** (`RecentlyDeleted.tsx`) | the dimmed row at the foot of the sidebar (only when there is something in it), and the root's menu | Every file the store holds and the folder does not: name, old folder, when it was last seen, *Open* (the last content, read-only, in the version preview) and *Restore* (its old path, or beside it when that is taken). Not gated on the cloud |
+| **Recently deleted** (`RecentlyDeleted.tsx`) | the bin and count in the footer bar under the sidebar (only when there is something in it), and the root's menu | Every file the store holds and the folder does not: name, old folder, when it was last seen, *Open* (the last content, read-only, in the version preview) and *Restore* (its old path, or beside it when that is taken). Not gated on the cloud |
 | **Versions settings** (`VersionsSettings.tsx`) | gear → *Versions · Version history…*, and the Cloud panel's *This Mac* | How far back this folder keeps (30 days / 90 days / a year / forever) and what it costs; the same for the bucket, when the workspace is connected and a mirror pass has run — one CAS, so every Mac reads the same answer; *Export…* (a folder picker, then one `tar.gz` of the folder and its history, with progress); and every store on this Mac with its size, the open one marked, the rest offering *Forget* behind an inline confirm. Only the cloud horizon is gated on the cloud |
-| **Toasts** (`CloudToasts.tsx`) | anywhere | `cloud-conflict` → *Open the copy*; `cloud-pending-deletes` → *Review…* (the panel); `cloud-applied` → the tree refreshes (open tabs reload through the file watcher) |
+| **Toasts** (`Toasts.tsx`) | anywhere | Each with a tone from the same vocabulary — a green check for done, an amber mark for waiting on you, red for a failure, no mark for plain news. `cloud-conflict` → *Open the copy*; `cloud-pending-deletes` → *Review…* (the panel); `cloud-applied` → the tree refreshes (open tabs reload through the file watcher) |
 
 ### 7.3 Gating
 
-- The Publish pill renders only for a file tab inside the open workspace —
+- The Live chip renders only for a file tab inside the open workspace —
   not a draft, not a board tab, not a missing file, not a file opened from
-  outside the workspace. When the workspace is not connected, the pill
+  outside the workspace. When the workspace is not connected, the chip
   opens a one-line explanation with *Connect a domain…*.
 - *Publish folder…* and *Stop publishing* appear only in a connected
   workspace. *Version history…* no longer does: since

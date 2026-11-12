@@ -151,8 +151,8 @@ line, *Open* reading the last content, and *Restore* landing at the old path
 and beside it when that path is taken. What only a Mac can answer is below:
 the real Trash, a real second Mac, and a folder deleted whole.
 
-- [ ] Delete a note. *Recently deleted* appears at the foot of the sidebar
-      with the right count.
+- [ ] Delete a note. A bin with the right count appears in the footer bar
+      under the sidebar, and opens *Recently deleted*.
 - [ ] It lists the note, its old folder and when it was last seen.
 - [ ] *Open* shows the last content, read-only.
 - [ ] *Restore* puts it back where it was, with its history.

@@ -35,8 +35,11 @@ import {
   type VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
-import CloudToasts, { type CloudToast } from "./CloudToasts";
-import PublishMenu from "./PublishMenu";
+import Toasts, { type Toast, type ToastTone } from "./Toasts";
+import LiveChip from "./LiveChip";
+import SyncStatus from "./SyncStatus";
+import { Facepile } from "./Avatar";
+import { livePathsOf, setLivePages } from "./livePages";
 import PublishFolder from "./PublishFolder";
 import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
@@ -46,6 +49,7 @@ import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted from "./RecentlyDeleted";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { dragWindowFromGap } from "./windowDrag";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
@@ -334,8 +338,8 @@ function suggestDraftFileName(md: string, fallback: string): string {
   return cleaned || fallback;
 }
 
-type Theme = "system" | "light" | "sepia" | "dark";
-const THEMES: Theme[] = ["system", "light", "sepia", "dark"];
+type Theme = "system" | "light" | "paper" | "dark";
+const THEMES: Theme[] = ["system", "light", "paper", "dark"];
 const THEME_STORAGE_KEY = "doklin:theme";
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
@@ -346,6 +350,44 @@ const DRAFT_SEQ_STORAGE_KEY = "doklin:draft-seq";
 const DRAFTS_META_STORAGE_KEY = "doklin:drafts-meta";
 const DRAFTS_OPEN_STORAGE_KEY = "doklin:drafts-open";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
+const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
+const DOC_FONT_STORAGE_KEY = "doklin:doc-font";
+
+/* The document font (Settings → Appearance): the bundled Newsreader serif by
+   default, or the system sans or mono. It sets the note body only — never
+   the chrome, colour or status — so it is per app, like zoom and the theme.
+   Applied as data-doc-font on <html>, which tokens.css keys --doc-font,
+   --doc-size and --doc-leading on. */
+type DocFont = "serif" | "sans" | "mono";
+const DOC_FONTS: DocFont[] = ["serif", "sans", "mono"];
+const DOC_FONT_LABEL: Record<DocFont, string> = { serif: "Serif", sans: "Sans", mono: "Mono" };
+
+function readStoredDocFont(): DocFont {
+  try {
+    const v = localStorage.getItem(DOC_FONT_STORAGE_KEY);
+    if (v && (DOC_FONTS as string[]).includes(v)) return v as DocFont;
+  } catch {
+    // localStorage may be unavailable; fall through
+  }
+  return "serif";
+}
+
+function applyDocFont(f: DocFont) {
+  document.documentElement.dataset.docFont = f;
+}
+
+/* "Wide page": the document column normally holds a reading measure
+   (--doc-measure, 68ch — tokens.css); wide trades it for the 1080px canvas
+   for tables, boards and diagrams. Per app, like zoom: it's about how the
+   reader likes to read, not about the file. Applied as data-page-width on
+   <html>, which App.css keys the measure on. */
+function readStoredPageWide(): boolean {
+  try {
+    return localStorage.getItem(PAGE_WIDE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
    One factor scales BOTH versions of a document, so switching MD↔HTML never
@@ -425,13 +467,20 @@ type DeletedRecord = {
 const THEME_LABEL: Record<Theme, string> = {
   system: "System",
   light: "Light",
-  sepia: "Sepia",
+  paper: "Paper",
   dark: "Dark",
 };
 
 function readStoredTheme(): Theme {
   try {
-    const v = localStorage.getItem(THEME_STORAGE_KEY);
+    let v = localStorage.getItem(THEME_STORAGE_KEY);
+    // Builds before 0.1.87 stored the paper theme as "sepia". Rewritten in
+    // place, so this keeps a reader's choice across the rename and then
+    // never matches again.
+    if (v === "sepia") {
+      v = "paper";
+      localStorage.setItem(THEME_STORAGE_KEY, v);
+    }
     if (v && (THEMES as string[]).includes(v)) return v as Theme;
   } catch {
     // localStorage may be unavailable; fall through
@@ -439,8 +488,34 @@ function readStoredTheme(): Theme {
   return "system";
 }
 
+// The theme that actually paints: "system" resolves here, once, against the
+// OS appearance. <html data-theme> only ever carries a resolved name, so
+// tokens.css writes each palette exactly once — no prefers-color-scheme
+// copies to drift — and an OS flip is the same attribute change as a menu
+// pick (mermaid.ts re-renders diagrams off that attribute). The stored
+// choice rides along on data-theme-pref for anything that needs it.
+type ResolvedTheme = Exclude<Theme, "system">;
+const darkSchemeQuery =
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+function resolveTheme(t: Theme): ResolvedTheme {
+  if (t !== "system") return t;
+  return darkSchemeQuery?.matches ? "dark" : "light";
+}
+
 function applyTheme(t: Theme) {
-  document.documentElement.dataset.theme = t;
+  const root = document.documentElement;
+  const resolved = resolveTheme(t);
+  if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
+  root.dataset.themePref = t;
+}
+
+// Paint the stored theme and document font before the first render, not after it.
+if (typeof document !== "undefined") {
+  applyTheme(readStoredTheme());
+  applyDocFont(readStoredDocFont());
 }
 
 function isWriteError(e: unknown): e is WriteErrorPayload {
@@ -715,6 +790,8 @@ export default function App() {
   const draftsMetaRef = useRef<DraftsMeta>({});
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+  const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
+  const [docFont, setDocFont] = useState<DocFont>(() => readStoredDocFont());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -977,6 +1054,9 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
+  // The pages of the open workspace, for the glyph on a live page's tab and
+  // card (a board inside a note reads it too, from its own React root).
+  useEffect(() => setLivePages(livePathsOf(cloudForRoot)), [cloudForRoot]);
   // The cloud surfaces (docs/cloud.md §7.2): the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
   // worker update card, and the transient notices. The held mass-deletion's paths ride the event that
@@ -1009,20 +1089,21 @@ export default function App() {
   const historyForRef = useRef<string | null>(null);
   // What ⌘⌥H opens history for: the active tab, unless it is a board.
   const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
-  const [cloudToasts, setCloudToasts] = useState<CloudToast[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
   const toastSeq = useRef(0);
-  const pushToast = useCallback((text: string, action?: CloudToast["action"]) => {
+  const pushToast = useCallback((tone: ToastTone, text: string, action?: Toast["action"]) => {
     toastSeq.current += 1;
     const id = toastSeq.current;
-    setCloudToasts((ts) => [...ts.slice(-3), { id, text, action }]);
+    setToasts((ts) => [...ts.slice(-3), { id, tone, text, action }]);
   }, []);
   const dismissToast = useCallback(
-    (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
+    (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
-  );  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
+  );
+  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
   // or the root for the whole workspace) and the list of every published
-  // page. The pill lives in the tab bar (PublishMenu).
+  // page. The Live chip lives in the title row (LiveChip).
   const [publishFolder, setPublishFolder] = useState<string | null>(null);
   const [publishedOpen, setPublishedOpen] = useState(false);
   // Stopping from the sidebar is immediate and undoable: the toast's Undo
@@ -1034,17 +1115,17 @@ export default function App() {
       const abs = page.path ? `${root}/${page.path}` : root;
       void cloudUnpublish(root, page.slug)
         .then(() =>
-          pushToast(`Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
+          pushToast("info", `Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
             label: "Undo",
             run: () =>
               void cloudPublish(abs, {
                 slug: page.slug,
                 title: page.title ?? undefined,
                 desc: page.desc ?? undefined,
-              }).catch((e) => pushToast(`Couldn't publish again: ${String(e)}`)),
+              }).catch((e) => pushToast("error", `Couldn't publish again: ${String(e)}`)),
           }),
         )
-        .catch((e) => pushToast(`Couldn't stop publishing: ${String(e)}`));
+        .catch((e) => pushToast("error", `Couldn't stop publishing: ${String(e)}`));
     },
     [workspaceRoot, pushToast],
   );
@@ -1249,7 +1330,30 @@ export default function App() {
     } catch {
       // ignore
     }
+    // "System" follows a live OS appearance change.
+    if (theme !== "system" || !darkSchemeQuery) return;
+    const onScheme = () => applyTheme("system");
+    darkSchemeQuery.addEventListener("change", onScheme);
+    return () => darkSchemeQuery.removeEventListener("change", onScheme);
   }, [theme]);
+
+  useEffect(() => {
+    applyDocFont(docFont);
+    try {
+      localStorage.setItem(DOC_FONT_STORAGE_KEY, docFont);
+    } catch {
+      // ignore
+    }
+  }, [docFont]);
+
+  useEffect(() => {
+    document.documentElement.dataset.pageWidth = pageWide ? "wide" : "normal";
+    try {
+      localStorage.setItem(PAGE_WIDE_STORAGE_KEY, pageWide ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [pageWide]);
 
   // The markdown editor reads the factor straight off <html> (App.css); the
   // html rendition gets it as a prop, since only the bridge can reach inside
@@ -2657,7 +2761,7 @@ export default function App() {
         });
         setHistoryToken((t) => t + 1);
       } catch (e) {
-        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+        pushToast("error", `Couldn't undo that restore: ${errText(e)}`);
       }
     },
     [pushToast],
@@ -2678,12 +2782,12 @@ export default function App() {
         });
         setVersionPreview(null);
         setHistoryToken((t) => t + 1);
-        pushToast(`Restored the version from ${momentLabel(version.ts)}.`, {
+        pushToast("done", `Restored the version from ${momentLabel(version.ts)}.`, {
           label: "Undo",
           run: () => void undoRestore(docPath, root, outcome),
         });
       } catch (e) {
-        pushToast(`Couldn't restore that version: ${errText(e)}`);
+        pushToast("error", `Couldn't restore that version: ${errText(e)}`);
       }
     },
     [pushToast, undoRestore],
@@ -2766,7 +2870,7 @@ export default function App() {
       try {
         await versionsRestoreSnapshot(root, report.preRestoreTs, paths);
       } catch (e) {
-        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+        pushToast("error", `Couldn't undo that restore: ${errText(e)}`);
       }
     },
     [pushToast],
@@ -2778,7 +2882,7 @@ export default function App() {
         report.written > 0 && `${report.written} file${report.written === 1 ? "" : "s"} written`,
         report.trashed > 0 && `${report.trashed} moved to the Trash`,
       ].filter(Boolean) as string[];
-      pushToast(moved.length ? `Restored — ${moved.join(", ")}.` : "Nothing needed changing.", {
+      pushToast(moved.length ? "done" : "info", moved.length ? `Restored — ${moved.join(", ")}.` : "Nothing needed changing.", {
         label: "Undo",
         run: () => void undoSnapshotRestore(root, report, paths),
       });
@@ -4984,7 +5088,7 @@ export default function App() {
       // what the Versions settings reads.
       onVersionsStatus((s) => setVersionStatuses(s)),
       onCloudConflict((e) => {
-        pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
+        pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
           run: () => void openTab(e.conflictPath, "file"),
         });
@@ -4993,6 +5097,7 @@ export default function App() {
         setPendingDeletes(e);
         if (e.count > 0) {
           pushToast(
+            "warn",
             `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
             { label: "Review…", run: () => setCloudPanelOpen(true) },
           );
@@ -5021,6 +5126,14 @@ export default function App() {
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
   const activeIsStore = activeTab?.kind === "store";
+  // The open note relative to the workspace: what the Live chip publishes
+  // and whose presence the facepile shows. Null for a draft, a board, or a
+  // file from outside the workspace.
+  const activeRel =
+    activeTab?.kind === "file" && workspaceRoot ? relPathIn(workspaceRoot, activeTab.path) : null;
+  const hereNow = [
+    ...new Set((cloudForRoot?.presence ?? []).filter((p) => p.path === activeRel).map((p) => p.name)),
+  ];
   // The sidebar's active row. A board's cards have no rows of their own, so
   // the board's row carries the highlight for whatever inside it is focused.
   const sidebarCurrentPath = activeIsStore ? activeTab.path : activeFilePath;
@@ -5365,6 +5478,14 @@ export default function App() {
               onExport={exportStoreCsv}
             />
           )}
+          {focused && conflict && (
+            // The open document changed on disk under unsaved edits: the
+            // question sits over the document it is about.
+            <ConflictBanner
+              onReload={() => void reloadFromDisk()}
+              onKeep={keepMyVersion}
+            />
+          )}
           {leasedHere && activeLease && showEditorHere && paneView === "md" && !previewHere && (
             <LeaseBanner lease={activeLease.lease} onTakeOver={takeOverActive} />
           )}
@@ -5459,7 +5580,7 @@ export default function App() {
                 void restoreVersion(versionPreview.docPath, versionPreview.root, version, text)
               }
               onOpenFile={(path) => void openTab(path, "file")}
-              onError={(message) => pushToast(message)}
+              onError={(message) => pushToast("error", message)}
             />
           )}
           {showHtmlHere && (
@@ -5538,77 +5659,100 @@ export default function App() {
     );
   };
 
+  // The left column: the sidebar, the drafts panel, or both.
+  const leftColumn = showSidebar || draftsOpen;
+
+  // The gear lives in the left column's footer whenever there is a left
+  // column, so it never sits over the file tree; with neither showing it
+  // floats bottom-left.
+  const settingsMenu = (
+    <Settings
+      docked={leftColumn}
+      pageWide={pageWide}
+      onTogglePageWide={() => setPageWide((w) => !w)}
+      theme={theme}
+      onTheme={setTheme}
+      docFont={docFont}
+      onDocFont={setDocFont}
+      recents={recents}
+      onNewNote={() => void newDraft()}
+      onOpenFile={openFilePicker}
+      onOpenFolder={openFolderPicker}
+      onOpenFileNewWindow={() => void openFileInNewWindow()}
+      onOpenFolderNewWindow={() => void openFolderInNewWindow()}
+      onOpenRecent={openRecent}
+      canCopyWithComments={activeTab != null}
+      onCopyWithComments={() => void copyWithComments()}
+      onOpenDictationSetup={() => setDictationSetupOpen(true)}
+      update={update}
+      onOpenExternal={openExternal}
+      onOpenCloud={() => setCloudPanelOpen(true)}
+      cloudAttention={cloudNeedsAttention(cloudStatuses)}
+      onOpenVersions={() => setVersionsSettingsOpen(true)}
+    />
+  );
+
+  // The title row's left end: the traffic lights' clearance and the panel
+  // toggles. Over a left column (sidebar or drafts) it is that column's top
+  // row; with neither showing it rides at the start of the tab bar, so the
+  // tabs begin after it and the toggles never move. Its gaps drag the window.
+  const titleLead = (
+    <div className="title-lead" onMouseDown={dragWindowFromGap}>
+      <button
+        className="title-toggle"
+        onClick={() => setDraftsOpen((v) => !v)}
+        title={draftsOpen ? "Hide drafts (⌘⇧D)" : "Show drafts (⌘⇧D)"}
+        aria-label="Toggle drafts panel"
+        aria-pressed={draftsOpen}
+      >
+        <DraftsIcon />
+      </button>
+      {workspaceRoot && (
+        <button
+          className="title-toggle"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title={sidebarOpen ? "Hide sidebar (⌘\\)" : "Show sidebar (⌘\\)"}
+          aria-label="Toggle sidebar"
+          aria-pressed={sidebarOpen}
+        >
+          <SidebarIcon />
+        </button>
+      )}
+      {activeTab && !activeMissing && !activeIsHtmlDoc && (
+        <button
+          className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
+          onClick={() =>
+            // Dictation types into the markdown editor; from the html view,
+            // bring the editable version forward first (a session is never
+            // active there, so this is always a start). Never into a
+            // document another Mac holds — it is view-only here.
+            void (async () => {
+              if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
+              if (docViewRef.current === "html") await selectDocView("md");
+              await dictationRef.current?.toggle();
+            })()
+          }
+          disabled={leased && dictationUi.session === "idle"}
+          title={
+            dictationUi.session === "idle"
+              ? "Start dictation (⌘⇧V)"
+              : "Finish dictation (Esc)"
+          }
+          aria-label="Toggle dictation"
+          aria-pressed={dictationUi.session !== "idle"}
+        >
+          <MicIcon />
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
-      <div
-        className="drag-strip"
-        onMouseDown={(e) => {
-          // Drive the window drag ourselves rather than through the passive
-          // `data-tauri-drag-region` attribute: on macOS/WKWebView its injected
-          // mousedown handler intermittently fails to start the native drag, and
-          // a missed drag falls through to a normal content interaction — which
-          // is why dragging the strip would sometimes just select text instead
-          // of moving the window. Handling mousedown here (and preventing the
-          // default) starts the drag reliably and never selects text. A
-          // double-click zooms, matching a native title bar.
-          if (e.button !== 0) return;
-          e.preventDefault();
-          const win = getCurrentWindow();
-          if (e.detail === 2) void win.toggleMaximize();
-          else void win.startDragging();
-        }}
-      />
-      <div className="title-actions">
-        <button
-          className="title-toggle"
-          onClick={() => setDraftsOpen((v) => !v)}
-          title={draftsOpen ? "Hide drafts (⌘⇧D)" : "Show drafts (⌘⇧D)"}
-          aria-label="Toggle drafts panel"
-          aria-pressed={draftsOpen}
-        >
-          <DraftsIcon />
-        </button>
-        {workspaceRoot && (
-          <button
-            className="title-toggle"
-            onClick={() => setSidebarOpen((v) => !v)}
-            title={sidebarOpen ? "Hide sidebar (⌘\\)" : "Show sidebar (⌘\\)"}
-            aria-label="Toggle sidebar"
-            aria-pressed={sidebarOpen}
-          >
-            <SidebarIcon />
-          </button>
-        )}
-        {activeTab && !activeMissing && !activeIsHtmlDoc && (
-          <button
-            className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
-            onClick={() =>
-              // Dictation types into the markdown editor; from the html view,
-              // bring the editable version forward first (a session is never
-              // active there, so this is always a start). Never into a
-              // document another Mac holds — it is view-only here.
-              void (async () => {
-                if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-                if (docViewRef.current === "html") await selectDocView("md");
-                await dictationRef.current?.toggle();
-              })()
-            }
-            disabled={leased && dictationUi.session === "idle"}
-            title={
-              dictationUi.session === "idle"
-                ? "Start dictation (⌘⇧V)"
-                : "Finish dictation (Esc)"
-            }
-            aria-label="Toggle dictation"
-            aria-pressed={dictationUi.session !== "idle"}
-          >
-            <MicIcon />
-          </button>
-        )}
-      </div>
+      {leftColumn && titleLead}
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
@@ -5651,24 +5795,31 @@ export default function App() {
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
         onHistory={(path, kind) => void openHistory(path, kind)}
+        leading={leftColumn ? undefined : titleLead}
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
+              {/* Who else is in this note: their faces, from the
+                  workspace's presence. */}
+              <Facepile
+                names={hereNow}
+                size={22}
+                title={`In this note: ${hereNow.join(", ")}`}
+                testid="note-facepile"
+              />
               {/* Publishing: a file inside the open workspace only — not a
                   draft, not a board, not a file from outside (§7.3). */}
-              {activeTab.kind === "file" &&
-                workspaceRoot &&
-                relPathIn(workspaceRoot, activeTab.path) !== null && (
-                  <PublishMenu
-                    cloud={cloudForRoot}
-                    absPath={activeTab.path}
-                    rel={relPathIn(workspaceRoot, activeTab.path) ?? ""}
-                    dirty={dirty}
-                    onConnect={() => setCloudSetup("connect")}
-                    onOpenExternal={openExternal}
-                    onOpenPublished={() => setPublishedOpen(true)}
-                  />
-                )}
+              {activeRel !== null && (
+                <LiveChip
+                  cloud={cloudForRoot}
+                  absPath={activeTab.path}
+                  rel={activeRel}
+                  dirty={dirty}
+                  onConnect={() => setCloudSetup("connect")}
+                  onOpenExternal={openExternal}
+                  onOpenPublished={() => setPublishedOpen(true)}
+                />
+              )}
               {/* Markdown only: an html view docks its own comment-mode
                   toggle (and PDF export) into the slot below instead —
                   comment mode itself lives inside HtmlView. */}
@@ -5727,12 +5878,12 @@ export default function App() {
           onOpen={(file) => previewDeleted(file, workspaceRoot)}
           onRestored={(path) => {
             setTreeRefreshToken((t) => t + 1);
-            pushToast(`${basename(path)} is back.`, {
+            pushToast("done", `${basename(path)} is back.`, {
               label: "Open",
               run: () => void openTab(path, "file"),
             });
           }}
-          onError={(message) => pushToast(message)}
+          onError={(message) => pushToast("error", message)}
         />
       )}
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
@@ -5777,7 +5928,7 @@ export default function App() {
           root={workspaceRoot}
           onClose={() => setWorkspaceHistoryOpen(false)}
           onRestored={(report, paths) => snapshotRestored(workspaceRoot, report, paths)}
-          onError={(message) => pushToast(message)}
+          onError={(message) => pushToast("error", message)}
         />
       )}
       {versionsSettingsOpen && (
@@ -5786,12 +5937,6 @@ export default function App() {
           statuses={versionStatuses}
           cloud={cloudForRoot}
           onClose={() => setVersionsSettingsOpen(false)}
-        />
-      )}
-      {conflict && (
-        <ConflictBanner
-          onReload={() => void reloadFromDisk()}
-          onKeep={keepMyVersion}
         />
       )}
       {savePrompt && (
@@ -5831,7 +5976,7 @@ export default function App() {
             onSelect={previewVersion}
             onClose={closeHistory}
             reloadToken={historyToken}
-            onError={(message) => pushToast(message)}
+            onError={(message) => pushToast("error", message)}
           />
         )}
         {tabDrop && (
@@ -5946,31 +6091,61 @@ export default function App() {
           onOpenExternal={openExternal}
         />
       )}
-      <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
-      <Settings
-        theme={theme}
-        onChange={setTheme}
-        recents={recents}
-        onNewNote={() => void newDraft()}
-        onOpenFile={openFilePicker}
-        onOpenFolder={openFolderPicker}
-        onOpenFileNewWindow={() => void openFileInNewWindow()}
-        onOpenFolderNewWindow={() => void openFolderInNewWindow()}
-        onOpenRecent={openRecent}
-        canCopyWithComments={activeTab != null}
-        onCopyWithComments={() => void copyWithComments()}
-        onOpenDictationSetup={() => setDictationSetupOpen(true)}
-        update={update}
-        onOpenExternal={openExternal}
-        onOpenCloud={() => setCloudPanelOpen(true)}
-        cloudAttention={cloudNeedsAttention(cloudStatuses)}
-        onOpenVersions={() => setVersionsSettingsOpen(true)}
-      />
+      <Toasts toasts={toasts} onDismiss={dismissToast} />
+      {leftColumn ? (
+        // The left column's footer bar: settings, the folder's deleted
+        // files — a count that is here only when there is something in it
+        // (docs/versioning-plan.md §12.3.4), which toggles the column between
+        // the tree and the list — and, for a connected workspace, its sync
+        // in words.
+        <div className="side-footer">
+          {settingsMenu}
+          {showSidebar && workspaceRoot && deletedFiles.length > 0 && (
+            <button
+              className="side-footer-btn"
+              data-testid="recently-deleted-button"
+              aria-pressed={sidebarMode === "deleted"}
+              aria-label={`Recently deleted (${deletedFiles.length})`}
+              title="Recently deleted — files this folder's history still holds"
+              onClick={() => setSidebarMode((m) => (m === "deleted" ? "files" : "deleted"))}
+            >
+              <TrashIcon />
+              <span className="side-footer-count">{deletedFiles.length}</span>
+            </button>
+          )}
+          {showSidebar && cloudForRoot && (
+            <SyncStatus cloud={cloudForRoot} onOpen={() => setCloudPanelOpen(true)} />
+          )}
+        </div>
+      ) : (
+        settingsMenu
+      )}
     </div>
   );
 }
 
 /* ---------- Subviews ---------- */
+
+function TrashIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
 
 // The MD/HTML segmented toggle (right end of the tab bar, and each pane
 // header in split mode). Both sides always render so the control reads the
@@ -6364,9 +6539,28 @@ function ConflictBanner({
   );
 }
 
+/** A theme in miniature: its canvas, its sheet with two lines of text, and
+ *  the accent — painted from that theme's own tokens. */
+function ThemeSwatch({ theme }: { theme: ResolvedTheme }) {
+  return (
+    <span className="settings-swatch-face" data-theme={theme}>
+      <span className="settings-swatch-sheet">
+        <span className="settings-swatch-line" />
+        <span className="settings-swatch-line is-short" />
+        <span className="settings-swatch-accent" />
+      </span>
+    </span>
+  );
+}
+
 function Settings({
+  docked,
+  pageWide,
+  onTogglePageWide,
   theme,
-  onChange,
+  onTheme,
+  docFont,
+  onDocFont,
   recents,
   onNewNote,
   onOpenFile,
@@ -6383,8 +6577,14 @@ function Settings({
   cloudAttention,
   onOpenVersions,
 }: {
+  /** In the left column's footer (true) or floating bottom-left. */
+  docked: boolean;
+  pageWide: boolean;
+  onTogglePageWide: () => void;
   theme: Theme;
-  onChange: (t: Theme) => void;
+  onTheme: (t: Theme) => void;
+  docFont: DocFont;
+  onDocFont: (f: DocFont) => void;
   recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
@@ -6459,7 +6659,7 @@ function Settings({
       : "Settings";
 
   return (
-    <div ref={wrapRef} className="settings-wrap">
+    <div ref={wrapRef} className={`settings-wrap${docked ? " is-docked" : ""}`}>
       {open && (
         <div className="settings-popover" role="menu" aria-label="Settings">
           <div className="settings-section-label">File</div>
@@ -6611,23 +6811,63 @@ function Settings({
           )}
           <div className="settings-divider" />
           <div className="settings-section-label">Appearance</div>
-          {THEMES.map((t) => (
-            <button
-              key={t}
-              role="menuitemradio"
-              aria-checked={theme === t}
-              className={`settings-option ${theme === t ? "is-active" : ""}`}
-              onClick={() => {
-                onChange(t);
-                setOpen(false);
-              }}
-            >
-              <span className="settings-option-check">
-                {theme === t ? <CheckIcon /> : null}
-              </span>
-              <span className="settings-option-label">{THEME_LABEL[t]}</span>
-            </button>
-          ))}
+          {/* Live choices: the menu stays open so the note behind it can be
+              read in each one. A swatch is drawn from its own theme's
+              tokens: data-theme scopes a palette to any element. */}
+          <div className="settings-tiles is-themes" role="group" aria-label="Theme">
+            {THEMES.map((t) => (
+              <button
+                key={t}
+                role="menuitemradio"
+                aria-checked={theme === t}
+                className={`settings-tile ${theme === t ? "is-active" : ""}`}
+                data-testid={`settings-theme-${t}`}
+                onClick={() => onTheme(t)}
+              >
+                <span className="settings-tile-face" aria-hidden>
+                  {t === "system" ? (
+                    <>
+                      <ThemeSwatch theme="light" />
+                      <ThemeSwatch theme="dark" />
+                    </>
+                  ) : (
+                    <ThemeSwatch theme={t} />
+                  )}
+                </span>
+                <span className="settings-tile-name">{THEME_LABEL[t]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="settings-tiles is-fonts" role="group" aria-label="Document font">
+            {DOC_FONTS.map((f) => (
+              <button
+                key={f}
+                role="menuitemradio"
+                aria-checked={docFont === f}
+                className={`settings-tile ${docFont === f ? "is-active" : ""}`}
+                data-testid={`settings-font-${f}`}
+                title={`Set notes in ${DOC_FONT_LABEL[f].toLowerCase()}`}
+                onClick={() => onDocFont(f)}
+              >
+                <span className={`settings-tile-face settings-font-sample is-${f}`} aria-hidden>
+                  Ag
+                </span>
+                <span className="settings-tile-name">{DOC_FONT_LABEL[f]}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            role="menuitemcheckbox"
+            aria-checked={pageWide}
+            className={`settings-option ${pageWide ? "is-active" : ""}`}
+            title="Use the full 1080px canvas instead of a reading-width column"
+            onClick={onTogglePageWide}
+          >
+            <span className="settings-option-check">
+              {pageWide ? <CheckIcon /> : null}
+            </span>
+            <span className="settings-option-label">Wide page</span>
+          </button>
           <div className="settings-divider" />
           <div className="settings-section-label">Updates</div>
           {updateAvailable ? (
