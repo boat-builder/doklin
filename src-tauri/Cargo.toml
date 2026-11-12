@@ -10,10 +10,10 @@ name = "doklin_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-process = "2"

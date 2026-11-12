@@ -18,7 +18,7 @@
     "@milkdown/crepe": "^7.5.8",
     "@milkdown/kit": "^7.5.8",
     "@milkdown/react": "^7.5.8",
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
@@ -28,7 +28,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260903.1",
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@typescript-eslint/parser": "^8.63.0",
