@@ -211,7 +211,7 @@ for (const theme of ["light", "dark"]) {
     togglesStay: withSide.toggle?.x === noSide.toggle?.x && withSide.toggle?.y === noSide.toggle?.y && drafts.toggle?.x === withSide.toggle?.x,
     sheetInsetNoSide: noSide.sheet?.x === 8 && noSide.sheet?.y === 40,
     sheetAgainstSidebar: withSide.sheet?.x === 240,
-    tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 3 * 28,
+    tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 2 * 28,
     sheetAgainstDrafts: drafts.sheet?.x === 480,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);

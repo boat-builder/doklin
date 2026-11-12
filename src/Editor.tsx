@@ -36,8 +36,6 @@ import {
   criticCopyPlugin,
   setActiveThread,
 } from "./criticPlugin";
-import { ghostPlugin, ghostKey, getGhostState, type GhostSegment } from "./ghostText";
-import { polishRevertPlugin, revertKey, getRevertEntries } from "./polishRevert";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
 import { linkOpenPlugin, openInBrowserTab } from "./linkOpen";
 import type { TableCols } from "./tableWidths";
@@ -94,44 +92,14 @@ import "@milkdown/crepe/theme/frame.css";
    timing than it has now. */
 CodeMirrorBlock.TEARDOWN_DELAY = 2 ** 31 - 1;
 
-// Document context handed to the dictation polish pass: enough surrounding
-// text for the LLM to disambiguate misheard words, never to rewrite them.
-export type DictationContext = {
-  docText: string;
-  headingPath: string;
-  before: string;
-  after: string;
-};
-
 // Imperative handle the host (App) uses to drive in-file search. Setting the
 // query is idempotent; next/prev advance the current match and scroll it into
 // view. Calls made before the editor has mounted are buffered (see pendingRef).
-//
-// The dictation* methods drive voice input: begin pins the ghost-text anchor
-// at the caret and suspends typing while the pipeline is busy; setGhost
-// paints the in-flight transcript; commit inserts finalized text at the
-// anchor (one undo step per chunk); end restores normal editing. The
-// controller calls begin/end around each utterance batch — between them the
-// document is an ordinary editor. insertText types literal text at the caret
-// (the talk key doubles as the spacebar when tapped).
-//
-// When commit gets a `raw` that differs from the polished text, the landed
-// range is tracked (see polishRevert.ts): revertPolish swaps every still-
-// intact tracked range back to its raw transcript, clearRevert forgets them
-// (the controller calls it on each talk-key press).
 export type EditorHandle = {
   setSearch: (query: string, caseSensitive: boolean) => void;
   searchNext: () => void;
   searchPrev: () => void;
   clearSearch: () => void;
-  insertText: (text: string) => void;
-  dictationBegin: () => boolean;
-  dictationSetGhost: (segments: GhostSegment[]) => void;
-  dictationCommit: (text: string, raw?: string) => void;
-  dictationRevertPolish: () => number;
-  dictationClearRevert: () => void;
-  dictationEnd: () => void;
-  dictationContext: () => DictationContext | null;
   // Create a comment thread on the current selection (the same act as the
   // toolbar's Comment button). Read-only hosts use this: Crepe suppresses its
   // selection toolbar there, so they provide their own affordance and route
@@ -261,54 +229,6 @@ function scrollToCurrent(view: EditorView) {
   if (m) scrollPosIntoView(view, m.from);
 }
 
-/* ---------- Dictation helpers ---------- */
-
-// Join a finalized dictation chunk onto the text before the anchor: add the
-// missing space between chunks, capitalize at paragraph starts and after
-// sentence enders. Whisper already punctuates within a chunk; this only fixes
-// the seams between chunks.
-function smartJoin(doc: import("@milkdown/kit/prose/model").Node, anchor: number, text: string): string {
-  let out = text.replace(/\s*\n+\s*/g, " ").trim();
-  if (!out) return "";
-  const before = doc.textBetween(Math.max(0, anchor - 8), anchor, "\n", "\n");
-  const atBlockStart = before === "" || before.endsWith("\n");
-  const last = before.slice(-1);
-  if (!atBlockStart && last && !/\s/.test(last) && !/^[,.;:!?)\]}»%]/.test(out)) {
-    out = " " + out;
-  }
-  if (atBlockStart || /[.!?…]["')\]]?\s*$/.test(before)) {
-    const lead = out.search(/\S/);
-    out = out.slice(0, lead) + out.charAt(lead).toUpperCase() + out.slice(lead + 1);
-  }
-  return out;
-}
-
-// Heading trail above a position ("Doc Title › Section › Subsection") plus the
-// text right before/after it — the structural context for the polish prompt.
-function dictationContextAt(doc: import("@milkdown/kit/prose/model").Node, anchor: number): DictationContext {
-  const levels: string[] = [];
-  doc.forEach((node, offset) => {
-    if (offset >= anchor) return;
-    if (node.type.name === "heading") {
-      const level = Math.max(1, Math.min(6, Number(node.attrs.level) || 1));
-      levels.length = level - 1; // entering h2 drops any stale h3+ trail
-      levels[level - 1] = node.textContent;
-    }
-  });
-  const headingPath = levels.filter(Boolean).join(" › ");
-
-  const before = doc.textBetween(Math.max(0, anchor - 700), anchor, "\n", " ");
-  const after = doc.textBetween(anchor, Math.min(doc.content.size, anchor + 400), "\n", " ");
-
-  let docText = doc.textBetween(0, doc.content.size, "\n", " ");
-  if (docText.length > 8000) {
-    // Keep both ends — openings carry titles/terms, the tail is what the user
-    // is dictating into.
-    docText = `${docText.slice(0, 4000)}\n[…]\n${docText.slice(-4000)}`;
-  }
-  return { docText, headingPath, before, after };
-}
-
 const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   {
     initialMarkdown,
@@ -336,11 +256,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   // editor DOM is detached (closest() finds nothing), and with split panes a
   // global .editor-wrap query could hit the OTHER pane.
   const wrapRef = useRef<HTMLElement | null>(null);
-  // True while dictation owns the editor — from the talk-key press until the
-  // chunk pipeline drains. The editable prop (installed at mount) reads this,
-  // so typing is suspended exactly while spoken text is in flight. Flips take
-  // effect on the next transaction, which begin/end always dispatch.
-  const dictatingRef = useRef(false);
   // A search request that arrived before the editor mounted (e.g. opening a
   // workspace-search result remounts the editor, then the query is applied).
   const pendingRef = useRef<{ query: string; caseSensitive: boolean } | null>(null);
@@ -558,8 +473,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     crepe.editor.use(linkOpenPlugin(() => onOpenLinkRef.current ?? openInBrowserTab));
     crepe.editor.use(criticActivePlugin);
     crepe.editor.use(criticCopyPlugin);
-    crepe.editor.use(ghostPlugin);
-    crepe.editor.use(polishRevertPlugin);
     // Column drag-resize; must come after the Crepe features so its table
     // node view overrides the table block's (see tableResize.ts). The store
     // reads the widths prop from THIS render (mount-time by definition) and
@@ -584,7 +497,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       api.mounted((ctx) => {
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
-        view.setProps({ editable: () => !dictatingRef.current && !readOnlyRef.current });
+        view.setProps({ editable: () => !readOnlyRef.current });
         // Emit the mounted doc's serialization as the baseline. markdownUpdated
         // only fires on edit transactions — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
@@ -841,85 +754,6 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         if (!view) return;
         dispatchMeta(view, { kind: "clear" });
         report();
-      },
-      insertText(text) {
-        const view = viewRef.current;
-        if (!view || dictatingRef.current || !view.hasFocus()) return;
-        view.dispatch(view.state.tr.insertText(text));
-      },
-      dictationBegin() {
-        const view = viewRef.current;
-        if (!view || dictatingRef.current) return false;
-        dictatingRef.current = true;
-        const pos = view.state.selection.head;
-        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "begin", pos }));
-        return true;
-      },
-      dictationSetGhost(segments) {
-        const view = viewRef.current;
-        if (!view || !dictatingRef.current) return;
-        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "segments", segments }));
-      },
-      dictationCommit(text, raw) {
-        const view = viewRef.current;
-        if (!view || !dictatingRef.current) return;
-        const anchor = getGhostState(view.state)?.anchor;
-        if (anchor == null) return;
-        const joined = smartJoin(view.state.doc, anchor, text);
-        if (!joined) return;
-        const tr = view.state.tr.insertText(joined, anchor, anchor);
-        if (raw != null && raw.trim() && raw !== text) {
-          tr.setMeta(revertKey, {
-            kind: "track",
-            entry: { from: anchor, to: anchor + joined.length, inserted: joined, raw },
-          });
-        }
-        view.dispatch(tr);
-      },
-      dictationRevertPolish() {
-        const view = viewRef.current;
-        if (!view) return 0;
-        const entries = getRevertEntries(view.state);
-        if (entries.length === 0) return 0;
-        // Front-to-back, remapping each entry through the replacements made
-        // so far, so every raw chunk re-joins (spacing, capitalization)
-        // against the already-reverted text before it. Only ranges that
-        // still read exactly what polish inserted are touched — user edits win.
-        let tr = view.state.tr;
-        let reverted = 0;
-        for (const e of [...entries].sort((a, b) => a.from - b.from)) {
-          const from = tr.mapping.map(e.from, 1);
-          const to = tr.mapping.map(e.to, -1);
-          if (to <= from || to > tr.doc.content.size) continue;
-          if (tr.doc.textBetween(from, to, "\n", "\n") !== e.inserted) continue;
-          const rawJoined = smartJoin(tr.doc, from, e.raw);
-          if (!rawJoined) continue;
-          tr = tr.insertText(rawJoined, from, to);
-          reverted++;
-        }
-        view.dispatch(tr.setMeta(revertKey, { kind: "clear" }));
-        return reverted;
-      },
-      dictationClearRevert() {
-        const view = viewRef.current;
-        if (!view || getRevertEntries(view.state).length === 0) return;
-        view.dispatch(view.state.tr.setMeta(revertKey, { kind: "clear" }));
-      },
-      dictationEnd() {
-        const view = viewRef.current;
-        if (!view) {
-          dictatingRef.current = false;
-          return;
-        }
-        dictatingRef.current = false;
-        view.dispatch(view.state.tr.setMeta(ghostKey, { kind: "end" }));
-        view.focus();
-      },
-      dictationContext() {
-        const view = viewRef.current;
-        if (!view) return null;
-        const anchor = getGhostState(view.state)?.anchor ?? view.state.selection.head;
-        return dictationContextAt(view.state.doc, anchor);
       },
       commentSelection() {
         const view = viewRef.current;

@@ -420,10 +420,7 @@ node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 ## Rust side
 
 `cd src-tauri && cargo check` works on Linux after
-`apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev` and
-creating dummy gitignored resources the build script expects:
-`binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
-`binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
+`apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev`.
 Versioning also has a by-hand pass — `docs/versioning-testing.md`, run
 through the app once its phases are in, because "no data is lost" is not a
 thing a suite can answer. `scripts/versions.sh <folder>` prints what a
