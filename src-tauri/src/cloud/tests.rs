@@ -17,7 +17,7 @@ use super::config::{
 };
 use super::engine::{
     next_wake, Engine, EngineCmd, EngineConfig, PublishRequest, WorkspaceState, DIRECTORY_MIN_GAP,
-    LEGACY_BATCH, POLL_INTERVAL,
+    LEGACY_BATCH, POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
@@ -34,7 +34,7 @@ use crate::versions::store::{
 
 /// A stand-in for the worker: the binding, a manifest with CAS-by-etag,
 /// content-addressed blobs (each with the time it landed, so a grace period
-/// is testable), the retired history archives, presence. `racer` lets a test
+/// is testable), presence and the polls that carry it. `racer` lets a test
 /// inject "another device won the CAS between your fetch and your put";
 /// `reject_schema` plays a worker that predates the app's manifest.
 #[derive(Default)]
@@ -50,6 +50,12 @@ struct FakeWorker {
     features: Vec<String>,
     racer: Option<Manifest>,
     put_manifest_calls: u64,
+    /// Every request that reached the worker — what "an idle Mac makes four
+    /// requests a minute" is counted in.
+    requests: u64,
+    /// Every poll, with the beat it carried: `None` is a `GET`, which writes
+    /// nothing. Since v7 there is no other way for a beat to arrive.
+    polls: Vec<Option<Beat>>,
     /// How many times `/api/meta` was asked — the directory rides on it, so
     /// this is what makes "ask again, but not every cycle" testable.
     meta_calls: u64,
@@ -100,7 +106,7 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 fn fake_worker() -> SharedWorker {
     Arc::new(Mutex::new(FakeWorker {
         worker_version: 1,
-        features: vec!["sync".into(), "wipe".into(), "versions".into(), "members".into()],
+        features: vec!["sync".into(), "wipe".into(), "versions".into(), "members".into(), "presence".into()],
         owner_token: OWNER_TOKEN.into(),
         ..Default::default()
     }))
@@ -126,7 +132,9 @@ impl FakeRemote {
     }
 
     fn check_offline(&self) -> RemoteResult<()> {
-        if self.be.lock().unwrap().offline {
+        let mut be = self.be.lock().unwrap();
+        be.requests += 1;
+        if be.offline {
             Err(RemoteError::Offline("fake worker down".into()))
         } else {
             Ok(())
@@ -223,11 +231,36 @@ impl Remote for FakeRemote {
         }
     }
 
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
         let this = self.clone();
+        let beat = beat.cloned();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            if beat.is_some() && !b.features.iter().any(|f| f == "presence") {
+                // A worker before v7: the poll is GET-only.
+                return Err(RemoteError::Other("http 405: method not allowed".into()));
+            }
+            b.polls.push(beat.clone());
+            match beat {
+                None => {}
+                Some(Beat::Leave) => {
+                    b.presence.remove(&this.device_id);
+                }
+                Some(Beat::Here { name, path }) => {
+                    // Whose Mac it is, the way the worker decides: off the
+                    // token for a member, off the adopted row for the owner.
+                    let member_id = match caller {
+                        Caller::Owner => b.members.values().find(|m| m.role == "owner").map(|m| m.id.clone()),
+                        Caller::Member => b
+                            .tokens
+                            .get(&this.token)
+                            .and_then(|t| b.members.get(&t.email))
+                            .map(|m| m.id.clone()),
+                    };
+                    b.presence.insert(this.device_id.clone(), PresenceEntry { member_id, name, path, ts: now_ms() });
+                }
+            }
             Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone() })
         }
     }
@@ -319,7 +352,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.be.lock().unwrap().blobs.remove(&key);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.blobs.remove(&key);
             Ok(())
         }
     }
@@ -390,7 +425,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.be.lock().unwrap().version_snapshots.remove(&id);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.version_snapshots.remove(&id);
             Ok(())
         }
     }
@@ -440,25 +477,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.be.lock().unwrap().version_blobs.remove(&hash);
-            Ok(())
-        }
-    }
-
-    fn put_presence(&self, name: &str, path: Option<&str>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let entry = PresenceEntry { name: name.to_string(), path: path.map(String::from), ts: now_ms() };
-        async move {
-            this.ready()?;
-            this.be.lock().unwrap().presence.insert(this.device_id.clone(), entry);
-            Ok(())
-        }
-    }
-
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        async move {
-            this.be.lock().unwrap().presence.remove(&this.device_id);
+            let mut b = this.be.lock().unwrap();
+            b.requests += 1;
+            b.version_blobs.remove(&hash);
             Ok(())
         }
     }
@@ -2340,10 +2361,12 @@ async fn touched_path_settles_faster_than_a_watched_one() {
     tokio::time::sleep(Duration::from_millis(3600)).await;
     assert!(has("external.md"), "pushed 5 s after the event");
 
-    // Shutdown leaves presence.
+    // Shutdown leaves presence: the last poll says so.
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"), "here, while it runs");
     cmd_tx.send(EngineCmd::Shutdown).unwrap();
     task.await.unwrap();
     assert!(be.lock().unwrap().presence.get("d-alice").is_none());
+    assert_eq!(be.lock().unwrap().polls.last(), Some(&Some(Beat::Leave)));
     drop(root_dir);
 }
 
@@ -2484,12 +2507,16 @@ async fn presence_reports_the_edited_path_and_the_others() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     let mut b = device("Bob", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
     a.write("doc.md", "# doc\n");
     a.cycle().await;
     b.cycle().await;
 
+    // The beat is the poll's: a new path makes one due, and the poll that
+    // follows carries it.
     a.engine.set_activity(Some(a.abs("doc.md").to_string_lossy().to_string()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
     {
         let p = &be.lock().unwrap().presence;
         assert_eq!(p["d-alice"].name, "Alice");
@@ -2497,19 +2524,274 @@ async fn presence_reports_the_edited_path_and_the_others() {
     }
     // A path outside the workspace reads as idle.
     a.engine.set_activity(Some("/elsewhere/x.md".into()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
     assert_eq!(be.lock().unwrap().presence["d-alice"].path, None);
     a.engine.set_activity(Some(a.abs("doc.md").to_string_lossy().to_string()));
-    a.engine.presence_tick().await;
+    a.engine.poll_for_test().await;
 
     // Bob's poll shows Alice, never Bob himself.
-    b.engine.presence_tick().await;
     b.engine.poll_for_test().await;
     let seen = b.status().presence;
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].device_id, "d-alice");
     assert_eq!(seen[0].name, "Alice");
+    assert_eq!(seen[0].device, "Alice");
     assert_eq!(seen[0].path.as_deref(), Some("doc.md"));
+}
+
+/// Three polls, one beat. The beat has no request of its own any more: it
+/// rides the first poll at least `PRESENCE_BEAT` after the last one, and a
+/// path that changes brings the poll forward rather than waiting for it.
+#[tokio::test(start_paused = true)]
+async fn the_beat_rides_every_third_poll_and_a_new_path_brings_the_poll_forward() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let doc = a.abs("doc.md").to_string_lossy().to_string();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    let settle = || async {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    };
+    settle().await;
+
+    // A Mac that has never beaten owes one, so it shows up once it has
+    // synced instead of a poll later.
+    assert_eq!(be.lock().unwrap().polls.len(), 1, "the first poll follows the first cycle");
+    assert!(matches!(be.lock().unwrap().polls[0], Some(Beat::Here { path: None, .. })));
+
+    // Idle: a poll every 15 s, a beat on every third.
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL * 6 + Duration::from_millis(100)).await;
+    let polls = be.lock().unwrap().polls.clone();
+    assert_eq!(polls.len(), 6, "{polls:?}");
+    let beats = polls.iter().filter(|p| p.is_some()).count();
+    assert_eq!(beats, 2, "one in three: {polls:?}");
+    assert!(polls[..2].iter().all(Option::is_none), "nothing owed for 45 s: {polls:?}");
+    assert!(polls[2].is_some());
+
+    // Opening a document is owed a beat at once, and gets one.
+    be.lock().unwrap().polls.clear();
+    cmd_tx.send(EngineCmd::SetActivity(Some(doc))).unwrap();
+    settle().await;
+    let polls = be.lock().unwrap().polls.clone();
+    assert_eq!(polls.len(), 1, "the poll came forward: {polls:?}");
+    assert!(matches!(&polls[0], Some(Beat::Here { path: Some(p), .. }) if p == "doc.md"));
+    assert_eq!(be.lock().unwrap().presence["d-alice"].path.as_deref(), Some("doc.md"));
+
+    // …and it does not restart the cadence from scratch: the next beat is a
+    // whole beat later, not on the next poll.
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL * 2 + Duration::from_millis(100)).await;
+    assert!(be.lock().unwrap().polls.iter().all(Option::is_none));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    assert_eq!(be.lock().unwrap().polls.last(), Some(&Some(Beat::Leave)), "it says goodbye");
+    assert!(!be.lock().unwrap().presence.contains_key("d-alice"));
+    drop(root_dir);
+}
+
+/// The budget this phase exists for (docs/teams-plan.md §5): an idle Mac is
+/// four polls a minute and nothing else. The beat used to be two more.
+#[tokio::test(start_paused = true)]
+async fn an_idle_device_makes_exactly_four_requests_a_minute() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+
+    // First contact, the first mirror and the one-time clean-up all happen in
+    // the first minute or so; the window starts once they are behind it.
+    tokio::time::sleep(Duration::from_secs(120) + Duration::from_millis(100)).await;
+    let (before, beats_before) = {
+        let b = be.lock().unwrap();
+        (b.requests, b.polls.iter().filter(|p| p.is_some()).count())
+    };
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let b = be.lock().unwrap();
+    assert_eq!(b.requests - before, 4, "four polls a minute, the beat folded into them");
+    let beats = b.polls.iter().filter(|p| p.is_some()).count() - beats_before;
+    assert!((1..=2).contains(&beats), "and still beating, {beats} times");
+    drop(b);
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// Every settled edit runs a cycle, and a cycle pushes the poll clock back
+/// — so a Mac someone is typing on used to poll rarely, and a beat that only
+/// rode the clock would go quiet exactly while they were editing. An owed
+/// beat brings the poll forward after a cycle instead.
+#[tokio::test(start_paused = true)]
+async fn a_mac_being_typed_on_keeps_beating_while_its_cycles_hold_off_the_poll() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let root = a.root.path().to_path_buf();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    // A save every 4 s for three minutes: each settles 1.5 s later into a
+    // cycle, so the 15 s poll clock never runs out on its own.
+    be.lock().unwrap().polls.clear();
+    for i in 0..45 {
+        std::fs::write(root.join("typed.md"), format!("draft {i}\n")).unwrap();
+        cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    }
+    let beats = be.lock().unwrap().polls.iter().filter(|p| p.is_some()).count();
+    // 180 s at one beat per 45 s, give or take where the window cuts.
+    assert!(beats >= 3, "only {beats} beats in three minutes of typing — the TTL is 90 s");
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// A worker before v7 has no beat to take: its poll is GET-only, and a POST
+/// would be a 405 every 45 s. The app polls quietly instead — this Mac is
+/// invisible, the others are not, and sync is untouched — and the hourly
+/// pass that waits for the version store waits for this too, so updating the
+/// worker reaches a Mac that is already running.
+#[tokio::test(start_paused = true)]
+async fn a_worker_without_presence_is_polled_and_never_beaten_at_until_it_is_updated() {
+    let be = fake_worker();
+    be.lock().unwrap().features.retain(|f| f != "presence");
+    let a = device("Alice", &be);
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    tokio::time::sleep(POLL_INTERVAL * 8).await;
+    {
+        let b = be.lock().unwrap();
+        assert!(b.polls.len() >= 7, "it polls: {}", b.polls.len());
+        assert!(b.polls.iter().all(Option::is_none), "and never sends a beat this worker would refuse");
+        assert!(b.presence.is_empty());
+    }
+
+    // The worker is updated; within the hour this Mac notices, unprompted.
+    be.lock().unwrap().features.push("presence".into());
+    tokio::time::sleep(MIRROR_EVERY + POLL_INTERVAL * 2).await;
+    assert!(be.lock().unwrap().polls.iter().any(Option::is_some), "beating, without a restart");
+    assert!(be.lock().unwrap().presence.contains_key("d-alice"));
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
+}
+
+/// "Who else is here" names people (docs/teams-plan.md §13): the worker says
+/// whose Mac each one is and the engine puts the directory's name to it —
+/// except your own other Mac, which is named as a Mac, because "Ada is
+/// editing" tells Ada nothing.
+#[tokio::test]
+async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
+
+    let mut studio = device("Studio", &be);
+    let mut air = device("Air", &be); // Ada's second Mac: the owner's secret too
+    let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    for d in [&mut studio, &mut air, &mut bob] {
+        d.engine.probe_worker().await;
+        d.cycle().await;
+        d.engine.poll_for_test().await;
+    }
+    studio.engine.poll_for_test().await;
+
+    let seen = studio.status().presence;
+    let bob_here = seen.iter().find(|p| p.device_id == "d-bob").unwrap();
+    assert_eq!(bob_here.name, "Bob Mbeki", "a person, not a Mac");
+    assert_eq!(bob_here.device, "Bob");
+    assert!(bob_here.member_id.as_deref().map(is_member_id).unwrap_or(false));
+    let air_here = seen.iter().find(|p| p.device_id == "d-air").unwrap();
+    assert_eq!(air_here.name, "Air", "your own other Mac is told apart by its name");
+    assert_eq!(air_here.member_id, studio.engine.me_for_test().map(String::from));
+
+    // Bob sees Ada, twice, as Ada — once per Mac, each with its name.
+    bob.engine.poll_for_test().await;
+    let theirs = bob.status().presence;
+    assert_eq!(theirs.iter().filter(|p| p.name == "Ada").count(), 2);
+    assert_eq!(
+        theirs.iter().map(|p| p.device.as_str()).collect::<BTreeSet<_>>(),
+        ["Air", "Studio"].into_iter().collect()
+    );
+}
+
+/// Someone who joined after this engine last probed is here before they are
+/// in its directory. Their Mac's name stands in for them, and the engine asks
+/// who they are — once, under the same gap as a stranger in the manifest.
+#[tokio::test(start_paused = true)]
+async fn a_stranger_here_is_shown_as_their_mac_and_asked_about_once() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-studio");
+    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let mut studio = device("Studio", &be);
+    studio.engine.probe_worker().await;
+    studio.cycle().await;
+
+    let token = invite_and_redeem(&be, &owner, "cy@example.com", "Cy", "d-cy").await;
+    let mut cy = device_as("Laptop", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    cy.engine.probe_worker().await;
+    cy.cycle().await;
+    cy.engine.poll_for_test().await;
+
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    let before = be.lock().unwrap().meta_calls;
+    studio.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "a Mac here nobody can name is what asked");
+    let here = &studio.status().presence[0];
+    assert_eq!(here.name, "Cy", "and the answer names them on the same poll");
+    assert_eq!(here.device, "Laptop");
+    for _ in 0..3 {
+        studio.engine.poll_for_test().await;
+    }
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "not once a poll");
+}
+
+/// The beat is presence, not sync: a poll that fails takes its beat with it
+/// and the next poll owes it again — no retry loop, no extra request.
+#[tokio::test(start_paused = true)]
+async fn a_beat_lost_with_its_poll_rides_the_next_one() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Device { engine, root: root_dir, _state, .. } = a;
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    tokio::time::sleep(PRESENCE_BEAT - Duration::from_secs(1)).await;
+
+    be.lock().unwrap().offline = true;
+    let before = be.lock().unwrap().requests;
+    tokio::time::sleep(POLL_INTERVAL * 2).await;
+    assert_eq!(be.lock().unwrap().requests - before, 2, "two polls refused, nothing hammering behind them");
+    be.lock().unwrap().offline = false;
+    be.lock().unwrap().polls.clear();
+    tokio::time::sleep(POLL_INTERVAL).await;
+    assert!(
+        matches!(be.lock().unwrap().polls.first(), Some(Some(Beat::Here { .. }))),
+        "the first poll back carries the beat it owed"
+    );
+
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+    drop(root_dir);
 }
 
 /* ---------- The bus, the wake, the grammars, the config ---------- */

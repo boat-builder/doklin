@@ -1,9 +1,10 @@
-// Readers for the bucket's small JSON objects — the binding, presence, the
+// Readers for the bucket's small JSON objects — the binding and the
 // manifest's totals — tolerant of a corrupt object (the worker answers with
-// what it can tell, never a 500 from someone else's bytes).
+// what it can tell, never a 500 from someone else's bytes). Presence was one
+// of them until v7; it is a D1 table now (presence.ts).
 
 import type { Env } from "./env";
-import { MANIFEST_KEY, MAX_NAME_LEN, PRESENCE_KEY, PRESENCE_TTL_MS, WORKSPACE_KEY } from "./layout";
+import { MANIFEST_KEY, MAX_NAME_LEN, WORKSPACE_KEY } from "./layout";
 
 /** workspace.json — the binding. Exists iff the domain holds a workspace. */
 export type WorkspaceRecord = {
@@ -12,9 +13,6 @@ export type WorkspaceRecord = {
   createdAt: string;
   createdBy: { deviceId: string | null; deviceName: string };
 };
-
-export type PresenceEntry = { name: string; path?: string; ts: number };
-export type PresenceMap = Record<string, PresenceEntry>;
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -52,31 +50,6 @@ export async function readWorkspace(env: Env): Promise<WorkspaceRecord | null> {
       deviceName: str(by.deviceName, "unknown"),
     },
   };
-}
-
-export async function readPresence(env: Env): Promise<PresenceMap> {
-  const v = await readObject(env, PRESENCE_KEY);
-  const devices = v?.devices;
-  if (!isObject(devices)) return {};
-  const out: PresenceMap = {};
-  for (const [id, entry] of Object.entries(devices)) {
-    if (!isObject(entry) || typeof entry.ts !== "number") continue;
-    out[id] = {
-      name: str(entry.name, "Someone"),
-      ...(typeof entry.path === "string" ? { path: entry.path } : {}),
-      ts: entry.ts,
-    };
-  }
-  return out;
-}
-
-/** Drop the devices that stopped heartbeating. */
-export function prunePresence(devices: PresenceMap, now = Date.now()): PresenceMap {
-  const fresh: PresenceMap = {};
-  for (const [id, entry] of Object.entries(devices)) {
-    if (now - entry.ts < PRESENCE_TTL_MS) fresh[id] = entry;
-  }
-  return fresh;
 }
 
 /** How much the manifest lists: file count and their bytes. Zero when there is no readable manifest. */

@@ -411,7 +411,8 @@ budget, for no extra freshness.
    success and on discovering it has expired; the owner's list filters
    expired ones. No cron trigger, no reaper — §8.1's cheap answer, made
    complete by the delete.
-7. **`lastSeenAt` lives on the member and is written at most once a day**,
+7. **`lastSeenAt` lives on the member and is written at most once a day**
+   (an hour, as built — §13),
    from the presence beat — never in `authenticate`, which would be a write
    on every request. "Here now" comes from the `presence` table for free.
 8. **The owner authenticates without D1** (§3.2), and gets a member row for
@@ -428,7 +429,7 @@ budget, for no extra freshness.
 | 3 | The code and the redeem flow | the 100-bit code, `cloud_redeem`, the wizard's third mode | 2 | an invited Mac can join — **built** |
 | 4 | The People panel | the owner's list, Invite…, Revoke, own credentials | 3 | people, listed and revocable — **built** |
 | 5 | Attribution by person | manifest v3, `by` as a member id, `hist` and the history routes gone | 4 | what the workspace records says *who*, not *which Mac* — **built** |
-| 6 | Presence in D1, folded into the poll | the presence table, `POST /api/poll`, the beat's own request gone | 2 | **nothing** — 33% fewer requests |
+| 6 | Presence in D1, folded into the poll | the presence table, `POST /api/poll`, the beat's own request gone | 2 | **nothing** — 33% fewer requests — **built** |
 | 7 | Leases | acquire, renew on the poll, release; the editor's banner and *Take over* | 6 | §11.7 closes |
 | 8 | The manifest pointer in D1 *(optional)* | `seq` CAS, immutable manifest blobs, no R2 head on the poll | 6 | **nothing** |
 
@@ -825,6 +826,65 @@ requests a minute.
 
 **Done when:** those pass and [cloud.md](cloud.md) §5.2–5.3 and §11.2 are
 rewritten — §11.2 from a blocker into the arithmetic of §5 here.
+
+**Built.** `WORKER_VERSION` is 7 and the schema is at 3; `presence.json`,
+`PUT` and `DELETE /api/presence`, `PRESENCE_KEY`, the bucket's presence
+readers and `Remote::put_presence` / `delete_presence` are deleted. An idle
+Mac makes four requests a minute and the test says exactly that. Six things
+the sketch did not say:
+
+- **`GET /api/poll` stays, and it is the idle poll.** The plan had the poll
+  become a `POST` with an optional body. As built the method says whether
+  anything is written: a `GET` only reads, a `POST` always carries a beat
+  (or a leave), and the engine sends a `POST` only when one is due — two
+  polls in three are still `GET`s. It costs nothing, and it is what makes
+  the skew polite in the direction §2 cares about: an app a release behind
+  still polls with the `GET` that answers, so it keeps syncing, and only its
+  own presence goes unseen until it updates.
+- **A worker without `presence` gets no beat at all.** The other direction
+  is a new app on a v6 worker, whose poll would answer a `POST` with `405`.
+  Rather than a version comparison or a fallback, the beat is gated on a new
+  feature name, `presence`: missing, the engine polls with `GET` and says
+  nothing, and the update badge is already asking for the worker. The hourly
+  re-probe that waited for `versions` now waits for `presence` too, so an
+  update reaches Macs that are already running rather than the next launch.
+- **An owed beat brings the poll forward.** The beat has no request of its
+  own, so a poll is the only thing that can carry it — and every settled edit
+  runs a cycle that pushes the poll clock back. Bursty typing (a pause every
+  few seconds) could hold polls off indefinitely, so a beat that waited for
+  the clock would go quiet exactly while somebody was editing. This was true
+  of the old beat too: it was tested on the poll tick. After a cycle, and on
+  a new path, the next poll is now `min(the clock, when the beat is owed)`;
+  after a poll it is the clock alone, so a domain that is not answering is
+  never asked faster. A path change costs one request, as it did before —
+  the frontend reports one per tab switch, not per keystroke.
+- **Presence names the person — and your own other Mac by its name.** The
+  poll answers `memberId` beside the Mac's name, and the engine resolves it
+  through the directory the way it resolves a `by` (§12). The status grew
+  `memberId` and `device`; `name` is the person, except when it is *you* on
+  another Mac, where "Ada is editing" would tell Ada nothing and the Mac's
+  name does. A Mac whose person the directory cannot name yet is shown
+  as the Mac and asks once, under the same five-minute gap as a stranger in
+  the manifest. The one visible change is in *Here now*: a person with two
+  Macs open is two rows, and the row says which Mac.
+- **`member_id` is nullable, and `lastSeenAt` moves hourly.** An owner who
+  never adopted an identity is here all the same, as their Mac — the schema
+  sketch's `NOT NULL` would have hidden them. And decision 7's "at most once
+  a day" became an hour: the People list prints "seen 3 h ago", and a daily
+  grain would print "seen 20 h ago" for somebody here an hour ago. It is one
+  row a person an hour — 240 a day for ten people, a quarter of one percent
+  of the write budget.
+- **Leaving is immediate, for every reason.** A quitting engine's last poll
+  is `{leave: true}`. Revoking a Mac or removing a person deletes their
+  presence row in the same batch as the credential, so somebody shown the
+  door does not stay "here now" for the TTL. And a beat to a domain that
+  holds no workspace answers `404` and records nobody — the one place the
+  beat reads R2 before it writes D1 rather than alongside it.
+
+What the arithmetic of §5 became, as measured rather than estimated, is in
+[cloud.md](cloud.md) §11.2: Workers requests 58 %, R2 Class A about nothing,
+Class B 17 %, D1 about 17 % of reads and 20 % of writes. Phase 7 is next,
+and the poll it renews leases on now exists.
 
 ## 14. Phase 7 — Leases
 

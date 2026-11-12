@@ -179,7 +179,7 @@ const memberId = (): string => `m-${randomHex(4)}`;
  *
  * Deliberately NOT written here: `last_seen_at`. A write on every request is
  * 57,600 writes a day for ten Macs; the presence beat carries it instead,
- * at most once a day per person (§6.7).
+ * at most once an hour per person (presence.ts, decision 7).
  */
 export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | null> {
   return withDb(env, async (db) => {
@@ -307,11 +307,13 @@ export async function adoptOwner(env: Env, email: string, name: string | null): 
  * Remove a person and everything they can sign in with, atomically: their
  * tokens, their pending invite, then the row itself. The cascade is declared
  * in the schema too, but spelling it out means revocation does not depend on
- * whether foreign keys are being enforced.
+ * whether foreign keys are being enforced. Their presence goes with them, so
+ * nobody keeps seeing a person who is no longer here.
  */
 export async function deleteMember(env: Env, id: string): Promise<boolean | null> {
   return withDb(env, async (db) => {
     const results = await db.batch([
+      db.prepare("DELETE FROM presence WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM tokens WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM invites WHERE member_id = ?").bind(id),
       db.prepare("DELETE FROM members WHERE id = ?").bind(id),
@@ -352,11 +354,18 @@ export async function listTokens(env: Env): Promise<TokenRow[] | null> {
 }
 
 /** Revoke one device. Takes effect on that device's very next request: the
- *  bearer resolves through this table, so there is no session to expire. */
+ *  bearer resolves through this table, so there is no session to expire.
+ *  Its presence row goes in the same batch — a Mac that has just been shown
+ *  the door should not stay "here now" for the TTL's minute and a half. */
 export async function deleteToken(env: Env, id: string): Promise<boolean | null> {
   return withDb(env, async (db) => {
-    const res = await db.prepare("DELETE FROM tokens WHERE id = ?").bind(id).run();
-    return res.meta.changes > 0;
+    const results = await db.batch([
+      db
+        .prepare("DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)")
+        .bind(id),
+      db.prepare("DELETE FROM tokens WHERE id = ?").bind(id),
+    ]);
+    return (results.at(-1)?.meta.changes ?? 0) > 0;
   });
 }
 

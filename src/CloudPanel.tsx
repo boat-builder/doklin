@@ -461,6 +461,8 @@ export default function CloudPanel({
               <li key={p.deviceId} className="cloud-presence-row">
                 <span className="cloud-presence-name">{p.name}</span>
                 <span className="cloud-presence-what">
+                  {/* A person with two Macs open is two rows; the Mac tells them apart. */}
+                  {p.device && p.device !== p.name && `on ${p.device} · `}
                   {p.path ? `editing ${p.path}` : "here, idle"} · {timeAgo(p.ts, now)}
                 </span>
               </li>

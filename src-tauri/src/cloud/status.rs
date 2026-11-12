@@ -101,11 +101,21 @@ pub struct PublicPage {
     pub root: bool,
 }
 
+/// Another Mac here now. Resolved by the engine like every other `by`: the
+/// worker says whose Mac it is, the directory says what they are called.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresenceDevice {
     pub device_id: String,
+    /// Whose Mac it is; null from a worker before v7, or for an owner who
+    /// never said who they are.
+    pub member_id: Option<String>,
+    /// Who is here, in words: the person — or, when it is *your* other Mac,
+    /// or nobody the directory can name, the Mac. "Sherin is editing" says
+    /// nothing to Sherin; "MacBook Air is editing" does.
     pub name: String,
+    /// The Mac's own name, whoever's it is.
+    pub device: String,
     pub path: Option<String>,
     pub ts: u64,
 }

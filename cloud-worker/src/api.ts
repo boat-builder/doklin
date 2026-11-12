@@ -12,7 +12,11 @@
 //                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-//   GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+//   GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll; reads only
+//   POST   /api/poll                 the same poll, carrying this device's beat (docs/teams-plan.md §13):
+//                                    body {name, path?} — "here, editing path" — or {leave: true}.
+//                                    Presence is best effort: a database that cannot answer costs
+//                                    the list ({} comes back), never the etag
 //   GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 //   PUT    /api/manifest             x-base-etag required; 412 + current etag on a lost race;
 //                                    400 on garbage, 426 on a schema this worker predates
@@ -29,8 +33,6 @@
 //   GET    /api/versions/blobs/<hash>     the bytes
 //   PUT    /api/versions/blobs/<hash>     create-only
 //   DELETE /api/versions/blobs/<hash>     garbage-collect an unreferenced version
-//   PUT    /api/presence             body {name?, path?} — "this device is here (editing path)"
-//   DELETE /api/presence             this device left
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
 //                                    repeat until remaining:false. Frees the domain.
 //
@@ -56,7 +58,7 @@
 
 import { authenticate, type Auth } from "./auth";
 import { randomHex } from "./crypto";
-import { prunePresence, readManifestTotals, readPresence, readWorkspace, type WorkspaceRecord } from "./bucket";
+import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
 import {
@@ -65,7 +67,6 @@ import {
   MANIFEST_KEY,
   MAX_FILE_BYTES,
   MAX_MANIFEST_BYTES,
-  PRESENCE_KEY,
   WORKSPACE_KEY,
   blobKey,
   blobPrefix,
@@ -93,6 +94,7 @@ import {
   upsertMember,
 } from "./members";
 import { sha256Hex } from "./crypto";
+import { readPresence, recordBeat, type Beat } from "./presence";
 import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
@@ -156,10 +158,8 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   }
 
   if (section === "poll" && parts.length === 2) {
-    if (method !== "GET") return methodNotAllowed();
-    const [head, devices] = await Promise.all([env.DATA.head(MANIFEST_KEY), readPresence(env)]);
-    if (!head) return notBound();
-    return json({ manifestEtag: head.etag, presence: prunePresence(devices) });
+    if (method !== "GET" && method !== "POST") return methodNotAllowed();
+    return poll(request, env, auth);
   }
 
   if (section === "manifest" && parts.length === 2) {
@@ -184,11 +184,6 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   // with the manifest's per-file history (docs/versioning.md §6.4).
   if (section === "versions" && (parts.length === 3 || parts.length === 4)) {
     return handleVersions(request, env, url, parts);
-  }
-
-  if (section === "presence" && parts.length === 2) {
-    if (method !== "PUT" && method !== "DELETE") return methodNotAllowed();
-    return presence(request, env, auth);
   }
 
   if (section === "auth" && (parts.length === 3 || parts.length === 4)) {
@@ -511,33 +506,52 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
   return methodNotAllowed();
 }
 
-/* ---------- Presence ---------- */
+/* ---------- The poll ---------- */
 
 /**
- * "This device is here, editing <path>." Ephemeral and self-healing (the next
- * heartbeat repaints it, the TTL sweeps the silent), so plain last-write-wins
- * is fine — no CAS ceremony. The device is the request's `x-doklin-device`.
+ * The 15-second question every engine asks — "has the manifest moved?" — and,
+ * since v7, the carrier of its presence beat (docs/teams-plan.md §3.3, §13).
+ *
+ * The method says whether anything is written. A `GET` reads; a `POST` says
+ * "this device is here" (or is leaving), and the engine sends one only when a
+ * beat is due — every 45 s, or the moment the edited path changes — so an
+ * idle poll writes nothing and the client decides when a write happens. A
+ * worker that wrote on every poll would spend 58% of D1's free daily writes
+ * on freshness nobody can see (§5).
+ *
+ * The etag is the poll's job and presence is not. A database that is missing,
+ * broken or mid-outage answers `{}` for presence while the etag comes back as
+ * it always has — so presence stays off the sync path. A beat this cannot attribute (no device
+ * header) or whose path is not one is still a poll: it answers, and records
+ * what it can.
  */
-async function presence(request: Request, env: Env, auth: Auth): Promise<Response> {
-  const deviceId = auth.deviceId;
-  if (!deviceId) return json({ error: "x-doklin-device header required" }, 400);
-  const devices = prunePresence(await readPresence(env));
-  if (request.method === "DELETE") {
-    delete devices[deviceId];
-  } else {
+async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
+  let beat: Beat | null = null;
+  if (request.method === "POST") {
     const body = await readJsonObject(request);
     if (!body) return json({ error: "invalid json body" }, 400);
-    if (body.path !== undefined && body.path !== null && !validPath(body.path)) {
-      return json({ error: "invalid path" }, 400);
-    }
-    devices[deviceId] = {
-      name: validName(body.name, auth.name),
-      ...(typeof body.path === "string" ? { path: body.path } : {}),
-      ts: Date.now(),
-    };
+    beat =
+      body.leave === true
+        ? { kind: "leave" }
+        : {
+            kind: "here",
+            name: validName(body.name, auth.name),
+            path: typeof body.path === "string" && validPath(body.path) ? body.path : null,
+          };
   }
-  await env.DATA.put(PRESENCE_KEY, JSON.stringify({ devices }), JSON_OBJECT);
-  return json({ presence: devices });
+  const deviceId = auth.deviceId;
+  if (beat && deviceId) {
+    // In order, for a beat: a domain that holds no workspace answers 404 and
+    // records nobody as being in it. One poll in three carries a beat, so
+    // the round trip this costs is rare; the idle read below stays parallel.
+    const head = await env.DATA.head(MANIFEST_KEY);
+    if (!head) return notBound();
+    const presence = await recordBeat(env, auth, deviceId, beat);
+    return json({ manifestEtag: head.etag, presence: presence ?? {} });
+  }
+  const [head, presence] = await Promise.all([env.DATA.head(MANIFEST_KEY), readPresence(env)]);
+  if (!head) return notBound();
+  return json({ manifestEtag: head.etag, presence: presence ?? {} });
 }
 
 /* ---------- Wipe ---------- */

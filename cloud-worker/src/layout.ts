@@ -5,10 +5,6 @@
 //   workspace.json              the binding: one domain, one workspace (written create-only)
 //   manifest.json               the workspace manifest, updated by compare-and-swap on its etag
 //   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-//   history/<fileId>.json       DEPRECATED deep revision archive (docs/versioning.md §6.5) —
-//                               written only by an app on a release before the version store
-//                               replaced it; the current app deletes these once and never again
-//   presence.json               {devices: {<deviceId>: {name, path?, ts}}}, TTL'd, best effort
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
@@ -16,11 +12,14 @@
 // Nothing public is stored here: public pages are rendered from blobs/. And
 // nobody is stored here: people, their tokens and their invites live in the
 // D1 database beside the bucket (schema.ts, members.ts) — a blob store cannot
-// hold a UNIQUE email or delete a credential atomically.
+// hold a UNIQUE email or delete a credential atomically. Since v7 so does
+// presence (presence.ts): it was `presence.json`, one object every device
+// read and rewrote with no CAS. A bucket written by an older worker may still
+// hold one, or `history/<fileId>.json` archives from before v6; nothing reads
+// either, and a wipe takes them with everything else.
 
 export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";
-export const PRESENCE_KEY = "presence.json";
 export const BLOBS_PREFIX = "blobs/";
 export const VERSIONS_PREFIX = "versions/";
 export const VERSIONS_INDEX_KEY = "versions/index.json";
@@ -69,6 +68,8 @@ export const MAX_NAME_LEN = 80;
 export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
+/** How long a beat keeps a device "here". The engine beats every 45 s, so
+ *  one lost beat is survivable and two are not. */
 export const PRESENCE_TTL_MS = 90_000;
 /* The version store's caps. A snapshot is a gzip'd map of the whole
    workspace, so it is bounded by the manifest's own file ceiling; a version

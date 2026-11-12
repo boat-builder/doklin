@@ -107,8 +107,8 @@ flowchart LR
     WATCH[fs watcher] -- external edits --> ENG
   end
   subgraph cf[notes.example.com — the user's Cloudflare account]
-    W[cloud worker] --- R2[(R2 bucket<br/>workspace.json · manifest.json<br/>blobs · history · presence)]
-    W --- D1[(D1 database<br/>meta — people, presence<br/>and leases to come)]
+    W[cloud worker] --- R2[(R2 bucket<br/>workspace.json · manifest.json<br/>blobs · versions)]
+    W --- D1[(D1 database<br/>people · presence<br/>— leases to come)]
   end
   ENG <-- HTTPS, bearer OWNER_TOKEN --> W
   V[visitor's browser] -- GET /slug --> W
@@ -116,7 +116,7 @@ flowchart LR
 
 Three parties, two contracts:
 
-- **Engine ⇄ worker**: the sync API (manifest CAS, blobs, history, presence)
+- **Engine ⇄ worker**: the sync API (manifest CAS, blobs, the version store, the poll and the presence it carries)
   plus three small admin routes (meta, bind, wipe). JSON over HTTPS, bearer
   auth. Written down in [cloud-worker/README.md](../cloud-worker/README.md).
 - **UI ⇄ engine**: Tauri commands in, events out. Typed in one file
@@ -155,13 +155,14 @@ doing it by hand. The naming rule is one function, `resourceName` in
 `src/cloudPrompts.ts`.
 
 The database is where people, presence and file leases live
-([teams-plan.md](teams-plan.md)). Today it holds the first of those:
+([teams-plan.md](teams-plan.md)). Today it holds the first two:
 
 ```sql
 meta     (key, schema_version)                   the migration runner's anchor
 members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
 tokens   (hash, id, member_id, device_id, device_name, created_at)
 invites  (hash, id, member_id, created_at, expires_at)
+presence (device_id, member_id, device_name, path, ts)   a row per Mac here now (§5.3's poll)
 ```
 
 The worker builds and migrates that schema itself
@@ -186,7 +187,6 @@ workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceNa
                             — the binding. Written once, create-only.
 manifest.json               the workspace manifest (v3, §6.6) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [{id, ts, device, reason, files,
                             bytes, digest, pinned?, label?, restoredFrom?}]} — CAS by etag
 versions/snapshots/<id>.json.gz   one whole workspace state, gzip'd; immutable.
@@ -197,7 +197,12 @@ versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its 
 Nothing public is stored here: public pages are *rendered* from `blobs/`.
 And nobody is stored here: people, their tokens and their invites are rows
 in the D1 database beside the bucket (§5.1), because a blob store cannot
-hold a `UNIQUE` email or delete a credential atomically.
+hold a `UNIQUE` email or delete a credential atomically. Neither is who is
+here: presence was `presence.json` until worker v7, one object every device
+read, changed and wrote back with no CAS — a lost update whenever two beats
+crossed, and an R2 write per beat (§11.2). It is a row per device now. A
+bucket an older worker wrote may still hold that object, or `history/`
+archives from before v6; nothing reads either, and a wipe takes both.
 The layout and the grammar of its ids live in `cloud-worker/src/layout.ts`.
 
 `versions/` is the cloud half of versioning ([versioning.md](versioning.md)
@@ -226,7 +231,10 @@ POST   /api/workspace            owner; bind: body {name, deviceName?, ownerEmai
                                  → 201 {id, name, createdAt, createdBy, manifestEtag, owner?};
                                  409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+GET    /api/poll                 {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}}}
+                                 — the cheap 15 s poll; reads only
+POST   /api/poll                 the same poll carrying this Mac's beat: body {name, path?} — "here,
+                                 editing path" — or {leave: true}; needs x-doklin-device to record it
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
                                  on a lost race; 400 on garbage; 426 on ANY other schema version —
@@ -246,9 +254,6 @@ GET    /api/versions/blobs[?cursor=c] {blobs: [{hash, size, uploaded}], cursor?}
 GET    /api/versions/blobs/<hash>     the bytes
 PUT    /api/versions/blobs/<hash>     store bytes (immutable, {existed: true} on a re-PUT); 413 past 25 MB
 DELETE /api/versions/blobs/<hash>     collect a version no retained snapshot references
-PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
-                                 (path absent or null: here, idle); needs x-doklin-device
-DELETE /api/presence             this device left
 POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
                                  repeat until remaining:false. Frees the domain for a new binding.
 
@@ -283,7 +288,27 @@ they read ([versioning.md](versioning.md) §6.5,
 [teams-plan.md](teams-plan.md) §2). Nothing had written one since the version
 store landed; what kept them was compatibility with a release nobody runs.
 
-Not bound yet? `/api/poll`, `/api/manifest` and `/api/workspace` answer
+**The poll carries presence** (worker v7, [teams-plan.md](teams-plan.md)
+§13). The beat used to be a request of its own — `PUT /api/presence` every
+other poll — and an R2 write each time; now the engine attaches it to the
+poll it was going to make anyway, and the method says whether anything is
+written: a `GET` only reads, and a `POST` upserts the caller's row (or, for a
+leave, deletes it), sweeps rows past the 90 s TTL and answers with what is
+left, in one D1 batch. The engine sends a `POST` only when a beat is due —
+every 45 s, or the moment the edited path changes — so two polls in three
+write nothing. Each entry names the Mac (`name`) and whose it is
+(`memberId`; the owner's is the adopted row, null when there is none), and
+the person's `lastSeenAt` moves with it, at most once an hour. Revoking a
+Mac or removing a person deletes their row in the same batch, so neither
+lingers in *Here now* for the TTL.
+
+Presence is never on the sync path: with no database, a broken one, or a
+D1 query that throws, the poll still answers the etag, with `presence: {}`.
+A beat it cannot attribute (no `x-doklin-device`) or whose path is not one
+is a poll all the same — it answers, and records what it can.
+
+Not bound yet? `/api/poll` (either method — a beat to an empty domain
+records nobody), `/api/manifest` and `/api/workspace` answer
 `404 {"error":"not bound"}`.
 
 Public (no auth, `GET`/`HEAD` only; anything else is a 405):
@@ -460,13 +485,15 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (5 — the sync API was 1; publishing
+  the worker (§7.1): `WORKER_VERSION` (7 — the sync API was 1; publishing
   made it 2; the version store made it 3; the D1 binding made it 4; people
-  made it 5), `WORKER_FEATURES`
-  (`["sync", "wipe", "publish", "boards", "versions"]`; a feature name is a
-  promise about behaviour, listed only once the behaviour exists — the
-  engine mirrors nothing to a worker that does not list `versions`),
-  `MANIFEST_VERSION` (2) and `COMPATIBILITY_DATE` (the Workers
+  made it 5; attribution by person made it 6; presence in D1, folded into
+  the poll, made it 7), `WORKER_FEATURES`
+  (`["sync", "wipe", "publish", "boards", "versions", "members", "presence"]`;
+  a feature name is a promise about behaviour, listed only once the
+  behaviour exists — the engine mirrors nothing to a worker that does not
+  list `versions`, and sends no beat to one that does not list `presence`),
+  `MANIFEST_VERSION` (3) and `COMPATIBILITY_DATE` (the Workers
   runtime date `wrangler.toml` pins; moving it changes every new deploy's
   runtime, so it is moved on purpose).
 - The engine probes `/api/meta` on start and on every poll and reports
@@ -486,6 +513,16 @@ decision 7).
   mints and resolves per-person tokens. A bare `d1` is still deliberately
   not a feature name — that is plumbing, and `/api/meta`'s `d1` reports it
   more precisely than a name in a list could.
+- `"presence"` (version 7) is the promise that `POST /api/poll` takes a
+  beat. Every worker has had presence of some kind; before 7 it was a route
+  of its own, and the poll answered `GET` only. So an app that finds the
+  name missing polls with `GET` and sends nothing — its Mac goes unseen, sync
+  is untouched — and an app a release behind keeps polling with the `GET`
+  that still answers, its own beats going to a route that is gone. Neither
+  side corrupts anything; each is waiting on an update it is already being
+  shown. While a worker lacks `versions` or `presence` the engine asks
+  `/api/meta` again hourly, so an update reaches Macs that are already
+  running.
 
 ### 5.8 Size and tests
 
@@ -505,7 +542,10 @@ redeem → sync → revoke, the one-time and expiring invite, one email as one
 person, the carve-out, and the owner authenticating with the binding
 removed), auth, meta, bind-once, the unbound 404s and the landing page, manifest CAS
 (304 / 412 / 428), validation and the public map, 426 on a newer schema,
-blobs, history, presence, the statics, and then loads a seed workspace
+blobs, the retired history routes, the poll and the presence it carries
+(a `GET` that writes nothing, a beat, the sweep, a leave, `lastSeenAt` to
+the hour, revocation clearing a row, and the etag answering with the
+database removed), the statics, and then loads a seed workspace
 through the API (`test/seed.mjs` — a note, a note with an html rendition, a
 folder, a store with cards, a card with properties, a note with tables and
 widths, a note with comments, a diagram) and renders it: a note, a
@@ -542,7 +582,7 @@ opens a connection to the worker.
 src-tauri/src/cloud/
   mod.rs        the manager (one engine per root), the Tauri commands, init at boot
   engine.rs     Engine<R>: the cycle, fold_public, presence, history, status
-  manifest.rs   the wire types (manifest v2, the public map) + their grammar
+  manifest.rs   the wire types (manifest v3, the public map, the poll and its beat) + their grammar
   remote.rs     the Remote trait; HttpRemote (the real worker)
   flows.rs      bind + upload, download, wipe — generic over Remote, so the tests run them
   invite.rs     the invite code and the paste blob — the grammar, and the only
@@ -623,8 +663,9 @@ reconcile) or a *poll* (etag + presence).
    no inotify left, a filesystem without watch support, a root that vanished
    before it started — keeps syncing on the other three inputs; only an edit
    made by another program waits for one of them.
-3. **The poll** — every 15 s: `GET /api/poll`; a changed etag triggers a
-   cycle; presence rides along, and so does the version probe (§5.7).
+3. **The poll** — every 15 s: `GET /api/poll`, or a `POST` when this Mac
+   owes a beat; a changed etag triggers a cycle; the others' presence comes
+   back in the answer, and the version probe rides along too (§5.7).
 4. **Commands** — `SyncNow`, `Probe`, `Touched`, `SetActivity`, `Pause`,
    `ConfirmDeletes`, `Publish` / `Unpublish` / `SetRoot`, `History` /
    `Revision`, `Shutdown`.
@@ -632,8 +673,21 @@ reconcile) or a *poll* (etag + presence).
 The dirty set is a *hint about when*, never a substitute for the scan: the
 cycle still walks the whole tree and decides from content what changed
 (that is what makes rename detection and external edits correct). A hint
-only shortens the settle. Presence beats every 25 s — the edited path, or
-idle — and leaves with `DELETE /api/presence` on shutdown.
+only shortens the settle.
+
+**The beat rides the poll.** It is owed every 45 s (`PRESENCE_BEAT`, inside
+the worker's 90 s TTL) and at once when the edited path changes, and it has
+no request of its own: the next poll carries it. Two things bring that poll
+forward rather than letting the beat wait. A new path does — the frontend
+reports one per tab switch, not per keystroke, so that is one request per
+switch, what the beat's own route used to cost. And a cycle does: every
+settled edit runs one and pushes the poll clock back, so a Mac somebody is
+typing on would otherwise go quiet exactly while they are editing. A poll
+that fails leaves its beat owed for the next one and never retries it
+early. A quitting engine's last poll is a leave. A worker without the
+`presence` feature (before v7) gets plain `GET` polls and no beat at all —
+this Mac is simply not shown until the worker is updated, which the hourly
+re-probe notices without a restart (§6.7).
 
 ### 6.5 The cycle
 
@@ -778,7 +832,11 @@ type CloudStatus = {
             desc: string | null; by: string; at: number; alive: boolean; root: boolean }[];
                                                 // `by` is a name: the engine resolves the
                                                 // manifest's member id before it gets here
-  presence: { deviceId: string; name: string; path: string | null; ts: number }[];
+  presence: { deviceId: string; memberId: string | null; name: string; device: string;
+              path: string | null; ts: number }[];
+                                                // `name` is the person, resolved like a `by` —
+                                                // or the Mac (`device`), when it is your own
+                                                // other one or nobody the directory can name
 };
 ```
 
@@ -1202,10 +1260,10 @@ one's own — §11.1 and §11.7 say what each one blocks.
   opens read-only with a banner ("Alice is editing — view only") and a
   *Take over* that waits for the lease to lapse or breaks a stale one. The
   three-way merge stays as the fallback for the window a lease can't cover.
-- What is already there for it: presence keyed by device with a path and a
-  timestamp, the activity command on focus, and a status event the editor
-  can gate on. The lease table is either a field in `presence.json` or its
-  own `locks.json` — a worker-side detail.
+- What is already there for it: presence keyed by device with a path, a
+  timestamp and the person (a D1 row since worker v7), a poll that carries
+  a beat and can carry a renewal, the activity command on focus, and a
+  status event the editor can gate on.
 
 ---
 
@@ -1338,10 +1396,11 @@ them is signed in on, and which codes are still outstanding — and where any
 of those goes away again, one row at a time. Putting somebody out is now
 deleting one row rather than rotating the secret and reconnecting everybody.
 
-Two smaller things the surface inherits rather than fixes. `lastSeenAt` is
-null on every row until something writes one — the presence beat is what
-will, so the column fills in with §11.2's phase. And a member is shown their
-own half of the view rather than a roster: every identity route is the
+Two smaller things the surface inherits. `lastSeenAt` is written by the
+presence beat, never by authenticating, and only when the stored one is an
+hour stale — so the People list says when somebody was last here to the
+hour, at the cost of one row a person an hour (§11.2). And a member is shown
+their own half of the view rather than a roster: every identity route is the
 owner's, so a Mac that joined on an invite is told as much instead of an
 error.
 
@@ -1352,30 +1411,44 @@ and a conflict copy is called after one. What is still open is §8.2's leases,
 which need an identity to put in "Alice is editing" and now have one —
 [teams-plan.md](teams-plan.md) phase 7.
 
-### 11.2 The idle heartbeat is the free plan's real budget
+### 11.2 The idle heartbeat — no longer the free plan's real budget
 
-Every connected device sends `GET /api/poll` every 15 s (`POLL_INTERVAL`,
-`engine.rs:66`) and `PUT /api/presence` every 30 s — `PRESENCE_BEAT` is 25 s
-(`engine.rs:76`) but is only tested on the poll tick (`engine.rs:1784`), so it
-fires on every second poll. That is **six requests a minute per device,
-forever, with nobody typing**. Ten devices at ten hours is not ten times one
-device at one hour; it is a floor that never drops.
+*Was a blocker; closed by worker v7 ([teams-plan.md](teams-plan.md) §13). What
+follows is the arithmetic as built.*
 
-| Free-plan budget | Ten Macs, app left open | Ten Macs, eight hours a day |
-| --- | --- | --- |
-| Workers, 100,000 requests/day | 86,400 — **86 %** | 28,800 — 29 % |
-| R2 Class A, 1 M/month (the presence `put`, `api.ts:348`) | 864,000 — **86 %** | 288,000 — 29 % |
-| R2 Class B, 10 M/month (the poll's `head` + `get`, `api.ts:97`) | 4.3 M — 43 % | 1.4 M — 14 % |
-| R2 storage, 10 GB | well under 1 % | well under 1 % |
+Every connected device polls every 15 s (`POLL_INTERVAL`), and that is now
+the whole of its idle traffic: **four requests a minute**, where it used to
+be six. The beat that said "this Mac is here" was a `PUT /api/presence` of
+its own on every second poll, and each one rewrote a shared R2 object — so
+the dominant cost of a team leaving the app open was an R2 write nobody
+could see, made 28,800 times a day for ten Macs. It now rides the poll it
+was going to make anyway: every third poll is a `POST` carrying it, the
+other two are a `GET` that writes nothing, and the row it upserts is in D1
+(§5.3).
 
-The heartbeat, not the content and not the version store, is what spends the
-free plan. `PRESENCE_TTL_MS` is 90 s (`layout.ts:75`), so a 60 s beat would
-still be well inside the TTL and would cut the dominant Class A consumer by
-2.4× — the headroom is there, it is simply not taken.
+| Free-plan budget | Ten Macs, app left open | Ten Macs, eight hours a day | Before v7, left open |
+| --- | --- | --- | --- |
+| Workers, 100,000 requests/day | 57,600 — **58 %** | 19,200 — 19 % | 86,400 — 86 % |
+| R2 Class A, 1 M/month | ~0 — an idle Mac writes nothing | ~0 | 864,000 — 86 % |
+| R2 Class B, 10 M/month (the poll's manifest `head`) | 1.7 M — 17 % | 0.6 M — 6 % | 4.3 M — 43 % |
+| D1 rows read, 5 M/day (the presence read, and the beat's sweep) | ~0.85 M — 17 % | ~0.3 M — 6 % | — |
+| D1 rows written, 100,000/day (one per beat, plus last-seen hourly) | ~19,500 — 20 % | ~6,500 — 7 % | — |
+| R2 storage, 10 GB | well under 1 % | well under 1 % | well under 1 % |
 
-**Blocks:** ten Macs left running on the free plan. It does *not* block ten
-Macs used during working hours and quit at the end of the day, which is the
-difference between comfortable and over the cap.
+The beat is 10 Macs × 86,400 s / 45 s ≈ 19,200 rows a day, plus at most one
+`lastSeenAt` a person an hour. D1's free daily limits are enforced — queries
+past them fail rather than slow — and that is why a write is the client's
+decision rather than every poll's: writing on every poll would be 57,600
+rows, more than half the budget, for freshness nobody could see. A D1 that
+does fail costs presence and nothing else; the poll still answers the etag.
+
+What does not move is the binding constraint: **Workers requests**, set by
+the poll interval alone. Going lower than 58 % means a longer poll (sync
+latency) or a push channel (a much larger change).
+
+**Blocks:** nothing, for ten Macs on the free plan with the app left open —
+58 % of the request budget is the ceiling, and it leaves §11.3's fan-out
+the remaining 42,000 requests a day where it used to leave 14,000.
 
 ### 11.3 One edit fans out to everyone
 
@@ -1384,7 +1457,8 @@ sees it and runs a full cycle: `GET /api/manifest` plus a blob `GET` per
 changed file. One person's save therefore costs the author about three
 requests and the rest of the team about two each — roughly `2(N−1) + 3`. At
 N = 10 and a modest 2,000 team edits a day that is some 42,000 requests on
-top of §11.2's floor, which is what carries a left-open team past 100,000.
+top of §11.2's floor — and 57,600 + 42,000 is a left-open team at the edge
+of 100,000.
 
 **Blocks:** the free plan for an actively editing team of ten. The shape is
 right — a poll that only costs a `head` when nothing moved is the cheap
@@ -1396,7 +1470,7 @@ bursts of edits from one author into one wake for everyone else.
 `next_poll` is reset to `now + POLL_INTERVAL` on every path
 (`engine.rs:1788`), and a 429 arrives as `RemoteError::Other("http 429: …")`
 (`remote.rs:282`) — an error phase, not a signal to slow down. Past the daily
-cap ten devices keep asking six times a minute until midnight UTC.
+cap ten devices keep asking four times a minute until midnight UTC.
 
 **Blocks:** degrading gracefully. Over quota the team does not get slower, it
 gets errors and keeps hammering — and burns the next day's allowance on the

@@ -544,19 +544,30 @@ await emit("cloud-applied", { root: "/docs", paths: ["fresh.md"] });
 await poll(async () => (await page.locator('[data-tree-path="/docs/fresh.md"]').count()) === 1);
 step("cloud-applied: the tree picks up the file sync wrote", true);
 
-/* 16 — presence: a chip on the row being edited, and the panel's list */
+/* 16 — presence: a chip on the row being edited, and the panel's list. The
+   engine names people (worker v7): Bob is a person on his Mac, and your own
+   other Mac is named as a Mac, since "you are editing" would say nothing. */
 await setStatuses([
-  status({ presence: [{ deviceId: "d-bob", name: "Bob", path: "other.md", ts: Date.now() }] }),
+  status({
+    presence: [
+      { deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", path: "other.md", ts: Date.now() },
+      { deviceId: "d-studio", memberId: "m-00000001", name: "Studio", device: "Studio", path: null, ts: Date.now() },
+    ],
+  }),
 ]);
 await poll(async () => (await tid("tree-presence").count()) === 1);
 const chipRow = await tid("tree-presence").locator("xpath=ancestor::button").getAttribute("data-tree-path");
 await tid("sidebar-cloud-dot").click();
 await poll(async () => (await tid("presence-list").count()) === 1);
+const hereNow = await tid("presence-list").textContent();
 step(
-  "presence: 'Bob' on other.md's row, 'Bob editing other.md' in the panel",
-  (await tid("tree-presence").textContent()) === "Bob" &&
+  "presence: 'Bob Mbeki' on other.md's row; the panel names the person, his Mac, and your own other Mac once",
+  (await tid("tree-presence").textContent()) === "Bob Mbeki" &&
     chipRow === "/docs/other.md" &&
-    (await tid("presence-list").textContent()).includes("editing other.md"),
+    hereNow.includes("Bob Mbeki") &&
+    hereNow.includes("on Bob's Air · editing other.md") &&
+    hereNow.includes("Studio") &&
+    !hereNow.includes("on Studio"),
 );
 
 /* 17 — Connect another Mac: endpoint + token shown */

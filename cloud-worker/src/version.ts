@@ -46,15 +46,35 @@
 //       The three deprecated /api/history/<fid> routes go with it: the
 //       manifest has carried no revisions since the version store landed, and
 //       what reads them is a release nobody is running.
-export const WORKER_VERSION = 6;
+//   7 = presence in D1, folded into the poll (docs/teams-plan.md §13): a row
+//       per device instead of one shared presence.json, written by
+//       `POST /api/poll` when the engine has a beat to send and never by a
+//       `GET`, which still only reads. Entries carry the member id, so "who
+//       else is here" names people. PUT and DELETE /api/presence are gone,
+//       and with them the separate beat request and nearly every R2 write an
+//       idle workspace made. A revoked device or a removed person leaves
+//       presence at once rather than at the end of the TTL.
+export const WORKER_VERSION = 7;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
 // is served) and "boards" (embedded stores render) joined when the renderer
 // landed, not before.
-export const WORKER_FEATURES: readonly string[] = ["sync", "wipe", "publish", "boards", "versions", "members"];
+export const WORKER_FEATURES: readonly string[] = [
+  "sync",
+  "wipe",
+  "publish",
+  "boards",
+  "versions",
+  "members",
+  "presence",
+];
 // "members" is a promise the app can act on: this worker mints and resolves
-// per-person tokens, so the People panel has something to talk to. A bare
+// per-person tokens, so the People panel has something to talk to.
+// "presence" is the promise that `POST /api/poll` carries a beat. Every
+// worker has had presence of some kind; before this one it was a route of its
+// own, and an app that beats into a worker without the name would be POSTing
+// to a poll that answers 405 — so it polls with GET and stays quiet instead. A bare
 // "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
 // reports it more precisely than a name in this list could.
 

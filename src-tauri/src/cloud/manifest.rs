@@ -161,7 +161,8 @@ impl PublicEntry {
     }
 }
 
-/// `GET /api/poll`.
+/// `GET /api/poll`, or the `POST` that carries a beat: whether the manifest
+/// moved, and who else is here.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PollResponse {
     #[serde(rename = "manifestEtag")]
@@ -170,15 +171,43 @@ pub struct PollResponse {
     pub presence: BTreeMap<String, PresenceEntry>,
 }
 
-/// One device in `presence.json`: here, and editing `path` when set.
+/// One device, keyed by its id in `PollResponse::presence`: here, and
+/// editing `path` when set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresenceEntry {
+    /// Whose Mac it is (worker v7, docs/teams-plan.md §13). Absent from an
+    /// older worker, and null for an owner who never adopted an identity —
+    /// both are shown by the Mac's name, which is what `name` is.
+    #[serde(rename = "memberId", default)]
+    pub member_id: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub ts: u64,
+}
+
+/// What a poll carries when the engine has a beat to send (`POST /api/poll`).
+/// No beat at all is a `GET`, which writes nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Beat {
+    /// "This Mac is here" — editing `path` when set, idle otherwise. `name`
+    /// is the Mac's; the worker knows whose it is from the bearer.
+    Here { name: String, path: Option<String> },
+    /// The last poll a quitting engine makes.
+    Leave,
+}
+
+impl Beat {
+    /// The request body, exactly as the worker reads it.
+    pub fn body(&self) -> serde_json::Value {
+        match self {
+            Beat::Here { name, path: Some(path) } => serde_json::json!({ "name": name, "path": path }),
+            Beat::Here { name, path: None } => serde_json::json!({ "name": name }),
+            Beat::Leave => serde_json::json!({ "leave": true }),
+        }
+    }
 }
 
 /* ---------- Grammars ---------- */

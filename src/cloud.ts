@@ -47,9 +47,16 @@ export type PublicPage = {
   root: boolean;
 };
 
+/** Another Mac here now. Mirrors `PresenceDevice` in status.rs — change both. */
 export type PresenceDevice = {
   deviceId: string;
+  /** Whose Mac it is; null from a worker before v7, or an owner nobody named. */
+  memberId: string | null;
+  /** Who is here, in words: the person — or the Mac, when it is your own
+   *  other Mac or nobody the workspace can name yet. The engine resolves it. */
   name: string;
+  /** The Mac's own name, whoever's it is. */
+  device: string;
   /** Workspace-relative path being edited; null = here, idle. */
   path: string | null;
   ts: number;
@@ -155,8 +162,8 @@ export type CloudMember = {
    *  the domain's env secret, so no row anybody can write confers it. */
   role: "owner" | "member";
   createdAt: number;
-  /** Null until something writes one: the presence beat carries it, so it
-   *  fills in with the phase that folds presence into the poll. */
+  /** When this person's Mac last beat, to the hour — the poll that carries
+   *  presence writes it (worker v7). Null until they have been here since. */
   lastSeenAt: number | null;
   disabled: boolean;
   /** How many Macs this person is signed in on. */

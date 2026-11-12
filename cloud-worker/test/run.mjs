@@ -168,15 +168,19 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
 
   const first = await call("/api/meta", { token: OWNER });
   assert.equal(first.status, 200);
-  assert.equal(first.json.d1, 2, "the probe reports the schema version");
+  assert.equal(first.json.d1, 3, "the probe reports the schema version");
   assert.ok(db.queries.length > 0, "…and the probe is what ran the migration");
-  assert.deepEqual(db.tables(), ["invites", "members", "meta", "tokens"], "people, and the runner's own anchor");
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 2);
+  assert.deepEqual(
+    db.tables(),
+    ["invites", "members", "meta", "presence", "tokens"],
+    "people, who is here, and the runner's own anchor",
+  );
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 3);
   assert.equal(db.rows("SELECT * FROM meta").length, 1, "one row, and re-running never adds another");
 
   db.queries.length = 0;
   const again = await call("/api/meta", { token: OWNER });
-  assert.equal(again.json.d1, 2);
+  assert.equal(again.json.d1, 3);
   // The migration never runs twice in an isolate. Identity does run every
   // time — a probe answers who the caller is and what everyone here is
   // called — but it only ever reads.
@@ -478,6 +482,9 @@ await test("unbound: poll, manifest and workspace are 404 until a workspace is b
     assert.equal(res.status, 404, p);
     assert.equal(res.json.error, "not bound", p);
   }
+  const beat = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Mac" } });
+  assert.equal(beat.status, 404, "a poll that beats is still a poll");
+  assert.deepEqual(db.rows("SELECT * FROM presence"), [], "and nobody is recorded as being in a workspace that is not there");
   const put = await putManifest(manifest(1, {}), "made-up-etag");
   assert.equal(put.status, 404, "a manifest PUT before binding has nothing to update");
   // The public side of a free domain: the landing page, and nothing else.
@@ -1023,42 +1030,149 @@ await test("versions: snapshots and blobs are immutable and create-only; the inv
   assert.equal((await call(`/api/versions/blobs/${sha256("huge")}`, { method: "PUT", token: OWNER, body: fatBlob })).status, 413);
 });
 
-await test("presence: the device header names the device; beats upsert, silence prunes, DELETE leaves; the poll carries it", async () => {
-  const anonymous = await call("/api/presence", { method: "PUT", token: OWNER, device: null, body: { path: "Home.md" } });
-  assert.equal(anonymous.status, 400);
-  const badPath = await call("/api/presence", { method: "PUT", token: OWNER, body: { path: "../x" } });
-  assert.equal(badPath.status, 400);
+/** The presence rows, as the database holds them — what a route wrote, read
+ *  without going through one. */
+const presenceRows = () => db.rows("SELECT * FROM presence ORDER BY device_id");
+const writes = () => db.queries.filter((sql) => !/^\s*SELECT/i.test(sql));
 
-  const beat = await call("/api/presence", { method: "PUT", token: OWNER, body: { name: "Sherin's MacBook Pro", path: "Projects/plan.md" } });
-  assert.equal(beat.status, 200);
-  assert.equal(beat.json.presence[DEVICE].path, "Projects/plan.md");
-  assert.equal(beat.json.presence[DEVICE].name, "Sherin's MacBook Pro");
-  assert.ok(Date.now() - beat.json.presence[DEVICE].ts < 5000);
-
-  // Alice is here but not editing anything: present, no path.
-  const idle = await call("/api/presence", { method: "PUT", token: MEMBER, device: OTHER_DEVICE, body: { path: null } });
+await test("poll: a GET only reads; a POST is the same poll carrying this device's beat", async () => {
+  const ownerId = (await call("/api/meta", { token: OWNER })).json.you.memberId;
+  db.queries.length = 0;
+  const idle = await call("/api/poll", { token: OWNER });
   assert.equal(idle.status, 200);
-  assert.equal(idle.json.presence[OTHER_DEVICE].name, "Alice", "the token's name when the beat carries none");
-  assert.equal(idle.json.presence[OTHER_DEVICE].path, undefined);
-  assert.ok(idle.json.presence[DEVICE], "the other device's entry survives a beat");
+  assert.equal(idle.json.manifestEtag, await currentEtag());
+  assert.deepEqual(idle.json.presence, {}, "nobody has beaten yet");
+  assert.deepEqual(writes(), [], "an idle poll writes nothing — the client decides when a write happens");
 
-  // Plant a stale entry directly; the next beat sweeps it out.
-  const stored = await (await fake.get("presence.json")).json();
-  stored.devices["d-ghost"] = { name: "Ghost", path: "Old.md", ts: Date.now() - 10 * 60 * 1000 };
-  await fake.put("presence.json", JSON.stringify(stored));
-  const beat2 = await call("/api/presence", { method: "PUT", token: OWNER, body: { path: "Home.md" } });
-  assert.ok(!beat2.json.presence["d-ghost"], "stale presence pruned");
-  assert.equal(beat2.json.presence[DEVICE].path, "Home.md");
+  const beat = await call("/api/poll", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Sherin's MacBook Pro", path: "Projects/plan.md" },
+  });
+  assert.equal(beat.status, 200);
+  assert.equal(beat.json.manifestEtag, await currentEtag(), "the etag is the poll's job either way");
+  const mine = beat.json.presence[DEVICE];
+  assert.equal(mine.name, "Sherin's MacBook Pro", "the Mac's own name");
+  assert.equal(mine.memberId, ownerId, "the owner's secret reads no row, so the beat takes the adopted one");
+  assert.equal(mine.path, "Projects/plan.md");
+  assert.ok(Date.now() - mine.ts < 5000);
 
-  const poll = await call("/api/poll", { token: MEMBER });
-  assert.equal(poll.status, 200);
-  assert.equal(poll.json.manifestEtag, await currentEtag());
-  assert.ok(poll.json.presence[DEVICE] && poll.json.presence[OTHER_DEVICE]);
+  // Alice is here and editing nothing: present, no path, her own person.
+  const alice = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: null } });
+  assert.equal(alice.status, 200);
+  assert.equal(alice.json.presence[OTHER_DEVICE].memberId, ALICE.id, "who else is here names a person");
+  assert.equal(alice.json.presence[OTHER_DEVICE].name, "Alice", "the person's name when the beat carries none");
+  assert.equal(alice.json.presence[OTHER_DEVICE].path, undefined);
+  assert.ok(alice.json.presence[DEVICE], "the owner's row survives somebody else's beat");
+  assert.equal(presenceRows().length, 2, "a row per device, upserted");
 
-  const leave = await call("/api/presence", { method: "DELETE", token: MEMBER, device: OTHER_DEVICE });
+  // A second beat from the same Mac moves its row; it never adds one.
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Sherin's MacBook Pro", path: "Home.md" } });
+  assert.equal(presenceRows().length, 2);
+  assert.equal(presenceRows().find((r) => r.device_id === DEVICE).path, "Home.md");
+
+  // A beat it cannot use is still a poll. No device header: it answers and
+  // records nothing. A path that is not one: here, idle. Only a body that is
+  // not JSON at all is refused — that is a broken client, not a beat.
+  const anonymous = await call("/api/poll", { method: "POST", token: OWNER, device: null, body: { name: "?" } });
+  assert.equal(anonymous.status, 200);
+  assert.ok(anonymous.json.manifestEtag);
+  assert.equal(presenceRows().length, 2, "nobody to attribute it to, so nothing written");
+  const traversal = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { path: "../x" } });
+  assert.equal(traversal.status, 200);
+  assert.equal(traversal.json.presence[OTHER_DEVICE].path, undefined);
+  assert.equal((await call("/api/poll", { method: "POST", token: OWNER, body: "not json" })).status, 400);
+
+  // The old routes are gone, and the poll answers two verbs.
+  assert.equal((await call("/api/presence", { method: "PUT", token: OWNER, body: { path: "Home.md" } })).status, 404);
+  assert.equal((await call("/api/presence", { method: "DELETE", token: OWNER })).status, 404);
+  assert.equal((await call("/api/poll", { method: "PUT", token: OWNER, body: {} })).status, 405);
+  assert.equal(await fake.get("presence.json"), null, "and nothing writes the bucket for it");
+});
+
+await test("poll: a lapsed row falls out of the window, the next beat sweeps it, and a leave is immediate", async () => {
+  db.run(
+    "INSERT INTO presence (device_id, member_id, device_name, path, ts) VALUES ('d-ghost', NULL, 'Ghost', 'Old.md', ?)",
+    Date.now() - 10 * 60 * 1000,
+  );
+  const read = await call("/api/poll", { token: MEMBER });
+  assert.ok(!read.json.presence["d-ghost"], "out of the TTL window, so not here");
+  assert.ok(presenceRows().some((r) => r.device_id === "d-ghost"), "a GET reads, and sweeps nothing");
+  await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Sherin's MacBook Pro" } });
+  assert.ok(!presenceRows().some((r) => r.device_id === "d-ghost"), "the next beat takes it, without a reaper");
+
+  const leave = await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: { leave: true } });
   assert.equal(leave.status, 200);
-  assert.ok(!leave.json.presence[OTHER_DEVICE]);
+  assert.equal(leave.json.manifestEtag, await currentEtag());
+  assert.ok(!leave.json.presence[OTHER_DEVICE], "gone in the answer to the leave itself");
   assert.ok(leave.json.presence[DEVICE]);
+  assert.ok(!presenceRows().some((r) => r.device_id === OTHER_DEVICE));
+});
+
+await test("poll: last seen is the beat's to write, at most once an hour per person", async () => {
+  const seen = async (id) =>
+    (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.id === id).lastSeenAt;
+  const ownerId = (await call("/api/meta", { token: OWNER })).json.you.memberId;
+  await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: {} });
+  const first = await seen(ALICE.id);
+  assert.ok(first && Date.now() - first < 5000, "a beat says the person was here");
+  assert.ok((await seen(ownerId)) > 0, "the owner too, through the row the beat attributed to them");
+
+  // Within the hour: the beat writes its own row and leaves hers alone.
+  const halfHourAgo = Date.now() - 30 * 60 * 1000;
+  db.run("UPDATE members SET last_seen_at = ? WHERE id = ?", halfHourAgo, ALICE.id);
+  await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: {} });
+  assert.equal(await seen(ALICE.id), halfHourAgo, "not on every beat");
+  // Past it: moved.
+  db.run("UPDATE members SET last_seen_at = ? WHERE id = ?", Date.now() - 2 * 60 * 60 * 1000, ALICE.id);
+  await call("/api/poll", { method: "POST", token: MEMBER, device: OTHER_DEVICE, body: {} });
+  assert.ok(Date.now() - (await seen(ALICE.id)) < 5000, "an hour stale, and the beat writes it");
+  // And never from authenticating: a member's GET poll is a request, not a beat.
+  db.run("UPDATE members SET last_seen_at = ? WHERE id = ?", Date.now() - 2 * 60 * 60 * 1000, ALICE.id);
+  const stale = await seen(ALICE.id);
+  await call("/api/poll", { token: MEMBER, device: OTHER_DEVICE });
+  await call("/api/manifest", { token: MEMBER, device: OTHER_DEVICE });
+  assert.equal(await seen(ALICE.id), stale);
+});
+
+await test("poll: revoking a Mac or removing a person takes them out of presence at once", async () => {
+  const invite = async (email, body) =>
+    call("/api/auth/invites", {
+      method: "POST",
+      token: OWNER,
+      body: { email, codeHash: sha256(body), expiresAt: Date.now() + DAY },
+    });
+  const join = async (body, deviceId) =>
+    (await call("/api/auth/join", { method: "POST", body: { code: code(body), deviceId, deviceName: "Air" } })).json;
+
+  await invite("gail@example.com", "GGGGGGGGGGGGGGGGGGGG");
+  const gail = await join("GGGGGGGGGGGGGGGGGGGG", "d-gail");
+  await call("/api/poll", { method: "POST", token: gail.token, device: "d-gail", body: { name: "Air" } });
+  assert.ok(presenceRows().some((r) => r.device_id === "d-gail"));
+  assert.equal((await call(`/api/auth/tokens/${gail.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.ok(!presenceRows().some((r) => r.device_id === "d-gail"), "not 'here now' for the TTL's minute and a half");
+
+  await invite("hal@example.com", "HHHHHHHHHHHHHHHHHHHH");
+  const hal = await join("HHHHHHHHHHHHHHHHHHHH", "d-hal");
+  await call("/api/poll", { method: "POST", token: hal.token, device: "d-hal", body: { name: "Air" } });
+  assert.ok(presenceRows().some((r) => r.member_id === hal.member.id));
+  assert.equal((await call(`/api/auth/members/${hal.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.ok(!presenceRows().some((r) => r.member_id === hal.member.id), "the person goes, and so does their row");
+  assert.ok(presenceRows().some((r) => r.device_id === DEVICE), "nobody else's");
+});
+
+await test("poll: with no database, or a broken one, the etag still comes back and only presence goes quiet", async () => {
+  const etag = await currentEtag();
+  for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
+    const read = await call("/api/poll", { token: OWNER, bindings });
+    assert.equal(read.status, 200, "presence is never on the sync path");
+    assert.equal(read.json.manifestEtag, etag);
+    assert.deepEqual(read.json.presence, {});
+    const beat = await call("/api/poll", { method: "POST", token: OWNER, bindings, body: { name: "Mac", path: "Home.md" } });
+    assert.equal(beat.status, 200, "…not even when it carries a beat nobody can write");
+    assert.equal(beat.json.manifestEtag, etag);
+    assert.deepEqual(beat.json.presence, {});
+  }
 });
 
 /* ---------- The public surface ---------- */
@@ -1413,6 +1527,7 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal(db.value("SELECT COUNT(*) FROM members"), 0, "nobody is left");
   assert.equal(db.value("SELECT COUNT(*) FROM tokens"), 0);
   assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM presence"), 0, "and nobody is here");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 401);
   assert.deepEqual((await call("/api/auth/members", { token: OWNER })).json.members, []);
   const meta = await call("/api/meta", { token: OWNER });
@@ -1422,9 +1537,9 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
 
   // The database is emptied, not dropped: the schema is re-run so the next
   // binding finds a migrated database rather than a half-built one.
-  assert.deepEqual(db.tables(), ["invites", "members", "meta", "tokens"]);
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 2);
-  assert.equal(meta.json.d1, 2, "…and the probe still says so");
+  assert.deepEqual(db.tables(), ["invites", "members", "meta", "presence", "tokens"]);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 3);
+  assert.equal(meta.json.d1, 3, "…and the probe still says so");
 
   const rebound = await call("/api/workspace", {
     method: "POST",

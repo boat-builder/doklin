@@ -75,12 +75,15 @@ export class FakeD1 {
     return { count: 1, duration: 0 };
   }
 
-  /** All or nothing, the way D1's batch is. */
+  /** All or nothing, the way D1's batch is — and, the way D1's is, a read
+   *  inside one answers its rows (the presence beat ends on one). */
   async batch(statements) {
     this.db.exec("BEGIN");
     try {
       const out = [];
-      for (const statement of statements) out.push(await statement.run());
+      for (const statement of statements) {
+        out.push(await (/^\s*SELECT/i.test(statement.sql) ? statement.all() : statement.run()));
+      }
       this.db.exec("COMMIT");
       return out;
     } catch (err) {

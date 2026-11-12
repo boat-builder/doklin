@@ -44,25 +44,27 @@ workspace.json              {id, name, createdAt, createdBy: {deviceId, deviceNa
                             — the binding. Written once, create-only.
 manifest.json               the workspace manifest (v3, below) — CAS by etag
 blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
-presence.json               {devices: {<deviceId>: {name, path?, ts}}} — TTL'd, best effort
 versions/index.json         {version, horizonDays, snapshots: [...]} — the version store — CAS by etag
 versions/snapshots/<id>.json.gz   one workspace state, gzip'd; immutable. <id> is <ts13>-<deviceId>
 versions/blobs/<hash>       one file's content, gzip'd; immutable, keyed by its full sha256
 ```
 
-Nobody is stored here — people and their credentials are rows next door.
+Nobody is stored here — people, their credentials and who is here now are
+rows next door. (Presence was `presence.json` until v7; a bucket an older
+worker wrote may still hold one, and nothing reads it.)
 
 ## The database
 
 A D1 database beside the bucket, bound as `DB`, for the state a blob store
 cannot hold: people, presence and file leases
-([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds the first:
+([docs/teams-plan.md](../docs/teams-plan.md)). Today it holds the first two:
 
 ```sql
 meta     (key, schema_version)                   one row — the runner's anchor
 members  (id, email UNIQUE, name, role, created_at, last_seen_at, disabled)
 tokens   (hash, id, member_id, device_id, device_name, created_at)
 invites  (hash, id, member_id, created_at, expires_at)
+presence (device_id, member_id, device_name, path, ts)   a row per Mac here now
 ```
 
 An *identity* is not a *credential*, and the three tables are that sentence.
@@ -72,7 +74,16 @@ A **token** is per-device and disposable. An **invite** is a token nobody has
 claimed yet. Neither secret is stored: `tokens.hash` is `sha256(token)` and
 `invites.hash` is `sha256(code)`, so the database is a list of people rather
 than a list of credentials — and `last_seen_at` is written by the presence
-beat, never by authenticating, which would be a write on every request.
+beat, never by authenticating, which would be a write on every request, and
+only when it is an hour stale.
+
+**Presence** (`src/presence.ts`) is a row per device, upserted by the poll
+that carries a beat — atomic by itself, where the shared R2 object it
+replaced lost one of any two beats that crossed. The beat's batch also
+sweeps rows past the 90 s TTL, so there is no reaper; a leave deletes the
+caller's row, and revoking a Mac or removing a person deletes theirs. It is
+best effort throughout: a database that cannot answer costs the presence
+list and never the poll's etag.
 
 The worker owns its schema (`src/schema.ts`). An update ships one bundled
 file and no migrations directory, so `wrangler d1 migrations apply` is not
@@ -182,7 +193,11 @@ DELETE /api/auth/tokens/<id>     owner; revoke one device (204)
 POST   /api/workspace            owner; bind: body {name, deviceName?} → 201 {id, name, createdAt,
                                  createdBy, manifestEtag}; 409 {workspace} when already bound
 GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-GET    /api/poll                 {manifestEtag, presence} — the cheap 15 s poll
+GET    /api/poll                 {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}}}
+                                 — the cheap 15 s poll; reads only
+POST   /api/poll                 the same poll carrying this Mac's beat: body {name, path?} or
+                                 {leave: true}; recorded when x-doklin-device names the Mac. Without
+                                 a database it is still a poll: the etag, and presence {}
 GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 PUT    /api/manifest             header x-base-etag required (428 without); 412 + current etag
                                  on a lost race; 400 on garbage; 426 on ANY other schema version;
@@ -202,9 +217,6 @@ GET    /api/versions/blobs[?cursor=c] {blobs: [{hash, size, uploaded}], cursor?}
 GET    /api/versions/blobs/<hash>     the bytes
 PUT    /api/versions/blobs/<hash>     store bytes (immutable, {existed: true} on a re-PUT); 413 past 25 MB
 DELETE /api/versions/blobs/<hash>     garbage-collect a version no retained snapshot references
-PUT    /api/presence             body {name?, path?} — "this device is here, editing path"
-                                 (path absent or null: here, idle); needs x-doklin-device
-DELETE /api/presence             this device left
 POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
                                  repeat until remaining:false. Frees the domain for a new binding.
 ```
@@ -303,7 +315,7 @@ npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the datab
 npx -y wrangler@4 secret put OWNER_TOKEN                     # paste the token the app shows
 npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta
-# → {"version":5,"features":["sync","wipe","publish","boards","versions","members"],"workspace":null,"d1":2}
+# → {"version":7,"features":["sync","wipe","publish","boards","versions","members","presence"],"workspace":null,"d1":3,…}
 ```
 
 `"d1"` is the database's schema version, or `null` on a deployment with no

@@ -121,7 +121,9 @@ node verify-harness/drive-cloud.mjs        # 34 steps: boots the REAL <App/> (cl
                                            # update card (a prompt with no secret, Check again), a
                                            # held mass-deletion's toast → panel → confirm, a conflict
                                            # copy's toast opening the copy, cloud-applied refreshing
-                                           # the tree, presence chips, Connect another Mac, the
+                                           # the tree, presence chips (a person named, their
+                                           # Mac beside them, your own other Mac as a Mac),
+                                           # Connect another Mac, the
                                            # history panel restoring a revision, disconnect, wipe →
                                            # the teardown prompt, the join flow opening the
                                            # downloaded folder, the invite door (one paste
@@ -340,7 +342,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 38 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 42 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh
@@ -360,7 +362,13 @@ node cloud-worker/test/run.mjs             # 38 cases against an in-memory R2 fa
                                            # the unbound 404s + landing page, manifest CAS (304 /
                                            # 412 / 428), validation + the public map, 426 on a
                                            # newer schema, blobs (a re-put is a no-op), history,
-                                           # presence (device header, prune, leave), the statics /
+                                           # the poll and the presence it carries (a GET writes
+                                           # nothing; a POST beat upserts a row naming the Mac and
+                                           # the person; the sweep without a reaper; a leave;
+                                           # lastSeenAt at most hourly and never from auth;
+                                           # revoking a Mac or removing a person clearing their
+                                           # row; a beat to an unbound domain recording nobody;
+                                           # the etag answering with the DB removed), the statics /
                                            # OG image / an empty folder page / 404s, then the seed
                                            # workspace loaded through the API and the renderer: a
                                            # note (title, description, noindex, HEAD), a rendition
@@ -396,14 +404,21 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 64 tests: the two-device merge / conflict /
+in-memory worker (`--lib cloud` — 71 tests: the two-device merge / conflict /
 tombstone / rename / CAS-race matrix, the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
 paused clock, the 426 → worker-outdated state and the Probe command that
 resumes it, an engine whose watcher never started still syncing on the bus,
-presence, the invite code and the redeem flow (a minted code reading back the
+presence folded into the poll (a beat on every third poll and none in
+between, a new path bringing the poll forward, an idle Mac making exactly
+four requests a minute, a Mac being typed on still beating while its cycles
+hold the poll clock off, a beat lost with its poll riding the next one rather
+than a retry, a worker without `presence` polled and never beaten at until
+the hourly re-probe sees it updated, a leave as the last poll, and the
+person named — your own other Mac by its name, a stranger here asking the
+directory once), the invite code and the redeem flow (a minted code reading back the
 way it was written and surviving what a chat client does to it, one paste
 filling both of the wizard's boxes — an address never read as a code though
 its letters spell one — a code traded once for a token of that Mac's own, a

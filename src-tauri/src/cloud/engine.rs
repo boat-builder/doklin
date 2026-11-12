@@ -16,7 +16,8 @@
 //! The engine wakes on four things — the edit bus, the filesystem watcher,
 //! the poll clock, commands — and does one of two: a *cycle* (full
 //! reconcile, `cycle()`, deliberately the only place local and remote state
-//! meet) or a *poll* (etag + presence). It also owns the public map's queued
+//! meet) or a *poll* (etag + presence, and this Mac's own beat when one is
+//! due — the beat has no request of its own). It also owns the public map's queued
 //! ops (folded into the manifest it publishes), history reads, presence, and
 //! the one status event that is the frontend's entire model. Generic over
 //! [`Remote`] so all of it runs in tests against an in-memory worker.
@@ -33,7 +34,7 @@ use tokio::time::Instant;
 
 use super::manifest::{
     clean_text, dedupe_paths, files_under, is_member_id, random_slug, unique_slug, valid_rel_path,
-    valid_slug, Manifest, ManifestFile, PublicEntry, PublicKind, Target, Tombstone,
+    valid_slug, Beat, Manifest, ManifestFile, PollResponse, PublicEntry, PublicKind, Target, Tombstone,
     MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
@@ -66,8 +67,11 @@ pub const FS_SETTLE: Duration = Duration::from_millis(5000);
 /// the cloud about two seconds after the keystroke.
 pub const TOUCH_SETTLE: Duration = Duration::from_millis(1500);
 /// Presence heartbeat cadence + how recent activity must be to count as
-/// "editing".
-const PRESENCE_BEAT: Duration = Duration::from_secs(25);
+/// "editing". The beat rides the poll (docs/teams-plan.md §13): it goes out
+/// on the first poll at least this long after the last one landed — every
+/// third, at a 15 s poll — and well inside the worker's 90 s TTL, so one
+/// lost beat is survivable and two are not.
+pub(crate) const PRESENCE_BEAT: Duration = Duration::from_secs(45);
 const ACTIVITY_FRESH: Duration = Duration::from_secs(90);
 /// Tombstones older than this get dropped from the manifest by whoever
 /// writes it next.
@@ -77,6 +81,9 @@ const TOMBSTONE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// ask. Protects against an unmounted/renamed folder nuking the remote.
 const MASS_DELETE_PCT: usize = 30;
 const MASS_DELETE_MIN: usize = 5;
+/// What an engine asks `/api/meta` about again, hourly, while the worker
+/// lacks it — so updating the worker reaches a Mac that is already running.
+const ASKED_AGAIN_FOR: [&str; 2] = ["versions", "presence"];
 /// Blob GC runs opportunistically on this fraction of cycles.
 const GC_EVERY_N_CYCLES: u64 = 20;
 /// A blob must be at least this old before GC may take it (a racing pusher
@@ -311,6 +318,8 @@ pub struct Engine<R: Remote> {
     last_mirror_ms: Option<u64>,
     /// Absolute path the user is actively editing (frontend-reported).
     activity: Option<(String, Instant)>,
+    /// When the last beat that landed was sent, and the path it named — what
+    /// makes the next one due.
     last_beat: Option<Instant>,
     beaconed: Option<String>,
     presence: Vec<PresenceDevice>,
@@ -1477,19 +1486,17 @@ impl<R: Remote> Engine<R> {
         }
         let hourly = self.mirror_due();
         self.last_mirror = Some(Instant::now());
-        if !self.worker_has("versions") {
+        if hourly && ASKED_AGAIN_FOR.iter().any(|f| !self.worker_has(f)) {
             // Either `/api/meta` never answered (the app started offline) or
-            // the worker predates the version store. Ask again on the hourly
-            // pass — the mirror is meant to start the moment the worker is
-            // updated, without a restart — but never once per cycle.
-            if !hourly {
-                return;
-            }
+            // the worker predates something this app can use — the version
+            // store, or the poll that carries a beat. Ask again on the hourly
+            // pass: both are meant to start the moment the worker is updated,
+            // on every Mac and without a restart — but never once per cycle.
             self.probe_worker().await;
             self.refresh_status();
-            if !self.worker_has("versions") {
-                return;
-            }
+        }
+        if !self.worker_has("versions") {
+            return;
         }
         let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
         let remote = self.remote.clone();
@@ -1697,19 +1704,57 @@ impl<R: Remote> Engine<R> {
         rel_path(&self.cfg.root, Path::new(abs)).filter(|r| !r.is_empty())
     }
 
-    /// Heartbeat "this device is here (editing <path>)": on a cadence, and
-    /// at once when the edited path changes. Every device beats, editing
-    /// or idle, so the others see who is around; a device that goes quiet
-    /// falls out of presence by the worker's TTL.
-    pub(crate) async fn presence_tick(&mut self) {
-        let rel = self.activity_rel();
-        let due = self.last_beat.map(|t| t.elapsed() >= PRESENCE_BEAT).unwrap_or(true) || self.beaconed != rel;
-        if !due {
-            return;
+    /// Is a beat owed — "this Mac is here (editing <path>)"? On a cadence,
+    /// and at once when the edited path changes. Every device beats, editing
+    /// or idle, so the others see who is around; one that goes quiet falls
+    /// out of presence by the worker's TTL.
+    ///
+    /// Never to a worker without `presence`: before v7 the poll was `GET`
+    /// only, and the beat a route this app no longer speaks. Such a Mac polls
+    /// and stays invisible until the worker is updated, which the update badge
+    /// is already asking for.
+    fn beat_due(&self) -> bool {
+        self.worker_has("presence")
+            && (self.last_beat.map(|t| t.elapsed() >= PRESENCE_BEAT).unwrap_or(true)
+                || self.beaconed != self.activity_rel())
+    }
+
+    /// When the next beat is owed: now, when the edited path has moved since
+    /// the last one, and a beat's length after it otherwise. None when this
+    /// worker takes no beat.
+    fn beat_deadline(&self) -> Option<Instant> {
+        if !self.worker_has("presence") {
+            return None;
         }
-        if self.remote.put_presence(&self.cfg.device_name, rel.as_deref()).await.is_ok() {
-            self.last_beat = Some(Instant::now());
-            self.beaconed = rel;
+        if self.beaconed != self.activity_rel() {
+            return Some(Instant::now());
+        }
+        Some(self.last_beat.map(|t| t + PRESENCE_BEAT).unwrap_or_else(Instant::now))
+    }
+
+    /// When to poll next, after anything that was not itself a poll: the
+    /// poll clock, or sooner when a beat is owed — a beat has no request of
+    /// its own, so a poll is the only thing that can carry it. This is what
+    /// keeps an editing Mac visible: every settled edit runs a cycle and
+    /// pushes the poll clock back, and a beat that waited for the clock would
+    /// wait for the typing to stop.
+    ///
+    /// Not after a poll: one that failed leaves its beat owed, and pulling
+    /// the next one forward would spin on a domain that is not answering.
+    fn next_poll_after_cycle(&self) -> Instant {
+        let clock = Instant::now() + POLL_INTERVAL;
+        match self.beat_deadline() {
+            Some(owed) if self.outdated.is_none() && !self.paused => clock.min(owed),
+            _ => clock,
+        }
+    }
+
+    /// The last poll a quitting engine makes: "this Mac is leaving", so the
+    /// others stop showing it now rather than at the end of the TTL.
+    /// Best effort — the TTL is what catches a Mac that could not say so.
+    async fn leave(&mut self) {
+        if self.worker_has("presence") && self.last_beat.is_some() {
+            let _ = self.remote.poll(Some(&Beat::Leave)).await;
         }
     }
 
@@ -1724,31 +1769,37 @@ impl<R: Remote> Engine<R> {
     }
 
     #[cfg(test)]
+    pub(crate) fn me_for_test(&self) -> Option<&str> {
+        self.me.as_deref()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn poll_for_test(&mut self) {
         let _ = self.poll_and_maybe_cycle().await;
     }
 
     /// Poll cheaply; a moved etag is what makes the full cycle worth
-    /// running. Presence rides along and only re-emits when it changed.
+    /// running. This Mac's beat rides along when one is owed, and the
+    /// others' presence comes back in the answer and only re-emits when it
+    /// changed.
     async fn poll_and_maybe_cycle(&mut self) -> RemoteResult<()> {
-        let poll = self.remote.poll().await?;
-        let mut presence: Vec<PresenceDevice> = poll
-            .presence
-            .iter()
-            .filter(|(id, _)| id.as_str() != self.cfg.device_id)
-            .map(|(id, e)| PresenceDevice {
-                device_id: id.clone(),
-                name: e.name.clone(),
-                path: e.path.clone(),
-                ts: e.ts,
-            })
-            .collect();
-        presence.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.device_id.cmp(&b.device_id)));
+        let beat = self
+            .beat_due()
+            .then(|| Beat::Here { name: self.cfg.device_name.clone(), path: self.activity_rel() });
+        let sent = Instant::now();
+        let poll = self.remote.poll(beat.as_ref()).await?;
+        if let Some(Beat::Here { path, .. }) = beat {
+            // From when it was sent, not when it was answered: the next beat
+            // is then owed a little early rather than a poll late.
+            self.last_beat = Some(sent);
+            self.beaconed = path;
+        }
+        self.learn_people_here(&poll).await;
+        let presence = self.presence_of(&poll);
         let presence_changed = presence.len() != self.presence.len()
-            || presence
-                .iter()
-                .zip(self.presence.iter())
-                .any(|(a, b)| a.device_id != b.device_id || a.path != b.path || a.name != b.name);
+            || presence.iter().zip(self.presence.iter()).any(|(a, b)| {
+                a.device_id != b.device_id || a.path != b.path || a.name != b.name || a.device != b.device
+            });
         self.presence = presence;
         if Some(poll.manifest_etag.as_str()) != self.state.manifest_etag.as_deref() {
             self.cycle().await?;
@@ -1757,6 +1808,52 @@ impl<R: Remote> Engine<R> {
         }
         self.legacy_cleanup().await;
         Ok(())
+    }
+
+    /// Everybody else here, in words. The worker says whose Mac each one is;
+    /// the directory says what they are called — the same resolution every
+    /// `by` gets (docs/teams-plan.md §12). Your own other Mac is named as a
+    /// Mac, and so is one whose person the directory cannot name yet.
+    fn presence_of(&self, poll: &PollResponse) -> Vec<PresenceDevice> {
+        let mut presence: Vec<PresenceDevice> = poll
+            .presence
+            .iter()
+            .filter(|(id, _)| id.as_str() != self.cfg.device_id)
+            .map(|(id, e)| {
+                let person = e
+                    .member_id
+                    .as_deref()
+                    .filter(|m| Some(*m) != self.me.as_deref())
+                    .and_then(|m| self.people.get(m));
+                PresenceDevice {
+                    device_id: id.clone(),
+                    member_id: e.member_id.clone(),
+                    name: person.cloned().unwrap_or_else(|| e.name.clone()),
+                    device: e.name.clone(),
+                    path: e.path.clone(),
+                    ts: e.ts,
+                }
+            })
+            .collect();
+        presence.sort_by(|a, b| {
+            a.name.cmp(&b.name).then_with(|| a.device.cmp(&b.device)).then_with(|| a.device_id.cmp(&b.device_id))
+        });
+        presence
+    }
+
+    /// A Mac here belongs to somebody this engine cannot name — someone who
+    /// joined since it last probed. Ask once, under the same gap as a
+    /// stranger in the manifest (`learn_people`).
+    async fn learn_people_here(&mut self, poll: &PollResponse) {
+        let stranger = poll
+            .presence
+            .values()
+            .filter_map(|e| e.member_id.as_deref())
+            .any(|m| is_member_id(m) && !self.people.contains_key(m));
+        if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
+            return;
+        }
+        self.probe_worker().await;
     }
 
     /* ----- the task ----- */
@@ -1778,7 +1875,9 @@ impl<R: Remote> Engine<R> {
         }
         let mut fs_dirty_at: Option<Instant> = None;
         let mut touch_dirty_at: Option<Instant> = None;
-        let mut next_poll = Instant::now() + POLL_INTERVAL;
+        // A Mac that has never beaten owes one now, so it shows up as soon as
+        // it has synced rather than a poll later.
+        let mut next_poll = self.next_poll_after_cycle();
         // False once the watcher channel is closed — either it never started
         // (`spawn_engine` says so) or it has gone away. The engine carries on
         // without it; a closed channel would otherwise answer `None` forever
@@ -1792,8 +1891,7 @@ impl<R: Remote> Engine<R> {
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     None | Some(EngineCmd::Shutdown) => {
-                        // Leave presence on the way out, best-effort.
-                        let _ = self.remote.delete_presence().await;
+                        self.leave().await;
                         return;
                     }
                     Some(EngineCmd::SyncNow) => cycle_now = true,
@@ -1811,8 +1909,13 @@ impl<R: Remote> Engine<R> {
                         touch_dirty_at = Some(Instant::now());
                     }
                     Some(EngineCmd::SetActivity(p)) => {
+                        // A new path is owed a beat now; the poll is what
+                        // carries it, so the poll comes forward. The frontend
+                        // reports a path when the tab changes, not as you
+                        // type, so this is one request per switch — what the
+                        // beat's own route used to cost.
                         self.set_activity(p);
-                        self.presence_tick().await;
+                        next_poll = next_poll.min(self.next_poll_after_cycle());
                     }
                     Some(EngineCmd::Pause(p)) => self.set_paused(p),
                     Some(EngineCmd::ConfirmDeletes) => {
@@ -1882,7 +1985,7 @@ impl<R: Remote> Engine<R> {
                 if self.can_cycle() {
                     let _ = self.cycle().await;
                 }
-                next_poll = Instant::now() + POLL_INTERVAL;
+                next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
                 if self.outdated.is_some() {
                     // Waiting on a worker update: ask, and resume the moment
@@ -1896,7 +1999,6 @@ impl<R: Remote> Engine<R> {
                 } else {
                     let _ = self.poll_and_maybe_cycle().await;
                 }
-                self.presence_tick().await;
                 if self.mirror_due() {
                     self.mirror_versions().await;
                 }

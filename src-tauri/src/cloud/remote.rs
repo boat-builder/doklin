@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Manifest, PollResponse};
+use super::manifest::{Beat, Manifest, PollResponse};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -235,7 +235,11 @@ pub trait Remote: Send + Sync + 'static {
         name: &str,
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Bound>> + Send;
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
+    /// The 15-second poll. With no beat it is a `GET` and writes nothing;
+    /// with one it is a `POST` that also says this Mac is here, or leaving
+    /// (worker v7, docs/teams-plan.md §13). The engine only hands it a beat
+    /// when the worker lists `presence`.
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -305,13 +309,6 @@ pub trait Remote: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// "This device is here" — editing `path` when given, idle otherwise.
-    fn put_presence(
-        &self,
-        name: &str,
-        path: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
 
     /* ----- people (docs/cloud.md §5.4, teams-plan.md §3.1) ----- */
@@ -555,9 +552,18 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn poll(&self) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+    fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send {
+        let body = beat.map(Beat::body);
         async move {
-            let res = self.auth(self.client.get(self.url("poll"))).send().await.map_err(transport_err)?;
+            let req = match &body {
+                None => self.client.get(self.url("poll")),
+                Some(body) => self
+                    .client
+                    .post(self.url("poll"))
+                    .header("content-type", "application/json")
+                    .body(serde_json::to_vec(body).unwrap_or_default()),
+            };
+            let res = self.auth(req).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
             res.json::<PollResponse>().await.map_err(transport_err)
         }
@@ -837,38 +843,6 @@ impl Remote for HttpRemote {
         let url = self.url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn put_presence(
-        &self,
-        name: &str,
-        path: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let body = match path {
-            Some(p) => json!({ "name": name, "path": p }),
-            None => json!({ "name": name }),
-        };
-        async move {
-            let res = self
-                .auth(self.client.put(self.url("presence")))
-                .header("content-type", "application/json")
-                .body(serde_json::to_vec(&body).unwrap_or_default())
-                .send()
-                .await
-                .map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn delete_presence(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        async move {
-            let res = self
-                .auth(self.client.delete(self.url("presence")))
-                .send()
-                .await
-                .map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
         }
     }

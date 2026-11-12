@@ -83,6 +83,28 @@ const STEPS: readonly Step[] = [
       `CREATE INDEX IF NOT EXISTS invites_by_member ON invites(member_id)`,
     ],
   },
+  {
+    // Who is here, a row per device (docs/teams-plan.md §3.3, §13). It used
+    // to be one shared R2 object read, mutated and written back with no CAS —
+    // two beats landing together lost one, and every beat was a Class A
+    // write. A row per device, upserted, is atomic by itself.
+    //
+    // `member_id` is nullable where the plan's sketch was not: an owner who
+    // never adopted an identity is here all the same, as their Mac's name.
+    // No index on `ts`: the table holds one row per live device, every read
+    // filters by the TTL, and an index would be a second write on every beat.
+    to: 3,
+    tables: ["presence"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS presence (
+         device_id   TEXT PRIMARY KEY,          -- x-doklin-device
+         member_id   TEXT,                      -- the person; null for an owner nobody named
+         device_name TEXT NOT NULL,
+         path        TEXT,                      -- what they are editing, when anything
+         ts          INTEGER NOT NULL
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
