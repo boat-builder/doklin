@@ -178,8 +178,8 @@ await poll(async () => (await tid("version-preview").count()) === 1);
 await tid("restore-version").click();
 await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe first text\n");
 const restoreCall = await lastVersionCall("versions_restore_file");
-await poll(async () => (await page.locator(".cloud-toast").count()) === 1);
-const toast = await page.locator(".cloud-toast-text").textContent();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const toast = await page.locator(".toast-text").textContent();
 step(
   "Restore is one command: the version's hash and its ts, and the file is written",
   restoreCall.args.path === "/docs/other.md" &&
@@ -203,7 +203,7 @@ step(
 await page.screenshot({ path: SHOTS + "versions-03-restored.png" });
 
 /* 12 — Undo is another restore, of the state the first one left (§12.3.8). */
-await page.locator(".cloud-toast-btn", { hasText: "Undo" }).click();
+await page.locator(".toast-btn", { hasText: "Undo" }).click();
 await poll(async () => (await versionCalls("versions_restore_file")).length === 2);
 const undo = await lastVersionCall("versions_restore_file");
 await poll(async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nthe current text\n");
@@ -404,7 +404,7 @@ await poll(async () => (await page.evaluate(() => window.__versions.restores.len
 const whole = await page.evaluate(() => window.__versions.restores.at(-1));
 const refreshed = await poll(async () => (await page.evaluate(() => window.__treeCalls)) > 0);
 const undoToast = await poll(async () =>
-  (await page.locator(".cloud-toast").last().innerText()).includes("moved to the Trash"),
+  (await page.locator(".toast").last().innerText()).includes("moved to the Trash"),
 );
 step(
   "Restore all says what it will do, does it, and the tree refreshes with an Undo offered",
@@ -414,7 +414,7 @@ step(
     whole.trashed.length === 1 &&
     refreshed &&
     undoToast &&
-    (await page.locator(".cloud-toast").last().innerText()).includes("Undo"),
+    (await page.locator(".toast").last().innerText()).includes("Undo"),
   `${allText} → ${JSON.stringify(whole)}`,
 );
 

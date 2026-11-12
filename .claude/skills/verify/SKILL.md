@@ -55,7 +55,7 @@ node verify-harness/drive-table-resize.mjs # 15 steps: table column-width PERSIS
                                            # restores the columns on first paint, a header
                                            # rename re-keys the record instead of orphaning it,
                                            # and a read-only view resizes without ever emitting
-node verify-harness/drive-kanban.mjs       # 81 steps: boots the REAL <App/> (kanban.html seeds a
+node verify-harness/drive-kanban.mjs       # 93 steps: boots the REAL <App/> (kanban.html seeds a
                                           # /docs workspace holding a DATASTORE) and walks the
                                           # board end to end — the sidebar's one-row board with
                                           # no cards under it, the board tab, columns from
@@ -70,6 +70,10 @@ node verify-harness/drive-kanban.mjs       # 81 steps: boots the REAL <App/> (ka
                                           # the invariant the design rests on: a card's BODY
                                           # bytes never move when its properties do (and a note
                                           # with no frontmatter never grows one);
+                                          # the cards' excerpts and the stages a board with a
+                                          # Done tracks (glyphs, "1 of 3 done", a finished card
+                                          # checked), the view's Show excerpt writing only
+                                          # `excerpt: false`, a published card's live glyph;
                                           # then RENAMING a card — its title is its file name, so
                                           # the peek's title is editable in place (Enter renames
                                           # the file, Escape abandons without closing the panel,
@@ -110,19 +114,23 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 35 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 37 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
                                            # wizard's fresh / bound / marker outcomes (the setup
                                            # prompt carrying the token, the derived names, the
                                            # route, the runtime date read from version.ts), the
-                                           # panel's phases on both dots, the gear badge, the worker
+                                           # panel's phases on its dot and in the footer's words
+                                           # (a pass that ends in a blink never saying Syncing…),
+                                           # the gear badge, the worker
                                            # update card (a prompt with no secret, Check again), a
                                            # held mass-deletion's toast → panel → confirm, a conflict
                                            # copy's toast opening the copy, cloud-applied refreshing
-                                           # the tree, presence chips (a person named, their
-                                           # Mac beside them, your own other Mac as a Mac),
+                                           # the tree, presence (a face on the row, the person
+                                           # named in the panel with their Mac beside them, your
+                                           # own other Mac as a Mac; the title row's facepile:
+                                           # three faces then +N, one person on two Macs once),
                                            # a document another Mac holds (a lease) opening
                                            # view-only under its banner, typing writing
                                            # nothing, and Take over handing it here,
@@ -139,12 +147,15 @@ node verify-harness/drive-cloud.mjs        # 35 steps: boots the REAL <App/> (cl
                                            # exactly one thing away; then the same view on a Mac
                                            # that joined on an invite, where the list is the
                                            # owner's and the member is told so, not errored at)
-                                           # — and publishing: the pill's
+                                           # — and publishing: the Live chip's
                                            # not-connected door, a note published at a random then
                                            # a chosen address (Copy, a bad slug refused, the page
                                            # naming the person who published it and reading as
                                            # yours when that person is you), the
-                                           # sidebar's dots, the folder dialog, a note inside a
+                                           # chip's five states (Live with its address and the
+                                           # tab's glyph, Not updating and why, Page offline,
+                                           # Updating past the save until a sync lands), the
+                                           # sidebar's live dots, the folder dialog, a note inside a
                                            # published folder knowing its nested address, the
                                            # published list (home page, stop), the sidebar's
                                            # undoable stop, the panel's version-history line (what

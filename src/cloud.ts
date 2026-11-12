@@ -425,6 +425,84 @@ export function describeCloud(s: CloudStatus, now = Date.now()): string {
   return `${phase.charAt(0).toUpperCase() + phase.slice(1)} · ${s.domain}`;
 }
 
+/* ---------- Live status, in one vocabulary ----------
+   Green is live or in sync, the accent is working, amber is waiting (on you,
+   the network or the worker), red is broken. Every state pairs its colour
+   with words, and only a state in motion animates. */
+
+export type SyncTone = "live" | "busy" | "quiet" | "warn" | "error";
+
+/** The workspace's sync in a few words, for the sidebar footer:
+ *  "Synced", "Syncing…", "2 deletions to confirm". The full line
+ *  (describeCloud) is the tooltip. */
+export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
+  switch (s.phase) {
+    case "idle":
+      return { tone: "live", text: s.lastSyncMs == null ? "Not synced yet" : "Synced" };
+    case "syncing":
+      return { tone: "busy", text: "Syncing…" };
+    case "offline":
+      return { tone: "quiet", text: "Offline" };
+    case "paused":
+      return { tone: "quiet", text: "Sync paused" };
+    case "pending-deletes":
+      return {
+        tone: "warn",
+        text: `${s.pendingDeletes} deletion${s.pendingDeletes === 1 ? "" : "s"} to confirm`,
+      };
+    case "worker-outdated":
+      return { tone: "warn", text: "Worker update needed" };
+    case "revoked":
+      return { tone: "error", text: "Access revoked" };
+    case "error":
+      return { tone: "error", text: "Can't sync" };
+  }
+}
+
+/** Where a note's own page stands — the Live chip's five states.
+ *  `publish`: no page of its own. `live`: up to date. `updating`: edits
+ *  from here are still on their way. `stale`: sync has stopped short of the
+ *  page (offline, paused, held, an old worker, an error), so it keeps what
+ *  it had. `offline`: the page itself is down (access revoked, or the note
+ *  is not in the sync, so the address answers Not found). */
+export type PageState = "publish" | "live" | "updating" | "stale" | "offline";
+
+export function pageState(s: CloudStatus | null, page: PublicPage | null, pending: boolean): PageState {
+  if (!s || !page) return "publish";
+  if (s.phase === "revoked" || !page.alive) return "offline";
+  if (s.phase !== "idle" && s.phase !== "syncing") return "stale";
+  return pending ? "updating" : "live";
+}
+
+/** Why a page is in the state it is, in a sentence — the popover's line and
+ *  the chip's tooltip. Null for a page that is simply live. */
+export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()): string | null {
+  switch (state) {
+    case "publish":
+    case "live":
+      return null;
+    case "updating":
+      return "Your latest changes appear once synced.";
+    case "offline":
+      return s.phase === "revoked"
+        ? "This Mac's access was revoked, so it can't update the page."
+        : "The page answers Not found until this note is synced.";
+    case "stale":
+      switch (s.phase) {
+        case "offline":
+          return `Offline, so the page keeps what it had (${s.lastSyncMs == null ? "not synced yet" : `synced ${timeAgo(s.lastSyncMs, now)}`}).`;
+        case "paused":
+          return "Sync is paused, so the page keeps what it had.";
+        case "pending-deletes":
+          return "Sync is holding a deletion for your go, and the page waits with it.";
+        case "worker-outdated":
+          return `${s.domain} needs a worker update before the page changes again.`;
+        default:
+          return `Sync stopped: ${s.error ?? "an error"}.`;
+      }
+  }
+}
+
 /** What the Cloud panel's *Version history* line says: how much of this
  *  folder's history the domain is holding, or that its worker is too old to
  *  hold any (docs/versioning-plan.md §6.2). History is never gated on the

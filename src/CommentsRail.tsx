@@ -6,6 +6,7 @@ import {
   useState,
   type RefObject,
 } from "react";
+import Avatar from "./Avatar";
 import type { CommentEntry } from "./criticMark";
 
 // One thread as the rail renders it. `anchorTop` is the anchor's vertical
@@ -471,30 +472,6 @@ function autoGrow(el: HTMLTextAreaElement) {
 }
 
 /* ---------- Presentation helpers ---------- */
-
-export function Avatar({ name }: { name: string }) {
-  const known = name.trim().length > 0;
-  const style = known ? { background: `hsl(${hueOf(name)} 40% 52%)` } : undefined;
-  return (
-    <span className={`comment-avatar ${known ? "" : "is-unknown"}`} style={style} aria-hidden>
-      {known ? initialsOf(name) : "?"}
-    </span>
-  );
-}
-
-function initialsOf(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  const first = [...parts[0]][0] ?? "";
-  const last = parts.length > 1 ? [...parts[parts.length - 1]][0] ?? "" : "";
-  return (first + last).toUpperCase();
-}
-
-function hueOf(name: string): number {
-  let h = 0;
-  for (const ch of name) h = (h * 31 + (ch.codePointAt(0) ?? 0)) % 360;
-  return h;
-}
 
 function formatWhen(at: number): string {
   if (!at) return "";

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
-import { describeCloud, pageUrl, publishedByPath, type CloudStatus, type PublicPage } from "./cloud";
+import { Facepile } from "./Avatar";
+import { pageUrl, publishedByPath, type CloudStatus, type PublicPage } from "./cloud";
 import { invoke } from "@tauri-apps/api/core";
 
 export type TreeNode =
@@ -118,8 +119,8 @@ type Props = {
   // Drag-resize of the sidebar itself (right-edge handle); the app owns the
   // width (a CSS variable on the grid) and persists it.
   onResizeWidth?: (w: number) => void;
-  // Open the Cloud panel — the dot beside the workspace name, and "Cloud…"
-  // in its menu.
+  // Open the Cloud panel — "Cloud…" in the workspace menu. (The footer's
+  // sync line is the other way in; App owns the footer.)
   onOpenCloud?: () => void;
   // Version history for a document — the rail, for any workspace: since
   // docs/versioning.md it is no longer a cloud feature.
@@ -793,7 +794,7 @@ export default function Sidebar({
 
   const rootName = useMemo(() => basename(root), [root]);
 
-  // Who else is editing what, by absolute path — the chip on a file's row.
+  // Who else is editing what, by absolute path — the faces on a file's row.
   const presenceByPath = useMemo(() => {
     const out = new Map<string, string[]>();
     for (const p of cloud?.presence ?? []) {
@@ -1007,7 +1008,6 @@ export default function Sidebar({
       )}
       <SidebarHeader
         name={rootName}
-        cloud={cloud}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         onOpenFolder={onOpenFolder}
@@ -1125,7 +1125,6 @@ export default function Sidebar({
 
 function SidebarHeader({
   name,
-  cloud,
   menuOpen,
   setMenuOpen,
   onOpenFolder,
@@ -1140,7 +1139,6 @@ function SidebarHeader({
   onOpenCloud,
 }: {
   name: string;
-  cloud: CloudStatus | null;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
   onOpenFolder: () => void;
@@ -1194,17 +1192,6 @@ function SidebarHeader({
           <span className="sidebar-header-name">{name}</span>
           <ChevronDownIcon />
         </button>
-        {cloud && (
-          <button
-            className="sidebar-cloud-btn"
-            onClick={onOpenCloud}
-            title={describeCloud(cloud)}
-            aria-label={describeCloud(cloud)}
-            data-testid="sidebar-cloud-dot"
-          >
-            <span className={`sidebar-cloud-dot phase-${cloud.phase}`} />
-          </button>
-        )}
         {menuOpen && (
           <div className="sidebar-menu" role="menu">
             <button
@@ -1425,13 +1412,13 @@ function TreeItem({
             <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
           )}
           {editors && (
-            <span
-              className="tree-presence"
-              title={`${editors.join(", ")} — editing now`}
-              data-testid="tree-presence"
-            >
-              {editors.length > 1 ? `${editors[0]} +${editors.length - 1}` : editors[0]}
-            </span>
+            <Facepile
+              names={editors}
+              size={16}
+              max={2}
+              title={`${[...new Set(editors)].join(", ")} — editing now`}
+              testid="tree-presence"
+            />
           )}
         </button>
       </li>

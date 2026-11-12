@@ -300,6 +300,14 @@ body,
   white-space: nowrap;
 }
 
+/* A tab whose note has a page of its own. */
+.tab-live {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: -2px;
+  color: var(--live);
+}
+
 .tab-close {
   display: flex;
   align-items: center;
@@ -1042,7 +1050,7 @@ body,
   pointer-events: auto;
   filter: var(--shadow-drop);
 }
-.html-comment-pin .comment-avatar {
+.html-comment-pin .avatar {
   width: 24px;
   height: 24px;
   font-size: var(--fs-xs);
@@ -1050,7 +1058,7 @@ body,
   border-radius: 999px 999px 999px 3px; /* speech-bubble tail */
   transition: transform 0.12s ease;
 }
-.html-comment-pin:hover .comment-avatar {
+.html-comment-pin:hover .avatar {
   transform: scale(1.12);
 }
 .html-comment-pin-count {
@@ -1661,6 +1669,83 @@ body,
 .side-footer-btn:hover .side-footer-count,
 .side-footer-btn[aria-pressed="true"] .side-footer-count {
   background: var(--border);
+}
+
+/* The workspace's sync in words (src/SyncStatus.tsx), at the footer's end.
+   The icon carries the tone; the words stay in the secondary ink unless
+   they need you. */
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.sync-status:hover {
+  color: var(--text-1);
+  background: var(--hover);
+}
+
+.sync-status svg {
+  flex-shrink: 0;
+}
+
+.sync-status.is-live svg {
+  color: var(--live);
+}
+
+.sync-status.is-busy svg {
+  color: var(--accent);
+}
+
+.sync-status.is-quiet svg {
+  color: var(--text-3);
+}
+
+.sync-status.is-warn {
+  color: var(--warn-ink);
+}
+
+.sync-status.is-warn svg {
+  color: var(--warn);
+}
+
+.sync-status.is-error {
+  color: var(--error-ink);
+}
+
+.sync-status.is-error svg {
+  color: var(--error);
+}
+
+.sync-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Syncing: the arrows inside the cloud turn. */
+@keyframes sync-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sync-turn {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sync-turn 1.1s linear infinite;
 }
 
 .settings-wrap.is-docked {
@@ -2576,53 +2661,6 @@ body.sidebar-resizing {
   background: var(--hover);
 }
 
-/* The cloud dot beside the workspace name: the engine's phase at a glance
-   (the tooltip is src/cloud.ts describeCloud). Grey = paused/offline, green =
-   in sync, blue pulse = syncing, amber = waiting on the user or the worker,
-   red = revoked or an error. */
-.sidebar-cloud-dot {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  margin: 0 2px;
-  border-radius: 50%;
-  background: var(--text-3);
-  opacity: 0.6;
-}
-
-.sidebar-cloud-dot.phase-idle {
-  background: var(--live);
-  opacity: 1;
-}
-
-.sidebar-cloud-dot.phase-syncing {
-  background: var(--accent);
-  opacity: 1;
-  animation: sidebar-cloud-pulse 1.2s ease-in-out infinite;
-}
-
-.sidebar-cloud-dot.phase-pending-deletes,
-.sidebar-cloud-dot.phase-worker-outdated {
-  background: var(--warn);
-  opacity: 1;
-}
-
-.sidebar-cloud-dot.phase-revoked,
-.sidebar-cloud-dot.phase-error {
-  background: var(--error);
-  opacity: 1;
-}
-
-@keyframes sidebar-cloud-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-
 /* Opens just under the switcher button (34px tall). */
 .sidebar-menu {
   position: absolute;
@@ -3140,7 +3178,8 @@ body.tree-dragging.tree-drag-invalid * {
   min-width: 0;
 }
 
-.comment-avatar {
+/* A person's face (src/Avatar.tsx): initials on a hue from their name. */
+.avatar {
   flex: none;
   width: 18px;
   height: 18px;
@@ -3154,8 +3193,64 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--on-identity);
   user-select: none;
 }
-.comment-avatar.is-unknown {
+
+.avatar.is-16 {
+  width: 16px;
+  height: 16px;
+  font-size: 7.5px;
+}
+
+.avatar.is-22 {
+  width: 22px;
+  height: 22px;
+  font-size: 9.5px;
+}
+
+.avatar.is-unknown {
   background: var(--text-3);
+}
+
+/* "+2" after the faces a pile has room for. */
+.avatar.is-more {
+  background: var(--hover);
+  color: var(--text-2);
+  letter-spacing: 0;
+}
+
+/* Faces overlap, each ringed in the surface under it so the edge reads. */
+.facepile {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  --pile-ring: var(--canvas);
+}
+
+/* Each face sits over the next, so the first one's initials stay whole. */
+.facepile .avatar {
+  position: relative;
+  box-shadow: 0 0 0 2px var(--pile-ring);
+}
+
+.facepile .avatar:nth-child(1) {
+  z-index: 3;
+}
+
+.facepile .avatar:nth-child(2) {
+  z-index: 2;
+}
+
+.facepile .avatar:nth-child(3) {
+  z-index: 1;
+}
+
+/* Initials, unlike photos, can't lose an edge: the faces overlap by the
+   ring and a hair, so every letter stays whole. */
+.facepile .avatar + .avatar {
+  margin-left: -2px;
+}
+
+.facepile.is-16 .avatar + .avatar {
+  margin-left: -1px;
 }
 
 .comment-entry-author {
@@ -4680,6 +4775,12 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--warn-ink);
 }
 
+.dk-card-live {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--live);
+}
+
 /* Where the card in flight would land. */
 .dk-drop-line {
   height: 2px;
@@ -5929,7 +6030,13 @@ body.tree-dragging.tree-drag-invalid * {
 .cloud-dot.phase-syncing {
   background: var(--accent);
   opacity: 1;
-  animation: sidebar-cloud-pulse 1.2s ease-in-out infinite;
+  animation: cloud-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes cloud-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .cloud-dot.phase-pending-deletes,
@@ -6596,105 +6703,102 @@ body.tree-dragging.tree-drag-invalid * {
   background: color-mix(in srgb, var(--error) 16%, transparent);
 }
 
-/* Toasts: bottom-right, above the editor. */
-.cloud-toasts {
+/* Toasts (src/Toasts.tsx): bottom-right, above the editor. A raised card
+   with the tone's mark, the words, an action in the accent and a close. */
+.toasts {
   position: fixed;
   right: 16px;
   bottom: 16px;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
   z-index: 25;
   max-width: min(420px, calc(100vw - 32px));
 }
 
-.cloud-toast {
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.toast {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px 9px 14px;
-  border-radius: 10px;
-  background: var(--toast-bg);
-  color: var(--toast-fg);
+  min-height: 40px;
+  padding: 6px 6px 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  color: var(--text-1);
   font-size: var(--fs-md);
   line-height: 1.4;
   box-shadow: var(--shadow-pop);
+  animation: toast-in var(--dur-slow) var(--ease);
 }
 
-.cloud-toast-text {
+.toast-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: -3px;
+}
+
+.toast-mark.is-done {
+  color: var(--live);
+}
+
+.toast-mark.is-warn {
+  color: var(--warn);
+}
+
+.toast-mark.is-error {
+  color: var(--error);
+}
+
+.toast-text {
   flex: 1;
   min-width: 0;
 }
 
-.cloud-toast-btn {
+.toast-btn {
   flex-shrink: 0;
-  padding: 4px 9px;
-  border: 1px solid color-mix(in srgb, var(--toast-fg) 35%, transparent);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-
-.cloud-toast-btn:hover {
-  background: color-mix(in srgb, var(--toast-fg) 12%, transparent);
-}
-
-.cloud-toast-close {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  padding: 0;
+  height: 28px;
+  padding: 0 9px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: inherit;
-  font-size: 16px;
-  line-height: 1;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
   cursor: pointer;
-  opacity: 0.7;
 }
 
-.cloud-toast-close:hover {
-  opacity: 1;
-  background: color-mix(in srgb, var(--toast-fg) 12%, transparent);
+.toast-btn:hover {
+  background: var(--accent-wash);
 }
 
-/* The sidebar: the dot is a button now (it opens the panel), and a file
-   someone else is editing carries their name. */
-.sidebar-cloud-btn {
+.toast-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 22px;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: transparent;
+  color: var(--text-3);
   cursor: pointer;
-  flex-shrink: 0;
 }
 
-.sidebar-cloud-btn:hover {
+.toast-close:hover {
+  color: var(--text-1);
   background: var(--hover);
-}
-
-.tree-presence {
-  flex-shrink: 0;
-  max-width: 80px;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  line-height: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* The gear menu's Cloud… item lights a dot when a worker is behind. */
@@ -6706,91 +6810,215 @@ body.tree-dragging.tree-drag-invalid * {
   background: var(--accent);
 }
 
-/* ---- Publishing (docs/cloud.md §7.2): the pill in the tab bar and
-   its popover, the sidebar's published dots, the folder dialog, the list. */
-.publish-wrap {
+/* ---- Publishing (docs/cloud.md §7.2): the Live chip in the title row and
+   its popover (src/LiveChip.tsx), the sidebar's live dots, the folder
+   dialog, the list. One vocabulary: green is live, the accent is working,
+   amber is waiting, red is broken — and only the working state moves. */
+.live-wrap {
   position: relative;
   display: flex;
   align-items: center;
   flex-shrink: 0;
 }
 
-.publish-pill {
+.live-chip {
+  --chip-dot: var(--live);
+  --chip-ink: var(--live-ink);
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 9px;
-  border: 1px solid var(--border);
+  gap: 7px;
+  height: 28px;
+  max-width: 240px;
+  padding: 0 11px 0 9px;
+  border: none;
   border-radius: 999px;
-  background: var(--sheet);
-  color: var(--text-3);
+  background: color-mix(in srgb, var(--chip-dot) 13%, transparent);
+  color: var(--chip-ink);
   font: inherit;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
+  white-space: nowrap;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  transition: background var(--dur-fast) var(--ease);
 }
 
-.publish-pill:hover {
-  color: var(--text-1);
+.live-chip:hover,
+.live-chip[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--chip-dot) 21%, transparent);
+}
+
+.live-chip.is-publish {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text-2);
+}
+
+.live-chip.is-publish:hover,
+.live-chip.is-publish[aria-expanded="true"] {
   background: var(--hover);
+  color: var(--text-1);
 }
 
-.publish-pill.is-published {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+.live-chip.is-updating {
+  --chip-dot: var(--accent);
+  --chip-ink: var(--accent);
 }
 
-.publish-pill-dot {
-  width: 6px;
-  height: 6px;
+.live-chip.is-stale {
+  --chip-dot: var(--warn);
+  --chip-ink: var(--warn-ink);
+}
+
+.live-chip.is-offline {
+  --chip-dot: var(--error);
+  --chip-ink: var(--error-ink);
+}
+
+.live-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--chip-dot);
 }
 
-.publish-pop {
+/* Working: a turning ring in the dot's place. */
+@keyframes live-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.live-spin {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  animation: live-spin 0.9s linear infinite;
+}
+
+.live-chip-sep {
+  flex-shrink: 0;
+  width: 1px;
+  height: 12px;
+  background: color-mix(in srgb, var(--chip-dot) 40%, transparent);
+}
+
+.live-chip-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.live-pop {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
   z-index: 28;
-  width: 340px;
-  padding: 12px;
+  width: 352px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   background: var(--raised);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   box-shadow: var(--shadow-pop);
-  animation: settings-popover-in 0.1s ease-out;
+  font-size: var(--fs-md);
+  animation: dk-pop-in var(--dur) var(--ease);
 }
 
-.publish-heading {
-  font-size: var(--fs-md);
+.live-pop .modal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.live-pop .modal-buttons {
+  margin-top: 0;
+}
+
+.live-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--text-1);
+}
+
+/* The heading's dot is the chip's, with a halo. */
+.live-pop-head .live-dot {
+  --chip-dot: var(--live);
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chip-dot) 22%, transparent);
+}
+
+.live-pop-head .live-dot.is-updating {
+  --chip-dot: var(--accent);
+}
+
+.live-pop-head .live-dot.is-stale {
+  --chip-dot: var(--warn);
+}
+
+.live-pop-head .live-dot.is-offline {
+  --chip-dot: var(--error);
+}
+
+.live-pop-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.publish-url-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.live-pop-badge {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
 }
 
-.publish-url {
+/* The address, in a well, with Copy at its end. */
+.live-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--r-md);
+  background: var(--sunken);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text-3);
+}
+
+.live-url svg {
+  flex-shrink: 0;
+}
+
+.live-url-addr {
   flex: 1;
   min-width: 0;
   padding: 0;
   border: none;
   background: none;
   font: inherit;
-  font-size: var(--fs-sm);
-  color: var(--accent);
+  font-size: var(--fs-md);
+  color: var(--text-1);
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6798,8 +7026,79 @@ body.tree-dragging.tree-drag-invalid * {
   cursor: pointer;
 }
 
-.publish-url:hover {
+.live-url-addr:hover {
   text-decoration: underline;
+}
+
+.live-url-host {
+  color: var(--text-3);
+}
+
+.live-url .modal-btn {
+  height: 28px;
+  padding: 0 10px;
+}
+
+/* Why the page isn't current, in the state's ink. */
+.live-reason {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.45;
+}
+
+.live-reason.is-updating {
+  color: var(--accent);
+}
+
+.live-reason.is-stale {
+  color: var(--warn-ink);
+}
+
+.live-reason.is-offline {
+  color: var(--error-ink);
+}
+
+.live-meta {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.live-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.live-stop {
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--error-ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.live-stop:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.live-confirm {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+
+.live-all {
+  align-self: stretch;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  text-align: left;
 }
 
 .publish-address {
@@ -6854,15 +7153,16 @@ body.tree-dragging.tree-drag-invalid * {
   text-decoration: underline;
 }
 
-/* A row with a page of its own. */
+/* A row with a page of its own: the live dot, green with a halo, so blue
+   keeps meaning "selected". */
 .tree-published {
   flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  margin-left: 4px;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px 0 4px;
   border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.85;
+  background: var(--live);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 20%, transparent);
 }
 
 .published-list {

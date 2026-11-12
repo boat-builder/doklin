@@ -137,6 +137,36 @@ const CARD_C = "/docs/Projects/Write onboarding docs.md";
   );
 }
 
+/* ---------- 3c. a card with a page of its own carries the live glyph ---------- */
+{
+  // The engine's status names the pages (src/livePages.tsx feeds the board);
+  // the board's tab is live too when the folder itself is published.
+  const statusWith = (pub) => [
+    {
+      root: "/docs", domain: "notes.example.com", endpoint: "https://notes.example.com", wsId: "w",
+      name: "docs", phase: "idle", lastSyncMs: Date.now(), error: null, pendingDeletes: 0, me: "Test Mac",
+      workerVersion: null, versions: null, presence: [], leases: [],
+      public: pub.map(([slug, kind, path]) => ({
+        slug, kind, path, title: null, desc: null, by: "Test Mac", at: Date.now(), alive: true, root: false,
+      })),
+    },
+  ];
+  const glyphOn = (title) =>
+    page.locator(".dk-card", { hasText: title }).locator('[data-testid="card-live"]').count();
+  await page.evaluate((s) => window.__emit("cloud-status", s), statusWith([["dark-mode", "file", "Projects/Ship dark mode.md"]]));
+  await poll(async () => (await glyphOn("Ship dark mode")) === 1);
+  const others = (await page.locator('[data-testid="card-live"]').count()) - 1;
+  const boardTabBefore = await page.locator('.tab.is-board [data-testid="tab-live"]').count();
+  await page.evaluate((s) => window.__emit("cloud-status", s), statusWith([["dark-mode", "file", "Projects/Ship dark mode.md"], ["projects", "dir", "Projects"]]));
+  await poll(async () => (await page.locator('.tab.is-board [data-testid="tab-live"]').count()) === 1);
+  await page.evaluate(() => window.__emit("cloud-status", []));
+  await poll(async () => (await page.locator('[data-testid="card-live"]').count()) === 0);
+  step(
+    "a published card carries the live glyph, no other card does; a published board's tab does too, and both go when the page does",
+    others === 0 && boardTabBefore === 0 && (await page.locator('[data-testid="tab-live"]').count()) === 0,
+  );
+}
+
 /* ---------- 4. a drag writes one card's properties, not its body ---------- */
 {
   const bodyBefore = await bodyOf(CARD_A);

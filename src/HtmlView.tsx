@@ -10,7 +10,8 @@ import {
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Avatar, ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
+import Avatar from "./Avatar";
+import { ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
   addHtmlReply,
   createHtmlThread,

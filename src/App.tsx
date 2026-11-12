@@ -35,8 +35,11 @@ import {
   type VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
-import CloudToasts, { type CloudToast } from "./CloudToasts";
-import PublishMenu from "./PublishMenu";
+import Toasts, { type Toast, type ToastTone } from "./Toasts";
+import LiveChip from "./LiveChip";
+import SyncStatus from "./SyncStatus";
+import { Facepile } from "./Avatar";
+import { livePathsOf, setLivePages } from "./livePages";
 import PublishFolder from "./PublishFolder";
 import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
@@ -1023,6 +1026,9 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
+  // The pages of the open workspace, for the glyph on a live page's tab and
+  // card (a board inside a note reads it too, from its own React root).
+  useEffect(() => setLivePages(livePathsOf(cloudForRoot)), [cloudForRoot]);
   // The cloud surfaces (docs/cloud.md §7.2): the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
   // worker update card, and the transient notices. The held mass-deletion's paths ride the event that
@@ -1055,20 +1061,21 @@ export default function App() {
   const historyForRef = useRef<string | null>(null);
   // What ⌘⌥H opens history for: the active tab, unless it is a board.
   const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
-  const [cloudToasts, setCloudToasts] = useState<CloudToast[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
   const toastSeq = useRef(0);
-  const pushToast = useCallback((text: string, action?: CloudToast["action"]) => {
+  const pushToast = useCallback((tone: ToastTone, text: string, action?: Toast["action"]) => {
     toastSeq.current += 1;
     const id = toastSeq.current;
-    setCloudToasts((ts) => [...ts.slice(-3), { id, text, action }]);
+    setToasts((ts) => [...ts.slice(-3), { id, tone, text, action }]);
   }, []);
   const dismissToast = useCallback(
-    (id: number) => setCloudToasts((ts) => ts.filter((t) => t.id !== id)),
+    (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
-  );  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
+  );
+  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
   // or the root for the whole workspace) and the list of every published
-  // page. The pill lives in the tab bar (PublishMenu).
+  // page. The Live chip lives in the title row (LiveChip).
   const [publishFolder, setPublishFolder] = useState<string | null>(null);
   const [publishedOpen, setPublishedOpen] = useState(false);
   // Stopping from the sidebar is immediate and undoable: the toast's Undo
@@ -1080,17 +1087,17 @@ export default function App() {
       const abs = page.path ? `${root}/${page.path}` : root;
       void cloudUnpublish(root, page.slug)
         .then(() =>
-          pushToast(`Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
+          pushToast("info", `Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
             label: "Undo",
             run: () =>
               void cloudPublish(abs, {
                 slug: page.slug,
                 title: page.title ?? undefined,
                 desc: page.desc ?? undefined,
-              }).catch((e) => pushToast(`Couldn't publish again: ${String(e)}`)),
+              }).catch((e) => pushToast("error", `Couldn't publish again: ${String(e)}`)),
           }),
         )
-        .catch((e) => pushToast(`Couldn't stop publishing: ${String(e)}`));
+        .catch((e) => pushToast("error", `Couldn't stop publishing: ${String(e)}`));
     },
     [workspaceRoot, pushToast],
   );
@@ -2717,7 +2724,7 @@ export default function App() {
         });
         setHistoryToken((t) => t + 1);
       } catch (e) {
-        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+        pushToast("error", `Couldn't undo that restore: ${errText(e)}`);
       }
     },
     [pushToast],
@@ -2738,12 +2745,12 @@ export default function App() {
         });
         setVersionPreview(null);
         setHistoryToken((t) => t + 1);
-        pushToast(`Restored the version from ${momentLabel(version.ts)}.`, {
+        pushToast("done", `Restored the version from ${momentLabel(version.ts)}.`, {
           label: "Undo",
           run: () => void undoRestore(docPath, root, outcome),
         });
       } catch (e) {
-        pushToast(`Couldn't restore that version: ${errText(e)}`);
+        pushToast("error", `Couldn't restore that version: ${errText(e)}`);
       }
     },
     [pushToast, undoRestore],
@@ -2826,7 +2833,7 @@ export default function App() {
       try {
         await versionsRestoreSnapshot(root, report.preRestoreTs, paths);
       } catch (e) {
-        pushToast(`Couldn't undo that restore: ${errText(e)}`);
+        pushToast("error", `Couldn't undo that restore: ${errText(e)}`);
       }
     },
     [pushToast],
@@ -2838,7 +2845,7 @@ export default function App() {
         report.written > 0 && `${report.written} file${report.written === 1 ? "" : "s"} written`,
         report.trashed > 0 && `${report.trashed} moved to the Trash`,
       ].filter(Boolean) as string[];
-      pushToast(moved.length ? `Restored — ${moved.join(", ")}.` : "Nothing needed changing.", {
+      pushToast(moved.length ? "done" : "info", moved.length ? `Restored — ${moved.join(", ")}.` : "Nothing needed changing.", {
         label: "Undo",
         run: () => void undoSnapshotRestore(root, report, paths),
       });
@@ -5044,7 +5051,7 @@ export default function App() {
       // what the Versions settings reads.
       onVersionsStatus((s) => setVersionStatuses(s)),
       onCloudConflict((e) => {
-        pushToast(`${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
+        pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
           run: () => void openTab(e.conflictPath, "file"),
         });
@@ -5053,6 +5060,7 @@ export default function App() {
         setPendingDeletes(e);
         if (e.count > 0) {
           pushToast(
+            "warn",
             `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
             { label: "Review…", run: () => setCloudPanelOpen(true) },
           );
@@ -5081,6 +5089,14 @@ export default function App() {
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
   const activeIsStore = activeTab?.kind === "store";
+  // The open note relative to the workspace: what the Live chip publishes
+  // and whose presence the facepile shows. Null for a draft, a board, or a
+  // file from outside the workspace.
+  const activeRel =
+    activeTab?.kind === "file" && workspaceRoot ? relPathIn(workspaceRoot, activeTab.path) : null;
+  const hereNow = [
+    ...new Set((cloudForRoot?.presence ?? []).filter((p) => p.path === activeRel).map((p) => p.name)),
+  ];
   // The sidebar's active row. A board's cards have no rows of their own, so
   // the board's row carries the highlight for whatever inside it is focused.
   const sidebarCurrentPath = activeIsStore ? activeTab.path : activeFilePath;
@@ -5527,7 +5543,7 @@ export default function App() {
                 void restoreVersion(versionPreview.docPath, versionPreview.root, version, text)
               }
               onOpenFile={(path) => void openTab(path, "file")}
-              onError={(message) => pushToast(message)}
+              onError={(message) => pushToast("error", message)}
             />
           )}
           {showHtmlHere && (
@@ -5744,21 +5760,27 @@ export default function App() {
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
+              {/* Who else is in this note: their faces, from the
+                  workspace's presence. */}
+              <Facepile
+                names={hereNow}
+                size={22}
+                title={`In this note: ${hereNow.join(", ")}`}
+                testid="note-facepile"
+              />
               {/* Publishing: a file inside the open workspace only — not a
                   draft, not a board, not a file from outside (§7.3). */}
-              {activeTab.kind === "file" &&
-                workspaceRoot &&
-                relPathIn(workspaceRoot, activeTab.path) !== null && (
-                  <PublishMenu
-                    cloud={cloudForRoot}
-                    absPath={activeTab.path}
-                    rel={relPathIn(workspaceRoot, activeTab.path) ?? ""}
-                    dirty={dirty}
-                    onConnect={() => setCloudSetup("connect")}
-                    onOpenExternal={openExternal}
-                    onOpenPublished={() => setPublishedOpen(true)}
-                  />
-                )}
+              {activeRel !== null && (
+                <LiveChip
+                  cloud={cloudForRoot}
+                  absPath={activeTab.path}
+                  rel={activeRel}
+                  dirty={dirty}
+                  onConnect={() => setCloudSetup("connect")}
+                  onOpenExternal={openExternal}
+                  onOpenPublished={() => setPublishedOpen(true)}
+                />
+              )}
               {/* Markdown only: an html view docks its own comment-mode
                   toggle (and PDF export) into the slot below instead —
                   comment mode itself lives inside HtmlView. */}
@@ -5817,12 +5839,12 @@ export default function App() {
           onOpen={(file) => previewDeleted(file, workspaceRoot)}
           onRestored={(path) => {
             setTreeRefreshToken((t) => t + 1);
-            pushToast(`${basename(path)} is back.`, {
+            pushToast("done", `${basename(path)} is back.`, {
               label: "Open",
               run: () => void openTab(path, "file"),
             });
           }}
-          onError={(message) => pushToast(message)}
+          onError={(message) => pushToast("error", message)}
         />
       )}
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
@@ -5867,7 +5889,7 @@ export default function App() {
           root={workspaceRoot}
           onClose={() => setWorkspaceHistoryOpen(false)}
           onRestored={(report, paths) => snapshotRestored(workspaceRoot, report, paths)}
-          onError={(message) => pushToast(message)}
+          onError={(message) => pushToast("error", message)}
         />
       )}
       {versionsSettingsOpen && (
@@ -5915,7 +5937,7 @@ export default function App() {
             onSelect={previewVersion}
             onClose={closeHistory}
             reloadToken={historyToken}
-            onError={(message) => pushToast(message)}
+            onError={(message) => pushToast("error", message)}
           />
         )}
         {tabDrop && (
@@ -6030,12 +6052,13 @@ export default function App() {
           onOpenExternal={openExternal}
         />
       )}
-      <CloudToasts toasts={cloudToasts} onDismiss={dismissToast} />
+      <Toasts toasts={toasts} onDismiss={dismissToast} />
       {leftColumn ? (
-        // The left column's footer bar: settings, and the folder's deleted
+        // The left column's footer bar: settings, the folder's deleted
         // files — a count that is here only when there is something in it
-        // (docs/versioning-plan.md §12.3.4). It toggles the column between
-        // the tree and the list.
+        // (docs/versioning-plan.md §12.3.4), which toggles the column between
+        // the tree and the list — and, for a connected workspace, its sync
+        // in words.
         <div className="side-footer">
           {settingsMenu}
           {showSidebar && workspaceRoot && deletedFiles.length > 0 && (
@@ -6050,6 +6073,9 @@ export default function App() {
               <TrashIcon />
               <span className="side-footer-count">{deletedFiles.length}</span>
             </button>
+          )}
+          {showSidebar && cloudForRoot && (
+            <SyncStatus cloud={cloudForRoot} onOpen={() => setCloudPanelOpen(true)} />
           )}
         </div>
       ) : (

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ContextMenu from "./ContextMenu";
+import { LiveGlyph, useLivePages } from "./livePages";
 import { dragWindowFromGap } from "./windowDrag";
 
 // "store" is a datastore folder shown as a kanban board — a tab whose path
@@ -63,6 +64,8 @@ export default function TabBar({
   onHistory,
 }: Props) {
   const activeRef = useRef<HTMLButtonElement>(null);
+  // Tabs whose note (or board) has a page of its own carry the live glyph.
+  const live = useLivePages();
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; path: string; kind: "draft" | "file" } | null>(
     null,
   );
@@ -262,6 +265,11 @@ export default function TabBar({
                   {t.kind === "store" ? <BoardIcon /> : <NoteIcon />}
                 </span>
                 <span className="tab-label">{tabLabel(t)}</span>
+                {t.kind !== "draft" && live.has(t.path) && (
+                  <span className="tab-live" title="Live on the web" data-testid="tab-live">
+                    <LiveGlyph />
+                  </span>
+                )}
               </button>
               {/* Unsaved changes show as a dot where the × sits (the macOS
                   "edited" convention); hovering the tab brings the × back. */}

@@ -33,6 +33,7 @@ import {
   StatusGlyph,
   type ComposeHandle,
 } from "./storeChrome";
+import { LiveGlyph, useLivePages } from "./livePages";
 import type { StoreModel } from "./store/model";
 import { propText } from "./store/frontmatter";
 import {
@@ -147,6 +148,8 @@ export default function KanbanBoard({
   onDeleteCard,
   onRevealInFinder,
 }: Props) {
+  // Cards with a page of their own carry the live glyph in their foot.
+  const live = useLivePages();
   const [drag, setDrag] = useState<Drag | null>(null);
   const [drop, setDrop] = useState<DropTarget>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -484,7 +487,12 @@ export default function KanbanBoard({
                         <div className="dk-card-excerpt">{card.excerpt}</div>
                       )}
                       <Chips card={card} def={def} fields={pillFields} />
-                      <Dates card={card} fields={dateFields} finished={finished} />
+                      <CardFoot
+                        card={card}
+                        fields={dateFields}
+                        finished={finished}
+                        live={live.has(card.path)}
+                      />
                     </article>
                   </Fragment>
                 ))}
@@ -677,16 +685,19 @@ const DUE_RE = /\b(due|deadline)\b/i;
 const SOON_DAYS = 3;
 const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-/** The card's dates, in its foot: "Dec 4", amber when a deadline is close. */
-function Dates({
+/** The card's foot: its dates ("Dec 4", amber when a deadline is close),
+ *  and the live glyph when the card has a page of its own. */
+function CardFoot({
   card,
   fields,
   finished,
+  live,
 }: {
   card: Card;
   fields: Field[];
   /** A finished card's deadline no longer presses. */
   finished: boolean;
+  live: boolean;
 }) {
   const items = fields.flatMap((f) => {
     const raw = propText(card.props[f.id]).trim();
@@ -705,7 +716,7 @@ function Dates({
     const due = DUE_RE.test(f.name) || DUE_RE.test(f.id);
     return [{ field: f, text, soon: due && !finished && days <= SOON_DAYS }];
   });
-  if (items.length === 0) return null;
+  if (items.length === 0 && !live) return null;
   return (
     <div className="dk-card-meta">
       {items.map((d) => (
@@ -718,6 +729,11 @@ function Dates({
           {d.text}
         </span>
       ))}
+      {live && (
+        <span className="dk-card-live" title="Live on the web" data-testid="card-live">
+          <LiveGlyph />
+        </span>
+      )}
     </div>
   );
 }
