@@ -1325,6 +1325,13 @@ export default function App() {
 
   useEffect(() => {
     applyTheme(theme);
+    // Native chrome (context menus, dialogs, tooltips) follows the window's
+    // appearance, so it matches the theme rather than the OS. A chosen theme
+    // pins it; "system" hands it back to the OS, because a pinned appearance
+    // also pins prefers-color-scheme, which is what resolves "system".
+    void getCurrentWindow()
+      .setTheme(theme === "system" ? null : theme === "dark" ? "dark" : "light")
+      .catch(() => {});
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
