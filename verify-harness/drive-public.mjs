@@ -3,8 +3,9 @@
 // serve-worker.mjs over the seed workspace (cloud-worker/test/seed.mjs):
 // a note's page, the MD/HTML pill and the sandboxed rendition, a folder's
 // table of contents, a nested note with its crumb, a board drawn with
-// JavaScript off, a diagram hydrating in light and in dark, links between
-// notes, the root page, and a 404. Run:
+// JavaScript off, a diagram hydrating in light and in dark, the app's own
+// type and palettes, a board drawn as the app's embed draws it, links
+// between notes, the root page, and a 404. Run:
 //
 //   node verify-harness/serve-worker.mjs &     # bundles the worker (mermaid included), seeds, serves :8787
 //   node verify-harness/drive-public.mjs
@@ -140,9 +141,82 @@ step(
     darkSvg.length > 200 &&
     lightSvg !== darkSvg &&
     lightBg === "rgb(255, 255, 255)" &&
-    darkBg === "rgb(25, 25, 25)" &&
+    darkBg === "rgb(0, 0, 0)" &&
     (await page.locator("code.language-mermaid").count()) === 0,
   `${lightBg} / ${darkBg}`,
+);
+
+/* 6b — the app's look: its serif, its measure, its palettes */
+await page.goto(`${BASE}/home`);
+await page.evaluate(() => document.fonts.ready);
+const type = await page.evaluate(() => {
+  const doc = getComputedStyle(document.querySelector("main.doc"));
+  const p = getComputedStyle(document.querySelector("main.doc p"));
+  return {
+    face: doc.fontFamily.split(",")[0].replace(/"/g, ""),
+    size: p.fontSize,
+    loaded: document.fonts.check('18px "Newsreader"'),
+    served: performance.getEntriesByType("resource").some((r) => r.name.includes("/__web/fonts/")),
+    chrome: getComputedStyle(document.querySelector("footer")).fontFamily.split(",")[0],
+    // The reading measure: the column's content box, without its padding.
+    measure: Math.round(
+      document.querySelector("main.doc").getBoundingClientRect().width -
+        parseFloat(doc.paddingLeft) -
+        parseFloat(doc.paddingRight),
+    ),
+    accent: getComputedStyle(document.querySelector("main.doc a")).color,
+  };
+});
+const darkHome = await pageIn({ colorScheme: "dark" });
+await darkHome.goto(`${BASE}/home`);
+const darkLink = await darkHome.evaluate(() => getComputedStyle(document.querySelector("main.doc a")).color);
+await darkHome.screenshot({ path: SHOTS + "public-06b-home-dark.png" });
+await darkHome.context().close();
+await page.screenshot({ path: SHOTS + "public-06b-home-light.png" });
+step(
+  "the app's look: the note is set in the bundled Newsreader at 18px in a reading measure, the chrome in the UI face, links in the light and dark accents",
+  type.face === "Newsreader" &&
+    type.size === "18px" &&
+    type.loaded &&
+    type.served &&
+    type.chrome !== "Newsreader" &&
+    type.measure > 600 &&
+    type.measure < 720 &&
+    type.accent === "rgb(34, 103, 238)" &&
+    darkLink === "rgb(77, 148, 255)",
+  JSON.stringify({ ...type, darkLink }),
+);
+
+/* 6c — a board as the app's embed draws it */
+await page.goto(`${BASE}/projects/board`);
+await poll(async () => (await page.locator(".dk-embed").count()) === 2);
+const board = page.locator(".dk-embed").first();
+const look = await board.evaluate((el) => {
+  const col = el.querySelector(".dk-col.dk-color-blue");
+  return {
+    kind: el.querySelector(".dk-embed-kind").textContent,
+    progress: el.querySelector(".dk-progress")?.textContent ?? null,
+    glyphs: el.querySelectorAll(".dk-col-glyph svg").length,
+    tint: getComputedStyle(col).backgroundColor,
+    excerpt: el.querySelector(".dk-card-excerpt")?.textContent ?? null,
+    done: el.querySelectorAll(".dk-card.is-done .dk-card-check svg").length,
+    date: el.querySelector(".dk-card-date")?.textContent ?? null,
+  };
+});
+await board.screenshot({ path: SHOTS + "public-06c-board.png" });
+const cardBox = await board.locator(".dk-card", { hasText: "Ship the boat" }).boundingBox();
+await page.mouse.click(cardBox.x + cardBox.width - 6, cardBox.y + cardBox.height - 6);
+await poll(async () => page.url().endsWith("/projects/Roadmap/Ship%20the%20boat"));
+step(
+  "a board as the app's embed draws it: the kind in its bar, progress, a stage glyph per column, tinted columns, excerpts, a checked finished card, a date in the foot — and a click anywhere on a card opens its page",
+  look.kind === "Board" &&
+    look.progress === "1 of 3 done" &&
+    look.glyphs === 3 &&
+    look.tint !== "rgba(0, 0, 0, 0)" &&
+    look.excerpt === "After the hull." &&
+    look.done === 1 &&
+    /Dec 4/.test(look.date ?? ""),
+  JSON.stringify(look),
 );
 
 /* 7 — the root page and its links */

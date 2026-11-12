@@ -227,7 +227,14 @@ async function drawBoards(
     if (!stores.has(dir)) stores.set(dir, ws.storeAt(dir));
     const read = await stores.get(dir)!;
     if (!read) continue; // no board there — the fence stays a code block
-    const snap = boardSnapshot(text, kind, read.def, read.cards, (cardPath) => pub.urlFor(cardPath, dirSlug) ?? undefined);
+    const snap = boardSnapshot(
+      text,
+      kind,
+      read.def,
+      read.cards,
+      (cardPath) => pub.urlFor(cardPath, dirSlug) ?? undefined,
+      new Date(),
+    );
     if (snap) out.set(key, { snap, unread: read.unread });
   }
   return out;

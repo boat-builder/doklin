@@ -62,6 +62,8 @@ const {
   boardStages,
   cardExcerpt,
   cardChips,
+  cardDates,
+  cardFaceFields,
   cardPasses,
   cardValue,
   cardValues,
@@ -81,6 +83,16 @@ const {
   storeCsv,
   toCsv,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
+
+// The day every published picture below is drawn on: a card's dates read
+// against it.
+const TODAY = new Date(2026, 10, 12);
+const shortDay = (y, m, d, withYear = false) =>
+  new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(withYear ? { year: "numeric" } : {}),
+  });
 
 let checks = 0;
 const ok = (cond, msg) => {
@@ -699,7 +711,7 @@ const eq = (a, b, msg) => {
 
   /* ---- the picture a published page carries ---- */
   const pages = { "/w/Projects/Hull.md": "page-hull" };
-  const snap = boardSnapshot("store: ./Projects", "kanban", def, cards, (p) => pages[p]);
+  const snap = boardSnapshot("store: ./Projects", "kanban", def, cards, (p) => pages[p], TODAY);
   eq(snap.fence, "store: ./Projects");
   eq(snap.name, "Projects");
   eq(
@@ -710,7 +722,7 @@ const eq = (a, b, msg) => {
   // …but an EMPTY undeclared column is dropped: it exists on the desktop so
   // you can drag into it, and nobody drags on a published page.
   eq(
-    boardSnapshot("store: ./P", "kanban", def, [cards[0]], () => undefined).columns.map(
+    boardSnapshot("store: ./P", "kanban", def, [cards[0]], () => undefined, TODAY).columns.map(
       (c) => c.name,
     ),
     ["Backlog", "In progress", "Done"],
@@ -718,6 +730,7 @@ const eq = (a, b, msg) => {
   eq(snap.columns[2], {
     name: "In progress",
     color: "blue",
+    stage: { kind: "stage", fill: 0.5 },
     cards: [
       {
         title: "Hull",
@@ -736,16 +749,63 @@ const eq = (a, b, msg) => {
     "an empty declared column keeps its colour",
   );
   ok(!("page" in snap.columns[2].cards[1]), "a card with no page of its own isn't a link");
+  eq(
+    snap.columns.map((c) => c.stage?.kind),
+    ["todo", "todo", "stage", "done", undefined],
+    "a board with a finished option gives each column its stage; a value nothing declares has none",
+  );
+
+  // A card carries what its face shows in the app: its excerpt when the view
+  // shows them, its dates for the foot (never as pills), and — on a board
+  // that tracks progress — whether it is finished.
+  const dated = { ...def, fields: [...def.fields, { id: "due", name: "Due", type: "date" }] };
+  const faced = [
+    { ...card("Hull", { status: "In progress", rank: "a0", due: "2026-11-14" }), excerpt: "Keel first." },
+    { ...card("Mast", { status: "Done", rank: "a0", due: "2026-11-13" }), excerpt: "Stepped." },
+    { ...card("Deck", { status: "Backlog", rank: "a0", due: "2027-01-09" }), excerpt: "" },
+  ];
+  const pic = boardSnapshot("store: ./P", "kanban", dated, faced, () => undefined, TODAY);
+  const cardOf = (snapshot, title) => snapshot.columns.flatMap((c) => c.cards).find((c) => c.title === title);
+  eq(cardOf(pic, "Hull"), {
+    title: "Hull",
+    excerpt: "Keel first.",
+    dates: [{ name: "Due", text: shortDay(2026, 11, 14), soon: true }],
+  }, "a deadline two days out presses");
+  eq(cardOf(pic, "Mast"), {
+    title: "Mast",
+    excerpt: "Stepped.",
+    dates: [{ name: "Due", text: shortDay(2026, 11, 13) }],
+    done: true,
+  }, "a finished card is done, and its deadline no longer presses");
+  eq(cardOf(pic, "Deck"), {
+    title: "Deck",
+    dates: [{ name: "Due", text: shortDay(2027, 1, 9, true) }],
+  }, "no excerpt to show; a date in another year says the year");
+  const quiet = boardSnapshot(
+    "store: ./P",
+    "kanban",
+    { ...dated, views: [{ ...newView("board", "kanban", "Board", "status"), excerpt: false }] },
+    faced,
+    () => undefined,
+    TODAY,
+  );
+  ok(!("excerpt" in cardOf(quiet, "Hull")), "a view with excerpts off publishes none");
+  ok(
+    boardSnapshot("store: ./P\ngroup: owner", "kanban", dated, faced, () => undefined, TODAY).columns.every(
+      (c) => !("stage" in c) && c.cards.every((k) => !("done" in k)),
+    ),
+    "grouped by anything else, a board claims nothing about progress",
+  );
 
   // The embed's own keys narrow the picture, exactly as they narrow the board.
   eq(
     boardSnapshot("store: ./P\nhide: [Done, Shipped?]", "kanban", def, cards, () =>
-      undefined,
+      undefined, TODAY,
     ).columns.map((c) => c.name),
     ["No status", "Backlog", "In progress"],
   );
   eq(
-    boardSnapshot("store: ./P\ngroup: owner", "kanban", def, cards, () => undefined).columns.map(
+    boardSnapshot("store: ./P\ngroup: owner", "kanban", def, cards, () => undefined, TODAY).columns.map(
       (c) => c.name,
     ),
     ["No owner", "Ada"],
@@ -756,7 +816,7 @@ const eq = (a, b, msg) => {
   const many = Array.from({ length: 260 }, (_, i) =>
     card(`C${String(i).padStart(3, "0")}`, { status: "Backlog", rank: `a${i}` }),
   );
-  const big = boardSnapshot("store: ./P", "kanban", def, many, () => undefined);
+  const big = boardSnapshot("store: ./P", "kanban", def, many, () => undefined, TODAY);
   const backlog = big.columns.find((c) => c.name === "Backlog");
   eq(backlog.cards.length, 200);
   eq(backlog.more, 60);
@@ -769,9 +829,44 @@ const eq = (a, b, msg) => {
       { ...def, fields: [], options: [], views: [] },
       [],
       () => undefined,
+      TODAY,
     ),
     null,
   );
+}
+
+/* ============ a card's face: pills, dates ============
+   The board tab, a note's embed and the published picture split a card's
+   fields the same way and read its dates the same way. */
+{
+  const def = {
+    name: "Work",
+    fields: [
+      { id: "status", name: "Status", type: "select" },
+      { id: "owner", name: "Owner", type: "select" },
+      { id: "due", name: "Due", type: "date" },
+      { id: "started", name: "Started", type: "date" },
+    ],
+    options: [],
+    views: [],
+    foreign: [],
+  };
+  const face = cardFaceFields(def, "status");
+  eq(face.pills.map((f) => f.id), ["owner"], "the group-by is left out: the column says it");
+  eq(face.dates.map((f) => f.id), ["due", "started"], "dates go to the foot");
+  eq(cardFaceFields(def, "status", ["due"]).dates.map((f) => f.id), ["due"], "only what the view shows");
+
+  const at = (props) => ({ path: "/w/x.md", name: "x.md", title: "x", snapshot: { mtime_ms: 0, size: 0 }, props, opaque: [] });
+  const dates = (props, finished = false) => cardDates(at(props), face.dates, finished, TODAY);
+  eq(dates({ due: "2026-11-15", started: "2026-11-15" }), [
+    { key: "due", name: "Due", text: shortDay(2026, 11, 15), soon: true },
+    { key: "started", name: "Started", text: shortDay(2026, 11, 15), soon: false },
+  ], "three days out presses for a deadline, never for any other date");
+  eq(dates({ due: "2026-11-16" })[0].soon, false, "four days out doesn't");
+  eq(dates({ due: "2026-11-01" })[0].soon, true, "an overdue deadline presses most of all");
+  eq(dates({ due: "2026-11-14" }, true)[0].soon, false, "not on a finished card");
+  eq(dates({ due: "next week" }), [{ key: "due", name: "Due", text: "next week", soon: false }], "a value that isn't a day, as written");
+  eq(dates({}), [], "no value, no date");
 }
 
 /* ============ what a VIEW does to the cards ============
@@ -883,7 +978,7 @@ const eq = (a, b, msg) => {
   /* ---- a published table ---- */
   const pages = { "/w/Work/Alpha.md": "page-alpha" };
   const view = { ...newView("t", "table", "T", ""), show: ["status", "tags"] };
-  const table = boardSnapshot("store: ./W\nview: t", "table", { ...def, views: [view] }, cards, (p) => pages[p]);
+  const table = boardSnapshot("store: ./W\nview: t", "table", { ...def, views: [view] }, cards, (p) => pages[p], TODAY);
   eq(table.kind, "table");
   eq(table.fields, ["Status", "Tags"], "the columns a view shows, named as the store names them");
   eq(table.rows.length, 3);
@@ -895,7 +990,7 @@ const eq = (a, b, msg) => {
   ok(!("page" in table.rows[2]), "a card with no page of its own isn't a link");
   eq(table.rows[2].cells, [[{ text: "Todo", color: "grey" }], []], "an empty cell is empty, not missing");
   // The same store, the same config, two languages: two different views.
-  eq(boardSnapshot("store: ./W", "kanban", def, cards, () => undefined).kind, undefined);
+  eq(boardSnapshot("store: ./W", "kanban", def, cards, () => undefined, TODAY).kind, undefined);
 
   const sorted = boardSnapshot(
     "store: ./W",
@@ -903,6 +998,7 @@ const eq = (a, b, msg) => {
     { ...def, views: [{ ...newView("t", "table", "T", ""), sort: { field: "due", dir: "asc" } }] },
     cards,
     () => undefined,
+    TODAY,
   );
   eq(sorted.rows.map((r) => r.title), ["Beta", "Alpha", "Gamma"], "the view's sort is what it publishes");
 
@@ -917,6 +1013,7 @@ const eq = (a, b, msg) => {
     },
     cards,
     () => undefined,
+    TODAY,
   );
   eq(filtered.rows.map((r) => r.title), ["Beta"], "a view's filter travels with it");
 
@@ -924,7 +1021,7 @@ const eq = (a, b, msg) => {
   const many = Array.from({ length: 240 }, (_, i) =>
     card(`C${String(i).padStart(3, "0")}`, { status: "Todo", rank: `a${i}` }),
   );
-  const big = boardSnapshot("store: ./W", "table", def, many, () => undefined);
+  const big = boardSnapshot("store: ./W", "table", def, many, () => undefined, TODAY);
   eq(big.rows.length, 200);
   eq(big.more, 40);
 }

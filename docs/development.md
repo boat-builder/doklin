@@ -151,4 +151,16 @@ components consume those tokens and carry no theme-specific literals. The
 document font is Newsreader (bundled, OFL) at 18px in a 68ch measure, with a
 "Wide page" setting (`doklin:page-wide`) for the 1080px canvas.
 
-Theme is persisted to `localStorage` under `doklin:theme`.
+Settings → Appearance picks the theme from four swatches (each painted from
+its own palette: `data-theme` scopes a palette to any element) and the
+document font — Serif, Sans or Mono — which sets `data-doc-font` on `<html>`
+and only ever changes the note body. Both apply live with the menu open.
+Theme is persisted to `localStorage` under `doklin:theme`, the font under
+`doklin:doc-font`.
+
+Published pages wear the same tokens and the same Newsreader file: the cloud
+worker imports `tokens.css` and `fonts.css` when it is built
+(`cloud-worker/src/theme.ts`, docs/cloud.md §5.6), the light palette as
+`:root` and the dark one under `prefers-color-scheme` (paper and the font
+choice stay in the app). Keep `tokens.css` a flat list of rules with the
+three selectors the worker reads — its tests fail on one it can't find.

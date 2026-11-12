@@ -1868,6 +1868,140 @@ body,
   font-weight: 600;
 }
 
+/* Appearance: the themes and the document fonts as rows of tiles — a
+   preview over its name, the chosen one ringed in the accent. */
+.settings-tiles {
+  display: grid;
+  gap: 6px;
+  padding: 4px 6px 8px;
+}
+
+.settings-tiles.is-themes {
+  grid-template-columns: repeat(4, 58px);
+}
+
+.settings-tiles.is-fonts {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.settings-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.settings-tile:hover,
+.settings-tile.is-active {
+  color: var(--text-1);
+}
+
+.settings-tile.is-active .settings-tile-name {
+  font-weight: 600;
+}
+
+.settings-tile-face {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 40px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--border);
+  transition: box-shadow var(--dur-fast) var(--ease);
+}
+
+.settings-tile:hover .settings-tile-face {
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.settings-tile.is-active .settings-tile-face {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.settings-tile:focus-visible {
+  outline: none;
+}
+
+.settings-tile:focus-visible .settings-tile-face {
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+/* A theme in miniature (ThemeSwatch): its canvas, its sheet with two lines of
+   text, and the accent — each face carries data-theme, so these tokens are
+   that theme's. System lays dark over light, cut on the diagonal. */
+.settings-swatch-face {
+  position: absolute;
+  inset: 0;
+  padding: 8px 0 0 9px;
+  background: var(--canvas);
+}
+
+.settings-swatch-face + .settings-swatch-face {
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+
+.settings-swatch-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 100%;
+  padding: 7px 8px;
+  border-radius: 5px 0 0 0;
+  background: var(--sheet);
+  box-shadow: var(--shadow-sheet);
+}
+
+.settings-swatch-line {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-2);
+}
+
+.settings-swatch-line.is-short {
+  width: 62%;
+  background: var(--text-3);
+}
+
+.settings-swatch-accent {
+  width: 38%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* A document font, as "Ag" in that face on the sheet. */
+.settings-font-sample {
+  display: grid;
+  place-items: center;
+  background: var(--sheet);
+  color: var(--text-1);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.settings-font-sample.is-serif {
+  font-family: var(--font-serif);
+  font-size: 21px;
+}
+
+.settings-font-sample.is-sans {
+  font-family: var(--font-sans);
+}
+
+.settings-font-sample.is-mono {
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+
 /* ---------- Custom select (Select.tsx) ----------
    The native <select> trigger was easy to de-chrome, but its dropdown list is
    OS chrome that ignores the theme palettes. Select.tsx renders the menu

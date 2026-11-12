@@ -209,14 +209,19 @@ node verify-harness/drive-versions.mjs      # 32 steps over the SAME harness pag
 node verify-harness/serve-worker.mjs &     # the cloud worker bundled in-process (mermaid module
                                            # included, ~1 min) over an in-memory bucket seeded with
                                            # cloud-worker/test/seed.mjs, on http://localhost:8787
-node verify-harness/drive-public.mjs       # 8 steps against it, in Chromium: a note with stored
+node verify-harness/drive-public.mjs       # 10 steps against it, in Chromium: a note with stored
                                            # column widths, the MD/HTML pill and the sandboxed
                                            # rendition (its script runs), the folder page's cards,
                                            # the crumb on a nested note, a board with JavaScript
                                            # OFF (cards linking to their pages, a card's
                                            # properties), a diagram hydrating in light and dark,
-                                           # the root page's rewritten links and a picture inside
-                                           # the published folder, 404s
+                                           # the app's look (the served Newsreader at 18px in the
+                                           # reading measure, the accents light and dark), a board
+                                           # drawn as the app's embed (progress, stage glyphs,
+                                           # tinted columns, excerpts, a checked card, a date; a
+                                           # click anywhere on a card opens it), the root page's
+                                           # rewritten links and a picture inside the published
+                                           # folder, 404s
 ```
 
 The driver prints PASS/FAIL per step and exits non-zero on failure.

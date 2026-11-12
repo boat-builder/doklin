@@ -35,12 +35,12 @@ import {
 } from "./storeChrome";
 import { LiveGlyph, useLivePages } from "./livePages";
 import type { StoreModel } from "./store/model";
-import { propText } from "./store/frontmatter";
 import {
   boardColumns,
   cardChips,
+  cardDates,
+  cardFaceFields,
   renamedCardPath,
-  chipFieldsOf,
   orderedOptions,
   sanitizeTitle,
   type BoardColumn,
@@ -179,10 +179,7 @@ export default function KanbanBoard({
   // What a card face shows: the fields this view shows, except the one the
   // board groups by (the column already says it). Dates read as dates in the
   // card's foot; everything else is a pill.
-  const [pillFields, dateFields] = useMemo(() => {
-    const shown = chipFieldsOf(def, groupBy, show);
-    return [shown.filter((f) => f.type !== "date"), shown.filter((f) => f.type === "date")];
-  }, [def, groupBy, show]);
+  const face = useMemo(() => cardFaceFields(def, groupBy, show), [def, groupBy, show]);
 
   // New card lands in the first column a card is meant to start in: the
   // first declared one, past the "No status" column.
@@ -486,10 +483,10 @@ export default function KanbanBoard({
                       {excerpt && card.excerpt && (
                         <div className="dk-card-excerpt">{card.excerpt}</div>
                       )}
-                      <Chips card={card} def={def} fields={pillFields} />
+                      <Chips card={card} def={def} fields={face.pills} />
                       <CardFoot
                         card={card}
-                        fields={dateFields}
+                        fields={face.dates}
                         finished={finished}
                         live={live.has(card.path)}
                       />
@@ -679,12 +676,6 @@ function Chips({
   );
 }
 
-// A date field that reads as a deadline — the one a card's date turns amber
-// for when it comes close. Any other date (started, shipped) is just a date.
-const DUE_RE = /\b(due|deadline)\b/i;
-const SOON_DAYS = 3;
-const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
 /** The card's foot: its dates ("Dec 4", amber when a deadline is close),
  *  and the live glyph when the card has a page of its own. */
 function CardFoot({
@@ -699,31 +690,15 @@ function CardFoot({
   finished: boolean;
   live: boolean;
 }) {
-  const items = fields.flatMap((f) => {
-    const raw = propText(card.props[f.id]).trim();
-    if (raw === "") return [];
-    const m = ISO_DAY_RE.exec(raw);
-    if (!m) return [{ field: f, text: raw, soon: false }];
-    const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const days = Math.round((day.getTime() - today.getTime()) / 86_400_000);
-    const text = day.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      ...(day.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
-    });
-    const due = DUE_RE.test(f.name) || DUE_RE.test(f.id);
-    return [{ field: f, text, soon: due && !finished && days <= SOON_DAYS }];
-  });
+  const items = cardDates(card, fields, finished, new Date());
   if (items.length === 0 && !live) return null;
   return (
     <div className="dk-card-meta">
       {items.map((d) => (
         <span
-          key={d.field.id}
+          key={d.key}
           className={`dk-card-date ${d.soon ? "is-soon" : ""}`}
-          title={d.field.name}
+          title={d.name}
         >
           <CalendarIcon size={12} />
           {d.text}

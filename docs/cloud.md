@@ -350,6 +350,7 @@ GET /<dirSlug>/<rel/path>      a note inside it (markdown extension dropped, seg
 GET /og.png · /<slug>/og.png   the site's static Open Graph image
 GET /robots.txt · /favicon.ico · /apple-touch-icon.png
 GET /__web/<tag>/mermaid.js    the standalone mermaid module (immutable, content-tagged)
+GET /__web/fonts/<file>        the Newsreader files the app bundles (a week, like the icons)
 everything else                a 404 page — an unpublished path, a slug whose file is gone
 ```
 
@@ -407,7 +408,7 @@ reports the binding so the setup wizard can tell "fresh domain" from
 
 ### 5.6 Public rendering — from synced files
 
-Five modules, each a question:
+Six modules, each a question:
 
 - **`workspace.ts` — what is in the synced tree.** `openWorkspace(env)` does
   one `head(manifest.json)` per request and fetches the body only when the
@@ -446,8 +447,25 @@ Five modules, each a question:
   `link` and `image` for the rewriting), the page chrome (`noindex`, the
   `og:*` and twitter meta, the MD/HTML pill, the "← Folder" crumb), the
   table-of-contents layouts, the mermaid hydrator (the diagram takes the
-  page's palette in light and in dark, as in the app), and the stylesheet —
-  ported from the desktop and inlined in every page.
+  page's palette in light and in dark, as in the app), and the stylesheet,
+  inlined in every page. A board or table is drawn as the app's embed draws
+  it — the bar naming its kind, the board's name over its progress ("1 of 3
+  done") or its count, columns tinted in their hue with the stage glyph,
+  cards with their excerpt (when the view shows them), pills and dates, a
+  finished card checked — and a card with a page is a link over the whole
+  card.
+- **`theme.ts` — the app's look.** The page's tokens and type are not
+  restated: the worker imports `src/styles/tokens.css` and
+  `src/styles/fonts.css` as text, and the Newsreader files as bytes, when it
+  is built. The theme-independent `:root`, the light palette and the dark
+  palette are taken by selector — light as `:root`, dark under
+  `prefers-color-scheme`, so a page reads right with scripts off — and
+  paper and the document-font variants are left out (they are choices made
+  inside the app; no browser can ask for them). The `@font-face` rules point
+  at `/__web/fonts/`, and a page set in the serif preloads its latin face.
+  A palette change in the app reaches published pages with the next worker
+  build — and, like any change to what a page looks like, with a
+  `WORKER_VERSION` bump, which is how a deployed domain learns to update.
 - **`public.ts` — routing and the cache.** `caches.default` under the
   synthetic key `https://cache.doklin/<manifestEtag><pathname><search>`,
   filled with `ctx.waitUntil`; the cached copy is good for a day, the
@@ -455,8 +473,8 @@ Five modules, each a question:
   assets bypass. A manifest change gives every URL a new key, so a page is
   never served stale past one `head`; old entries age out. Steady state per
   public request: one `head`, one cache hit. `static.ts` holds the landing
-  page, the 404 page, robots, the icons, the OG image (`og.ts`) and the
-  mermaid module.
+  page, the 404 page (both in the same theme), robots, the icons, the OG
+  image (`og.ts`), the fonts and the mermaid module.
 
 | Input | Where it comes from |
 | --- | --- |
@@ -508,10 +526,11 @@ decision 7).
 
 - `cloud-worker/src/version.ts` is the one place the version lives — a
   separate file so the app's build can read the integer without bundling
-  the worker (§7.1): `WORKER_VERSION` (8 — the sync API was 1; publishing
+  the worker (§7.1): `WORKER_VERSION` (9 — the sync API was 1; publishing
   made it 2; the version store made it 3; the D1 binding made it 4; people
   made it 5; attribution by person made it 6; presence in D1, folded into
-  the poll, made it 7; leases made it 8), `WORKER_FEATURES`
+  the poll, made it 7; leases made it 8; public pages in the app's own look
+  made it 9, with no API change), `WORKER_FEATURES`
   (`["sync", "wipe", "publish", "boards", "versions", "members", "presence",
   "leases"]`; a feature name is a promise about behaviour, listed only once
   the behaviour exists — the engine mirrors nothing to a worker that does

@@ -3,13 +3,13 @@
 // picture of all of that which a published page carries.
 //
 // Nothing here reads a file or touches Tauri. That is the point: the board
-// tab, a note's embed, and the snapshot a share push sends all derive their
-// columns HERE, so a published board cannot quietly disagree with the board
-// it was published from — and the whole derivation can be unit-tested
+// tab, a note's embed, and the picture a published page draws all derive
+// their columns HERE, so a published board cannot quietly disagree with the
+// board it was published from — and the whole derivation can be unit-tested
 // without a browser (verify-harness/store.test.mjs).
 //
 // The live view that fills these shapes from disk is model.ts; the code that
-// reads a store to build a snapshot is publish.ts.
+// reads a synced store to build a snapshot is the cloud worker's pages.ts.
 
 import { propList, propText, type Props } from "./frontmatter";
 import { parseEmbedConfig } from "./embedConfig";
@@ -438,14 +438,74 @@ export function cardChips(card: Card, def: StoreDef, fields: Field[]): CardChip[
   return chips;
 }
 
+/**
+ * What a card face shows, split the way the face lays it out: the fields the
+ * view shows minus the group-by (chipFieldsOf), with dates in the card's foot
+ * and everything else as a pill.
+ */
+export function cardFaceFields(
+  def: StoreDef,
+  groupBy: string | null,
+  show?: string[] | null,
+): { pills: Field[]; dates: Field[] } {
+  const shown = chipFieldsOf(def, groupBy, show);
+  return { pills: shown.filter((f) => f.type !== "date"), dates: shown.filter((f) => f.type === "date") };
+}
+
+/* ---------- a card's dates ---------- */
+
+// A date field that reads as a deadline — the one a card's date turns amber
+// for when it comes close. Any other date (started, shipped) is just a date.
+const DUE_RE = /\b(due|deadline)\b/i;
+const SOON_DAYS = 3;
+const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** One date in a card's foot. */
+export type CardDate = { key: string; name: string; text: string; soon: boolean };
+
+/**
+ * A card's dates, one per date field it has a value for: "Dec 4", with the
+ * year only when it isn't this one, and as written when it isn't an ISO day.
+ * `soon` marks a deadline within SOON_DAYS of `today` on a card that isn't
+ * finished; a finished card's deadline no longer presses. `today` is the
+ * caller's, so the board in the app and the board a published page draws
+ * read the same dates the same way.
+ */
+export function cardDates(card: Card, fields: Field[], finished: boolean, today: Date): CardDate[] {
+  const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return fields.flatMap((f) => {
+    const raw = propText(card.props[f.id]).trim();
+    if (raw === "") return [];
+    const m = ISO_DAY_RE.exec(raw);
+    if (!m) return [{ key: f.id, name: f.name, text: raw, soon: false }];
+    const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const days = Math.round((day.getTime() - midnight.getTime()) / 86_400_000);
+    const text = day.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(day.getFullYear() === midnight.getFullYear() ? {} : { year: "numeric" }),
+    });
+    const due = DUE_RE.test(f.name) || DUE_RE.test(f.id);
+    return [{ key: f.id, name: f.name, text, soon: due && !finished && days <= SOON_DAYS }];
+  });
+}
+
 /* ---------- the frozen picture ---------- */
 
 /** One pill on a published card. */
 export type BoardChip = { text: string; color?: OptionColor };
 
+/** One date in a published card's foot. */
+export type BoardDateSnap = { name: string; text: string; soon?: true };
+
 export type BoardCardSnap = {
   title: string;
+  /** The card's first paragraph, when the view shows excerpts. */
+  excerpt?: string;
   chips?: BoardChip[];
+  dates?: BoardDateSnap[];
+  /** The card sits in the board's finished column. */
+  done?: true;
   /** The card's own public address, when the card is inside a published folder (the worker fills it in). */
   page?: string;
 };
@@ -453,6 +513,8 @@ export type BoardCardSnap = {
 export type BoardColumnSnap = {
   name: string;
   color?: OptionColor;
+  /** Where the column sits in the work, on a board that tracks progress. */
+  stage?: Stage;
   cards: BoardCardSnap[];
   /** Cards beyond the cap, counted rather than dropped silently. */
   more?: number;
@@ -549,6 +611,11 @@ const snapChips = (chips: CardChip[]): BoardChip[] =>
  * nothing in it is part of the board's shape — and dropped otherwise: the
  * "No status" column and a stray value's column exist on the desktop so you
  * can drag into them, and nobody drags on a published page.
+ *
+ * A card carries what its face in the app shows: its excerpt when the view
+ * shows excerpts, its pills, its dates (read against `today`), and — on a
+ * board that tracks progress — whether it is finished, with each column's
+ * stage beside it.
  */
 export function boardSnapshot(
   fence: string,
@@ -556,6 +623,7 @@ export function boardSnapshot(
   def: StoreDef,
   cards: Card[],
   pageIdFor: (cardPath: string) => string | undefined,
+  today: Date,
 ): BoardSnap | null {
   const cfg = parseEmbedConfig(fence);
   const view = resolveView(def, kind, cfg.view);
@@ -565,21 +633,33 @@ export function boardSnapshot(
 
   const groupBy = cfg.group ?? view.groupBy;
   if (!groupBy) return null;
-  const fields = chipFieldsOf(def, groupBy, view.show);
+  const face = cardFaceFields(def, groupBy, view.show);
+  const stages = boardStages(def, groupBy);
   const hide = cfg.hide.length > 0 ? cfg.hide : (view.hide ?? []);
   const columns: BoardColumnSnap[] = [];
   for (const col of boardColumns(def, kept, groupBy, { hide, sort: view.sort ?? null })) {
     if (col.cards.length === 0 && !col.declared) continue;
     const shown = col.cards.slice(0, MAX_CARDS);
+    const stage = stages?.stages.get(col.key);
+    const finished = stages !== null && col.key === stages.done;
     columns.push({
       name: clipText(col.label),
       ...(col.color ? { color: col.color } : {}),
+      ...(stage ? { stage } : {}),
       cards: shown.map((card) => {
-        const chips = snapChips(cardChips(card, def, fields));
+        const chips = snapChips(cardChips(card, def, face.pills));
+        const dates = cardDates(card, face.dates, finished, today).map((d) => ({
+          name: clipText(d.name),
+          text: clipText(d.text),
+          ...(d.soon ? { soon: true as const } : {}),
+        }));
         const page = pageIdFor(card.path);
         return {
           title: clipText(card.title),
+          ...(view.excerpt && card.excerpt ? { excerpt: clipText(card.excerpt) } : {}),
           ...(chips.length > 0 ? { chips } : {}),
+          ...(dates.length > 0 ? { dates } : {}),
+          ...(finished ? { done: true as const } : {}),
           ...(page ? { page } : {}),
         };
       }),

@@ -17,12 +17,16 @@ import { deriveId, type TableCols } from "../../src/metaFile";
 import { KANBAN_LANG, TABLE_LANG } from "../../src/store/embedConfig";
 import {
   snapKeyOf,
+  type BoardCardSnap,
   type BoardChip,
+  type BoardColumnSnap,
   type BoardSnap,
   type KanbanSnap,
   type PageProp,
+  type Stage,
   type TableSnap,
 } from "../../src/store/board";
+import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 
 /* ---------- Words ---------- */
 
@@ -70,6 +74,41 @@ export function leadTitle(md: string): string | null {
 /** A drawn snapshot plus what the read left out (workspace.ts MAX_STORE_CARDS). */
 export type DrawnBoard = { snap: BoardSnap; unread: number };
 
+// The board's marks, as strings: the same 16-unit line drawings the app's
+// React icons are (src/storeChrome.tsx — BoardIcon, TableIcon, CalendarIcon,
+// StatusGlyph), so a published board wears the app's glyphs.
+const glyph = (size: number, body: string): string =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const BOARD_ICON = glyph(
+  13,
+  '<rect x="1.75" y="2.25" width="3.5" height="11.5" rx="1"/><rect x="6.25" y="2.25" width="3.5" height="7.5" rx="1"/><rect x="10.75" y="2.25" width="3.5" height="9.5" rx="1"/>',
+);
+const TABLE_ICON = glyph(13, '<rect x="1.75" y="2.5" width="12.5" height="11" rx="2"/><path d="M1.75 6.25h12.5M6 6.25v7.25"/>');
+const CALENDAR_ICON = glyph(12, '<rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5 1.5v3M11 1.5v3"/>');
+
+/** A column's stage of work (StatusGlyph): dashed ring, filling ring, check, slashed ring — or a dot on a board that tracks none. */
+function stageGlyph(stage: Stage | undefined, size = 15): string {
+  const ring = '<circle cx="8" cy="8" r="6" stroke-width="1.6"/>';
+  if (!stage) return glyph(size, '<circle cx="8" cy="8" r="3.75" fill="currentColor" stroke="none"/>');
+  if (stage.kind === "todo") return glyph(size, '<circle cx="8" cy="8" r="6" stroke-width="1.6" stroke-dasharray="2.3 2.1"/>');
+  if (stage.kind === "done") {
+    return glyph(
+      size,
+      '<circle cx="8" cy="8" r="6.75" fill="currentColor" stroke="none"/><path class="dk-glyph-check" d="M5.25 8.25l1.9 1.9 3.6-4" stroke-width="1.7"/>',
+    );
+  }
+  if (stage.kind === "closed") return glyph(size, `${ring}<path d="M4.5 11.5l7-7" stroke-width="1.6"/>`);
+  // The pie grows clockwise from twelve o'clock.
+  const r = 3.5;
+  const a = stage.fill * 2 * Math.PI;
+  const x = (8 + r * Math.sin(a)).toFixed(2);
+  const y = (8 - r * Math.cos(a)).toFixed(2);
+  return glyph(
+    size,
+    `${ring}<path d="M8 8V${8 - r}A${r} ${r} 0 ${stage.fill > 0.5 ? 1 : 0} 1 ${x} ${y}Z" fill="currentColor" stroke="none"/>`,
+  );
+}
+
 // Every chip names a palette colour, grey when it has none — the same
 // `dk-color-${color ?? "grey"}` the app writes, so the two markups match.
 const chipHtml = (chip: BoardChip): string =>
@@ -80,36 +119,69 @@ const boardFoot = (unread: number): string =>
     ? `<div class="dk-board-foot">${unread} more ${unread === 1 ? "card isn't" : "cards aren't"} shown here</div>`
     : "";
 
+const cardCount = (n: number): string => `<span class="dk-board-sub">${n} ${n === 1 ? "card" : "cards"}</span>`;
+
+/**
+ * The frame a board or table sits in, as a note's embed sits in the app: a
+ * bar naming the kind, then the board's own head — its name, and either its
+ * progress or its count.
+ */
+function embedHtml(kind: "Board" | "Table", name: string, summary: string, body: string, unread: number): string {
+  const title = name ? `<span class="dk-board-title">${escapeHtml(name)}</span>` : "";
+  return `<div class="dk-embed"><div class="dk-embed-bar"><span class="dk-embed-kind">${
+    kind === "Board" ? BOARD_ICON : TABLE_ICON
+  }${kind}</span></div><div class="dk-board"><div class="dk-board-head"><div class="dk-board-titlerow">${title}<span class="dk-board-spacer"></span>${summary}</div></div>${body}${boardFoot(
+    unread,
+  )}</div></div>`;
+}
+
+function cardHtml(card: BoardCardSnap): string {
+  const check = card.done ? `<span class="dk-card-check">${stageGlyph({ kind: "done", fill: 1 }, 14)}</span>` : "";
+  const title = `${check}${escapeHtml(card.title)}`;
+  // A card links to its own page exactly when it has one (the link covers
+  // the whole card, as a click on a card does in the app); otherwise it is a
+  // title, not a dead link.
+  const face = card.page
+    ? `<a class="dk-card-title" href="${escapeHtml(card.page)}">${title}</a>`
+    : `<span class="dk-card-title">${title}</span>`;
+  const excerpt = card.excerpt ? `<div class="dk-card-excerpt">${escapeHtml(card.excerpt)}</div>` : "";
+  const chips = card.chips ? `<div class="dk-card-chips">${card.chips.map(chipHtml).join("")}</div>` : "";
+  const dates = card.dates
+    ? `<div class="dk-card-meta">${card.dates
+        .map(
+          (d) =>
+            `<span class="dk-card-date${d.soon ? " is-soon" : ""}" title="${escapeHtml(d.name)}">${CALENDAR_ICON}${escapeHtml(d.text)}</span>`,
+        )
+        .join("")}</div>`
+    : "";
+  return `<li class="dk-card${card.done ? " is-done" : ""}">${face}${excerpt}${chips}${dates}</li>`;
+}
+
 /** One board, as the page shows it — class for class the app's own markup, with nothing interactive. */
 function boardHtml(board: KanbanSnap, unread = 0): string {
-  const total = board.columns.reduce((n, c) => n + c.cards.length + (c.more ?? 0), 0) + unread;
+  const count = (c: BoardColumnSnap) => c.cards.length + (c.more ?? 0);
+  const total = board.columns.reduce((n, c) => n + count(c), 0) + unread;
   const cols = board.columns
     .map((col) => {
-      const cards = col.cards
-        .map((card) => {
-          const title = escapeHtml(card.title);
-          // A card links to its own page exactly when it has one; otherwise
-          // it is a title, not a dead link.
-          const face = card.page
-            ? `<a class="dk-card-title" href="${escapeHtml(card.page)}">${title}</a>`
-            : `<span class="dk-card-title">${title}</span>`;
-          const chips = card.chips ? `<div class="dk-card-chips">${card.chips.map(chipHtml).join("")}</div>` : "";
-          return `<li class="dk-card">${face}${chips}</li>`;
-        })
-        .join("");
       // A div, not a <p>: `.doc p` is the document's paragraph styling.
       const more = col.more ? `<div class="dk-col-more">+${col.more} more</div>` : "";
-      return `<section class="dk-col"><header class="dk-col-head"><span class="dk-col-dot dk-color-${
-        col.color ?? "grey"
-      }"></span><span class="dk-col-name">${escapeHtml(col.name)}</span><span class="dk-col-count">${
-        col.cards.length + (col.more ?? 0)
-      }</span></header><ul class="dk-col-list">${cards}</ul>${more}</section>`;
+      return `<section class="dk-col dk-color-${col.color ?? "grey"}"><header class="dk-col-head"><span class="dk-col-glyph">${stageGlyph(
+        col.stage,
+      )}</span><span class="dk-col-name">${escapeHtml(col.name)}</span><span class="dk-col-count">${count(
+        col,
+      )}</span></header><ul class="dk-col-list">${col.cards.map(cardHtml).join("")}</ul>${more}</section>`;
     })
     .join("");
-  const name = board.name ? `<span class="dk-board-name">${escapeHtml(board.name)}</span>` : "";
-  return `<div class="dk-board"><div class="dk-board-head"><span class="dk-board-kind">Board</span>${name}<span class="dk-board-sub">${total} ${
-    total === 1 ? "card" : "cards"
-  }</span></div><div class="dk-board-cols">${cols}</div>${boardFoot(unread)}</div>`;
+  // How far the work has got, on a board whose finished column is showing
+  // and whose every card was read; otherwise how many cards it holds.
+  const finished = board.columns.filter((c) => c.stage?.kind === "done");
+  let summary = cardCount(total);
+  if (finished.length > 0 && unread === 0) {
+    const done = finished.reduce((n, c) => n + count(c), 0);
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    summary = `<span class="dk-progress" title="${done} of ${total} in ${escapeHtml(finished[0].name)}"><span class="dk-progress-track" aria-hidden="true"><span class="dk-progress-fill" style="width:${pct}%"></span></span>${done} of ${total} done</span>`;
+  }
+  return embedHtml("Board", board.name, summary, `<div class="dk-board-cols">${cols}</div>`, unread);
 }
 
 /** One table, as the page shows it. Its own classes, not a markdown table's: a picture of a store, not a table someone wrote. */
@@ -131,10 +203,13 @@ function tableHtml(board: TableSnap, unread = 0): string {
     })
     .join("");
   const more = board.more ? `<div class="dk-col-more">+${board.more} more</div>` : "";
-  const name = board.name ? `<span class="dk-board-name">${escapeHtml(board.name)}</span>` : "";
-  return `<div class="dk-board"><div class="dk-board-head"><span class="dk-board-kind">Table</span>${name}<span class="dk-board-sub">${total} ${
-    total === 1 ? "card" : "cards"
-  }</span></div><div class="dk-table-wrap"><table class="dk-table"><thead>${head}</thead><tbody>${rows}</tbody></table>${more}</div>${boardFoot(unread)}</div>`;
+  return embedHtml(
+    "Table",
+    board.name,
+    cardCount(total),
+    `<div class="dk-table-wrap"><table class="dk-table"><thead>${head}</thead><tbody>${rows}</tbody></table>${more}</div>`,
+    unread,
+  );
 }
 
 /** A document's properties, above its body. Empty rows never reach here. */
@@ -350,6 +425,7 @@ export function notePageHtml(p: NotePageInputs): string {
 <html lang="en">
 <head>
 ${headHtml(p.meta)}
+${FONT_PRELOAD}
 <style>${PAGE_CSS}</style>
 </head>
 <body>
@@ -487,6 +563,7 @@ export function tocPageHtml(p: TocPageInputs): string {
 <html lang="en">
 <head>
 ${headHtml(p.meta)}
+${FONT_PRELOAD}
 <style>${PAGE_CSS}</style>
 </head>
 <body>
@@ -559,133 +636,146 @@ function mermaidHydrator(tag: string): string {
 
 /* ---------- Styles ---------- */
 
-// The reading page. The same tokens the app's reading view uses, so a
-// published note and the note in the app read as one document; light and
-// dark from the visitor's own preference.
-const PAGE_CSS = `
-:root {
-  --bg: #ffffff;
-  --text: #37352f;
-  --muted: rgba(55, 53, 47, 0.5);
-  --border: rgba(55, 53, 47, 0.09);
-  --surface: #f7f6f3;
-  --inline-code: #b45309;
-  --link: #2383e2;
-  --selection: rgba(35, 131, 226, 0.18);
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #191919;
-    --text: #ebebeb;
-    --muted: rgba(255, 255, 255, 0.45);
-    --border: rgba(255, 255, 255, 0.08);
-    --surface: #1f1f1f;
-    --inline-code: #f59e9e;
-    --link: #529cca;
-    --selection: rgba(255, 255, 255, 0.12);
-  }
-}
+// The reading page, in the app's own theme (theme.ts: tokens.css and the
+// Newsreader face, light and dark from the visitor's preference). The rules
+// below restate the app's DOCUMENT rules (App.css: the editor's type, links,
+// quotes, code, tables, and the board an embed draws) for marked's plain
+// HTML, so a published note and the note in the app read as one document.
+// The chrome around the document — the crumb, the MD/HTML pill, the footer —
+// is the app's UI face at its UI sizes.
+const PAGE_CSS = `${PAGE_THEME}
 * { box-sizing: border-box; }
-/* The document flows vertically and never scrolls sideways — mirrors the app's
+/* The document flows vertically and never scrolls sideways — like the app's
    editor canvas. Wide blocks (code, tables, boards) scroll within themselves. */
-html, body { margin: 0; padding: 0; background: var(--bg); overflow-x: hidden; }
-/* Sticky footer: the body fills the viewport and the footer rides its bottom edge. */
+html, body { margin: 0; padding: 0; background: var(--sheet); overflow-x: hidden; }
+/* Sticky footer: the body fills the viewport and the footer rides its bottom
+   edge. The body is the UI face: mermaid measures its labels against it. */
 body {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
-  font-size: 16px;
-  line-height: 1.6;
-  font-synthesis: none;
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--selection); }
+/* The document: the app's reading measure (68ch of the document font) plus
+   its side padding, set in the document font at the document size. */
 main.doc {
   width: 100%;
-  max-width: 1080px;
+  max-width: calc(var(--doc-measure) + 128px);
   margin: 0 auto;
-  padding: 48px 64px 96px;
+  padding: 56px 64px 96px;
+  font-family: var(--doc-font);
+  font-size: var(--doc-size);
+  line-height: var(--doc-leading);
 }
 @media (max-width: 720px) {
-  main.doc { padding: 32px 24px 72px; }
+  main.doc { padding: 40px 24px 72px; }
 }
 .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
+  margin: 0;
+  padding: 2px 0;
   font-family: inherit;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  margin-bottom: 4px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--text-1);
 }
-.doc h1 { font-size: 32px; line-height: 1.25; margin-top: 28px; }
-.doc h2 { font-size: 24px; line-height: 1.3; margin-top: 24px; }
-.doc h3 { font-size: 19px; line-height: 1.35; margin-top: 20px; }
-.doc h4, .doc h5, .doc h6 { font-size: 16px; margin-top: 16px; }
+.doc h1 { font-size: 2em; line-height: 1.18; letter-spacing: -0.02em; margin-top: 28px; }
+.doc h2 { font-size: 1.389em; line-height: 1.28; margin-top: 26px; }
+.doc h3 { font-size: 1.111em; line-height: 1.35; margin-top: 20px; }
+.doc h4, .doc h5, .doc h6 { font-size: 1em; margin-top: 16px; }
 .doc > :first-child { margin-top: 0; }
-.doc p { font-size: 16px; line-height: 1.6; margin: 0; padding: 3px 0; }
-.doc ul, .doc ol { margin: 4px 0; padding-left: 26px; }
+.doc p { margin: 0; padding: 3px 0; }
+.doc ul, .doc ol { margin: 2px 0; padding-left: 1.4em; }
 .doc li { padding: 2px 0; }
+.doc li::marker { color: var(--text-3); }
 .doc li > p { padding: 0; }
+.doc input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.45em 0 0; }
+.doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
+/* Quotes: a quiet bar and the secondary ink, not a tinted slab. */
 .doc blockquote {
-  margin: 6px 0;
-  padding: 2px 0 2px 14px;
-  border-left: 3px solid var(--text);
+  position: relative;
+  margin: 4px 0;
+  padding: 0 0 0 22px;
+  color: var(--text-2);
 }
-.doc a { color: var(--link); text-decoration: none; }
-.doc a:hover { text-decoration: underline; }
+.doc blockquote::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 100px;
+  background: var(--quote-bar);
+}
+.doc a {
+  color: var(--accent);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: text-decoration-color var(--dur-fast) var(--ease);
+}
+.doc a:hover { text-decoration-color: var(--accent); }
+/* Code: the mono face, a step down from the prose; inline code a neutral pill. */
 .doc code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 85%;
-  padding: 0.15em 0.35em;
+  font-family: var(--font-mono);
+  font-size: 87.5%;
+  line-height: 1.4286;
+  padding: 0 2px;
   border-radius: 4px;
-  background: var(--surface);
-  color: var(--inline-code);
+  color: var(--code-ink);
+  background: color-mix(in srgb, var(--code-bg), transparent 40%);
 }
 .doc pre {
   margin: 8px 0;
-  padding: 16px 20px;
-  border-radius: 8px;
-  background: var(--surface);
+  padding: 14px 18px;
+  border-radius: var(--r-md);
+  background: var(--code-bg);
   overflow-x: auto;
 }
-.doc pre code {
-  padding: 0;
-  background: none;
-  color: var(--text);
-  font-size: 13.5px;
-  line-height: 1.55;
-}
-.doc img { max-width: 100%; border-radius: 4px; }
+.doc pre code { padding: 0; background: none; font-size: 0.85em; line-height: 1.5; }
+.doc img { max-width: 100%; vertical-align: bottom; border-radius: var(--r-xs); }
 /* Rendered mermaid diagrams (the hydrator swaps them in for their fenced
    code blocks). Colors live inside the SVG, derived from this page's palette
-   — this is layout only: a centered figure, wide charts scroll within it. */
+   — this is layout only: a centered figure, wide charts scroll within it.
+   Mermaid measures its labels against the body, so a diagram is set in the
+   body's face and size, never the document's: a mismatch clips the label
+   boxes. The same goes for the page's paragraph styling (.doc p). */
 .doc .dk-mermaid {
   display: flex;
   justify-content: safe center;
   margin: 8px 0;
   padding: 12px 0;
   overflow-x: auto;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
 }
 .doc .dk-mermaid svg { max-width: 100%; flex: none; }
-/* The page's paragraph styling (.doc p) must not restyle the HTML labels
-   inside a diagram — mermaid measures them outside .doc, and a mismatch
-   clips the label boxes. */
 .doc .dk-mermaid p { font-size: inherit; line-height: inherit; padding: 0; }
 .doc hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+/* Tables: hairlines from the theme, a sunken header row. */
 .doc table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
 /* A table WITH stored column widths: the widths come from a colgroup, which
    only takes effect on a real table box — so the horizontal scroll that
    display:block gives every other table moves out to a wrapper. */
 .doc .dk-table-scroll { overflow-x: auto; margin: 8px 0; }
 .doc table.dk-cols { display: table; table-layout: fixed; margin: 0; }
-.doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
-.doc th { background: var(--surface); font-weight: 600; }
+.doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; vertical-align: top; }
+.doc th { background: var(--sunken); font-weight: 600; }
 /* ---- Boards and properties ----
-   The app's own board (src/App.css) rendered for a reader: same class names,
-   same named palette, no drag affordances and no scroll traps. Colours are
-   one hue/saturation pair per name with the ink and wash swapped for dark,
-   exactly as the app does it, so "green" means the same green on both. */
+   The app's own board (App.css) as a note's embed draws it, rendered for a
+   reader: the same class names, the same named palette, no drag affordances
+   and no scroll traps. Each option name sets a hue; the theme sets how dark
+   a pill's ink, how strong its wash, how tinted a column and how bright a
+   glyph (--dk-ink, --dk-wash, --dk-col-wash, --dk-dot), so "green" means the
+   same green here as there. Board chrome is the UI face, not the document's. */
 .dk-color-grey { --dk-h: 220; --dk-s: 6%; }
 .dk-color-brown { --dk-h: 25; --dk-s: 35%; }
 .dk-color-orange { --dk-h: 32; --dk-s: 80%; }
@@ -695,142 +785,229 @@ main.doc {
 .dk-color-purple { --dk-h: 268; --dk-s: 50%; }
 .dk-color-pink { --dk-h: 330; --dk-s: 62%; }
 .dk-color-red { --dk-h: 2; --dk-s: 68%; }
-:root { --dk-ink: 30%; --dk-wash: 0.15; }
-@media (prefers-color-scheme: dark) {
-  :root { --dk-ink: 76%; --dk-wash: 0.24; }
-}
 .dk-chip {
   display: inline-block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
-  line-height: 16px;
-  padding: 0 6px;
-  border-radius: 4px;
-  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50% / var(--dk-wash));
-  color: hsl(var(--dk-h, 220) var(--dk-s, 6%) var(--dk-ink));
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 20px;
+  padding: 0 7px;
+  border-radius: var(--r-xs);
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-wash));
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-ink));
 }
 /* The document's own frontmatter, above the body and ruled off from it. */
 .doc .dk-props {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin: 0 0 20px;
+  margin: 0 0 24px;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.4;
 }
-.doc .dk-prop-row { display: flex; align-items: baseline; gap: 8px; min-height: 24px; }
+.doc .dk-prop-row { display: flex; align-items: flex-start; gap: 8px; min-height: 26px; }
 .doc .dk-prop-label {
   flex: 0 0 130px;
-  font-size: 12px;
-  color: var(--muted);
+  padding: 4px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.doc .dk-prop-value { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
-/* A board embedded in the document. It sits in the text flow (it is a block
-   of the document, not a pane), and scrolls sideways within itself. */
-.doc .dk-board {
-  margin: 16px 0;
+.doc .dk-prop-value { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px 0; }
+/* A board embedded in the document: a block of the note, framed and barred
+   like the app's embed, scrolling sideways within itself. */
+.doc .dk-embed {
+  margin: 18px 0;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border-radius: var(--r-lg);
+  background: var(--sheet);
   overflow: hidden;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.4;
 }
-.doc .dk-board-head {
+.doc .dk-embed-bar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  padding: 10px 12px 6px;
-  font-size: 12px;
-  color: var(--muted);
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sunken);
 }
-.doc .dk-board-kind { text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
-.doc .dk-board-name { color: var(--text); font-weight: 600; font-size: 13px; }
-.doc .dk-board-sub { margin-left: auto; }
-.doc .dk-board-foot { padding: 0 12px 10px; font-size: 11.5px; color: var(--muted); }
+.doc .dk-embed-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.doc .dk-embed-kind > svg { color: var(--board); }
+.doc .dk-board-head { padding: 12px 14px 0; }
+.doc .dk-board-titlerow { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 22px; }
+.doc .dk-board-title {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc .dk-board-spacer { flex: 1 1 auto; }
+.doc .dk-board-sub { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* "1 of 3 done", over a bar in the finished colour. */
+.doc .dk-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.doc .dk-progress-track { width: 84px; height: 6px; border-radius: 3px; background: var(--hover); overflow: hidden; }
+.doc .dk-progress-fill { display: block; height: 100%; border-radius: 3px; background: var(--live); }
+.doc .dk-board-foot { padding: 0 14px 12px; font-size: var(--fs-xs); color: var(--text-3); }
 .doc .dk-board-cols {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 0 12px 12px;
+  gap: 12px;
+  padding: 12px 14px 14px;
   overflow-x: auto;
 }
+/* A column is washed in its own hue, so the board reads by colour before a
+   single word of it is read. */
 .doc .dk-col {
-  flex: 0 0 220px;
-  border-radius: 8px;
-  padding: 6px;
-  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+  flex: 0 0 248px;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-lg);
+  padding: 4px 6px 6px;
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-col-wash));
 }
-.doc .dk-col-head { display: flex; align-items: center; gap: 6px; padding: 4px 4px 8px; }
-.doc .dk-col-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: hsl(var(--dk-h, 220) var(--dk-s, 6%) 50%);
-}
+.doc .dk-col-head { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 4px 0 6px; min-width: 0; }
+.doc .dk-col-glyph { flex: none; display: grid; place-items: center; color: hsl(var(--dk-h) var(--dk-s) var(--dk-dot)); }
+.doc .dk-glyph-check { stroke: var(--on-fill); }
 .doc .dk-col-name {
-  font-size: 12px;
+  min-width: 0;
+  font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--text);
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.doc .dk-col-count { font-size: 11px; color: var(--muted); margin-left: auto; }
-.doc .dk-col-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.doc .dk-col-count {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  color: hsl(var(--dk-h) var(--dk-s) var(--dk-ink));
+  background: hsl(var(--dk-h) var(--dk-s) 50% / var(--dk-wash));
 }
-.doc .dk-col-list li { margin: 0; }
+.doc .dk-col-list { list-style: none; margin: 0; padding: 1px 1px 2px; display: flex; flex-direction: column; gap: 8px; }
+.doc .dk-col-more { margin: 6px 6px 2px; font-size: var(--fs-xs); color: var(--text-3); }
+/* A card: raised off its column. One with a page of its own is a link over
+   the whole card, and lifts a pixel under the pointer (a translate, never a
+   scale — the app's rule, for the same blur). */
 .doc .dk-card {
-  border-radius: 6px;
-  background: var(--bg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.09), 0 0 0 1px var(--border);
-  padding: 8px 10px;
+  position: relative;
   display: flex;
   flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--raised);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
+  transition: box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.doc .dk-card:has(> a.dk-card-title):hover {
+  box-shadow: var(--shadow-card-hover), 0 0 0 1px var(--border-strong);
+  transform: translateY(-1px);
+}
+.doc .dk-card-title {
+  display: flex;
+  align-items: flex-start;
   gap: 6px;
-}
-.doc .dk-card-title { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
-.doc a.dk-card-title { color: var(--link); text-decoration: none; }
-.doc a.dk-card-title:hover { text-decoration: underline; }
-.doc .dk-card-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.doc .dk-col-more { margin: 6px 4px 2px; font-size: 11px; color: var(--muted); }
-/* A store shown as a table. Its own rules, not the document table's: this is
-   a picture of a store, not a table someone wrote in the note. */
-.doc .dk-table-wrap { padding: 0 12px 12px; overflow-x: auto; }
-.doc table.dk-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 13px; display: table; }
-.doc .dk-th {
-  text-align: left;
+  font-size: var(--fs-md);
   font-weight: 500;
-  font-size: 12px;
-  color: var(--muted);
-  border: none;
-  border-bottom: 1px solid var(--border);
-  padding: 6px 8px;
-  white-space: nowrap;
-  background: none;
+  line-height: 1.38;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+  text-decoration: none;
 }
-.doc .dk-th.is-title { min-width: 160px; }
+.doc a.dk-card-title::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.doc a.dk-card-title:focus-visible { outline: none; }
+.doc a.dk-card-title:focus-visible::after { box-shadow: 0 0 0 2px var(--accent-ring); border-radius: var(--r-md); }
+/* A finished card: checked, and stepped back. */
+.doc .dk-card.is-done .dk-card-title { color: var(--text-2); }
+.doc .dk-card-check { flex: none; display: grid; margin-top: 1px; color: hsl(var(--dk-h) var(--dk-s) var(--dk-dot)); }
+.doc .dk-card-excerpt {
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.doc .dk-card.is-done .dk-card-excerpt { color: var(--text-3); }
+.doc .dk-card-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+/* The card's foot: its dates. A deadline that is close reads amber. */
+.doc .dk-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.doc .dk-card-date { display: inline-flex; align-items: center; gap: 4px; }
+.doc .dk-card-date.is-soon { color: var(--warn-ink); }
+/* A store shown as a table: the app's table view, not a markdown table. */
+.doc .dk-table-wrap { padding: 4px 14px 14px; overflow-x: auto; }
+.doc table.dk-table { display: table; width: 100%; margin: 0; border-collapse: collapse; font-size: var(--fs-md); }
+.doc .dk-th {
+  height: 34px;
+  padding: 0 8px;
+  border: none;
+  background: none;
+  box-shadow: inset 0 -1px 0 var(--border);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+  text-align: left;
+  white-space: nowrap;
+}
+.doc .dk-th.is-title { min-width: 220px; }
 .doc .dk-td { border: none; border-bottom: 1px solid var(--border); padding: 6px 8px; vertical-align: middle; }
+.doc .dk-tr:hover .dk-td { background: color-mix(in srgb, var(--hover) 60%, transparent); }
 .doc .dk-td .dk-chip { margin-right: 4px; }
-.doc .dk-row-title { font-size: 13px; overflow-wrap: anywhere; }
-.doc a.dk-row-title { color: var(--link); text-decoration: none; }
-.doc a.dk-row-title:hover { text-decoration: underline; }
-.doc input[type="checkbox"] { margin-right: 6px; }
-.doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
-.muted { color: var(--muted); }
-/* MD/HTML version pill (only rendered when a page has both versions),
-   pinned top-right. */
+.doc .dk-row-title { font-weight: 500; color: var(--text-1); text-decoration: none; overflow-wrap: anywhere; }
+.doc a.dk-row-title:hover { color: var(--accent); }
+/* ---- The page's own chrome, floating over the document ---- */
+/* MD/HTML version pill (only rendered when a page has both versions), pinned
+   top-right: the app's segmented control — a tinted track, the chosen side
+   lifted — on a frosted float. */
 .page-top {
   position: fixed;
   top: 14px;
@@ -840,43 +1017,28 @@ main.doc {
   align-items: center;
   gap: 8px;
 }
-.view-pill {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+.view-pill, .home-crumb {
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--raised) 82%, transparent);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
+.view-pill { display: flex; gap: 2px; padding: 3px; }
 .view-seg {
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
-  color: var(--muted);
+  color: var(--text-3);
   text-decoration: none;
+  transition: background var(--dur-fast), color var(--dur-fast);
 }
-.view-seg:hover { color: var(--text); }
-.view-seg.is-active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 0 0 1px var(--border);
-}
-footer {
-  width: 100%;
-  max-width: 1080px;
-  margin: auto auto 0;
-  padding: 24px 64px 48px;
-  font-size: 12px;
-  color: var(--muted);
-  text-align: center;
-}
-footer a { color: var(--muted); }
+.view-seg:hover { color: var(--text-1); }
+.view-seg.is-active { background: var(--hover); color: var(--text-1); }
 /* "Back to the folder" crumb on notes reached through a published folder —
-   the view pill's mirror image, pinned top-left. */
+   the pill's mirror image, pinned top-left. */
 .home-crumb {
   position: fixed;
   top: 14px;
@@ -886,45 +1048,60 @@ footer a { color: var(--muted); }
   align-items: center;
   gap: 6px;
   max-width: 40vw;
-  padding: 4px 12px 4px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  font-size: 12px;
+  height: 32px;
+  padding: 0 12px 0 10px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--muted);
+  color: var(--text-2);
   text-decoration: none;
+  transition: color var(--dur-fast);
 }
-.home-crumb:hover { color: var(--text); }
+.home-crumb:hover { color: var(--text-1); }
 .home-crumb-arrow { font-weight: 400; flex: none; }
 .home-crumb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The folder page: a quiet editorial cover — title, optional description, a
-   hairline rule — over a list of tappable rows. Directories are native
-   <details> rows with a count and a rotating chevron. */
-main.toc { max-width: 680px; }
+footer {
+  width: 100%;
+  max-width: 1080px;
+  margin: auto auto 0;
+  padding: 24px 64px 44px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  text-align: center;
+}
+footer a { color: var(--text-2); text-decoration: none; }
+footer a:hover { color: var(--accent); }
+/* ---- The folder page ----
+   A quiet editorial cover — the title in the document serif, an optional
+   description, a hairline rule — over a list of rows in the UI face.
+   Directories are native <details> rows with a count and a turning chevron. */
+main.doc.toc { max-width: 680px; font-family: var(--font-ui); font-size: var(--fs-lg); line-height: 1.5; }
 .toc-head { padding: 34px 0 24px; border-bottom: 1px solid var(--border); }
-.toc-title {
+.doc h1.toc-title {
   margin: 0;
-  font-size: clamp(28px, 5.4vw, 36px);
+  padding: 0;
+  font-family: var(--font-serif);
+  font-size: clamp(30px, 5.4vw, 40px);
   line-height: 1.15;
-  font-weight: 700;
+  font-weight: 650;
   letter-spacing: -0.02em;
 }
-.toc-desc {
+.doc p.toc-desc {
   margin: 12px 0 0;
+  padding: 0;
   max-width: 40rem;
-  font-size: 16.5px;
-  line-height: 1.55;
-  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: 19px;
+  line-height: 1.5;
+  color: var(--text-2);
 }
-.toc-meta {
+.doc p.toc-meta {
   margin: 16px 0 0;
-  font-size: 12.5px;
+  padding: 0;
+  font-size: var(--fs-sm);
   font-weight: 500;
   letter-spacing: 0.02em;
-  color: var(--muted);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 .toc-meta-sep {
   display: inline-block;
@@ -933,7 +1110,7 @@ main.toc { max-width: 680px; }
   margin: 0 8px;
   vertical-align: 2.5px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--text-3);
 }
 .toc-tree { margin-top: 20px; display: flex; flex-direction: column; gap: 2px; }
 .toc-icon {
@@ -943,78 +1120,70 @@ main.toc { max-width: 680px; }
   width: 32px;
   height: 32px;
   flex: none;
-  border-radius: 8px;
-  background: var(--surface);
+  border-radius: var(--r-sm);
+  background: var(--sunken);
   border: 1px solid var(--border);
-  color: var(--muted);
-  transition: color 0.12s;
+  color: var(--text-3);
+  transition: color var(--dur-fast), background var(--dur-fast), border-color var(--dur-fast);
 }
 .toc-icon svg { width: 16px; height: 16px; }
-.doc .toc-page {
+.doc .toc-page, .toc-dir > summary {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 12px;
-  border-radius: 10px;
-  color: var(--text);
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  color: var(--text-1);
   text-decoration: none;
-  font-size: 15px;
-  font-weight: 500;
-  transition: background 0.12s;
+  font-size: var(--fs-lg);
+  transition: background var(--dur-fast);
 }
-.doc .toc-page:hover { background: var(--surface); text-decoration: none; }
-.doc .toc-page:hover .toc-icon { background: var(--bg); color: var(--text); }
+.doc .toc-page { font-weight: 500; }
+.doc .toc-page:hover, .toc-dir > summary:hover { background: var(--hover); }
+.doc .toc-page:hover .toc-icon, .toc-dir > summary:hover .toc-icon { background: var(--raised); color: var(--text-1); }
 .toc-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toc-page-arrow {
   width: 15px;
   height: 15px;
   flex: none;
   margin-left: auto;
-  color: var(--muted);
+  color: var(--text-3);
   opacity: 0;
   transform: translateX(-4px);
-  transition: opacity 0.12s, transform 0.12s;
+  transition: opacity var(--dur-fast), transform var(--dur-fast), color var(--dur-fast);
 }
-.doc .toc-page:hover .toc-page-arrow { opacity: 1; transform: none; }
+.doc .toc-page:hover .toc-page-arrow, .doc .toc-card:hover .toc-page-arrow { opacity: 1; transform: none; color: var(--accent); }
 .toc-dir { margin: 0; }
 .toc-dir > summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 12px;
-  border-radius: 10px;
   cursor: pointer;
   list-style: none;
-  font-size: 15px;
   font-weight: 600;
-  color: var(--text);
   user-select: none;
   -webkit-user-select: none;
-  transition: background 0.12s;
 }
 .toc-dir > summary::-webkit-details-marker { display: none; }
-.toc-dir > summary:hover { background: var(--surface); }
-.toc-dir > summary:hover .toc-icon { background: var(--bg); color: var(--text); }
 .toc-dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toc-count {
   margin-left: auto;
   flex: none;
   min-width: 20px;
-  padding: 1px 7px;
+  padding: 0 7px;
   border-radius: 999px;
-  background: var(--surface);
+  background: var(--sunken);
   border: 1px solid var(--border);
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
   text-align: center;
-  color: var(--muted);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 .toc-dir > summary .toc-chevron {
   width: 13px;
   height: 13px;
   flex: none;
-  color: var(--muted);
-  transition: transform 0.15s;
+  color: var(--text-3);
+  transition: transform var(--dur);
 }
 .toc-dir[open] > summary .toc-chevron { transform: rotate(90deg); }
 .toc-children {
@@ -1028,28 +1197,32 @@ main.toc { max-width: 680px; }
 .toc-empty {
   margin-top: 20px;
   padding: 44px 24px;
-  border: 1px dashed var(--border);
-  border-radius: 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-lg);
   text-align: center;
-  font-size: 14px;
-  color: var(--muted);
+  font-size: var(--fs-md);
+  color: var(--text-3);
 }
-/* Small folders (≤ TOC_CARDS_MAX pages) list every page as a card. */
+/* Small folders (≤ TOC_CARDS_MAX pages) list every page as a raised card. */
 .toc-cards { gap: 10px; }
 .doc .toc-card {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 15px 18px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  color: var(--text);
+  padding: 14px 18px;
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
+  color: var(--text-1);
   text-decoration: none;
-  transition: background 0.12s, border-color 0.12s;
+  transition: box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
-.doc .toc-card:hover { background: var(--surface); text-decoration: none; }
-.doc .toc-card:hover .toc-icon { background: var(--bg); color: var(--text); }
-.toc-card .toc-icon { width: 36px; height: 36px; border-radius: 10px; }
+.doc .toc-card:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 0 1px var(--border-strong);
+  transform: translateY(-1px);
+}
+.doc .toc-card:hover .toc-icon { background: var(--accent-wash); border-color: transparent; color: var(--accent); }
+.toc-card .toc-icon { width: 36px; height: 36px; border-radius: var(--r-md); }
 .toc-card .toc-icon svg { width: 17px; height: 17px; }
 .toc-card-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .toc-card-title {
@@ -1061,8 +1234,8 @@ main.toc { max-width: 680px; }
   white-space: nowrap;
 }
 .toc-card-path {
-  font-size: 12.5px;
-  color: var(--muted);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1084,7 +1257,9 @@ main.toc { max-width: 680px; }
 }
 `;
 
-/* The framed rendition: it owns the whole viewport; only the pill and the crumb float above it. */
+/* The framed rendition: it owns the whole viewport; only the pill and the
+   crumb float above it. A rendition paints its own page on white, as it
+   does in the app. */
 const FRAME_CSS = `
 html, body { height: 100%; overflow: hidden; }
 .raw-frame {
@@ -1093,6 +1268,6 @@ html, body { height: 100%; overflow: hidden; }
   width: 100%;
   height: 100%;
   border: 0;
-  background: #ffffff;
+  background: var(--html-page);
 }
 `;

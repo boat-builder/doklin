@@ -9,7 +9,16 @@
    written exactly once below, with no prefers-color-scheme copies: an OS
    appearance flip is a JS attribute change, like any other theme change.
    Before App.tsx runs, :root (light) applies — the window stays hidden until
-   the app is ready, so that frame is never seen.
+   the app is ready, so that frame is never seen. A palette also scopes to
+   any element carrying data-theme: Settings → Appearance draws each theme's
+   swatch that way.
+
+   Published pages wear these same tokens: the cloud worker reads this file
+   when it is built (cloud-worker/src/theme.ts) and takes the theme-independent
+   :root, the light block and the dark block by their selectors, the dark one
+   under prefers-color-scheme. Keep those three selectors as they are, and the
+   file a flat list of rules (no @media or nesting): the worker's tests fail
+   on a block it can't find.
 
    Keep colour values hex or rgb()/rgba(): mermaidTheme.ts parses tokens with
    a hex/rgb reader, and an oklch() or color-mix() VALUE here would make

@@ -351,6 +351,30 @@ const DRAFTS_META_STORAGE_KEY = "doklin:drafts-meta";
 const DRAFTS_OPEN_STORAGE_KEY = "doklin:drafts-open";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
+const DOC_FONT_STORAGE_KEY = "doklin:doc-font";
+
+/* The document font (Settings → Appearance): the bundled Newsreader serif by
+   default, or the system sans or mono. It sets the note body only — never
+   the chrome, colour or status — so it is per app, like zoom and the theme.
+   Applied as data-doc-font on <html>, which tokens.css keys --doc-font,
+   --doc-size and --doc-leading on. */
+type DocFont = "serif" | "sans" | "mono";
+const DOC_FONTS: DocFont[] = ["serif", "sans", "mono"];
+const DOC_FONT_LABEL: Record<DocFont, string> = { serif: "Serif", sans: "Sans", mono: "Mono" };
+
+function readStoredDocFont(): DocFont {
+  try {
+    const v = localStorage.getItem(DOC_FONT_STORAGE_KEY);
+    if (v && (DOC_FONTS as string[]).includes(v)) return v as DocFont;
+  } catch {
+    // localStorage may be unavailable; fall through
+  }
+  return "serif";
+}
+
+function applyDocFont(f: DocFont) {
+  document.documentElement.dataset.docFont = f;
+}
 
 /* "Wide page": the document column normally holds a reading measure
    (--doc-measure, 68ch — tokens.css); wide trades it for the 1080px canvas
@@ -488,8 +512,11 @@ function applyTheme(t: Theme) {
   root.dataset.themePref = t;
 }
 
-// Paint the stored theme before the first render, not after it.
-if (typeof document !== "undefined") applyTheme(readStoredTheme());
+// Paint the stored theme and document font before the first render, not after it.
+if (typeof document !== "undefined") {
+  applyTheme(readStoredTheme());
+  applyDocFont(readStoredDocFont());
+}
 
 function isWriteError(e: unknown): e is WriteErrorPayload {
   return (
@@ -764,6 +791,7 @@ export default function App() {
   const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
   const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
+  const [docFont, setDocFont] = useState<DocFont>(() => readStoredDocFont());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -1308,6 +1336,15 @@ export default function App() {
     darkSchemeQuery.addEventListener("change", onScheme);
     return () => darkSchemeQuery.removeEventListener("change", onScheme);
   }, [theme]);
+
+  useEffect(() => {
+    applyDocFont(docFont);
+    try {
+      localStorage.setItem(DOC_FONT_STORAGE_KEY, docFont);
+    } catch {
+      // ignore
+    }
+  }, [docFont]);
 
   useEffect(() => {
     document.documentElement.dataset.pageWidth = pageWide ? "wide" : "normal";
@@ -5634,7 +5671,9 @@ export default function App() {
       pageWide={pageWide}
       onTogglePageWide={() => setPageWide((w) => !w)}
       theme={theme}
-      onChange={setTheme}
+      onTheme={setTheme}
+      docFont={docFont}
+      onDocFont={setDocFont}
       recents={recents}
       onNewNote={() => void newDraft()}
       onOpenFile={openFilePicker}
@@ -6500,12 +6539,28 @@ function ConflictBanner({
   );
 }
 
+/** A theme in miniature: its canvas, its sheet with two lines of text, and
+ *  the accent — painted from that theme's own tokens. */
+function ThemeSwatch({ theme }: { theme: ResolvedTheme }) {
+  return (
+    <span className="settings-swatch-face" data-theme={theme}>
+      <span className="settings-swatch-sheet">
+        <span className="settings-swatch-line" />
+        <span className="settings-swatch-line is-short" />
+        <span className="settings-swatch-accent" />
+      </span>
+    </span>
+  );
+}
+
 function Settings({
   docked,
   pageWide,
   onTogglePageWide,
   theme,
-  onChange,
+  onTheme,
+  docFont,
+  onDocFont,
   recents,
   onNewNote,
   onOpenFile,
@@ -6527,7 +6582,9 @@ function Settings({
   pageWide: boolean;
   onTogglePageWide: () => void;
   theme: Theme;
-  onChange: (t: Theme) => void;
+  onTheme: (t: Theme) => void;
+  docFont: DocFont;
+  onDocFont: (f: DocFont) => void;
   recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
@@ -6754,32 +6811,57 @@ function Settings({
           )}
           <div className="settings-divider" />
           <div className="settings-section-label">Appearance</div>
-          {THEMES.map((t) => (
-            <button
-              key={t}
-              role="menuitemradio"
-              aria-checked={theme === t}
-              className={`settings-option ${theme === t ? "is-active" : ""}`}
-              onClick={() => {
-                onChange(t);
-                setOpen(false);
-              }}
-            >
-              <span className="settings-option-check">
-                {theme === t ? <CheckIcon /> : null}
-              </span>
-              <span className="settings-option-label">{THEME_LABEL[t]}</span>
-            </button>
-          ))}
+          {/* Live choices: the menu stays open so the note behind it can be
+              read in each one. A swatch is drawn from its own theme's
+              tokens: data-theme scopes a palette to any element. */}
+          <div className="settings-tiles is-themes" role="group" aria-label="Theme">
+            {THEMES.map((t) => (
+              <button
+                key={t}
+                role="menuitemradio"
+                aria-checked={theme === t}
+                className={`settings-tile ${theme === t ? "is-active" : ""}`}
+                data-testid={`settings-theme-${t}`}
+                onClick={() => onTheme(t)}
+              >
+                <span className="settings-tile-face" aria-hidden>
+                  {t === "system" ? (
+                    <>
+                      <ThemeSwatch theme="light" />
+                      <ThemeSwatch theme="dark" />
+                    </>
+                  ) : (
+                    <ThemeSwatch theme={t} />
+                  )}
+                </span>
+                <span className="settings-tile-name">{THEME_LABEL[t]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="settings-tiles is-fonts" role="group" aria-label="Document font">
+            {DOC_FONTS.map((f) => (
+              <button
+                key={f}
+                role="menuitemradio"
+                aria-checked={docFont === f}
+                className={`settings-tile ${docFont === f ? "is-active" : ""}`}
+                data-testid={`settings-font-${f}`}
+                title={`Set notes in ${DOC_FONT_LABEL[f].toLowerCase()}`}
+                onClick={() => onDocFont(f)}
+              >
+                <span className={`settings-tile-face settings-font-sample is-${f}`} aria-hidden>
+                  Ag
+                </span>
+                <span className="settings-tile-name">{DOC_FONT_LABEL[f]}</span>
+              </button>
+            ))}
+          </div>
           <button
             role="menuitemcheckbox"
             aria-checked={pageWide}
             className={`settings-option ${pageWide ? "is-active" : ""}`}
             title="Use the full 1080px canvas instead of a reading-width column"
-            onClick={() => {
-              onTogglePageWide();
-              setOpen(false);
-            }}
+            onClick={onTogglePageWide}
           >
             <span className="settings-option-check">
               {pageWide ? <CheckIcon /> : null}

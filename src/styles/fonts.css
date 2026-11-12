@@ -6,7 +6,10 @@
    display cut and body text the text cut with no extra CSS.
    SIL Open Font License 1.1 — see ../assets/fonts/newsreader/OFL.txt.
    Only latin and latin-ext ship; other scripts fall through the stack in
-   tokens.css (--font-serif) to the system serif. */
+   tokens.css (--font-serif) to the system serif.
+   Published pages use these same rules and files: the cloud worker imports
+   both (cloud-worker/src/theme.ts) and points each url() at its own route,
+   so a file named here must be one it imports — its tests say so if not. */
 
 @font-face {
   font-family: "Newsreader";

@@ -42,6 +42,8 @@ export {
   boardStages,
   cardExcerpt,
   cardChips,
+  cardDates,
+  cardFaceFields,
   cardPasses,
   cardValue,
   cardValues,
