@@ -33,7 +33,7 @@ export const dirOf = (p: string) => {
  * Resolve a link's href against the note it was written in — "./other.md",
  * "../archive/x.md", "/Users/me/notes/x.md", "file:///…". Returns null when
  * the target can't be placed: an external URL, or a relative link in a
- * document that has no path of its own (an unsaved draft).
+ * document that has no path of its own (an untitled note).
  *
  * A #fragment or ?query is dropped — opening the document is as far as a link
  * between files takes us.

@@ -9,7 +9,7 @@
 // groups and the ladder collapsed under an older day, the trust line, the
 // in-place read-only preview and the live editor surviving it, Esc, Show
 // changes, Restore + the toast's Undo, Make a copy, Name this version, the
-// tab menu and ⌘⌥H, a draft's history, and a revision only the cloud has.
+// tab menu and ⌘⌥H, an untitled note having none, and a revision only the cloud has.
 // Then the whole folder: the timeline, a partial restore, *Restore all*, the
 // deleted row and its column — and the settings the two horizons, the space
 // each store uses, the export and *Forget* live in.
@@ -244,26 +244,19 @@ step("the tab's right-click menu opens the rail", (await tid("history-rail").cou
 await page.locator(".history-rail-close").click();
 await poll(async () => (await tid("history-rail").count()) === 0);
 
-/* 16 — a draft has a history too: the drafts folder is a root like any
-       other, so the one thing with nowhere else to live is kept as well. */
-await page.keyboard.press("Meta+Shift+KeyD");
-await poll(async () => (await page.locator(".draft-row").count()) === 1);
-await page.locator(".draft-row").click({ button: "right" });
-await poll(async () => (await page.locator(".tree-context-menu").count()) === 1);
-await page.locator(".tree-context-menu .sidebar-menu-item", { hasText: "Version history" }).click();
-await poll(async () => (await tid("history-rail").count()) === 1);
-await poll(async () => (await lastVersionCall("versions_history")).args.path === "/drafts/d-1.md");
-await tid("history-version").first().click();
-await poll(async () => (await tid("version-preview").count()) === 1);
+/* 16 — an untitled note has no history: it is unsaved until it is a file,
+       and gone when its tab closes. Its tab has no menu and ⌘⌥H does nothing. */
+await page.keyboard.press("Meta+KeyN");
+await poll(async () => (await page.locator(".tab.is-active .tab-label").innerText()) === "Untitled");
+await page.locator(".tab.is-active").click({ button: "right" });
+await page.keyboard.press("Meta+Alt+KeyH");
+await page.waitForTimeout(200);
 step(
-  "a draft's history opens, from the store the drafts folder has of its own",
-  (await lastVersionCall("versions_read")).args.root === "/drafts" &&
-    (await tid("version-preview").innerText()).includes("a draft with a history"),
+  "an untitled note has no version history, from its tab or from ⌘⌥H",
+  (await page.locator(".tree-context-menu").count()) === 0 && (await tid("history-rail").count()) === 0,
 );
-await page.keyboard.press("Escape");
-await page.locator(".history-rail-close").click();
-await page.keyboard.press("Meta+Shift+KeyD");
-await poll(async () => (await page.locator(".draft-row").count()) === 0);
+await page.keyboard.press("Meta+KeyW"); // nothing typed: it closes without a question
+await poll(async () => (await page.locator(".tab-label", { hasText: "Untitled" }).count()) === 0);
 
 /* 17 — a version another Mac mirrored: the same rail, the same reads. What
    the cloud adds is depth, and it arrives looking like everything else. */

@@ -1,8 +1,8 @@
 //! Versioning (docs/versioning.md): every open folder gets a local store
 //! that captures snapshots on the cadence rule, thins them on the retention
 //! ladder, and never deletes anything anywhere else. This file is the
-//! manager — one versioner task per open root plus the drafts folder, the
-//! routing table the edit bus writes into, and the Tauri commands
+//! manager — one versioner task per open root, the routing table the edit
+//! bus writes into, and the Tauri commands
 //! (mirrored in src/versions.ts).
 //!
 //! ```text
@@ -63,11 +63,6 @@ use status::{
 use store::{store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
 use stores::{ExportReport, StoreInfo};
 use workspace::{DeletedFile, RestoreReport, SnapshotDiff};
-
-/// The folder holding drafts is a root like any workspace, under a fixed
-/// key — so the one thing in the app with nowhere else to live has a
-/// history too.
-pub const DRAFTS_KEY: &str = "drafts";
 
 /// Where a versioner reads the time — the wall clock in the app, one the
 /// test can move by hand in `tests.rs`. Only snapshot timestamps come from
@@ -812,7 +807,7 @@ pub struct VersionsManager {
 }
 
 /// Called once from tauri's setup, after `cloud::init`: read the settings,
-/// then start a versioner for every root already open (and for drafts).
+/// then start a versioner for every root already open.
 pub(crate) fn init(app: &AppHandle) {
     let Ok(data_dir) = app.path().app_data_dir() else { return };
     let _ = std::fs::create_dir_all(versions_dir(&data_dir));
@@ -833,10 +828,10 @@ pub(crate) fn init(app: &AppHandle) {
     reconcile(app);
 }
 
-/// Which folders are open, from the window registry — plus the drafts
-/// directory, which is always one. Called whenever a window reports its
-/// content and when one is destroyed, so no new frontend call is needed to
-/// start or stop a versioner.
+/// Which folders are open, from the window registry. Called whenever a
+/// window reports its content and when one is destroyed, so no new frontend
+/// call is needed to start or stop a versioner. An untitled note is in no
+/// folder, so it has no history: it is unsaved, and gone when its tab closes.
 fn open_roots(app: &AppHandle) -> BTreeSet<String> {
     let mut roots = BTreeSet::new();
     if let Some(registry) = app.try_state::<crate::WindowRegistry>() {
@@ -847,11 +842,6 @@ fn open_roots(app: &AppHandle) -> BTreeSet<String> {
                 }
             }
         }
-    }
-    if let Ok(data_dir) = app.path().app_data_dir() {
-        let drafts = data_dir.join("drafts");
-        let _ = std::fs::create_dir_all(&drafts);
-        roots.insert(drafts.to_string_lossy().to_string());
     }
     roots
 }
@@ -884,7 +874,7 @@ fn start_versioner(inner: &mut ManagerInner, display_root: &str) {
     if root.starts_with(&stores) || stores.starts_with(&root) {
         return;
     }
-    let key = if root == inner.data_dir.join("drafts") { DRAFTS_KEY.to_string() } else { store_key(&root) };
+    let key = store_key(&root);
     // One store, one versioner. Two windows on the same folder are one root
     // and never get here; two spellings of one path (a symlink, a `..`)
     // would, and two tasks writing one index would lose rows to each other.

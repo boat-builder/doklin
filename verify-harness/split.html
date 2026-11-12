@@ -61,12 +61,11 @@
                 isMain: true,
                 folder: null,
                 file: null,
-                files: [],
-                activeFile: null,
+                tabs: [],
+                activeId: null,
                 restored: false,
               });
             case "take_pending_folder":
-            case "migrate_scratch":
               return Promise.resolve(null);
             case "read_file": {
               const c = window.__fs.get(args.path);
@@ -113,8 +112,13 @@
               return Promise.resolve(null);
             case "device_name":
               return Promise.resolve("Test Mac");
-            case "list_drafts":
+            case "untitled_dir":
+              return Promise.resolve("/untitled");
+            case "orphaned_untitled":
               return Promise.resolve([]);
+            case "discard_untitled":
+              window.__fs.delete(args.path);
+              return Promise.resolve(null);
             case "open_external":
               (window.__opened ??= []).push(args.url);
               return Promise.resolve(null);

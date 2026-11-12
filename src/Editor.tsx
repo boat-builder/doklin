@@ -108,6 +108,12 @@ export type EditorHandle = {
   // Swap thread bodies in place (external meta change — a teammate's reply
   // arriving through sync). Caret-safe, history-free; see criticMark.ts.
   refreshThreadBodies: (bodies: Map<string, CommentEntry[]>) => void;
+  // Report the document's markdown NOW, through onChange. Edits normally
+  // reach the host on the listener's own short debounce, so for a moment
+  // after a keystroke the host's copy is behind; a host about to save, close
+  // or decide anything on that copy calls this first. A no-op until the
+  // editor has mounted (the mount reports the baseline itself).
+  flushMarkdown: () => void;
 };
 
 // Markdown threads whose meta record lost its marker (deleted in another
@@ -486,6 +492,10 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     );
     crepe.editor.use(resizableTableView);
     crepeRef.current = crepe;
+    // No view until THIS editor mounts: a view left over from an instance
+    // this one replaces is not ours to drive (flushMarkdown would ask the
+    // new editor for a document it does not have yet).
+    viewRef.current = null;
     // Crepe's readonly flag silences its own chrome (toolbar, slash menu,
     // block handle); the editable prop installed at mount keeps ProseMirror
     // itself from accepting input.
@@ -501,9 +511,9 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         // Emit the mounted doc's serialization as the baseline. markdownUpdated
         // only fires on edit transactions — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
-        // draft) for the load-normalization baseline and never autosave it.
+        // untitled note) for the load-normalization baseline and never autosave it.
         onChangeRef.current(crepe.getMarkdown());
-        // Host visibility into editor focus (drives the empty-draft placeholder).
+        // Host visibility into editor focus.
         view.dom.addEventListener("focus", () => onFocusChangeRef.current?.(true));
         view.dom.addEventListener("blur", () => onFocusChangeRef.current?.(false));
         const pending = pendingRef.current;
@@ -787,6 +797,11 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         const view = viewRef.current;
         if (!view) return;
         refreshThreadBodies(view, bodies);
+      },
+      flushMarkdown() {
+        const crepe = crepeRef.current;
+        if (!crepe || !viewRef.current) return;
+        onChangeRef.current(crepe.getMarkdown());
       },
     }),
     [],

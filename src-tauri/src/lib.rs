@@ -22,6 +22,8 @@ mod cloud;
 mod versions;
 // The one call every write command ends with; it feeds both of the above.
 mod edits;
+// Untitled notes: the buffers behind tabs that have no file yet.
+mod untitled;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
@@ -48,29 +50,58 @@ struct WindowGeometry {
     height: f64,
 }
 
-/// What a single window currently shows: its workspace folder (if any), the
-/// real-file paths open in its tabs (in tab order), the active tab's path, and
-/// its last-known frame. The renderer keeps the content current via
-/// `register_window_content`; geometry is tracked backend-side from window
-/// events. Serves double duty: live routing (focus an existing window that
-/// already shows a path instead of opening a duplicate) and session persistence
-/// (this is exactly what `session.json` stores per window).
+/// What a tab shows. A `Store` tab's path is a datastore folder (a board); an
+/// `Untitled` tab's is the buffer of a note not saved to a file yet (see
+/// `untitled.rs`). Mirrors `TabKind` in the renderer's src/tabs.ts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TabKind {
+    File,
+    Store,
+    Untitled,
+}
+
+/// One tab, as the renderer describes it. The id is the renderer's own, kept
+/// so a restored window gets its tabs back rather than lookalikes — and an
+/// untitled note's buffer is named after it.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct WindowTab {
+    pub(crate) id: String,
+    pub(crate) kind: TabKind,
+    pub(crate) path: String,
+}
+
+/// What a single window currently shows: its workspace folder (if any), its
+/// tabs in tab order, which of them is active, and its last-known frame. The
+/// renderer keeps the content current via `register_window_content`; geometry
+/// is tracked backend-side from window events. Serves double duty: live
+/// routing (focus an existing window that already shows a path instead of
+/// opening a duplicate) and session persistence (this is exactly what
+/// `session.json` stores per window).
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct WindowContent {
+pub(crate) struct WindowContent {
     folder: Option<String>,
-    files: Vec<String>,
-    active_file: Option<String>,
+    pub(crate) tabs: Vec<WindowTab>,
+    active_id: Option<String>,
     geometry: Option<WindowGeometry>,
 }
 
+impl WindowContent {
+    /// The tab showing this file, if the window has one.
+    fn file_tab(&self, path: &str) -> Option<&WindowTab> {
+        self.tabs.iter().find(|t| t.kind == TabKind::File && t.path == path)
+    }
+}
+
 #[derive(Default)]
-struct WindowRegistry(Mutex<HashMap<String, WindowContent>>);
+pub(crate) struct WindowRegistry(pub(crate) Mutex<HashMap<String, WindowContent>>);
 
 /// The on-disk session (<app_data_dir>/session.json): every window open at the
 /// last snapshot, in stable `win_order`. Non-main windows are respawned from
 /// this on launch; the main window only takes its frame from here (its tabs
-/// restore from the renderer's localStorage session, which also covers drafts).
+/// restore from the renderer's localStorage session, which is keyed by
+/// workspace folder).
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct PersistedSession {
@@ -84,6 +115,13 @@ struct PersistedWindow {
     label: String,
     #[serde(flatten)]
     content: WindowContent,
+    /// One-time migration: builds up to 0.1.89 wrote a window's open files as
+    /// bare paths (session version 1). Read once by `read_persisted_session`,
+    /// which turns them into tabs; never written back.
+    #[serde(skip_serializing)]
+    files: Vec<String>,
+    #[serde(skip_serializing)]
+    active_file: Option<String>,
 }
 
 /// Flipped true when the app starts quitting (⌘Q, or the exit that follows the
@@ -98,10 +136,11 @@ struct Quitting(AtomicBool);
 #[derive(Default)]
 struct WindowSeq(Mutex<u32>);
 
-/// Flipped true once any window has reported its content. Until then an external
-/// folder open is treated as the cold-start path (handed to the first window via
-/// `PendingOpen`); afterwards it routes to a focused/new window. File opens
-/// bypass this entirely — they always spawn their own window.
+/// Flipped true once the main window has taken the folder it was launched with
+/// (`take_pending_folder`). Until then an external folder open is treated as
+/// the cold-start path (handed to the main window via `PendingOpen`);
+/// afterwards it routes to a focused/new window. File opens bypass this
+/// entirely — they always spawn their own window.
 #[derive(Default)]
 struct AppReady(AtomicBool);
 
@@ -132,13 +171,13 @@ const VERSIONS_FLUSH_TIMEOUT_MS: u64 = 2000;
 /// `take_window_init`. Passing content backend-side (rather than through the URL
 /// query) keeps it reliable in release builds, where the custom asset protocol
 /// can drop query strings. `file` is a fresh external/in-app open (one file);
-/// `files`/`active_file` carry a session-restored tab list.
+/// `tabs`/`active_id` carry a session-restored tab list.
 #[derive(Clone, Default)]
 struct PendingInit {
     folder: Option<String>,
     file: Option<String>,
-    files: Vec<String>,
-    active_file: Option<String>,
+    tabs: Vec<WindowTab>,
+    active_id: Option<String>,
     restored: bool,
 }
 
@@ -154,8 +193,8 @@ struct WindowInit {
     is_main: bool,
     folder: Option<String>,
     file: Option<String>,
-    files: Vec<String>,
-    active_file: Option<String>,
+    tabs: Vec<WindowTab>,
+    active_id: Option<String>,
     restored: bool,
 }
 
@@ -165,10 +204,26 @@ fn session_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn read_persisted_session(app: &AppHandle) -> PersistedSession {
-    session_path(app)
+    let mut session: PersistedSession = session_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The one-time migration `PersistedWindow` describes: a version 1 window's
+    // file paths become file tabs, so the windows open at the upgrade come
+    // back with what they were showing.
+    for w in &mut session.windows {
+        if !w.content.tabs.is_empty() {
+            continue;
+        }
+        for (i, path) in std::mem::take(&mut w.files).into_iter().enumerate() {
+            let id = format!("{}-{}", w.label, i);
+            if w.active_file.as_deref() == Some(path.as_str()) {
+                w.content.active_id = Some(id.clone());
+            }
+            w.content.tabs.push(WindowTab { id, kind: TabKind::File, path });
+        }
+    }
+    session
 }
 
 /// Snapshots the window registry to disk. Runs whenever a window's content
@@ -186,10 +241,11 @@ fn persist_session(app: &AppHandle) {
             .map(|label| PersistedWindow {
                 content: map[&label].clone(),
                 label,
+                ..Default::default()
             })
             .collect::<Vec<_>>()
     };
-    let Ok(json) = serde_json::to_string_pretty(&PersistedSession { version: 1, windows }) else {
+    let Ok(json) = serde_json::to_string_pretty(&PersistedSession { version: 2, windows }) else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -292,7 +348,7 @@ fn find_window_for(
     }
     if let Some(f) = file {
         for (label, c) in map.iter() {
-            if c.files.contains(f) && app.get_webview_window(label).is_some() {
+            if c.file_tab(f).is_some() && app.get_webview_window(label).is_some() {
                 return Some(label.clone());
             }
         }
@@ -320,14 +376,20 @@ fn spawn_window(
     };
     let label = format!("win-{}", n);
 
+    // A fresh open's file is seeded as a tab under an id of our own — enough
+    // for routing to find this window, and a real tab if the app quits before
+    // the renderer's first report replaces it.
     let seed = WindowContent {
         folder: init.folder.clone(),
-        files: if init.files.is_empty() {
-            init.file.clone().into_iter().collect()
+        tabs: if init.tabs.is_empty() {
+            init.file
+                .iter()
+                .map(|path| WindowTab { id: format!("{}-0", label), kind: TabKind::File, path: path.clone() })
+                .collect()
         } else {
-            init.files.clone()
+            init.tabs.clone()
         },
-        active_file: init.active_file.clone().or_else(|| init.file.clone()),
+        active_id: init.active_id.clone(),
         geometry,
     };
     if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {
@@ -385,8 +447,8 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
     let init = PendingInit {
         folder,
         file,
-        files: Vec::new(),
-        active_file: None,
+        tabs: Vec::new(),
+        active_id: None,
         restored: false,
     };
     // Bring the new window (and the app) to the foreground. When the spawn
@@ -516,7 +578,7 @@ pub(crate) fn is_markdown(path: &Path) -> bool {
 /// The entity meta file for a document path — same naming rule as the
 /// frontend's metaFile.ts: the stem (document extension stripped) plus
 /// ".meta.jsonl". Extensions are ASCII, so byte slicing is UTF-8 safe.
-fn meta_file_of(doc_path: &str) -> String {
+pub(crate) fn meta_file_of(doc_path: &str) -> String {
     let lower = doc_path.to_ascii_lowercase();
     for ext in [".markdown", ".mdown", ".mkd", ".md", ".html"] {
         if lower.ends_with(ext) {
@@ -1080,7 +1142,7 @@ fn clipboard_clear_files(app: AppHandle, state: State<'_, FileClipboard>) {
 }
 
 /// True if anything (file or folder) exists at `path`. The in-app Save As
-/// prompt checks this before promoting a draft, because the promotion write
+/// prompt checks this before saving an untitled note, because that write
 /// itself is deliberately unconditional (Save As overwrites its target).
 #[tauri::command]
 fn path_exists(path: String) -> bool {
@@ -1299,35 +1361,41 @@ fn search_workspace(
     Ok(results)
 }
 
+/// The main window, starting up, takes the folder a cold start was asked to
+/// open (if any). That ends the cold start: from here an external folder open
+/// routes to a window instead of waiting here for one. Both this and
+/// `handle_external_open` run on the main thread, so no open can fall between
+/// the take and the flag.
 #[tauri::command]
-fn take_pending_folder(state: State<'_, PendingOpen>) -> Option<String> {
-    state.folder.lock().ok().and_then(|mut g| g.take())
+fn take_pending_folder(state: State<'_, PendingOpen>, ready: State<'_, AppReady>) -> Option<String> {
+    let folder = state.folder.lock().ok().and_then(|mut g| g.take());
+    ready.0.store(true, Ordering::SeqCst);
+    folder
 }
 
 /// The renderer reports what this window currently shows (its workspace folder,
-/// the real files open in tabs, and the active tab) so external opens can focus
-/// the right window instead of duplicating it, and so the persisted session
-/// tracks what a relaunch should restore. Also marks the app "ready" so
-/// subsequent external opens route to windows rather than the cold-start
-/// pending-open path. Geometry is tracked separately (window events), so only
+/// its tabs, and which is active) so external opens can focus the right window
+/// instead of duplicating it, and so the persisted session tracks what a
+/// relaunch should restore — untitled notes included: their text is in their
+/// buffers, and this is what says a tab was showing one. A window first
+/// reports once it has restored its tabs; until then its entry is the seed it
+/// was spawned with. Geometry is tracked separately (window events), so only
 /// the content fields are replaced here.
 #[tauri::command]
 fn register_window_content(
     app: AppHandle,
     window: tauri::Window,
     folder: Option<String>,
-    files: Vec<String>,
-    active_file: Option<String>,
+    tabs: Vec<WindowTab>,
+    active_id: Option<String>,
     registry: State<'_, WindowRegistry>,
-    ready: State<'_, AppReady>,
 ) {
     if let Ok(mut map) = registry.0.lock() {
         let entry = map.entry(window.label().to_string()).or_default();
         entry.folder = folder;
-        entry.files = files;
-        entry.active_file = active_file;
+        entry.tabs = tabs;
+        entry.active_id = active_id;
     }
-    ready.0.store(true, Ordering::SeqCst);
     persist_session(&app);
     // Which folders are open is the versioner's cue to start or stop; the
     // registry above is the only place that knows.
@@ -1353,8 +1421,8 @@ fn take_window_init(window: tauri::Window, pending: State<'_, PendingWindowOpen>
         is_main,
         folder: init.folder,
         file: init.file,
-        files: init.files,
-        active_file: init.active_file,
+        tabs: init.tabs,
+        active_id: init.active_id,
         restored: init.restored,
     }
 }
@@ -1497,117 +1565,6 @@ fn quit_flush_ack(window: tauri::Window, app: AppHandle, state: State<'_, QuitFl
     if all_acked {
         app.exit(0);
     }
-}
-
-#[derive(Serialize)]
-struct DraftInfo {
-    id: String,
-    path: String,
-    snapshot: FileSnapshot,
-    preview: String,
-}
-
-/// Returns `app_data_dir/drafts`, creating it on first use. This directory holds
-/// the app-managed "untitled" buffers (one file per draft), so unsaved notes are
-/// durably persisted and survive restarts even before the user names a file.
-fn drafts_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {}", e))?
-        .join("drafts");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create drafts dir: {}", e))?;
-    Ok(dir)
-}
-
-/// Creates an empty draft file `drafts/<id>.md` (if absent) and returns its path.
-/// The renderer owns draft identity (a uuid), so naming stays stable across calls.
-#[tauri::command]
-fn create_draft(app: AppHandle, id: String) -> Result<String, String> {
-    let file = drafts_dir(&app)?.join(format!("{}.md", id));
-    if !file.exists() {
-        std::fs::write(&file, "").map_err(|e| format!("create draft {}: {}", id, e))?;
-    }
-    Ok(file.to_string_lossy().to_string())
-}
-
-/// Lists all drafts (newest first) with a one-line preview, so the drafts view
-/// can show closed-tab drafts without the renderer reading each file.
-#[tauri::command]
-fn list_drafts(app: AppHandle) -> Result<Vec<DraftInfo>, String> {
-    let dir = drafts_dir(&app)?;
-    let entries = std::fs::read_dir(&dir).map_err(|e| format!("read drafts dir: {}", e))?;
-    let mut out: Vec<DraftInfo> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_markdown(&path) {
-            continue;
-        }
-        let id = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let snapshot = match stat_snapshot(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let preview = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| {
-                c.lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().chars().take(120).collect::<String>())
-            })
-            .unwrap_or_default();
-        out.push(DraftInfo {
-            id,
-            path: path.to_string_lossy().to_string(),
-            snapshot,
-            preview,
-        });
-    }
-    out.sort_by(|a, b| b.snapshot.mtime_ms.cmp(&a.snapshot.mtime_ms));
-    Ok(out)
-}
-
-/// Permanently deletes a draft file. Drafts are app-internal temp files, so a
-/// hard delete (no Trash) is appropriate — they're recoverable from the drafts
-/// view only while they exist. The draft's entity meta (comment-thread
-/// bodies — see the frontend's metaFile.ts) dies with it.
-#[tauri::command]
-fn delete_draft(path: String) -> Result<(), String> {
-    std::fs::remove_file(&path).map_err(|e| format!("delete draft {}: {}", path, e))?;
-    let meta = meta_file_of(&path);
-    if Path::new(&meta).exists() {
-        let _ = std::fs::remove_file(&meta);
-    }
-    Ok(())
-}
-
-/// One-shot migration from the legacy single scratchpad to the drafts model. If
-/// `scratch/current.md` exists and is non-empty, moves its content into
-/// `drafts/<id>.md` and returns that path; otherwise removes the stale scratch
-/// file and returns None.
-#[tauri::command]
-fn migrate_scratch(app: AppHandle, id: String) -> Result<Option<String>, String> {
-    let scratch = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {}", e))?
-        .join("scratch")
-        .join("current.md");
-    if !scratch.exists() {
-        return Ok(None);
-    }
-    let contents = std::fs::read_to_string(&scratch).unwrap_or_default();
-    if contents.trim().is_empty() {
-        let _ = std::fs::remove_file(&scratch);
-        return Ok(None);
-    }
-    let dest = drafts_dir(&app)?.join(format!("{}.md", id));
-    std::fs::write(&dest, contents).map_err(|e| format!("migrate scratch: {}", e))?;
-    let _ = std::fs::remove_file(&scratch);
-    Ok(Some(dest.to_string_lossy().to_string()))
 }
 
 /// macOS-only: moves `path` to the system Trash via `NSFileManager` and returns
@@ -1861,10 +1818,9 @@ pub fn run() {
             take_window_init,
             open_in_window,
             focus_next_window,
-            create_draft,
-            list_drafts,
-            delete_draft,
-            migrate_scratch,
+            untitled::untitled_dir,
+            untitled::discard_untitled,
+            untitled::orphaned_untitled,
             trash_file,
             restore_trashed,
             reveal_in_finder,
@@ -1921,8 +1877,13 @@ pub fn run() {
             // The cloud engines start with the app: one per connected
             // workspace, from cloud.json.
             cloud::init(&handle);
-            // The versioners start with it too: one per open folder, plus
-            // drafts. `reconcile` starts the rest as windows report in.
+            // Before anything looks in app data: the old drafts folder, if a
+            // previous build left one, becomes untitled notes.
+            if let Ok(data_dir) = handle.path().app_data_dir() {
+                untitled::adopt_legacy_drafts(&data_dir);
+            }
+            // The versioners start with it too: one per open folder.
+            // `reconcile` starts the rest as windows report in.
             versions::init(&handle);
             let saved = read_persisted_session(&handle);
             let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
@@ -1953,17 +1914,17 @@ pub fn run() {
                     continue;
                 }
                 let mut content = w.content.clone();
-                if content.folder.is_none() && content.files.is_empty() {
+                if content.folder.is_none() && content.tabs.is_empty() {
                     continue; // an empty window isn't worth resurrecting
                 }
                 if initial_folder_str.is_some() && content.folder == initial_folder_str {
                     folder_restored = true;
                 }
                 if let Some(f) = &initial_file_str {
-                    if content.files.contains(f) {
+                    if let Some(id) = content.file_tab(f).map(|t| t.id.clone()) {
                         // The externally-opened file rides the restored window —
                         // as its active tab.
-                        content.active_file = Some(f.clone());
+                        content.active_id = Some(id);
                         file_restored = true;
                     }
                 }
@@ -1972,8 +1933,8 @@ pub fn run() {
                     PendingInit {
                         folder: content.folder.clone(),
                         file: None,
-                        files: content.files.clone(),
-                        active_file: content.active_file.clone(),
+                        tabs: content.tabs.clone(),
+                        active_id: content.active_id.clone(),
                         restored: true,
                     },
                     content.geometry,
