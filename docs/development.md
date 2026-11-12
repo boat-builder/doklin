@@ -103,7 +103,7 @@ window has open but that has text in it — the app died between closing a tab
 and deleting its buffer, a session file was lost, this launch opened a
 different folder than the note was last seen in — is reopened in the main
 window as an unsaved note rather than deleted; a buffer with nothing in it is
-swept. Builds up to 0.1.87 kept untitled notes as "drafts" in
+swept. Builds up to 0.1.89 kept untitled notes as "drafts" in
 `<app_data>/drafts`, listed in a Drafts panel; on first launch those files are
 moved into the untitled folder, so each one that has text comes back the same
 way — as an unsaved tab.

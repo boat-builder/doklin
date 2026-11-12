@@ -550,7 +550,7 @@ export default function CloudPanel({
       <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           {view !== "main" && view !== "teardown" && (
-            <button className="dictation-back" onClick={() => setView("main")} aria-label="Back">
+            <button className="modal-back" onClick={() => setView("main")} aria-label="Back">
               <BackIcon />
             </button>
           )}

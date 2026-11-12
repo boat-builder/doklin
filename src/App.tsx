@@ -75,17 +75,6 @@ import {
 import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
 import MermaidModal from "./MermaidModal";
-import DictationHud from "./DictationHud";
-import DictationInspector from "./DictationInspector";
-import DictationSetup from "./DictationSetup";
-import {
-  DictationController,
-  getDictationConfig,
-  INITIAL_DICTATION_UI,
-  type DictationConfig,
-  type DictationUiState,
-  type InspectorEntry,
-} from "./dictation";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
@@ -143,8 +132,8 @@ type WindowInit = {
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
 // true and flip it false for spawned windows once init resolves, so a spawned
-// window never clobbers the main window's session. Shared prefs (theme,
-// recents) stay shared across all windows.
+// window never clobbers the main window's session. Shared prefs (the theme)
+// stay shared across all windows.
 let isMainWindow = true;
 
 // The main window's workspace root, mirrored module-level (like isMainWindow)
@@ -230,8 +219,8 @@ type DocView = "md" | "html";
 
 /* ---------- Split view ----------
    The editor area can split into two side-by-side panes. The app's whole
-   document machinery (autosave, watcher, conflicts, comments,
-   dictation, find) stays bound to ONE document — the FOCUSED pane's — and
+   document machinery (autosave, watcher, conflicts, comments, find)
+   stays bound to ONE document — the FOCUSED pane's — and
    `SplitPane` describes the other pane:
 
    - Same-document split (`doc === null`): the active document open in both
@@ -344,8 +333,6 @@ const THEMES: Theme[] = ["system", "light", "paper", "dark"];
 const THEME_STORAGE_KEY = "doklin:theme";
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
-const RECENTS_STORAGE_KEY = "doklin:recents";
-const RECENTS_MAX = 8;
 const SESSION_STORAGE_KEY = "doklin:session";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
@@ -423,8 +410,6 @@ function stepDocZoom(current: number, dir: 1 | -1): number {
   const i = DOC_ZOOM_STEPS.indexOf(nearestZoomStep(current));
   return DOC_ZOOM_STEPS[Math.min(DOC_ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
 }
-
-type RecentEntry = { path: string; kind: "file" | "folder" };
 
 const uuid = () =>
   typeof crypto !== "undefined" && crypto.randomUUID
@@ -559,29 +544,6 @@ function writeStoredSidebarOpen(open: boolean) {
   }
 }
 
-function readStoredRecents(): RecentEntry[] {
-  try {
-    const raw = localStorage.getItem(RECENTS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is RecentEntry =>
-        r && typeof r.path === "string" && (r.kind === "file" || r.kind === "folder"),
-    );
-  } catch {
-    return [];
-  }
-}
-
-function writeStoredRecents(entries: RecentEntry[]) {
-  try {
-    localStorage.setItem(RECENTS_STORAGE_KEY, JSON.stringify(entries));
-  } catch {
-    // ignore
-  }
-}
-
 // The persisted session is keyed by workspace root so each directory remembers
 // its OWN open tabs: opening directory B never shows directory A's tabs, and
 // reopening A brings A's tabs back. Tabs opened with no folder (a bare launch)
@@ -682,7 +644,7 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
   }
 }
 
-// One-time cleanup: builds up to 0.1.87 had a Drafts panel, and kept its
+// One-time cleanup: builds up to 0.1.89 had a Drafts panel, and kept its
 // numbering and open state under these keys. Nothing reads them any more.
 function forgetDraftsPanelKeys() {
   try {
@@ -739,7 +701,6 @@ export default function App() {
     }
   });
   const [commentCount, setCommentCount] = useState(0);
-  const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
   // Undo stack for trashed entries. `files` is everything one delete moved to
   // the Trash (a markdown file's html rendition rides along); `openPaths` are
@@ -1188,107 +1149,6 @@ export default function App() {
     editorRef.current?.flushMarkdown();
   }, []);
 
-  // Voice dictation. The controller (src/dictation.ts) owns the session; React
-  // only mirrors its state for the HUD/inspector. Created once via ref so the
-  // sidecar event listener never re-registers.
-  const [dictationUi, setDictationUi] = useState<DictationUiState>(INITIAL_DICTATION_UI);
-  // Session mirror for the split view's focus swap (a swap retargets
-  // editorRef; an active session must end first, on the old target).
-  const dictationSessionRef = useRef<DictationUiState["session"]>("idle");
-  const [dictationConfig, setDictationConfig] = useState<DictationConfig | null>(null);
-  const [dictationSetupOpen, setDictationSetupOpen] = useState(false);
-  const [inspectorEntries, setInspectorEntries] = useState<InspectorEntry[]>([]);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const dictationRef = useRef<DictationController | null>(null);
-  if (!dictationRef.current) {
-    dictationRef.current = new DictationController({
-      getEditor: () => editorRef.current,
-      onState: (s) => {
-        dictationSessionRef.current = s.session;
-        setDictationUi(s);
-      },
-      onInspect: (entry) => setInspectorEntries((prev) => [entry, ...prev].slice(0, 200)),
-    });
-  }
-  useEffect(() => {
-    void dictationRef.current?.init();
-    void getDictationConfig().then(setDictationConfig);
-    return () => dictationRef.current?.dispose();
-  }, []);
-  // The inspector auto-opens with a session when enabled in settings.
-  useEffect(() => {
-    if (dictationUi.session === "active" && dictationConfig?.inspector) setInspectorOpen(true);
-  }, [dictationUi.session, dictationConfig?.inspector]);
-
-  // Session keyboard: while a dictation session is live, Space doubles as the
-  // talk key — held past a short threshold it opens the mic; a quick tap is
-  // just the spacebar (the keydown was swallowed, so the release types the
-  // space). Everything else passes through: the document stays editable
-  // between utterances, and the controller suspends typing on its own while
-  // the pipeline is busy. Esc ends the session. Capture phase, so the editor
-  // and the global shortcut handler never see the intercepted keys; text
-  // fields (find bar, comment cards, rename inputs) keep theirs.
-  useEffect(() => {
-    if (dictationUi.session === "idle") return;
-    const ctl = dictationRef.current!;
-    const active = dictationUi.session === "active";
-    const HOLD_MS = 200;
-    let holdTimer: number | null = null;
-    const inTextField = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t) return false;
-      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return true;
-      return t.isContentEditable && !t.closest(".milkdown");
-    };
-    const isTalkKey = (e: KeyboardEvent) =>
-      active && e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey;
-    const down = (e: KeyboardEvent) => {
-      if (inTextField(e)) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        void ctl.stop();
-        return;
-      }
-      if (!isTalkKey(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.repeat) return;
-      holdTimer = window.setTimeout(() => {
-        holdTimer = null;
-        ctl.setGate(true);
-      }, HOLD_MS);
-    };
-    const up = (e: KeyboardEvent) => {
-      if (!isTalkKey(e) || inTextField(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (holdTimer != null) {
-        // Released before the hold threshold: an ordinary spacebar press.
-        window.clearTimeout(holdTimer);
-        holdTimer = null;
-        editorRef.current?.insertText(" ");
-      } else {
-        ctl.setGate(false);
-      }
-    };
-    window.addEventListener("keydown", down, true);
-    window.addEventListener("keyup", up, true);
-    return () => {
-      if (holdTimer != null) window.clearTimeout(holdTimer);
-      window.removeEventListener("keydown", down, true);
-      window.removeEventListener("keyup", up, true);
-    };
-  }, [dictationUi.session]);
-
-  // A dictation session is anchored to one document; switching or closing
-  // tabs ends it immediately (pending chunks flush as raw text first) — the
-  // graceful drain would land text in the wrong editor.
-  useEffect(() => {
-    if (dictationUi.session !== "idle") void dictationRef.current?.stop(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId]);
-
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findCase, setFindCase] = useState(false);
@@ -1322,6 +1182,13 @@ export default function App() {
 
   useEffect(() => {
     applyTheme(theme);
+    // Native chrome (context menus, dialogs, tooltips) follows the window's
+    // appearance, so it matches the theme rather than the OS. A chosen theme
+    // pins it; "system" hands it back to the OS, because a pinned appearance
+    // also pins prefers-color-scheme, which is what resolves "system".
+    void getCurrentWindow()
+      .setTheme(theme === "system" ? null : theme === "dark" ? "dark" : "light")
+      .catch(() => {});
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
@@ -1845,17 +1712,6 @@ export default function App() {
     }),
     [mdOrphans, mutateMdOrphans],
   );
-
-  const addRecent = useCallback((p: string, kind: "file" | "folder") => {
-    setRecents((prev) => {
-      const next = [{ path: p, kind }, ...prev.filter((r) => r.path !== p)].slice(
-        0,
-        RECENTS_MAX,
-      );
-      writeStoredRecents(next);
-      return next;
-    });
-  }, []);
 
   // The focused pane's side: always opposite the split pane; left otherwise.
   const focusedSideOf = (s: SplitPane | null): PaneSide =>
@@ -2386,8 +2242,8 @@ export default function App() {
     [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
-  // Open a path in a tab (dedupe by path): a file (picker / recents / sidebar /
-  // CLI) or a board.
+  // Open a path in a tab (dedupe by path): a file (picker / sidebar / CLI) or
+  // a board.
   const openTab = useCallback(
     async (p: string, kind: "file" | "store") => {
       // An html file whose markdown sibling exists is a rendition of THAT
@@ -2414,10 +2270,9 @@ export default function App() {
         }
         return;
       }
-      if (kind === "file") addRecent(p, "file");
       await appendAndActivate({ id: uuid(), kind, path: p });
     },
-    [switchTab, addRecent, appendAndActivate, loadActiveContent],
+    [switchTab, appendAndActivate, loadActiveContent],
   );
 
   // ⌘N: a new untitled note, in a new tab. Nothing is written for it until
@@ -2447,12 +2302,11 @@ export default function App() {
     setWorkspaceRoot(root);
     setSidebarOpen(true);
     selectSidebarEntries([]); // a selection from the previous workspace is meaningless
-    addRecent(root, "folder");
     writeStoredSession(tabsRef.current, activeIdRef.current); // the root is part of the session
-  }, [addRecent, selectSidebarEntries]);
+  }, [selectSidebarEntries]);
 
-  // Switch this window to a different workspace folder (File ▸ Open Folder, a
-  // recent, the sidebar). Because tabs are keyed by folder, we persist the
+  // Switch this window to a different workspace folder (File ▸ Open Folder,
+  // the sidebar). Because tabs are keyed by folder, we persist the
   // outgoing folder's tabs under its own key, then load and install the incoming
   // folder's — the same directory-scoped model a `doklin <dir>` launch uses.
   // Document content lives on disk and autosaves, so swapping the tab set never
@@ -2462,7 +2316,7 @@ export default function App() {
   const openWorkspace = useCallback(
     async (root: string) => {
       if (root === sessionWorkspaceRoot) {
-        setWorkspace(root); // already here — just resurface the sidebar/recents
+        setWorkspace(root); // already here — just resurface the sidebar
         return;
       }
       flushPendingAutosave(); // land the outgoing doc before we swap tabs
@@ -2505,7 +2359,7 @@ export default function App() {
       activeIdRef.current = activeId;
       setTabs(restored);
       setActiveId(activeId);
-      setWorkspace(root); // adopt root, open sidebar, add recent, persist session
+      setWorkspace(root); // adopt root, open sidebar, persist session
       const active = restored.find((t) => t.id === activeId);
       if (active) await loadActiveContent(active);
       else await clearActiveDoc(); // incoming folder has no tabs → welcome screen
@@ -2564,33 +2418,23 @@ export default function App() {
         ],
       });
       if (typeof chosen === "string") {
-        addRecent(chosen, "file");
         await invoke("open_in_window", { folder: null, file: chosen });
       }
     } catch (e) {
       console.error("open file in new window failed", e);
     }
-  }, [addRecent]);
+  }, []);
 
   const openFolderInNewWindow = useCallback(async () => {
     try {
       const chosen = await openDialog({ directory: true, multiple: false });
       if (typeof chosen === "string") {
-        addRecent(chosen, "folder");
         await invoke("open_in_window", { folder: chosen, file: null });
       }
     } catch (e) {
       console.error("open folder in new window failed", e);
     }
-  }, [addRecent]);
-
-  const openRecent = useCallback(
-    (r: RecentEntry) => {
-      if (r.kind === "folder") void openWorkspace(r.path);
-      else void openTab(r.path, "file");
-    },
-    [openWorkspace, openTab],
-  );
+  }, []);
 
   // Copy the document verbatim — CriticMarkup markers and comments intact (the
   // "full" working format for collaborators using the same tool). Plain ⌘C, by
@@ -2905,7 +2749,6 @@ export default function App() {
         if (sp.view === "md") {
           const htmlPath = htmlPathRef.current;
           if (!htmlPath) return;
-          await dictationRef.current?.stop();
           // Awaited: the meta reload below re-reads the entity from disk,
           // and a still-in-flight autosave (markdown + thread bodies) must
           // land first or the reload adopts a stale thread set.
@@ -2948,9 +2791,6 @@ export default function App() {
         const htmlPath = htmlPathRef.current;
         if (!htmlPath) return; // no rendition — the toggle side is disabled
         captureActiveScroll(); // remember the markdown offset before hiding it
-        // Dictation is an editing mode and the html view is read-only: end an
-        // active session (its pending chunks flush) before hiding the editor.
-        await dictationRef.current?.stop();
         // Awaited for the same reason as the pane-swap branch above: the
         // meta reload must see this document's landed thread bodies.
         await flushPendingAutosave();
@@ -3005,12 +2845,6 @@ export default function App() {
     async (toFocusSide?: PaneSide) => {
       const s = splitRef.current;
       if (!s || !s.doc) return;
-      // Dictation writes through editorRef; retargeting mid-session would
-      // land spoken text in the other document. End it first (the common
-      // promote path — a click — runs with dictation idle and stays sync).
-      if (dictationSessionRef.current !== "idle") {
-        await dictationRef.current?.stop();
-      }
       const incoming = s.doc;
       const incomingTabId = s.tabId;
       const incomingView = s.view;
@@ -3492,7 +3326,6 @@ export default function App() {
           await commitTabDrop(existing.id, side);
           return;
         }
-        addRecent(target, "file");
         const tab: Tab = { id: uuid(), kind: "file", path: target };
         if (side === focusedSideOf(splitRef.current)) {
           // Focused half (or no split yet, left half): a normal open.
@@ -3507,7 +3340,7 @@ export default function App() {
         await openInPane(tab.id, side);
       })();
     },
-    [dropSideForPointer, commitTabDrop, addRecent, appendAndActivate, openInPane],
+    [dropSideForPointer, commitTabDrop, appendAndActivate, openInPane],
   );
 
   // The tab-bar split button / ⌘⇧\: open the active document in a second
@@ -3607,7 +3440,6 @@ export default function App() {
       htmlPathRef.current = siblingExists ? sibling : null;
       setHasHtml(siblingExists);
       await refreshWatchSet();
-      addRecent(chosen, "file");
       setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
       return true;
     },
@@ -3616,7 +3448,6 @@ export default function App() {
       writeToDisk,
       scheduleAutosave,
       pushToast,
-      addRecent,
       loadEntityMeta,
       adoptTableWidths,
       refreshWatchSet,
@@ -3948,8 +3779,8 @@ export default function App() {
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint every piece of state that keys
   // off the old path: open tabs (including everything inside a moved folder),
-  // the active document's autosave target and watcher, recents, and the
-  // sidebar selection. Returns an error message for the caller to surface
+  // the active document's autosave target and watcher, and the sidebar
+  // selection. Returns an error message for the caller to surface
   // (inline under the rename input, alert for a drop), or null on success.
   const movePath = useCallback(
     async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
@@ -4065,19 +3896,6 @@ export default function App() {
         }
       }
       if (rewatch) await refreshWatchSet();
-
-      setRecents((prev) => {
-        let changed = false;
-        const next = prev.map((r) => {
-          const np = remap(r.path);
-          if (np === r.path) return r;
-          changed = true;
-          return { ...r, path: np };
-        });
-        if (!changed) return prev;
-        writeStoredRecents(next);
-        return next;
-      });
 
       const sels = sidebarSelectionRef.current;
       const remapped = sels.map((s) => {
@@ -4236,10 +4054,10 @@ export default function App() {
         isMainWindow = false;
         if (init.restored) {
           // A window brought back by quit-time session restore: re-adopt its
-          // folder and rebuild its tabs directly — openTab/setWorkspace would
-          // reshuffle recents, and restoring isn't an "open". Unreadable
-          // paths stay visible as ghost tabs and untitled notes come back
-          // unsaved, same as the main window's restore.
+          // folder and rebuild its tabs directly — restoring isn't an "open"
+          // (openTab/setWorkspace would activate each tab in turn and force the
+          // sidebar open). Unreadable paths stay visible as ghost tabs and
+          // untitled notes come back unsaved, same as the main window's restore.
           if (init.folder) setWorkspaceRoot(init.folder);
           const restored = await rebuildTabs(sanitizeTabs(init.tabs));
           if (restored.length > 0) {
@@ -4332,7 +4150,7 @@ export default function App() {
       } else if (targetRoot) {
         // Reopen the last workspace — via setWorkspaceRoot, not setWorkspace:
         // restoring shouldn't force the sidebar open (its state is persisted
-        // separately) or reshuffle recents. A root that doesn't read right now
+        // separately). A root that doesn't read right now
         // stays in the stored session (see sessionWorkspaceRoot) but isn't
         // shown, so an unmounted drive self-heals on a later launch.
         const exists = await invoke<boolean>("path_exists", {
@@ -4688,30 +4506,6 @@ export default function App() {
     };
   }, [flushPendingAutosave, flushSidecarWrite]);
 
-  // Mirror recent workspaces into the native File → "Open Recent Workspace"
-  // menu (macOS). Fires on mount (restoring from localStorage) and on every
-  // change. Folders only — files aren't workspaces. The backend menu is
-  // app-global, so the last window to push wins, which is the freshest list.
-  useEffect(() => {
-    const folders = recents
-      .filter((r) => r.kind === "folder")
-      .map((r) => r.path);
-    void invoke("set_recent_workspaces", { folders }).catch(() => {});
-  }, [recents]);
-
-  // "Clear Menu" in that native submenu emits this; wipe the shared recents (the
-  // push effect above then blanks the menu). Broadcast to every window, each
-  // clearing its own copy of the shared list.
-  useEffect(() => {
-    const un = listen("menu-clear-recent-workspaces", () => {
-      setRecents([]);
-      writeStoredRecents([]);
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, []);
-
 
   // An untitled note is known by its first line and is unsaved for as long
   // as it has text: keep its tab saying both as the text changes. Neither is
@@ -4979,19 +4773,6 @@ export default function App() {
         // on macOS ⌥ remaps e.key (⌥H → "˙").
         e.preventDefault();
         toggleHistory();
-      } else if (k === "v" && e.shiftKey) {
-        // ⌘⇧V: start/finish voice dictation (same as the titlebar mic).
-        // Dictation types into the markdown editor; starting it from the html
-        // view brings the editable version forward first. (In html view a
-        // session is never active — entering the view stops it — so this
-        // toggle can only be a start.)
-        e.preventDefault();
-        // Not into a document another Mac holds: it is view-only here.
-        if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-        void (async () => {
-          if (docViewRef.current === "html") await selectDocView("md");
-          await dictationRef.current?.toggle();
-        })();
       } else if (e.code === "Equal" || e.code === "NumpadAdd") {
         // ⌘+ / ⌘- / ⌘0: document zoom, both versions (see DOC_ZOOM_STEPS).
         // e.code, not e.key: on most layouts ⌘+ arrives as ⌘⇧= — matching the
@@ -5150,11 +4931,6 @@ export default function App() {
   const activeLeaseRef = useRef(activeLease);
   activeLeaseRef.current = activeLease;
   const leased = activeLease != null;
-  useEffect(() => {
-    // Dictation types into the document: a lease that lands mid-session ends
-    // it, its pending chunks flushing the way leaving for the html view does.
-    if (leased && dictationSessionRef.current !== "idle") void dictationRef.current?.stop();
-  }, [leased]);
   const takeOverActive = useCallback(() => {
     const held = activeLeaseRef.current;
     if (held && activeFilePath) void cloudTakeOver(held.status.root, activeFilePath).catch(() => {});
@@ -5489,10 +5265,6 @@ export default function App() {
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
           previewHere ? "is-version-preview" : ""
-        } ${
-          dictationUi.session !== "idle"
-            ? `is-dictating ${dictationUi.gate === "listening" && dictationUi.session === "active" ? "is-listening" : "is-paused"}`
-            : ""
         }`
       : `editor-wrap ${paneView === "html" ? "is-html-view" : ""}`;
 
@@ -5727,19 +5499,9 @@ export default function App() {
               untitled tab in VS Code. */}
           {focused && !activeTab && (
             <ScratchEmptyState
-              recents={recents}
               onNewNote={() => void newUntitled()}
               onOpenFile={openFilePicker}
               onOpenFolder={openFolderPicker}
-              onOpenRecent={openRecent}
-            />
-          )}
-          {focused && (
-            <DictationHud
-              ui={dictationUi}
-              onFlush={() => dictationRef.current?.flushPending()}
-              onRevert={() => dictationRef.current?.revertPolish()}
-              onStop={() => void dictationRef.current?.stop()}
             />
           )}
         </div>
@@ -5758,16 +5520,13 @@ export default function App() {
       onTheme={setTheme}
       docFont={docFont}
       onDocFont={setDocFont}
-      recents={recents}
       onNewNote={() => void newUntitled()}
       onOpenFile={openFilePicker}
       onOpenFolder={openFolderPicker}
       onOpenFileNewWindow={() => void openFileInNewWindow()}
       onOpenFolderNewWindow={() => void openFolderInNewWindow()}
-      onOpenRecent={openRecent}
       canCopyWithComments={activeTab != null}
       onCopyWithComments={() => void copyWithComments()}
-      onOpenDictationSetup={() => setDictationSetupOpen(true)}
       update={update}
       onOpenExternal={openExternal}
       onOpenCloud={() => setCloudPanelOpen(true)}
@@ -5791,32 +5550,6 @@ export default function App() {
           aria-pressed={sidebarOpen}
         >
           <SidebarIcon />
-        </button>
-      )}
-      {activeTab && !activeMissing && !activeIsHtmlDoc && (
-        <button
-          className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
-          onClick={() =>
-            // Dictation types into the markdown editor; from the html view,
-            // bring the editable version forward first (a session is never
-            // active there, so this is always a start). Never into a
-            // document another Mac holds — it is view-only here.
-            void (async () => {
-              if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-              if (docViewRef.current === "html") await selectDocView("md");
-              await dictationRef.current?.toggle();
-            })()
-          }
-          disabled={leased && dictationUi.session === "idle"}
-          title={
-            dictationUi.session === "idle"
-              ? "Start dictation (⌘⇧V)"
-              : "Finish dictation (Esc)"
-          }
-          aria-label="Toggle dictation"
-          aria-pressed={dictationUi.session !== "idle"}
-        >
-          <MicIcon />
         </button>
       )}
     </div>
@@ -6059,23 +5792,6 @@ export default function App() {
           </div>
         )}
       </main>
-      {inspectorOpen && dictationConfig?.inspector && (
-        <DictationInspector
-          entries={inspectorEntries}
-          onClear={() => setInspectorEntries([])}
-          onClose={() => setInspectorOpen(false)}
-        />
-      )}
-      {dictationSetupOpen && dictationConfig && (
-        <DictationSetup
-          config={dictationConfig}
-          onClose={() => setDictationSetupOpen(false)}
-          onSaved={(next) => {
-            setDictationConfig(next);
-            void dictationRef.current?.reloadConfig();
-          }}
-        />
-      )}
       {cloudPanelOpen && (
         <CloudPanel
           root={workspaceRoot}
@@ -6260,7 +5976,7 @@ function ViewToggle({
 
 // Slim header atop each pane in split mode: the document name, its MD/HTML
 // switcher, and a close-pane ✕. The focused pane is tinted — that's where
-// typing, find, and dictation act.
+// typing and find act.
 function PaneHeader({
   title,
   focused,
@@ -6696,16 +6412,13 @@ function Settings({
   onTheme,
   docFont,
   onDocFont,
-  recents,
   onNewNote,
   onOpenFile,
   onOpenFolder,
   onOpenFileNewWindow,
   onOpenFolderNewWindow,
-  onOpenRecent,
   canCopyWithComments,
   onCopyWithComments,
-  onOpenDictationSetup,
   update,
   onOpenExternal,
   onOpenCloud,
@@ -6720,16 +6433,13 @@ function Settings({
   onTheme: (t: Theme) => void;
   docFont: DocFont;
   onDocFont: (f: DocFont) => void;
-  recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
   onOpenFileNewWindow: () => void;
   onOpenFolderNewWindow: () => void;
-  onOpenRecent: (r: RecentEntry) => void;
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
-  onOpenDictationSetup: () => void;
   update: UpdateController;
   onOpenExternal: (url: string) => void;
   // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
@@ -6877,19 +6587,6 @@ function Settings({
             </>
           )}
           <div className="settings-divider" />
-          <div className="settings-section-label">Voice</div>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenDictationSetup();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Dictation settings…</span>
-          </button>
-          <div className="settings-divider" />
           <div className="settings-section-label">Cloud</div>
           <button
             role="menuitem"
@@ -6919,31 +6616,6 @@ function Settings({
             <span className="settings-option-check" />
             <span className="settings-option-label">Version history…</span>
           </button>
-          {recents.length > 0 && (
-            <>
-              <div className="settings-divider" />
-              <div className="settings-section-label">Recent</div>
-              <div className="settings-recents">
-                {recents.map((r) => (
-                  <button
-                    key={r.path}
-                    role="menuitem"
-                    className="settings-option"
-                    title={r.path}
-                    onClick={() => {
-                      setOpen(false);
-                      onOpenRecent(r);
-                    }}
-                  >
-                    <span className="settings-option-check">
-                      {r.kind === "folder" ? <FolderIcon /> : <FileIcon />}
-                    </span>
-                    <span className="settings-option-label">{basename(r.path)}</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
           <div className="settings-divider" />
           <div className="settings-section-label">Appearance</div>
           {/* Live choices: the menu stays open so the note behind it can be
@@ -7092,17 +6764,13 @@ function Settings({
 // The welcome screen shown when no document is open. (An open note, including
 // an empty untitled one, shows the bare editor instead — no overlay.)
 function ScratchEmptyState({
-  recents,
   onNewNote,
   onOpenFile,
   onOpenFolder,
-  onOpenRecent,
 }: {
-  recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
-  onOpenRecent: (r: RecentEntry) => void;
 }) {
   return (
     <div className="scratch-empty" aria-hidden={false}>
@@ -7125,22 +6793,6 @@ function ScratchEmptyState({
             <span className="scratch-empty-kbd">⌘⇧O</span>
           </button>
         </div>
-        {recents.length > 0 && (
-          <div className="scratch-empty-recents">
-            <div className="scratch-empty-recents-label">Recent</div>
-            {recents.map((r) => (
-              <button
-                key={r.path}
-                className="scratch-empty-recent"
-                title={r.path}
-                onClick={() => onOpenRecent(r)}
-              >
-                {r.kind === "folder" ? <FolderIcon /> : <FileIcon />}
-                <span className="scratch-empty-recent-name">{basename(r.path)}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -7183,26 +6835,6 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
-    </svg>
-  );
-}
-
-function MicIcon() {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="9" y="2" width="6" height="12" rx="3" />
-      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
-      <line x1="12" y1="18" x2="12" y2="22" />
     </svg>
   );
 }

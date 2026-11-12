@@ -142,7 +142,7 @@ fn orphans_in(dir: &Path, held: &HashSet<PathBuf>) -> Vec<String> {
         .collect()
 }
 
-/// One-time migration: builds up to 0.1.87 kept every untitled note as a
+/// One-time migration: builds up to 0.1.89 kept every untitled note as a
 /// "draft" in `<app_data>/drafts` — listed in a Drafts panel whether or not a
 /// tab showed it, with a version store of its own. Move those files into the
 /// untitled folder, where this launch's orphan pass reopens each one that has

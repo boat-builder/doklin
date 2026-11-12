@@ -1,6 +1,6 @@
 [package]
 name = "doklin"
-version = "0.1.87"
+version = "0.1.89"
 description = "Markdown editor"
 authors = ["Sherin"]
 edition = "2021"
@@ -10,18 +10,18 @@ name = "doklin_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-# Dictation sidecar request/response plumbing (tauri already ships tokio; the
-# direct dep is for oneshot + timeout in src/dictation.rs).
+# Async plumbing for the cloud engine, versioning and the PDF export
+# (tauri already ships tokio; the direct dep names the features they use).
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 notify = "6"
 notify-debouncer-full = "0.3"
