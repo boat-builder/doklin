@@ -101,6 +101,26 @@ node verify-harness/drive-kanban-embed.mjs # 44 steps over the SAME harness page
                                           # edit), an embed pointing at a folder that isn't a
                                           # board, and a split pane's board going read-only
                                           # until promoted
+node verify-harness/drive-untitled.mjs     # 36 steps: boots the REAL <App/> (untitled.html's
+                                           # in-memory backend survives a reload the way the real
+                                           # one survives a quit) and walks an UNTITLED NOTE's
+                                           # life — ⌘N writing nothing, the tab titled from the
+                                           # first line and unsaved for as long as it has text
+                                           # (with no registry report per keystroke), closing
+                                           # asking (Esc / Cancel keep it, the question owns the
+                                           # keyboard), a relaunch bringing it back unsaved, ⌘S
+                                           # and Save… turning it into a file and deleting the
+                                           # buffer, Don't Save deleting it and writing nothing,
+                                           # a taken name refused, text typed an instant before
+                                           # ⌘W still asked about, a slow load overtaken by a
+                                           # newer one standing down, a note staying with the
+                                           # window across a folder switch, a note no window has open
+                                           # recovered at launch, another window's note left
+                                           # alone, the main window closing without asking and a
+                                           # second window asking first, and — with no workspace
+                                           # — the native dialog, a failed write leaving the note
+                                           # unsaved, a dismissed dialog cancelling the close.
+                                           # HARNESS_ORIGIN overrides the server's origin
 node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (split.html stubs
                                            # enough IPC: in-memory fs, /docs workspace tree,
                                            # window init, the device name) and walks the split view —
@@ -189,8 +209,8 @@ node verify-harness/drive-versions.mjs      # 32 steps over the SAME harness pag
                                            # (hash + ts, no text) with the toast's Undo restoring
                                            # the pre-restore hash, the rail gaining a row that says
                                            # what it was restored from, Name this version, the tab
-                                           # menu and ⌘⌥H, a draft's history from the drafts
-                                           # store, a version another Mac mirrored — its device,
+                                           # menu and ⌘⌥H, an untitled note having no history at
+                                           # all, a version another Mac mirrored — its device,
                                            # its reason, read through the version store,
                                            # comparable — and that across every rail walked the
                                            # sync manifest is never asked for a revision;
@@ -506,10 +526,7 @@ node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 ## Rust side
 
 `cd src-tauri && cargo check` works on Linux after
-`apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev` and
-creating dummy gitignored resources the build script expects:
-`binaries/doklin-stt-x86_64-unknown-linux-gnu` (empty file) plus empty dirs
-`binaries/{mlx-swift_Cmlx,swift-crypto_Crypto,swift-transformers_Hub}.bundle`.
+`apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev`.
 Versioning also has a by-hand pass — `docs/versioning-testing.md`, run
 through the app once its phases are in, because "no data is lost" is not a
 thing a suite can answer. `scripts/versions.sh <folder>` prints what a

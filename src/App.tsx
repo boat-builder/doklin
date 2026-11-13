@@ -60,21 +60,21 @@ import Sidebar, {
   type TreeNode,
 } from "./Sidebar";
 import TabBar from "./TabBar";
-import DraftsPanel from "./DraftsPanel";
+import {
+  isUnsaved,
+  isUntitled,
+  noteHasText,
+  noteTitle,
+  tabLabel,
+  toStoredTab,
+  type StoredTab,
+  type Tab,
+  type TabKind,
+  type UntitledTab,
+} from "./tabs";
 import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
 import MermaidModal from "./MermaidModal";
-import DictationHud from "./DictationHud";
-import DictationInspector from "./DictationInspector";
-import DictationSetup from "./DictationSetup";
-import {
-  DictationController,
-  getDictationConfig,
-  INITIAL_DICTATION_UI,
-  type DictationConfig,
-  type DictationUiState,
-  type InspectorEntry,
-} from "./dictation";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
@@ -124,16 +124,16 @@ type WindowInit = {
   isMain: boolean;
   folder: string | null;
   file: string | null;
-  files: string[];
-  activeFile: string | null;
+  tabs: StoredTab[];
+  activeId: string | null;
   restored: boolean;
 };
 
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
 // true and flip it false for spawned windows once init resolves, so a spawned
-// window never clobbers the main window's session. Shared prefs (theme, recents,
-// drafts) stay shared across all windows.
+// window never clobbers the main window's session. Shared prefs (the theme)
+// stay shared across all windows.
 let isMainWindow = true;
 
 // The main window's workspace root, mirrored module-level (like isMainWindow)
@@ -219,8 +219,8 @@ type DocView = "md" | "html";
 
 /* ---------- Split view ----------
    The editor area can split into two side-by-side panes. The app's whole
-   document machinery (autosave, watcher, conflicts, comments,
-   dictation, find) stays bound to ONE document — the FOCUSED pane's — and
+   document machinery (autosave, watcher, conflicts, comments, find)
+   stays bound to ONE document — the FOCUSED pane's — and
    `SplitPane` describes the other pane:
 
    - Same-document split (`doc === null`): the active document open in both
@@ -322,33 +322,18 @@ function readStoredSplitRatio(): number {
   return 0.5;
 }
 
-// Suggest a filename (no extension) for saving a draft: its first non-empty
-// line with markdown syntax and filesystem-hostile characters stripped, falling
-// back to the draft's Untitled-N title. Pre-fills the Save As prompt so naming
-// a note that already starts with a heading is just ⌘S + Enter.
-function suggestDraftFileName(md: string, fallback: string): string {
-  const line = md.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
-  const cleaned = line
-    .replace(/^[#>\s*+-]+/, "") // heading/quote/list markers
-    .replace(/[*_`~[\]]/g, "") // inline emphasis/link syntax
-    .replace(/[/\\:]/g, "-")
-    .trim()
-    .slice(0, 60)
-    .trim();
-  return cleaned || fallback;
-}
+// The file name (no extension) the Save prompt offers for an untitled note:
+// what the note is called — its first line — with the characters a file name
+// can't hold swapped out.
+const suggestedFileName = (title: string) =>
+  title.replace(/[/\\:]/g, "-").trim() || "Untitled";
 
 type Theme = "system" | "light" | "paper" | "dark";
 const THEMES: Theme[] = ["system", "light", "paper", "dark"];
 const THEME_STORAGE_KEY = "doklin:theme";
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
-const RECENTS_STORAGE_KEY = "doklin:recents";
-const RECENTS_MAX = 8;
 const SESSION_STORAGE_KEY = "doklin:session";
-const DRAFT_SEQ_STORAGE_KEY = "doklin:draft-seq";
-const DRAFTS_META_STORAGE_KEY = "doklin:drafts-meta";
-const DRAFTS_OPEN_STORAGE_KEY = "doklin:drafts-open";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
 const DOC_FONT_STORAGE_KEY = "doklin:doc-font";
@@ -426,38 +411,50 @@ function stepDocZoom(current: number, dir: 1 | -1): number {
   return DOC_ZOOM_STEPS[Math.min(DOC_ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
 }
 
-type RecentEntry = { path: string; kind: "file" | "folder" };
-
-// A tab is a lightweight descriptor; the document's content always lives on disk
-// (drafts in app_data_dir/drafts/<id>.md, files at their real path) and autosaves
-// there, so disk — not memory — is the source of truth across tabs.
-// "store" is a DATASTORE folder shown as a kanban board — a tab whose path is
-// a directory, not a document. The app's document machinery (autosave,
-// watcher, comments, dictation, find) stands down for one, the way it
-// does for an html-only document: the board owns its own reads and writes.
-type TabKind = "draft" | "file" | "store";
-// `missing` marks a file tab whose path failed to read (drive unmounted, file
-// moved) — kept visible as a "ghost" tab instead of silently dropped. Every
-// activation re-checks the path, so the flag self-heals if the file returns.
-type Tab = { id: string; kind: TabKind; path: string; title?: string; missing?: boolean };
-type DraftInfo = { id: string; path: string; snapshot: FileSnapshot; preview: string };
-type DraftRow = { id: string; path: string; title: string; preview: string };
-type DraftsMeta = Record<string, { seq: number }>;
-
-// For a draft the tab id IS the draft file's stem (the uuid), so tab/meta/disk
-// all join on the same id. For files the title is derived from the path.
-const draftIdFromPath = (p: string) => basename(p).replace(/\.(md|markdown|mdown|mkd)$/i, "");
 const uuid = () =>
   typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
     : `id-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
-const tabTitle = (t: Tab) => (t.kind === "draft" ? t.title ?? "Untitled" : basename(t.path));
-// A document's display title, for pane headers: the tab title, minus the
-// document extension for real files ("notes.md" reads as "notes").
-const docDisplayTitle = (t: Tab) =>
-  t.kind === "draft"
-    ? t.title ?? "Untitled"
-    : basename(t.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
+
+// Where untitled notes' buffers live (src-tauri/src/untitled.rs), asked for
+// once before this window builds its first tab. A new note's buffer is named
+// after its tab; the file itself appears with the note's first autosave.
+let untitledDir = "";
+const untitledPathFor = (id: string) => `${untitledDir}/${id}.md`;
+
+// Read a tab's document. An untitled note nothing has been typed into has no
+// buffer on disk yet — that is an empty note, not a missing file.
+const readTabDoc = async (
+  tab: StoredTab,
+): Promise<{ contents: string; snapshot: FileSnapshot | null }> => {
+  try {
+    return await invoke<ReadFileResult>("read_file", { path: tab.path });
+  } catch (e) {
+    if (tab.kind === "untitled") return { contents: "", snapshot: null };
+    throw e;
+  }
+};
+
+// An untitled note's tab, read back out of its buffer — or null when the
+// buffer has no text in it: then it is not a note any more, and what is left
+// of it is deleted. (A buffer that fails to read is left alone; if it does
+// hold a note, the next launch finds it.)
+const restoreUntitled = async (id: string, path: string): Promise<UntitledTab | null> => {
+  let md: string;
+  try {
+    md = (await invoke<ReadFileResult>("read_file", { path })).contents;
+  } catch {
+    return null;
+  }
+  if (!noteHasText(md)) {
+    void invoke("discard_untitled", { path }).catch(() => {});
+    return null;
+  }
+  return { id, kind: "untitled", path, title: noteTitle(md), unsaved: true };
+};
+
+// What can be done with an untitled note whose tab is about to close.
+type UnsavedChoice = "save" | "discard" | "cancel";
 
 // One in-app delete, as undo needs to see it — see deletedStackRef.
 type DeletedRecord = {
@@ -547,36 +544,13 @@ function writeStoredSidebarOpen(open: boolean) {
   }
 }
 
-function readStoredRecents(): RecentEntry[] {
-  try {
-    const raw = localStorage.getItem(RECENTS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is RecentEntry =>
-        r && typeof r.path === "string" && (r.kind === "file" || r.kind === "folder"),
-    );
-  } catch {
-    return [];
-  }
-}
-
-function writeStoredRecents(entries: RecentEntry[]) {
-  try {
-    localStorage.setItem(RECENTS_STORAGE_KEY, JSON.stringify(entries));
-  } catch {
-    // ignore
-  }
-}
-
 // The persisted session is keyed by workspace root so each directory remembers
 // its OWN open tabs: opening directory B never shows directory A's tabs, and
 // reopening A brings A's tabs back. Tabs opened with no folder (a bare launch)
 // live under a sentinel key. `lastRoot` records which workspace to restore on a
 // bare launch, where the command line names no folder.
 type StoredSplit = { tabId: string; view: DocView; side: PaneSide };
-type SessionEntry = { tabs: Tab[]; activeId: string | null; split?: StoredSplit | null };
+type SessionEntry = { tabs: StoredTab[]; activeId: string | null; split?: StoredSplit | null };
 type StoredSessions = { lastRoot: string | null; sessions: Record<string, SessionEntry> };
 const NO_WORKSPACE_KEY = "<no-workspace>";
 const sessionKeyFor = (root: string | null) => root ?? NO_WORKSPACE_KEY;
@@ -591,17 +565,19 @@ function sanitizeSplit(raw: unknown): StoredSplit | null {
     : null;
 }
 
-function sanitizeTabs(raw: unknown): Tab[] {
+function sanitizeTabs(raw: unknown): StoredTab[] {
   return Array.isArray(raw)
-    ? raw.filter(
-        (t: unknown): t is Tab =>
-          !!t &&
-          typeof (t as Tab).id === "string" &&
-          typeof (t as Tab).path === "string" &&
-          ((t as Tab).kind === "draft" ||
-            (t as Tab).kind === "file" ||
-            (t as Tab).kind === "store"),
-      )
+    ? raw
+        .filter(
+          (t: unknown): t is StoredTab =>
+            !!t &&
+            typeof (t as StoredTab).id === "string" &&
+            typeof (t as StoredTab).path === "string" &&
+            ((t as StoredTab).kind === "file" ||
+              (t as StoredTab).kind === "store" ||
+              (t as StoredTab).kind === "untitled"),
+        )
+        .map(({ id, kind, path }) => ({ id, kind, path }))
     : [];
 }
 
@@ -657,7 +633,7 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
     // ever opened); it reads back as "no tabs" either way. `lastRoot` still
     // points here so a later bare launch reopens this folder.
     if (tabs.length === 0) delete all.sessions[key];
-    else all.sessions[key] = { tabs, activeId, split: sessionSplit };
+    else all.sessions[key] = { tabs: tabs.map(toStoredTab), activeId, split: sessionSplit };
     all.lastRoot = sessionWorkspaceRoot;
     localStorage.setItem(
       SESSION_STORAGE_KEY,
@@ -668,53 +644,13 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
   }
 }
 
-function readDraftSeq(): number {
+// One-time cleanup: builds up to 0.1.89 had a Drafts panel, and kept its
+// numbering and open state under these keys. Nothing reads them any more.
+function forgetDraftsPanelKeys() {
   try {
-    const v = parseInt(localStorage.getItem(DRAFT_SEQ_STORAGE_KEY) || "0", 10);
-    return Number.isFinite(v) ? v : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeDraftSeq(n: number) {
-  try {
-    localStorage.setItem(DRAFT_SEQ_STORAGE_KEY, String(n));
-  } catch {
-    // ignore
-  }
-}
-
-function readDraftsMeta(): DraftsMeta {
-  try {
-    const raw = localStorage.getItem(DRAFTS_META_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? (parsed as DraftsMeta) : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeDraftsMeta(m: DraftsMeta) {
-  try {
-    localStorage.setItem(DRAFTS_META_STORAGE_KEY, JSON.stringify(m));
-  } catch {
-    // ignore
-  }
-}
-
-function readDraftsOpen(): boolean {
-  try {
-    return localStorage.getItem(DRAFTS_OPEN_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeDraftsOpen(open: boolean) {
-  try {
-    localStorage.setItem(DRAFTS_OPEN_STORAGE_KEY, open ? "1" : "0");
+    for (const key of ["doklin:draft-seq", "doklin:drafts-meta", "doklin:drafts-open"]) {
+      localStorage.removeItem(key);
+    }
   } catch {
     // ignore
   }
@@ -736,16 +672,23 @@ export default function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   // The sidebar's selected rows (files or folders; ⌘/⇧-click multi-selects).
   // Lives here — not in Sidebar — because the PRIMARY selection (the last
-  // entry, the row clicked most recently) is the creation context: saving a
-  // new draft defaults the save dialog into the selected folder (or next to
-  // the selected file), falling back to the workspace root. Mirrored in a ref
-  // for async readers.
+  // entry, the row clicked most recently) is the creation context: saving an
+  // untitled note defaults into the selected folder (or next to the selected
+  // file), falling back to the workspace root. Mirrored in a ref for async
+  // readers.
   const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection[]>([]);
   const sidebarSelectionRef = useRef<SidebarSelection[]>([]);
   // The in-app Save As prompt (shown instead of the native save panel when a
   // workspace decides the destination): the folder is fixed, only the name is
-  // asked for. null = closed.
+  // asked for. null = closed. Whoever opened it is waiting on the answer —
+  // `savePromptDoneRef` resolves true once the note is a file, false when the
+  // prompt is dismissed.
   const [savePrompt, setSavePrompt] = useState<{ dir: string; suggested: string } | null>(null);
+  const savePromptDoneRef = useRef<((saved: boolean) => void) | null>(null);
+  // The question an untitled note with text in it raises before its tab
+  // closes (see closeTab): which note, and the resolver for the answer.
+  const [unsavedPrompt, setUnsavedPrompt] = useState<{ title: string } | null>(null);
+  const unsavedAnswerRef = useRef<((choice: UnsavedChoice) => void) | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => readStoredSidebarOpen());
   // The comment layer: visible by default, hideable app-wide (persisted) so a
   // marked-up document can be read clean. The count comes from the editor and
@@ -758,14 +701,7 @@ export default function App() {
     }
   });
   const [commentCount, setCommentCount] = useState(0);
-  const [draftsOpen, setDraftsOpen] = useState<boolean>(() => readDraftsOpen());
-  const [draftRows, setDraftRows] = useState<DraftRow[]>([]);
-  const [recents, setRecents] = useState<RecentEntry[]>(() => readStoredRecents());
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
-  // Bumped after each autosave write of a draft lands on disk, so the drafts
-  // panel re-lists (list_drafts reads from disk, so the refresh has to follow
-  // the write, not the keystroke). The 600ms autosave debounce is the rate cap.
-  const [draftsRefreshToken, setDraftsRefreshToken] = useState(0);
   // Undo stack for trashed entries. `files` is everything one delete moved to
   // the Trash (a markdown file's html rendition rides along); `openPaths` are
   // the file tabs the delete closed (the entry itself for a file, everything
@@ -787,8 +723,6 @@ export default function App() {
   // restored once the incoming editor is ready. DOM-level (.editor-wrap), so it
   // needs no editor internals. In-memory only — a fresh launch starts at top.
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
-  const draftsMetaRef = useRef<DraftsMeta>({});
-  const draftSeqRef = useRef<number>(0);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
   const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
   const [docFont, setDocFont] = useState<DocFont>(() => readStoredDocFont());
@@ -920,6 +854,19 @@ export default function App() {
     const m = editorSeqRef.current;
     m.set(tabId, (m.get(tabId) ?? 0) + 1);
   }, []);
+  // Which tab the document machinery's refs (path, baseline, snapshot…)
+  // describe right now: set when a load has installed them and bumped the
+  // tab's editor seq, or when a focus swap hands the machinery to an editor
+  // that is already mounted; null while a load is in flight or nothing is
+  // open. With the seq it names the ONE editor instance whose changes are
+  // the active document's — see onMarkdownChange.
+  const loadedIdRef = useRef<string | null>(null);
+  // Loads are asynchronous and can overlap — close a tab, then ⌘N before its
+  // neighbour has finished loading — while the machinery is ONE set of refs.
+  // Only the latest may install into it: whatever is about to (a load, the
+  // reset to no document, a focus swap) takes a ticket, and a load that
+  // wakes from an await to find a newer one stops where it is.
+  const loadTicketRef = useRef(0);
   // The two panes' scroll containers and (when a pane shows html) their
   // HtmlView handles, by side — the scroll-sync plumbing.
   const wrapElsRef = useRef<Record<PaneSide, HTMLElement | null>>({
@@ -1087,8 +1034,9 @@ export default function App() {
   const [versionStatuses, setVersionStatuses] = useState<VersionsStatus[]>([]);
   const [versionsSettingsOpen, setVersionsSettingsOpen] = useState(false);
   const historyForRef = useRef<string | null>(null);
-  // What ⌘⌥H opens history for: the active tab, unless it is a board.
-  const historyTargetRef = useRef<{ path: string; kind: "file" | "draft" } | null>(null);
+  // What ⌘⌥H opens history for: the active tab's file. A board has no
+  // document to version, and an untitled note has no history.
+  const historyTargetRef = useRef<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
   const toastSeq = useRef(0);
@@ -1190,107 +1138,16 @@ export default function App() {
   // plugin through the editor ref. `findInfo` mirrors the plugin's match count +
   // current index for the "3/12" readout.
   const editorRef = useRef<EditorHandle>(null);
-
-  // Voice dictation. The controller (src/dictation.ts) owns the session; React
-  // only mirrors its state for the HUD/inspector. Created once via ref so the
-  // sidecar event listener never re-registers.
-  const [dictationUi, setDictationUi] = useState<DictationUiState>(INITIAL_DICTATION_UI);
-  // Session mirror for the split view's focus swap (a swap retargets
-  // editorRef; an active session must end first, on the old target).
-  const dictationSessionRef = useRef<DictationUiState["session"]>("idle");
-  const [dictationConfig, setDictationConfig] = useState<DictationConfig | null>(null);
-  const [dictationSetupOpen, setDictationSetupOpen] = useState(false);
-  const [inspectorEntries, setInspectorEntries] = useState<InspectorEntry[]>([]);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const dictationRef = useRef<DictationController | null>(null);
-  if (!dictationRef.current) {
-    dictationRef.current = new DictationController({
-      getEditor: () => editorRef.current,
-      onState: (s) => {
-        dictationSessionRef.current = s.session;
-        setDictationUi(s);
-      },
-      onInspect: (entry) => setInspectorEntries((prev) => [entry, ...prev].slice(0, 200)),
-    });
-  }
-  useEffect(() => {
-    void dictationRef.current?.init();
-    void getDictationConfig().then(setDictationConfig);
-    return () => dictationRef.current?.dispose();
+  // Bring the app's copy of the active document up to the editor's. The
+  // editor reports its text on a short debounce of its own, so for a moment
+  // after a keystroke the app is behind; anything about to write that copy,
+  // or to decide something on it — whether a note has text, what to call it
+  // — asks the editor to report now. The report arrives through the editor's
+  // own onChange, so it is held to the same rule as any other: only the
+  // instance the document was loaded for is heard (see onMarkdownChange).
+  const catchUpWithEditor = useCallback(() => {
+    editorRef.current?.flushMarkdown();
   }, []);
-  // The inspector auto-opens with a session when enabled in settings.
-  useEffect(() => {
-    if (dictationUi.session === "active" && dictationConfig?.inspector) setInspectorOpen(true);
-  }, [dictationUi.session, dictationConfig?.inspector]);
-
-  // Session keyboard: while a dictation session is live, Space doubles as the
-  // talk key — held past a short threshold it opens the mic; a quick tap is
-  // just the spacebar (the keydown was swallowed, so the release types the
-  // space). Everything else passes through: the document stays editable
-  // between utterances, and the controller suspends typing on its own while
-  // the pipeline is busy. Esc ends the session. Capture phase, so the editor
-  // and the global shortcut handler never see the intercepted keys; text
-  // fields (find bar, comment cards, rename inputs) keep theirs.
-  useEffect(() => {
-    if (dictationUi.session === "idle") return;
-    const ctl = dictationRef.current!;
-    const active = dictationUi.session === "active";
-    const HOLD_MS = 200;
-    let holdTimer: number | null = null;
-    const inTextField = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t) return false;
-      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return true;
-      return t.isContentEditable && !t.closest(".milkdown");
-    };
-    const isTalkKey = (e: KeyboardEvent) =>
-      active && e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey;
-    const down = (e: KeyboardEvent) => {
-      if (inTextField(e)) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        void ctl.stop();
-        return;
-      }
-      if (!isTalkKey(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.repeat) return;
-      holdTimer = window.setTimeout(() => {
-        holdTimer = null;
-        ctl.setGate(true);
-      }, HOLD_MS);
-    };
-    const up = (e: KeyboardEvent) => {
-      if (!isTalkKey(e) || inTextField(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (holdTimer != null) {
-        // Released before the hold threshold: an ordinary spacebar press.
-        window.clearTimeout(holdTimer);
-        holdTimer = null;
-        editorRef.current?.insertText(" ");
-      } else {
-        ctl.setGate(false);
-      }
-    };
-    window.addEventListener("keydown", down, true);
-    window.addEventListener("keyup", up, true);
-    return () => {
-      if (holdTimer != null) window.clearTimeout(holdTimer);
-      window.removeEventListener("keydown", down, true);
-      window.removeEventListener("keyup", up, true);
-    };
-  }, [dictationUi.session]);
-
-  // A dictation session is anchored to one document; switching or closing
-  // tabs ends it immediately (pending chunks flush as raw text first) — the
-  // graceful drain would land text in the wrong editor.
-  useEffect(() => {
-    if (dictationUi.session !== "idle") void dictationRef.current?.stop(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId]);
 
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -1325,6 +1182,13 @@ export default function App() {
 
   useEffect(() => {
     applyTheme(theme);
+    // Native chrome (context menus, dialogs, tooltips) follows the window's
+    // appearance, so it matches the theme rather than the OS. A chosen theme
+    // pins it; "system" hands it back to the OS, because a pinned appearance
+    // also pins prefers-color-scheme, which is what resolves "system".
+    void getCurrentWindow()
+      .setTheme(theme === "system" ? null : theme === "dark" ? "dark" : "light")
+      .catch(() => {});
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
@@ -1386,19 +1250,16 @@ export default function App() {
     setCommentCount(0);
   }, [loadKey]);
 
-  useEffect(() => {
-    writeDraftsOpen(draftsOpen);
-  }, [draftsOpen]);
-
   // Defined with the meta helpers below; writeToDisk needs it before then.
   const writeSidecarNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
 
   // `contents` is the editor's serialization — FULL CriticMarkup. The disk
   // gets the hybrid split: markers-only markdown plus thread-body records in
   // the entity meta (see metaFile.ts). A body-only edit (a reply typed in
   // the rail) leaves the hybrid markdown byte-identical and skips that
   // write entirely — only the meta moves.
-  const writeToDisk = useCallback(async (target: string, contents: string) => {
+  const writeToDisk = useCallback(async (target: string, contents: string): Promise<void> => {
     const { md: hybrid, mthreads } = extractMarkdown(contents);
     // The editor never saw the document's frontmatter block; put it back,
     // byte for byte, in front of what it did see. Captured now, because the
@@ -1407,8 +1268,8 @@ export default function App() {
     try {
       const isActive = pathRef.current === target;
       let newSnapshot: FileSnapshot | null = null;
-      // Never skip a file's FIRST write (no snapshot = nothing on disk yet
-      // — a promoted draft must be created even when its content is empty).
+      // Never skip a document's FIRST write (no snapshot = nothing on disk
+      // yet: an untitled note's buffer only exists once something is typed).
       const mdUnchanged =
         isActive && snapshotRef.current !== null && hybrid === lastDiskMdRef.current;
       if (!mdUnchanged) {
@@ -1417,11 +1278,6 @@ export default function App() {
           contents: head + hybrid,
           expected: snapshotRef.current,
         });
-      }
-      // Same for the drafts panel: its previews come from disk, so re-list once
-      // a draft's write has landed (including a flush resolving after a switch).
-      if (tabsRef.current.some((t) => t.kind === "draft" && t.path === target)) {
-        setDraftsRefreshToken((n) => n + 1);
       }
       // The active tab may have switched while this write was in flight (e.g. a
       // flush of the previous doc resolving after switching tabs). Only commit
@@ -1508,7 +1364,10 @@ export default function App() {
 
   // Returns the write promise so callers that must not outrun the write (the
   // quit flush) can await it; fire-and-forget callers just ignore the result.
+  // The editor's latest text is taken first (see catchUpWithEditor): a flush
+  // that wrote the app's copy as it stood could miss the last keystrokes.
   const flushPendingAutosave = useCallback((): Promise<void> => {
+    catchUpWithEditor();
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
@@ -1518,7 +1377,7 @@ export default function App() {
     const snapshot = currentMarkdownRef.current;
     if (snapshot === lastSavedRef.current) return Promise.resolve();
     return writeToDisk(target, snapshot);
-  }, [writeToDisk]);
+  }, [catchUpWithEditor, writeToDisk]);
 
   /* ---------- HTML rendition comments: meta load/save ----------
      The rendition's threads live in the entity meta file beside the document
@@ -1571,26 +1430,14 @@ export default function App() {
     [],
   );
 
-  // Load the ACTIVE entity's meta into the app refs. The markdown-side split
-  // into live threads vs orphans needs the markdown text — callers that have
-  // it pass it; an html-only document parks every mthread record as a hidden
-  // orphan (unreachable without a markdown side, but never dropped).
-  const loadEntityMeta = useCallback(
-    async (
-      docPath: string | null,
-      md: string | null,
-    ): Promise<{ meta: EntityMeta; diskRaw: string | null }> => {
-      if (!docPath) {
-        htmlSidecarExistsRef.current = false;
-        applyHtmlThreads([]);
-        mdThreadsRef.current = [];
-        mdOrphansRef.current = [];
-        setMdOrphans([]);
-        adoptTableWidths([]);
-        metaForeignRef.current = [];
-        return { meta: emptyMeta(), diskRaw: null };
-      }
-      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath);
+  // Install a meta as the ACTIVE entity's, into the app refs. The
+  // markdown-side split into live threads vs orphans needs the markdown text
+  // — callers that have it pass it; an html-only document parks every mthread
+  // record as a hidden orphan (unreachable without a markdown side, but never
+  // dropped). Synchronous, so a caller can check it is still the one loading
+  // between reading the meta and installing it.
+  const adoptEntityMeta = useCallback(
+    (meta: EntityMeta, metaExists: boolean, md: string | null) => {
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
       adoptTableWidths(meta.tcols);
@@ -1606,9 +1453,26 @@ export default function App() {
         mdOrphansRef.current = meta.mthreads;
         setMdOrphans([]);
       }
+    },
+    [applyHtmlThreads, adoptTableWidths],
+  );
+
+  // Read an entity's meta and install it as the active one's (no document =
+  // no meta).
+  const loadEntityMeta = useCallback(
+    async (
+      docPath: string | null,
+      md: string | null,
+    ): Promise<{ meta: EntityMeta; diskRaw: string | null }> => {
+      if (!docPath) {
+        adoptEntityMeta(emptyMeta(), false, null);
+        return { meta: emptyMeta(), diskRaw: null };
+      }
+      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath);
+      adoptEntityMeta(meta, metaExists, md);
       return { meta, diskRaw };
     },
-    [applyHtmlThreads, adoptTableWidths, readEntityMeta],
+    [adoptEntityMeta, readEntityMeta],
   );
 
   // (Re)arm the file watcher with the full CURRENT document set: the active
@@ -1849,17 +1713,6 @@ export default function App() {
     [mdOrphans, mutateMdOrphans],
   );
 
-  const addRecent = useCallback((p: string, kind: "file" | "folder") => {
-    setRecents((prev) => {
-      const next = [{ path: p, kind }, ...prev.filter((r) => r.path !== p)].slice(
-        0,
-        RECENTS_MAX,
-      );
-      writeStoredRecents(next);
-      return next;
-    });
-  }, []);
-
   // The focused pane's side: always opposite the split pane; left otherwise.
   const focusedSideOf = (s: SplitPane | null): PaneSide =>
     s ? otherSide(s.side) : "left";
@@ -1933,7 +1786,7 @@ export default function App() {
     const cur = tabsRef.current;
     if (!cur.some((t) => t.id === id && !!t.missing !== missing)) return;
     const next = cur.map((t) =>
-      t.id === id ? { ...t, missing: missing || undefined } : t,
+      t.id === id && t.kind !== "untitled" ? { ...t, missing: missing || undefined } : t,
     );
     tabsRef.current = next;
     setTabs(next);
@@ -1978,7 +1831,7 @@ export default function App() {
       let contents = "";
       let snapshot: FileSnapshot | null = null;
       try {
-        const r = await invoke<ReadFileResult>("read_file", { path: tab.path });
+        const r = await readTabDoc(tab);
         contents = r.contents;
         snapshot = r.snapshot;
       } catch (e) {
@@ -2097,6 +1950,9 @@ export default function App() {
   // A failed read doesn't drop the tab — it becomes a "ghost" (missing) tab with
   // no document loaded; a later activation retries and recovers automatically.
   const loadActiveContent = useCallback(async (tab: Tab) => {
+    const ticket = ++loadTicketRef.current;
+    const superseded = () => ticket !== loadTicketRef.current;
+    loadedIdRef.current = null; // nobody's changes count until this load lands
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
@@ -2104,6 +1960,7 @@ export default function App() {
     // A pending comment write still targets the PREVIOUS document's sidecar
     // (htmlPathRef switches below) — land it first.
     await flushSidecarWrite();
+    if (superseded()) return;
     // A BOARD tab: its path is a folder, and KanbanBoard owns every read and
     // write inside it. Stand the document machinery down completely — the
     // same posture an html-only document takes, one step further.
@@ -2111,6 +1968,7 @@ export default function App() {
       const exists = await invoke<boolean>("path_exists", { path: tab.path }).catch(
         () => false,
       );
+      if (superseded()) return;
       setTabMissing(tab.id, !exists);
       adoptFrontmatter("");
       baselineCapturedRef.current = false;
@@ -2125,7 +1983,7 @@ export default function App() {
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
-      await loadEntityMeta(null, null);
+      adoptEntityMeta(emptyMeta(), false, null);
       applyDocView("md");
       setLoadKey((k) => k + 1);
       await refreshWatchSet(); // nothing of the board's is watched as a file
@@ -2139,13 +1997,14 @@ export default function App() {
     let snapshot: FileSnapshot | null = null;
     let failed = false;
     try {
-      const result = await invoke<ReadFileResult>("read_file", { path: tab.path });
+      const result = await readTabDoc(tab);
       contents = result.contents;
       snapshot = result.snapshot;
     } catch (e) {
       failed = true;
       console.error("read failed", tab.path, e);
     }
+    if (superseded()) return;
     if (failed) {
       // Ghost state: pathRef stays null so autosave can't recreate the file at
       // its old path, and nothing is watched. The editor is not rendered.
@@ -2163,7 +2022,7 @@ export default function App() {
       htmlPathRef.current = null;
       setHtmlContent(null);
       setHasHtml(false);
-      await loadEntityMeta(null, null);
+      adoptEntityMeta(emptyMeta(), false, null);
       applyDocView("md");
       await refreshWatchSet(); // nothing active to watch (a split pane may remain)
       return;
@@ -2182,12 +2041,16 @@ export default function App() {
       );
       if (exists) htmlPath = sibling;
     }
+    const { meta, metaExists, diskRaw } = await readEntityMeta(tab.path);
+    // Everything is read; from here to the editor's key the document is
+    // installed in one go — unless a newer load has started meanwhile.
+    if (superseded()) return;
     // The frontmatter boundary: split the leading block off the top and keep
     // it in the refs. Everything below — the meta layer, the editor, the disk
     // baseline — works on the BODY alone, so prose edits can never rewrite
     // properties and property edits never touch the prose.
     const body = adoptFrontmatter(htmlOnly ? "" : contents).body;
-    const { meta, diskRaw } = await loadEntityMeta(tab.path, htmlOnly ? null : body);
+    adoptEntityMeta(meta, metaExists, htmlOnly ? null : body);
     // The editor speaks full CriticMarkup; the disk keeps the hybrid form
     // (markers only). Expand thread bodies from the meta records here, at the
     // read boundary — see metaFile.ts.
@@ -2204,8 +2067,7 @@ export default function App() {
     htmlPathRef.current = htmlPath;
     setHasHtml(htmlPath != null);
     // Old-layout content (full threads inline) normalizes on open —
-    // fire-and-forget; conditional writes make racing edits safe. Drafts
-    // migrate through their own saves.
+    // fire-and-forget; conditional writes make racing edits safe.
     if (tab.kind === "file" && snapshot) {
       const snap = snapshot;
       void migrateEntityOnDisk(tab.path, {
@@ -2224,62 +2086,62 @@ export default function App() {
       if (htmlOnly) {
         setHtmlContent(contents);
       } else {
-        try {
-          const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
-          setHtmlContent(r.contents);
-        } catch (e) {
-          console.error("read failed", htmlPath, e);
-          setHtmlContent(null);
-          applyDocView("md");
-        }
+        const rendition = await invoke<ReadFileResult>("read_file", { path: htmlPath }).then(
+          (r) => r.contents,
+          (e) => {
+            console.error("read failed", htmlPath, e);
+            return null;
+          },
+        );
+        if (superseded()) return;
+        setHtmlContent(rendition);
+        if (rendition === null) applyDocView("md");
       }
     } else {
       setHtmlContent(null);
     }
     bumpEditorSeq(tab.id); // remount the focused pane's editor with the fresh content
+    loadedIdRef.current = tab.id; // …and that instance is the one to listen to
     setLoadKey((k) => k + 1);
 
     // Watch the document set: the markdown for the edit/conflict flow, the
     // rendition so external regeneration re-renders live, the entity meta so
     // threads delivered from outside pop in — plus the
-    // split pane's set. Drafts aren't externally watched.
+    // split pane's set. An untitled note's buffer has no other writer, so it
+    // isn't watched.
     await refreshWatchSet();
   }, [
     setTabMissing,
     adoptFrontmatter,
     applyDocView,
     flushSidecarWrite,
-    loadEntityMeta,
+    readEntityMeta,
+    adoptEntityMeta,
     migrateEntityOnDisk,
     refreshWatchSet,
     bumpEditorSeq,
   ]);
 
-  // Re-materialize stored tab descriptors against disk: a readable tab keeps its
-  // identity (a draft regains its Untitled-N title; a stale `missing` flag
-  // clears), an unreadable FILE tab becomes a visible ghost, and an unreadable
-  // draft (app-managed, so truly gone) is dropped. Shared by the startup restore
-  // and in-app workspace switches.
-  const rebuildTabs = useCallback(async (stored: Tab[]): Promise<Tab[]> => {
+  // Re-materialize stored tab descriptors against disk: a readable file (or
+  // board) keeps its tab, an unreadable one becomes a visible ghost, and an
+  // untitled note comes back — titled, and unsaved — if its buffer still has
+  // text in it. Shared by the startup restore and in-app workspace switches.
+  const rebuildTabs = useCallback(async (stored: StoredTab[]): Promise<Tab[]> => {
     const out: Tab[] = [];
-    for (const t of stored) {
-      if (t.kind === "store") {
-        const exists = await invoke<boolean>("path_exists", { path: t.path }).catch(
-          () => false,
-        );
-        out.push(exists ? { ...t, missing: undefined } : { ...t, missing: true });
+    for (const { id, kind, path } of stored) {
+      if (kind === "untitled") {
+        const note = await restoreUntitled(id, path);
+        if (note) out.push(note);
         continue;
       }
-      try {
-        await invoke<ReadFileResult>("read_file", { path: t.path });
-        out.push(
-          t.kind === "draft" && !t.title
-            ? { ...t, title: `Untitled-${draftsMetaRef.current[t.id]?.seq ?? "?"}` }
-            : { ...t, missing: undefined }, // readable again → clear a stale flag
-        );
-      } catch {
-        if (t.kind === "file") out.push({ ...t, missing: true });
-      }
+      const readable =
+        kind === "store"
+          ? await invoke<boolean>("path_exists", { path }).catch(() => false)
+          : await invoke<ReadFileResult>("read_file", { path }).then(
+              () => true,
+              () => false,
+            );
+      out.push({ id, kind, path, missing: readable ? undefined : true });
     }
     return out;
   }, []);
@@ -2287,11 +2149,14 @@ export default function App() {
   // Reset to the "no document open" state (welcome screen). Clears the per-doc
   // refs so autosave is a no-op and unmounts the editor.
   const clearActiveDoc = useCallback(async () => {
+    const ticket = ++loadTicketRef.current;
+    loadedIdRef.current = null;
     if (autosaveTimerRef.current != null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
     await flushSidecarWrite();
+    if (ticket !== loadTicketRef.current) return; // a document started loading meanwhile
     pathRef.current = null;
     currentMarkdownRef.current = "";
     lastSavedRef.current = "";
@@ -2305,10 +2170,10 @@ export default function App() {
     htmlPathRef.current = null;
     setHtmlContent(null);
     setHasHtml(false);
-    await loadEntityMeta(null, null);
+    adoptEntityMeta(emptyMeta(), false, null);
     applyDocView("md");
     await refreshWatchSet(); // drops the active set; keeps a split pane's watch alive
-  }, [adoptFrontmatter, applyDocView, flushSidecarWrite, loadEntityMeta, refreshWatchSet]);
+  }, [adoptFrontmatter, applyDocView, flushSidecarWrite, adoptEntityMeta, refreshWatchSet]);
 
   const switchTab = useCallback(
     async (id: string) => {
@@ -2377,10 +2242,10 @@ export default function App() {
     [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
-  // Open a path in a tab (dedupe by path). Used for files (picker/recents/sidebar/
-  // CLI) and for reopening a draft from the drafts list.
+  // Open a path in a tab (dedupe by path): a file (picker / sidebar / CLI) or
+  // a board.
   const openTab = useCallback(
-    async (p: string, kind: TabKind) => {
+    async (p: string, kind: "file" | "store") => {
       // An html file whose markdown sibling exists is a rendition of THAT
       // document — open the pair as one tab keyed on the markdown path,
       // starting on the view the user actually asked for.
@@ -2405,66 +2270,27 @@ export default function App() {
         }
         return;
       }
-      if (kind === "file") addRecent(p, "file");
-      if (kind === "draft") {
-        const id = draftIdFromPath(p);
-        await appendAndActivate({
-          id,
-          kind,
-          path: p,
-          title: `Untitled-${draftsMetaRef.current[id]?.seq ?? "?"}`,
-        });
-      } else {
-        await appendAndActivate({ id: uuid(), kind, path: p });
-      }
+      await appendAndActivate({ id: uuid(), kind, path: p });
     },
-    [switchTab, addRecent, appendAndActivate, loadActiveContent],
+    [switchTab, appendAndActivate, loadActiveContent],
   );
 
-  // ⌘N: create a brand-new empty draft and open it. Don't spawn a second empty
-  // draft if the active one is already an untouched draft.
-  const newDraft = useCallback(async () => {
+  // ⌘N: a new untitled note, in a new tab. Nothing is written for it until
+  // something is typed into it. An untitled note that is still empty IS a new
+  // note, so asking for another while on one changes nothing.
+  const newUntitled = useCallback(async () => {
+    catchUpWithEditor();
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-    if (active?.kind === "draft" && currentMarkdownRef.current.trim().length === 0) {
-      return;
-    }
-    const seq = draftSeqRef.current + 1;
-    draftSeqRef.current = seq;
-    writeDraftSeq(seq);
+    if (active?.kind === "untitled" && !noteHasText(currentMarkdownRef.current)) return;
     const id = uuid();
-    let draftPath: string;
-    try {
-      draftPath = await invoke<string>("create_draft", { id });
-    } catch (e) {
-      console.error("create_draft failed", e);
-      return;
-    }
-    draftsMetaRef.current = { ...draftsMetaRef.current, [id]: { seq } };
-    writeDraftsMeta(draftsMetaRef.current);
-    await appendAndActivate({ id, kind: "draft", path: draftPath, title: `Untitled-${seq}` });
-  }, [appendAndActivate]);
-
-  // Refresh the drafts-panel list: all drafts (newest first) joined with their
-  // Untitled-N number. Keeps open + empty drafts so the panel always reflects
-  // what exists (including the active new draft).
-  const refreshDraftsPanel = useCallback(async () => {
-    let drafts: DraftInfo[] = [];
-    try {
-      drafts = await invoke<DraftInfo[]>("list_drafts");
-    } catch (e) {
-      console.error("list_drafts failed", e);
-      setDraftRows([]);
-      return;
-    }
-    setDraftRows(
-      drafts.map((d) => ({
-        id: d.id,
-        path: d.path,
-        title: `Untitled-${draftsMetaRef.current[d.id]?.seq ?? "?"}`,
-        preview: d.preview,
-      })),
-    );
-  }, []);
+    await appendAndActivate({
+      id,
+      kind: "untitled",
+      path: untitledPathFor(id),
+      title: "",
+      unsaved: false,
+    });
+  }, [catchUpWithEditor, appendAndActivate]);
 
   const selectSidebarEntries = useCallback((sels: SidebarSelection[]) => {
     sidebarSelectionRef.current = sels;
@@ -2476,28 +2302,33 @@ export default function App() {
     setWorkspaceRoot(root);
     setSidebarOpen(true);
     selectSidebarEntries([]); // a selection from the previous workspace is meaningless
-    addRecent(root, "folder");
     writeStoredSession(tabsRef.current, activeIdRef.current); // the root is part of the session
-  }, [addRecent, selectSidebarEntries]);
+  }, [selectSidebarEntries]);
 
-  // Switch this window to a different workspace folder (File ▸ Open Folder, a
-  // recent, the sidebar). Because tabs are keyed by folder, we persist the
+  // Switch this window to a different workspace folder (File ▸ Open Folder,
+  // the sidebar). Because tabs are keyed by folder, we persist the
   // outgoing folder's tabs under its own key, then load and install the incoming
   // folder's — the same directory-scoped model a `doklin <dir>` launch uses.
   // Document content lives on disk and autosaves, so swapping the tab set never
-  // loses edits.
+  // loses edits. Untitled notes are the exception to "keyed by folder": a note
+  // with no file belongs to the window, not to a folder, so it stays open
+  // across the switch rather than vanishing into the outgoing folder's tabs.
   const openWorkspace = useCallback(
     async (root: string) => {
       if (root === sessionWorkspaceRoot) {
-        setWorkspace(root); // already here — just resurface the sidebar/recents
+        setWorkspace(root); // already here — just resurface the sidebar
         return;
       }
       flushPendingAutosave(); // land the outgoing doc before we swap tabs
       captureActiveScroll();
       // Persist the outgoing workspace under its own key before switching, so
       // returning to it later restores exactly these tabs (split included —
-      // the module mirror still holds the outgoing one).
-      writeStoredSession(tabsRef.current, activeIdRef.current);
+      // the module mirror still holds the outgoing one). Its untitled notes
+      // are not among them: they stay with the window.
+      writeStoredSession(
+        tabsRef.current.filter((t) => !isUntitled(t)),
+        activeIdRef.current,
+      );
       // From here session writes target the incoming folder. Drop the split
       // WITHOUT persisting (tabsRef still holds the outgoing tabs; a write
       // now would stamp them into the incoming key).
@@ -2506,18 +2337,29 @@ export default function App() {
       sessionSplit = null;
       const session = readStoredSession(root);
       sessionWorkspaceRoot = root;
-      const restored = await rebuildTabs(session.tabs);
+      // The incoming folder's own tabs, then the notes that stayed. (A stored
+      // session read here never brings untitled notes of its own: any it
+      // names are either among the ones staying or long gone.) The notes are
+      // taken from the tabs as they stand once the folder's have been read —
+      // one of them may have been typed in meanwhile.
+      const incoming = await rebuildTabs(session.tabs.filter((t) => t.kind !== "untitled"));
+      const staying = tabsRef.current.filter(isUntitled);
+      const stayingActive = staying.find((t) => t.id === activeIdRef.current)?.id ?? null;
+      const restored = [...incoming, ...staying];
+      // A note being written stays in front; otherwise the folder comes back
+      // on the tab it was left on.
       const activeId =
         restored.length === 0
           ? null
-          : session.activeId && restored.some((t) => t.id === session.activeId)
-            ? session.activeId
-            : restored[restored.length - 1].id;
+          : stayingActive ??
+            (session.activeId && restored.some((t) => t.id === session.activeId)
+              ? session.activeId
+              : restored[restored.length - 1].id);
       tabsRef.current = restored;
       activeIdRef.current = activeId;
       setTabs(restored);
       setActiveId(activeId);
-      setWorkspace(root); // adopt root, open sidebar, add recent, persist session
+      setWorkspace(root); // adopt root, open sidebar, persist session
       const active = restored.find((t) => t.id === activeId);
       if (active) await loadActiveContent(active);
       else await clearActiveDoc(); // incoming folder has no tabs → welcome screen
@@ -2576,33 +2418,23 @@ export default function App() {
         ],
       });
       if (typeof chosen === "string") {
-        addRecent(chosen, "file");
         await invoke("open_in_window", { folder: null, file: chosen });
       }
     } catch (e) {
       console.error("open file in new window failed", e);
     }
-  }, [addRecent]);
+  }, []);
 
   const openFolderInNewWindow = useCallback(async () => {
     try {
       const chosen = await openDialog({ directory: true, multiple: false });
       if (typeof chosen === "string") {
-        addRecent(chosen, "folder");
         await invoke("open_in_window", { folder: chosen, file: null });
       }
     } catch (e) {
       console.error("open folder in new window failed", e);
     }
-  }, [addRecent]);
-
-  const openRecent = useCallback(
-    (r: RecentEntry) => {
-      if (r.kind === "folder") void openWorkspace(r.path);
-      else void openTab(r.path, "file");
-    },
-    [openWorkspace, openTab],
-  );
+  }, []);
 
   // Copy the document verbatim — CriticMarkup markers and comments intact (the
   // "full" working format for collaborators using the same tool). Plain ⌘C, by
@@ -2704,16 +2536,15 @@ export default function App() {
 
   /* ---------- Version history (docs/versioning-plan.md §5.4) ---------- */
 
-  // The rail, for a document reached from the sidebar, a tab, the drafts
-  // panel or ⌘⌥H. It always opens on the list: a rail is somewhere to look,
-  // not a jump to a version.
+  // The rail, for a file reached from the sidebar, a tab or ⌘⌥H. It always
+  // opens on the list: a rail is somewhere to look, not a jump to a version.
   const openHistory = useCallback(
-    async (path: string, kind: "file" | "draft" = "file") => {
+    async (path: string) => {
       setVersionPreview(null);
       // A version shows in the document area, so the document has to be the
       // one standing in it: opening history for a file in the tree opens the
       // file too.
-      if (historyTargetRef.current?.path !== path) await openTab(path, kind);
+      if (historyTargetRef.current !== path) await openTab(path, "file");
       setHistoryFor(path);
       setHistoryToken((t) => t + 1);
     },
@@ -2725,14 +2556,14 @@ export default function App() {
     setVersionPreview(null);
   }, []);
 
-  // ⌘⌥H, the fourth way in: a toggle for whatever is open.
+  // ⌘⌥H, the third way in: a toggle for the file that is open.
   const toggleHistory = useCallback(() => {
     if (historyForRef.current) {
       closeHistory();
       return;
     }
     const target = historyTargetRef.current;
-    if (target) void openHistory(target.path, target.kind);
+    if (target) void openHistory(target);
   }, [closeHistory, openHistory]);
 
   // Selecting a version shows it where the document is. The live editor's
@@ -2918,7 +2749,6 @@ export default function App() {
         if (sp.view === "md") {
           const htmlPath = htmlPathRef.current;
           if (!htmlPath) return;
-          await dictationRef.current?.stop();
           // Awaited: the meta reload below re-reads the entity from disk,
           // and a still-in-flight autosave (markdown + thread bodies) must
           // land first or the reload adopts a stale thread set.
@@ -2961,9 +2791,6 @@ export default function App() {
         const htmlPath = htmlPathRef.current;
         if (!htmlPath) return; // no rendition — the toggle side is disabled
         captureActiveScroll(); // remember the markdown offset before hiding it
-        // Dictation is an editing mode and the html view is read-only: end an
-        // active session (its pending chunks flush) before hiding the editor.
-        await dictationRef.current?.stop();
         // Awaited for the same reason as the pane-swap branch above: the
         // meta reload must see this document's landed thread bodies.
         await flushPendingAutosave();
@@ -3018,12 +2845,6 @@ export default function App() {
     async (toFocusSide?: PaneSide) => {
       const s = splitRef.current;
       if (!s || !s.doc) return;
-      // Dictation writes through editorRef; retargeting mid-session would
-      // land spoken text in the other document. End it first (the common
-      // promote path — a click — runs with dictation idle and stays sync).
-      if (dictationSessionRef.current !== "idle") {
-        await dictationRef.current?.stop();
-      }
       const incoming = s.doc;
       const incomingTabId = s.tabId;
       const incomingView = s.view;
@@ -3087,6 +2908,8 @@ export default function App() {
         doc: outgoing,
       });
       activeIdRef.current = incomingTabId;
+      loadTicketRef.current += 1; // a load still in flight is for a document that just lost focus
+      loadedIdRef.current = incomingTabId; // its editor is mounted; the machinery is its now
       setActiveId(incomingTabId);
       writeStoredSession(tabsRef.current, incomingTabId);
       // Same watch set, roles flipped — no re-arm needed.
@@ -3503,7 +3326,6 @@ export default function App() {
           await commitTabDrop(existing.id, side);
           return;
         }
-        addRecent(target, "file");
         const tab: Tab = { id: uuid(), kind: "file", path: target };
         if (side === focusedSideOf(splitRef.current)) {
           // Focused half (or no split yet, left half): a normal open.
@@ -3518,7 +3340,7 @@ export default function App() {
         await openInPane(tab.id, side);
       })();
     },
-    [dropSideForPointer, commitTabDrop, addRecent, appendAndActivate, openInPane],
+    [dropSideForPointer, commitTabDrop, appendAndActivate, openInPane],
   );
 
   // The tab-bar split button / ⌘⇧\: open the active document in a second
@@ -3532,11 +3354,255 @@ export default function App() {
     await splitSameDoc("right");
   }, [closeSplit, splitSameDoc]);
 
+  /* ---------- Untitled notes: saving and closing ----------
+     An untitled note is unsaved for as long as it has text (tabs.ts), and it
+     stops being one in exactly two ways: it is saved to a file — its tab
+     becomes that file's tab, in place — or its tab closes, and the note is
+     gone. So closing one that has text is asked, never assumed (closeTab).
+     Quitting is not closing: the window session and the buffers bring every
+     note back, still unsaved, at the next launch. */
+
+  // Move the active untitled note into the real file `chosen`. Every Save As
+  // path ends here — the in-app prompt (a workspace is open) and the native
+  // dialog (none is). Resolves false, with the note exactly as it was, if the
+  // file could not be written.
+  const saveUntitledTo = useCallback(
+    async (note: UntitledTab, chosen: string): Promise<boolean> => {
+      if (activeIdRef.current !== note.id) return false;
+      catchUpWithEditor();
+      if (autosaveTimerRef.current != null) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      const contents = currentMarkdownRef.current;
+      const hybrid = extractMarkdown(contents).md;
+      // The rendition beside the chosen name, if one is already there — probed
+      // before the write, because its meta is adopted below.
+      const sibling = htmlSiblingOf(chosen);
+      const siblingExists = await invoke<boolean>("path_exists", { path: sibling }).catch(
+        () => false,
+      );
+      // The file first, and on its own: if it cannot be written, nothing has
+      // changed, and the note is still an untitled note with all of its text.
+      let snapshot: FileSnapshot;
+      try {
+        snapshot = await invoke<FileSnapshot>("write_file", {
+          path: chosen,
+          contents: cardHeadRef.current + hybrid,
+          expected: null, // Save As: overwrite the chosen target unconditionally
+        });
+      } catch (e) {
+        console.error("save failed", chosen, e);
+        pushToast("error", `Couldn't save ${basename(chosen)}. The note is still unsaved.`);
+        if (currentMarkdownRef.current !== lastSavedRef.current) scheduleAutosave();
+        return false;
+      }
+      // From here the document IS the file. The chosen stem may already have
+      // an entity meta (an existing rendition with comments): adopt it before
+      // composing ours — writeToDisk builds the meta from the app refs, and
+      // the note's own would clobber it. The note's unanchored bodies and its
+      // table widths ride along; where both have a record, the file's wins.
+      const noteOrphans = mdOrphansRef.current;
+      const noteTableWidths = tableWidthsRef.current;
+      await loadEntityMeta(chosen, contents);
+      if (noteOrphans.length > 0) {
+        const have = new Set(mdOrphansRef.current.map((t) => t.id));
+        const merged = [...mdOrphansRef.current, ...noteOrphans.filter((t) => !have.has(t.id))];
+        mdOrphansRef.current = merged;
+        setMdOrphans(merged);
+      }
+      if (noteTableWidths.length > 0) {
+        const have = new Set(tableWidthsRef.current.map((t) => t.id));
+        adoptTableWidths([
+          ...tableWidthsRef.current,
+          ...noteTableWidths.filter((t) => !have.has(t.id)),
+        ]);
+      }
+      pathRef.current = chosen;
+      snapshotRef.current = snapshot;
+      lastDiskMdRef.current = hybrid;
+      // The markdown is on disk already, so this lands what is left: the
+      // thread bodies in the file's meta, and the saved baseline.
+      await writeToDisk(chosen, contents);
+      // The buffer is finished with — before the tab changes, so a crash in
+      // between leaves a saved file and nothing to "recover" beside it.
+      await invoke("discard_untitled", { path: note.path }).catch((e) =>
+        console.error("discard_untitled failed", e),
+      );
+      // The tab becomes the file's, in place.
+      const nextTabs = tabsRef.current.map(
+        (t): Tab => (t.id === note.id ? { id: t.id, kind: "file", path: chosen } : t),
+      );
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
+      writeStoredSession(nextTabs, activeIdRef.current);
+      // The rendition enables the view toggle and joins the watch set.
+      htmlPathRef.current = siblingExists ? sibling : null;
+      setHasHtml(siblingExists);
+      await refreshWatchSet();
+      setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
+      return true;
+    },
+    [
+      catchUpWithEditor,
+      writeToDisk,
+      scheduleAutosave,
+      pushToast,
+      loadEntityMeta,
+      adoptTableWidths,
+      refreshWatchSet,
+    ],
+  );
+
+  // Save the active untitled note: decide where, then move it there. Resolves
+  // true once the note is a file, false if the question was dismissed. With a
+  // workspace open there is no Finder navigation (VS Code-style): the
+  // destination is already decided by context — the sidebar's selected
+  // folder, the selected file's folder, or the workspace root — so the in-app
+  // prompt only asks for a name. With none, the native Save dialog is the
+  // only way to pick a location.
+  const saveUntitled = useCallback(async (): Promise<boolean> => {
+    catchUpWithEditor();
+    const note = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (!note || note.kind !== "untitled") return false;
+    const suggested = suggestedFileName(noteTitle(currentMarkdownRef.current));
+    const sels = sidebarSelectionRef.current;
+    const sel = sels[sels.length - 1] ?? null; // primary selection
+    const contextDir = sel
+      ? sel.kind === "dir"
+        ? sel.path
+        : dirname(sel.path)
+      : workspaceRoot;
+    if (contextDir) {
+      savePromptDoneRef.current?.(false); // a prompt already up is superseded
+      return new Promise<boolean>((resolve) => {
+        savePromptDoneRef.current = resolve;
+        setSavePrompt({ dir: contextDir, suggested });
+      });
+    }
+    const chosen = await saveDialog({
+      title: "Save note",
+      defaultPath: `${suggested}.md`,
+      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+    });
+    if (!chosen) return false;
+    return saveUntitledTo(note, chosen);
+  }, [catchUpWithEditor, saveUntitledTo, workspaceRoot]);
+
+  // Close the in-app Save As prompt and tell whoever opened it how it went.
+  const settleSavePrompt = useCallback((saved: boolean) => {
+    const done = savePromptDoneRef.current;
+    savePromptDoneRef.current = null;
+    setSavePrompt(null);
+    done?.(saved);
+  }, []);
+
+  // Commit the in-app Save As prompt. Returns an error message to show under
+  // the input (bad name, collision), or null once the prompt is done with.
+  const commitSavePrompt = useCallback(
+    async (name: string): Promise<string | null> => {
+      const sp = savePrompt;
+      const note = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!sp || note?.kind !== "untitled") {
+        settleSavePrompt(false); // the note went away under the prompt; nothing to save
+        return null;
+      }
+      const trimmed = name.trim();
+      if (!trimmed) return "A name is required.";
+      if (/[/\\:]/.test(trimmed)) return "Names can't contain /, \\ or :";
+      if (trimmed.startsWith(".")) return "Names can't start with a dot.";
+      const fileName = MD_EXT_RE.test(trimmed) ? trimmed : `${trimmed}.md`;
+      const target = `${sp.dir}/${fileName}`;
+      let exists = false;
+      try {
+        exists = await invoke<boolean>("path_exists", { path: target });
+      } catch {
+        // If the check itself fails, fall through — the write will surface it.
+      }
+      if (exists) return `"${fileName}" already exists in this folder.`;
+      setSavePrompt(null);
+      settleSavePrompt(await saveUntitledTo(note, target));
+      return null;
+    },
+    [savePrompt, saveUntitledTo, settleSavePrompt],
+  );
+
+  // The prompt's escape hatch: hand off to the native dialog (pre-filled with
+  // the typed name) for saving somewhere outside the workspace.
+  const browseSavePrompt = useCallback(
+    async (name: string) => {
+      const sp = savePrompt;
+      const note = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      setSavePrompt(null);
+      if (!sp || note?.kind !== "untitled") {
+        settleSavePrompt(false);
+        return;
+      }
+      const base = name.trim() || sp.suggested;
+      const fileName = MD_EXT_RE.test(base) ? base : `${base}.md`;
+      const chosen = await saveDialog({
+        title: "Save note",
+        defaultPath: `${sp.dir}/${fileName}`,
+        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+      });
+      settleSavePrompt(chosen ? await saveUntitledTo(note, chosen) : false);
+    },
+    [savePrompt, saveUntitledTo, settleSavePrompt],
+  );
+
+  // Ask what becomes of an untitled note that is about to close. One question
+  // at a time: asking again answers the one already up with "cancel".
+  const askUnsaved = useCallback((note: Tab): Promise<UnsavedChoice> => {
+    unsavedAnswerRef.current?.("cancel");
+    return new Promise<UnsavedChoice>((resolve) => {
+      unsavedAnswerRef.current = resolve;
+      setUnsavedPrompt({ title: tabLabel(note) });
+    });
+  }, []);
+
+  const answerUnsaved = useCallback((choice: UnsavedChoice) => {
+    const answer = unsavedAnswerRef.current;
+    unsavedAnswerRef.current = null;
+    setUnsavedPrompt(null);
+    answer?.(choice);
+  }, []);
+
+  // Close a tab. Resolves false if it stayed open — which only an untitled
+  // note with text in it can make happen: closing that is the end of the
+  // note, so it is brought to the front and asked about first (Save… /
+  // Don't Save / Cancel). A file's tab just closes: its content is on disk.
   const closeTab = useCallback(
-    async (id: string, opts?: { discard?: boolean }) => {
+    async (id: string): Promise<boolean> => {
+      // Whether a note has text is the tab's to say — once the editor has
+      // been heard: characters typed a moment ago may not have reached it.
+      if (id === activeIdRef.current) catchUpWithEditor();
+      const asked = tabsRef.current.find((t) => t.id === id);
+      if (!asked) return true;
+      if (isUnsaved(asked)) {
+        if (id !== activeIdRef.current) await switchTab(id);
+        if (activeIdRef.current !== id) return false;
+        const choice = await askUnsaved(asked);
+        if (choice === "cancel") return false;
+        if (choice === "save" && !(await saveUntitled())) return false;
+      }
+      // Re-read: a note that was just saved is a file tab now.
       const tab = tabsRef.current.find((t) => t.id === id);
-      if (!tab) return;
-      // Split bookkeeping first, so the close below never leaves a pane
+      if (!tab) return true;
+      // An untitled note closing — discarded, or never typed in — ends here.
+      // Its writers stand down first: an autosave or a meta write landing
+      // after the delete below would put the buffer back.
+      if (tab.kind === "untitled" && id === activeIdRef.current) {
+        if (autosaveTimerRef.current != null) {
+          window.clearTimeout(autosaveTimerRef.current);
+          autosaveTimerRef.current = null;
+        }
+        if (sidecarWriteTimerRef.current != null) {
+          window.clearTimeout(sidecarWriteTimerRef.current);
+          sidecarWriteTimerRef.current = null;
+        }
+        lastSavedRef.current = currentMarkdownRef.current; // nothing left to flush
+      }
+      // Split bookkeeping next, so the close below never leaves a pane
       // pointing at a closed tab — and closing the focused half of a
       // two-document split hands the area to the OTHER document instead of
       // loading a neighbor over it.
@@ -3550,30 +3616,12 @@ export default function App() {
         }
       }
       const isActive = id === activeIdRef.current;
-      if (isActive) flushPendingAutosave();
-
-      if (tab.kind === "draft") {
-        // Delete the draft file when discarding outright, or when it's empty
-        // (nothing to recover). Otherwise the draft persists in the drafts panel.
-        let remove = opts?.discard === true;
-        if (!remove) {
-          const content = isActive
-            ? currentMarkdownRef.current
-            : await invoke<ReadFileResult>("read_file", { path: tab.path })
-                .then((r) => r.contents)
-                .catch(() => "");
-          remove = content.trim().length === 0;
-        }
-        if (remove) {
-          try {
-            await invoke("delete_draft", { path: tab.path });
-          } catch (e) {
-            console.error("delete_draft failed", e);
-          }
-          const { [tab.id]: _removed, ...rest } = draftsMetaRef.current;
-          draftsMetaRef.current = rest;
-          writeDraftsMeta(rest);
-        }
+      if (tab.kind === "untitled") {
+        await invoke("discard_untitled", { path: tab.path }).catch((e) =>
+          console.error("discard_untitled failed", e),
+        );
+      } else if (isActive) {
+        flushPendingAutosave();
       }
 
       scrollPositionsRef.current.delete(id);
@@ -3597,8 +3645,13 @@ export default function App() {
         const target = remaining.find((t) => t.id === nextActive);
         if (target) await loadActiveContent(target);
       }
+      return true;
     },
     [
+      catchUpWithEditor,
+      switchTab,
+      askUnsaved,
+      saveUntitled,
       flushPendingAutosave,
       clearActiveDoc,
       loadActiveContent,
@@ -3606,35 +3659,6 @@ export default function App() {
       closeSplit,
     ],
   );
-
-  // Discard a draft from the drafts panel: if it's open in a tab, close that tab
-  // and force-delete it (even with content); otherwise just delete the file.
-  const discardDraft = useCallback(
-    async (p: string, id: string) => {
-      const open = tabsRef.current.find((t) => t.path === p);
-      if (open) {
-        await closeTab(open.id, { discard: true });
-      } else {
-        try {
-          await invoke("delete_draft", { path: p });
-        } catch (e) {
-          console.error("delete_draft failed", e);
-        }
-        const { [id]: _removed, ...rest } = draftsMetaRef.current;
-        draftsMetaRef.current = rest;
-        writeDraftsMeta(rest);
-      }
-      await refreshDraftsPanel();
-    },
-    [closeTab, refreshDraftsPanel],
-  );
-
-  // Keep the drafts panel in sync: refresh when it opens, whenever the open
-  // tabs change (new / close / promote all flow through here), and after each
-  // autosaved draft write lands (so previews track live edits).
-  useEffect(() => {
-    if (draftsOpen) void refreshDraftsPanel();
-  }, [draftsOpen, tabs, draftsRefreshToken, refreshDraftsPanel]);
 
   // Move a file or folder to the system Trash (⌘⌫ / the sidebar's context
   // menu). The backend returns where the entry landed inside the Trash so
@@ -3755,8 +3779,8 @@ export default function App() {
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint every piece of state that keys
   // off the old path: open tabs (including everything inside a moved folder),
-  // the active document's autosave target and watcher, recents, and the
-  // sidebar selection. Returns an error message for the caller to surface
+  // the active document's autosave target and watcher, and the sidebar
+  // selection. Returns an error message for the caller to surface
   // (inline under the rename input, alert for a drop), or null on success.
   const movePath = useCallback(
     async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
@@ -3872,19 +3896,6 @@ export default function App() {
         }
       }
       if (rewatch) await refreshWatchSet();
-
-      setRecents((prev) => {
-        let changed = false;
-        const next = prev.map((r) => {
-          const np = remap(r.path);
-          if (np === r.path) return r;
-          changed = true;
-          return { ...r, path: np };
-        });
-        if (!changed) return prev;
-        writeStoredRecents(next);
-        return next;
-      });
 
       const sels = sidebarSelectionRef.current;
       const remapped = sels.map((s) => {
@@ -4032,35 +4043,26 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      draftSeqRef.current = readDraftSeq();
-      draftsMetaRef.current = readDraftsMeta();
+      untitledDir = await invoke<string>("untitled_dir");
 
       // Ask the backend who we are and what to open (the window label is the
-      // authority). A spawned window initializes from its stashed file/folder and
-      // skips session restore, scratch migration, and pending-open consumption —
-      // those belong to the main window. (Shared prefs/drafts loaded above.)
+      // authority). A spawned window initializes from its stashed file/folder
+      // or its saved tabs, and skips the stored-session restore and
+      // pending-open consumption — those belong to the main window.
       const init = await invoke<WindowInit>("take_window_init");
       if (!init.isMain) {
         isMainWindow = false;
         if (init.restored) {
           // A window brought back by quit-time session restore: re-adopt its
-          // folder and rebuild its file tabs directly — openTab/setWorkspace
-          // would reshuffle recents, and restoring isn't an "open". Unreadable
-          // paths stay visible as ghost tabs, same as the main window's restore.
+          // folder and rebuild its tabs directly — restoring isn't an "open"
+          // (openTab/setWorkspace would activate each tab in turn and force the
+          // sidebar open). Unreadable paths stay visible as ghost tabs and
+          // untitled notes come back unsaved, same as the main window's restore.
           if (init.folder) setWorkspaceRoot(init.folder);
-          const restored: Tab[] = [];
-          for (const p of init.files) {
-            try {
-              await invoke<ReadFileResult>("read_file", { path: p });
-              restored.push({ id: uuid(), kind: "file", path: p });
-            } catch {
-              restored.push({ id: uuid(), kind: "file", path: p, missing: true });
-            }
-          }
+          const restored = await rebuildTabs(sanitizeTabs(init.tabs));
           if (restored.length > 0) {
             const active =
-              restored.find((t) => t.path === init.activeFile) ??
-              restored[restored.length - 1];
+              restored.find((t) => t.id === init.activeId) ?? restored[restored.length - 1];
             tabsRef.current = restored;
             activeIdRef.current = active.id;
             setTabs(restored);
@@ -4075,15 +4077,7 @@ export default function App() {
         return;
       }
 
-      // One-shot migration of the legacy single scratchpad into a draft.
-      let migrated: { id: string; path: string } | null = null;
-      const migrateId = uuid();
-      try {
-        const p = await invoke<string | null>("migrate_scratch", { id: migrateId });
-        if (p) migrated = { id: migrateId, path: p };
-      } catch (e) {
-        console.error("migrate_scratch failed", e);
-      }
+      forgetDraftsPanelKeys();
 
       // Which workspace are we opening? A CLI / Finder folder launch
       // (pendingFolder) targets that folder; otherwise reopen the last-active
@@ -4102,21 +4096,29 @@ export default function App() {
       // Restore that folder's persisted tabs. A file tab whose path no longer
       // reads is kept as a visible "ghost" (missing) tab rather than silently
       // dropped — the disk may just be unmounted, and the user decides whether
-      // to close it. Drafts are app-managed; one that's gone really is gone → drop.
+      // to close it. An untitled note comes back unsaved, with its text.
       const session = all.sessions[sessionKeyFor(targetRoot)] ?? {
         tabs: [],
         activeId: null,
       };
       const restored = await rebuildTabs(session.tabs);
 
-      // Append the migrated scratchpad (if any) as a fresh draft tab.
-      if (migrated) {
-        const seq = draftSeqRef.current + 1;
-        draftSeqRef.current = seq;
-        writeDraftSeq(seq);
-        draftsMetaRef.current = { ...draftsMetaRef.current, [migrated.id]: { seq } };
-        writeDraftsMeta(draftsMetaRef.current);
-        restored.push({ id: migrated.id, kind: "draft", path: migrated.path, title: `Untitled-${seq}` });
+      // Then every untitled note that no window has open. Normally there are
+      // none — a note's buffer is deleted with its tab — but one outlives its
+      // tab when the app dies between the two, when this launch opens a
+      // different folder than the one the note was last seen in, or when a
+      // session is lost. It is still unsaved work, so it is opened here
+      // rather than left where nothing shows it. (Its tab id is its buffer's
+      // name, so a note that was the active tab is the active tab again.)
+      const orphans = await invoke<string[]>("orphaned_untitled", {
+        open: restored.filter(isUntitled).map((t) => t.path),
+      }).catch((e) => {
+        console.error("orphaned_untitled failed", e);
+        return [] as string[];
+      });
+      for (const path of orphans) {
+        const note = await restoreUntitled(basename(path).replace(MD_EXT_RE, ""), path);
+        if (note && !restored.some((t) => t.id === note.id)) restored.push(note);
       }
 
       if (restored.length > 0) {
@@ -4148,7 +4150,7 @@ export default function App() {
       } else if (targetRoot) {
         // Reopen the last workspace — via setWorkspaceRoot, not setWorkspace:
         // restoring shouldn't force the sidebar open (its state is persisted
-        // separately) or reshuffle recents. A root that doesn't read right now
+        // separately). A root that doesn't read right now
         // stays in the stored session (see sessionWorkspaceRoot) but isn't
         // shown, so an unmounted drive self-heals on a later launch.
         const exists = await invoke<boolean>("path_exists", {
@@ -4160,23 +4162,25 @@ export default function App() {
     })();
   }, [openTab, setWorkspace, loadActiveContent, rebuildTabs]);
 
-  // Report this window's content (workspace folder + open file paths + active
-  // tab) to the backend whenever it changes, so folder opens and the in-app
-  // "open in new window" actions can focus the window that already shows a path
-  // instead of opening a duplicate, and so the backend's persisted session
-  // (session.json) can respawn this window after a quit. (External file opens
-  // always spawn a new window and never consult this registry.) The first
-  // report also marks the app "ready", flipping external folder opens from the
-  // cold-start pending-open path to window routing.
+  // Report this window's content (workspace folder + tabs + active tab) to the
+  // backend whenever it changes, so folder opens and the in-app "open in new
+  // window" actions can focus the window that already shows a path instead of
+  // opening a duplicate, and so the backend's persisted session (session.json)
+  // can respawn this window after a quit — untitled notes included. (External
+  // file opens always spawn a new window and never consult this registry.)
+  //
+  // Not before the window is ready: until then the registry holds what this
+  // window is ABOUT to restore, and that is what keeps another window from
+  // taking its untitled notes for ones nobody has open. And keyed on the
+  // serialized report, so the tab state that isn't part of it — a note's title
+  // changing as it is typed — doesn't cross the bridge on every keystroke.
+  const windowReport = useMemo(
+    () => JSON.stringify({ folder: workspaceRoot, tabs: tabs.map(toStoredTab), activeId }),
+    [workspaceRoot, tabs, activeId],
+  );
   useEffect(() => {
-    const files = tabs.filter((t) => t.kind === "file").map((t) => t.path);
-    const active = tabs.find((t) => t.id === activeId);
-    void invoke("register_window_content", {
-      folder: workspaceRoot,
-      files,
-      activeFile: active?.kind === "file" ? active.path : null,
-    });
-  }, [workspaceRoot, tabs, activeId]);
+    if (ready) void invoke("register_window_content", JSON.parse(windowReport));
+  }, [ready, windowReport]);
 
   useEffect(() => {
     const un = listen<ExternalChangePayload>("file-externally-changed", (e) => {
@@ -4438,18 +4442,38 @@ export default function App() {
     };
   }, [ready, workspaceRoot, migrateEntityOnDisk]);
 
-  // Robust quit flush: type-then-⌘Q within the autosave debounce would lose the
-  // last keystrokes if the process exits before the fire-and-forget write_file
-  // resolves. Intercept the close, await the pending write, then destroy the
-  // window for real. A second close request while the flush is in flight is let
-  // through untouched — the escape hatch if the write ever hangs.
-  const closingRef = useRef(false);
+  // Closing the window. Two things have to happen before it goes.
+  //
+  // Its untitled notes are settled — if this window is not coming back. The
+  // main window always does: the next launch restores its tabs, notes and
+  // all, so closing it asks nothing. Any other window is gone for good once
+  // closed (only a quit keeps it for the next launch), so each of its notes
+  // closes the way a tab does — asking about the ones with text — and a
+  // Cancel keeps the window open.
+  //
+  // Then the flush: type-then-close within the autosave debounce would lose
+  // the last keystrokes if the window went before the fire-and-forget
+  // write_file resolved. Intercept the close, await the pending write, then
+  // destroy the window for real. A second close request while the flush is in
+  // flight is let through untouched — the escape hatch if the write ever
+  // hangs; one that arrives while a question is up is simply held.
+  const closingRef = useRef<"asking" | "flushing" | null>(null);
   useEffect(() => {
     const win = getCurrentWindow();
     const un = win.onCloseRequested(async (event) => {
-      if (closingRef.current) return;
-      closingRef.current = true;
+      if (closingRef.current === "flushing") return;
       event.preventDefault();
+      if (closingRef.current === "asking") return;
+      if (!isMainWindow) {
+        closingRef.current = "asking";
+        for (const note of tabsRef.current.filter(isUntitled)) {
+          if (!(await closeTab(note.id))) {
+            closingRef.current = null;
+            return;
+          }
+        }
+      }
+      closingRef.current = "flushing";
       try {
         await Promise.all([flushPendingAutosave(), flushSidecarWrite()]);
       } finally {
@@ -4459,14 +4483,16 @@ export default function App() {
     return () => {
       void un.then((f) => f());
     };
-  }, [flushPendingAutosave, flushSidecarWrite]);
+  }, [closeTab, flushPendingAutosave, flushSidecarWrite]);
 
   // The close-requested flush above never fires on ⌘Q: the app menu's Quit
   // would invoke NSApp terminate:, which kills the process without any window
   // close events. So the backend replaces it with a custom Quit item (see
   // build_app_menu in lib.rs) that broadcasts this event instead; each window
   // flushes its pending autosave, acks, and the backend exits once every
-  // window has acked (or its ~1s timeout fires).
+  // window has acked (or its ~1s timeout fires). Quitting asks nothing about
+  // untitled notes: with their buffers flushed here and their tabs in the
+  // session, the next launch brings each one back as it was — unsaved.
   useEffect(() => {
     const un = listen("quit-flush-requested", async () => {
       try {
@@ -4480,34 +4506,44 @@ export default function App() {
     };
   }, [flushPendingAutosave, flushSidecarWrite]);
 
-  // Mirror recent workspaces into the native File → "Open Recent Workspace"
-  // menu (macOS). Fires on mount (restoring from localStorage) and on every
-  // change. Folders only — files aren't workspaces. The backend menu is
-  // app-global, so the last window to push wins, which is the freshest list.
-  useEffect(() => {
-    const folders = recents
-      .filter((r) => r.kind === "folder")
-      .map((r) => r.path);
-    void invoke("set_recent_workspaces", { folders }).catch(() => {});
-  }, [recents]);
 
-  // "Clear Menu" in that native submenu emits this; wipe the shared recents (the
-  // push effect above then blanks the menu). Broadcast to every window, each
-  // clearing its own copy of the shared list.
-  useEffect(() => {
-    const un = listen("menu-clear-recent-workspaces", () => {
-      setRecents([]);
-      writeStoredRecents([]);
-    });
-    return () => {
-      void un.then((f) => f());
-    };
+  // An untitled note is known by its first line and is unsaved for as long
+  // as it has text: keep its tab saying both as the text changes. Neither is
+  // persisted — a restore reads them back out of the buffer — so this is tab
+  // state only.
+  const syncUntitledTab = useCallback((md: string) => {
+    const id = activeIdRef.current;
+    const tab = tabsRef.current.find((t) => t.id === id);
+    if (tab?.kind !== "untitled") return;
+    const title = noteTitle(md);
+    const unsaved = noteHasText(md);
+    if (tab.title === title && tab.unsaved === unsaved) return;
+    const next = tabsRef.current.map(
+      (t): Tab => (t.id === id && t.kind === "untitled" ? { ...t, title, unsaved } : t),
+    );
+    tabsRef.current = next;
+    setTabs(next);
   }, []);
 
-
+  // A change from the focused pane's editor — the instance keyed `editorKey`.
+  // Only the instance the machinery was loaded for is listened to. A tab
+  // switch re-renders (new active tab → a new editor key) before the
+  // incoming document has been read, so for a moment an editor is mounted
+  // under the incoming tab that still holds the OUTGOING document's text; its
+  // mount-time serialization must not become the incoming document's
+  // baseline, content or title. The load replaces that instance by bumping
+  // the tab's seq, and from then on only the replacement's key matches.
   const onMarkdownChange = useCallback(
-    (md: string) => {
+    (editorKey: string, md: string) => {
+      const loaded = loadedIdRef.current;
+      if (
+        loaded === null ||
+        editorKey !== `${loaded}:${editorSeqRef.current.get(loaded) ?? 0}`
+      ) {
+        return;
+      }
       currentMarkdownRef.current = md;
+      syncUntitledTab(md);
       // The first onChange after a (re)mount is the editor's own mount-time
       // serialization of the loaded doc (Editor emits it explicitly). Re-baseline
       // on it so Milkdown's markdown normalization alone never counts as an edit.
@@ -4520,7 +4556,7 @@ export default function App() {
       setDirty(changed);
       if (changed) scheduleAutosave();
     },
-    [scheduleAutosave],
+    [scheduleAutosave, syncUntitledTab],
   );
 
   // The focused editor's table columns were resized (or a header edit moved a
@@ -4537,170 +4573,14 @@ export default function App() {
     [adoptTableWidths, scheduleSidecarWrite],
   );
 
-  // Move the active draft's content into the real file `chosen`: write it,
-  // flip the tab in place, start watching the file, and
-  // delete the draft. The final step of every Save As path — the in-app prompt
-  // (workspace open) and the native dialog (no workspace) both end here.
-  const promoteDraftTo = useCallback(async (active: Tab, chosen: string) => {
-    if (autosaveTimerRef.current != null) {
-      window.clearTimeout(autosaveTimerRef.current);
-      autosaveTimerRef.current = null;
-    }
-    const draftPath = active.path;
-    // The chosen stem may already have an entity meta (an existing rendition
-    // with comments): adopt it BEFORE the first write — writeToDisk composes
-    // the meta from the app refs, and stale draft refs would clobber it. The
-    // draft's own unanchored bodies ride along.
-    const draftOrphans = mdOrphansRef.current;
-    const draftTableWidths = tableWidthsRef.current;
-    const sibling0 = htmlSiblingOf(chosen);
-    const siblingExists0 = await invoke<boolean>("path_exists", { path: sibling0 }).catch(
-      () => false,
-    );
-    await loadEntityMeta(chosen, currentMarkdownRef.current);
-    if (draftOrphans.length > 0) {
-      const have = new Set(mdOrphansRef.current.map((t) => t.id));
-      const merged = [
-        ...mdOrphansRef.current,
-        ...draftOrphans.filter((t) => !have.has(t.id)),
-      ];
-      mdOrphansRef.current = merged;
-      setMdOrphans(merged);
-    }
-    // The document travels with the draft, so its table widths do too — but
-    // an existing entity at the target keeps its own (the same rule the
-    // thread bodies above follow: adopt the destination, add what only the
-    // draft had).
-    if (draftTableWidths.length > 0) {
-      const have = new Set(tableWidthsRef.current.map((t) => t.id));
-      adoptTableWidths([
-        ...tableWidthsRef.current,
-        ...draftTableWidths.filter((t) => !have.has(t.id)),
-      ]);
-    }
-    pathRef.current = chosen;
-    snapshotRef.current = null; // Save As: overwrite the chosen target unconditionally
-    lastDiskMdRef.current = "";
-    await writeToDisk(chosen, currentMarkdownRef.current);
-    // Flip the tab from draft to a real file (in place, keeping its position).
-    const nextTabs = tabsRef.current.map((t) =>
-      t.id === active.id ? { id: t.id, kind: "file" as const, path: chosen } : t,
-    );
-    tabsRef.current = nextTabs;
-    setTabs(nextTabs);
-    writeStoredSession(nextTabs, activeIdRef.current);
-    // The rendition (probed before the write — its meta was adopted there)
-    // enables the view toggle and joins the watch set.
-    htmlPathRef.current = siblingExists0 ? sibling0 : null;
-    setHasHtml(siblingExists0);
-    await refreshWatchSet();
-    // The content now lives in a real file; remove the draft + its metadata
-    // (the backend clears the draft's own meta sidecar with it).
-    try {
-      await invoke("delete_draft", { path: draftPath });
-    } catch (e) {
-      console.error("delete_draft failed", e);
-    }
-    const { [active.id]: _removed, ...rest } = draftsMetaRef.current;
-    draftsMetaRef.current = rest;
-    writeDraftsMeta(rest);
-    addRecent(chosen, "file");
-    setTreeRefreshToken((t) => t + 1); // the new file may have landed in the workspace tree
-  }, [
-    writeToDisk,
-    addRecent,
-    loadEntityMeta,
-    adoptTableWidths,
-    refreshWatchSet,
-  ]);
-
-  const handleSave = useCallback(async () => {
+  // ⌘S. Files autosave continuously, so for one it only lands a pending
+  // write; an untitled note is the one thing ⌘S actually saves.
+  const handleSave = useCallback(() => {
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
     if (!active) return;
-    if (active.kind === "file") {
-      // Real files autosave continuously; ⌘S just flushes any pending write.
-      flushPendingAutosave();
-      return;
-    }
-    // Promote a draft to a real file (Save As). With a workspace open there is
-    // no Finder navigation (VS Code-style): the destination is already decided
-    // by context — the sidebar's selected folder, the selected file's folder,
-    // or the workspace root — so the in-app prompt only asks for a name.
-    const sels = sidebarSelectionRef.current;
-    const sel = sels[sels.length - 1] ?? null; // primary selection
-    const contextDir = sel
-      ? sel.kind === "dir"
-        ? sel.path
-        : dirname(sel.path)
-      : workspaceRoot;
-    const fallback = active.title ?? "untitled";
-    if (contextDir) {
-      setSavePrompt({
-        dir: contextDir,
-        suggested: suggestDraftFileName(currentMarkdownRef.current, fallback),
-      });
-      return;
-    }
-    // No workspace: the native Save dialog is the only way to pick a location.
-    const chosen = await saveDialog({
-      title: "Save markdown",
-      defaultPath: `${fallback}.md`,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-    });
-    if (!chosen) return;
-    await promoteDraftTo(active, chosen);
-  }, [flushPendingAutosave, promoteDraftTo, workspaceRoot]);
-
-  // Commit the in-app Save As prompt. Returns an error message to show under
-  // the input (bad name, collision), or null once the draft is promoted.
-  const commitSavePrompt = useCallback(
-    async (name: string): Promise<string | null> => {
-      const sp = savePrompt;
-      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-      if (!sp || active?.kind !== "draft") {
-        setSavePrompt(null); // the draft went away under the prompt; nothing to save
-        return null;
-      }
-      const trimmed = name.trim();
-      if (!trimmed) return "A name is required.";
-      if (/[/\\:]/.test(trimmed)) return "Names can't contain /, \\ or :";
-      if (trimmed.startsWith(".")) return "Names can't start with a dot.";
-      const fileName = MD_EXT_RE.test(trimmed) ? trimmed : `${trimmed}.md`;
-      const target = `${sp.dir}/${fileName}`;
-      let exists = false;
-      try {
-        exists = await invoke<boolean>("path_exists", { path: target });
-      } catch {
-        // If the check itself fails, fall through — the write will surface it.
-      }
-      if (exists) return `"${fileName}" already exists in this folder.`;
-      setSavePrompt(null);
-      await promoteDraftTo(active, target);
-      return null;
-    },
-    [savePrompt, promoteDraftTo],
-  );
-
-  // The prompt's escape hatch: hand off to the native dialog (pre-filled with
-  // the typed name) for saving somewhere outside the workspace.
-  const browseSavePrompt = useCallback(
-    async (name: string) => {
-      const sp = savePrompt;
-      const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-      setSavePrompt(null);
-      if (!sp || active?.kind !== "draft") return;
-      const base = name.trim() || sp.suggested;
-      const fileName = MD_EXT_RE.test(base) ? base : `${base}.md`;
-      const chosen = await saveDialog({
-        title: "Save markdown",
-        defaultPath: `${sp.dir}/${fileName}`,
-        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-      });
-      if (!chosen) return;
-      await promoteDraftTo(active, chosen);
-    },
-    [savePrompt, promoteDraftTo],
-  );
+    if (active.kind === "untitled") void saveUntitled();
+    else void flushPendingAutosave();
+  }, [flushPendingAutosave, saveUntitled]);
 
   // Highlights are driven by the query alone, NOT by whether the find bar is
   // visible — so opening a workspace-search result can highlight the match
@@ -4797,16 +4677,17 @@ export default function App() {
         }
       } else if (k === "s" && !e.shiftKey) {
         e.preventDefault();
-        void handleSave();
+        handleSave();
       } else if ((k === "n" || k === "t") && !e.shiftKey) {
         // ⌘N and ⌘T both open a new untitled tab (⌘T is the macOS/VS Code
         // "new tab" convention; the tab-per-document model makes them the same).
         e.preventDefault();
-        void newDraft();
+        void newUntitled();
       } else if (k === "w" && !e.shiftKey) {
-        // ⌘W closes the active tab; with none left it closes the window (which
-        // flushes autosave then destroys — see onCloseRequested). ⌘⇧W always
-        // closes the window (native menu item). VS Code / Chrome convention.
+        // ⌘W closes the active tab — asking first if it is an untitled note
+        // with text; with none left it closes the window (see
+        // onCloseRequested). ⌘⇧W always closes the window (native menu item).
+        // VS Code / Chrome convention.
         e.preventDefault();
         if (activeIdRef.current) void closeTab(activeIdRef.current);
         else void getCurrentWindow().close();
@@ -4892,22 +4773,6 @@ export default function App() {
         // on macOS ⌥ remaps e.key (⌥H → "˙").
         e.preventDefault();
         toggleHistory();
-      } else if (k === "d" && e.shiftKey) {
-        e.preventDefault();
-        setDraftsOpen((v) => !v);
-      } else if (k === "v" && e.shiftKey) {
-        // ⌘⇧V: start/finish voice dictation (same as the titlebar mic).
-        // Dictation types into the markdown editor; starting it from the html
-        // view brings the editable version forward first. (In html view a
-        // session is never active — entering the view stops it — so this
-        // toggle can only be a start.)
-        e.preventDefault();
-        // Not into a document another Mac holds: it is view-only here.
-        if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-        void (async () => {
-          if (docViewRef.current === "html") await selectDocView("md");
-          await dictationRef.current?.toggle();
-        })();
       } else if (e.code === "Equal" || e.code === "NumpadAdd") {
         // ⌘+ / ⌘- / ⌘0: document zoom, both versions (see DOC_ZOOM_STEPS).
         // e.code, not e.key: on most layouts ⌘+ arrives as ⌘⇧= — matching the
@@ -4937,7 +4802,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     handleSave,
-    newDraft,
+    newUntitled,
     toggleHistory,
     closeTab,
     deleteEntry,
@@ -4960,8 +4825,14 @@ export default function App() {
 
   useEffect(() => {
     const active = tabs.find((t) => t.id === activeId);
-    const name = active ? tabTitle(active) : "Doklin";
-    void getCurrentWindow().setTitle(`${active && dirty ? "● " : ""}${name}`);
+    // A file goes by its full name here; an untitled note by its first line.
+    const name = !active
+      ? "Doklin"
+      : active.kind === "untitled"
+        ? tabLabel(active)
+        : basename(active.path);
+    const edited = active != null && (dirty || isUnsaved(active));
+    void getCurrentWindow().setTitle(`${edited ? "● " : ""}${name}`);
   }, [tabs, activeId, dirty]);
 
   // Stable element/handle sinks for the two panes (inline arrows would
@@ -5060,11 +4931,6 @@ export default function App() {
   const activeLeaseRef = useRef(activeLease);
   activeLeaseRef.current = activeLease;
   const leased = activeLease != null;
-  useEffect(() => {
-    // Dictation types into the document: a lease that lands mid-session ends
-    // it, its pending chunks flushing the way leaving for the html view does.
-    if (leased && dictationSessionRef.current !== "idle") void dictationRef.current?.stop();
-  }, [leased]);
   const takeOverActive = useCallback(() => {
     const held = activeLeaseRef.current;
     if (held && activeFilePath) void cloudTakeOver(held.status.root, activeFilePath).catch(() => {});
@@ -5112,9 +4978,8 @@ export default function App() {
   // shows the new one's history and drops the old one's preview.
   useEffect(() => {
     historyForRef.current = historyFor;
-    historyTargetRef.current =
-      activeTab && activeTab.kind !== "store" ? { path: activeTab.path, kind: activeTab.kind } : null;
-    const open = historyTargetRef.current?.path ?? null;
+    historyTargetRef.current = activeTab?.kind === "file" ? activeTab.path : null;
+    const open = historyTargetRef.current;
     if (historyFor && open && open !== historyFor) {
       setHistoryFor(open);
       setVersionPreview(null);
@@ -5122,12 +4987,11 @@ export default function App() {
     }
   }, [activeTab, historyFor]);
 
-  const activeDraftPath = activeTab?.kind === "draft" ? activeTab.path : null;
   // A board tab: its path is a FOLDER, and the whole document machinery is
   // standing down for it (see loadActiveContent).
   const activeIsStore = activeTab?.kind === "store";
   // The open note relative to the workspace: what the Live chip publishes
-  // and whose presence the facepile shows. Null for a draft, a board, or a
+  // and whose presence the facepile shows. Null for an untitled note, a board, or a
   // file from outside the workspace.
   const activeRel =
     activeTab?.kind === "file" && workspaceRoot ? relPathIn(workspaceRoot, activeTab.path) : null;
@@ -5312,7 +5176,7 @@ export default function App() {
 
   // What an embed inside a pane's note can reach. Built per pane
   // because a relative `store:` resolves against the note the embed is
-  // written in — a draft has nowhere to resolve against, and says so.
+  // written in — an untitled note has nowhere to resolve against, and says so.
   const kanbanHostFor = (tab: Tab | null): StoreEmbedHost | null => {
     if (!tab || tab.kind === "store") return null;
     const docPath = tab.kind === "file" ? tab.path : null;
@@ -5322,7 +5186,7 @@ export default function App() {
       createStore: (name) =>
         docPath
           ? createStoreBeside(dirname(docPath), name)
-          : // A draft has no folder of its own to put one beside. The picker
+          : // An untitled note has no folder to put one beside. The picker
             // says so and disables the button; this is the backstop.
             Promise.reject(new Error("Save this note first.")),
       // A card peeks, here as on a board tab — clicking one in the middle of
@@ -5401,10 +5265,6 @@ export default function App() {
     const wrapClass = focused
       ? `editor-wrap ${showHtmlView ? "is-html-view" : ""} ${
           previewHere ? "is-version-preview" : ""
-        } ${
-          dictationUi.session !== "idle"
-            ? `is-dictating ${dictationUi.gate === "listening" && dictationUi.session === "active" ? "is-listening" : "is-paused"}`
-            : ""
         }`
       : `editor-wrap ${paneView === "html" ? "is-html-view" : ""}`;
 
@@ -5432,7 +5292,7 @@ export default function App() {
       >
         {effectiveSplit && paneTab && (
           <PaneHeader
-            title={docDisplayTitle(paneTab)}
+            title={tabLabel(paneTab)}
             focused={focused}
             missing={paneMissing}
             view={paneView}
@@ -5493,8 +5353,8 @@ export default function App() {
             // This note's properties, above it. Changing a pill writes the
             // frontmatter block and nothing else — the body never moves. Every
             // note gets a header: a card's rows are its board's fields, any
-            // other note's are the keys its own file carries. A DRAFT gets
-            // none — it has no file to write a property to yet.
+            // other note's are the keys its own file carries. An UNTITLED note
+            // gets none — it has no file to write a property to yet.
             <PropertiesHeader
               def={activeCardDef}
               props={cardProps}
@@ -5543,7 +5403,7 @@ export default function App() {
               }
               onChange={
                 focused
-                  ? onMarkdownChange
+                  ? (md) => onMarkdownChange(editorKey, md)
                   : isMirror
                     ? noopMarkdownChange
                     : onCompanionMarkdownChange
@@ -5635,23 +5495,13 @@ export default function App() {
             />
           )}
           {/* Only when NO document is open (the welcome screen). An open note —
-              even an empty, unsaved draft — shows the bare editor, like an
+              even an empty untitled one — shows the bare editor, like an
               untitled tab in VS Code. */}
           {focused && !activeTab && (
             <ScratchEmptyState
-              recents={recents}
-              onNewNote={() => void newDraft()}
+              onNewNote={() => void newUntitled()}
               onOpenFile={openFilePicker}
               onOpenFolder={openFolderPicker}
-              onOpenRecent={openRecent}
-            />
-          )}
-          {focused && (
-            <DictationHud
-              ui={dictationUi}
-              onFlush={() => dictationRef.current?.flushPending()}
-              onRevert={() => dictationRef.current?.revertPolish()}
-              onStop={() => void dictationRef.current?.stop()}
             />
           )}
         </div>
@@ -5659,31 +5509,24 @@ export default function App() {
     );
   };
 
-  // The left column: the sidebar, the drafts panel, or both.
-  const leftColumn = showSidebar || draftsOpen;
-
-  // The gear lives in the left column's footer whenever there is a left
-  // column, so it never sits over the file tree; with neither showing it
-  // floats bottom-left.
+  // The gear lives in the sidebar's footer whenever the sidebar is showing,
+  // so it never sits over the file tree; otherwise it floats bottom-left.
   const settingsMenu = (
     <Settings
-      docked={leftColumn}
+      docked={showSidebar}
       pageWide={pageWide}
       onTogglePageWide={() => setPageWide((w) => !w)}
       theme={theme}
       onTheme={setTheme}
       docFont={docFont}
       onDocFont={setDocFont}
-      recents={recents}
-      onNewNote={() => void newDraft()}
+      onNewNote={() => void newUntitled()}
       onOpenFile={openFilePicker}
       onOpenFolder={openFolderPicker}
       onOpenFileNewWindow={() => void openFileInNewWindow()}
       onOpenFolderNewWindow={() => void openFolderInNewWindow()}
-      onOpenRecent={openRecent}
       canCopyWithComments={activeTab != null}
       onCopyWithComments={() => void copyWithComments()}
-      onOpenDictationSetup={() => setDictationSetupOpen(true)}
       update={update}
       onOpenExternal={openExternal}
       onOpenCloud={() => setCloudPanelOpen(true)}
@@ -5692,21 +5535,12 @@ export default function App() {
     />
   );
 
-  // The title row's left end: the traffic lights' clearance and the panel
-  // toggles. Over a left column (sidebar or drafts) it is that column's top
-  // row; with neither showing it rides at the start of the tab bar, so the
-  // tabs begin after it and the toggles never move. Its gaps drag the window.
+  // The title row's left end: the traffic lights' clearance and the toggles.
+  // Over the sidebar it is that column's top row; with no sidebar showing it
+  // rides at the start of the tab bar, so the tabs begin after it and the
+  // toggles never move. Its gaps drag the window.
   const titleLead = (
     <div className="title-lead" onMouseDown={dragWindowFromGap}>
-      <button
-        className="title-toggle"
-        onClick={() => setDraftsOpen((v) => !v)}
-        title={draftsOpen ? "Hide drafts (⌘⇧D)" : "Show drafts (⌘⇧D)"}
-        aria-label="Toggle drafts panel"
-        aria-pressed={draftsOpen}
-      >
-        <DraftsIcon />
-      </button>
       {workspaceRoot && (
         <button
           className="title-toggle"
@@ -5718,41 +5552,15 @@ export default function App() {
           <SidebarIcon />
         </button>
       )}
-      {activeTab && !activeMissing && !activeIsHtmlDoc && (
-        <button
-          className={`title-toggle dictation-mic ${dictationUi.session !== "idle" ? "is-dictating" : ""}`}
-          onClick={() =>
-            // Dictation types into the markdown editor; from the html view,
-            // bring the editable version forward first (a session is never
-            // active there, so this is always a start). Never into a
-            // document another Mac holds — it is view-only here.
-            void (async () => {
-              if (activeLeaseRef.current && dictationSessionRef.current === "idle") return;
-              if (docViewRef.current === "html") await selectDocView("md");
-              await dictationRef.current?.toggle();
-            })()
-          }
-          disabled={leased && dictationUi.session === "idle"}
-          title={
-            dictationUi.session === "idle"
-              ? "Start dictation (⌘⇧V)"
-              : "Finish dictation (Esc)"
-          }
-          aria-label="Toggle dictation"
-          aria-pressed={dictationUi.session !== "idle"}
-        >
-          <MicIcon />
-        </button>
-      )}
     </div>
   );
 
   return (
     <div
-      className={`app ${showSidebar ? "with-sidebar" : ""} ${draftsOpen ? "show-drafts" : ""}`}
+      className={`app ${showSidebar ? "with-sidebar" : ""}`}
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
-      {leftColumn && titleLead}
+      {showSidebar && titleLead}
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
@@ -5772,30 +5580,19 @@ export default function App() {
           onWriteThreads={writeMdThreadsToMeta}
         />
       )}
-      {draftsOpen && (
-        <DraftsPanel
-          drafts={draftRows}
-          activePath={activeDraftPath}
-          onOpen={(p) => void openTab(p, "draft")}
-          onDiscard={(p, id) => void discardDraft(p, id)}
-          onNewDraft={() => void newDraft()}
-          onClose={() => setDraftsOpen(false)}
-          onHistory={(path) => void openHistory(path, "draft")}
-        />
-      )}
       <TabBar
         tabs={tabs}
         activeId={activeId}
         dirty={dirty}
         onSwitch={(id) => void switchTab(id)}
         onClose={(id) => void closeTab(id)}
-        onNewDraft={() => void newDraft()}
+        onNewNote={() => void newUntitled()}
         onReorder={reorderTabs}
         onDragOut={handleTabDragOut}
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
-        onHistory={(path, kind) => void openHistory(path, kind)}
-        leading={leftColumn ? undefined : titleLead}
+        onHistory={(path) => void openHistory(path)}
+        leading={showSidebar ? undefined : titleLead}
         trailing={
           activeTab && !activeMissing && !activeIsStore ? (
             <>
@@ -5807,8 +5604,8 @@ export default function App() {
                 title={`In this note: ${hereNow.join(", ")}`}
                 testid="note-facepile"
               />
-              {/* Publishing: a file inside the open workspace only — not a
-                  draft, not a board, not a file from outside (§7.3). */}
+              {/* Publishing: a file inside the open workspace only — not an
+                  untitled note, not a board, not a file from outside (§7.3). */}
               {activeRel !== null && (
                 <LiveChip
                   cloud={cloudForRoot}
@@ -5949,9 +5746,10 @@ export default function App() {
           suggested={savePrompt.suggested}
           onCommit={commitSavePrompt}
           onBrowse={(name) => void browseSavePrompt(name)}
-          onCancel={() => setSavePrompt(null)}
+          onCancel={() => settleSavePrompt(false)}
         />
       )}
+      {unsavedPrompt && <UnsavedPrompt title={unsavedPrompt.title} onAnswer={answerUnsaved} />}
       <main
         className="editor-area"
         ref={editorAreaRef}
@@ -5994,23 +5792,6 @@ export default function App() {
           </div>
         )}
       </main>
-      {inspectorOpen && dictationConfig?.inspector && (
-        <DictationInspector
-          entries={inspectorEntries}
-          onClear={() => setInspectorEntries([])}
-          onClose={() => setInspectorOpen(false)}
-        />
-      )}
-      {dictationSetupOpen && dictationConfig && (
-        <DictationSetup
-          config={dictationConfig}
-          onClose={() => setDictationSetupOpen(false)}
-          onSaved={(next) => {
-            setDictationConfig(next);
-            void dictationRef.current?.reloadConfig();
-          }}
-        />
-      )}
       {cloudPanelOpen && (
         <CloudPanel
           root={workspaceRoot}
@@ -6092,8 +5873,8 @@ export default function App() {
         />
       )}
       <Toasts toasts={toasts} onDismiss={dismissToast} />
-      {leftColumn ? (
-        // The left column's footer bar: settings, the folder's deleted
+      {showSidebar ? (
+        // The sidebar's footer bar: settings, the folder's deleted
         // files — a count that is here only when there is something in it
         // (docs/versioning-plan.md §12.3.4), which toggles the column between
         // the tree and the list — and, for a connected workspace, its sync
@@ -6195,7 +5976,7 @@ function ViewToggle({
 
 // Slim header atop each pane in split mode: the document name, its MD/HTML
 // switcher, and a close-pane ✕. The focused pane is tinted — that's where
-// typing, find, and dictation act.
+// typing and find act.
 function PaneHeader({
   title,
   focused,
@@ -6478,6 +6259,76 @@ function SaveAsPrompt({
   );
 }
 
+// The question an untitled note raises before its tab closes. The note
+// exists nowhere else, so closing is the end of it unless it is saved first.
+// Enter saves — the answer that can't lose anything — Esc keeps the note
+// open, and ⌘D is Don't Save, as on a macOS save sheet. While it is up it
+// owns the keyboard: no app shortcut reaches the note behind it.
+function UnsavedPrompt({
+  title,
+  onAnswer,
+}: {
+  title: string;
+  onAnswer: (choice: UnsavedChoice) => void;
+}) {
+  const saveRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    saveRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onAnswer("cancel");
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        onAnswer("discard");
+      } else if (e.metaKey || e.ctrlKey) {
+        e.preventDefault(); // ⌘W, ⌘S, ⌘N…: nothing while the question is open
+      }
+    };
+    // Capture phase, on the window: ahead of the app's own key handler and
+    // of the editor's.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onAnswer]);
+
+  return (
+    <div className="modal-overlay">
+      <div
+        className="modal unsaved-prompt"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-prompt-title"
+        aria-describedby="unsaved-prompt-body"
+      >
+        <div className="unsaved-prompt-title" id="unsaved-prompt-title">
+          Save “{title}” before closing?
+        </div>
+        <div className="unsaved-prompt-body" id="unsaved-prompt-body">
+          This note hasn’t been saved to a file. If you don’t save it, it’s gone once the tab
+          closes.
+        </div>
+        <div className="modal-buttons unsaved-prompt-buttons">
+          <button className="modal-btn is-danger-outline" onClick={() => onAnswer("discard")}>
+            Don’t Save
+          </button>
+          <span className="unsaved-prompt-gap" />
+          <button className="modal-btn" onClick={() => onAnswer("cancel")}>
+            Cancel
+          </button>
+          <button ref={saveRef} className="modal-btn is-primary" onClick={() => onAnswer("save")}>
+            Save…
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Shown in place of the editor when the active tab's file can't be read.
 // Deliberately read-only: typing here could recreate the file at a path that
 // may be a momentarily-unmounted drive. Re-activating the tab retries the read.
@@ -6561,16 +6412,13 @@ function Settings({
   onTheme,
   docFont,
   onDocFont,
-  recents,
   onNewNote,
   onOpenFile,
   onOpenFolder,
   onOpenFileNewWindow,
   onOpenFolderNewWindow,
-  onOpenRecent,
   canCopyWithComments,
   onCopyWithComments,
-  onOpenDictationSetup,
   update,
   onOpenExternal,
   onOpenCloud,
@@ -6585,16 +6433,13 @@ function Settings({
   onTheme: (t: Theme) => void;
   docFont: DocFont;
   onDocFont: (f: DocFont) => void;
-  recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
   onOpenFileNewWindow: () => void;
   onOpenFolderNewWindow: () => void;
-  onOpenRecent: (r: RecentEntry) => void;
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
-  onOpenDictationSetup: () => void;
   update: UpdateController;
   onOpenExternal: (url: string) => void;
   // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
@@ -6742,19 +6587,6 @@ function Settings({
             </>
           )}
           <div className="settings-divider" />
-          <div className="settings-section-label">Voice</div>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenDictationSetup();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Dictation settings…</span>
-          </button>
-          <div className="settings-divider" />
           <div className="settings-section-label">Cloud</div>
           <button
             role="menuitem"
@@ -6784,31 +6616,6 @@ function Settings({
             <span className="settings-option-check" />
             <span className="settings-option-label">Version history…</span>
           </button>
-          {recents.length > 0 && (
-            <>
-              <div className="settings-divider" />
-              <div className="settings-section-label">Recent</div>
-              <div className="settings-recents">
-                {recents.map((r) => (
-                  <button
-                    key={r.path}
-                    role="menuitem"
-                    className="settings-option"
-                    title={r.path}
-                    onClick={() => {
-                      setOpen(false);
-                      onOpenRecent(r);
-                    }}
-                  >
-                    <span className="settings-option-check">
-                      {r.kind === "folder" ? <FolderIcon /> : <FileIcon />}
-                    </span>
-                    <span className="settings-option-label">{basename(r.path)}</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
           <div className="settings-divider" />
           <div className="settings-section-label">Appearance</div>
           {/* Live choices: the menu stays open so the note behind it can be
@@ -6955,19 +6762,15 @@ function Settings({
 }
 
 // The welcome screen shown when no document is open. (An open note, including
-// an empty unsaved draft, shows the bare editor instead — no overlay.)
+// an empty untitled one, shows the bare editor instead — no overlay.)
 function ScratchEmptyState({
-  recents,
   onNewNote,
   onOpenFile,
   onOpenFolder,
-  onOpenRecent,
 }: {
-  recents: RecentEntry[];
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
-  onOpenRecent: (r: RecentEntry) => void;
 }) {
   return (
     <div className="scratch-empty" aria-hidden={false}>
@@ -6990,22 +6793,6 @@ function ScratchEmptyState({
             <span className="scratch-empty-kbd">⌘⇧O</span>
           </button>
         </div>
-        {recents.length > 0 && (
-          <div className="scratch-empty-recents">
-            <div className="scratch-empty-recents-label">Recent</div>
-            {recents.map((r) => (
-              <button
-                key={r.path}
-                className="scratch-empty-recent"
-                title={r.path}
-                onClick={() => onOpenRecent(r)}
-              >
-                {r.kind === "folder" ? <FolderIcon /> : <FileIcon />}
-                <span className="scratch-empty-recent-name">{basename(r.path)}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -7048,44 +6835,6 @@ function DownloadIcon() {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <polyline points="7 10 12 15 17 10" />
       <line x1="12" y1="15" x2="12" y2="3" />
-    </svg>
-  );
-}
-
-function MicIcon() {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="9" y="2" width="6" height="12" rx="3" />
-      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
-      <line x1="12" y1="18" x2="12" y2="22" />
-    </svg>
-  );
-}
-
-function DraftsIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 5h12M4 10h16M4 15h10M4 20h14" />
     </svg>
   );
 }

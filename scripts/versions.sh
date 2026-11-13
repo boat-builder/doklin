@@ -7,7 +7,6 @@
 #
 #   scripts/versions.sh ~/Notes        print the history once
 #   scripts/versions.sh -w ~/Notes     print it every 5 s, until ^C
-#   scripts/versions.sh drafts         the drafts store
 #
 # macOS-only: the app-data path and `shasum` are the Mac's.
 set -eu
@@ -20,28 +19,18 @@ fi
 
 APP="$HOME/Library/Application Support/com.sherin.doklin"
 TARGET="${1:-.}"
-if [ "$TARGET" = "drafts" ]; then
-    ROOT="$APP/drafts"
-    KEY="drafts"
-else
-    # The store key the app derives: "r-" and the first 16 hex characters of
-    # the sha256 of the folder's canonical path (`pwd -P` resolves the
-    # symlinks `std::fs::canonicalize` does).
-    ROOT=$(cd "$TARGET" && pwd -P)
-    if [ "$ROOT" = "$APP/drafts" ]; then
-        KEY="drafts"
-    else
-        KEY="r-$(printf '%s' "$ROOT" | shasum -a 256 | cut -c1-16)"
-    fi
-fi
+# The store key the app derives: "r-" and the first 16 hex characters of the
+# sha256 of the folder's canonical path (`pwd -P` resolves the symlinks
+# `std::fs::canonicalize` does).
+ROOT=$(cd "$TARGET" && pwd -P)
+KEY="r-$(printf '%s' "$ROOT" | shasum -a 256 | cut -c1-16)"
 DIR="$APP/versions/$KEY"
 
 show() {
     echo "$ROOT"
     echo "$DIR"
     if [ ! -f "$DIR/index.json" ]; then
-        echo "  no store here yet — a folder gets one when a window opens it,"
-        echo "  drafts when the app starts"
+        echo "  no store here yet — a folder gets one when a window opens it"
         return
     fi
     python3 - "$DIR" <<'PY'

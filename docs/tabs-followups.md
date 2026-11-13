@@ -1,7 +1,7 @@
-# Tabs + Drafts — Follow-ups
+# Tabs — Follow-ups
 
-Deferred work from the multi-document tabs/drafts MVP. One item remains; it
-doesn't block the feature. High-level only.
+Deferred work from the multi-document tabs MVP. One item remains; it doesn't
+block the feature. High-level only.
 
 ## Preserve cursor/selection across tab switches
 

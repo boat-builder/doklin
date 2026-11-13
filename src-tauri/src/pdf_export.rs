@@ -5,10 +5,10 @@
 //! and it exposes no printToPDF-style API with background/scale/@page
 //! control. So exports render in a PINNED headless Chromium
 //! (chrome-headless-shell, the Chrome-for-Testing build made for exactly
-//! this), downloaded once on first export — like the WhisperKit models —
-//! sha256-verified, and driven from here over the DevTools protocol. No
-//! Node/Playwright ships with the app; the CDP client below is the ~10
-//! methods we need, hand-rolled over a websocket.
+//! this), downloaded once on first export, sha256-verified, and driven
+//! from here over the DevTools protocol. No Node/Playwright ships with the
+//! app; the CDP client below is the ~10 methods we need, hand-rolled over a
+//! websocket.
 //!
 //! The contract (docs/pdf-export.md): reproduce the document exactly —
 //! same page size, same fonts and wrapping, backgrounds intact, nothing

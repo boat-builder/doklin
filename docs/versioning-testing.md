@@ -20,8 +20,7 @@ You need:
   build for the quit and relaunch checks — `./scripts/install.sh`);
 - **Fresh** — a folder of a few dozen notes that Doklin has never opened;
 - **Connected** — a workspace connected to a cloud domain;
-- **Other Mac** — a second Mac holding the same workspace, for §8;
-- the drafts folder, which every install has.
+- **Other Mac** — a second Mac holding the same workspace, for §8.
 
 `scripts/versions.sh -w <folder>` prints what a store actually holds. Use it
 when a surface says something you doubt: it is the store's own account, and
@@ -58,8 +57,8 @@ The cadence, seen from the outside (phases 1–2).
 
 Phase 2's history rail.
 
-- [ ] Open a note's history from the sidebar's file menu, the tab's menu,
-      the drafts panel and `⌘⌥H`. All four reach the same rail.
+- [ ] Open a note's history from the sidebar's file menu, the tab's menu
+      and `⌘⌥H`. All three reach the same rail.
 - [ ] The rail groups by day, shows a time and a device name per row, and
       says how far back history reaches. Today and yesterday are open; an
       older day is one row that expands.
@@ -126,18 +125,18 @@ The heart of it, and the part with the most ways to go wrong (phase 2, and
       not promise ⌘Z here; the toast and the timeline are the undo. If ⌘Z
       does something surprising, that is a finding.)
 
-## 5. Drafts, renames and moves
+## 5. Untitled notes, renames and moves
 
 Where a history has to follow a document, or admit it cannot.
 
-- [ ] A draft has a history, from the drafts panel's row menu.
+- [ ] An untitled note has no history: its tab has no *Version history…*
+      and `⌘⌥H` does nothing while it is in front.
 - [ ] Rename a note in the sidebar. Its history continues across the rename
       rather than starting over.
 - [ ] Move a note into another folder of the same workspace. Same.
-- [ ] Promote a draft to a real file (⌘S). Decide and write down what
-      *should* happen to the draft's history — the plan does not say, and
-      the two stores are separate. A user who typed for an hour in a draft
-      will expect that hour to survive the save.
+- [ ] Save an untitled note to a file (⌘S). The file's history starts
+      there, with the text it was saved with; nothing from before the save
+      is in it.
 - [ ] Move a note from one workspace to another. Its history does not
       follow, and nothing pretends otherwise.
 - [ ] Delete a note, then create a new one at the same path. The new note's

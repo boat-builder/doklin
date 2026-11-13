@@ -45,7 +45,7 @@ pub struct StoreBytes {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionsStatus {
-    /// The display root; the drafts folder for drafts.
+    /// The display root.
     pub root: String,
     pub key: String,
     pub phase: Phase,

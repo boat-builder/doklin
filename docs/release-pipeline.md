@@ -6,8 +6,7 @@ so it can be lifted into any future Tauri desktop app — the per-app knobs are
 collected in [Reusing this for a new app](#8-reusing-this-for-a-new-app).
 
 **Scope: macOS, Apple Silicon.** That's what Doklin ships and what this pipeline
-builds — the Rust backend has macOS-only call sites (grep `macOS-only`) and the
-dictation sidecar is Swift/Metal.
+builds — the Rust backend has macOS-only call sites (grep `macOS-only`).
 
 **Companion doc.** This is the *producer* half. What a running app does with
 what CI publishes — the update manifest's semantics, the client state machine,
@@ -27,9 +26,8 @@ flowchart TD
   B --> R[job: build-release<br/>macos-15]
   K --> R
   R --> G1[guard: signing secrets present]
-  G1 --> S[build Swift sidecar]
-  S --> TB[pnpm tauri build --target aarch64-apple-darwin<br/>codesign + notarize + staple the .app]
-  TB --> V[verify: codesign / stapler / entitlements / lipo]
+  G1 --> TB[pnpm tauri build --target aarch64-apple-darwin<br/>codesign + notarize + staple the .app]
+  TB --> V[verify: codesign / stapler / lipo]
   V --> D[notarize + staple the .dmg<br/>version'd name + stable alias + SHA256SUMS]
   V --> U[updater artifacts: .app.tar.gz + latest.json]
   V --> W[bundle the cloud worker<br/>doklin-cloud-worker.js]
@@ -136,8 +134,7 @@ Requires `permissions: contents: write` at the workflow level.
 
 ## 4. Job 2 — `build-release`: the macOS build
 
-`runs-on: macos-15` — arm64 runner, Xcode 16.x. `macos-14`'s default Xcode is
-too old for the sidecar's Swift dependencies (mlx-swift, WhisperKit 1.x).
+`runs-on: macos-15` — arm64 runner, Xcode 16.x.
 `timeout-minutes: 360` is GitHub's hard per-job ceiling, chosen because Apple's
 notarization queue is the one unbounded wait in the pipeline.
 
@@ -160,38 +157,7 @@ actions/setup-node@v5         node-version: 22, cache: pnpm
 pnpm install --frozen-lockfile
 ```
 
-Then the **Swift sidecar cache**, which is the interesting one:
-
-```yaml
-key: stt-${{ xcode-version }}-${{ hashFiles('src-tauri/stt-helper/Package.resolved') }}
-restore-keys: stt-${{ xcode-version }}-
-path: src-tauri/stt-helper/.xcbuild
-```
-
-Cold-compiling MLX's C++/Metal core plus WhisperKit and swift-transformers is
-~10 minutes; with DerivedData restored and `Package.resolved` unchanged,
-`xcodebuild` is a near-no-op. **The Xcode version is part of the key on
-purpose** — DerivedData reused across toolchains invites module-cache
-corruption. `restore-keys` still lets a dependency bump start from the previous
-DerivedData and rebuild only what changed.
-
-### 4.3 Build the sidecar before Tauri
-
-`./scripts/build-stt.sh Release` must run before `tauri build`: `tauri-build`
-fails fast if an `externalBin` file is missing. The script stages
-`src-tauri/binaries/doklin-stt-aarch64-apple-darwin` (Tauri's `externalBin`
-target-triple naming — the bundler strips the triple inside the `.app`) plus the
-SPM `.bundle` resources holding the Metal kernels.
-
-It uses `xcodebuild`, not `swift build`, because SwiftPM's CLI can't compile
-Metal shaders and MLX dies at runtime with "Failed to load the default
-metallib". It also guards `lipo -archs == arm64`.
-
-*(Generic lesson: any sidecar, helper binary, or native resource has to be
-produced and staged as a pre-step, and it will be signed as part of the app —
-so its entitlements matter.)*
-
-### 4.4 Build, sign, notarize — one command
+### 4.3 Build, sign, notarize — one command
 
 ```yaml
 - run: pnpm tauri build --target aarch64-apple-darwin
@@ -211,8 +177,7 @@ keychain scripting on our side:
 
 1. imports the `.p12` into an **ephemeral keychain** it creates and destroys
    (this is why no `KEYCHAIN_PWD` secret is needed);
-2. `codesign`s the app and every nested binary with the **hardened runtime** and
-   the entitlements from `bundle.macOS.entitlements`;
+2. `codesign`s the app and every nested binary with the **hardened runtime**;
 3. `notarytool submit --wait` on the `.app`, using APPLE_ID / APPLE_PASSWORD /
    APPLE_TEAM_ID;
 4. `stapler staple`s the ticket onto the `.app`;
@@ -223,7 +188,7 @@ keychain scripting on our side:
 `beforeBuildCommand: pnpm build` (= `tsc && vite build`) runs the frontend build
 inside this same command.
 
-### 4.5 Verify — don't trust, check
+### 4.4 Verify — don't trust, check
 
 Tauri can silently skip notarization if an env var isn't recognized, and the
 result looks like a successful build. So:
@@ -231,16 +196,13 @@ result looks like a successful build. So:
 ```sh
 codesign --verify --deep --strict --verbose=2 "$APP"
 xcrun stapler validate "$APP"
-codesign -d --entitlements - "$APP/Contents/MacOS/doklin-stt" | grep -q "device.audio-input"
 for bin in "$APP"/Contents/MacOS/*; do [ "$(lipo -archs "$bin")" = arm64 ] || fail; done
 ```
 
-The entitlement check exists because under the hardened runtime a sidecar
-missing `com.apple.security.device.audio-input` fails microphone capture
-*silently*. The `lipo` loop enforces the arm64-only invariant — an x86_64 slice
+The `lipo` loop enforces the arm64-only invariant — an x86_64 slice
 sneaking back would double build time unnoticed.
 
-### 4.6 Notarize the DMG too
+### 4.5 Notarize the DMG too
 
 Tauri only notarizes the `.app`. A downloaded `.dmg` should also pass Gatekeeper
 offline, so CI submits and staples the disk image itself:
@@ -258,7 +220,7 @@ cp "$DMG" release-assets/Doklin-macos-arm64.dmg     # alias AFTER stapling
 Order matters: the alias is copied after stapling so both files carry the
 ticket.
 
-### 4.7 Updater manifest
+### 4.6 Updater manifest
 
 The `.app.tar.gz` from the build is copied as-is, and CI hand-builds a
 `latest.json` beside it: this run's version and a UTC `pub_date`, the `.sig`
@@ -270,7 +232,7 @@ The manifest's shape, its field-by-field semantics, and what an absent platform
 key does to installs are in
 [auto-update.md § Manifest format](auto-update.md#manifest-format-tauri-v2-static).
 
-### 4.8 The cloud worker asset, and the update script
+### 4.7 The cloud worker asset, and the update script
 
 ```yaml
 - name: Bundle cloud worker (release asset)
@@ -295,7 +257,7 @@ carries its own copy of the worker's compatibility date, both pinned to
 their sources by `verify-harness/cloudprompts.test.mjs`, so a release can
 never publish a script that would deploy against the wrong runtime date.
 
-### 4.9 The `doklin` command — three binaries and an installer
+### 4.8 The `doklin` command — three binaries and an installer
 
 The command an agent uses to work with a workspace through its domain
 (docs/cloud.md §8.6) ships as a release asset per platform, because a bot's
@@ -346,7 +308,7 @@ Two things this deliberately does not do:
   holds its URL, the line the app hands out and the asset names in this
   workflow to each other.
 
-### 4.10 Publish
+### 4.9 Publish
 
 ```yaml
 uses: softprops/action-gh-release@v2
@@ -366,7 +328,7 @@ half-empty release.
 ## 5. Handing off to the updater
 
 The pipeline's responsibility ends at three outputs of the publish step: the
-signed `Doklin.app.tar.gz`, the `latest.json` beside it (§4.7), and
+signed `Doklin.app.tar.gz`, the `latest.json` beside it (§4.6), and
 `make_latest: 'true'` on the release. What each one buys on the client side is
 [auto-update.md § What the release pipeline has to hand it](auto-update.md#what-the-release-pipeline-has-to-hand-it).
 
@@ -424,7 +386,6 @@ multi-day hold (6h ceiling); recovery is re-running the failed job.
 | A download link 404s | Alias filename changed | Fix every link that hardcodes the alias |
 | `build-cli` fails at `cargo build --locked` | `cli/Cargo.lock` does not match `cli/Cargo.toml` — a dependency changed without the lock being committed, or the version stamp missed the lock | Run `cargo build --manifest-path cli/Cargo.toml` locally and commit the lock; for the stamp, check the `doklin-cli` entry is still `name` then `version` on consecutive lines |
 | `install-doklin.sh` says the download does not match its checksum | A release was published between its two downloads, or an asset was replaced by hand | Run it again; never re-upload a binary without regenerating `SHA256SUMS` |
-| Sidecar can't reach the mic in the release build only | Entitlement missing under hardened runtime | The `codesign -d --entitlements` assertion should have caught it — check it still names the right binary |
 
 Build, signing and publishing symptoms only. When the release itself looks
 correct but installed apps don't take it, the causes are client-side and are
@@ -447,7 +408,7 @@ Copy `.github/workflows/release.yml` and `ci.yml` verbatim, then change:
 **`src-tauri/tauri.conf.json`**
 - [ ] `productName`, `version`, `identifier` (`com.<you>.<app>`)
 - [ ] `bundle.createUpdaterArtifacts: true`, `bundle.targets: "all"`
-- [ ] `bundle.macOS.minimumSystemVersion` + `entitlements` path
+- [ ] `bundle.macOS.minimumSystemVersion` (+ an `entitlements` path if the app needs any)
 - [ ] `bundle.icon` list, `fileAssociations` if the app owns a file type
 - [ ] `externalBin` / `resources` only if you ship sidecars
 
@@ -455,8 +416,9 @@ Copy `.github/workflows/release.yml` and `ci.yml` verbatim, then change:
 - [ ] `Cargo.lock` stamp: the `awk` matches `name = "doklin"` — change the crate name
 - [ ] All `Doklin.app` / `Doklin-macos-arm64.dmg` / `Doklin.app.tar.gz` names
 - [ ] The `.app` path (`target/<triple>/release/bundle/…`)
-- [ ] Drop the **Build dictation sidecar**, **Xcode/Swift cache**, and
-      **entitlements assertion** steps if there's no sidecar
+- [ ] A sidecar or helper binary must be built and staged as a step before
+      `tauri build` (it fails fast on a missing `externalBin`), and is signed
+      as part of the app — so its entitlements matter
 - [ ] Keep: secret guard, `codesign --verify`, `stapler validate`, `lipo` arch
       check, DMG notarize+staple, alias copy, `SHA256SUMS`, `latest.json`
 

@@ -22,7 +22,7 @@ background/scale/`@page` control. So exports render in a **pinned
 `chrome-headless-shell`** (Chrome for Testing), driven from Rust over the
 DevTools protocol — no Node or Playwright ships with the app.
 
-- Downloaded on first export (like the WhisperKit models): ~93 MB zip from
+- Downloaded on first export: ~93 MB zip from
   the immutable Chrome-for-Testing bucket, sha256-verified, unpacked to
   `~/Library/Application Support/com.sherin.doklin/pdf-engine/<version>/`.
 - Fresh browser profile per export, killed and cleaned afterwards. Network is

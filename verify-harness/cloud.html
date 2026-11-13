@@ -28,11 +28,7 @@
         ["/docs/other.md", `# Other\n\n${para("other", 6)}\n`],
         ["/docs/third.md", `# Third\n\n${para("third", 6)}\n`],
         ["/docs/Projects/plan.md", `# Plan\n\n${para("plan", 3)}\n`],
-        ["/drafts/d-1.md", "a draft with a history of its own\n"],
       ]);
-      // One draft, so the drafts panel's row menu — the third way into the
-      // version rail — has something to open.
-      window.__drafts = [{ id: "d-1", path: "/drafts/d-1.md", preview: "a draft" }];
       // The folders the workspace holds (publishing a folder is a folder page).
       window.__dirs = new Set(["/docs", "/docs/Projects"]);
       window.__mtime = 1000;
@@ -209,11 +205,6 @@
         // path → FileHistory. The drive replaces this wholesale to script a
         // mirrored version or an empty history.
         histories: {
-          "/drafts/d-1.md": {
-            root: "/drafts",
-            currentHash: H("e"),
-            versions: [version(at(0, 10), H("e"), { path: "d-1.md", current: true })],
-          },
           "/docs/other.md": {
             root: "/docs",
             currentHash: H("a"),
@@ -230,7 +221,6 @@
           [H("b")]: "# Other\n\nthis morning's text\n",
           [H("c")]: "# Other\n\nthe named version\n",
           [H("d")]: "# Other\n\nthe first text\n",
-          [H("e")]: "a draft with a history of its own\n",
         },
         diff: "--- original\n+++ modified\n@@ -1,3 +1,3 @@\n # Other\n \n-the first text\n+the current text\n",
         // The workspace timeline (§7.2): the retained moments, each with what
@@ -352,12 +342,11 @@
                 isMain: true,
                 folder: null,
                 file: null,
-                files: [],
-                activeFile: null,
+                tabs: [],
+                activeId: null,
                 restored: false,
               });
             case "take_pending_folder":
-            case "migrate_scratch":
               return Promise.resolve(null);
             case "read_file": {
               const c = window.__fs.get(args.path);
@@ -390,8 +379,13 @@
               return Promise.resolve(null);
             case "device_name":
               return Promise.resolve("Test Mac");
-            case "list_drafts":
-              return Promise.resolve(window.__drafts ?? []);
+            case "untitled_dir":
+              return Promise.resolve("/untitled");
+            case "orphaned_untitled":
+              return Promise.resolve([]);
+            case "discard_untitled":
+              window.__fs.delete(args.path);
+              return Promise.resolve(null);
             case "open_external":
               (window.__opened ??= []).push(args.url);
               return Promise.resolve(null);

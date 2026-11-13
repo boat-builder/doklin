@@ -8,8 +8,10 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 
 ## Features
 
-- **Tabs & drafts** — open many documents at once, mixing real `.md` files with
-  untitled drafts that persist across restarts and are never silently lost.
+- **Tabs & untitled notes** — open many documents at once. `⌘N` starts an
+  untitled note that is *unsaved* until you give it a file: closing it asks
+  first, quitting doesn't — it is back, still unsaved, the next time you open
+  the app.
 - **Live block editing** — Notion-like WYSIWYG (Milkdown / Crepe): `# ` becomes a
   heading, `**bold**` bolds inline, `[ ] ` starts a GitHub-style checklist you
   tick by clicking the box, `/` opens a block menu, plus drag handles and a
@@ -53,7 +55,7 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   markdown files, with VS Code-style file management: create, rename, and
   delete files and folders from the context menu, and drag rows onto a folder
   (or empty space) to move them.
-- **Autosave** — real files save back to the same `.md`; drafts save to app
+- **Autosave** — real files save back to the same `.md`; untitled notes save to app
   storage. Nothing is lost on tab switch or quit.
 - **Version history** — every folder you open keeps its own history, cloud or
   no cloud: ⌘⌥H (or *Version history…* on a file) opens a rail of versions
@@ -153,8 +155,8 @@ Deeper docs live in dedicated files to keep this page focused:
   one-click in-app update feature — its UI flow and state machine, the
   signed-manifest architecture and why it's safe, and a **portable checklist
   for adding the same feature to another Tauri app**.
-- **[docs/tabs-drafts-followups.md](docs/tabs-drafts-followups.md)** — design
-  notes and deferred follow-ups for the tabs + drafts system.
+- **[docs/tabs-followups.md](docs/tabs-followups.md)** — design notes and
+  deferred follow-ups for the tab system.
 - **[docs/datastores-kanban.md](docs/datastores-kanban.md)** — the design for
   structured data: *datastores* (a folder of markdown cards with frontmatter
   plus a `store.jsonl` definition), kanban and table views as a tab and as

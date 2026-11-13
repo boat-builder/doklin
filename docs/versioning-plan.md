@@ -102,6 +102,11 @@ built* note by the phase that lands it.
 7. **The drafts directory is a root too.** `<app_data>/drafts` runs a
    versioner like any workspace (key `drafts`), so the one thing with no
    versioning today gets it in phase 1 and a surface in phase 2.
+   *Reversed since:* the Drafts panel and the drafts directory are gone
+   (development.md, *Untitled notes*). A note with no file is unsaved, and
+   gone when its tab closes, so there is no drafts root, store or history,
+   and the old store is deleted on upgrade. Where the sections below mention
+   drafts, read them as the record of what was built.
 8. **`hist` is retired without bumping `MANIFEST_VERSION`.** An empty `hist`
    array is a valid v2 manifest, and old workers and old apps keep working
    against it. The spec's §6.5 said v3; a schema bump would force every user

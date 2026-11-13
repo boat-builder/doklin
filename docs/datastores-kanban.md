@@ -36,7 +36,7 @@ Goals:
   files.
 - Zero new lock-in: a store must be readable and editable without Doklin.
 - Fit the machinery that exists — sync's three-way text merge, per-file
-  history, the cloud worker's public pages, the entity meta sidecar, the tab/draft model —
+  history, the cloud worker's public pages, the entity meta sidecar, the tab model —
   rather than build a parallel world.
 - One data model that a table, list, or calendar view can be added to later
   without touching the files on disk.
@@ -309,7 +309,7 @@ them cards (with no status until someone gives them one) — the quickest way
 to promote existing notes onto a board. The inline *New File…* is not
 offered inside a board; cards are created from the board.
 
-A new **tab kind** `store` (today `TabKind` is `"draft" | "file"`) keyed on
+A new **tab kind** `store` (beside `"file"` and `"untitled"`) keyed on
 the folder path renders `<StoreView>` instead of the editor, with the app's
 document machinery (autosave, watcher, comments, publishing) standing down the
 way it does for an html-only document. Session restore treats it like any
@@ -357,7 +357,7 @@ The fence's LANGUAGE, not the config, decides which kind of view is drawn —
 a ` ```table ` naming a kanban view still shows a table, because the
 language is what every other markdown renderer sees. The path resolves
 relative to the note through `linkTargetPath` in `src/docLinks.ts`, exactly
-as a link between notes does — so an unsaved draft can't embed a relative
+as a link between notes does — so an untitled note can't embed a relative
 store and says so in place.
 
 Why a fenced block: it is the one construct every markdown tool agrees to
@@ -717,7 +717,7 @@ it.
 - **A note embeds a store that doesn't exist** → the block renders a quiet
   card ("no board at ./Projects — create it?") with the same posture as an
   unparsed diagram: the fence stays, nothing is rewritten.
-- **A draft embeds `./Projects`** → "save this note first" — the draft has
+- **An untitled note embeds `./Projects`** → "save this note first" — it has
   no folder to resolve against, exactly as with links.
 - **Frontmatter the dialect can't read** → opaque lines, preserved; the
   properties header shows the fields it can, and a small "n lines this app

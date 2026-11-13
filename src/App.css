@@ -31,7 +31,7 @@ body,
   padding: 0;
   background: var(--sheet);
   /* Fixed-window app shell: the document itself never scrolls — every pane
-     (editor canvas, tab strip, sidebar, drafts) owns its own overflow. Clip
+     (editor canvas, tab strip, sidebar) owns its own overflow. Clip
      here so a stray pixel from a grid track or a fixed overlay can't leak out
      into a window-level scrollbar. */
   overflow: hidden;
@@ -99,41 +99,32 @@ body,
 }
 
 /* ---------- App shell ----------
-   Three left-to-right slots: drafts panel | file sidebar | editor column.
-   Areas are constant; each panel's column collapses to 0 when hidden.
+   Two left-to-right slots: file sidebar | editor column. Areas are
+   constant; the sidebar's column collapses to 0 when hidden.
 
-   The top row is the window's title bar (--bar-h). Over the left column it
-   is the lead — the traffic lights' clearance and the panel toggles; over
-   the editor column it is the tab bar. With no left column showing, App.tsx
-   moves the lead to the start of the tab bar, so the tabs always begin
-   after the traffic lights. Every gap in the row drags the window
-   (windowDrag.ts).
+   The top row is the window's title bar (--bar-h). Over the sidebar it is
+   the lead — the traffic lights' clearance and the toggles; over the editor
+   column it is the tab bar. With no sidebar showing, App.tsx moves the lead
+   to the start of the tab bar, so the tabs always begin after the traffic
+   lights. Every gap in the row drags the window (windowDrag.ts).
 
    Everything sits on the canvas except the document area: the one sheet,
    inset from the window edge with rounded corners. */
 .app {
   display: grid;
-  grid-template-columns: 0 0 1fr;
+  grid-template-columns: 0 1fr;
   grid-template-rows: var(--bar-h) 1fr auto;
   grid-template-areas:
-    "lead   lead  bar"
-    "drafts side  main"
-    "foot   foot  main";
+    "lead bar"
+    "side main"
+    "foot main";
   height: 100vh;
   background: var(--canvas);
   position: relative;
 }
 
-.app.show-drafts {
-  grid-template-columns: 240px 0 1fr;
-}
-
 .app.with-sidebar {
-  grid-template-columns: 0 var(--sidebar-w, 240px) 1fr;
-}
-
-.app.show-drafts.with-sidebar {
-  grid-template-columns: 240px var(--sidebar-w, 240px) 1fr;
+  grid-template-columns: var(--sidebar-w, 240px) 1fr;
 }
 
 /* ---------- Title bar: the lead and its toggles ---------- */
@@ -144,8 +135,8 @@ body,
   gap: 2px;
   min-width: 0;
   /* The traffic lights sit at x 16–70 (tauri.conf.json); the toggles start
-     after them, at the same x whether the lead is over the left column or
-     at the start of the tab bar. */
+     after them, at the same x whether the lead is over the sidebar or at
+     the start of the tab bar. */
   padding-left: 84px;
   user-select: none;
 }
@@ -550,7 +541,7 @@ body,
   overflow: hidden;
 }
 
-.app:not(.with-sidebar):not(.show-drafts) .editor-area {
+.app:not(.with-sidebar) .editor-area {
   margin-left: var(--inset);
 }
 
@@ -1676,8 +1667,8 @@ body,
 }
 
 /* ---------- Settings (bottom-left) ----------
-   Docked (.is-docked) in the left column's footer when a sidebar or the
-   drafts panel is showing; floating bottom-left when neither is. */
+   Docked (.is-docked) in the sidebar's footer when the sidebar is showing;
+   floating bottom-left when it isn't. */
 
 .side-footer {
   grid-area: foot;
@@ -2058,126 +2049,9 @@ body,
   font-size: 16px;
 }
 
-/* ---------- Custom select (Select.tsx) ----------
-   The native <select> trigger was easy to de-chrome, but its dropdown list is
-   OS chrome that ignores the theme palettes. Select.tsx renders the menu
-   itself; these styles keep it in the same visual language as
-   .settings-popover / .sidebar-menu. */
-
-.select-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  outline: none;
-}
-
-.select-trigger-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.select-trigger-chevron {
-  flex: none;
-  color: var(--text-3);
-}
-
-/* Bordered field look — settings rows (the dictation models). */
-.select-trigger--field {
-  padding: 4px 9px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--sheet);
-  font-size: var(--fs-md);
-  transition: border-color 0.12s, background 0.12s;
-}
-
-.select-trigger--field:hover {
-  background: var(--hover);
-}
-
-.select-trigger--field:focus-visible {
-  border-color: var(--accent);
-}
-
-/* The menu is portaled to <body> with fixed coordinates (never clipped by a
-   modal, never adds a scrollbar to its host), so it must clear the modal
-   overlay's z-index: 30. */
-.select-menu {
-  position: fixed;
-  z-index: 40;
-  max-width: min(380px, calc(100vw - 16px));
-  max-height: min(320px, calc(100vh - 16px));
-  overflow-y: auto;
-  scrollbar-width: none;
-  padding: 5px;
-  background: var(--raised);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: var(--shadow-pop);
-  animation: settings-popover-in 0.1s ease-out;
-}
-
-.select-menu::-webkit-scrollbar {
-  display: none;
-}
-
-/* Rows mirror .settings-option; "active" tracks pointer/arrow keys since
-   focus stays on the trigger (aria-activedescendant). */
-.select-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 6px 10px 6px 7px;
-  border-radius: 6px;
-  font-size: var(--fs-md);
-  color: var(--text-1);
-  cursor: pointer;
-}
-
-.select-option.is-active {
-  background: var(--hover);
-}
-
-.select-option-check {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 13px;
-  flex: none;
-  margin-top: 3px;
-  color: var(--text-1);
-}
-
-.select-option-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.select-option[aria-selected="true"] .select-option-label {
-  font-weight: 600;
-}
-
-.select-option-detail {
-  font-size: var(--fs-xs);
-  line-height: 1.45;
-  color: var(--text-3);
-}
-
 /* ---------- Custom checkbox ----------
-   Native checkboxes are OS chrome too; restyle them app-wide so every
-   checkbox matches the palette. The dictation toggle keeps its own look —
-   its input is already invisible under the switch track. */
+   Native checkboxes are OS chrome; restyle them app-wide so every checkbox
+   matches the palette. */
 
 input[type="checkbox"] {
   -webkit-appearance: none;
@@ -2297,15 +2171,6 @@ input[type="checkbox"]:focus-visible {
   height: 1px;
   background: var(--border);
   margin: 4px 0;
-}
-
-.settings-recents {
-  max-height: 196px;
-  overflow-y: auto;
-}
-
-.settings-recents .settings-option-check {
-  color: var(--text-3);
 }
 
 .settings-option:disabled {
@@ -2441,204 +2306,6 @@ input[type="checkbox"]:focus-visible {
   font-size: var(--fs-xs);
   color: var(--text-3);
   font-feature-settings: "tnum" 1;
-}
-
-.scratch-empty-recents {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin-top: 2px;
-  max-height: 220px;
-  overflow-y: auto;
-  scrollbar-width: none;
-}
-
-.scratch-empty-recents::-webkit-scrollbar {
-  display: none;
-}
-
-.scratch-empty-recents-label {
-  padding: 4px 6px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.scratch-empty-recent {
-  pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 8px;
-  font: inherit;
-  font-size: var(--fs-md);
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-1);
-  cursor: pointer;
-  text-align: left;
-}
-
-.scratch-empty-recent:hover {
-  background: var(--hover);
-}
-
-.scratch-empty-recent svg {
-  color: var(--text-3);
-  flex-shrink: 0;
-}
-
-.scratch-empty-recent-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---------- Drafts panel (left, workspace-independent) ---------- */
-
-.drafts-panel {
-  grid-area: drafts;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* Beside the sidebar, a hairline between the two columns; alone, the
-   sheet's own edge is the divide. */
-.app.with-sidebar .drafts-panel {
-  border-right: 1px solid var(--border);
-}
-
-.drafts-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 8px 6px 12px;
-  flex-shrink: 0;
-}
-
-.drafts-header-title {
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-3);
-}
-
-.drafts-header-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.drafts-header-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.drafts-header-button:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-.drafts-body {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.drafts-empty {
-  padding: 8px 12px;
-  font-size: var(--fs-sm);
-  color: var(--text-3);
-}
-
-.drafts-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 6px;
-}
-
-.draft-row {
-  display: flex;
-  align-items: stretch;
-  border-radius: 6px;
-}
-
-.draft-row:hover {
-  background: var(--hover);
-}
-
-.draft-row.is-active {
-  background: var(--accent-wash);
-}
-
-.draft-open {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border: none;
-  background: transparent;
-  color: var(--text-1);
-  cursor: pointer;
-  text-align: left;
-}
-
-.draft-title {
-  font-size: var(--fs-md);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-row.is-active .draft-title {
-  font-weight: 600;
-}
-
-.draft-preview {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-discard {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 26px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0;
-}
-
-.draft-row:hover .draft-discard {
-  opacity: 1;
-}
-
-.draft-discard:hover {
-  background: var(--border);
-  color: var(--text-1);
 }
 
 /* ---------- Sidebar ---------- */
@@ -3169,6 +2836,39 @@ body.tree-dragging.tree-drag-invalid * {
   position: fixed;
   inset: 0;
   z-index: 40;
+}
+
+/* ---------- Unsaved note prompt (an untitled note's tab closing) ----------
+   A real modal, unlike the quick input above: the note behind it is about to
+   be saved or lost, so nothing else answers until this does. */
+
+.unsaved-prompt {
+  max-width: 400px;
+  padding: 16px;
+}
+
+.unsaved-prompt-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.unsaved-prompt-body {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.unsaved-prompt-buttons {
+  flex-wrap: nowrap;
+  margin-top: 16px;
+}
+
+/* Don't Save sits apart from the two safe answers. */
+.unsaved-prompt-gap {
+  flex: 1;
 }
 
 .saveas-panel {
@@ -3892,207 +3592,8 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--text-1);
 }
 
-/* ---------- Voice dictation ---------- */
-
-/* Titlebar mic: red pulse while a session is live. */
-.dictation-mic.is-dictating {
-  color: var(--error);
-}
-
-.dictation-mic.is-dictating svg {
-  animation: dictation-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes dictation-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
-}
-
-/* Session ring: a soft inset outline on the editor while dictating —
-   red when the mic is hot, amber while paused/thinking. Inset box-shadow on
-   the scroll container itself: it hugs the visible box and never scrolls
-   with content, and the idle layout never shifts. */
-.editor-wrap.is-dictating {
-  transition: box-shadow 0.25s ease;
-}
-
-.editor-wrap.is-dictating.is-listening {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--error) 55%, transparent);
-}
-
-.editor-wrap.is-dictating.is-paused {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--warn) 50%, transparent);
-}
-
-/* Ghost text — the uncommitted transcript at the anchor. */
-.dictation-ghost {
-  pointer-events: none;
-}
-
-.dictation-ghost-seg.is-listening {
-  color: var(--text-3);
-  animation: dictation-shimmer 1.4s ease-in-out infinite;
-}
-
-.dictation-ghost-seg.is-polishing {
-  color: var(--accent);
-  opacity: 0.75;
-}
-
-@keyframes dictation-shimmer {
-  0%, 100% { opacity: 0.85; }
-  50% { opacity: 0.45; }
-}
-
-/* The HUD: floats bottom-center over the window (fixed: .editor-wrap is a
-   scroll container, so absolute children would scroll away with content). */
-.dictation-hud {
-  position: fixed;
-  left: 50%;
-  bottom: 22px;
-  transform: translateX(-50%);
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: min(720px, calc(100% - 48px));
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--sheet);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-pop);
-  font-size: var(--fs-md);
-  color: var(--text-1);
-}
-
-.dictation-dot {
-  flex-shrink: 0;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-}
-
-.dictation-hud.is-listening .dictation-dot {
-  background: var(--error);
-  animation: dictation-pulse 1.2s ease-in-out infinite;
-}
-
-.dictation-hud.is-paused .dictation-dot {
-  background: var(--warn);
-}
-
-.dictation-meter {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 2.5px;
-  height: 18px;
-}
-
-.dictation-bar {
-  width: 3px;
-  border-radius: 2px;
-  background: currentColor;
-  opacity: 0.65;
-  transition: height 0.09s ease-out;
-}
-
-.dictation-hud.is-listening .dictation-meter {
-  color: var(--error);
-}
-
-.dictation-hud.is-paused .dictation-meter {
-  color: var(--text-3);
-}
-
-.dictation-status {
-  flex: 1;
-  min-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-3);
-}
-
-.dictation-status.is-error {
-  color: var(--error-ink);
-}
-
-/* Last utterance was changed by polish; clicking restores the raw words. */
-.dictation-revert {
-  appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
-  flex-shrink: 0;
-  padding: 2px 7px;
-  border-radius: 7px;
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.dictation-revert:hover {
-  border-color: var(--border);
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-/* Chunks waiting on polish; clicking commits them as-is right now. */
-.dictation-pending {
-  appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
-  flex-shrink: 0;
-  padding: 2px 7px;
-  border-radius: 7px;
-  font-size: var(--fs-xs);
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.dictation-pending:hover {
-  border-color: var(--border);
-  background: var(--hover);
-}
-
-.dictation-close {
-  appearance: none;
-  border: none;
-  background: transparent;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.dictation-close:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-/* Dictation settings modal — a compact preferences card in the modal
-   shell: grouped rows, control on the right, macOS-settings style. Long-form
-   settings (the polish instructions) drill into a subview that widens the
-   card; the header grows a back arrow. */
-.dictation-setup {
-  max-width: 440px;
-  transition: max-width 0.18s ease;
-}
-
-.dictation-setup--wide {
-  max-width: 600px;
-}
-
-.dictation-setup .modal-title {
-  flex: 1;
-}
-
-.dictation-back {
+/* A drill-in view's way back, at the head of the modal title. */
+.modal-back {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4107,384 +3608,9 @@ body.tree-dragging.tree-drag-invalid * {
   cursor: pointer;
 }
 
-.dictation-back:hover {
+.modal-back:hover {
   background: var(--hover);
   color: var(--text-1);
-}
-
-.dictation-setup-body {
-  overflow-y: auto;
-  padding: 0 2px 2px;
-}
-
-.dictation-intro {
-  margin: 0 0 12px;
-  font-size: var(--fs-sm);
-  line-height: 1.55;
-  color: var(--text-3);
-}
-
-.dictation-rows {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--sheet);
-}
-
-.dictation-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  column-gap: 16px;
-  padding: 10px 12px;
-}
-
-.dictation-row + .dictation-row {
-  border-top: 1px solid var(--border);
-}
-
-.dictation-row--toggle {
-  cursor: pointer;
-}
-
-/* A row that navigates to a subview (button element; needs its own reset). */
-.dictation-row--nav {
-  width: 100%;
-  margin: 0;
-  border: none;
-  background: transparent;
-  font: inherit;
-  text-align: left;
-  color: inherit;
-  cursor: pointer;
-  transition: background 0.12s;
-}
-
-.dictation-row--nav:hover {
-  background: var(--hover);
-}
-
-.dictation-row-value {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  justify-self: end;
-  font-size: var(--fs-sm);
-  color: var(--text-3);
-}
-
-.dictation-row-label {
-  font-size: var(--fs-md);
-  font-weight: 500;
-  color: var(--text-1);
-}
-
-.dictation-row-caption {
-  grid-column: 1 / -1;
-  margin-top: 3px;
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  color: var(--text-3);
-}
-
-.dictation-select {
-  justify-self: end;
-  min-width: 0;
-  max-width: 240px;
-}
-
-.dictation-select .select-trigger {
-  max-width: 100%;
-  font-size: var(--fs-sm);
-}
-
-/* Inspector toggle switch. */
-.dictation-switch {
-  position: relative;
-  justify-self: end;
-  width: 34px;
-  height: 20px;
-  flex: none;
-}
-
-/* The input spans the whole track (the app-wide checkbox restyle sizes
-   checkboxes 14px; this one is invisible and only provides the hitbox). */
-.dictation-switch input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  border: none;
-  border-radius: 999px;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.dictation-switch-track {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-1) 16%, transparent);
-  transition: background 0.15s;
-  pointer-events: none;
-}
-
-.dictation-switch-track::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--knob);
-  box-shadow: var(--shadow-card);
-  transition: transform 0.15s ease;
-}
-
-.dictation-switch input:checked + .dictation-switch-track {
-  background: var(--accent);
-}
-
-.dictation-switch input:checked + .dictation-switch-track::after {
-  transform: translateX(14px);
-}
-
-.dictation-switch input:focus-visible + .dictation-switch-track {
-  box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3.5px var(--accent);
-}
-
-.dictation-footnote {
-  margin: 10px 2px 0;
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  color: var(--text-3);
-}
-
-/* Polish-instructions subview: the editable system prompt above a read-only
-   render of the request template it is wrapped in. */
-.dictation-prompt-editor {
-  width: 100%;
-  /* Leave room below the fold cue for the request-template card. */
-  height: clamp(160px, 28vh, 280px);
-  min-height: 120px;
-  resize: vertical;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--sheet);
-  color: var(--text-1);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  line-height: 1.6;
-  outline: none;
-}
-
-.dictation-prompt-editor:focus {
-  border-color: var(--accent);
-}
-
-.dictation-prompt-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 6px;
-  min-height: 18px;
-  font-size: var(--fs-sm);
-  color: var(--text-3);
-}
-
-.dictation-prompt-reset {
-  padding: 0;
-  border: none;
-  background: transparent;
-  font: inherit;
-  font-size: var(--fs-sm);
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.dictation-prompt-reset:hover {
-  text-decoration: underline;
-}
-
-.dictation-template {
-  margin-top: 14px;
-}
-
-.dictation-template-title {
-  margin-bottom: 6px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.dictation-template-body {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--sheet);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  line-height: 1.7;
-  color: var(--text-3);
-}
-
-.dictation-template-var {
-  margin: 0 1px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-  font-family: inherit;
-  white-space: nowrap;
-}
-
-.dictation-template-lit {
-  color: var(--text-3);
-}
-
-.dictation-template-note {
-  margin-top: 6px;
-  font-size: var(--fs-xs);
-  line-height: 1.5;
-  color: var(--text-3);
-}
-
-.dictation-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 2px 0;
-}
-
-/* Inspector — advanced-only floating log panel. */
-.dictation-inspector {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 70;
-  width: 400px;
-  max-width: calc(100vw - 32px);
-  max-height: 46vh;
-  display: flex;
-  flex-direction: column;
-  border-radius: 10px;
-  background: var(--sheet);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-pop);
-  font-size: var(--fs-sm);
-}
-
-.dictation-inspector-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-.dictation-inspector-title {
-  flex: 1;
-  font-weight: 600;
-  color: var(--text-1);
-}
-
-.dictation-inspector-btn {
-  appearance: none;
-  border: none;
-  background: transparent;
-  padding: 2px 7px;
-  border-radius: 5px;
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.dictation-inspector-btn:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-
-.dictation-inspector-body {
-  overflow-y: auto;
-  padding: 4px 0;
-}
-
-.dictation-inspector-empty {
-  padding: 14px 12px;
-  color: var(--text-3);
-  line-height: 1.5;
-}
-
-.dictation-inspector-row {
-  appearance: none;
-  border: none;
-  background: transparent;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  width: 100%;
-  padding: 4px 10px;
-  text-align: left;
-  color: var(--text-1);
-  cursor: pointer;
-}
-
-.dictation-inspector-row:hover {
-  background: var(--hover);
-}
-
-.dictation-inspector-time {
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-3);
-}
-
-.dictation-inspector-label {
-  flex: 1;
-  overflow-wrap: anywhere;
-}
-
-.dictation-inspector-entry.kind-event .dictation-inspector-label {
-  color: var(--text-3);
-}
-
-.dictation-inspector-caret {
-  flex-shrink: 0;
-  color: var(--text-3);
-}
-
-.dictation-inspector-detail {
-  padding: 2px 10px 8px 10px;
-}
-
-.dictation-inspector-key {
-  margin-top: 6px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-3);
-}
-
-.dictation-inspector-pre {
-  margin: 2px 0 0;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--hover);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: var(--fs-xs);
-  line-height: 1.45;
-  max-height: 180px;
-  overflow-y: auto;
 }
 
 /* ---------- Datastores: the kanban board ----------

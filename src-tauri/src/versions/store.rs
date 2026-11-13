@@ -167,7 +167,7 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    /// `r-<16 hex>` for a workspace folder, `drafts` for the drafts directory.
+    /// `r-<16 hex>`, from the folder's path.
     pub key: String,
     /// The display root this store versions.
     pub root: PathBuf,
