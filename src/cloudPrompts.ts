@@ -257,6 +257,34 @@ UPDATED: ${endpoint}
 Do not deploy anything by hand, and do not create or modify any Cloudflare resource yourself: the script is the whole job.`;
 }
 
+export type AgentLoginPromptInput = {
+  /** The workspace's address as its owner knows it: notes.example.com. */
+  domain: string;
+  /** `doklin login <address> <code>`, as the domain minted it. */
+  line: string;
+  /** When the code in it stops working, in ms. */
+  expiresAt: number;
+};
+
+/** What the owner hands an agent to log it in — pasted into its chat, or read
+ *  by whoever sets its machine up. Short on purpose: what Doklin is, the two
+ *  commands, and what the address in the second one is. `doklin help agent`
+ *  is the briefing; this only gets the agent that far. It carries the login
+ *  code, which works once — the one prompt here with a secret in it besides
+ *  setup's. */
+export function buildAgentLoginPrompt(i: AgentLoginPromptInput): string {
+  // UTC and spelled out: the reader is on another machine, in no known zone.
+  const expires = `${new Date(i.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return `Doklin is a workspace of markdown and HTML documents. Its command line, \`doklin\`, lets you read, write, search, comment on and publish them over the network, with no copy of the folder.
+
+The first command below installs \`doklin\` (skip it if it is already installed). The second logs you in: ${i.domain} is the workspace's address, and the code after it works once and expires at ${expires}.
+
+${CLI_INSTALL_LINE}
+${i.line}
+
+Then run \`doklin help agent\` to see what you can do.`;
+}
+
 export type TeardownPromptInput = { endpoint: string };
 
 /** Teardown: after the app's wipe emptied the bucket, remove the worker and

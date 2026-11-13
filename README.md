@@ -90,10 +90,10 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   sync. Stop publishing and the link stops working. How it is built:
   [docs/cloud.md](docs/cloud.md).
 - **Agents** — a bot on another computer can work with a connected workspace
-  without a copy of it. Add an agent under *Cloud → People*, tick what it may
-  do — read, comment, edit, publish — and hand over the two lines the app
-  shows: one installs the `doklin` command (Linux or macOS), the other logs
-  it in. From there it lists, reads, writes, searches, comments on and
+  without a copy of it. Add an agent under *Cloud → Agents*, tick what it may
+  do — read, comment, edit, publish — and hand over the short prompt the app
+  shows: it says what Doklin is and carries the two commands, one that
+  installs `doklin` (Linux or macOS) and one that logs it in. From there it lists, reads, writes, searches, comments on and
   publishes documents through your domain, and what it changes arrives in
   the app like an edit from another Mac, signed with its name. A note and the
   html page made from it are one document to it, and its comments open in

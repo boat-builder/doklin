@@ -5537,6 +5537,54 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-wrap: anywhere;
 }
 
+/* People | Agents — the two tabs of one view. The MD/HTML control's look
+   (a tinted track, the chosen side lifted) at the panel's size, across its
+   whole width so that neither half reads as the lesser one. */
+.cloud-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--text-1) 7%, transparent);
+}
+
+.cloud-tab {
+  flex: 1;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.cloud-tab:hover:not(.is-active) {
+  color: var(--text-1);
+}
+
+.cloud-tab.is-active {
+  background: var(--raised);
+  color: var(--text-1);
+  box-shadow: var(--shadow-card);
+}
+
+/* A column inside the panel's column, spaced the same: a tab's contents, and
+   the door-form-code group at the top of one. A hidden tab stays mounted. */
+.cloud-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cloud-stack[hidden] {
+  display: none;
+}
+
 /* What an agent may do: one ticked line per permission. */
 .cloud-scopes {
   display: flex;
@@ -5691,6 +5739,11 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-wrap: anywhere;
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* A prompt short enough to be read whole before it is handed over. */
+.cloud-prompt.cloud-prompt--whole {
+  max-height: none;
 }
 
 .cloud-version-line {

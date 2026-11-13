@@ -421,6 +421,13 @@ export function leaseLine(lease: LeaseHolder): string {
   return lease.own ? `Open on your other Mac, ${lease.name} — view only` : `${lease.name} is editing — view only`;
 }
 
+/** Bring what has just opened at the top of a list into view: the row that
+ *  asked for it may be a screen further down. After the frame, so that it is
+ *  there to scroll to. */
+export function revealSoon(el: { current: HTMLElement | null }): void {
+  requestAnimationFrame(() => el.current?.scrollIntoView({ block: "nearest" }));
+}
+
 /** "just now", "2 min ago", "3 h ago", "12 d ago". */
 export function timeAgo(ms: number, now = Date.now()): string {
   const secs = Math.max(0, Math.round((now - ms) / 1000));

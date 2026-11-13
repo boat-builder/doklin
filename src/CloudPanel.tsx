@@ -6,8 +6,10 @@
 // Not connected: three doors — connect this folder to a domain, open a
 // workspace another Mac of yours connected, or join one somebody invited you
 // to with the line they sent. Connected: the domain and its phase,
-// sync now / pause, who else is here, the people on the workspace (their own
-// view, CloudPeople.tsx), the held mass-deletion waiting for a word, the
+// sync now / pause, who else is here, the people and the agents on the
+// workspace (one view with a tab each, CloudPeople.tsx — and a door each
+// here, so neither has to be found behind the other), the held
+// mass-deletion waiting for a word, the
 // worker's version against this app's, the credentials a second Mac needs,
 // disconnect, and the danger zone: erase everything on the domain (which
 // frees it), then the teardown prompt for the agent.
@@ -54,7 +56,8 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
-type View = "main" | "people" | "another" | "wipe" | "teardown";
+// "people" and "agents" are one view — CloudPeople, on that tab.
+type View = "main" | "people" | "agents" | "another" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
@@ -171,8 +174,8 @@ export default function CloudPanel({
   }, [cloud]);
 
   const title =
-    view === "people"
-      ? "People"
+    view === "people" || view === "agents"
+      ? "People and agents"
       : view === "another"
         ? "Connect another Mac"
         : view === "wipe"
@@ -245,8 +248,17 @@ export default function CloudPanel({
         </p>
       </>
     );
-  } else if (view === "people" && cloud) {
-    body = <CloudPeople root={cloud.root} domain={cloud.domain} copy={(k, t) => void copy(k, t)} copied={copied} />;
+  } else if ((view === "people" || view === "agents") && cloud) {
+    body = (
+      <CloudPeople
+        root={cloud.root}
+        domain={cloud.domain}
+        tab={view}
+        onTab={setView}
+        copy={(k, t) => void copy(k, t)}
+        copied={copied}
+      />
+    );
   } else if (view === "another") {
     body = (
       <>
@@ -469,12 +481,20 @@ export default function CloudPanel({
             ))}
           </ul>
         )}
-        <div className="cloud-section-label">People</div>
+        {/* Two doors into one view: a person and an agent are let in, and
+            shut out, in different ways, and each should be findable by name. */}
+        <div className="cloud-section-label">People and agents</div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="people-open" onClick={() => setView("people")}>
             People…
           </button>
           <span className="cloud-hint">Invite someone by email, or take a Mac’s access away.</span>
+        </div>
+        <div className="cloud-actions">
+          <button className="modal-btn" data-testid="agents-open" onClick={() => setView("agents")}>
+            Agents…
+          </button>
+          <span className="cloud-hint">Let a bot work here from another computer, and say what it may do.</span>
         </div>
 
         <div className="cloud-section-label">Public</div>

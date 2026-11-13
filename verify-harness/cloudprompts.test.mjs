@@ -37,6 +37,7 @@ const {
   CLI_INSTALL_SCRIPT_URL,
   WORKER_BUNDLE_URL,
   WORKER_UPDATE_SCRIPT_URL,
+  buildAgentLoginPrompt,
   buildSetupPrompt,
   buildTeardownPrompt,
   buildUpdatePrompt,
@@ -323,6 +324,40 @@ eq(
   ok(/isn't empty, STOP/.test(p), "a non-empty bucket stops the agent");
   ok(p.includes("TORN DOWN: https://notes.example.com"));
   ok(!p.includes("curl -fsSL"), "nothing to download for a teardown");
+}
+
+/* ---------- the agent login prompt ---------- */
+//
+// What the owner hands an agent — the one thing the Agents tab's login card
+// copies (docs/cloud.md §8.3). Held to being short, and to carrying exactly
+// what a bot that has never heard of Doklin needs: what it is, the two
+// commands, and what the address in the second one is.
+{
+  const LINE = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
+  const p = buildAgentLoginPrompt({
+    domain: "notes.example.com",
+    line: LINE,
+    expiresAt: Date.UTC(2026, 10, 13, 6, 40, 59),
+  });
+  const lines = p.split("\n");
+  ok(p.startsWith("Doklin is a workspace of markdown and HTML documents."), "opens with what Doklin is");
+  ok(/`doklin`, lets you read, write, search, comment on and publish them/.test(p), "…and what its command line does");
+  ok(p.includes("with no copy of the folder"), "…without the folder");
+  ok(lines.includes(CLI_INSTALL_LINE), "the install command, on a line of its own");
+  ok(lines.includes(LINE), "the login command, verbatim, on a line of its own");
+  eq(lines.indexOf(LINE), lines.indexOf(CLI_INSTALL_LINE) + 1, "install first, then login");
+  ok(p.includes("installs `doklin` (skip it if it is already installed)"), "says what the first command is, and that it can be skipped");
+  ok(p.includes("notes.example.com is the workspace's address"), "says what the address in the second command is");
+  ok(p.includes("works once"), "the code is single-use");
+  ok(p.includes("expires at 2026-11-13 06:40 UTC"), "…and when it stops working, in UTC");
+  ok(p.endsWith("Then run `doklin help agent` to see what you can do."), "ends by pointing at the briefing");
+  eq((p.match(/dkla-/g) ?? []).length, 1, "the code appears once");
+  eq((p.match(/https?:\/\//g) ?? []).length, 2, "two addresses: the installer and the workspace");
+  eq(lines.filter((l) => l.trim()).length, 5, "short: three paragraphs and two commands");
+  ok(p.length < 700, "…and under 700 characters");
+  ok(!/wrangler|Cloudflare|token/i.test(p), "nothing about how the domain is run");
+  const help = fs.readFileSync(path.join(repoRoot, "cli", "src", "help.rs"), "utf8");
+  ok(/"agent" \| "agents" => AGENT/.test(help), "the briefing it points at exists");
 }
 
 /* ---------- the `doklin` installer ---------- */

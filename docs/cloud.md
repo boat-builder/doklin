@@ -668,12 +668,12 @@ decision 7).
 - The five agent names (version 10) are promises to the `doklin` command
   line, which checks the one a command needs before it offers it and exits
   7 — "update the worker" — when it is missing (§8.4): `"agents"` is the
-  login and the People view's Agents section; `"agent-docs"` reading and
+  login and the *People and agents* view's Agents tab; `"agent-docs"` reading and
   changing documents; `"agent-pages"` publishing; `"agent-comments"`
   threads; `"agent-search"` the search mirror. They were built as five
   phases and released as one version; the names stay apart because each is
   a promise a client can check on its own. The app gates nothing on them:
-  against an older worker its Agents section says the worker is too old for
+  against an older worker its Agents tab says the worker is too old for
   agents, off the `404` the route answers.
 
 ### 5.8 Size and tests
@@ -1206,9 +1206,9 @@ every blob no retained snapshot references and older than an hour's grace.
 
 | Surface | Where | What it does |
 | --- | --- | --- |
-| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, the workspace menu's *Cloud…*, and the sync line in the sidebar's footer | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* (the view below), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
+| **Cloud panel** (`CloudPanel.tsx`) | gear → *Cloud…*, the workspace menu's *Cloud…*, and the sync line in the sidebar's footer | Not connected: *Connect a domain…*, *Open a workspace from a domain…* (another Mac of yours — it wants that domain's token) and *Join with an invite…* (a workspace somebody else runs). Connected: the domain, the phase line ("Synced 2 min ago" / offline / paused / revoked / "this Mac's changes are waiting on the worker update"), who else is here, a held mass-deletion waiting for a word, what the domain holds of this folder's version history (or that its worker is too old to hold any) with *Workspace history…* beside it, *Sync now*, *Pause*, *Published pages (N)…*, *Update the worker…* (with the version it runs against this app's), *People…* and *Agents…* under one heading (two doors into the view below, one per tab, so that neither kind of access has to be found behind the other), *Connect another Mac…* (the endpoint and the credential this Mac syncs with), *Version settings…* (the two horizons, the space, the export), *Disconnect this Mac* (confirmed inline), and the danger zone: *Delete everything on notes.example.com…* — the domain typed back, wipe, then the teardown prompt |
 | **Setup wizard** (`CloudSetup.tsx`) | the panel's three entrances | Name the workspace; a domain of your own or a free workers.dev name (`doklin-<name>`); the setup prompt, copied with the token in it; paste the endpoint the agent printed (a workers.dev address is only known once wrangler prints it); the probe decides between *Connect & upload*, *Download it here* and *Resume syncing this folder*; the marker's `wsId` is what makes *Resume* appear. The third mode is *redeem*: paste the line an owner sent — into either box, both fill — trade the code for this Mac's own credential, then the same *Download it here* (§6.8) |
-| **People** (`CloudPeople.tsx`) | the Cloud panel, *People…* | Everything `cloud_people` answers, this Mac's own role included — and the role is asked rather than remembered: only the owner's credential is answered by the members route, so a `403` is the member branch, not an error. Owner: every person with their address, role and the Macs they hold, each Mac revocable on its own; *Remove from notes.example.com…* for the person, their invite and every Mac at once; the pending codes with what is left of their life, *New code…* and *Withdraw*; *Invite someone…* (address, an optional name, 1 / 7 / 30 days) and then the code, once, with the line to send beside it. The owner's own Macs are not listed: their credential is the domain's env secret, which has no row to revoke. A domain with no owner row asks for an address once — identity, never authority. Member: no list and no invite door, because both are the owner's — their own credential for a second Mac is behind *Connect another Mac…*. Below the people, owner only, **Agents** (`CloudAgents.tsx`, §8.3): each agent with what it may do, the machines it is logged in on — each with *Log out* — and when it was last used; *Add an agent…* (a name and four boxes: *read* fixed, *publish* off unless ticked, with what it means beside it), *New login code…*, *Edit…* and *Remove*; and after an add or a new code, the two lines to hand over — the one that installs `doklin`, then `doklin login …` — once, with what is left of the code's hour |
+| **People and agents** (`CloudPeople.tsx`) | the Cloud panel, *People…* or *Agents…* | One view with a tab for each kind of access — a segmented switch at the top, each tab opening with a line that says what that kind is, then what the owner came to do (the door, its form, the one-time code it ends in), then the lists. Both tabs stay mounted, so a code that is shown once survives a look at the other. **People:** everything `cloud_people` answers, this Mac's own role included — and the role is asked rather than remembered: only the owner's credential is answered by the members route, so a `403` is the member branch, not an error. Owner: every person with their address, role and the Macs they hold, each Mac revocable on its own; *Remove from notes.example.com…* for the person, their invite and every Mac at once; the pending codes with what is left of their life, *New code…* and *Withdraw*; *Invite someone…* (address, an optional name, 1 / 7 / 30 days) and then the code, once, with the line to send beside it. The owner's own Macs are not listed: their credential is the domain's env secret, which has no row to revoke. A domain with no owner row asks for an address once — identity, never authority. Member: no tabs, no list and no door of either kind, because all of it is the owner's — their own credential for a second Mac is behind *Connect another Mac…*. **Agents**, owner only (`CloudAgents.tsx`, §8.3): each agent with what it may do, the machines it is logged in on — each with *Log out* — and when it was last used; *Add an agent…* (a name and four boxes: *read* fixed, *publish* off unless ticked, with what it means beside it), *New login code…*, *Edit…* and *Remove*; and after an add or a new code, one short prompt to hand over (`buildAgentLoginPrompt`, `cloudPrompts.ts`) — what Doklin is, the command that installs `doklin`, `doklin login …`, and what the address in it is — shown once, with one *Copy prompt* button and what is left of the code's hour |
 | **Worker update** (`WorkerUpdate.tsx`) | the panel, and the gear's badge | One card (`v2 → v3`), then two ways to run the same update: the two commands that fetch and run `doklin-cloud-update.sh`, and below them the agent prompt that asks for exactly those. Neither carries a secret. *Check again* sends the engine a probe; a `worker-outdated` pause resumes on it |
 | **Live chip** (`LiveChip.tsx`) | the title row, for a note inside the workspace | Five states (`pageState` in `src/cloud.ts`): *Publish* (an outline, no page of its own), *Live · /slug* (green, a still dot), *Updating* (the accent and a turning ring: an edit made here is on its way, from the first keystroke until a sync completes after the save), *Not updating* (amber: sync is offline, paused, holding a deletion, waiting on the worker or failing, so the page keeps what it had) and *Page offline* (red: access revoked, or the note isn't in the sync, so the address answers Not found). Not connected: one line and the door to the wizard. Connected: publish at a random or chosen address (a bad slug refused in place); once published, the state in words with why, the address in a well with *Copy*, *Open*, *Change address* (the engine re-keys the page), "Published by Alice · 3 days ago" when someone else did it, the nested address when the note is also inside a published folder, *Stop publishing* (confirmed inline), *All published pages…* |
 | **Facepile** (`Avatar.tsx`) | the title row, beside the Live chip | Who else is in the open note: up to three faces, then *+N*; the same person on two Macs is one face; the names on hover |
@@ -1408,7 +1408,7 @@ never enters it.
 - **The owner authenticates without the database.** `OWNER_TOKEN` is the env
   secret and never reads a row (§5.4), so a D1 outage degrades a team
   workspace to one credential and never locks its owner out. The owner gets
-  a member row — adopted at bind, or later from the People view — for
+  a member row — adopted at bind, or later from the People tab — for
   attribution only: identity, never authority.
 - **Revoking names a token id, not a hash.** The owner never holds anyone's
   token, so the list answers ids and the delete finds the row by id. Removing
@@ -1497,14 +1497,18 @@ The same three lifetimes as a person (§8.1), in three tables of their own
 | **Login code** | `sha256(code)`, named by `c-` + 8 hex | an hour, or until it is traded in | a pending token |
 | **Token** | `sha256(token)`, named by `t-` + 8 hex | one machine, until revoked | the credential: `dka_` + 64 hex |
 
-- **One way in.** The owner adds an agent in the People view (§7.2): a name
+- **One way in.** The owner adds an agent on the Agents tab (§7.2): a name
   and what it may do. The app mints a code
   (`dkla-XXXXX-XXXXX-XXXXX-XXXXX`, 100 bits of Crockford base32, the grammar
   of an invite code under its own prefix), sends only its sha256, and shows
-  two lines, once: the one that installs the command (§8.6) and
-  `doklin login https://notes.example.com dkla-…`. Whoever sets the bot up
-  runs them — a person in a shell, or the agent itself when the lines are
-  pasted into its chat. `POST /api/agent/login` deletes the code and mints
+  one short prompt, once, with one button to copy it: two sentences on what
+  Doklin is, the command that installs `doklin` (§8.6),
+  `doklin login https://notes.example.com dkla-…`, what the address in that
+  command is, and a pointer to `doklin help agent`. It is short on purpose —
+  the briefing is the command's own — and it is the only thing to copy,
+  because a bot that has never heard of Doklin can do nothing with two bare
+  commands. Whoever sets the bot up runs them — a person in a shell, or the
+  agent itself when the prompt is pasted into its chat. `POST /api/agent/login` deletes the code and mints
   that machine's token in one statement. There is no second path: no
   environment variable, no token pasted by hand, no keychain.
 - **The code is single-use and lives an hour** (`AGENT_CODE_MINUTES`,
@@ -1541,7 +1545,7 @@ The same three lifetimes as a person (§8.1), in three tables of their own
 - **One read to authenticate, and no write.** A bearer that starts `dka_` is
   resolved by one primary-key lookup — `agent_tokens.hash = sha256(bearer)`,
   joined to its agent — the way a member's is. `last_used_at` moves at most
-  once an hour, so the People view can say when an agent was last here
+  once an hour, so the Agents tab can say when an agent was last here
   without a write on every request. The owner's secret and members' tokens
   are untouched: the owner still authenticates with no database read.
 - **Revoking is deleting a row.** One machine's token, or the agent with
@@ -1858,8 +1862,8 @@ one entry every command uses it; with several, `-w notes.example.com`
 picks. There is no keychain path: a bot's machine is usually a headless
 Linux box with none, and one code path is the point.
 
-**Installing it** is one line, the one the agent login card hands out above
-the login line (`CLI_INSTALL_LINE`, `src/cloudPrompts.ts`):
+**Installing it** is one line, the first of the two commands in the prompt
+the agent login card hands out (`CLI_INSTALL_LINE`, `src/cloudPrompts.ts`):
 
 ```sh
 curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh
@@ -1954,7 +1958,7 @@ shows what one agent is doing right now.
 half its allowance. The design is ready for it — a per-agent budget
 (requests a minute, requests a day, writes a day) counted in the statement
 that authenticates the token, so it costs no extra query — and is a change
-to the worker and the People view alone.
+to the worker and the Agents tab alone.
 
 **Not yet measured.** CPU: a write parses and re-serialises the manifest,
 which on a 5,000-file workspace may pass the free plan's 10 ms. The
@@ -2151,8 +2155,8 @@ pnpm test:worker                           # cloud-worker/test/run.mjs — every
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (99 tests)
-node verify-harness/cloudprompts.test.mjs  # the prompts, the update script and the doklin installer (235 checks)
-node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (40 steps)
+node verify-harness/cloudprompts.test.mjs  # the prompts, the update script and the doklin installer (252 checks)
+node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (41 steps)
 (cd cli && cargo build --release)          # the doklin command…
 node verify-harness/drive-cli.mjs          # …driven against the harness worker: every command, every exit code (49 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
@@ -2172,8 +2176,8 @@ The one thing a Linux runner cannot do is the real thing: the wizard
 against a deployed worker, an edit reaching the bucket, a second Mac
 joining, two Macs seeing each other's lease. That is a manual pass on macOS
 with `pnpm tauri dev`. So is an agent against a real domain — a bot on
-another machine and a Mac with the folder open: add the agent in the People
-view and log it in with the two lines, edit from the bot while typing on the
+another machine and a Mac with the folder open: add the agent on the Agents
+tab and log it in with the prompt it hands over, edit from the bot while typing on the
 Mac, publish from the bot and open the address, comment from the bot and
 answer in the app's rail.
 
@@ -2203,7 +2207,7 @@ than everyone's `owner`.
 
 The app drives it end to end. `cloud_invite` mints a 100-bit code, sends only
 its sha256 and hands the code over once; the wizard's third mode trades it
-for a credential of that Mac's own (§6.8); and the Cloud panel's People view
+for a credential of that Mac's own (§6.8); and the Cloud panel's People tab
 (§7.2) is where an owner sees who is in the workspace, which Macs each of
 them is signed in on, and which codes are still outstanding — and where any
 of those goes away again, one row at a time. Putting somebody out is now

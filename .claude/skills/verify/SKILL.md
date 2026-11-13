@@ -134,7 +134,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 40 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 41 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -160,22 +160,28 @@ node verify-harness/drive-cloud.mjs        # 40 steps: boots the REAL <App/> (cl
                                            # downloaded folder, the invite door (one paste
                                            # filling both boxes, a refused code spending nothing,
                                            # the download riding the member's own token rather
-                                           # than the owner's), and the People view (a domain with
+                                           # than the owner's), and the People and agents view —
+                                           # a door for each in the panel, a tab for each in the
+                                           # view, the door of each tab above its list — whose
+                                           # People tab is (a domain with
                                            # no owner row asking for one, an invite's code shown
                                            # once with the line to send, and the three ways access
                                            # ends — one Mac, one code, one person — each taking
                                            # exactly one thing away; then the same view on a Mac
                                            # that joined on an invite, where the list is the
                                            # owner's and the member is told so, not errored at)
-                                           # — the People view's Agents section (docs/cloud.md
+                                           # — the Agents tab (docs/cloud.md
                                            # §8.3): what each agent may do and where it is logged
                                            # in, a new one starting without publishing and with
-                                           # reading fixed, the two lines to hand over — install,
-                                           # then login — shown once and copied together or the
-                                           # login alone, a new login code, changing the boxes,
-                                           # logging one machine out, removing the agent, and a
-                                           # worker too old for agents saying so in a line while
-                                           # the people stay manageable; a member sees none of it
+                                           # reading fixed, the ONE short prompt to hand over —
+                                           # what Doklin is, install, login, what the address is —
+                                           # shown once, copied by its one button and kept through
+                                           # a look at the People tab, a new login code, changing
+                                           # the boxes, logging one machine out, removing the
+                                           # agent, and a worker too old for agents saying so in a
+                                           # line (reached by the panel's Agents… door) while the
+                                           # People tab stays manageable; a member sees no tabs
+                                           # and none of it
                                            # — and publishing: the Live chip's
                                            # not-connected door, a note published at a random then
                                            # a chosen address (Copy, a bad slug refused, the page
@@ -361,7 +367,10 @@ node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) a
                                            # are refused before the disk is touched, and a
                                            # checksum that does not match, a binary the sums do
                                            # not list and a missing asset each install nothing
-                                           # (235 checks)
+                                           # — and the prompt that logs an agent in
+                                           # (buildAgentLoginPrompt): what Doklin is, the two
+                                           # commands in order, what the address is, the expiry
+                                           # in UTC, and that it stays short (252 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
