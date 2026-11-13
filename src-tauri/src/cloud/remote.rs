@@ -175,6 +175,56 @@ pub struct TokenRecord {
     pub created_at: u64,
 }
 
+/* ---------- Agents (docs/cloud.md §8.3) ---------- */
+
+/// An agent as the owner's routes describe one: an identity that is not a
+/// person, with what it may do, the machines it is logged in on and the
+/// login code nobody has used yet. Never a credential.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecord {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// `read`, `comment`, `edit`, `publish` — the ones the owner ticked.
+    /// `read` is always among them.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    /// When it last made a request, to the hour. None until it has.
+    #[serde(default)]
+    pub last_used_at: Option<u64>,
+    #[serde(default)]
+    pub machines: Vec<AgentMachine>,
+    #[serde(default)]
+    pub code: Option<AgentCode>,
+}
+
+/// One machine an agent is logged in on: what `doklin login` left there,
+/// named by what the machine calls itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMachine {
+    pub id: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// A login code nobody has traded in yet. The code is not in it and never
+/// comes back from the worker.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCode {
+    pub id: String,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+}
+
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WipeRound {
@@ -432,6 +482,77 @@ impl HttpRemote {
             let res = expect_status(res).await?;
             read_list(res, kind).await
         }
+    }
+}
+
+/// The owner's agent routes (`/api/auth/agents…`). Inherent rather than part
+/// of [`Remote`]: that trait is what the *engine* needs, so that it can run
+/// against an in-memory worker, and the engine never manages agents — only
+/// the People view's commands do (mod.rs), and they hold an `HttpRemote`.
+impl HttpRemote {
+    /// `GET /api/auth/agents`: every agent, with its machines and pending code.
+    pub async fn list_agents(&self) -> RemoteResult<Vec<AgentRecord>> {
+        self.list_of("agents").await
+    }
+
+    /// `POST /api/auth/agents`: add an agent with its first login code on
+    /// it. Only `sha256(code)` goes up, as with an invite.
+    pub async fn create_agent(
+        &self,
+        name: &str,
+        scopes: &[String],
+        code_hash: &str,
+        expires_at: u64,
+    ) -> RemoteResult<AgentRecord> {
+        let body = json!({ "name": name, "scopes": scopes, "codeHash": code_hash, "expiresAt": expires_at });
+        let v = self.post_json("auth/agents", &body).await?;
+        serde_json::from_value(v.get("agent").cloned().unwrap_or_default())
+            .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't an agent: {}", e)))
+    }
+
+    /// `POST /api/auth/agents/<id>`: rename it, or change what it may do.
+    /// Takes effect on the agent's next request.
+    pub async fn update_agent(&self, id: &str, name: Option<&str>, scopes: Option<&[String]>) -> RemoteResult<()> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = name {
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(scopes) = scopes {
+            body.insert("scopes".into(), json!(scopes));
+        }
+        self.post_json(&format!("auth/agents/{}", id), &serde_json::Value::Object(body)).await.map(|_| ())
+    }
+
+    /// `POST /api/auth/agents/<id>/code`: a fresh login code, replacing any
+    /// the agent had — for another machine, or after the first ran out.
+    pub async fn new_agent_code(&self, id: &str, code_hash: &str, expires_at: u64) -> RemoteResult<AgentCode> {
+        let body = json!({ "codeHash": code_hash, "expiresAt": expires_at });
+        let v = self.post_json(&format!("auth/agents/{}/code", id), &body).await?;
+        serde_json::from_value(v.get("code").cloned().unwrap_or_default())
+            .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a login code: {}", e)))
+    }
+
+    /// `DELETE /api/auth/agents/<id>`: the agent and every token it holds.
+    pub async fn delete_agent(&self, id: &str) -> RemoteResult<()> {
+        self.revoke("agents", id).await
+    }
+
+    /// `DELETE /api/auth/agents/<id>/tokens/<tid>`: log one machine out.
+    pub async fn delete_agent_machine(&self, agent_id: &str, token_id: &str) -> RemoteResult<()> {
+        self.revoke(&format!("agents/{}/tokens", agent_id), token_id).await
+    }
+
+    /// POST a JSON body with the bearer and read the JSON answer.
+    async fn post_json(&self, tail: &str, body: &serde_json::Value) -> RemoteResult<serde_json::Value> {
+        let res = self
+            .auth(self.client.post(self.url(tail)))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(body).unwrap_or_default())
+            .send()
+            .await
+            .map_err(transport_err)?;
+        let res = expect_status(res).await?;
+        res.json::<serde_json::Value>().await.map_err(transport_err)
     }
 }
 

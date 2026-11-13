@@ -2018,7 +2018,7 @@ async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
     let m = manifest_of(&be);
     let f = m.files.values().next().unwrap();
     assert_eq!(f.by, ada.id, "the manifest carries the id");
-    assert!(is_member_id(&f.by), "{} is not a member id", f.by);
+    assert!(is_directory_id(&f.by), "{} is not a member id", f.by);
     assert_eq!(m.public["the-doc"].by, ada.id, "a published page too");
     assert!(!f.by.contains("Alice"), "and never the Mac's name");
 
@@ -2762,7 +2762,7 @@ async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
     let bob_here = seen.iter().find(|p| p.device_id == "d-bob").unwrap();
     assert_eq!(bob_here.name, "Bob Mbeki", "a person, not a Mac");
     assert_eq!(bob_here.device, "Bob");
-    assert!(bob_here.member_id.as_deref().map(is_member_id).unwrap_or(false));
+    assert!(bob_here.member_id.as_deref().map(is_directory_id).unwrap_or(false));
     let air_here = seen.iter().find(|p| p.device_id == "d-air").unwrap();
     assert_eq!(air_here.name, "Air", "your own other Mac is told apart by its name");
     assert_eq!(air_here.member_id, studio.engine.me_for_test().map(String::from));

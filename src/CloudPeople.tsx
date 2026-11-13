@@ -7,6 +7,9 @@
 // route, so a member is shown their own half instead of an error, and nothing
 // on this Mac records which they are: the domain is asked every time the view
 // opens. No `fetch` here either; the engine makes every call.
+//
+// Below the people sit the workspace's agents (CloudAgents.tsx) — identities
+// that are not people, and the owner's to manage in the same way.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -22,6 +25,7 @@ import {
   type CloudMember,
   type CloudPeople as People,
 } from "./cloud";
+import CloudAgents from "./CloudAgents";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -441,6 +445,8 @@ export default function CloudPeople({
         </div>
       )}
       {error && <div className="modal-error">{error}</div>}
+
+      <CloudAgents root={root} domain={domain} copy={copy} copied={copied} />
     </>
   );
 }

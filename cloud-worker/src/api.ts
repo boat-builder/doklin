@@ -57,7 +57,16 @@
 //   DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
 //   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
 //   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
+//
+//   Agents (docs/cloud.md §8.3). An agent's token is answered under /api/agent and nowhere
+//   else — every route above answers one with 403 — and the routes that manage agents sit
+//   beside the people routes, owner-only like them. Both are listed in agentApi.ts.
+//
+//   POST   /api/agent/login          NO BEARER — the second route above the gate
+//   *      /api/agent/…              an agent's token only: the document API
+//   *      /api/auth/agents…         owner; add, list, change and remove agents
 
+import { agentLogin, handleAgent, handleAgentAdmin } from "./agentApi";
 import { authenticate, type Auth } from "./auth";
 import { randomHex } from "./crypto";
 import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
@@ -107,7 +116,12 @@ const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 4
 const ownerOnly = (): Response => json({ error: "owner only" }, 403);
 const notBound = (): Response => json({ error: "not bound" }, 404);
 
-export async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
+export async function handleApi(
+  request: Request,
+  env: Env,
+  url: URL,
+  ctx: ExecutionContext | undefined,
+): Promise<Response> {
   const parts = url.pathname.split("/").filter(Boolean); // ["api", section, …]
 
   // The one route above the gate. Redeeming an invite is how a Mac GETS a
@@ -117,12 +131,33 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   if (request.method === "POST" && parts.length === 3 && parts[1] === "auth" && parts[2] === "join") {
     return joinWithInvite(request, env);
   }
+  // The other one, for the same reason: `doklin login` is how a bot gets a
+  // bearer. Method and path exactly, again — `DELETE /api/agent/login` is a
+  // token revoking itself, and meets the gate like everything else.
+  if (request.method === "POST" && parts.length === 3 && parts[1] === "agent" && parts[2] === "login") {
+    return agentLogin(request, env);
+  }
 
   const auth = await authenticate(request, env);
   if (!auth) return json({ error: "unauthorized" }, 401);
 
   const section = parts[1];
   const method = request.method;
+
+  // An agent's token and the document API belong to each other, both ways.
+  // A token that could `PUT /api/manifest` could rewrite the whole workspace,
+  // and then no permission on its row would mean anything — so an agent gets
+  // nothing but /api/agent. And a person's credential is not a limited
+  // account, so it has no business on routes whose whole point is the limit.
+  if (auth.agent) {
+    if (section !== "agent") {
+      return json({ error: "an agent's token works on the document API only — /api/agent" }, 403);
+    }
+    return handleAgent(request, env, url, ctx, parts, { ...auth, agent: auth.agent });
+  }
+  if (section === "agent") {
+    return json({ error: "the document API is for agents — add one in Doklin, under Cloud → People → Agents" }, 403);
+  }
 
   // The probe: liveness, the credential, the version and "is this domain
   // bound" in one call — what the setup wizard asks before touching anything.
@@ -186,6 +221,11 @@ export async function handleApi(request: Request, env: Env, url: URL): Promise<R
   // with the manifest's per-file history (docs/versioning.md §6.4).
   if (section === "versions" && (parts.length === 3 || parts.length === 4)) {
     return handleVersions(request, env, url, parts);
+  }
+
+  if (section === "auth" && parts[2] === "agents") {
+    if (auth.role !== "owner") return ownerOnly();
+    return handleAgentAdmin(request, env, parts);
   }
 
   if (section === "auth" && (parts.length === 3 || parts.length === 4)) {

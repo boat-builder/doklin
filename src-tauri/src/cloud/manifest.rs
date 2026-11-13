@@ -45,15 +45,18 @@ const SLUG_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 pub const RANDOM_SLUG_LEN: usize = 8;
 const MAX_SLUG_LEN: usize = 64;
 
-/// The shape of a member id — `m-` and eight hex characters, `ENTITY_ID_RE`
-/// in cloud-worker/src/members.ts narrowed to the one prefix a manifest can
-/// carry. **Change both.**
+/// The shape of an id the workspace's directory can resolve: `m-` (a person)
+/// or `a-` (an agent) and eight hex characters — `ENTITY_ID_RE` in
+/// cloud-worker/src/members.ts narrowed to the prefix a person signs with,
+/// plus `AGENT_ID_RE` in cloud-worker/src/agents.ts. **Change all three.**
 ///
 /// What tells a `by` that can be looked up from one written before v3, when
 /// it was a device's name: the engine resolves the first through the
-/// workspace's directory and shows the second exactly as it stands.
-pub fn is_member_id(by: &str) -> bool {
-    by.len() == 10 && by.starts_with("m-") && by[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+/// directory `/api/meta` answers and shows the second exactly as it stands.
+pub fn is_directory_id(by: &str) -> bool {
+    by.len() == 10
+        && (by.starts_with("m-") || by.starts_with("a-"))
+        && by[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /* ---------- Wire types ---------- */

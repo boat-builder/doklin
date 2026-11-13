@@ -1,0 +1,25 @@
+[package]
+name = "doklin-cli"
+version = "0.1.87"
+description = "Work with a Doklin workspace from anywhere, through its own domain"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "doklin"
+path = "src/main.rs"
+
+[dependencies]
+# Blocking HTTP with rustls and bundled roots: one static binary, nothing to
+# install beside it on a bot's machine.
+ureq = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gethostname = "0.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

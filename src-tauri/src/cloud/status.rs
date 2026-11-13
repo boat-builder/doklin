@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use super::manifest::PublicKind;
-use super::remote::{InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
+use super::remote::{AgentRecord, InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -208,6 +208,27 @@ pub struct People {
     /// Every signed-in Mac. The owner's own are not among them — their
     /// credential is the domain's env secret, which has no row (remote.rs).
     pub devices: Vec<TokenRecord>,
+}
+
+/// A fresh login code for an agent, and the line that carries it — the one
+/// moment the code exists in the clear. Shown once; the domain keeps only
+/// its sha256 (docs/cloud.md §8.3).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLogin {
+    /// The whole command to run on the agent's machine:
+    /// `doklin login https://notes.example.com dkla-…`.
+    pub line: String,
+    pub code: String,
+    pub expires_at: u64,
+}
+
+/// `cloud_agent_add`: the agent the domain now holds, and how it logs in.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAdded {
+    pub agent: AgentRecord,
+    pub login: AgentLogin,
 }
 
 /* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */
