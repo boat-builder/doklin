@@ -14,9 +14,13 @@
 //              GET    /api/agent/comments?path=
 //              GET    /api/agent/search?q=&dir=&limit=
 //              GET    /api/agent/pages
+//              GET    /api/agent/board?path=        GET /api/agent/cards?path=&by=&where=
+//              GET    /api/agent/card?path=&card=
 //   edit       PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      if-rev: <n> | *
 //              DELETE /api/agent/doc?path=&v=[&dry=1]
 //              POST   /api/agent/move               {from, to, dryRun?}
+//              POST   /api/agent/board · POST/PATCH/DELETE /api/agent/card, /field, /option
+//                                                   (agentBoards.ts says what each takes)
 //   comment    POST   /api/agent/comments           {path, on, body, v?, dryRun?} | {path, thread, body, dryRun?}
 //              DELETE /api/agent/comments?path=&thread=[&dry=1]
 //   publish    PUT    /api/agent/pages              {path, slug?, title?, desc?, dryRun?}
@@ -35,6 +39,21 @@
 // in `error` that says what to do next, because the reader is as likely to be
 // a model as a person.
 
+import {
+  deleteCard,
+  deleteField,
+  deleteOption,
+  getBoard,
+  getCard,
+  getCards,
+  patchCard,
+  patchField,
+  patchOption,
+  postBoard,
+  postCard,
+  postField,
+  postOption,
+} from "./agentBoards";
 import type { AgentCaller, Call } from "./agentCall";
 import { deleteComment, getComments, postComment } from "./agentComments";
 import { deleteDoc, getDoc, getTree, postMove, putDoc } from "./agentDocs";
@@ -123,6 +142,11 @@ const ROUTES: Record<string, Partial<Record<string, [Scope, Handler]>>> = {
   comments: { GET: ["read", getComments], POST: ["comment", postComment], DELETE: ["comment", deleteComment] },
   search: { GET: ["read", getSearch] },
   pages: { GET: ["read", getPages], PUT: ["publish", putPage], DELETE: ["publish", deletePage] },
+  board: { GET: ["read", getBoard], POST: ["edit", postBoard] },
+  cards: { GET: ["read", getCards] },
+  card: { GET: ["read", getCard], POST: ["edit", postCard], PATCH: ["edit", patchCard], DELETE: ["edit", deleteCard] },
+  field: { POST: ["edit", postField], PATCH: ["edit", patchField], DELETE: ["edit", deleteField] },
+  option: { POST: ["edit", postOption], PATCH: ["edit", patchOption], DELETE: ["edit", deleteOption] },
 };
 
 export async function handleAgent(

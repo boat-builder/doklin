@@ -35,6 +35,17 @@ Changing
   publish <doc or folder>      make it public                 [--slug s] [--title t] [--desc d]
   unpublish <doc, folder or address>
 
+Boards
+  board show <board>           its cards, in columns          [--by field] [--where field=value]…
+  board info <board>           its fields and their options
+  board card <board> <card>    one card: its properties and its page
+  board add <board> <title>    a new card                     [field=value…] [--first] [--from file|-]
+  board set <board> <card>     change a card                  [field=value…] [--title t] [--first|--last|--before c|--after c]
+  board rm <board> <card>      remove a card
+  board new <path>             a new board                    [--name n]
+  board field add|set|rm …     the board's fields             (doklin help boards)
+  board option add|set|rm …    a field's options, which are its columns
+
 Everywhere
   -w <domain>     which workspace, when this machine is logged in to several
   --json          answer in JSON (already the case when the output is not a terminal)
@@ -44,6 +55,7 @@ More
   doklin help documents        one document, two versions: markdown and html
   doklin help comments         how a comment attaches to text
   doklin help publishing       what public means
+  doklin help boards           a board, its cards and their properties
   doklin help agent            a short brief for an AI agent using this
   doklin help <command>
 
@@ -150,6 +162,66 @@ the document is back, and then shows it again. Stop publishing with `unpublish`.
 This machine can publish only if the workspace's owner allowed it: `doklin whoami`
 says what it may do."#;
 
+const BOARDS: &str = r#"BOARDS
+
+A board is a set of cards in columns — a kanban board, as people see it in the
+Doklin app. It is named by its path, like a document: Projects/Roadmap
+
+  doklin board show Projects/Roadmap               every card, in its column
+  doklin board info Projects/Roadmap               its fields, and their options
+  doklin board card Projects/Roadmap "Ship it"     one card: its properties and its page
+
+A card has a title, properties, and a page. Its properties are the board's fields:
+
+  select         one of the field's options        status=Done
+  multi-select   several of them                   tags=bug,auth · tags+=bug · tags-=auth
+  text           anything                          owner="Ada Lovelace"
+  number         a number                          points=3
+  date           a day, as YYYY-MM-DD              due=2026-09-12
+  checkbox       true or false                     shipped=true
+  any field      left empty clears it              due=
+
+Name a field by its name or its id, in any case, and quote it if it has spaces:
+"Due date"=2026-09-12. A value that is not one of a select's options is refused,
+with the options there are; add one first with `board option add`.
+
+  doklin board add Projects/Roadmap "Rig the mast" status=Backlog tags=hull
+  doklin board add Projects/Roadmap "Rig the mast" --from notes.md    with a page
+  doklin board set Projects/Roadmap "Rig the mast" status="In progress"
+  doklin board set Projects/Roadmap "Rig the mast" --before "Ship it"
+  doklin board set Projects/Roadmap "Rig the mast" --title "Rig both masts"
+  doklin board rm Projects/Roadmap "Rig the mast"
+
+The board's columns are the options of the field it is grouped by. A card that
+changes column goes to the bottom of its new one; --first, --last, --before and
+--after put it elsewhere. A title is unique on its board. `board show --by tags`
+groups by another field; --where status!=Done (or tags=bug, or due= for empty)
+shows only the cards that match, and may be said more than once.
+
+A card's page is a document named <board>/<card>. Read it, change it and comment
+on it the way you do any document — its properties are not part of its text:
+
+  doklin read "Projects/Roadmap/Ship it"
+  doklin edit "Projects/Roadmap/Ship it" --find "June" --replace "July"
+  doklin comment "Projects/Roadmap/Ship it" --on "the hull" -m "Which one?"
+
+A board is not a folder. Nothing else goes in it, and nothing in it is moved or
+removed but through `doklin board`. `doklin mv` moves a whole board.
+
+The board itself:
+
+  doklin board new Work/Sprint                     with Status: Backlog, In progress, Done
+  doklin board field add Work/Sprint Priority --type select --options "Low, High"
+  doklin board field set Work/Sprint Priority --name Urgency
+  doklin board field rm Work/Sprint Urgency        cards keep their values
+  doklin board option add Work/Sprint Status Review --before Done --color purple
+  doklin board option set Work/Sprint Status Review --name "In review"
+  doklin board option rm Work/Sprint Status "In review"
+
+Renaming an option renames it on every card that has it. Removing an option or a
+field changes no card: a card keeps its value, and shows it as what it is.
+Colors: grey, brown, orange, yellow, green, blue, purple, pink, red, or none."#;
+
 const AGENT: &str = r#"FOR AN AGENT
 
 You are working in a Doklin workspace: documents that people write and review in
@@ -183,6 +255,14 @@ What matters here
     look at a folder with --dry-run first (doklin help publishing).
   · Every command that changes something takes --dry-run.
 
+Boards
+  `doklin ls` shows a board as one row: [board · 12 cards]. It is not a folder —
+  never write files into it. Work with it through `doklin board` (doklin help boards):
+    doklin board show <board>                        the cards, in their columns
+    doklin board set <board> "<card>" status=Done    move a card, set a property
+  A card's page is a document named <board>/<card>: read, edit and comment on it
+  as on any other.
+
 Output is JSON whenever it is not going to a terminal. A refusal is one sentence
 on stderr that says what to do next, with an exit code: 2 bad usage, 3 not found,
 4 not permitted, 5 conflict (the document changed, or the name is taken), 6 not
@@ -201,10 +281,11 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         "comments" => COMMENTS,
         "publishing" => PUBLISHING,
         "agent" | "agents" => AGENT,
+        "boards" | "cards" => BOARDS,
         name => {
             let Some(found) = COMMANDS.iter().find(|c| c.name == name) else {
                 return Err(Failure::usage(format!(
-                    "there is no help on \"{}\" — try: documents, comments, publishing, agent, or a command's name",
+                    "there is no help on \"{}\" — try: documents, comments, publishing, boards, agent, or a command's name",
                     name
                 )));
             };
@@ -245,6 +326,9 @@ fn options_of(command: &str) -> &'static str {
             "  --slug <s>     the last part of the address (default: a random one)\n  --title <t>    the page's title, where it differs from the document's\n  --desc <d>     its description, for link previews\n  --dry-run      list what would become public"
         }
         "ls" => "  --deep         everything beneath the folder, not only what is directly in it",
+        "board" => {
+            "  --by <field>      group by another select, multi-select or date field\n  --where <cond>    field=value, field!=value, field= (empty) — repeat to narrow\n  --first, --last   the top or the bottom of its column\n  --before <name>   just before another card (or option)\n  --after <name>    just after it\n  --title <t>       a card's new title\n  --from <file|->   a new card's page, from a file or from what is piped in\n  --type <type>     a field's type: select, multi_select, text, number, date, checkbox\n  --options \"…\"     a select field's first options, comma-separated\n  --name <n>        a new board's name, or a field's or option's new name\n  --color <c>       an option's color, or none\n  --dry-run         say what would happen"
+        }
         "rm" => "  --md, --html   remove one version, keeping the other and the document\n  --dry-run      say what would happen",
         _ => "",
     }

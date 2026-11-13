@@ -181,8 +181,8 @@ doing it by hand. The naming rule is one function, `resourceName` in
 The database is where people, presence, leases and agents live — everything
 a blob store cannot hold: a `UNIQUE` email, a credential deleted atomically,
 a row per device upserted without a lost update, a lock acquired in one
-statement — and the one thing a Worker cannot afford to read blob by blob,
-the text a search scans:
+statement — and the two things a Worker cannot afford to read blob by blob,
+the text a search scans and the properties a board shows:
 
 ```sql
 meta     (key, schema_version)                   the migration runner's anchor
@@ -196,6 +196,7 @@ agent_codes  (hash, id, agent_id, created_at, expires_at)             a login co
 agent_tokens (hash, id, agent_id, host, created_at)                   one machine an agent is logged in on
 search_text  (fid, folded)                                            a document's text, lower-cased (§8.5)
 search_state (key, etag, held)                                        one row: how far that mirror has caught up
+board_cards  (fid, hash, head)                                        a card's properties block, as last read (§8.4, Boards)
 ```
 
 Two columns carry a name beside an id — `tokens.device_name`, and the Mac's
@@ -610,11 +611,12 @@ decision 7).
   made it 2; the version store made it 3; the D1 binding made it 4; people
   made it 5; attribution by person made it 6; presence in D1, folded into
   the poll, made it 7; leases made it 8; public pages in the app's own look
-  made it 9, with no API change; agents and the document API made it 10),
+  made it 9, with no API change; agents and the document API made it 10;
+  boards for agents made it 11),
   `WORKER_FEATURES`
   (`["sync", "wipe", "publish", "boards", "versions", "members", "presence",
   "leases", "agents", "agent-docs", "agent-pages", "agent-comments",
-  "agent-search"]`; a feature name is a promise about behaviour, listed only once
+  "agent-search", "agent-boards"]`; a feature name is a promise about behaviour, listed only once
   the behaviour exists — the engine mirrors nothing to a worker that does
   not list `versions`, sends no beat to one that does not list `presence`,
   and owes no claim to one that does not list `leases`),
@@ -674,7 +676,9 @@ decision 7).
   phases and released as one version; the names stay apart because each is
   a promise a client can check on its own. The app gates nothing on them:
   against an older worker its Agents tab says the worker is too old for
-  agents, off the `404` the route answers.
+  agents, off the `404` the route answers. `"agent-boards"` (version 11) is
+  the first that grew alone: the board routes, and a board that is one name
+  everywhere else on the document API (§8.4, Boards).
 
 ### 5.8 Size and tests
 
@@ -1645,7 +1649,8 @@ manifest said, and the engine would have to rename it to agree.
 
 **No silent overwrite.** A read answers the bytes with the file's revision
 in `x-doklin-rev` (and `x-doklin-kind`, `-path`, `-file`, `-version`,
-`-html-behind`; values percent-encoded, since a path is not always ASCII).
+`-html-behind`, and `-board` for a card's page; values percent-encoded,
+since a path is not always ASCII).
 Replacing content needs that revision back — `if-rev: <n>`, or `if-rev: *`
 for something that must not exist yet — or an explicit `force=1`. A write
 with none of them over existing content is refused (`needs_rev`); one whose
@@ -1755,8 +1760,93 @@ threads wholly in the sidecar, anchored to an element (§5.6,
   app keeps it, and the answer names it (`orphaned`); a marker whose id no
   thread has is refused (`unknownMarkers`) — an agent may not invent one.
 
+**Boards.** On disk a board is a folder: `store.jsonl` holds its fields,
+options and views, and every card is a markdown note directly in it whose
+frontmatter is its properties ([datastores-kanban.md](datastores-kanban.md)).
+To an agent it is never that (decided 2026-11-13). A board is one name, by
+its path; a card is named by its title; and a board's insides are reached
+only through routes of their own (`cloud-worker/src/agentBoards.ts`):
+
+| Route | What it is | Permission |
+| --- | --- | --- |
+| `GET board?path=` | its name, fields, options in column order, card count, conflict copies of its definition | read |
+| `GET cards?path=&by=&where=…` | every card, in the columns the board's own view makes | read |
+| `GET card?path=&card=` | one card: properties (by field name), undeclared keys, page, comment count | read |
+| `POST board` | a new board: a new folder with the app's default definition | edit |
+| `POST`, `PATCH`, `DELETE card` | add, change (properties, title, place), remove a card | edit |
+| `POST`, `PATCH`, `DELETE field` | add (with options), rename, undeclare a field | edit |
+| `POST`, `PATCH`, `DELETE option` | add, change (name, color, place), remove an option | edit |
+
+- **The app's own rules, in one place.** The worker reads and writes with
+  the pure modules the app uses (`src/store/`: `storeFile.ts`,
+  `frontmatter.ts`, `rank.ts`, `board.ts`), so columns, card order and every
+  byte written are what the app would produce. An assignment arrives as
+  typed — `status=Done`, `tags+=bug`, `tags-=bug`, `due=` to clear — and is
+  read here against the field's type: a select or multi-select value must be
+  a declared option (matched in any case, stored in its declared spelling),
+  a number a number, a date `YYYY-MM-DD`, a checkbox `true` or `false`. An
+  unknown field or option is a `404` that lists what exists; `rank` is never
+  a field. Keys the board does not declare are kept and shown, never set.
+- **Views are the people's.** An agent gets no kanban/table, filter, sort or
+  hidden columns. `cards` groups by the field the board's first kanban view
+  groups by — what the app opens — or by `by=`; `where=` narrows (`=` is
+  "carries" on a multi-select, `!=` its opposite, `field=` empty).
+- **Where a card goes.** A new card goes to the foot of its column; a card
+  whose grouping value changes goes to the foot of its new column; `first`,
+  `last`, `before`, `after` place it. A rank is one order across the board,
+  so "before X" is the rank just before X's. A card some other tool made has
+  no rank and sorts after the ranked ones; nothing can be placed next to it.
+- **Titles are unique on a board**, case-insensitively: a taken one is a
+  `409` (`taken`) rather than the app's `Title 2`. `/` and `:` become `-`, as
+  they do in the app, and the answer names the title that was used. A new
+  title moves the note, its sidecar and an html rendition beside it.
+- **No `if-rev`.** Every board change is a commit over the latest bytes, so
+  two agents setting different properties of one card both land. A page
+  write keeps its revision check.
+- **Renaming an option** rewrites every card that carries the value — the
+  definition first, as the app does it — a round of cards at a time. A
+  request with more cards to go answers `202` with `pending`, and asking the
+  same again carries on (the option already has its new name, and the cards
+  that still carry the old one are rewritten). Removing an option or a field
+  touches no card: the value stays, and shows as a column, or a key, of its
+  own.
+- **The card copy.** Showing a board needs every card's block, and each is a
+  blob read. So `board_cards` keeps every card's block, keyed by file id
+  beside the hash it was read from: a read brings up to date only the rows
+  whose hash is not the manifest's — 32 a request, `202 {indexing, pending}`
+  past that, and the CLI asks again. A change made through the API is stale
+  in it like a Mac's, and read again by the next show. A card removed on a
+  Mac leaves its row until a wipe. It is the database or nothing: without
+  one the board routes answer `503`.
+- **What is a board.** A folder holding a `store.jsonl` — told from the
+  manifest alone, so `ls` stays free of blob reads. The app also wants the
+  file's header line, which the board routes read: a folder whose
+  `store.jsonl` is not Doklin's is hidden like a board and refused as one
+  (`409`). A board inside a board is part of the outer one.
+
+What the document routes do with a board (`documents.ts`, `locate`):
+
+- `tree` lists a board as a row of its own, with its card count, and never as
+  a folder; `deep` does not go inside one; a board or anything in it as `dir`
+  is a `400` that points at `board show`.
+- `<board>/<card>` is the card's **page**: a read leaves the properties
+  block out, a write puts the block back as it is on disk at that moment —
+  the split the app makes (`splice_body`, `src-tauri/src/store.rs`) — and a
+  page that begins with a block of its own is refused. A card has no html
+  version. A comment's line, and a search match's, is counted from the
+  page's first line.
+- Anything else inside a board — `store.jsonl`, its conflict copies, a
+  subfolder, a picture, an html beside a card — has no name: it is not
+  listed, read, written, searched or moved (`400`, `code: "board"`). Writing
+  a new name inside one points at `board add`; removing or moving a card
+  points at `board rm` and `board set --title`; nothing moves into a board.
+- A board moves whole (`kind: "board"`), and its definition's name follows
+  the folder's when it was the folder's name to begin with.
+- Publishing a card's page is publishing a document. A board itself is not
+  a folder to publish: it is public where a published note embeds it.
+
 **Skew.** `/api/agent/me`, and the answer to a login, carry the worker's
-version and features. The five agent features (§5.7) are what the CLI checks
+version and features. The six agent features (§5.7) are what the CLI checks
 before it offers a command; one whose feature is missing exits 7 with
 "update the worker". The CLI sends `x-doklin-client: cli/<version>`.
 
@@ -1818,7 +1908,7 @@ it sends what was typed and prints what it is told.
 | `login <domain> <code>` | trade the code for this machine's token | — |
 | `logout` | forget the token here and revoke it on the domain | — |
 | `whoami` | workspace, agent, permissions | read |
-| `ls [folder] [--deep]` | folders, documents (their versions, *html is behind*, public addresses) and plain files | read |
+| `ls [folder] [--deep]` | folders, boards (with their card counts), documents (their versions, *html is behind*, public addresses) and plain files | read |
 | `info <doc>` | each version's revision, size, who changed it and when; comment threads; public addresses | read |
 | `read <doc> [--md\|--html] [--clean] [-o file]` | the content, and its revision on stderr. `--clean` drops comment markers | read |
 | `search <text> [--in folder] [--limit n]` | documents containing the text, with line numbers and the lines | read |
@@ -1833,6 +1923,15 @@ it sends what was typed and prints what it is told.
 | `rm <doc> [--md\|--html]` | remove a document, or one version | edit |
 | `publish <doc or folder> [--slug s] [--title t] [--desc d]` | make it public; prints the address | publish |
 | `unpublish <doc, folder or address>` | stop publishing | publish |
+| `board info <board>` | its name, fields and their options, how many cards | read |
+| `board show <board> [--by field] [--where c]…` | every card, in its column, with its properties | read |
+| `board card <board> <card>` | one card: its properties and its page | read |
+| `board add <board> <title> [field=value…] [--first] [--from file\|-]` | a new card | edit |
+| `board set <board> <card> [field=value…] [--title t] [--first\|--last\|--before c\|--after c]` | change a card's properties, title or place | edit |
+| `board rm <board> <card>` | remove a card | edit |
+| `board new <path> [--name n]` | a new board, with the app's Status column set | edit |
+| `board field add\|set\|rm <board> …` | add (`--type`, `--options`), rename (`--name`) or undeclare a field | edit |
+| `board option add\|set\|rm <board> <field> <option> …` | add, change (`--name`, `--color`, a place) or remove an option | edit |
 
 - **Output.** Text for a terminal, JSON when stdout is not one (or with
   `--json`). `read` writes the content to stdout and what is known about it
@@ -1846,10 +1945,17 @@ it sends what was typed and prints what it is told.
   the worker is too old for this command · `1` anything else.
 - **`edit`** is a read and a conditional write inside the CLI, so it carries
   the revision itself. `--find` must match exactly once unless `--all`.
+- **A board's commands** send what was typed — `status=Done` is a string the
+  worker reads — and repeat a request the worker answered `202`: a board
+  whose cards are still being read into the copy, or a rename with cards
+  left to rewrite. `board add --from -` is the only way it reads stdin, so a
+  shell that leaves stdin open cannot hang it. A card's page goes through
+  the document commands as `<board>/<card>`.
 - **Help is where the concepts live.** `doklin help documents` explains the
   two versions and why they must be kept in step; `help comments` the
-  markers; `help publishing` what public means; `doklin help agent` is a
-  short brief an agent reads once.
+  markers; `help publishing` what public means; `help boards` a board, its
+  cards and their properties; `doklin help agent` is a short brief an agent
+  reads once.
 - **On a Mac, an argument that is not a command is a path to open in the
   app** — what `doklin <file>` has always meant there. `scripts/install.sh`
   installs this binary where it used to write a shell shim.
@@ -1915,6 +2021,10 @@ requests, 25 billion rows read, 50 million rows written.
 | a search | 1 | one per document being caught up | 0 | 1 + one per document shown |
 | a write (`write`, `mv`, `rm`, a comment, `publish`) | 1 **+ about 2 for every Mac online** | 0, or 2 once there is a search mirror | 2–4 | 1–3, + 2 a Mac |
 | `edit` | a read and a write | | | |
+| `board info`, `board card` | 1 | 0 | 0 | 1–2 |
+| `board show` | 1 (+1 per 32 cards changed since the last show) | one per card read again | 0 | 1 + one per card read again |
+| a board change (`board add`, `set`, `rm`, `new`, `field`, `option`) | like a write | as `board show` when it needs card order | 2–4 | 1–3 + cards read again, + 2 a Mac |
+| renaming an option on N cards | one request per round of up to 20 cards, each like a write | as `board show` | 2–4, + 1 a card | 1–3, + 1 a card |
 
 The row that matters is the write's fan-out, which is §11.3's: a write moves
 the manifest's etag, and every Mac that is running sees it within fifteen
@@ -2135,12 +2245,22 @@ blocked on a real account.
     statement. Rejected for when it comes: Cloudflare's rate-limit binding —
     a new binding in every `wrangler.toml`, counters per location, periods
     of 10 or 60 seconds only, so no daily budget.
-34. **No history, boards, presence, leases or sync controls in the CLI.** A
-    card is a markdown document and reads and writes as one; the version
-    store on the Macs is what undoes an agent's mistake. An agent's write
-    does not read a lease — a lease is an editor's courtesy between people
-    (§8.2), and the three-way merge is the answer when an agent and a person
-    change one document at once.
+34. **No history, presence, leases or sync controls in the CLI.** The
+    version store on the Macs is what undoes an agent's mistake. An agent's
+    write does not read a lease — a lease is an editor's courtesy between
+    people (§8.2), and the three-way merge is the answer when an agent and a
+    person change one document at once. Boards were in this list until
+    2026-11-13 ("a card is a markdown document and reads and writes as
+    one"); see 35.
+35. **A board is a board to an agent, never a folder** (decided 2026-11-13,
+    §8.4, Boards). Its noun is the app's, "board" ("datastore" stays the word
+    in code); a card's page is the document `<board>/<card>`; views stay the
+    people's. Rejected: boards as files (raw frontmatter lets an agent write
+    a value no option declares, or break a `rank`, and leaves card order and
+    columns to every client); a CLI that knows the store format (the rules
+    would live in two places); capping a board read at the forty cards a
+    public page reads (a board of a hundred cards could not be shown at all),
+    for a D1 copy of the properties blocks, refreshed the way search is.
 
 ---
 
@@ -2151,14 +2271,14 @@ walks. The cloud's own checks:
 
 ```sh
 pnpm typecheck:worker                      # the worker against the Workers runtime types
-pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (62 cases)
+pnpm test:worker                           # cloud-worker/test/run.mjs — every route + the renderer (68 cases)
 pnpm bundle:worker                         # the release file, size printed, fails past 3 MB gzipped
 node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 cd src-tauri && cargo test --lib cloud     # the engine against the in-memory worker (99 tests)
 node verify-harness/cloudprompts.test.mjs  # the prompts, the update script and the doklin installer (252 checks)
 node verify-harness/drive-cloud.mjs        # the app's cloud and publishing surfaces over a scripted engine (41 steps)
 (cd cli && cargo build --release)          # the doklin command…
-node verify-harness/drive-cli.mjs          # …driven against the harness worker: every command, every exit code (49 steps)
+node verify-harness/drive-cli.mjs          # …driven against the harness worker: every command, every exit code (54 steps)
 node verify-harness/drive-versions.mjs     # the rail, the timeline, the deleted files, the settings (32 steps)
 node verify-harness/serve-worker.mjs &     # the bundled worker over the seed, on :8787
 node verify-harness/drive-public.mjs       # the public pages in Chromium, JavaScript off for the board (8 steps)

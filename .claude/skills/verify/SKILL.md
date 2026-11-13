@@ -412,7 +412,7 @@ worker:
 
 ```sh
 (cd cli && cargo build --release)          # the app's Rust is not needed; this crate is small
-node verify-harness/drive-cli.mjs          # 49 steps, no browser: starts serve-worker.mjs itself on
+node verify-harness/drive-cli.mjs          # 54 steps, no browser: starts serve-worker.mjs itself on
                                            # a free port (and stops it), puts a recording relay in
                                            # front of it so a step can say what the CLI actually
                                            # asked, and gives every "machine" a scratch HOME and
@@ -434,8 +434,13 @@ node verify-harness/drive-cli.mjs          # 49 steps, no browser: starts serve-
                                            # through the 202 and after a Mac's change, each
                                            # permission refused (4) by name, what the owner takes
                                            # away gone on the next request, -w across two domains,
-                                           # logout revoking the token, and a worker that is
-                                           # behind (7) — a tiny fake of one, inside the script
+                                           # logout revoking the token, boards (show / info / card,
+                                           # add / set / rm with values read by the worker and
+                                           # refused by name, a card's page through read / write /
+                                           # edit / comment with its properties kept, nothing
+                                           # written or moved into a board, an option rename
+                                           # asked again through its 202 rounds), and a worker
+                                           # that is behind (7) — a tiny fake of one, inside the script
 ```
 
 It builds nothing itself and says so in one sentence when the binary is
@@ -453,7 +458,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 62 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 68 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh

@@ -29,6 +29,7 @@
 // and loses nothing else.
 
 import type { Call } from "./agentCall";
+import { splitCard } from "./boardCards";
 import type { Committed } from "./commit";
 import { Index, nameOf, pathProblem, type Entry } from "./documents";
 import type { Env } from "./env";
@@ -37,7 +38,7 @@ import { textOf } from "./htmlText";
 import { blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { ensureSchema } from "./schema";
-import { isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
+import { dirOf, isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
 
@@ -60,8 +61,8 @@ type Held = Record<string, string>;
 type State = { etag: string; held: Held };
 
 /** One document as search sees it: keyed by its markdown file, or by its
- *  html when it has no markdown. */
-type Searchable = { text: Entry; meta: Entry | null; signature: string };
+ *  html when it has no markdown. `board` when it is a card's page. */
+type Searchable = { text: Entry; meta: Entry | null; board: string | null; signature: string };
 
 /** Every document the manifest holds, by the file id its mirror row is keyed on. */
 function searchable(m: Manifest): Map<string, Searchable> {
@@ -70,12 +71,18 @@ function searchable(m: Manifest): Map<string, Searchable> {
   for (const [fid, file] of Object.entries(m.files)) {
     const md = isMarkdownPath(file.path);
     if (!md && !isHtmlPath(file.path)) continue;
+    // Inside a board only its cards are documents.
+    if (index.hidden(file.path)) continue;
     const { stem } = nameOf(file.path);
     // An html file beside its markdown is that document's other version,
     // not a document of its own.
     if (!md && index.doc(stem).md) continue;
     const meta = index.at(`${stem}${META_SUFFIX}`);
-    out.set(fid, { text: { fid, file }, meta, signature: `${file.hash}.${meta?.file.hash ?? ""}` });
+    const board = index.isCard(file.path) ? index.board(dirOf(file.path)) : null;
+    // A card's row holds its page, not its properties — so it is read again
+    // when its folder becomes a board, or stops being one.
+    const signature = `${file.hash}.${meta?.file.hash ?? ""}${board ? ".card" : ""}`;
+    out.set(fid, { text: { fid, file }, meta, board, signature });
   }
   return out;
 }
@@ -164,7 +171,7 @@ async function catchUp(
     const [text, metaText] = await Promise.all([blobText(env, w.text), w.meta ? blobText(env, w.meta) : Promise.resolve(null)]);
     // A blob that is not there yet is a sync still in flight: leave the row
     // stale, and the next catch-up reads it.
-    return text === null ? null : { fid, w, text: folded(w.text.file.path, text, metaText) };
+    return text === null ? null : { fid, w, text: folded(w.text.file.path, w.board ? splitCard(text).page : text, metaText) };
   });
 
   const held: Held = { ...state.held };
@@ -284,10 +291,13 @@ export async function getSearch(c: Call): Promise<Response> {
 
   const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc }) => {
     const path = doc.text.file.path;
-    const text = await blobText(env, doc.text);
+    const raw = await blobText(env, doc.text);
+    // A card's lines are its page's, numbered as `read` shows them.
+    const text = raw !== null && doc.board ? splitCard(raw).page : raw;
     const { matches, total } = text === null ? { matches: [], total: 0 } : matchingLines(path, text, needle);
     return {
       path: nameOf(path).stem,
+      ...(doc.board ? { board: doc.board } : {}),
       version: isMarkdownPath(path) ? "md" : "html",
       matches,
       ...(total > matches.length ? { moreLines: total - matches.length } : {}),
