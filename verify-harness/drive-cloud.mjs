@@ -994,14 +994,36 @@ step(
 );
 await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 
-/* 24 — People: the panel adopts an identity for a domain that has none,
-   lists everyone with the Macs they hold, and mints a code that is on screen
-   once (docs/cloud.md §7.2) */
+/* 24 — People and agents: one view, a tab each, and a door for each in the
+   panel — so that neither has to be found behind the other (docs/cloud.md
+   §7.2). People… lands on the People tab, with the invite door above the list */
 await tid("sync-status").click();
 await poll(async () => (await tid("people-open").count()) === 1);
+const doorLabel = await dialog("Cloud").locator(".cloud-section-label", { hasText: "People and agents" }).count();
+const doors = [(await tid("people-open").textContent()).trim(), (await tid("agents-open").textContent()).trim()];
 await tid("people-open").click();
-await poll(async () => (await dialog("People").count()) === 1);
+await poll(async () => (await dialog("People and agents").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
+const selected = async (tab) => (await tid(`tab-${tab}`).getAttribute("aria-selected")) === "true";
+const above = async (a, b) => (await tid(a).boundingBox()).y < (await tid(b).boundingBox()).y;
+step(
+  "People and agents: the panel has a door for each; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
+  doorLabel === 1 &&
+    doors.join("|") === "People…|Agents…" &&
+    (await tid("tab-people").textContent()).trim() === "People" &&
+    (await tid("tab-agents").textContent()).trim() === "Agents" &&
+    (await selected("people")) &&
+    !(await selected("agents")) &&
+    (await tid("pane-people").isVisible()) &&
+    !(await tid("pane-agents").isVisible()) &&
+    (await tid("people-intro").textContent()).includes("Doklin app") &&
+    (await above("people-intro", "invite-open")) &&
+    (await above("invite-open", "people-list")),
+);
+
+/* 24a — People: the panel adopts an identity for a domain that has none,
+   lists everyone with the Macs they hold, and mints a code that is on screen
+   once */
 const adoptAsked = (await tid("adopt-owner").count()) === 1;
 await tid("adopt-email").fill("ada@example.com");
 await tid("adopt-name").fill("Ada");
@@ -1066,12 +1088,21 @@ step(
     (await tid("person-m-owner").count()) === 1,
 );
 
-/* 24c — Agents, under the people (docs/cloud.md §8.3): the owner adds a bot,
+/* 24c — Agents, on their own tab (docs/cloud.md §8.3): the owner adds a bot,
    ticks what it may do — publishing is off until ticked, reading is not a
-   choice — and is handed two lines, once: the one that installs `doklin` and
-   the one that logs it in */
+   choice — and is handed ONE thing, once: a short prompt that says what
+   Doklin is and carries the command that installs `doklin` and the one that
+   logs it in. One button copies it; a look at the other tab does not lose it */
 const INSTALL_LINE = "curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh";
+await tid("tab-agents").click();
 await poll(async () => (await tid("agent-list").count()) === 1);
+const agentsTab =
+  (await selected("agents")) &&
+  (await tid("pane-agents").isVisible()) &&
+  !(await tid("pane-people").isVisible()) &&
+  (await tid("agents-intro").textContent()).includes("bots") &&
+  (await above("agents-intro", "agent-open")) &&
+  (await above("agent-open", "agent-list"));
 const reviewBot = await tid("agent-a-11111111").textContent();
 await tid("agent-open").click();
 await poll(async () => (await tid("agent-form").count()) === 1);
@@ -1089,24 +1120,27 @@ await tid("agent-scope-comment").uncheck();
 await tid("agent-save").click();
 await poll(async () => (await tid("agent-login").count()) === 1);
 const addCall = await lastCall("cloud_agent_add");
-const lines = [
-  (await tid("agent-install-line").textContent()).trim(),
-  (await tid("agent-login-line").textContent()).trim(),
-].join("\n");
+const prompt = await tid("agent-prompt").textContent();
+const promptLines = prompt.split("\n");
 const loginCard = await tid("agent-login").textContent();
-await tid("copy-agent-lines").click();
-const copiedBoth = await poll(async () => await page.evaluate(() => navigator.clipboard.readText()));
-await tid("copy-agent-line").click();
-const copiedLogin = await poll(async () => {
+const cardButtons = (await tid("agent-login").locator("button").allTextContents()).map((t) => t.trim());
+await tid("copy-agent-prompt").click();
+const copiedPrompt = await poll(async () => {
   const text = await page.evaluate(() => navigator.clipboard.readText());
-  return text.startsWith("doklin login") ? text : null;
+  return text.startsWith("Doklin is") ? text : null;
 });
 const grokRow = await tid("agent-a-new-1").textContent();
 await page.screenshot({ path: SHOTS + "cloud-10b-agents.png" });
+// the code is shown once: a look at the People tab must not cost it
+await tid("tab-people").click();
+const hiddenNotGone = !(await tid("agent-login").isVisible()) && (await tid("agent-login").count()) === 1;
+await tid("tab-agents").click();
+const promptKept = (await tid("agent-prompt").isVisible()) && (await tid("agent-prompt").textContent()) === prompt;
 const LOGIN_1 = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
 step(
-  "Agents: the list names what each may do and where it is logged in; a new one starts without publishing, reading fixed; the two lines — install, then login — are shown once and copy together or the login alone",
-  reviewBot.includes("Review bot") &&
+  "Agents: their own tab, the door above the list; the list names what each may do and where it is logged in; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is — copied by one button, shown once, and kept through a look at the other tab",
+  agentsTab &&
+    reviewBot.includes("Review bot") &&
     reviewBot.includes("read · comment") &&
     !reviewBot.includes("can publish") &&
     reviewBot.includes("Logged in on 1 machine") &&
@@ -1116,15 +1150,21 @@ step(
     saveNeedsName &&
     addCall.args.name === "Grok bot" &&
     JSON.stringify(addCall.args.scopes) === JSON.stringify(["read", "edit"]) &&
-    lines === `${INSTALL_LINE}\n${LOGIN_1}` &&
+    prompt.startsWith("Doklin is a workspace of markdown and HTML documents.") &&
+    promptLines.indexOf(INSTALL_LINE) > 0 &&
+    promptLines.indexOf(LOGIN_1) === promptLines.indexOf(INSTALL_LINE) + 1 &&
+    prompt.includes("notes.example.com is the workspace's address") &&
+    prompt.includes("doklin help agent") &&
     loginCard.includes("Log Grok bot in") &&
     /stops working in\s+(1 h|59 min)\./.test(loginCard) &&
-    copiedBoth === `${INSTALL_LINE}\n${LOGIN_1}` &&
-    copiedLogin === LOGIN_1 &&
+    cardButtons.join("|") === "Copy prompt|Done" &&
+    copiedPrompt === prompt &&
+    hiddenNotGone &&
+    promptKept &&
     grokRow.includes("Not logged in anywhere") &&
     grokRow.includes("a login code is waiting") &&
     (await tid("agent-form").count()) === 0,
-  lines.split("\n")[1],
+  LOGIN_1,
 );
 
 /* 24d — and afterwards: the code is gone from the screen for good, a new one
@@ -1134,10 +1174,7 @@ await tid("agent-login-done").click();
 const lineGone = (await tid("agent-login").count()) === 0;
 await tid("agent-code-a-11111111").click();
 await poll(async () => (await tid("agent-login").count()) === 1);
-const secondLines = [
-  (await tid("agent-install-line").textContent()).trim(),
-  (await tid("agent-login-line").textContent()).trim(),
-].join("\n");
+const secondPrompt = (await tid("agent-prompt").textContent()).split("\n");
 const codeCall = await lastCall("cloud_agent_code");
 await tid("agent-login-done").click();
 
@@ -1160,10 +1197,12 @@ await tid("agent-remove-a-new-1").click();
 await tid("agent-remove-yes-a-new-1").click();
 await poll(async () => (await tid("agent-a-new-1").count()) === 0);
 step(
-  "Agents: Done takes the line off the screen; a new login code is another line for the same agent; ticking Publish says so on its row; logging a machine out leaves the agent, removing the agent takes its row — and the people above are untouched",
+  "Agents: Done takes the prompt off the screen; a new login code is another prompt for the same agent; ticking Publish says so on its row; logging a machine out leaves the agent, removing the agent takes its row — and the People tab is untouched",
   lineGone &&
     codeCall.args.agentId === "a-11111111" &&
-    secondLines === `${INSTALL_LINE}\ndoklin login https://notes.example.com dkla-2B4D6-8FHKM-PRTVX-Z3579` &&
+    secondPrompt.includes(INSTALL_LINE) &&
+    secondPrompt.includes("doklin login https://notes.example.com dkla-2B4D6-8FHKM-PRTVX-Z3579") &&
+    !secondPrompt.join("\n").includes("dkla-7QK2M") &&
     JSON.stringify(editBoxes) === JSON.stringify({ read: true, comment: false, edit: true, publish: false }) &&
     updateCall.args.agentId === "a-new-1" &&
     JSON.stringify([...updateCall.args.scopes].sort()) === JSON.stringify(["edit", "publish", "read"]) &&
@@ -1177,24 +1216,31 @@ step(
     (await tid("person-m-bob").count()) === 1,
 );
 
-/* 24e — a worker that predates agents: the section says so in a line, and
-   the people above it are still there to manage */
+/* 24e — a worker that predates agents, reached by the panel's Agents door:
+   the tab says so in a line under what an agent is, and the People tab is
+   still there to manage */
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const TOO_OLD = "notes.example.com runs a worker too old for agents \u2014 update it from the Cloud panel";
 await page.evaluate((error) => {
   window.__cloud.agents.error = error;
 }, TOO_OLD);
-await tid("people-open").click();
+await tid("agents-open").click();
 await poll(async () => (await tid("agents-unavailable").count()) === 1);
 await poll(async () => (await tid("agents-unavailable").textContent()).includes("too old for agents"));
+const landedOnAgents = (await selected("agents")) && (await tid("agents-unavailable").isVisible()) && !(await tid("pane-people").isVisible());
+const tooOld = (await tid("agents-unavailable").textContent()).trim();
+const stillSaysWhat = await tid("agents-intro").isVisible();
+await tid("tab-people").click();
 step(
-  "Agents (an older worker): one line saying the worker is too old, no list and no door — and the people are still listed",
-  (await tid("agents-unavailable").textContent()).trim() === TOO_OLD &&
+  "Agents (an older worker): Agents… opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
+  landedOnAgents &&
+    tooOld === TOO_OLD &&
+    stillSaysWhat &&
     (await tid("agent-list").count()) === 0 &&
     (await tid("agent-open").count()) === 0 &&
-    (await tid("person-m-bob").count()) === 1 &&
-    (await tid("invite-open").count()) === 1,
+    (await tid("person-m-bob").isVisible()) &&
+    (await tid("invite-open").isVisible()),
 );
 await page.evaluate(() => {
   window.__cloud.agents.error = null;
@@ -1209,14 +1255,17 @@ await tid("people-open").click();
 await poll(async () => (await tid("people-member").count()) === 1);
 const memberCard = await tid("people-member").textContent();
 step(
-  "People (a member): no list, no invite door — their own credential and how to get another code",
+  "People and agents (a member): no tabs, no list, no door of either kind — both are the owner's, and the card says so beside their own credential and how to get another code",
   memberCard.includes("invite") &&
+    memberCard.includes("people and agents alike") &&
+    (await tid("tab-people").count()) === 0 &&
+    (await tid("tab-agents").count()) === 0 &&
     (await tid("invite-open").count()) === 0 &&
     (await tid("people-list").count()) === 0 &&
     (await tid("agent-list").count()) === 0 &&
     (await tid("agent-open").count()) === 0 &&
     (await tid("agents-unavailable").count()) === 0 &&
-    (await dialog("People").locator(".modal-error").count()) === 0,
+    (await dialog("People and agents").locator(".modal-error").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
 

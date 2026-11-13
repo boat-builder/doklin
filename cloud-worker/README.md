@@ -122,7 +122,7 @@ A **code** is one-time and short-lived: the owner's app mints
 a day out (the app asks for an hour), and `doklin login` trades it —
 deleted in the statement that finds it — for a **token**, `dka_` + 64 hex,
 one per machine and stored as its sha256. `host` is what that machine calls
-itself: a label for the People view, never authority. `last_used_at` moves
+itself: a label for the app's Agents tab, never authority. `last_used_at` moves
 at most once an hour. Removing an agent cascades to its codes and tokens.
 
 **The search mirror** (`src/search.ts`) is derived and lazy. `search_text`

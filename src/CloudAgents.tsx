@@ -1,17 +1,22 @@
-// The People view's Agents section — docs/cloud.md §8.3.
+// The Agents tab of the Cloud panel's "People and agents" view —
+// docs/cloud.md §8.3.
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
-// copy of the folder. The owner adds one here, ticks what it may do, and
-// hands over two lines — the one that installs the command, and
-// `doklin login <address> <code>` — which are the whole of setting it up.
-// Everything it can reach is decided by the boxes below, on the domain;
-// nothing on the bot's machine can widen them.
+// copy of the folder. The owner adds one here, ticks what it may do, and is
+// handed one short prompt to give it (cloudPrompts.ts): what Doklin is, the
+// command that installs `doklin`, and `doklin login <address> <code>`. That
+// is the whole of setting it up, and there is one button for it. Everything
+// the agent can reach is decided by the boxes here, on the domain; nothing
+// on the bot's machine can widen them.
+//
+// The order is the People tab's: the door, its form and the prompt it ends
+// in at the top, the list under them.
 //
 // Owner only: the routes behind this are the owner's, like the people routes
 // beside them, and CloudPeople renders this only on the owner's branch. As
 // everywhere in the panel, no `fetch` here — the engine makes every call.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cloudAgentAdd,
   cloudAgentCode,
@@ -19,13 +24,14 @@ import {
   cloudAgentRevokeMachine,
   cloudAgentUpdate,
   cloudAgents,
+  revealSoon,
   timeAgo,
   timeUntil,
   type AgentScope,
   type CloudAgent,
   type CloudAgentLogin,
 } from "./cloud";
-import { CLI_INSTALL_LINE } from "./cloudPrompts";
+import { buildAgentLoginPrompt } from "./cloudPrompts";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -45,6 +51,15 @@ const DEFAULT_SCOPES: AgentScope[] = ["read", "comment", "edit"];
 
 type Draft = { id: string | null; name: string; scopes: AgentScope[] };
 
+/** What an agent is — the first thing on the tab, whatever else it shows. */
+const INTRO = (
+  <p className="cloud-hint" data-testid="agents-intro">
+    Agents are bots. Each works with this workspace from another computer through the{" "}
+    <code>doklin</code> command line — reading, writing, commenting and publishing within what
+    you allow — with no copy of the folder.
+  </p>
+);
+
 export default function CloudAgents({
   root,
   domain,
@@ -60,11 +75,13 @@ export default function CloudAgents({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
-  /** A login line just minted — on screen once, and never again. */
+  /** A login code just minted — on screen once, and never again. */
   const [login, setLogin] = useState<{ name: string; login: CloudAgentLogin } | null>(null);
   /** Which row is asking "are you sure": `agent:<id>` or `machine:<id>`. */
   const [confirm, setConfirm] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  /** The door, its form and the prompt it ends in. */
+  const top = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -110,6 +127,7 @@ export default function CloudAgents({
         const added = await cloudAgentAdd(root, name, draft.scopes);
         // The one moment the code exists in the clear.
         setLogin({ name: added.agent.name, login: added.login });
+        revealSoon(top);
       } else {
         await cloudAgentUpdate(root, draft.id, name, draft.scopes);
       }
@@ -120,7 +138,10 @@ export default function CloudAgents({
   const newCode = useCallback(
     (agent: CloudAgent) => {
       setDraft(null);
-      void act(async () => setLogin({ name: agent.name, login: await cloudAgentCode(root, agent.id) }));
+      void act(async () => {
+        setLogin({ name: agent.name, login: await cloudAgentCode(root, agent.id) });
+        revealSoon(top);
+      });
     },
     [act, root],
   );
@@ -132,11 +153,11 @@ export default function CloudAgents({
   };
 
   if (!agents) {
-    // A worker that predates agents says so here; the people above are
-    // unaffected, so this is a line under them rather than a failed view.
+    // A worker that predates agents says so here, under what an agent is; the
+    // People tab is unaffected.
     return (
       <>
-        <div className="cloud-section-label">Agents</div>
+        {INTRO}
         <p className="cloud-hint" data-testid="agents-unavailable">
           {error ?? `Asking ${domain} about its agents…`}
         </p>
@@ -144,16 +165,121 @@ export default function CloudAgents({
     );
   }
 
+  const prompt = login
+    ? buildAgentLoginPrompt({ domain, line: login.login.line, expiresAt: login.login.expiresAt })
+    : "";
+
   return (
     <>
+      {INTRO}
+
+      <div className="cloud-stack" ref={top}>
+        {login && (
+          <div className="cloud-card cloud-card--ok" data-testid="agent-login">
+            <div className="cloud-card-title">Log {login.name} in</div>
+            <p className="cloud-hint">
+              Give this to the agent — paste it into its chat and it sets itself up — or run the two
+              commands in it on the machine the agent works from.
+            </p>
+            <pre className="cloud-prompt cloud-prompt--whole" data-testid="agent-prompt">
+              {prompt}
+            </pre>
+            <p className="cloud-hint">
+              The code in it works once, on one machine, and stops working in{" "}
+              {timeUntil(login.login.expiresAt, now)}. This is the only time it is shown: {domain} kept
+              nothing but its fingerprint. A second machine needs a code of its own —{" "}
+              <em>New login code…</em> on the agent’s row.
+            </p>
+            <div className="modal-buttons">
+              <button
+                className="modal-btn is-primary"
+                data-testid="copy-agent-prompt"
+                onClick={() => copy("agent-prompt", prompt)}
+              >
+                {copied === "agent-prompt" ? "Copied ✓" : "Copy prompt"}
+              </button>
+              <button className="modal-btn" data-testid="agent-login-done" onClick={() => setLogin(null)}>
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
+        {draft ? (
+          <div className="cloud-card" data-testid="agent-form">
+            <div className="cloud-card-title">{draft.id === null ? `Add an agent to ${domain}` : "Edit this agent"}</div>
+            <div className="modal-field">
+              <div className="modal-field-label">Its name</div>
+              <input
+                className="modal-field-input"
+                data-testid="agent-name"
+                placeholder="Research bot"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              />
+            </div>
+            <div className="modal-field">
+              <div className="modal-field-label">It may</div>
+              <div className="cloud-scopes">
+                {SCOPES.map((s) => (
+                  <label className="cloud-scope" key={s.scope}>
+                    <input
+                      type="checkbox"
+                      data-testid={`agent-scope-${s.scope}`}
+                      checked={draft.scopes.includes(s.scope)}
+                      disabled={s.scope === "read"}
+                      onChange={() => toggle(s.scope)}
+                    />
+                    <span>
+                      <strong>{s.label}</strong> — {s.what}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <p className="cloud-hint">
+              The name is what its comments and changes are signed with. An agent cannot see or change
+              who is on this workspace, its history or its settings, whatever is ticked here — and a
+              change to these boxes reaches it on its next command.
+            </p>
+            <div className="modal-buttons">
+              <button
+                className="modal-btn is-primary"
+                data-testid="agent-save"
+                disabled={busy || !draft.name.trim()}
+                onClick={save}
+              >
+                {draft.id === null ? (busy ? "Adding…" : "Add, and make a login code") : busy ? "Saving…" : "Save"}
+              </button>
+              <button className="modal-btn" disabled={busy} onClick={() => setDraft(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="cloud-actions">
+            <button
+              className="modal-btn is-primary"
+              data-testid="agent-open"
+              onClick={() => {
+                setLogin(null);
+                setDraft({ id: null, name: "", scopes: DEFAULT_SCOPES });
+                revealSoon(top);
+              }}
+            >
+              Add an agent…
+            </button>
+            <span className="cloud-hint">A bot gets an identity of its own, which you can take back.</span>
+          </div>
+        )}
+      </div>
+
       <div className="cloud-section-label">
         {agents.length} {agents.length === 1 ? "agent" : "agents"}
       </div>
       {agents.length === 0 ? (
         <p className="cloud-hint" data-testid="agents-empty">
-          An agent is a bot that works with this workspace from another computer, through the{" "}
-          <code>doklin</code> command line: it reads, writes, comments and publishes within what you
-          allow, without a copy of the folder.
+          None yet.
         </p>
       ) : (
         <ul className="cloud-people" data-testid="agent-list">
@@ -224,6 +350,7 @@ export default function CloudAgents({
                   onClick={() => {
                     setLogin(null);
                     setDraft({ id: a.id, name: a.name, scopes: a.scopes });
+                    revealSoon(top);
                   }}
                 >
                   Edit…
@@ -258,114 +385,6 @@ export default function CloudAgents({
             </li>
           ))}
         </ul>
-      )}
-
-      {login && (
-        <div className="cloud-card cloud-card--ok" data-testid="agent-login">
-          <div className="cloud-card-title">Log {login.name} in</div>
-          {/* A well each: both are long enough to wrap, and two wrapped
-              commands in one well cannot be told apart. */}
-          <pre className="cloud-code cloud-code--line" data-testid="agent-install-line">
-            {CLI_INSTALL_LINE}
-          </pre>
-          <pre className="cloud-code cloud-code--line" data-testid="agent-login-line">
-            {login.login.line}
-          </pre>
-          <p className="cloud-hint">
-            Two lines, for the machine the agent runs on — or paste them into the agent’s chat,
-            and it will run them itself. The first installs the <code>doklin</code> command, on
-            Linux or a Mac; leave it out where <code>doklin</code> already is. The second logs in:
-            it works once, on one machine, and stops working in{" "}
-            {timeUntil(login.login.expiresAt, now)}. This is the only time it is shown: {domain}{" "}
-            kept nothing but its fingerprint. A second machine needs a code of its own.
-          </p>
-          <div className="modal-buttons">
-            <button
-              className="modal-btn is-primary"
-              data-testid="copy-agent-lines"
-              onClick={() => copy("agent-lines", `${CLI_INSTALL_LINE}\n${login.login.line}`)}
-            >
-              {copied === "agent-lines" ? "Copied ✓" : "Copy both lines"}
-            </button>
-            <button
-              className="modal-btn"
-              data-testid="copy-agent-line"
-              onClick={() => copy("agent-line", login.login.line)}
-            >
-              {copied === "agent-line" ? "Copied ✓" : "Copy the login line"}
-            </button>
-            <button className="modal-btn" data-testid="agent-login-done" onClick={() => setLogin(null)}>
-              Done
-            </button>
-          </div>
-        </div>
-      )}
-
-      {draft ? (
-        <div className="cloud-card" data-testid="agent-form">
-          <div className="cloud-card-title">{draft.id === null ? `Add an agent to ${domain}` : "Edit this agent"}</div>
-          <div className="modal-field">
-            <div className="modal-field-label">Its name</div>
-            <input
-              className="modal-field-input"
-              data-testid="agent-name"
-              placeholder="Research bot"
-              value={draft.name}
-              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            />
-          </div>
-          <div className="modal-field">
-            <div className="modal-field-label">It may</div>
-            <div className="cloud-scopes">
-              {SCOPES.map((s) => (
-                <label className="cloud-scope" key={s.scope}>
-                  <input
-                    type="checkbox"
-                    data-testid={`agent-scope-${s.scope}`}
-                    checked={draft.scopes.includes(s.scope)}
-                    disabled={s.scope === "read"}
-                    onChange={() => toggle(s.scope)}
-                  />
-                  <span>
-                    <strong>{s.label}</strong> — {s.what}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <p className="cloud-hint">
-            The name is what its comments and changes are signed with. An agent cannot see or change
-            who is on this workspace, its history or its settings, whatever is ticked here — and a
-            change to these boxes reaches it on its next command.
-          </p>
-          <div className="modal-buttons">
-            <button
-              className="modal-btn is-primary"
-              data-testid="agent-save"
-              disabled={busy || !draft.name.trim()}
-              onClick={save}
-            >
-              {draft.id === null ? (busy ? "Adding…" : "Add, and make a login code") : busy ? "Saving…" : "Save"}
-            </button>
-            <button className="modal-btn" disabled={busy} onClick={() => setDraft(null)}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="cloud-actions">
-          <button
-            className="modal-btn"
-            data-testid="agent-open"
-            onClick={() => {
-              setLogin(null);
-              setDraft({ id: null, name: "", scopes: DEFAULT_SCOPES });
-            }}
-          >
-            Add an agent…
-          </button>
-          <span className="cloud-hint">A bot gets an identity of its own, which you can take back.</span>
-        </div>
       )}
       {error && <div className="modal-error">{error}</div>}
     </>
