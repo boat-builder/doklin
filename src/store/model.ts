@@ -26,10 +26,12 @@ import {
   defaultStoreDef,
   fieldOf,
   groupableFields,
+  newFieldId,
   newView,
   parseStoreDef,
   RANK_KEY,
   serializeStoreDef,
+  slugId,
   storeFileOf,
   STORE_FILE,
   type FieldType,
@@ -480,7 +482,7 @@ export class StoreModel {
     const def = this.state.def;
     const clean = name.trim();
     if (!def || !clean) return null;
-    const id = slugId(clean, new Set(def.fields.map((f) => f.id)));
+    const id = newFieldId(def, clean);
     await this.writeDef({ ...def, fields: [...def.fields, { id, name: clean, type }] });
     return id;
   }
@@ -576,23 +578,6 @@ export class StoreModel {
     if (!def) return;
     await this.writeDef({ ...def, views: def.views.filter((v) => v.id !== id) });
   }
-}
-
-/**
- * An id for a name: lowercase, words joined by underscores, unique among
- * `taken`. Field ids become frontmatter keys, so the alphabet is deliberately
- * narrower than the dialect accepts — a key nobody has to quote.
- */
-function slugId(name: string, taken: Set<string>): string {
-  const base =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .slice(0, 40) || "field";
-  let id = base;
-  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
-  return id;
 }
 
 /* ---------- registry + folder watch ---------- */

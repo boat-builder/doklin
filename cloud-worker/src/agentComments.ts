@@ -15,6 +15,7 @@
 
 import { notBound, refuse, type Call } from "./agentCall";
 import { contentTypeOf, documentAt, versionFlag } from "./agentDocs";
+import { headLines, splitCard } from "./boardCards";
 import { Refusal, commit, newFileId, type Tx } from "./commit";
 import { Index, askedVersion, type Doc, type Version } from "./documents";
 import { json, readJsonObject } from "./http";
@@ -80,9 +81,11 @@ function blocksOf(md: string): { index: number; end: number; anchor: string; spa
 /**
  * Every thread on a document, both versions. Pure: the texts in, the threads
  * out. `md` and `html` are null when the document has no such version — a
- * thread recorded for a version that is gone reads as orphaned.
+ * thread recorded for a version that is gone reads as orphaned. `skip` is the
+ * lines above what the reader is shown — a card's properties — so a line is
+ * numbered as `read` shows it.
  */
-export function threadsOf(md: string | null, html: string | null, meta: EntityMeta): Thread[] {
+export function threadsOf(md: string | null, html: string | null, meta: EntityMeta, skip = 0): Thread[] {
   const out: Thread[] = [];
 
   if (md !== null) {
@@ -103,7 +106,7 @@ export function threadsOf(md: string | null, html: string | null, meta: EntityMe
         id,
         version: "md",
         on: block.anchor,
-        ...(raw.length === bare.length ? { line: lineAt(md, raw[i].index) } : {}),
+        ...(raw.length === bare.length ? { line: lineAt(md, raw[i].index) - skip } : {}),
         comments: entries(bodies.get(id) ?? []),
       });
     });
@@ -144,6 +147,12 @@ export async function getComments({ env, url }: Call): Promise<Response> {
   };
   const meta = doc.meta ? parseEntityMeta((await text(doc.meta)) ?? "") : emptyMeta();
   const [md, html] = await Promise.all([text(doc.md), meta.hthreads.length > 0 ? text(doc.html) : Promise.resolve(null)]);
+  if (doc.board) {
+    // A card's page: its lines counted below its properties, and no html
+    // threads, since a card has no html version to put them on.
+    const skip = md === null ? 0 : headLines(splitCard(md).head);
+    return json({ path: doc.stem, board: doc.board, threads: threadsOf(md, null, { ...meta, hthreads: [] }, skip) });
+  }
   return json({ path: doc.stem, threads: threadsOf(md, html, meta) });
 }
 
@@ -336,11 +345,14 @@ async function start(
     if (!doc.md || open.md === null) return new Refusal(404, `${doc.stem} has no markdown version — comment on its html with --html`);
     const problem = anchorProblem(on);
     if (problem) return new Refusal(400, problem);
-    const at = placeForMarker(open.md, on, doc.stem);
+    // A card's words are looked for on its page, and its lines numbered there.
+    const head = doc.board ? splitCard(open.md).head : "";
+    const page = open.md.slice(head.length);
+    const at = placeForMarker(page, on, doc.stem);
     if (at instanceof Refusal) return at;
-    const md = `${open.md.slice(0, at)}{==${on}==}{>>#${id}<<}${open.md.slice(at + on.length)}`;
+    const md = `${head}${page.slice(0, at)}{==${on}==}{>>#${id}<<}${page.slice(at + on.length)}`;
     open.meta.mthreads = [...open.meta.mthreads, { id, comments: [entry] }];
-    return { md, answer: { path: doc.stem, thread: id, version, on, line: lineAt(open.md, at) } };
+    return { md, answer: { path: doc.stem, thread: id, version, on, line: lineAt(page, at) } };
   }
 
   if (!doc.html) return new Refusal(404, `${doc.stem} has no html version`);

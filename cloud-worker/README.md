@@ -69,7 +69,7 @@ worker wrote may still hold one, and nothing reads it.)
 
 A D1 database beside the bucket, bound as `DB`, for the state a blob store
 cannot hold — people, presence, file leases and agents — and the text a
-search scans ([docs/cloud.md](../docs/cloud.md) §5.1, §8):
+search scans and the properties a board shows ([docs/cloud.md](../docs/cloud.md) §5.1, §8):
 
 ```sql
 meta     (key, schema_version)                   one row — the runner's anchor
@@ -83,6 +83,7 @@ agent_codes  (hash, id, agent_id, created_at, expires_at)             a login co
 agent_tokens (hash, id, agent_id, host, created_at)                   one machine an agent is logged in on
 search_text  (fid, folded)                                            a document's text, lower-cased
 search_state (key, etag, held)                                        one row: how far that mirror has caught up
+board_cards  (fid, hash, head)                                        a card's properties block, as last read
 ```
 
 An *identity* is not a *credential*, and the three tables are that sentence.
@@ -137,6 +138,14 @@ change made through the document API catches up straight away; a Mac's
 manifest PUT does not, so a save never costs a database write. Until
 somebody searches there is no mirror at all.
 
+**The card copy** (`src/boardCards.ts`) is derived and lazy the same way.
+`board_cards` holds a board card's frontmatter block, keyed by its file id
+beside the content hash it was read from. A board read asks for its cards'
+rows in one batch and reads again only those whose hash is not the
+manifest's — 32 a request, `202` past that. Nothing writes a row but a read,
+so a change made anywhere is simply stale until the next one; a card removed
+on a Mac leaves its row until a wipe.
+
 The worker owns its schema (`src/schema.ts`). An update ships one bundled
 file and no migrations directory, so `wrangler d1 migrations apply` is not
 available to a domain being updated: instead an ordered list of steps runs
@@ -149,7 +158,7 @@ The binding is optional and the whole sync API is indifferent to it: a
 domain deployed before it existed has no `DB`, and one whose database is
 broken or deleted keeps serving every sync route — `/api/meta` reports
 `"d1": null`. What it cannot do is resolve a member's or an agent's token
-(they get a `401`), answer an identity route or search (a `503`). The owner is unaffected either
+(they get a `401`), answer an identity route, search or a board (a `503`). The owner is unaffected either
 way, because `OWNER_TOKEN` is matched against the worker's env secret with
 no database read at all; losing D1 costs a workspace its people, never its
 owner. The owner's wipe empties the tables and re-runs the schema, so a
@@ -307,14 +316,16 @@ DELETE /api/agent/login       this token revokes itself (204)
 GET    /api/agent/me          {agent: {id, name}, scopes, workspace, version, features}
 
 read     GET    /api/agent/tree?dir=&deep=1
-                {dir, folders: [path], documents: [{path, md?, html?, htmlBehind?, public?}],
-                files: [{path, rev, size, changed, by, public?}]} — one folder, or with deep
-                everything beneath it. A version is {file, rev, size, changed, by}; `public` is
-                every address the thing answers at. 404 for a folder that holds nothing
+                {dir, folders: [path], boards: [{path, cards}], documents: [{path, md?, html?,
+                htmlBehind?, public?}], files: [{path, rev, size, changed, by, public?}]} — one
+                folder, or with deep everything beneath it but a board's insides. A version is
+                {file, rev, size, changed, by}; `public` is every address the thing answers at.
+                404 for a folder that holds nothing; 400 for a board, or a folder inside one
          GET    /api/agent/doc?path=&v=md|html[&clean=1][&info=1]
                 the bytes, with x-doklin-kind (document | file), x-doklin-path, x-doklin-file,
                 x-doklin-rev, and for a document x-doklin-version and, when it is so,
-                x-doklin-html-behind: 1. Header values are percent-encoded. clean=1 strips
+                x-doklin-html-behind: 1 — and for a card's page x-doklin-board, and the page
+                without its properties block. Header values are percent-encoded. clean=1 strips
                 comment markers from markdown. info=1 answers JSON instead: the tree's row,
                 plus {kind, comments: <threads>} and byName beside each by
          GET    /api/agent/comments?path=
@@ -327,6 +338,17 @@ read     GET    /api/agent/tree?dir=&deep=1
          GET    /api/agent/pages
                 {pages: [{slug, url, kind: document | file | folder, path, title?, desc?, home?,
                 by?, byName?, at?, missing?}]}
+         GET    /api/agent/board?path=
+                {board, name, cards, by, fields: [{id, name, type, options?: [{name, color?}]}],
+                conflicts?} — `by` is the field its first kanban view groups by
+         GET    /api/agent/cards?path=&by=&where=…
+                {board, name, cards, shown?, by, fields, columns: [{name, empty?, color?,
+                cards: [{title, props, rev, changed, by, byName?, conflict?}]}], conflicts?},
+                or 202 {indexing: true, pending} while the card copy catches up — ask again.
+                where= is field=value · field!=value · field= (empty) · field!= (not), ANDed
+         GET    /api/agent/card?path=&card=
+                {board, title, path, rev, changed, by, byName?, size, props, other?, comments,
+                public?, conflict?, page}
 
 edit     PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      the new bytes
                 if-rev: <n> replaces revision n · if-rev: * creates, and refuses what exists ·
@@ -337,8 +359,25 @@ edit     PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      the new bytes
                 the document — every version and its comments — or with v one version, never
                 the last. → {kind, path, versions, stillPublic, threadsRemoved?}
          POST   /api/agent/move        {from, to, dryRun?}
-                a document, a plain file or a folder; a destination that is a folder, or ends
-                in /, means into it. → {kind, from, to, files}
+                a document, a plain file, a folder or a board; a destination that is a folder,
+                or ends in /, means into it. → {kind, from, to, files, name?} — `name` when a
+                board's definition took its new folder's name. Nothing moves into a board
+         POST   /api/agent/board       {path, name?, dryRun?}                    → 201 {board, name, fields, created}
+         POST   /api/agent/card        {path, title, set?, first?, page?, dryRun?} → 201 {board, title, path, rev, props, created}
+         PATCH  /api/agent/card        {path, card, set?, title?, <place>, dryRun?}
+                → {board, title, path, rev, props, renamed?, placed?}, changed: false when it
+                already said that
+         DELETE /api/agent/card?path=&card=[&dry=1]        → {board, title, path, stillPublic}
+         POST   /api/agent/field       {path, name, type, options?, dryRun?}     → 201 {board, field, created}
+         PATCH  /api/agent/field       {path, field, name, dryRun?}              → {board, field, renamed}
+         DELETE /api/agent/field?path=&field=[&dry=1]      → {board, field}
+         POST   /api/agent/option      {path, field, name, color?, <place>, dryRun?} → 201 {board, field, option, options, created}
+         PATCH  /api/agent/option      {path, field, option, name?, color?, <place>, dryRun?}
+                → {board, field, option, options, renamed?, cards?, pending?} — 202 while a
+                rename has cards left to rewrite: the same request again carries on
+         DELETE /api/agent/option?path=&field=&option=[&dry=1] → {board, field, option, options}
+                set is a list of assignments as typed: status=Done · tags=a,b · tags+=a ·
+                tags-=a · due= (clears). <place> is first: true · last: true · before · after
 
 comment  POST   /api/agent/comments    {path, on, body, v?, dryRun?}    start a thread → 201
                                        {path, thread, body, dryRun?}    answer one → 200
@@ -363,6 +402,14 @@ it is refused rather than guessed. Anything that is not markdown or html is
 a plain file, named in full, through the same routes
 (`src/documents.ts`, `locate`).
 
+A **board** is a folder holding a `store.jsonl`, and the API never shows it
+as one. It is a row of `tree` and a name for the board routes
+(`src/agentBoards.ts`), which read and write with the app's own store
+modules. A card's page is the document `<board>/<card>`: a read leaves its
+properties block out, a write splices the block back as it is on disk at
+that moment, and a page that begins with a block of its own is refused.
+Nothing else inside a board's folder can be named.
+
 Refusals are a sentence in `error` that says what to do next. Where a
 program has to tell one from another there is a `code`:
 
@@ -374,6 +421,9 @@ program has to tell one from another there is a `code`:
 | `last_version` | 409 | removing one version would remove the document |
 | `anchor` | 404 · 409 | the words a comment is on are not there (404), or occur more than once or only where a comment cannot sit (409) — `occurrences` (markdown) or `candidates` (html) lists where |
 | `slug_taken` | 409 | another page has that address |
+| `board` | 400 | the path is a board, or inside one: a board is worked on with the board routes, and holds cards and nothing else |
+| `no_card` · `no_field` · `no_option` | 404 | the board has no such card, field or option — `fields` or `options` lists what it has |
+| `taken` | 409 | a card's title, a field's name or an option's name is already the board's |
 
 A markdown write that carries a comment marker no thread has is refused
 (`400`, with `unknownMarkers`); one that drops a marker succeeds and names the

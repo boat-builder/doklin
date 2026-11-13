@@ -193,6 +193,24 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // A copy of every board card's properties block (docs/cloud.md §8.4,
+    // Boards), so showing a board is one query rather than a blob read per
+    // card. Keyed by file id, with the content hash the block was read from:
+    // a row whose hash is not the manifest's is stale, and read again. A
+    // card removed on a Mac leaves its row behind until a wipe — a few
+    // hundred bytes, never a wrong answer, since a board only asks for the
+    // cards its manifest holds.
+    to: 7,
+    tables: ["board_cards"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS board_cards (
+         fid  TEXT PRIMARY KEY,                 -- the card's markdown file
+         hash TEXT NOT NULL,                    -- the content hash its block was read from
+         head TEXT NOT NULL                     -- the frontmatter block, fences included; '' for none
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */

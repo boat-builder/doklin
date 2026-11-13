@@ -694,6 +694,20 @@ like any other —
   page that embeds the board is drawn from the new state. There is no
   snapshot to refresh and no fingerprint to compare.
 
+## Agents
+
+The `doklin` command line works with a board as a board — never as the
+folder it is on disk ([cloud.md](cloud.md) §8.4, *Boards*, and §8.6).
+`doklin board show` lists the cards in the columns the board's first kanban
+view makes; `board add`, `set` and `rm` make, change and remove cards, with
+properties typed as `status=Done` and read by the worker against each field's
+type; `board field …` and `board option …` change the definition. The
+worker does all of it with the modules above (`storeFile.ts`,
+`frontmatter.ts`, `rank.ts`, `board.ts`), so what it writes is what the app
+would. A card's page is a document named `<board>/<card>`, read and written
+without its properties block, as the editor shows it. Views stay the
+people's: an agent gets no filter, sort or hidden columns of its own.
+
 Worth saying plainly: publishing a note that embeds a store **publishes
 what that view says**, whether or not the store's folder is published —
 and a table view says more per card than a board does, since it shows
@@ -746,7 +760,9 @@ it.
 - **Two boards of one store in one window** → one model instance; the
   drag lands in both.
 - **Search** → cards are notes: workspace search already finds their
-  bodies (and their frontmatter lines, which is fine). A card opened from a
+  bodies (and their frontmatter lines, which is fine). An agent's search
+  finds a card by its page and comments only, and says which board it is
+  on. A card opened from a
   search hit or a link is a tab like any note; the sidebar marks its board
   row.
 - **Html rendition / PDF** → the fence shows as its config text. Out of

@@ -24,17 +24,36 @@ const SHORT: &[(&str, &str)] = &[("w", "workspace"), ("m", "message"), ("o", "ou
 #[derive(Debug, Default)]
 pub struct Args {
     pub positionals: Vec<String>,
-    values: HashMap<String, String>,
+    /// Every value a flag was given, in order: `--where` may be said twice.
+    values: HashMap<String, Vec<String>>,
     switches: Vec<String>,
 }
 
 impl Args {
+    /// A flag's value — the last one, when it was given more than once.
     pub fn value(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values.get(name).and_then(|v| v.last()).map(String::as_str)
+    }
+
+    /// Every value a flag was given.
+    pub fn values(&self, name: &str) -> Vec<&str> {
+        self.values.get(name).map(|v| v.iter().map(String::as_str).collect()).unwrap_or_default()
     }
 
     pub fn has(&self, name: &str) -> bool {
         self.switches.iter().any(|s| s == name)
+    }
+
+    /// Refuse any flag of this command's that `allowed` leaves out — for a
+    /// command whose verbs take different flags (`doklin board`).
+    pub fn only(&self, allowed: &[&str], what: &str) -> Result<(), Failure> {
+        let given = self.values.keys().map(String::as_str).chain(self.switches.iter().map(String::as_str));
+        for name in given {
+            if !GLOBAL_VALUES.contains(&name) && !GLOBAL_SWITCHES.contains(&name) && !allowed.contains(&name) {
+                return Err(Failure::usage(format!("{} takes no --{} option", what, name)));
+            }
+        }
+        Ok(())
     }
 
     /// The positional at `i`, or a usage failure that names what is missing.
@@ -96,7 +115,7 @@ pub fn parse(raw: &[String], accepts: &Accepts) -> Result<Args, Failure> {
                     v
                 }
             };
-            args.values.insert(name, value);
+            args.values.entry(name).or_default().push(value);
         } else if is_switch {
             if inline.is_some() {
                 return Err(Failure::usage(format!("--{} takes no value", name)));
