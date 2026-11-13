@@ -2,7 +2,8 @@
 // serving one workspace's cloud at one domain (docs/cloud.md §5).
 //
 // Two surfaces:
-//   /api/*      the engine's — bearer auth, JSON; see api.ts for the routes
+//   /api/*      the engine's — bearer auth, JSON; see api.ts for the routes —
+//               and, under /api/agent, an agent's (agentApi.ts)
 //   everything  the visitor's — no auth, GET/HEAD only; see public.ts
 //   else
 //
@@ -20,7 +21,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/api" || path.startsWith("/api/")) return handleApi(request, env, url);
+    if (path === "/api" || path.startsWith("/api/")) return handleApi(request, env, url, ctx);
 
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed", { status: 405 });

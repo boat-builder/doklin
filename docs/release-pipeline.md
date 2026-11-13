@@ -21,31 +21,39 @@ the Settings UI, the app-side plugin wiring — is
 flowchart TD
   PR[Pull request] -->|ci.yml: eslint + tsc + worker tests| M[Merge to main]
   M --> B[job: bump<br/>ubuntu]
-  B -->|stamp version in 4 files<br/>commit + tag vX.Y.Z<br/>push| T[(tag vX.Y.Z)]
+  B -->|stamp version in 6 files<br/>commit + tag vX.Y.Z<br/>push| T[(tag vX.Y.Z)]
+  B --> K[job: build-cli<br/>ubuntu x64 + ubuntu arm64<br/>static doklin binaries]
   B --> R[job: build-release<br/>macos-15]
+  K --> R
   R --> G1[guard: signing secrets present]
   G1 --> TB[pnpm tauri build --target aarch64-apple-darwin<br/>codesign + notarize + staple the .app]
   TB --> V[verify: codesign / stapler / lipo]
   V --> D[notarize + staple the .dmg<br/>version'd name + stable alias + SHA256SUMS]
   V --> U[updater artifacts: .app.tar.gz + latest.json]
   V --> W[bundle the cloud worker<br/>doklin-cloud-worker.js]
+  V --> I[the doklin command: macOS binary,<br/>the two from build-cli,<br/>install-doklin.sh, checksums]
   D --> P[GitHub Release, make_latest]
   U --> P
   W --> P
+  I --> P
   P -->|releases/latest/download/latest.json| A[Installed apps poll,<br/>one-click self-update]
   P -->|releases/latest/download/*.dmg| L[Stable download link]
   P -->|releases/latest/download/doklin-cloud-worker.js| C[An agent sets up a domain<br/>with wrangler; the update script<br/>redeploys an existing one]
+  P -->|releases/latest/download/install-doklin.sh| N[An agent's machine installs<br/>the doklin command]
 ```
 
 Two workflows, no more:
 
 | Workflow | Trigger | Runner | Job |
 | --- | --- | --- | --- |
-| [`ci.yml`](../.github/workflows/ci.yml) | `pull_request` | `ubuntu-latest`, 10 min | `pnpm lint` (eslint `react-hooks/rules-of-hooks`) + `pnpm exec tsc --noEmit`, then the cloud worker: its typecheck, `node cloud-worker/test/run.mjs`, the bundle (size printed, fails past 3 MB gzipped) and the suite again against the bundle |
-| [`release.yml`](../.github/workflows/release.yml) | push to `main`, or `workflow_dispatch` | `ubuntu-latest` → `macos-15`, 360 min | `bump` then `build-release` |
+| [`ci.yml`](../.github/workflows/ci.yml) | `pull_request` | `ubuntu-latest`, 10 min | `checks`: `pnpm lint` (eslint `react-hooks/rules-of-hooks`) + `pnpm exec tsc --noEmit`, then the cloud worker: its typecheck, `node cloud-worker/test/run.mjs`, the bundle (size printed, fails past 3 MB gzipped) and the suite again against the bundle. `cli`: builds the `doklin` command and drives it against the harness worker (`verify-harness/drive-cli.mjs`) |
+| [`release.yml`](../.github/workflows/release.yml) | push to `main`, or `workflow_dispatch` | `ubuntu-latest` → `macos-15`, 360 min | `bump`, then `build-cli` (two Linux runners), then `build-release` |
 
-Rust is deliberately **not** built in the PR gate — it would dominate CI time
-and the release build covers it. The PR gate exists for what a compile can't
+The app's Rust is deliberately **not** built in the PR gate — it would
+dominate CI time and the release build covers it. The `doklin` command is the
+exception: it is a small crate of its own (`cli/`), nothing else builds it
+before a release ships it, and its drive is the only automated check that
+the command and the worker still agree. The PR gate exists for what a compile can't
 catch: a hook-order bug shipped in v0.1.24 and made the app unbootable for four
 releases, which is why eslint is a merge blocker.
 
@@ -61,7 +69,7 @@ The "storage" for built artifacts is the **GitHub Release for the tag**, marked
 `releases/latest/download/…`, which is what everything downstream points at —
 no S3/R2 bucket, no CDN config, no credentials for consumers.
 
-Every release carries six assets, staged in `release-assets/` (never `dist/` —
+Every release carries eleven assets, staged in `release-assets/` (never `dist/` —
 that's Vite's frontend output, and publishing `dist/*` would sweep `index.html`
 and the web assets into the release; see commit `4d8f2e8`):
 
@@ -69,11 +77,13 @@ and the web assets into the release; see commit `4d8f2e8`):
 | --- | --- | --- |
 | `Doklin-<version>-macos-arm64.dmg` | The versioned installer, notarized + stapled | Humans, archival |
 | `Doklin-macos-arm64.dmg` | Byte-identical alias, copied **after** stapling | `releases/latest/download/…` — the stable download link (the README, a public page's footer) |
-| `SHA256SUMS` | Checksums for both DMGs | Verification |
+| `SHA256SUMS` | Checksums for both DMGs and the three `doklin` binaries | Verification; `install-doklin.sh` refuses a download that does not match |
 | `Doklin.app.tar.gz` | The signed bundle the updater swaps in | `tauri-plugin-updater` |
 | `latest.json` | Update manifest: version, notes, pub_date, per-platform `{signature, url}` | The updater endpoint in `tauri.conf.json` |
 | `doklin-cloud-worker.js` | The cloud worker, bundled to one file (`scripts/bundle-worker.mjs`, the mermaid module spliced in) | `releases/latest/download/…` — what the app's setup prompt and the update script fetch |
 | `doklin-cloud-update.sh` | `scripts/doklin-cloud-update.sh`, copied verbatim | `releases/latest/download/…` — the two commands on the app's "Update the worker" card curl and run it (docs/cloud.md §7.4) |
+| `doklin-linux-x64` · `doklin-linux-arm64` · `doklin-macos-arm64` | The `doklin` command (`cli/`): what an agent uses to work with a workspace through its domain. The Linux two are static musl binaries | `install-doklin.sh` picks the one for the machine it runs on |
+| `install-doklin.sh` | `scripts/install-doklin.sh`, copied verbatim | `releases/latest/download/…` — the line the app's agent login card hands out pipes it to `sh` (docs/cloud.md §8.6) |
 
 Note the `.sig` file is **not** published: its contents are inlined into
 `latest.json` as the `signature` field.
@@ -97,12 +107,14 @@ Runs on `ubuntu-latest`. Owns versioning entirely; nothing is versioned by hand.
    cut a minor or major: raise it in your feature commit. First-ever release
    ships the committed version as-is. If the computed tag already exists, the
    job fails loudly rather than clobbering.
-3. **Stamp the version into four places** — `package.json`,
-   `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the `doklin` entry
-   in `src-tauri/Cargo.lock`. It uses `sed`/`awk` (first match only) rather than
-   `jq` so JSON formatting stays untouched, then asserts all of them agree.
-   `Cargo.lock` matters: a stale lock version makes the build dirty the lock and
-   drift from the tag.
+3. **Stamp the version into six places** — `package.json`,
+   `src-tauri/tauri.conf.json`, and for each of the two crates its
+   `Cargo.toml` and its own entry in its `Cargo.lock`: the app (`src-tauri/`,
+   package `doklin`) and the command line (`cli/`, package `doklin-cli`). It
+   uses `sed`/`awk` (first match only) rather than `jq` so JSON formatting
+   stays untouched, then asserts all of them agree. `Cargo.lock` matters: a
+   stale lock version makes the app's build dirty the lock and drift from the
+   tag, and fails the command line's outright — it is built `--locked`.
 4. **Commit `chore: release vX.Y.Z [skip ci]`, tag, push** both in one
    `git push origin HEAD:main refs/tags/vX.Y.Z`.
 
@@ -245,7 +257,58 @@ carries its own copy of the worker's compatibility date, both pinned to
 their sources by `verify-harness/cloudprompts.test.mjs`, so a release can
 never publish a script that would deploy against the wrong runtime date.
 
-### 4.8 Publish
+### 4.8 The `doklin` command — three binaries and an installer
+
+The command an agent uses to work with a workspace through its domain
+(docs/cloud.md §8.6) ships as a release asset per platform, because a bot's
+machine has no app to carry it and should need nothing installed first.
+
+**`build-cli`**, a job of its own between `bump` and `build-release`, builds
+the two Linux binaries — each natively, on a runner of its own architecture
+(`ubuntu-latest` and `ubuntu-24.04-arm`):
+
+```yaml
+- run: sudo apt-get update && sudo apt-get install -y musl-tools
+- uses: dtolnay/rust-toolchain@stable
+  with:
+    targets: ${{ matrix.target }}      # x86_64- / aarch64-unknown-linux-musl
+- run: cargo build --release --locked --manifest-path cli/Cargo.toml --target "$TARGET"
+```
+
+Static musl, so one file runs on Debian, on Alpine and in a scratch
+container. Native rather than cross-compiled because the TLS library carries
+C and assembly, and a native `musl-gcc` (named outright in
+`CC_<target>`, so nothing depends on a guess) is all that takes. The job
+then checks what it built before handing it over: `readelf -d` must list no
+`NEEDED` library, `doklin --version` must be `doklin <the release's
+version>` — which is the stamp in `cli/Cargo.toml` and `cli/Cargo.lock`
+agreeing with the tag — and `doklin help` must run. Each binary is passed on
+as a workflow artifact.
+
+`build-release` **needs** `build-cli`, rather than merely following it: the
+two binaries are release assets, and a release without them would break the
+installer for everyone at once. It builds the macOS binary itself, after the
+app (`lipo` must say `arm64`, `codesign --verify` must pass, the version must
+match), downloads the two artifacts, copies `scripts/install-doklin.sh` in
+verbatim and appends the three binaries to `SHA256SUMS`.
+
+Two things this deliberately does not do:
+
+- **The macOS binary is not notarized.** It carries the linker's ad-hoc
+  signature, which is all an Apple Silicon Mac needs to run a file that
+  `curl` fetched — there is no quarantine flag on it. Notarizing would be a
+  third Apple round-trip per release (§7's unbounded wait, again) for a
+  browser download nobody is pointed at.
+- **Nothing is installed by a package manager.** The installer is forty
+  lines of POSIX `sh`: pick the asset for `uname`, fetch it and
+  `SHA256SUMS`, compare, and rename it into `$DOKLIN_INSTALL_DIR`,
+  `/usr/local/bin` or `~/.local/bin`. `verify-harness/cloudprompts.test.mjs`
+  runs it against a release made up in a temp folder — every platform,
+  a checksum that does not match, a binary the release does not carry — and
+  holds its URL, the line the app hands out and the asset names in this
+  workflow to each other.
+
+### 4.9 Publish
 
 ```yaml
 uses: softprops/action-gh-release@v2
@@ -321,6 +384,8 @@ multi-day hold (6h ceiling); recovery is re-running the failed job.
 | Release contains `index.html` and JS assets | Something staged into `dist/` | Stage only into `release-assets/` |
 | Users see "app is damaged" / Gatekeeper prompt | Unsigned or unstapled artifact | Verify locally: `spctl -a -vvv -t install Doklin.app` |
 | A download link 404s | Alias filename changed | Fix every link that hardcodes the alias |
+| `build-cli` fails at `cargo build --locked` | `cli/Cargo.lock` does not match `cli/Cargo.toml` — a dependency changed without the lock being committed, or the version stamp missed the lock | Run `cargo build --manifest-path cli/Cargo.toml` locally and commit the lock; for the stamp, check the `doklin-cli` entry is still `name` then `version` on consecutive lines |
+| `install-doklin.sh` says the download does not match its checksum | A release was published between its two downloads, or an asset was replaced by hand | Run it again; never re-upload a binary without regenerating `SHA256SUMS` |
 
 Build, signing and publishing symptoms only. When the release itself looks
 correct but installed apps don't take it, the causes are client-side and are

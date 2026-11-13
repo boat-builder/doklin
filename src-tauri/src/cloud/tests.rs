@@ -3,7 +3,8 @@
 //! public map (mirroring, rename-follow, re-bind, folder re-point, the
 //! custom-slug race, the root page), the flows (bind-once, upload and
 //! download, resume in place), the timings (a touch settles faster than a
-//! watched write), the worker-outdated state, presence, and the edit bus.
+//! watched write), the worker-outdated state, presence, the edit bus, and
+//! the worker as a third writer of the manifest (an agent's changes).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError}
 use super::invite;
 use super::manifest::*;
 use super::remote::*;
-use super::scan::{hash16, now_ms, scan_local};
+use super::scan::{hash16, now_ms, random_id, scan_local};
 use super::status::*;
 use super::versions::{snapshot_id, VersionsEntry, VersionsIndex, CLOUD_GC_GRACE_MS, MIRROR_EVERY, NO_INDEX};
 use crate::versions::store::{
@@ -58,6 +59,9 @@ struct FakeWorker {
     features: Vec<String>,
     racer: Option<Manifest>,
     put_manifest_calls: u64,
+    /// Every blob a device asked for — what "a move fetches no bytes" is
+    /// counted in.
+    blob_gets: u64,
     /// Every request that reached the worker — what "an idle Mac makes four
     /// requests a minute" is counted in.
     requests: u64,
@@ -89,6 +93,10 @@ struct FakeWorker {
     /// and it bites on that Mac's next call because every call comes through
     /// `ready` — which is the whole of what a session would have been.
     tokens: BTreeMap<String, TokenRecord>,
+    /// Agent id -> name (docs/cloud.md §8.3). All the engine ever learns of
+    /// an agent: `/api/meta` lists them after the people, so an `a-` id in a
+    /// manifest gets a name the same way an `m-` id does.
+    agents: BTreeMap<String, String>,
     next_id: u64,
 }
 
@@ -211,8 +219,13 @@ impl Remote for FakeRemote {
                 email: me.as_ref().map(|m| m.email.clone()),
                 name: me.map(|m| m.name).unwrap_or_else(|| "Owner".into()),
             });
-            let people =
-                b.members.values().map(|m| Person { id: m.id.clone(), name: m.name.clone() }).collect();
+            // People, then agents — `listDirectory` (cloud-worker/src/members.ts).
+            let people = b
+                .members
+                .values()
+                .map(|m| Person { id: m.id.clone(), name: m.name.clone() })
+                .chain(b.agents.iter().map(|(id, name)| Person { id: id.clone(), name: name.clone() }))
+                .collect();
             Ok(Meta {
                 version: b.worker_version,
                 features: b.features.clone(),
@@ -360,7 +373,8 @@ impl Remote for FakeRemote {
         let key = (file_id.to_string(), hash.to_string());
         async move {
             this.ready()?;
-            let b = this.be.lock().unwrap();
+            let mut b = this.be.lock().unwrap();
+            b.blob_gets += 1;
             b.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
     }
@@ -1256,6 +1270,7 @@ async fn rename_is_metadata_only_and_propagates() {
     b.cycle().await;
 
     let fid_before: String = manifest_of(&be).files.keys().next().unwrap().clone();
+    let before = manifest_of(&be).files[&fid_before].clone();
 
     a.rename("old-name.md", "new-name.md");
     a.cycle().await;
@@ -1265,6 +1280,11 @@ async fn rename_is_metadata_only_and_propagates() {
         let (fid, f) = m.files.iter().next().unwrap();
         assert_eq!(*fid, fid_before, "same identity across the rename");
         assert_eq!(f.path, "new-name.md");
+        assert_eq!(f.rev, before.rev + 1, "a move is the next revision");
+        // …of the same content: `mtime` says when that last changed, and the
+        // document API reads it to tell an html version that has fallen
+        // behind (cloud-worker/src/documents.ts, `htmlBehind`).
+        assert_eq!((f.hash.as_str(), f.mtime), (before.hash.as_str(), before.mtime), "a move is not an edit");
     }
 
     b.cycle().await;
@@ -2018,7 +2038,7 @@ async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
     let m = manifest_of(&be);
     let f = m.files.values().next().unwrap();
     assert_eq!(f.by, ada.id, "the manifest carries the id");
-    assert!(is_member_id(&f.by), "{} is not a member id", f.by);
+    assert!(is_directory_id(&f.by), "{} is not a member id", f.by);
     assert_eq!(m.public["the-doc"].by, ada.id, "a published page too");
     assert!(!f.by.contains("Alice"), "and never the Mac's name");
 
@@ -2762,7 +2782,7 @@ async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
     let bob_here = seen.iter().find(|p| p.device_id == "d-bob").unwrap();
     assert_eq!(bob_here.name, "Bob Mbeki", "a person, not a Mac");
     assert_eq!(bob_here.device, "Bob");
-    assert!(bob_here.member_id.as_deref().map(is_member_id).unwrap_or(false));
+    assert!(bob_here.member_id.as_deref().map(is_directory_id).unwrap_or(false));
     let air_here = seen.iter().find(|p| p.device_id == "d-air").unwrap();
     assert_eq!(air_here.name, "Air", "your own other Mac is told apart by its name");
     assert_eq!(air_here.member_id, studio.engine.me_for_test().map(String::from));
@@ -3770,4 +3790,930 @@ async fn a_bookmark_from_the_archive_pass_does_not_carry_into_the_blob_sweep() {
     assert!(a.engine.state.legacy_cleanup.archives_done, "there is only one pass now");
     a.engine.poll_for_test().await;
     assert_eq!(be.lock().unwrap().blobs.len(), 3, "every file swept, not just the ones past the old cursor");
+}
+
+/* ---------- The worker as a writer: what an agent changes (docs/cloud.md §8.4) ---------- */
+
+/// The id an agent signs with: `a-` and eight hex, as the worker mints one
+/// (cloud-worker/src/agents.ts).
+const AGENT: &str = "a-1234abcd";
+
+/// A sidecar as the app and the worker both write one (src/metaFile.ts): the
+/// conversation behind the marker `#c7k2x9` in a document's markdown.
+const THREAD: &str = "{\"t\":\"mthread\",\"id\":\"c7k2x9\",\"comments\":[{\"author\":\"Grok bot\",\"at\":1763000000000,\"body\":\"Is that still true?\"}]}\n";
+
+/// A change made the way the worker's document API makes one
+/// (cloud-worker/src/commit.ts): the manifest as it stands, changed through
+/// the same verbs as its `Tx`, then replaced in one step — content first, one
+/// `seq`, one new etag. An agent has no engine, so this is the whole of what
+/// a Mac ever sees of one, and the tests below are worth exactly what this
+/// mirror is. **Change both.**
+struct WorkerTx {
+    m: Manifest,
+    by: String,
+    /// One clock for the whole change, as in `Tx`.
+    now: u64,
+    staged: Vec<((String, String), Vec<u8>)>,
+    dirty: bool,
+}
+
+impl WorkerTx {
+    fn fid(&self, path: &str) -> String {
+        self.m
+            .files
+            .iter()
+            .find(|(_, f)| f.path == path)
+            .map(|(fid, _)| fid.clone())
+            .unwrap_or_else(|| panic!("the manifest has nothing at {}", path))
+    }
+
+    /// `Tx.write`: the next revision of `fid`, or a new file at `path` —
+    /// one past its tombstone, if it has one, and the tombstone withdrawn.
+    fn write(&mut self, fid: &str, path: &str, content: &str) -> ManifestFile {
+        let bytes = content.as_bytes().to_vec();
+        let hash = hash16(&bytes);
+        let prev = self.m.files.get(fid).cloned();
+        if let Some(p) = prev.as_ref().filter(|p| p.hash == hash) {
+            return p.clone(); // the same bytes are not a new revision
+        }
+        let tomb_rev = self.m.tombstones.get(fid).map(|t| t.rev).unwrap_or(0);
+        let file = ManifestFile {
+            path: prev.as_ref().map(|p| p.path.clone()).unwrap_or_else(|| path.to_string()),
+            rev: prev.as_ref().map(|p| p.rev).unwrap_or(0).max(tomb_rev) + 1,
+            hash: hash.clone(),
+            size: bytes.len() as u64,
+            mtime: self.now,
+            by: self.by.clone(),
+        };
+        self.staged.push(((fid.to_string(), hash), bytes));
+        self.m.tombstones.remove(fid);
+        self.m.files.insert(fid.to_string(), file.clone());
+        self.dirty = true;
+        file
+    }
+
+    /// A file that was not there, under a fresh id — `newFileId`, which is
+    /// the engine's own `random_id("f")`.
+    fn create(&mut self, path: &str, content: &str) -> String {
+        let fid = random_id("f");
+        self.write(&fid, path, content);
+        fid
+    }
+
+    /// `Tx.move`: a new path and the next revision. The hash stays, and so
+    /// does `mtime` — a move is not an edit.
+    fn mv(&mut self, fid: &str, to: &str) {
+        let Some(f) = self.m.files.get_mut(fid) else { return };
+        if f.path == to {
+            return;
+        }
+        f.path = to.to_string();
+        f.rev += 1;
+        f.by = self.by.clone();
+        self.dirty = true;
+    }
+
+    /// `Tx.remove`: the entry goes, a tombstone one revision on stays.
+    fn remove(&mut self, fid: &str) {
+        let Some(f) = self.m.files.remove(fid) else { return };
+        self.m.tombstones.insert(
+            fid.to_string(),
+            Tombstone { path: f.path, rev: f.rev + 1, ts: self.now, by: self.by.clone() },
+        );
+        self.dirty = true;
+    }
+
+    /// `keepPublic` (cloud-worker/src/agentDocs.ts) — the worker's half of
+    /// the engine's `fold_public`: a page's path follows its file, and a
+    /// page whose file is gone adopts a page-less file now at its path.
+    fn keep_public(&mut self) {
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        for e in self.m.public.values_mut().filter(|e| e.kind == PublicKind::File) {
+            let Some(fid) = e.file.clone() else { continue };
+            if let Some(live) = self.m.files.get(&fid).filter(|live| live.path != e.path) {
+                e.path = live.path.clone();
+                self.dirty = true;
+            }
+            referenced.insert(fid);
+        }
+        let dead: Vec<(String, String)> = self
+            .m
+            .public
+            .iter()
+            .filter(|(_, e)| e.kind == PublicKind::File)
+            .filter(|(_, e)| e.file.as_ref().map(|f| !self.m.files.contains_key(f)).unwrap_or(true))
+            .map(|(slug, e)| (slug.clone(), e.path.clone()))
+            .collect();
+        for (slug, path) in dead {
+            let adopt = self
+                .m
+                .files
+                .iter()
+                .find(|(fid, f)| f.path == path && !referenced.contains(*fid))
+                .map(|(fid, _)| fid.clone());
+            if let Some(fid) = adopt {
+                referenced.insert(fid.clone());
+                self.m.public.get_mut(&slug).unwrap().file = Some(fid);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// `postMove` on a folder: every file inside moves, a published folder
+    /// at or beneath it follows, and the file pages are kept true.
+    fn move_folder(&mut self, from: &str, to: &str) {
+        let prefix = format!("{}/", from);
+        let inside: Vec<(String, String)> = self
+            .m
+            .files
+            .iter()
+            .filter(|(_, f)| f.path.starts_with(&prefix))
+            .map(|(fid, f)| (fid.clone(), format!("{}{}", to, &f.path[from.len()..])))
+            .collect();
+        for (fid, dest) in inside {
+            self.mv(&fid, &dest);
+        }
+        for e in self.m.public.values_mut().filter(|e| e.kind == PublicKind::Dir) {
+            if e.path == from || e.path.starts_with(&prefix) {
+                e.path = format!("{}{}", to, &e.path[from.len()..]);
+                self.dirty = true;
+            }
+        }
+        self.keep_public();
+    }
+
+    /// `publish` on one document (cloud-worker/src/agentPages.ts).
+    fn publish(&mut self, slug: &str, fid: &str) {
+        let path = self.m.files[fid].path.clone();
+        self.m.public.insert(
+            slug.to_string(),
+            PublicEntry {
+                kind: PublicKind::File,
+                file: Some(fid.to_string()),
+                path,
+                title: None,
+                desc: None,
+                root: false,
+                by: self.by.clone(),
+                at: self.now,
+            },
+        );
+        self.dirty = true;
+    }
+
+    /// `repointPages`: a document's page belongs to its markdown when it has
+    /// one, and to its html when it has not.
+    fn repoint_pages(&mut self, from: &str, to: &str) {
+        let path = self.m.files[to].path.clone();
+        for e in self.m.public.values_mut().filter(|e| e.file.as_deref() == Some(from)) {
+            e.file = Some(to.to_string());
+            e.path = path.clone();
+            self.dirty = true;
+        }
+    }
+}
+
+/// `commit()` up to the manifest PUT: the change is applied to the manifest
+/// as it stands and its blobs are stored, and the manifest it would put is
+/// handed back — `None` when the change left everything as it found it, in
+/// which case the worker writes nothing. A test lands it when it likes:
+/// at once (`worker_writes`), or in the middle of a Mac's own put (`racer`).
+fn worker_would_write<T>(be: &SharedWorker, change: impl FnOnce(&mut WorkerTx) -> T) -> (T, Option<Manifest>) {
+    let mut b = be.lock().unwrap();
+    let mut tx =
+        WorkerTx { m: b.manifest.clone(), by: AGENT.into(), now: now_ms(), staged: Vec::new(), dirty: false };
+    let value = change(&mut tx);
+    if !tx.dirty {
+        return (value, None);
+    }
+    for (key, bytes) in tx.staged {
+        b.blobs.entry(key).or_insert((bytes, 0));
+    }
+    tx.m.seq += 1;
+    (value, Some(tx.m))
+}
+
+/// One write by the worker, landed: every file it touches under one new etag.
+fn worker_writes<T>(be: &SharedWorker, change: impl FnOnce(&mut WorkerTx) -> T) -> T {
+    let (value, next) = worker_would_write(be, change);
+    if let Some(next) = next {
+        let mut b = be.lock().unwrap();
+        b.manifest = next;
+        b.etag += 1;
+    }
+    value
+}
+
+fn fid_at(be: &SharedWorker, path: &str) -> String {
+    manifest_of(be)
+        .files
+        .iter()
+        .find(|(_, f)| f.path == path)
+        .map(|(fid, _)| fid.clone())
+        .unwrap_or_else(|| panic!("the manifest has nothing at {}", path))
+}
+
+/// A cycle that is only allowed to listen. What the worker wrote is applied
+/// and this Mac says nothing back: no manifest PUT, so no new etag. That is
+/// what makes an agent's write cost each Mac one cycle and not two — a Mac
+/// that "corrected" the worker's manifest would wake every other Mac again
+/// (docs/cloud.md §8.7).
+async fn applies_quietly(d: &mut Device, be: &SharedWorker) {
+    let (calls, etag) = {
+        let b = be.lock().unwrap();
+        (b.put_manifest_calls, b.etag)
+    };
+    d.cycle().await;
+    let b = be.lock().unwrap();
+    let who = d.engine.device_name_for_test();
+    assert_eq!(b.put_manifest_calls, calls, "{} answered the worker's write with one of its own", who);
+    assert_eq!(b.etag, etag, "{} moved the manifest", who);
+    drop(b);
+    assert_eq!(d.phase(), Phase::Idle);
+}
+
+/// Created: a file id of the engine's own shape, revision one, signed by the
+/// agent. Every Mac downloads it and has nothing to add.
+#[tokio::test]
+async fn a_document_the_worker_created_arrives_on_every_mac() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("readme.md", "already here\n");
+    a.cycle().await;
+    b.cycle().await;
+    let seq = manifest_of(&be).seq;
+
+    let fid = worker_writes(&be, |tx| tx.create("Projects/plan.md", "# Plan\n\nwritten by an agent\n"));
+    let written = manifest_of(&be);
+    assert_eq!(written.seq, seq + 1);
+    assert!(fid.len() == 14 && fid.starts_with("f-"), "an id as a Mac mints one: {}", fid);
+    let f = &written.files[&fid];
+    assert_eq!((f.rev, f.by.as_str()), (1, AGENT));
+
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.read("Projects/plan.md").as_deref(), Some("# Plan\n\nwritten by an agent\n"));
+        let applied = d.events.of(EV_APPLIED);
+        assert_eq!(applied.last().unwrap()["paths"], serde_json::json!(["Projects/plan.md"]));
+        // And it stays applied: the next cycle has nothing to do.
+        applies_quietly(d, &be).await;
+    }
+    assert_eq!(manifest_of(&be), written, "exactly as the worker left it");
+
+    // It is held as synced, so carrying on from it is an ordinary revision.
+    a.write("Projects/plan.md", "# Plan\n\nand a person carried on from there\n");
+    a.cycle().await;
+    let f = &manifest_of(&be).files[&fid];
+    assert_eq!((f.rev, f.by.as_str()), (2, "Alice"));
+    b.cycle().await;
+    assert_eq!(b.read("Projects/plan.md").as_deref(), Some("# Plan\n\nand a person carried on from there\n"));
+}
+
+/// Changed: the next revision, new content. A clean copy is replaced — and a
+/// Mac that slept through several revisions lands on the last.
+#[tokio::test]
+async fn a_revision_the_worker_wrote_replaces_a_clean_copy() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "v1\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+    let before = manifest_of(&be).files[&fid].clone();
+
+    let f = worker_writes(&be, |tx| tx.write(&fid, "doc.md", "v2 — rewritten by the agent\n"));
+    assert_eq!((f.path.as_str(), f.rev, f.by.as_str()), ("doc.md", before.rev + 1, AGENT));
+    assert_ne!(f.hash, before.hash);
+    assert_eq!(f.size, "v2 — rewritten by the agent\n".len() as u64);
+    assert!(f.mtime >= before.mtime);
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.read("doc.md").as_deref(), Some("v2 — rewritten by the agent\n"));
+        assert_eq!(d.files(), vec!["doc.md"]);
+    }
+
+    worker_writes(&be, |tx| tx.write(&fid, "doc.md", "v3\n"));
+    applies_quietly(&mut a, &be).await;
+    worker_writes(&be, |tx| tx.write(&fid, "doc.md", "v4, the one Bob wakes up to\n"));
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.read("doc.md").as_deref(), Some("v4, the one Bob wakes up to\n"));
+    }
+    assert_eq!(manifest_of(&be).files[&fid].rev, before.rev + 3);
+}
+
+/// Changed on both sides, in different places: the agent started a comment
+/// thread — a marker in the first paragraph and the sidecar that holds what
+/// was said, in one write — while somebody was typing further down. The
+/// engine merges as it does with another Mac's edit and pushes the result as
+/// its own revision; the sidecar stays the agent's.
+#[tokio::test]
+async fn what_the_worker_wrote_merges_with_what_was_typed_here_meanwhile() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("plan.md", "The boat ships in June.\n\nPaint is on order.\n\nSails are not.\n");
+    a.cycle().await;
+    b.cycle().await;
+    let md = fid_at(&be, "plan.md");
+
+    let meta = worker_writes(&be, |tx| {
+        tx.write(
+            &md,
+            "plan.md",
+            "The boat {==ships in June==}{>>#c7k2x9<<}.\n\nPaint is on order.\n\nSails are not.\n",
+        );
+        tx.create("plan.meta.jsonl", THREAD)
+    });
+    b.write("plan.md", "The boat ships in June.\n\nPaint is on order.\n\nSails are not — Bob is asking around.\n");
+    b.cycle().await;
+
+    let merged =
+        "The boat {==ships in June==}{>>#c7k2x9<<}.\n\nPaint is on order.\n\nSails are not — Bob is asking around.\n";
+    assert_eq!(b.read("plan.md").as_deref(), Some(merged));
+    assert_eq!(b.read("plan.meta.jsonl").as_deref(), Some(THREAD));
+    assert_eq!(b.files(), vec!["plan.md", "plan.meta.jsonl"], "merged, so no conflict copy");
+    let m = manifest_of(&be);
+    assert_eq!((m.files[&md].rev, m.files[&md].by.as_str()), (3, "Bob"), "the merge is Bob's, on top of the agent's");
+    assert_eq!(m.files[&md].hash, hash16(merged.as_bytes()));
+    assert_eq!((m.files[&meta].rev, m.files[&meta].by.as_str()), (1, AGENT));
+
+    a.cycle().await;
+    assert_eq!(a.read("plan.md").as_deref(), Some(merged));
+    assert_eq!(a.read("plan.meta.jsonl").as_deref(), Some(THREAD));
+}
+
+/// Changed on both sides, on the same line: nothing is merged and nothing is
+/// lost. What was typed here stays the document; the agent's text lands
+/// beside it as a conflict copy named after the agent — by its name, which
+/// the directory supplies the first time its id is seen.
+#[tokio::test]
+async fn the_same_line_changed_here_and_by_the_worker_keeps_both() {
+    let be = fake_worker();
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "shared line\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    worker_writes(&be, |tx| tx.write(&fid, "doc.md", "the agent's take on the line\n"));
+    a.write("doc.md", "alice's very different take\n");
+    a.cycle().await;
+
+    assert_eq!(a.read("doc.md").as_deref(), Some("alice's very different take\n"));
+    let copies: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", a.files());
+    assert!(copies[0].contains("(conflict — Grok bot"), "named after the agent: {}", copies[0]);
+    assert!(!copies[0].contains(AGENT), "not after its id: {}", copies[0]);
+    assert_eq!(a.read(&copies[0]).as_deref(), Some("the agent's take on the line\n"));
+    let conflicts = a.events.of(EV_CONFLICT);
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["path"], "doc.md");
+    assert_eq!(conflicts[0]["by"], "Grok bot");
+    assert_eq!(conflicts[0]["conflictPath"], copies[0]);
+
+    // Both are Alice's to push: her text as the next revision, the copy as a
+    // file of its own that every Mac gets.
+    let m = manifest_of(&be);
+    assert_eq!((m.files[&fid].rev, m.files[&fid].by.as_str()), (3, "Alice"));
+    b.cycle().await;
+    assert_eq!(b.read("doc.md").as_deref(), Some("alice's very different take\n"));
+    assert_eq!(b.read(&copies[0]).as_deref(), Some("the agent's take on the line\n"));
+}
+
+/// A name taken on both sides before either knew: the agent created a
+/// document where this Mac had one it had not synced yet. With no common
+/// ancestor there is nothing to merge against, so it is the same-line rule —
+/// and the Mac's text carries on under the id the worker minted.
+#[tokio::test]
+async fn a_document_the_worker_created_where_this_mac_had_an_unsynced_one_keeps_both() {
+    let be = fake_worker();
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    let mut a = device("Alice", &be);
+    a.write("readme.md", "already here\n");
+    a.cycle().await;
+
+    let fid = worker_writes(&be, |tx| tx.create("ideas.md", "the agent's ideas\n"));
+    a.write("ideas.md", "alice's ideas — different\n");
+    a.cycle().await;
+
+    assert_eq!(a.read("ideas.md").as_deref(), Some("alice's ideas — different\n"));
+    let copies: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — Grok bot")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", a.files());
+    assert_eq!(a.read(&copies[0]).as_deref(), Some("the agent's ideas\n"));
+
+    let m = manifest_of(&be);
+    assert_eq!((m.files[&fid].path.as_str(), m.files[&fid].rev, m.files[&fid].by.as_str()), ("ideas.md", 2, "Alice"));
+    let mut paths: Vec<&str> = m.files.values().map(|f| f.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, vec![copies[0].as_str(), "ideas.md", "readme.md"], "no two files share a path");
+}
+
+/// Moved: a new path and the next revision, the same bytes — so the same
+/// hash, and the same `mtime`, which says when the content last changed. A
+/// Mac renames what it holds and asks the bucket for nothing.
+#[tokio::test]
+async fn a_move_the_worker_made_renames_in_place_and_downloads_nothing() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("notes/old-name.md", "stable content that does not change\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "notes/old-name.md");
+    let before = manifest_of(&be).files[&fid].clone();
+
+    worker_writes(&be, |tx| tx.mv(&fid, "archive/2026/new-name.md"));
+    let f = manifest_of(&be).files[&fid].clone();
+    assert_eq!((f.path.as_str(), f.rev, f.by.as_str()), ("archive/2026/new-name.md", before.rev + 1, AGENT));
+    assert_eq!((f.hash.as_str(), f.size, f.mtime), (before.hash.as_str(), before.size, before.mtime));
+
+    let gets = be.lock().unwrap().blob_gets;
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert!(d.read("notes/old-name.md").is_none());
+        assert_eq!(d.read("archive/2026/new-name.md").as_deref(), Some("stable content that does not change\n"));
+        assert_eq!(d.files(), vec!["archive/2026/new-name.md"], "a move must not fork the file");
+        // Nor does the renamed file read as edited on the next look.
+        applies_quietly(d, &be).await;
+    }
+    assert_eq!(be.lock().unwrap().blob_gets, gets, "a rename moves no bytes");
+    assert_eq!(manifest_of(&be).files[&fid], f, "exactly as the worker left it");
+}
+
+/// Moved there, edited here: the file follows the move, and what was typed
+/// before the move was heard of is not forgotten — it goes up as the next
+/// revision, at the new path.
+#[tokio::test]
+async fn an_edit_typed_here_rides_along_with_the_workers_move() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "line one\nline two\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    worker_writes(&be, |tx| tx.mv(&fid, "sub/doc.md"));
+    let edited = "line one\nline two\nand a third thought, typed before the move was heard of\n";
+    a.write("doc.md", edited);
+    a.cycle().await;
+
+    assert!(a.read("doc.md").is_none());
+    assert_eq!(a.read("sub/doc.md").as_deref(), Some(edited));
+    let f = manifest_of(&be).files[&fid].clone();
+    assert_eq!(f.path, "sub/doc.md");
+    assert_eq!(f.hash, hash16(edited.as_bytes()), "the edit was pushed, not left on one Mac");
+    assert_eq!((f.rev, f.by.as_str()), (3, "Alice"));
+
+    b.cycle().await;
+    assert_eq!(b.read("sub/doc.md").as_deref(), Some(edited));
+    assert_eq!(b.files(), vec!["sub/doc.md"]);
+}
+
+/// Removed: the entry is gone and a tombstone one revision on stands in its
+/// place. A clean copy leaves the folder; one that was edited here stays and
+/// goes back up as a file of its own — the edit wins, as it does against
+/// another Mac's delete.
+#[tokio::test]
+async fn a_removal_the_worker_made_takes_a_clean_copy_and_spares_an_edited_one() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("keep.md", "keeper\n");
+    a.write("gone.md", "doomed\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "gone.md");
+    let rev = manifest_of(&be).files[&fid].rev;
+
+    let asked = now_ms();
+    worker_writes(&be, |tx| tx.remove(&fid));
+    let m = manifest_of(&be);
+    assert!(!m.files.contains_key(&fid));
+    let t = &m.tombstones[&fid];
+    assert_eq!((t.path.as_str(), t.rev, t.by.as_str()), ("gone.md", rev + 1, AGENT));
+    assert!(t.ts >= asked);
+
+    applies_quietly(&mut a, &be).await;
+    assert!(a.read("gone.md").is_none());
+    assert_eq!(a.read("keep.md").as_deref(), Some("keeper\n"));
+
+    b.write("gone.md", "doomed — but bob kept working on this\n");
+    b.cycle().await;
+    assert_eq!(b.read("gone.md").as_deref(), Some("doomed — but bob kept working on this\n"));
+    let m = manifest_of(&be);
+    let back = fid_at(&be, "gone.md");
+    assert_ne!(back, fid, "it re-enters as a new file");
+    assert_eq!((m.files[&back].rev, m.files[&back].by.as_str()), (1, "Bob"));
+    a.cycle().await;
+    assert_eq!(a.read("gone.md").as_deref(), Some("doomed — but bob kept working on this\n"));
+}
+
+/// A document is up to three files — markdown, html, and the sidecar that
+/// holds its comments — and the worker changes them in one write or not at
+/// all. A Mac sees each such write whole: the three arrive together, move
+/// together without a byte fetched, and leave together.
+#[tokio::test]
+async fn a_document_with_its_html_and_sidecar_arrives_moves_and_leaves_whole() {
+    const MD: &str = "# Plan\n\nThe boat {==ships in June==}{>>#c7k2x9<<}.\n";
+    const HTML: &str = "<!doctype html><h1>Plan</h1><p>The boat ships in June.</p>\n";
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("readme.md", "root doc\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    // Created.
+    let etag = be.lock().unwrap().etag;
+    let parts = worker_writes(&be, |tx| {
+        [
+            (tx.create("Projects/plan.md", MD), ".md"),
+            (tx.create("Projects/plan.html", HTML), ".html"),
+            (tx.create("Projects/plan.meta.jsonl", THREAD), ".meta.jsonl"),
+        ]
+    });
+    assert_eq!(be.lock().unwrap().etag, etag + 1, "three files, one write");
+    applies_quietly(&mut a, &be).await;
+    assert_eq!(
+        a.files(),
+        vec!["Projects/plan.html", "Projects/plan.md", "Projects/plan.meta.jsonl", "readme.md"]
+    );
+    let applied = a.events.of(EV_APPLIED);
+    assert_eq!(applied.last().unwrap()["paths"].as_array().unwrap().len(), 3, "and one event for the document");
+
+    // Moved.
+    worker_writes(&be, |tx| {
+        for (fid, ext) in &parts {
+            tx.mv(fid, &format!("Archive/plan-2026{}", ext));
+        }
+    });
+    assert_eq!(be.lock().unwrap().etag, etag + 2);
+    let gets = be.lock().unwrap().blob_gets;
+    applies_quietly(&mut a, &be).await;
+    assert_eq!(be.lock().unwrap().blob_gets, gets, "renamed in place, all three");
+    let moved = vec!["Archive/plan-2026.html", "Archive/plan-2026.md", "Archive/plan-2026.meta.jsonl", "readme.md"];
+    assert_eq!(a.files(), moved);
+    assert_eq!(a.read("Archive/plan-2026.md").as_deref(), Some(MD));
+    assert_eq!(a.read("Archive/plan-2026.html").as_deref(), Some(HTML));
+    assert_eq!(a.read("Archive/plan-2026.meta.jsonl").as_deref(), Some(THREAD));
+
+    // Bob slept through both: he gets the document where it is now and never
+    // hears of where it was.
+    applies_quietly(&mut b, &be).await;
+    assert_eq!(b.files(), moved);
+    assert_eq!(b.read("Archive/plan-2026.meta.jsonl").as_deref(), Some(THREAD));
+
+    // Removed.
+    worker_writes(&be, |tx| {
+        for (fid, _) in &parts {
+            tx.remove(fid);
+        }
+    });
+    let m = manifest_of(&be);
+    assert_eq!(m.files.len(), 1);
+    assert!(parts.iter().all(|(fid, _)| m.tombstones[fid].by == AGENT));
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.files(), vec!["readme.md"], "a removal that arrives is not held like a mass delete made here");
+    }
+
+    // And a Mac that joins after all of it sees none of it.
+    let mut c = device("Carol", &be);
+    applies_quietly(&mut c, &be).await;
+    assert_eq!(c.files(), vec!["readme.md"]);
+}
+
+/// Removed and written again. The worker's `write` takes a tombstoned id
+/// back one revision past the tombstone — `max(prev, tombstone) + 1`, the
+/// engine's own rule — while the document API, which mints a fresh id for a
+/// document that is not there, leaves the old tombstone beside the new file.
+/// Either way the document comes back, on a Mac that saw it go and on one
+/// that slept through it.
+#[tokio::test]
+async fn a_document_written_again_after_its_removal_comes_back_everywhere() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("plan.md", "first life\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "plan.md");
+
+    // The same id, over its own tombstone.
+    worker_writes(&be, |tx| tx.remove(&fid));
+    assert_eq!(manifest_of(&be).tombstones[&fid].rev, 2);
+    applies_quietly(&mut a, &be).await;
+    assert!(a.read("plan.md").is_none());
+    let f = worker_writes(&be, |tx| tx.write(&fid, "plan.md", "second life\n"));
+    assert_eq!(f.rev, 3, "one past the tombstone, not one past nothing");
+    assert!(manifest_of(&be).tombstones.is_empty(), "written again is not deleted");
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.read("plan.md").as_deref(), Some("second life\n"));
+    }
+
+    // A fresh id at the same path, the old one's tombstone still standing.
+    worker_writes(&be, |tx| tx.remove(&fid));
+    applies_quietly(&mut a, &be).await;
+    let reborn = worker_writes(&be, |tx| tx.create("plan.md", "third life\n"));
+    let m = manifest_of(&be);
+    assert_ne!(reborn, fid);
+    assert_eq!(m.files[&reborn].rev, 1);
+    assert_eq!(m.tombstones[&fid].rev, 4);
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        assert_eq!(d.read("plan.md").as_deref(), Some("third life\n"));
+        assert_eq!(d.files(), vec!["plan.md"]);
+    }
+}
+
+/// …and where this Mac had edited the document the worker then removed and
+/// wrote afresh, the edit outlives the removal and meets the new document as
+/// a text with no common ancestor: both stay.
+#[tokio::test]
+async fn an_edit_here_outlives_the_workers_removal_and_meets_what_was_written_in_its_place() {
+    let be = fake_worker();
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    let mut a = device("Alice", &be);
+    a.write("plan.md", "first life\n");
+    a.cycle().await;
+    let fid = fid_at(&be, "plan.md");
+
+    worker_writes(&be, |tx| tx.remove(&fid));
+    let reborn = worker_writes(&be, |tx| tx.create("plan.md", "the agent started over\n"));
+    a.write("plan.md", "first life, and alice kept going\n");
+    a.cycle().await;
+
+    assert_eq!(a.read("plan.md").as_deref(), Some("first life, and alice kept going\n"));
+    let copies: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — Grok bot")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", a.files());
+    assert_eq!(a.read(&copies[0]).as_deref(), Some("the agent started over\n"));
+    let m = manifest_of(&be);
+    assert!(!m.files.contains_key(&fid));
+    assert_eq!((m.files[&reborn].rev, m.files[&reborn].by.as_str()), (2, "Alice"), "her text carries on as the new document");
+    assert_eq!(m.files[&reborn].hash, hash16(b"first life, and alice kept going\n"));
+}
+
+/* ----- who did it ----- */
+
+/// An agent signs with its id exactly as a person does, and the engine tells
+/// an id the directory can resolve from a device name by its shape alone —
+/// `AGENT_ID_RE` in cloud-worker/src/agents.ts.
+#[test]
+fn an_agents_id_is_one_the_directory_resolves() {
+    assert!(is_directory_id(AGENT));
+    assert!(is_directory_id("a-00000000"));
+    assert!(is_directory_id("m-00000001"));
+    for not in ["a-1234abc", "a-1234abcde", "a-1234ABCD", "a-1234abcg", "b-1234abcd", "a_1234abcd", "Grok bot", ""] {
+        assert!(!is_directory_id(not), "{:?} is not an id", not);
+    }
+}
+
+/// A worker a release behind lists no agents, and an agent removed since is
+/// in nobody's directory: either way its id is all there is. It is shown as
+/// it stands — legible, never "someone" — and costs one ask per gap, never
+/// one per cycle. The name appears on the first ask that knows it.
+#[tokio::test(start_paused = true)]
+async fn an_agent_the_directory_cannot_name_is_shown_as_its_id_and_asked_about_once_a_gap() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "shared line\n");
+    a.write("other.md", "untouched by Alice\n");
+    a.cycle().await;
+    let before = be.lock().unwrap().meta_calls;
+    let other = fid_at(&be, "other.md");
+
+    worker_writes(&be, |tx| {
+        let doc = tx.fid("doc.md");
+        tx.write(&doc, "doc.md", "the agent's take on the line\n");
+        tx.write(&other, "other.md", "rewritten by the agent, and left that way\n");
+    });
+    a.write("doc.md", "alice's very different take\n");
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "the stranger is what asked");
+    let copies: Vec<String> = a.files().into_iter().filter(|p| p.contains("(conflict — ")).collect();
+    assert_eq!(copies.len(), 1, "exactly one conflict copy, got {:?}", a.files());
+    assert!(copies[0].contains(&format!("(conflict — {}", AGENT)), "the id, as it stands: {}", copies[0]);
+    assert_eq!(a.events.of(EV_CONFLICT)[0]["by"], AGENT);
+    assert_eq!(a.read("other.md").as_deref(), Some("rewritten by the agent, and left that way\n"));
+
+    // `other.md` goes on carrying the id, cycle after cycle.
+    assert_eq!(manifest_of(&be).files[&other].by, AGENT);
+    for _ in 0..3 {
+        a.cycle().await;
+    }
+    assert_eq!(be.lock().unwrap().meta_calls, before + 1, "not once a cycle");
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().meta_calls, before + 2, "once a gap at the very most");
+
+    // The worker is updated — or the agent is added — and the next ask
+    // brings the name with it.
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    worker_writes(&be, |tx| tx.publish("launch", &other));
+    tokio::time::sleep(DIRECTORY_MIN_GAP + Duration::from_secs(1)).await;
+    a.cycle().await;
+    assert_eq!(a.page("launch").unwrap().by, "Grok bot");
+    assert_eq!(a.status().me, "Alice", "and this Mac is still itself");
+}
+
+/* ----- the public map rides the same write ----- */
+
+/// A page follows its document. The worker re-points the path it snapshots
+/// in the very write that moves the file (`keepPublic`), so the map a Mac
+/// reads is already true and `fold_public` finds nothing to add.
+#[tokio::test]
+async fn a_page_follows_a_document_the_worker_moved_and_no_mac_has_to_say_so() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "# doc\n");
+    a.publish("doc.md", PublicKind::File, Some("page1")).unwrap();
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    worker_writes(&be, |tx| {
+        tx.mv(&fid, "sub/renamed.md");
+        tx.keep_public();
+    });
+    let entry = public_of(&be)["page1"].clone();
+    assert_eq!(
+        (entry.file.as_deref(), entry.path.as_str(), entry.by.as_str()),
+        (Some(fid.as_str()), "sub/renamed.md", "Alice"),
+        "the same page, still its publisher's, at the new path"
+    );
+
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        let page = d.page("page1").unwrap();
+        assert_eq!(page.path, "sub/renamed.md");
+        assert!(page.alive);
+    }
+    assert_eq!(public_of(&be)["page1"], entry);
+}
+
+/// A published folder follows its folder: every file inside moves in the one
+/// write, and the folder's entry with them.
+#[tokio::test]
+async fn a_folder_page_follows_a_folder_the_worker_moved() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("Projects/Roadmap/a.md", "# a\n");
+    a.write("Projects/Roadmap/b.md", "# b\n");
+    a.write("Other.md", "# other\n");
+    a.publish_folder("Projects/Roadmap", "roadmap", "Roadmap", "What we're building").unwrap();
+    a.cycle().await;
+    b.cycle().await;
+
+    let gets = be.lock().unwrap().blob_gets;
+    worker_writes(&be, |tx| tx.move_folder("Projects/Roadmap", "Projects/Plans"));
+    let entry = public_of(&be)["roadmap"].clone();
+    assert_eq!((entry.kind, entry.path.as_str()), (PublicKind::Dir, "Projects/Plans"));
+    assert_eq!(entry.title.as_deref(), Some("Roadmap"));
+
+    for d in [&mut a, &mut b] {
+        applies_quietly(d, &be).await;
+        let page = d.page("roadmap").unwrap();
+        assert_eq!(page.path, "Projects/Plans");
+        assert!(page.alive);
+        assert_eq!(d.files(), vec!["Other.md", "Projects/Plans/a.md", "Projects/Plans/b.md"]);
+    }
+    assert_eq!(be.lock().unwrap().blob_gets, gets);
+    assert_eq!(public_of(&be)["roadmap"], entry);
+}
+
+/// What an agent publishes is a page like any other, under the agent's name
+/// in the Published list. It outlives its document — dead, not gone — and
+/// comes back when the worker writes a document at that path again.
+#[tokio::test]
+async fn a_page_the_agent_published_is_named_after_it_and_outlives_its_document() {
+    let be = fake_worker();
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    worker_writes(&be, |tx| tx.publish("launch", &fid));
+    applies_quietly(&mut a, &be).await;
+    let page = a.page("launch").unwrap();
+    assert_eq!((page.path.as_str(), page.by.as_str(), page.alive), ("doc.md", "Grok bot", true));
+
+    worker_writes(&be, |tx| tx.remove(&fid));
+    applies_quietly(&mut a, &be).await;
+    assert!(a.read("doc.md").is_none());
+    let page = a.page("launch").unwrap();
+    assert_eq!((page.path.as_str(), page.alive), ("doc.md", false));
+    assert_eq!(public_of(&be)["launch"].file.as_deref(), Some(fid.as_str()));
+
+    let reborn = worker_writes(&be, |tx| {
+        let fid = tx.create("doc.md", "# reborn\n");
+        tx.keep_public();
+        fid
+    });
+    assert_eq!(public_of(&be)["launch"].file.as_deref(), Some(reborn.as_str()));
+    applies_quietly(&mut a, &be).await;
+    assert_eq!(a.read("doc.md").as_deref(), Some("# reborn\n"));
+    assert!(a.page("launch").unwrap().alive);
+    assert_eq!(public_of(&be)["launch"].by, AGENT, "the page is still its publisher's");
+}
+
+/// An html-only document that gains its markdown: the page becomes the
+/// markdown's in the write that creates it, and a Mac takes that as read.
+#[tokio::test]
+async fn a_page_moves_to_the_markdown_an_html_only_document_gains() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("deck.html", "<h1>Deck</h1>\n");
+    a.publish("deck.html", PublicKind::File, Some("deck")).unwrap();
+    a.cycle().await;
+    let html = fid_at(&be, "deck.html");
+    assert_eq!(public_of(&be)["deck"].file.as_deref(), Some(html.as_str()));
+
+    let md = worker_writes(&be, |tx| {
+        let md = tx.create("deck.md", "# Deck\n");
+        tx.repoint_pages(&html, &md);
+        md
+    });
+    applies_quietly(&mut a, &be).await;
+    assert_eq!(a.files(), vec!["deck.html", "deck.md"]);
+    let page = a.page("deck").unwrap();
+    assert_eq!((page.path.as_str(), page.alive), ("deck.md", true));
+    assert_eq!(public_of(&be)["deck"].file.as_deref(), Some(md.as_str()));
+}
+
+/* ----- the race for the manifest ----- */
+
+/// The worker's write lands between a Mac's fetch and its put. The Mac loses
+/// the compare-and-swap, starts again from what the worker wrote, and both
+/// changes stand — the race two Macs run, with the same ending.
+#[tokio::test]
+async fn a_worker_write_that_wins_the_race_is_kept_and_so_is_the_macs() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("mine.md", "alice v1\n");
+    a.write("theirs.md", "v1\n");
+    a.cycle().await;
+    let mine = fid_at(&be, "mine.md");
+    let theirs = fid_at(&be, "theirs.md");
+    let seq = manifest_of(&be).seq;
+
+    let (created, raced) = worker_would_write(&be, |tx| {
+        tx.write(&theirs, "theirs.md", "v2, by the agent\n");
+        tx.create("new.md", "also the agent's\n")
+    });
+    let calls = {
+        let mut b = be.lock().unwrap();
+        b.racer = raced;
+        b.put_manifest_calls
+    };
+    a.write("mine.md", "alice v2 — longer\n");
+    a.cycle().await;
+
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls + 2, "the first put lost, the second landed");
+    let m = manifest_of(&be);
+    assert_eq!(m.seq, seq + 2, "the worker's write, then Alice's on top of it");
+    assert_eq!((m.files[&theirs].rev, m.files[&theirs].by.as_str()), (2, AGENT));
+    assert_eq!((m.files[&created].rev, m.files[&created].by.as_str()), (1, AGENT));
+    assert_eq!((m.files[&mine].rev, m.files[&mine].by.as_str()), (2, "Alice"));
+    assert_eq!(a.read("theirs.md").as_deref(), Some("v2, by the agent\n"));
+    assert_eq!(a.read("new.md").as_deref(), Some("also the agent's\n"));
+    assert_eq!(a.read("mine.md").as_deref(), Some("alice v2 — longer\n"));
+}
+
+/// The same race on one document: what the Mac was about to push and what
+/// the worker landed first meet on the retry, and merge.
+#[tokio::test]
+async fn a_worker_write_that_wins_the_race_on_the_same_document_is_merged_on_the_retry() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "line one\nline two\nline three\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    let (_, raced) =
+        worker_would_write(&be, |tx| tx.write(&fid, "doc.md", "line one — AGENT\nline two\nline three\n"));
+    be.lock().unwrap().racer = raced;
+    a.write("doc.md", "line one\nline two\nline three — ALICE\n");
+    a.cycle().await;
+
+    let merged = "line one — AGENT\nline two\nline three — ALICE\n";
+    assert_eq!(a.read("doc.md").as_deref(), Some(merged));
+    assert_eq!(a.files().len(), 1, "no conflict copy");
+    let f = manifest_of(&be).files[&fid].clone();
+    assert_eq!((f.rev, f.by.as_str()), (3, "Alice"));
+    assert_eq!(f.hash, hash16(merged.as_bytes()));
+    b.cycle().await;
+    assert_eq!(b.read("doc.md").as_deref(), Some(merged));
 }

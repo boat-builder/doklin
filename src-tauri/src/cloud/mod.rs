@@ -60,8 +60,8 @@ use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AppEvents, CloudStatus, Credentials, Events, Invited, People, Probe, Redeemed,
-    StatusTable,
+    emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, Events, Invited, People,
+    Probe, Redeemed, StatusTable,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -551,6 +551,132 @@ fn revoked(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
     match r {
         Ok(()) | Err(remote::RemoteError::NotFound) => Ok(()),
         Err(e) => Err(describe_people(domain, e)),
+    }
+}
+
+/* ---------- Agents (docs/cloud.md §8.3) ---------- */
+
+/// A fresh login code and the line that carries it. The code is minted and
+/// hashed here, exactly as an invite's is: only its sha256 goes up, so a
+/// worker log, a database backup and the request body are all incapable of
+/// logging anything in.
+fn mint_agent_login(endpoint: &str) -> (AgentLogin, String) {
+    let canonical = invite::random_code();
+    let code = invite::format_agent_code(&canonical);
+    let login = AgentLogin {
+        line: invite::agent_login_line(endpoint, &code),
+        code,
+        expires_at: invite::agent_code_expires_at(scan::now_ms()),
+    };
+    (login, invite::code_hash(&canonical))
+}
+
+/// A failed agent call in words. As with people, the arm that earns its
+/// place is `NotFound`: a worker that predates agents has no such route.
+fn describe_agents(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old for agents — update it from the Cloud panel", domain)
+        }
+        other => flows::describe(domain, other.into()),
+    }
+}
+
+/// The permissions as the worker spells them, with nothing it would refuse.
+fn clean_scopes(scopes: Vec<String>) -> Vec<String> {
+    const KNOWN: [&str; 4] = ["read", "comment", "edit", "publish"];
+    KNOWN.iter().filter(|k| **k == "read" || scopes.iter().any(|s| s == *k)).map(|k| k.to_string()).collect()
+}
+
+/// Every agent on this workspace (owner only): what each may do, the
+/// machines it is logged in on, and whether a login code is still waiting.
+#[tauri::command]
+pub(crate) async fn cloud_agents(app: AppHandle, root: String) -> Result<Vec<remote::AgentRecord>, String> {
+    let call = workspace_call(&app, &root)?;
+    call.remote.list_agents().await.map_err(|e| describe_agents(&call.domain, e))
+}
+
+/// Add an agent (owner only) and mint the code its first machine logs in
+/// with. The line comes back once, in the answer, and nothing stores it.
+#[tauri::command]
+pub(crate) async fn cloud_agent_add(
+    app: AppHandle,
+    root: String,
+    name: String,
+    scopes: Vec<String>,
+) -> Result<AgentAdded, String> {
+    let call = workspace_call(&app, &root)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("give the agent a name — it is what its comments and changes are signed with".into());
+    }
+    let (login, hash) = mint_agent_login(&call.endpoint);
+    let agent = call
+        .remote
+        .create_agent(name, &clean_scopes(scopes), &hash, login.expires_at)
+        .await
+        .map_err(|e| describe_agents(&call.domain, e))?;
+    Ok(AgentAdded { agent, login })
+}
+
+/// A new login code for an agent that exists — for another machine, or
+/// because the first one ran out. Whatever code it had stops working.
+#[tauri::command]
+pub(crate) async fn cloud_agent_code(app: AppHandle, root: String, agent_id: String) -> Result<AgentLogin, String> {
+    let call = workspace_call(&app, &root)?;
+    let (login, hash) = mint_agent_login(&call.endpoint);
+    call.remote
+        .new_agent_code(&agent_id, &hash, login.expires_at)
+        .await
+        .map_err(|e| describe_agents(&call.domain, e))?;
+    Ok(login)
+}
+
+/// Rename an agent, or change what it may do. The agent finds out on its
+/// next request: its permissions are read off its row every time.
+#[tauri::command]
+pub(crate) async fn cloud_agent_update(
+    app: AppHandle,
+    root: String,
+    agent_id: String,
+    name: Option<String>,
+    scopes: Option<Vec<String>>,
+) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let scopes = scopes.map(clean_scopes);
+    call.remote
+        .update_agent(&agent_id, name, scopes.as_deref())
+        .await
+        .map_err(|e| describe_agents(&call.domain, e))
+}
+
+/// Remove an agent: its row, its pending code and every machine it is
+/// logged in on. Each of them is refused on its very next request.
+#[tauri::command]
+pub(crate) async fn cloud_agent_remove(app: AppHandle, root: String, agent_id: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    agent_gone(&call.domain, call.remote.delete_agent(&agent_id).await)
+}
+
+/// Log one machine out, leaving the agent and its other machines alone.
+#[tauri::command]
+pub(crate) async fn cloud_agent_revoke_machine(
+    app: AppHandle,
+    root: String,
+    agent_id: String,
+    token_id: String,
+) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    agent_gone(&call.domain, call.remote.delete_agent_machine(&agent_id, &token_id).await)
+}
+
+/// A removal's answer, where `NotFound` is success — the row is gone, which
+/// is what was asked for (see `revoked`).
+fn agent_gone(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
+    match r {
+        Ok(()) | Err(remote::RemoteError::NotFound) => Ok(()),
+        Err(e) => Err(describe_agents(domain, e)),
     }
 }
 

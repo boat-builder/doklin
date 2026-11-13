@@ -5529,6 +5529,34 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-x: auto;
 }
 
+/* An agent's login line: a whole command, so it wraps instead of spacing out. */
+.cloud-code.cloud-code--line {
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* What an agent may do: one ticked line per permission. */
+.cloud-scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cloud-scope {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+
+.cloud-scope strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
 .cloud-copy-row {
   display: flex;
   gap: 6px;

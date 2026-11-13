@@ -127,6 +127,72 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // Agents and the credentials they hold (docs/cloud.md §8.3) — the same
+    // three lifetimes as people, in tables of their own: an agent is not a
+    // member (no email, permissions a member does not have, and a token that
+    // is only answered on the document API). Both secrets are stored as their
+    // sha256, exactly as a person's are.
+    //
+    // `scopes` is the permissions, space-separated ("read comment edit"):
+    // four fixed words do not earn a table. `host` is what the machine that
+    // logged in calls itself — a label for the People view, never authority.
+    to: 5,
+    tables: ["agent_tokens", "agent_codes", "agents"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS agents (
+         id           TEXT PRIMARY KEY,         -- a-xxxxxxxx
+         name         TEXT NOT NULL,
+         scopes       TEXT NOT NULL,            -- 'read comment edit publish', any subset holding 'read'
+         created_at   INTEGER NOT NULL,
+         last_used_at INTEGER,                  -- moved by a request, at most once an hour
+         disabled     INTEGER NOT NULL DEFAULT 0
+       )`,
+      `CREATE TABLE IF NOT EXISTS agent_codes (
+         hash       TEXT PRIMARY KEY,           -- sha256(code) — never the plaintext
+         id         TEXT NOT NULL,              -- c-xxxxxxxx
+         agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS agent_codes_by_agent ON agent_codes(agent_id)`,
+      `CREATE TABLE IF NOT EXISTS agent_tokens (
+         hash       TEXT PRIMARY KEY,           -- sha256(token) — the auth lookup
+         id         TEXT NOT NULL,              -- t-xxxxxxxx, what revocation names
+         agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         host       TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS agent_tokens_by_agent ON agent_tokens(agent_id)`,
+    ],
+  },
+  {
+    // The search mirror (docs/cloud.md §8.5): one row per document holding
+    // its text, lower-cased, so "which documents contain this" is one scan in
+    // the database instead of a blob read per document. Keyed by file id, so
+    // a move or a rename costs it nothing.
+    //
+    // `search_state` is one row: the manifest etag the mirror was last whole
+    // at, and `held` — a JSON map of file id to the content hashes each row
+    // was read from. Finding what is stale is then one row read and a diff
+    // against the manifest, not a scan of every row.
+    //
+    // Derived data, all of it: a wipe empties it and the next search fills
+    // it again.
+    to: 6,
+    tables: ["search_text", "search_state"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS search_text (
+         fid    TEXT PRIMARY KEY,               -- the document's markdown file, or its html when it has no markdown
+         folded TEXT                            -- lower-cased text, then comment bodies; NULL when too large to hold
+       )`,
+      `CREATE TABLE IF NOT EXISTS search_state (
+         key  TEXT PRIMARY KEY,                 -- 'mirror'
+         etag TEXT NOT NULL,                    -- the manifest etag the mirror was last whole at ('' = never)
+         held TEXT NOT NULL                     -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */

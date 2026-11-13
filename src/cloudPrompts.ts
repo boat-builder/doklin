@@ -25,6 +25,13 @@ export const WORKER_BUNDLE_URL =
 /** scripts/doklin-cloud-update.sh, attached to every release beside the bundle. */
 export const WORKER_UPDATE_SCRIPT_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh";
+/** scripts/install-doklin.sh, attached to every release beside the `doklin`
+ *  binaries it fetches (docs/cloud.md §8.6). */
+export const CLI_INSTALL_SCRIPT_URL =
+  "https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh";
+/** The one line that puts the `doklin` command on an agent's machine — what
+ *  the agent login card hands out above the login line itself. */
+export const CLI_INSTALL_LINE = `curl -fsSL ${CLI_INSTALL_SCRIPT_URL} | sh`;
 export const REPO_URL = "https://github.com/boat-builder/doklin";
 
 /** Where a cloud lives: a domain of the user's own, or a free workers.dev address. */

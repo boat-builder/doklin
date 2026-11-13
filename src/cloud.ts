@@ -216,6 +216,31 @@ export type CloudPeople = {
   devices: CloudDevice[];
 };
 
+/** What an agent may do (docs/cloud.md §8.3). `read` is always held. */
+export type AgentScope = "read" | "comment" | "edit" | "publish";
+
+/** One machine an agent is logged in on, by what the machine calls itself. */
+export type CloudAgentMachine = { id: string; host: string; createdAt: number };
+
+/** An agent: an identity that is not a person, added by the owner. Never a
+ *  credential — `code` says a login code is waiting, not what it is. */
+export type CloudAgent = {
+  id: string;
+  name: string;
+  scopes: AgentScope[];
+  createdAt: number;
+  /** When it last made a request, to the hour. Null until it has. */
+  lastUsedAt: number | null;
+  machines: CloudAgentMachine[];
+  code: { id: string; createdAt: number; expiresAt: number } | null;
+};
+
+/** A freshly minted login code and the line that carries it — the one moment
+ *  the code exists in the clear. Show it once; nothing can produce it again. */
+export type CloudAgentLogin = { line: string; code: string; expiresAt: number };
+
+export type CloudAgentAdded = { agent: CloudAgent; login: CloudAgentLogin };
+
 export type CloudAppliedEvent = { root: string; paths: string[] };
 /** `by` is a name, not an id: the engine resolves it, because the conflict
  *  copy it names is a real file on disk and had to be called something. */
@@ -281,6 +306,30 @@ export const cloudRevokeDevice = (root: string, tokenId: string) =>
 /** Withdraw a code nobody has traded in yet. The person's row stays. */
 export const cloudWithdrawInvite = (root: string, inviteId: string) =>
   invoke<void>("cloud_withdraw_invite", { root, inviteId });
+
+/** Every agent on this workspace — the owner's to see. */
+export const cloudAgents = (root: string) => invoke<CloudAgent[]>("cloud_agents", { root });
+
+/** Add an agent and mint the line its first machine logs in with. */
+export const cloudAgentAdd = (root: string, name: string, scopes: AgentScope[]) =>
+  invoke<CloudAgentAdded>("cloud_agent_add", { root, name, scopes });
+
+/** A new login code for an agent — for another machine, or after the last
+ *  one ran out. Whatever code it had stops working. */
+export const cloudAgentCode = (root: string, agentId: string) =>
+  invoke<CloudAgentLogin>("cloud_agent_code", { root, agentId });
+
+/** Rename an agent or change what it may do; it finds out on its next request. */
+export const cloudAgentUpdate = (root: string, agentId: string, name: string | null, scopes: AgentScope[] | null) =>
+  invoke<void>("cloud_agent_update", { root, agentId, name, scopes });
+
+/** Remove an agent and log every one of its machines out. */
+export const cloudAgentRemove = (root: string, agentId: string) =>
+  invoke<void>("cloud_agent_remove", { root, agentId });
+
+/** Log one machine out, leaving the agent and its other machines alone. */
+export const cloudAgentRevokeMachine = (root: string, agentId: string, tokenId: string) =>
+  invoke<void>("cloud_agent_revoke_machine", { root, agentId, tokenId });
 
 /** Ask the domain's worker what it is again ("Check again" after an update);
  *  the fresh version arrives in the next status. */

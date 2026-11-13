@@ -100,6 +100,28 @@
         },
         // What the owner's own invite mints, in the clear, once.
         mintedCode: "dkln-9F4TR-2QWXM-7NBKD-5HGVZ",
+        // The domain's agents (docs/cloud.md §8.3), kept as real state like
+        // the people below: adding one adds a row, a new login code replaces
+        // the pending one, logging a machine out takes one away. `error`, when
+        // a string, is what every agent command rejects with — a worker that
+        // predates agents answers that way.
+        agents: {
+          list: [
+            {
+              id: "a-11111111",
+              name: "Review bot",
+              scopes: ["read", "comment"],
+              createdAt: Date.now() - 2 * 86400000,
+              lastUsedAt: Date.now() - 2 * 3600000,
+              machines: [{ id: "t-box-1", host: "ci-runner-7", createdAt: Date.now() - 86400000 }],
+              code: null,
+            },
+          ],
+          // The codes it mints, in the clear, in order.
+          codes: ["dkla-7QK2M-9XVR4-8TBHN-3WGYD", "dkla-2B4D6-8FHKM-PRTVX-Z3579"],
+          seq: 0,
+          error: null,
+        },
         // Who the scripted domain says is on the workspace (docs/cloud.md
         // §7.2). The stub keeps this as real state — an invite adds a row, a
         // revoke takes one away — so a drive watches the list move rather
@@ -533,6 +555,62 @@
               record(cmd, args);
               const p = window.__cloud.people;
               p.invites = p.invites.filter((i) => i.id !== args.inviteId);
+              return Promise.resolve(null);
+            }
+            case "cloud_agents": {
+              record(cmd, args);
+              const a = window.__cloud.agents;
+              if (typeof a.error === "string") return Promise.reject(a.error);
+              return Promise.resolve(JSON.parse(JSON.stringify(a.list)));
+            }
+            case "cloud_agent_add":
+            case "cloud_agent_code": {
+              record(cmd, args);
+              const a = window.__cloud.agents;
+              if (typeof a.error === "string") return Promise.reject(a.error);
+              const n = (a.seq += 1);
+              const code = a.codes[(n - 1) % a.codes.length];
+              const endpoint = window.__cloud.statuses.find((s) => s.root === args.root)?.endpoint ?? "";
+              const expiresAt = Date.now() + 60 * 60000;
+              const login = { line: `doklin login ${endpoint} ${code}`, code, expiresAt };
+              // One pending code per agent: a new one replaces it.
+              const pending = { id: `c-new-${n}`, createdAt: Date.now(), expiresAt };
+              if (cmd === "cloud_agent_code") {
+                a.list = a.list.map((x) => (x.id === args.agentId ? { ...x, code: pending } : x));
+                return Promise.resolve(login);
+              }
+              const agent = {
+                id: `a-new-${n}`,
+                name: args.name,
+                scopes: args.scopes,
+                createdAt: Date.now(),
+                lastUsedAt: null,
+                machines: [],
+                code: pending,
+              };
+              a.list = [...a.list, agent];
+              return Promise.resolve({ agent: JSON.parse(JSON.stringify(agent)), login });
+            }
+            case "cloud_agent_update": {
+              record(cmd, args);
+              const a = window.__cloud.agents;
+              a.list = a.list.map((x) =>
+                x.id === args.agentId ? { ...x, name: args.name ?? x.name, scopes: args.scopes ?? x.scopes } : x,
+              );
+              return Promise.resolve(null);
+            }
+            case "cloud_agent_remove": {
+              record(cmd, args);
+              const a = window.__cloud.agents;
+              a.list = a.list.filter((x) => x.id !== args.agentId);
+              return Promise.resolve(null);
+            }
+            case "cloud_agent_revoke_machine": {
+              record(cmd, args);
+              const a = window.__cloud.agents;
+              a.list = a.list.map((x) =>
+                x.id === args.agentId ? { ...x, machines: x.machines.filter((m) => m.id !== args.tokenId) } : x,
+              );
               return Promise.resolve(null);
             }
             case "cloud_token": {

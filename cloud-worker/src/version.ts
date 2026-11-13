@@ -70,7 +70,18 @@
 //       tinted columns with their stage glyphs, progress, card excerpts and
 //       dates. No API change: the bump is how the new look reaches a deployed
 //       domain, through the update badge.
-export const WORKER_VERSION = 9;
+//  10 = agents (docs/cloud.md §8.3–8.5): identities that are not people,
+//       added by the owner with a set of permissions, logged in by a one-time
+//       code, and answered on the document API under /api/agent and nowhere
+//       else. There the worker reads and changes the workspace itself — it
+//       writes blobs and compare-and-swaps the manifest the way a Mac does —
+//       so an agent with no copy of the folder can read, write, move and
+//       remove documents, comment on them, publish them and search them. A
+//       document is one name with a markdown and an html version; its sidecar
+//       never crosses the wire. `/api/meta`'s directory lists agents too, so
+//       a Mac can name the `a-` id on what an agent changed. D1 gains the
+//       agents' tables and the search mirror.
+export const WORKER_VERSION = 10;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -85,6 +96,11 @@ export const WORKER_FEATURES: readonly string[] = [
   "members",
   "presence",
   "leases",
+  "agents",
+  "agent-docs",
+  "agent-pages",
+  "agent-comments",
+  "agent-search",
 ];
 // "members" is a promise the app can act on: this worker mints and resolves
 // per-person tokens, so the People panel has something to talk to.
@@ -95,7 +111,13 @@ export const WORKER_FEATURES: readonly string[] = [
 // "leases" is the promise that a beat's path claims the document and that the
 // poll says who holds what. Without it the app opens every document as it
 // always has and shows no lock — which is exactly what an older worker can
-// honestly offer. A bare
+// honestly offer.
+// The five "agent" names are what the `doklin` command line checks before it
+// offers a command (docs/cloud.md §8.6): "agents" is the login and the People
+// view's Agents section; "agent-docs" reading and changing documents;
+// "agent-pages" publishing; "agent-comments" threads; "agent-search" the
+// mirror and the search over it. They landed together, and stay separate
+// names so a later worker can grow one without the others. A bare
 // "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
 // reports it more precisely than a name in this list could.
 

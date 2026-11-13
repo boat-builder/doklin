@@ -12,7 +12,11 @@
 // opening the downloaded folder, the invite door: one paste filling both
 // boxes, a refused code spending nothing, a download on the member's own
 // credential, the People view: adopting an identity, inviting somebody, the
-// code shown once, and the three ways access goes away — and publishing:
+// code shown once, and the three ways access goes away, and under the people
+// its Agents section: adding an agent with publishing off until it is ticked,
+// the two lines to hand over shown once, a new login code, changing what it
+// may do, logging one machine out, removing it, and a worker too old for
+// agents saying so without taking the people down — and publishing:
 // the Live chip's not-connected
 // door, publishing a note at a random then a chosen address, the chip's five
 // states and the tab's live glyph, the sidebar's live dots, the folder
@@ -1062,6 +1066,140 @@ step(
     (await tid("person-m-owner").count()) === 1,
 );
 
+/* 24c — Agents, under the people (docs/cloud.md §8.3): the owner adds a bot,
+   ticks what it may do — publishing is off until ticked, reading is not a
+   choice — and is handed two lines, once: the one that installs `doklin` and
+   the one that logs it in */
+const INSTALL_LINE = "curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh";
+await poll(async () => (await tid("agent-list").count()) === 1);
+const reviewBot = await tid("agent-a-11111111").textContent();
+await tid("agent-open").click();
+await poll(async () => (await tid("agent-form").count()) === 1);
+const boxes = async () => ({
+  read: await tid("agent-scope-read").isChecked(),
+  comment: await tid("agent-scope-comment").isChecked(),
+  edit: await tid("agent-scope-edit").isChecked(),
+  publish: await tid("agent-scope-publish").isChecked(),
+});
+const defaults = await boxes();
+const readFixed = await tid("agent-scope-read").isDisabled();
+const saveNeedsName = await tid("agent-save").isDisabled();
+await tid("agent-name").fill("Grok bot");
+await tid("agent-scope-comment").uncheck();
+await tid("agent-save").click();
+await poll(async () => (await tid("agent-login").count()) === 1);
+const addCall = await lastCall("cloud_agent_add");
+const lines = [
+  (await tid("agent-install-line").textContent()).trim(),
+  (await tid("agent-login-line").textContent()).trim(),
+].join("\n");
+const loginCard = await tid("agent-login").textContent();
+await tid("copy-agent-lines").click();
+const copiedBoth = await poll(async () => await page.evaluate(() => navigator.clipboard.readText()));
+await tid("copy-agent-line").click();
+const copiedLogin = await poll(async () => {
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  return text.startsWith("doklin login") ? text : null;
+});
+const grokRow = await tid("agent-a-new-1").textContent();
+await page.screenshot({ path: SHOTS + "cloud-10b-agents.png" });
+const LOGIN_1 = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
+step(
+  "Agents: the list names what each may do and where it is logged in; a new one starts without publishing, reading fixed; the two lines — install, then login — are shown once and copy together or the login alone",
+  reviewBot.includes("Review bot") &&
+    reviewBot.includes("read · comment") &&
+    !reviewBot.includes("can publish") &&
+    reviewBot.includes("Logged in on 1 machine") &&
+    reviewBot.includes("ci-runner-7") &&
+    JSON.stringify(defaults) === JSON.stringify({ read: true, comment: true, edit: true, publish: false }) &&
+    readFixed &&
+    saveNeedsName &&
+    addCall.args.name === "Grok bot" &&
+    JSON.stringify(addCall.args.scopes) === JSON.stringify(["read", "edit"]) &&
+    lines === `${INSTALL_LINE}\n${LOGIN_1}` &&
+    loginCard.includes("Log Grok bot in") &&
+    /stops working in\s+(1 h|59 min)\./.test(loginCard) &&
+    copiedBoth === `${INSTALL_LINE}\n${LOGIN_1}` &&
+    copiedLogin === LOGIN_1 &&
+    grokRow.includes("Not logged in anywhere") &&
+    grokRow.includes("a login code is waiting") &&
+    (await tid("agent-form").count()) === 0,
+  lines.split("\n")[1],
+);
+
+/* 24d — and afterwards: the code is gone from the screen for good, a new one
+   replaces it, the boxes can be changed, one machine can be logged out, and
+   removing the agent takes its row */
+await tid("agent-login-done").click();
+const lineGone = (await tid("agent-login").count()) === 0;
+await tid("agent-code-a-11111111").click();
+await poll(async () => (await tid("agent-login").count()) === 1);
+const secondLines = [
+  (await tid("agent-install-line").textContent()).trim(),
+  (await tid("agent-login-line").textContent()).trim(),
+].join("\n");
+const codeCall = await lastCall("cloud_agent_code");
+await tid("agent-login-done").click();
+
+await tid("agent-edit-a-new-1").click();
+await poll(async () => (await tid("agent-form").count()) === 1);
+const editBoxes = await boxes();
+await tid("agent-scope-publish").check();
+await tid("agent-save").click();
+await poll(async () => (await tid("agent-a-new-1").textContent()).includes("can publish"));
+const updateCall = await lastCall("cloud_agent_update");
+const noLineOnEdit = (await tid("agent-login").count()) === 0;
+
+await tid("agent-logout-t-box-1").click();
+await tid("agent-logout-yes-t-box-1").click();
+await poll(async () => (await tid("agent-machine-t-box-1").count()) === 0);
+const logoutCall = await lastCall("cloud_agent_revoke_machine");
+const reviewBotKept = (await tid("agent-a-11111111").textContent()).includes("Not logged in anywhere");
+
+await tid("agent-remove-a-new-1").click();
+await tid("agent-remove-yes-a-new-1").click();
+await poll(async () => (await tid("agent-a-new-1").count()) === 0);
+step(
+  "Agents: Done takes the line off the screen; a new login code is another line for the same agent; ticking Publish says so on its row; logging a machine out leaves the agent, removing the agent takes its row — and the people above are untouched",
+  lineGone &&
+    codeCall.args.agentId === "a-11111111" &&
+    secondLines === `${INSTALL_LINE}\ndoklin login https://notes.example.com dkla-2B4D6-8FHKM-PRTVX-Z3579` &&
+    JSON.stringify(editBoxes) === JSON.stringify({ read: true, comment: false, edit: true, publish: false }) &&
+    updateCall.args.agentId === "a-new-1" &&
+    JSON.stringify([...updateCall.args.scopes].sort()) === JSON.stringify(["edit", "publish", "read"]) &&
+    noLineOnEdit &&
+    logoutCall.args.agentId === "a-11111111" &&
+    logoutCall.args.tokenId === "t-box-1" &&
+    reviewBotKept &&
+    (await lastCall("cloud_agent_remove")).args.agentId === "a-new-1" &&
+    (await tid("agent-a-11111111").count()) === 1 &&
+    (await tid("person-m-owner").count()) === 1 &&
+    (await tid("person-m-bob").count()) === 1,
+);
+
+/* 24e — a worker that predates agents: the section says so in a line, and
+   the people above it are still there to manage */
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 1);
+const TOO_OLD = "notes.example.com runs a worker too old for agents \u2014 update it from the Cloud panel";
+await page.evaluate((error) => {
+  window.__cloud.agents.error = error;
+}, TOO_OLD);
+await tid("people-open").click();
+await poll(async () => (await tid("agents-unavailable").count()) === 1);
+await poll(async () => (await tid("agents-unavailable").textContent()).includes("too old for agents"));
+step(
+  "Agents (an older worker): one line saying the worker is too old, no list and no door — and the people are still listed",
+  (await tid("agents-unavailable").textContent()).trim() === TOO_OLD &&
+    (await tid("agent-list").count()) === 0 &&
+    (await tid("agent-open").count()) === 0 &&
+    (await tid("person-m-bob").count()) === 1 &&
+    (await tid("invite-open").count()) === 1,
+);
+await page.evaluate(() => {
+  window.__cloud.agents.error = null;
+});
+
 /* 25 — the same view on a Mac that joined with an invite: the list is the
    owner's to see, so a member is shown their own half instead of an error */
 await page.keyboard.press("Escape"); // back to the panel's main view
@@ -1075,6 +1213,9 @@ step(
   memberCard.includes("invite") &&
     (await tid("invite-open").count()) === 0 &&
     (await tid("people-list").count()) === 0 &&
+    (await tid("agent-list").count()) === 0 &&
+    (await tid("agent-open").count()) === 0 &&
+    (await tid("agents-unavailable").count()) === 0 &&
     (await dialog("People").locator(".modal-error").count()) === 0,
 );
 await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });

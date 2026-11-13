@@ -4,7 +4,10 @@
 // scripts/doklin-cloud-update.sh, and the "no step the agent has to invent"
 // check that docs/cloud.md §7.4 asks for. The script is held to the same
 // naming rule and the same compatibility date as the prompts, by running its
-// `--names` mode and reading the worker's source. Run:
+// `--names` mode and reading the worker's source. The other line the app
+// hands out — the one that installs the `doklin` command — is held to the
+// release that serves it, and scripts/install-doklin.sh is run against a
+// release made up on the spot. Run:
 //
 //   node verify-harness/cloudprompts.test.mjs
 //
@@ -12,7 +15,9 @@
 import { build } from "vite";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import assert from "node:assert";
 
@@ -28,6 +33,8 @@ const out = await build({
 });
 const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
 const {
+  CLI_INSTALL_LINE,
+  CLI_INSTALL_SCRIPT_URL,
   WORKER_BUNDLE_URL,
   WORKER_UPDATE_SCRIPT_URL,
   buildSetupPrompt,
@@ -316,6 +323,173 @@ eq(
   ok(/isn't empty, STOP/.test(p), "a non-empty bucket stops the agent");
   ok(p.includes("TORN DOWN: https://notes.example.com"));
   ok(!p.includes("curl -fsSL"), "nothing to download for a teardown");
+}
+
+/* ---------- the `doklin` installer ---------- */
+//
+// The agent login card hands out one line that installs the command
+// (docs/cloud.md §8.6). That line, the script it fetches and the release
+// that attaches the script and its binaries have to agree on every name —
+// and the script has to refuse a download that is not what the release says
+// it is. It is run here against a release made up in a temp folder: a `curl`
+// and a `uname` of the test's own stand first on PATH, so nothing is fetched
+// and every platform can be asked for from this one.
+{
+  const script = path.join(repoRoot, "scripts", "install-doklin.sh");
+  const text = fs.readFileSync(script, "utf8");
+  const release = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+  const ASSETS = ["doklin-linux-x64", "doklin-linux-arm64", "doklin-macos-arm64"];
+
+  eq(path.basename(CLI_INSTALL_SCRIPT_URL), "install-doklin.sh", "the release asset's name");
+  eq(CLI_INSTALL_LINE, `curl -fsSL ${CLI_INSTALL_SCRIPT_URL} | sh`, "the line the card hands out");
+  ok(text.includes(CLI_INSTALL_LINE), "the script's own header shows that line");
+  ok(text.includes(`BASE="${path.dirname(CLI_INSTALL_SCRIPT_URL)}"`), "it fetches from the release it came from");
+  ok(release.includes("cp scripts/install-doklin.sh release-assets/install-doklin.sh"), "the release attaches it");
+  ok(release.includes(CLI_INSTALL_LINE), "the release notes carry the same line");
+  for (const asset of ASSETS) {
+    ok(text.includes(asset), `the script documents ${asset}`);
+    ok(new RegExp(`shasum -a 256 .*\\b${asset}\\b.* >> SHA256SUMS`).test(release), `the release checksums ${asset}`);
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "doklin-install-test-"));
+  try {
+    const rel = path.join(tmp, "release");
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(rel);
+    fs.mkdirSync(bin);
+    // A "binary" per platform, each saying which one it is.
+    const sums = [];
+    for (const asset of ASSETS) {
+      const body = `#!/bin/sh\necho "doklin 9.9.9 (${asset})"\n`;
+      fs.writeFileSync(path.join(rel, asset), body);
+      sums.push(`${createHash("sha256").update(body).digest("hex")}  ${asset}`);
+    }
+    // As the release writes it: the disk images first, the binaries after.
+    const writeSums = (lines) => fs.writeFileSync(path.join(rel, "SHA256SUMS"), `${"0".repeat(64)}  Doklin-macos-arm64.dmg\n${lines.join("\n")}\n`);
+    writeSums(sums);
+    // `curl -fsSL <url> -o <file>`: the file of that name out of the made-up release.
+    fs.writeFileSync(
+      path.join(bin, "curl"),
+      `#!/bin/sh\n[ "$1" = "-fsSL" ] && [ "$3" = "-o" ] || exit 2\ncase "$2" in "$FAKE_BASE"/*) ;; *) exit 22 ;; esac\ncp "$FAKE_RELEASE/\${2##*/}" "$4" 2>/dev/null || exit 22\n`,
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(path.join(bin, "uname"), `#!/bin/sh\ncase "$1" in -s) echo "$FAKE_OS" ;; -m) echo "$FAKE_ARCH" ;; esac\n`, { mode: 0o755 });
+
+    const install = (osName, arch, extra = {}) => {
+      const home = fs.mkdtempSync(path.join(tmp, "home-"));
+      const dir = path.join(home, "tools");
+      let stdout = "";
+      let stderr = "";
+      let status = 0;
+      try {
+        stdout = execFileSync("sh", [script], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            PATH: `${bin}:/usr/bin:/bin`,
+            HOME: home,
+            DOKLIN_INSTALL_DIR: dir,
+            FAKE_OS: osName,
+            FAKE_ARCH: arch,
+            FAKE_RELEASE: rel,
+            FAKE_BASE: path.dirname(CLI_INSTALL_SCRIPT_URL),
+            ...extra,
+          },
+        });
+      } catch (e) {
+        status = e.status;
+        stdout = e.stdout;
+        stderr = e.stderr;
+      }
+      const installed = path.join(dir, "doklin");
+      return { status, stdout, stderr, home, dir, installed, exists: fs.existsSync(installed) };
+    };
+
+    for (const [osName, arch, asset] of [
+      ["Linux", "x86_64", "doklin-linux-x64"],
+      ["Linux", "amd64", "doklin-linux-x64"],
+      ["Linux", "aarch64", "doklin-linux-arm64"],
+      ["Linux", "arm64", "doklin-linux-arm64"],
+      ["Darwin", "arm64", "doklin-macos-arm64"],
+    ]) {
+      const r = install(osName, arch);
+      eq(r.status, 0, `${osName} ${arch}: installs (${r.stderr})`);
+      ok(r.exists, `${osName} ${arch}: the command is where it was asked to go`);
+      eq(execFileSync(r.installed, ["--version"], { encoding: "utf8" }).trim(), `doklin 9.9.9 (${asset})`, `${osName} ${arch}: it is ${asset}`);
+      eq(fs.statSync(r.installed).mode & 0o777, 0o755, `${osName} ${arch}: and executable`);
+      eq(fs.readdirSync(r.dir).join(), "doklin", `${osName} ${arch}: nothing else is left beside it`);
+      ok(r.stdout.includes(`doklin 9.9.9 (${asset}) installed: ${r.installed}`), `${osName} ${arch}: says what it installed and where`);
+      ok(r.stdout.includes("is not on this shell's PATH"), `${osName} ${arch}: says so when that folder is not on PATH`);
+      ok(r.stdout.includes("doklin login <domain> <code>"), `${osName} ${arch}: and what to run next`);
+    }
+
+    // With no folder named: ~/.local/bin, when /usr/local/bin is not this
+    // user's to write. Where it is — a container's root — the script would
+    // put its made-up binary over a real one, so that machine skips this.
+    {
+      let open = true;
+      try {
+        fs.accessSync("/usr/local/bin", fs.constants.W_OK);
+      } catch {
+        open = false;
+      }
+      if (!open) {
+        const r = install("Linux", "x86_64", { DOKLIN_INSTALL_DIR: "" });
+        eq(r.status, 0, `the default folder: installs (${r.stderr})`);
+        ok(fs.existsSync(path.join(r.home, ".local", "bin", "doklin")), "the default folder is ~/.local/bin");
+      }
+    }
+
+    // What it refuses, leaving nothing behind.
+    for (const [osName, arch, why] of [
+      ["Darwin", "x86_64", /no doklin for Intel Macs/],
+      ["Linux", "riscv64", /no doklin for riscv64/],
+      ["MINGW64_NT", "x86_64", /Linux and macOS/],
+    ]) {
+      const r = install(osName, arch);
+      eq(r.status, 1, `${osName} ${arch}: refused`);
+      ok(why.test(r.stderr), `${osName} ${arch}: with the reason (${r.stderr.trim()})`);
+      ok(!fs.existsSync(r.dir), `${osName} ${arch}: before touching the disk`);
+    }
+    {
+      // A download that is not what the release says it is.
+      writeSums(sums.map((line) => (line.endsWith("doklin-linux-x64") ? `${"f".repeat(64)}  doklin-linux-x64` : line)));
+      const r = install("Linux", "x86_64");
+      eq(r.status, 1, "a download that does not match its checksum is refused");
+      ok(/does not match its checksum/.test(r.stderr), `…and says so (${r.stderr.trim()})`);
+      ok(!r.exists, "…and is not installed");
+      eq(fs.readdirSync(r.dir).length, 0, "…and nothing of it is left behind");
+      eq(install("Linux", "aarch64").status, 0, "…while the others still install");
+    }
+    {
+      writeSums(sums.filter((line) => !line.endsWith("doklin-macos-arm64")));
+      const r = install("Darwin", "arm64");
+      eq(r.status, 1, "a binary the checksums do not list is refused");
+      ok(/do not list doklin-macos-arm64/.test(r.stderr), `…by name (${r.stderr.trim()})`);
+      ok(!r.exists, "…and is not installed");
+    }
+    {
+      writeSums(sums);
+      fs.rmSync(path.join(rel, "doklin-linux-arm64"));
+      const r = install("Linux", "aarch64");
+      eq(r.status, 1, "a release with no such binary is an error, not an empty file");
+      ok(/could not download doklin-linux-arm64/.test(r.stderr), `…named (${r.stderr.trim()})`);
+      ok(!r.exists, "…and nothing is installed");
+    }
+    {
+      // An older `doklin` already there is replaced by a rename, never written over.
+      const r = install("Linux", "x86_64");
+      const before = fs.statSync(r.installed).ino;
+      const again = execFileSync("sh", [script], {
+        encoding: "utf8",
+        env: { PATH: `${bin}:${r.dir}:/usr/bin:/bin`, HOME: r.home, DOKLIN_INSTALL_DIR: r.dir, FAKE_OS: "Linux", FAKE_ARCH: "x86_64", FAKE_RELEASE: rel, FAKE_BASE: path.dirname(CLI_INSTALL_SCRIPT_URL) },
+      });
+      ok(fs.statSync(r.installed).ino !== before, "running it again puts a new file in place of the old one");
+      ok(!again.includes("is not on this shell's PATH"), "…and says nothing about PATH when the folder is on it");
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 console.log(`cloudprompts: ${checks} checks passed`);

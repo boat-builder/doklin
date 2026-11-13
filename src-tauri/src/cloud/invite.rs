@@ -70,9 +70,51 @@ pub fn random_code() -> String {
 /// A canonical code as it is written and read aloud:
 /// `dkln-K7QM2-9XVR4-8TBHN-3WGYD`.
 pub fn format_code(canonical: &str) -> String {
+    grouped(PREFIX, canonical)
+}
+
+/// `<prefix>-XXXXX-XXXXX-XXXXX-XXXXX`: groups of five, the way a licence key
+/// is written.
+fn grouped(prefix: &str, canonical: &str) -> String {
     let chars: Vec<char> = canonical.chars().collect();
     let groups: Vec<String> = chars.chunks(GROUP).map(|g| g.iter().collect()).collect();
-    format!("{}-{}", PREFIX, groups.join("-"))
+    format!("{}-{}", prefix, groups.join("-"))
+}
+
+/* ---------- An agent's login code (docs/cloud.md §8.3) ---------- */
+
+/// What an agent's login code announces itself as. A different word from an
+/// invite's on purpose: the two are redeemed by different routes into
+/// different tables, and a code pasted into the wrong one should be told so
+/// rather than looked up and missed (`normalizeAgentCode`,
+/// cloud-worker/src/agents.ts — change both).
+const AGENT_PREFIX: &str = "dkla";
+
+/// How long a login code is good for. Short on purpose: the line it travels
+/// in is pasted into chats and prompts, and a code that has been used or has
+/// run out is worth nothing to whoever reads the transcript later. The worker
+/// accepts up to a day (`MAX_AGENT_CODE_TTL_MS`) only so two clocks that
+/// disagree by a few minutes do not refuse each other.
+pub const AGENT_CODE_MINUTES: u64 = 60;
+
+/// A canonical code as an agent's login code is written:
+/// `dkla-K7QM2-9XVR4-8TBHN-3WGYD`. Minted by [`random_code`] and hashed by
+/// [`code_hash`], exactly as an invite is — only the word in front differs.
+pub fn format_agent_code(canonical: &str) -> String {
+    grouped(AGENT_PREFIX, canonical)
+}
+
+/// When a login code minted now runs out.
+pub fn agent_code_expires_at(now_ms: u64) -> u64 {
+    now_ms + AGENT_CODE_MINUTES * 60 * 1000
+}
+
+/// The one line the owner hands to whoever sets the bot up — or pastes
+/// straight into the agent's chat: `doklin login https://notes.example.com
+/// dkla-K7QM2-9XVR4-8TBHN-3WGYD`. It is the command itself, so there is
+/// nothing to explain alongside it.
+pub fn agent_login_line(endpoint: &str, code: &str) -> String {
+    format!("doklin login {} {}", endpoint, code)
 }
 
 /// A code as it is hashed: the twenty characters, uppercase, no prefix and

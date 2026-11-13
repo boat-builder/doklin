@@ -89,6 +89,16 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   renditions included — read-only and `noindex`, exactly as fresh as the
   sync. Stop publishing and the link stops working. How it is built:
   [docs/cloud.md](docs/cloud.md).
+- **Agents** — a bot on another computer can work with a connected workspace
+  without a copy of it. Add an agent under *Cloud → People*, tick what it may
+  do — read, comment, edit, publish — and hand over the two lines the app
+  shows: one installs the `doklin` command (Linux or macOS), the other logs
+  it in. From there it lists, reads, writes, searches, comments on and
+  publishes documents through your domain, and what it changes arrives in
+  the app like an edit from another Mac, signed with its name. A note and the
+  html page made from it are one document to it, and its comments open in
+  the app's comment rail. `doklin help agent` is the brief an agent reads
+  once.
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin path/to/file.md`. A second launch talks to the running app: a
@@ -98,7 +108,7 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 ## Install
 
 One script builds the release bundle, installs `Doklin.app` to `/Applications`, and
-installs the `doklin` CLI shim:
+installs the `doklin` command:
 
 ```sh
 ./scripts/install.sh
@@ -111,9 +121,9 @@ Optional env overrides:
 
 ```sh
 APP_DIR=~/Applications  ./scripts/install.sh   # install .app elsewhere
-CLI_DIR=~/.local/bin    ./scripts/install.sh   # install shim elsewhere
+CLI_DIR=~/.local/bin    ./scripts/install.sh   # install the command elsewhere
 SKIP_BUILD=1            ./scripts/install.sh   # re-install without rebuilding
-SKIP_CLI=1              ./scripts/install.sh   # only the .app, no shim
+SKIP_CLI=1              ./scripts/install.sh   # only the .app, no command
 ```
 
 Once installed:
@@ -122,6 +132,7 @@ Once installed:
 doklin notes.md
 doklin ~/notes                # open a folder as a workspace
 doklin                        # empty editor (welcome screen)
+doklin help                   # the commands that work with a connected workspace from anywhere
 ```
 
 Or double-click a `.md` file or folder in Finder.
@@ -133,7 +144,7 @@ Or double-click a `.md` file or folder in Finder.
 Deeper docs live in dedicated files to keep this page focused:
 
 - **[docs/development.md](docs/development.md)** — how to run from source, the
-  architecture (frontend/backend, Tauri commands, file association, CLI shim),
+  architecture (frontend/backend, Tauri commands, file association, the CLI),
   saving/autosave internals, the macOS-only porting convention, and the full
   keyboard / UI / theme reference. **Start here for any code change.**
 - **[docs/release-pipeline.md](docs/release-pipeline.md)** — the *producer* side:
@@ -160,8 +171,10 @@ Deeper docs live in dedicated files to keep this page focused:
   agent + wrangler setup, a workspace shared with people (a member keyed by
   their email, an invite code that is a 100-bit capability, presence and
   advisory file leases riding the poll, all in a D1 database beside the
-  bucket), the decisions behind each, and what a team of ten still runs
-  into on Cloudflare's free plan.
+  bucket) and with agents (an identity that is not a person, the document
+  API it works through, search, and the `doklin` command line in `cli/`),
+  the decisions behind each, and what a team of ten still runs into on
+  Cloudflare's free plan.
 - **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
-  contract: the bucket, the manifest, the sync API, the public routes, and
-  deploying by hand.
+  contract: the bucket, the manifest, the sync API, the document API, the
+  public routes, and deploying by hand.

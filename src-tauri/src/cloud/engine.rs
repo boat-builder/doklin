@@ -33,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::manifest::{
-    clean_text, dedupe_paths, files_under, is_member_id, lease_key, random_slug, unique_slug,
+    clean_text, dedupe_paths, files_under, is_directory_id, lease_key, random_slug, unique_slug,
     valid_rel_path, valid_slug, Beat, LeaseEntry, Manifest, ManifestFile, PollResponse, PublicEntry,
     PublicKind, Target, Tombstone,
     MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
@@ -600,8 +600,8 @@ impl<R: Remote> Engine<R> {
         self.me.clone().unwrap_or_else(|| self.cfg.device_name.clone())
     }
 
-    /// A `by` in words. A member id resolves through the directory; anything
-    /// else is shown as it stands — a device name from before v3, or from a
+    /// A `by` in words. A person's or an agent's id resolves through the
+    /// directory; anything else is shown as it stands — a device name from before v3, or from a
     /// Mac that signed while the domain had not said who it was. An id
     /// nobody can name (a person since removed) stays an id rather than
     /// becoming "someone".
@@ -610,7 +610,8 @@ impl<R: Remote> Engine<R> {
     }
 
     /// Ask for the directory again when a manifest names somebody this
-    /// engine cannot: a person invited since it last probed. Rate-limited by
+    /// engine cannot: a person invited, or an agent added, since it last
+    /// probed. Rate-limited by
     /// `DIRECTORY_MIN_GAP`, because an id belonging to somebody since removed
     /// never resolves, and must not cost a request every cycle for ever.
     async fn learn_people(&mut self, m: &Manifest) {
@@ -620,7 +621,7 @@ impl<R: Remote> Engine<R> {
             .map(|f| f.by.as_str())
             .chain(m.tombstones.values().map(|t| t.by.as_str()))
             .chain(m.public.values().map(|e| e.by.as_str()))
-            .any(|by| is_member_id(by) && !self.people.contains_key(by));
+            .any(|by| is_directory_id(by) && !self.people.contains_key(by));
         if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
             return;
         }
@@ -854,6 +855,13 @@ impl<R: Remote> Engine<R> {
                         }
                         if std::fs::rename(&from, &target).is_ok() {
                             self.record_synced(&fid, &rf, None);
+                            // A rename moves no bytes, so the snapshot from
+                            // before it still says whether the file was
+                            // edited here meanwhile; the fresh stat would
+                            // make that edit read as synced and never push.
+                            if let Some(st) = self.state.files.get_mut(&fid) {
+                                (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
+                            }
                             touched.push(rf.path.clone());
                             continue;
                         }
@@ -1113,9 +1121,14 @@ impl<R: Remote> Engine<R> {
 
         for (fid, to) in &staged.moves {
             if let Some(f) = next.files.get_mut(fid) {
+                // `mtime` stays: it says when the content last changed, and a
+                // move is not an edit. The document API reads it to tell an
+                // html version that has fallen behind its markdown
+                // (cloud-worker/src/documents.ts, `htmlBehind`), and a rename
+                // that restamped both would hide exactly that. The worker's
+                // own move keeps it too (commit.ts). Change both.
                 f.path = to.clone();
                 f.rev += 1;
-                f.mtime = now_ms();
                 f.by = self.signature();
             }
         }
@@ -1966,7 +1979,7 @@ impl<R: Remote> Engine<R> {
             .presence
             .values()
             .filter_map(|e| e.member_id.as_deref())
-            .any(|m| is_member_id(m) && !self.people.contains_key(m));
+            .any(|m| is_directory_id(m) && !self.people.contains_key(m));
         if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
             return;
         }

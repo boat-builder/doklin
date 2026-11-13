@@ -1,12 +1,12 @@
 #!/bin/sh
-# Builds Doklin from source and installs both the .app bundle and the `doklin` CLI
-# shim. Safe to re-run after code changes — the previous bundle is removed
+# Builds Doklin from source and installs both the .app bundle and the `doklin`
+# command. Safe to re-run after code changes — the previous bundle is removed
 # before the new one is copied so LaunchServices doesn't cache stale
 # associations.
 #
 # Defaults:
 #   - .app installs to /Applications (falls back to sudo when needed)
-#   - doklin shim installs to /usr/local/bin (or ~/.local/bin if not writable)
+#   - doklin installs to /usr/local/bin (or ~/.local/bin if not writable)
 #
 # Env overrides (rarely needed):
 #   APP_DIR=~/Applications  ./scripts/install.sh
@@ -17,7 +17,7 @@
 set -e
 
 APP_NAME="Doklin.app"
-SHIM_NAME="doklin"
+CLI_NAME="doklin"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -101,8 +101,22 @@ if [ -x "$LSREGISTER" ]; then
 fi
 touch "$REPO_ROOT/src-tauri/target/.metadata_never_index" 2>/dev/null || true
 
-# ---------- 3. Install the CLI shim ----------
+# ---------- 3. Install the `doklin` command ----------
+#
+# The binary a release ships (cli/, docs/cloud.md §8.6). It works with a
+# connected workspace through its domain — `doklin help` — and, given a path
+# instead of a command, opens that file or folder in the app.
 if [ -z "$SKIP_CLI" ]; then
+  CLI_BIN="$REPO_ROOT/cli/target/release/doklin"
+  if [ -z "$SKIP_BUILD" ]; then
+    echo "==> building the doklin command"
+    cargo build --release --locked --manifest-path "$REPO_ROOT/cli/Cargo.toml"
+  fi
+  if [ ! -x "$CLI_BIN" ]; then
+    echo "error: $CLI_BIN not found — run without SKIP_BUILD." >&2
+    exit 1
+  fi
+
   if [ ! -d "$CLI_DIR" ] || [ ! -w "$CLI_DIR" ]; then
     if [ "$CLI_DIR" = "/usr/local/bin" ]; then
       FALLBACK="$HOME/.local/bin"
@@ -115,30 +129,14 @@ if [ -z "$SKIP_CLI" ]; then
     fi
   fi
 
-  SHIM="$CLI_DIR/$SHIM_NAME"
-  echo "==> installing $SHIM_NAME shim to $CLI_DIR"
-  cat > "$SHIM" <<'EOS'
-#!/bin/sh
-# doklin — open markdown files (or a folder) in the Doklin editor.
-if [ $# -eq 0 ]; then
-  open -a "Doklin"
-  exit $?
-fi
-args=""
-for f in "$@"; do
-  case "$f" in
-    /*) abs="$f" ;;
-    *)  abs="$PWD/$f" ;;
-  esac
-  args="$args \"$abs\""
-done
-# -n forces a new instance to launch so the file is delivered as argv; the
-# single-instance plugin forwards it to the running app, which opens it in a
-# new window (or focuses an existing window already showing it). Without -n,
-# `open -a` on a running app just activates it and drops --args.
-eval open -n -a \"Doklin\" --args $args
-EOS
-  chmod +x "$SHIM"
+  DEST_CLI="$CLI_DIR/$CLI_NAME"
+  echo "==> installing $CLI_NAME to $CLI_DIR"
+  # Copied beside its destination and renamed into place: macOS remembers a
+  # binary's signature by file, and one overwritten where it lies is killed
+  # the next time it runs.
+  cp "$CLI_BIN" "$DEST_CLI.new"
+  chmod 755 "$DEST_CLI.new"
+  mv -f "$DEST_CLI.new" "$DEST_CLI"
 
   case ":$PATH:" in
     *":$CLI_DIR:"*) ;;
@@ -150,5 +148,5 @@ echo
 echo "done."
 echo "  app: $DEST_APP"
 if [ -z "$SKIP_CLI" ]; then
-  echo "  cli: $SHIM"
+  echo "  cli: $DEST_CLI"
 fi

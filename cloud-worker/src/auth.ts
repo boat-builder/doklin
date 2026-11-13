@@ -12,15 +12,22 @@
 // primary-key lookup and makes revocation — delete the row — take effect on
 // the very next request: there is no session, so there is nothing to expire.
 //
-// The one route above this gate is `POST /api/auth/join`, which has to answer
-// without a bearer because answering it is how a Mac GETS one (api.ts).
+// A bearer that starts `dka_` is an agent's (agents.ts) and resolves through
+// the agents' own table instead: the same one primary-key read, to a role the
+// sync API refuses outright. An agent is only ever answered on the document
+// API (agentApi.ts), within the permissions on its row.
+//
+// The two routes above this gate are `POST /api/auth/join` and
+// `POST /api/agent/login`, which have to answer without a bearer because
+// answering them is how a Mac, or a bot, GETS one (api.ts).
 
+import { AGENT_TOKEN_PREFIX, resolveAgentToken, touchAgent, type Scope } from "./agents";
 import { sha256Hex, timingEq } from "./crypto";
 import type { Env } from "./env";
 import { ID_RE } from "./layout";
 import { resolveToken } from "./members";
 
-export type Role = "owner" | "member";
+export type Role = "owner" | "member" | "agent";
 
 export type Auth = {
   role: Role;
@@ -39,6 +46,12 @@ export type Auth = {
   name: string;
   /** The calling device, from x-doklin-device (null when the header is missing or malformed). */
   deviceId: string | null;
+  /**
+   * Set exactly when `role` is "agent": the id it signs what it changes with,
+   * and what the owner ticked for it. Null for people — a person's token is
+   * not a limited account, so there is nothing to list.
+   */
+  agent: { id: string; scopes: readonly Scope[] } | null;
 };
 
 export { randomHex } from "./crypto";
@@ -59,7 +72,22 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | n
 
   const bearerHash = await sha256Hex(bearer);
   if (env.OWNER_TOKEN && timingEq(bearerHash, await sha256Hex(env.OWNER_TOKEN))) {
-    return { role: "owner", tokenId: "owner", memberId: null, email: null, name: "Owner", deviceId };
+    return { role: "owner", tokenId: "owner", memberId: null, email: null, name: "Owner", deviceId, agent: null };
+  }
+
+  if (bearer.startsWith(AGENT_TOKEN_PREFIX)) {
+    const agent = await resolveAgentToken(env, bearerHash);
+    if (!agent) return null;
+    await touchAgent(env, agent);
+    return {
+      role: "agent",
+      tokenId: agent.tokenId,
+      memberId: null,
+      email: null,
+      name: agent.name,
+      deviceId,
+      agent: { id: agent.agentId, scopes: agent.scopes },
+    };
   }
 
   const identity = await resolveToken(env, bearerHash);
@@ -75,5 +103,6 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | n
     email: identity.email,
     name: identity.name,
     deviceId,
+    agent: null,
   };
 }
