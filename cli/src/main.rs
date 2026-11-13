@@ -226,7 +226,8 @@ fn run(raw: &[String], json: bool) -> Result<(), Failure> {
     };
     let args = args::parse(&raw[1..], &command.accepts)?;
     if args.has("help") {
-        return help::print(Some(command.name));
+        help::command(command);
+        return Ok(());
     }
     let ctx = Ctx { json, dry_run: args.has("dry-run"), workspace: args.value("workspace").map(String::from) };
     (command.run)(&args, &ctx)

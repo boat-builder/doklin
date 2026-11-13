@@ -71,7 +71,7 @@ function targetAt(index: Index, raw: string): { target: Target; fids: string[] }
   const asFolder = raw.endsWith("/");
   const path = raw.replace(/^\/+|\/+$/g, "");
   if (path === "") {
-    return asFolder || raw === "." ? { target: { kind: "dir", path: "" }, fids: [] } : new Refusal(400, "say what to publish");
+    return asFolder ? { target: { kind: "dir", path: "" }, fids: [] } : new Refusal(400, "say what to publish");
   }
   const problem = pathProblem(path);
   if (problem) return new Refusal(400, problem);
@@ -205,14 +205,15 @@ function publish(
     tx.touch();
   }
 
-  const documents =
-    target.kind === "dir" ? documentsUnder(index, target.path).filter((d) => d.md).map((d) => d.stem) : [target.name];
+  const documents = target.kind === "dir" ? documentsUnder(index, target.path).map((d) => d.stem) : [target.name];
   return {
     slug,
     url: `${origin}/${slug}`,
     kind: target.kind === "dir" ? "folder" : target.shown,
     path: target.kind === "dir" ? target.path : target.name,
-    // Everything this makes public: one document, or every note in the folder.
+    // Everything this makes readable: one document, or every document in the
+    // folder — an html-only one included, which a published folder serves at
+    // its own name (pages.ts).
     documents,
     created: !prev,
   };

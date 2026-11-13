@@ -60,6 +60,19 @@ export function nameOf(path: string): { stem: string; version: Version | null } 
   return { stem: path, version: null };
 }
 
+/** The version a request picked — by its flag, or by the extension it typed —
+ *  or null when it picked none, or a refusal when the two disagree. */
+export function askedVersion(path: string, flag: Version | null): Version | null | Refusal {
+  const typed = nameOf(path).version;
+  if (flag && typed && flag !== typed) {
+    return new Refusal(
+      400,
+      `${basename(path)} names the ${VERSION_WORD[typed]} version — drop the flag, or name the document without its extension`,
+    );
+  }
+  return flag ?? typed;
+}
+
 /** Whether a name carries an extension of its own (`chart.png`, not `plan`). */
 const hasExtension = (path: string): boolean => /[^.]\.[^./]+$/.test(basename(path));
 
@@ -126,6 +139,24 @@ export class Index {
   }
 
   /**
+   * `path` with its folders spelled the way the workspace already spells
+   * them: a new file typed under `projects/` goes into `Projects/` when that
+   * is the folder there is. On a Mac's case-insensitive disk it would land
+   * there whatever the manifest said, and the engine — which matches paths
+   * exactly — would have to rename it to agree. The name itself, and any
+   * folder that does not exist yet, stay as typed.
+   */
+  spelled(path: string): string {
+    const segs = path.split("/");
+    for (let i = segs.length - 1; i >= 1; i -= 1) {
+      const dir = segs.slice(0, i).join("/");
+      const inside = this.under(dir)[0];
+      if (inside) return `${inside.file.path.slice(0, dir.length)}/${segs.slice(i).join("/")}`;
+    }
+    return path;
+  }
+
+  /**
    * Why nothing can be created at `path`: a file is in the way of one of its
    * folders, or a folder already has its name. Null when the place is free.
    * (A file already AT the path is the caller's question, not this one.)
@@ -172,13 +203,8 @@ export function locate(index: Index, path: string, flag: Version | null): Named 
   const problem = pathProblem(path);
   if (problem) return new Refusal(400, problem);
   const named = nameOf(path);
-  if (flag && named.version && flag !== named.version) {
-    return new Refusal(
-      400,
-      `${basename(path)} names the ${VERSION_WORD[named.version]} version — drop the flag, or name the document without its extension`,
-    );
-  }
-  const asked = flag ?? named.version;
+  const asked = askedVersion(path, flag);
+  if (asked instanceof Refusal) return asked;
   const doc = index.doc(named.stem);
 
   if (named.version === null) {

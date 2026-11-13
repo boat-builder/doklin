@@ -16,7 +16,7 @@
 import { notBound, refuse, type Call } from "./agentCall";
 import { contentTypeOf, documentAt, versionFlag } from "./agentDocs";
 import { Refusal, commit, newFileId, type Tx } from "./commit";
-import { Index, type Doc, type Version } from "./documents";
+import { Index, askedVersion, type Doc, type Version } from "./documents";
 import { json, readJsonObject } from "./http";
 import { ANCHOR_TEXT_LEN, anchorResolves, elementsOf, elementsStartingWith, normalizeText } from "./htmlText";
 import { blobKey } from "./layout";
@@ -216,8 +216,11 @@ function placeForMarker(md: string, on: string, name: string): number | Refusal 
   for (const { index: _index, ...rest } of found) {
     if (occurrences.length < 20 && !occurrences.some((o) => o.line === rest.line && o.inside === rest.inside)) occurrences.push(rest);
   }
+  // Words that are not there are not found; words that are there but cannot
+  // carry a comment, or are there more than once, are a conflict with the
+  // text as it stands. `edit --find` draws the same line.
   if (found.length === 0) {
-    return new Refusal(409, `"${on}" does not occur in the markdown of ${name} — quote the words exactly as reading it shows them`, {
+    return new Refusal(404, `"${on}" does not occur in the markdown of ${name} — quote the words exactly as reading it shows them`, {
       code: "anchor",
       occurrences,
     });
@@ -282,14 +285,22 @@ export async function postComment(c: Call): Promise<Response> {
   if (!thread && !on) return json({ error: "say which words the comment is on, or which thread it answers" }, 400);
   const flag = versionFlag(body.v);
   if (flag instanceof Refusal) return refuse(flag);
+  // A new thread is on one version: the one the flag names, or the one the
+  // path was typed with — `plan.html` means the page, as it does to a read.
+  const asked = thread ? null : askedVersion(path, flag);
+  if (asked instanceof Refusal) return refuse(asked);
 
   const done = await commit(env, who.id, async (tx) => {
     const doc = documentAt(new Index(tx.files), path);
     if (doc instanceof Refusal) return doc;
     const open = await openThreads(tx, doc);
     if (open instanceof Refusal) return open;
-    const entry: CommentEntry = { author: sanitizeAuthor(who.name), at: tx.now, body: said };
-    const value = thread ? reply(doc, open, thread, entry) : await start(tx, doc, open, on, flag, entry);
+    // To the second: the markdown form of a thread keeps no finer time
+    // (criticMarkup.ts, `formatEntry`), so a record stamped more finely would
+    // differ from its own round trip — and every Mac that opened the document
+    // would rewrite the sidecar to say so (`migrateEntity`).
+    const entry: CommentEntry = { author: sanitizeAuthor(who.name), at: Math.floor(tx.now / 1000) * 1000, body: said };
+    const value = thread ? reply(doc, open, thread, entry) : await start(tx, doc, open, on, asked, entry);
     if (value instanceof Refusal) return value;
     await saveThreads(tx, doc, value.md, open.meta);
     return value.answer;
@@ -315,10 +326,10 @@ async function start(
   doc: Doc,
   open: { md: string | null; meta: EntityMeta },
   on: string,
-  flag: Version | null,
+  asked: Version | null,
   entry: CommentEntry,
 ): Promise<Changed | Refusal> {
-  const version: Version = flag ?? (doc.md ? "md" : "html");
+  const version: Version = asked ?? (doc.md ? "md" : "html");
   const id = freshThreadId(open.md, open.meta);
 
   if (version === "md") {
@@ -341,7 +352,7 @@ async function start(
   if (hits.length !== 1) {
     const candidates = hits.slice(0, 20).map((el) => ({ tag: el.tag, text: el.text }));
     return new Refusal(
-      409,
+      hits.length === 0 ? 404 : 409,
       hits.length === 0
         ? `nothing on the html page of ${doc.stem} begins with "${normalizeText(on).slice(0, ANCHOR_TEXT_LEN)}" — give the opening words of a heading, a paragraph or a list item`
         : `${hits.length} elements on the html page of ${doc.stem} begin with those words — give more of them`,

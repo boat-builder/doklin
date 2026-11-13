@@ -96,15 +96,18 @@ fn may(scopes: &[String]) -> String {
 
 fn normalize_endpoint(raw: &str) -> Result<String, Failure> {
     let raw = raw.trim().trim_end_matches('/');
-    let with_scheme = if raw.contains("://") { raw.to_string() } else { format!("https://{}", raw) };
-    let host = creds::domain_of(&with_scheme);
-    if host.is_empty() || host.contains(char::is_whitespace) || !(with_scheme.starts_with("https://") || with_scheme.starts_with("http://")) {
+    // A scheme is the same word in any case, and so is a host; no scheme means https.
+    let (scheme, rest) = match raw.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => ("https".to_string(), raw),
+    };
+    let host = rest.split('/').next().unwrap_or(rest);
+    if host.is_empty() || host.contains(char::is_whitespace) || !(scheme == "https" || scheme == "http") {
         return Err(Failure::usage(format!(
             "\"{}\" is not a workspace's address — it looks like notes.example.com",
             raw
         )));
     }
-    let scheme = if with_scheme.starts_with("http://") { "http" } else { "https" };
     Ok(format!("{}://{}", scheme, host.to_ascii_lowercase()))
 }
 
@@ -790,15 +793,16 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     }
     // `doklin search boat ships` means the phrase, quoted or not.
     let query_text = args.positionals.join(" ");
+    let limit = args.value("limit");
+    if limit.is_some_and(|n| n.parse::<u32>().map(|n| n == 0).unwrap_or(true)) {
+        return Err(Failure::usage("--limit takes a number of documents"));
+    }
     let s = session(ctx, "agent-search")?;
     let mut query = vec![("q", query_text.as_str())];
     if let Some(dir) = args.value("in") {
         query.push(("dir", dir));
     }
-    if let Some(limit) = args.value("limit") {
-        if limit.parse::<u32>().map(|n| n == 0).unwrap_or(true) {
-            return Err(Failure::usage("--limit takes a number of documents"));
-        }
+    if let Some(limit) = limit {
         query.push(("limit", limit));
     }
 

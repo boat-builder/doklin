@@ -9,8 +9,14 @@ name: ci
 #     types, no DOM), its tests against an in-memory R2 — once compiled from
 #     source, once against the bundle — and the bundle itself, which prints
 #     the size and fails past Cloudflare's 3 MB free-plan ceiling
-# Rust is deliberately not built here — it would dominate the runtime and the
-# release build covers it.
+#   - the `doklin` command (cli/), built and then driven against the worker
+#     this branch carries (verify-harness/drive-cli.mjs): every command, every
+#     exit code. Nothing else builds it before a release ships it to machines
+#     that cannot be asked how it went, and its drive is the one automated
+#     check that the command and the worker still agree
+# The app's Rust is deliberately not built here — it would dominate the
+# runtime and the release build covers it. The command line is a small crate
+# of its own and takes a minute.
 
 on:
   pull_request:
@@ -51,3 +57,35 @@ jobs:
 
       - name: Cloud worker tests against the bundle
         run: node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
+
+  cli:
+    name: doklin CLI (build + drive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # The drive serves the cloud worker from source, through vite.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      # --locked: the release builds it that way, so a Cargo.lock left behind
+      # by a dependency change fails here, before merge, instead of there.
+      - name: Build the doklin CLI
+        run: cargo build --release --locked --manifest-path cli/Cargo.toml
+
+      - name: Drive it against the worker
+        run: node verify-harness/drive-cli.mjs

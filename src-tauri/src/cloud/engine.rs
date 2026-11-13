@@ -855,6 +855,13 @@ impl<R: Remote> Engine<R> {
                         }
                         if std::fs::rename(&from, &target).is_ok() {
                             self.record_synced(&fid, &rf, None);
+                            // A rename moves no bytes, so the snapshot from
+                            // before it still says whether the file was
+                            // edited here meanwhile; the fresh stat would
+                            // make that edit read as synced and never push.
+                            if let Some(st) = self.state.files.get_mut(&fid) {
+                                (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
+                            }
                             touched.push(rf.path.clone());
                             continue;
                         }
@@ -1114,9 +1121,14 @@ impl<R: Remote> Engine<R> {
 
         for (fid, to) in &staged.moves {
             if let Some(f) = next.files.get_mut(fid) {
+                // `mtime` stays: it says when the content last changed, and a
+                // move is not an edit. The document API reads it to tell an
+                // html version that has fallen behind its markdown
+                // (cloud-worker/src/documents.ts, `htmlBehind`), and a rename
+                // that restamped both would hide exactly that. The worker's
+                // own move keeps it too (commit.ts). Change both.
                 f.path = to.clone();
                 f.rev += 1;
-                f.mtime = now_ms();
                 f.by = self.signature();
             }
         }

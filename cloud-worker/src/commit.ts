@@ -122,7 +122,8 @@ export class Tx {
   }
 
   /** Move a file. The bytes, and so the hash, stay; so does `mtime`, which
-   *  says when the content last changed — a move is not an edit. */
+   *  says when the content last changed — a move is not an edit, here or in
+   *  the engine's own move (engine.rs, `staged.moves`). Change both. */
   move(fid: string, to: string): void {
     const file = this.m.files[fid];
     if (!file || file.path === to) return;

@@ -4,159 +4,180 @@
 # puts no limit on an agent (docs/cloud.md §8.7); this is how that decision
 # is watched. It ships nowhere and nothing calls it.
 #
-#   scripts/cloud-usage.sh notes.example.com
+#   scripts/cloud-usage.sh notes.example.com        the last 14 days
+#   scripts/cloud-usage.sh notes.example.com 30     the last 30 (the most)
 #
-# It reads, and changes nothing:
+# It reads, and changes nothing. Wrangler must be logged in to the account
+# that holds the domain (`npx wrangler login`); nothing else is needed.
 #
-#   wrangler d1 info        the database: size, and what it reports of the last 24 h
-#   wrangler r2 bucket info the bucket: objects and bytes stored
-#   GraphQL Analytics API   Worker requests since 00:00 UTC, and the bucket's
-#                           operations this month — wrangler has no command for either
+#   wrangler whoami      the accounts the login reaches — the one that holds
+#                        this domain's database is found by asking each
+#                        (CLOUDFLARE_ACCOUNT_ID, if set, is asked alone)
+#   wrangler d1 info     the database's id and size
+#   wrangler auth token  the login's own token, which may read analytics
+#   GraphQL Analytics    everything else, in one query: Worker requests and
+#                        D1 rows for each day, what the bucket holds, and its
+#                        operations this month
 #
 # The names follow the domain, as the setup prompt makes them: dots become
-# dashes behind "doklin-". Wrangler must be logged in to the account that
-# holds them (`npx wrangler login`).
+# dashes behind "doklin-".
 #
-# The Analytics API needs two things wrangler does not hand over by itself:
+# Why not `wrangler r2 bucket info`: it asks the same Analytics API and then
+# answers in words ("14.1 MB", "1,234"), which cannot be set against a limit.
 #
-#   CLOUDFLARE_ACCOUNT_ID   the account's id (`npx wrangler whoami` prints it)
-#   CLOUDFLARE_API_TOKEN    a token that may read analytics. Without one the
-#                           script tries the token wrangler is logged in with.
-#
-# NOT YET RUN AGAINST A REAL ACCOUNT. Two things are unconfirmed and the
-# script is written so that neither can produce a wrong number: which fields
-# `wrangler d1 info --json` and `r2 bucket info --json` report (anything not
-# recognised is printed as wrangler gave it), and whether wrangler's own
-# login token may read Workers analytics (if not, the API's refusal is
-# printed, and a read-only token with "Account Analytics: Read" is what it
-# takes).
-set -eu
+# Three things about the numbers. Days are UTC days, because that is when
+# Cloudflare's daily limits reset. Cloudflare samples Worker requests, so
+# those are estimates (a quiet day reads as a round number). And the plan's
+# allowances belong to the whole account: every other worker, database and
+# bucket on it draws on the same ones, so this is one domain's share.
+exec node --input-type=module - "$@" <<'EOF'
+import { execFileSync } from "node:child_process";
 
-DOMAIN="${1:-}"
-if [ -z "$DOMAIN" ]; then
-  echo "usage: scripts/cloud-usage.sh <domain>" >&2
-  exit 2
-fi
-NAME="doklin-$(printf '%s' "$DOMAIN" | tr '.' '-')"
-WRANGLER="npx -y wrangler@4"
+const [domain, daysArg = "14"] = process.argv.slice(2);
+const days = Number(daysArg);
+if (!domain || !Number.isInteger(days) || days < 1 || days > 30) {
+  console.error("usage: scripts/cloud-usage.sh <domain> [days: 1 to 30, 14 if not given]");
+  process.exit(2);
+}
+const name = `doklin-${domain.replaceAll(".", "-")}`;
 
-echo "Cloudflare usage for $DOMAIN  (worker, bucket and database: $NAME)"
-echo
+const stop = (message) => {
+  console.error(message);
+  process.exit(1);
+};
 
-# One wrangler JSON answer, reduced to the fields worth a line. Whatever is
-# not recognised is shown whole rather than guessed at.
-show() { # $1 = label, $2 = "key:Label:limit:unit ..." , stdin = JSON
-  node -e '
-    const [label, spec] = process.argv.slice(1);
-    let text = "";
-    process.stdin.on("data", (d) => (text += d)).on("end", () => {
-      let v;
-      try { v = JSON.parse(text); } catch { console.log(`${label}: wrangler did not answer JSON:\n${text.trim()}`); return; }
-      if (Array.isArray(v)) v = v[0] ?? {};
-      const fmt = (n, unit) => unit === "bytes" ? `${(n / 1048576).toFixed(1)} MB` : Number(n).toLocaleString("en-US");
-      let found = 0;
-      for (const item of spec.split(" ")) {
-        const [keys, name, limit, unit] = item.split(":");
-        const key = keys.split("|").find((k) => v[k] !== undefined && v[k] !== null);
-        if (!key) continue;
-        found += 1;
-        const n = Number(v[key]);
-        const of = limit ? `  of ${fmt(Number(limit), unit)}  (${((n / Number(limit)) * 100).toFixed(1)}%)` : "";
-        console.log(`  ${name.replace(/_/g, " ").padEnd(28)} ${fmt(n, unit)}${of}`);
-      }
-      if (found === 0) console.log(`  none of the expected fields were reported — wrangler said:\n${JSON.stringify(v, null, 2)}`);
-    });
-  ' "$1" "$2"
+// One wrangler command, answered as JSON. A refusal comes back as its text,
+// without the colour codes, under `refused`.
+function wrangler(args, account) {
+  const env = account ? { ...process.env, CLOUDFLARE_ACCOUNT_ID: account } : process.env;
+  try {
+    const out = execFileSync("npx", ["-y", "wrangler@4", ...args, "--json"], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return JSON.parse(out);
+  } catch (error) {
+    const said = `${error.stdout ?? ""}${error.stderr ?? ""}` || String(error.message);
+    return { refused: said.replace(/\x1b\[[0-9;]*m/g, "").trim() };
+  }
 }
 
-echo "D1 database (free: 5,000,000 rows read and 100,000 written a day, 500 MB)"
-$WRANGLER d1 info "$NAME" --json 2>&1 | show "d1" \
-  "rows_read_24h:rows_read,_last_24_h:5000000 rows_written_24h:rows_written,_last_24_h:100000 read_queries_24h:read_queries,_last_24_h write_queries_24h:write_queries,_last_24_h database_size|file_size:size:524288000:bytes"
-echo
+// The account: the one whose database carries this domain's name.
+let accounts = process.env.CLOUDFLARE_ACCOUNT_ID ? [process.env.CLOUDFLARE_ACCOUNT_ID] : null;
+if (!accounts) {
+  const who = wrangler(["whoami"]);
+  if (!who.loggedIn) stop("Wrangler is not logged in to Cloudflare. Run `npx wrangler login`, then this again.");
+  accounts = who.accounts.map((account) => account.id);
+}
+let account, database;
+for (const id of accounts) {
+  const info = wrangler(["d1", "info", name], id);
+  if (!info.uuid) continue;
+  [account, database] = [id, info];
+  break;
+}
+if (!database) {
+  stop(`No database named ${name} in ${accounts.length === 1 ? `account ${accounts[0]}` : `any of the ${accounts.length} accounts wrangler is logged in to`}.\n` +
+    `Is ${domain} the domain exactly as it was connected, and is wrangler logged in to the account that holds it?`);
+}
 
-echo "R2 bucket (free: 10 GB stored)"
-$WRANGLER r2 bucket info "$NAME" --json 2>&1 | show "r2" \
-  "object_count|objectCount:objects bucket_size|bucketSize|size:stored:10737418240:bytes"
-echo
+const { token } = wrangler(["auth", "token"]);
+if (!token) stop("Wrangler would not hand over its login token. Run `npx wrangler login`, then this again.");
 
-ACCOUNT="${CLOUDFLARE_ACCOUNT_ID:-}"
-TOKEN="${CLOUDFLARE_API_TOKEN:-}"
-if [ -z "$ACCOUNT" ]; then
-  echo "Worker requests and R2 operations: set CLOUDFLARE_ACCOUNT_ID to read them"
-  echo "  (wrangler has no command for either; \`npx wrangler whoami\` prints the id)"
-  exit 0
-fi
-if [ -z "$TOKEN" ]; then
-  TOKEN="$($WRANGLER auth token 2>/dev/null | tail -n 1 || true)"
-fi
-if [ -z "$TOKEN" ]; then
-  echo "Worker requests and R2 operations: no token — set CLOUDFLARE_API_TOKEN (Account Analytics: Read)"
-  exit 0
-fi
+const DAY_MS = 86_400_000;
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+const now = Date.now();
+const today = utcDay(now);
+const dayList = Array.from({ length: days }, (_, i) => utcDay(now - (days - 1 - i) * DAY_MS));
 
-DAY_START="$(date -u +%Y-%m-%dT00:00:00Z)"
-MONTH_START="$(date -u +%Y-%m-01T00:00:00Z)"
-
-QUERY='query ($account: String!, $script: String!, $bucket: String!, $day: Time!, $month: Time!) {
+const query = `query ($account: String!, $name: String!, $database: String!, $since: Date!, $month: Date!, $lately: Time!) {
   viewer { accounts(filter: { accountTag: $account }) {
-    workersInvocationsAdaptive(limit: 10000, filter: { scriptName: $script, datetime_geq: $day }) {
-      sum { requests errors subrequests }
+    worker: workersInvocationsAdaptive(limit: 100, filter: { scriptName: $name, date_geq: $since }) {
+      sum { requests errors }
+      dimensions { date }
     }
-    r2OperationsAdaptiveGroups(limit: 10000, filter: { bucketName: $bucket, datetime_geq: $month }) {
+    rows: d1AnalyticsAdaptiveGroups(limit: 100, filter: { databaseId: $database, date_geq: $since }) {
+      sum { rowsRead rowsWritten }
+      dimensions { date }
+    }
+    stored: r2StorageAdaptiveGroups(limit: 1, filter: { bucketName: $name, datetime_geq: $lately }, orderBy: [datetime_DESC]) {
+      max { objectCount payloadSize metadataSize }
+      dimensions { datetime }
+    }
+    operations: r2OperationsAdaptiveGroups(limit: 1000, filter: { bucketName: $name, date_geq: $month }) {
       sum { requests }
       dimensions { actionType }
     }
   } }
-}'
+}`;
+const variables = { account, name, database: database.uuid, since: dayList[0], month: `${today.slice(0, 7)}-01`, lately: new Date(now - DAY_MS).toISOString() };
 
-BODY="$(node -e '
-  const [query, account, name, day, month] = process.argv.slice(1);
-  console.log(JSON.stringify({ query, variables: { account, script: name, bucket: name, day, month } }));
-' "$QUERY" "$ACCOUNT" "$NAME" "$DAY_START" "$MONTH_START")"
+const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+  method: "POST",
+  headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+  body: JSON.stringify({ query, variables }),
+});
+const answer = await response.json().catch(() => null);
+const data = answer?.data?.viewer?.accounts?.[0];
+if (!data) {
+  const errors = answer?.errors ?? [];
+  const unauthorized = response.status === 401 || response.status === 403 || errors.some((error) => error.extensions?.code === "authz");
+  stop(`Cloudflare's Analytics API refused (HTTP ${response.status}):\n${JSON.stringify(answer?.errors ?? answer, null, 2)}` +
+    (unauthorized ? "\nWrangler's login may not read analytics on this account. A read-only API token with \"Account Analytics: Read\", in CLOUDFLARE_API_TOKEN, may." : ""));
+}
 
-curl -sS https://api.cloudflare.com/client/v4/graphql \
-  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" --data "$BODY" |
-  node -e '
-    // R2 bills by class. A: writes and listings; B: reads; deletes are free.
-    const CLASS_A = new Set(["ListBuckets", "PutBucket", "ListObjects", "PutObject", "CopyObject", "CompleteMultipartUpload",
-      "CreateMultipartUpload", "UploadPart", "UploadPartCopy", "ListMultipartUploads", "ListParts", "PutBucketEncryption",
-      "PutBucketCors", "PutBucketLifecycleConfiguration"]);
-    const CLASS_B = new Set(["HeadBucket", "HeadObject", "GetObject", "UsageSummary", "GetBucketEncryption", "GetBucketLocation",
-      "GetBucketCors", "GetBucketLifecycleConfiguration"]);
-    let text = "";
-    process.stdin.on("data", (d) => (text += d)).on("end", () => {
-      let v;
-      try { v = JSON.parse(text); } catch { console.log(`The Analytics API did not answer JSON:\n${text.trim()}`); return; }
-      const account = v?.data?.viewer?.accounts?.[0];
-      if (!account) {
-        console.log("The Analytics API refused, or knows no such account:");
-        console.log(JSON.stringify(v.errors ?? v, null, 2));
-        console.log("A read-only API token with \"Account Analytics: Read\", in CLOUDFLARE_API_TOKEN, is what this needs.");
-        return;
-      }
-      const n = (x) => Number(x).toLocaleString("en-US");
-      const pct = (x, of) => `${((x / of) * 100).toFixed(1)}%`;
-      const worker = (account.workersInvocationsAdaptive ?? []).reduce(
-        (sum, row) => ({ requests: sum.requests + row.sum.requests, errors: sum.errors + row.sum.errors, subrequests: sum.subrequests + row.sum.subrequests }),
-        { requests: 0, errors: 0, subrequests: 0 });
-      console.log("Worker, since 00:00 UTC (free: 100,000 requests a day)");
-      console.log(`  ${"requests".padEnd(28)} ${n(worker.requests)}  of 100,000  (${pct(worker.requests, 100000)})`);
-      console.log(`  ${"errors".padEnd(28)} ${n(worker.errors)}`);
-      console.log(`  ${"subrequests".padEnd(28)} ${n(worker.subrequests)}`);
-      let a = 0, b = 0, free = 0;
-      const other = {};
-      for (const row of account.r2OperationsAdaptiveGroups ?? []) {
-        const action = row.dimensions.actionType;
-        const count = row.sum.requests;
-        if (CLASS_A.has(action)) a += count;
-        else if (CLASS_B.has(action)) b += count;
-        else if (/^(Delete|Abort)/.test(action)) free += count;
-        else other[action] = (other[action] ?? 0) + count;
-      }
-      console.log("\nR2 operations, this month (free: 1,000,000 Class A and 10,000,000 Class B)");
-      console.log(`  ${"Class A (writes, lists)".padEnd(28)} ${n(a)}  of 1,000,000  (${pct(a, 1000000)})`);
-      console.log(`  ${"Class B (reads)".padEnd(28)} ${n(b)}  of 10,000,000  (${pct(b, 10000000)})`);
-      console.log(`  ${"deletes (free)".padEnd(28)} ${n(free)}`);
-      for (const [action, count] of Object.entries(other)) console.log(`  ${(action + " (unclassed)").padEnd(28)} ${n(count)}`);
-    });
-  '
+const count = (n) => Number(n).toLocaleString("en-US");
+const share = (n, of) => `${((n / of) * 100).toFixed(1)}%`;
+const size = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${(bytes / 1e6).toFixed(1)} MB`);
+
+console.log(`Cloudflare usage for ${domain}`);
+console.log(`worker, bucket and database ${name} · account ${account}`);
+
+const bucket = data.stored[0]?.max ?? { objectCount: 0, payloadSize: 0, metadataSize: 0 };
+const bucketBytes = bucket.payloadSize + bucket.metadataSize;
+console.log("\nStored now");
+console.log(`  ${"database".padEnd(10)} ${size(database.database_size).padStart(10)}   of 500 MB   ${share(database.database_size, 500e6).padStart(6)}`);
+console.log(`  ${"bucket".padEnd(10)} ${size(bucketBytes).padStart(10)}   of 10 GB    ${share(bucketBytes, 10e9).padStart(6)}   ${count(bucket.objectCount)} objects`);
+
+// A day Cloudflare has no row for is a day with nothing to count.
+const DAILY = [
+  { title: "Worker requests", allowed: 100_000, of: (day) => day.requests },
+  { title: "D1 rows read", allowed: 5_000_000, of: (day) => day.rowsRead },
+  { title: "D1 rows written", allowed: 100_000, of: (day) => day.rowsWritten },
+];
+const byDay = new Map(dayList.map((date) => [date, { requests: 0, errors: 0, rowsRead: 0, rowsWritten: 0 }]));
+for (const row of data.worker) Object.assign(byDay.get(row.dimensions.date) ?? {}, row.sum);
+for (const row of data.rows) Object.assign(byDay.get(row.dimensions.date) ?? {}, row.sum);
+
+const WIDTH = 22;
+const cell = (n, allowed) => `${count(n).padStart(10)}  ${share(n, allowed).padStart(6)}`.padEnd(WIDTH);
+console.log("\nEach day (UTC), against what the free plan allows in a day");
+console.log(`  ${"".padEnd(12)}${DAILY.map((column) => column.title.padStart(10 + 8).padEnd(WIDTH)).join("")}  Worker errors`);
+console.log(`  ${"".padEnd(12)}${DAILY.map((column) => `of ${count(column.allowed)}`.padStart(10 + 8).padEnd(WIDTH)).join("")}`.trimEnd());
+for (const [date, day] of byDay) {
+  console.log(`  ${date.padEnd(12)}${DAILY.map((column) => cell(column.of(day), column.allowed)).join("")}  ${count(day.errors).padStart(13)}${date === today ? "   so far" : ""}`);
+}
+if (days > 1) {
+  const highest = DAILY.map((column) => cell(Math.max(...[...byDay.values()].map(column.of)), column.allowed));
+  console.log(`  ${"highest".padEnd(12)}${highest.join("")}`.trimEnd());
+}
+
+// R2 bills by class. A: writes and listings; B: reads; deletes are free.
+const CLASS_A = new Set(["ListBuckets", "PutBucket", "ListObjects", "PutObject", "CopyObject", "CompleteMultipartUpload",
+  "CreateMultipartUpload", "UploadPart", "UploadPartCopy", "ListMultipartUploads", "ListParts", "PutBucketEncryption",
+  "PutBucketCors", "PutBucketLifecycleConfiguration"]);
+const CLASS_B = new Set(["HeadBucket", "HeadObject", "GetObject", "UsageSummary", "GetBucketEncryption", "GetBucketLocation",
+  "GetBucketCors", "GetBucketLifecycleConfiguration"]);
+let classA = 0, classB = 0, free = 0;
+const unclassed = {};
+for (const row of data.operations) {
+  const action = row.dimensions.actionType;
+  if (CLASS_A.has(action)) classA += row.sum.requests;
+  else if (CLASS_B.has(action)) classB += row.sum.requests;
+  else if (/^(Delete|Abort)/.test(action)) free += row.sum.requests;
+  else unclassed[action] = (unclassed[action] ?? 0) + row.sum.requests;
+}
+const line = (label, n, allowed) => `  ${label.padEnd(26)}${count(n).padStart(10)}${allowed ? `   of ${count(allowed).padEnd(10)}  ${share(n, allowed).padStart(6)}` : ""}`;
+console.log(`\nR2 operations since ${variables.month}, against what the free plan allows in a month`);
+console.log(line("Class A (writes, lists)", classA, 1_000_000));
+console.log(line("Class B (reads)", classB, 10_000_000));
+console.log(line("deletes (free)", free));
+for (const [action, n] of Object.entries(unclassed)) console.log(line(`${action} (unclassed)`, n));
+EOF

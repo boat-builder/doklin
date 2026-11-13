@@ -2,9 +2,10 @@
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
 // copy of the folder. The owner adds one here, ticks what it may do, and
-// hands over one line — `doklin login <address> <code>` — which is the whole
-// of setting it up. Everything it can reach is decided by the boxes below,
-// on the domain; nothing on the bot's machine can widen them.
+// hands over two lines — the one that installs the command, and
+// `doklin login <address> <code>` — which are the whole of setting it up.
+// Everything it can reach is decided by the boxes below, on the domain;
+// nothing on the bot's machine can widen them.
 //
 // Owner only: the routes behind this are the owner's, like the people routes
 // beside them, and CloudPeople renders this only on the owner's branch. As
@@ -24,6 +25,7 @@ import {
   type CloudAgent,
   type CloudAgentLogin,
 } from "./cloud";
+import { CLI_INSTALL_LINE } from "./cloudPrompts";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -168,7 +170,7 @@ export default function CloudAgents({
               </div>
               <div className="cloud-hint">
                 {a.machines.length === 0
-                  ? "Not logged in anywhere."
+                  ? "Not logged in anywhere"
                   : `Logged in on ${a.machines.length} machine${a.machines.length === 1 ? "" : "s"}`}
                 {a.lastUsedAt != null && ` · last used ${timeAgo(a.lastUsedAt, now)}`}
                 {a.code && a.code.expiresAt > now && ` · a login code is waiting, for ${timeUntil(a.code.expiresAt, now)} more`}
@@ -261,22 +263,36 @@ export default function CloudAgents({
       {login && (
         <div className="cloud-card cloud-card--ok" data-testid="agent-login">
           <div className="cloud-card-title">Log {login.name} in</div>
+          {/* A well each: both are long enough to wrap, and two wrapped
+              commands in one well cannot be told apart. */}
+          <pre className="cloud-code cloud-code--line" data-testid="agent-install-line">
+            {CLI_INSTALL_LINE}
+          </pre>
           <pre className="cloud-code cloud-code--line" data-testid="agent-login-line">
             {login.login.line}
           </pre>
           <p className="cloud-hint">
-            Run this where the agent runs — or paste it into the agent’s chat, and it will run it
-            itself. It works once, on one machine, and stops working in{" "}
-            {timeUntil(login.login.expiresAt, now)}. This is the only time it is shown: {domain} kept
-            nothing but its fingerprint. A second machine needs a code of its own.
+            Two lines, for the machine the agent runs on — or paste them into the agent’s chat,
+            and it will run them itself. The first installs the <code>doklin</code> command, on
+            Linux or a Mac; leave it out where <code>doklin</code> already is. The second logs in:
+            it works once, on one machine, and stops working in{" "}
+            {timeUntil(login.login.expiresAt, now)}. This is the only time it is shown: {domain}{" "}
+            kept nothing but its fingerprint. A second machine needs a code of its own.
           </p>
           <div className="modal-buttons">
             <button
               className="modal-btn is-primary"
+              data-testid="copy-agent-lines"
+              onClick={() => copy("agent-lines", `${CLI_INSTALL_LINE}\n${login.login.line}`)}
+            >
+              {copied === "agent-lines" ? "Copied ✓" : "Copy both lines"}
+            </button>
+            <button
+              className="modal-btn"
               data-testid="copy-agent-line"
               onClick={() => copy("agent-line", login.login.line)}
             >
-              {copied === "agent-line" ? "Copied ✓" : "Copy the line"}
+              {copied === "agent-line" ? "Copied ✓" : "Copy the login line"}
             </button>
             <button className="modal-btn" data-testid="agent-login-done" onClick={() => setLogin(null)}>
               Done

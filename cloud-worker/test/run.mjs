@@ -62,6 +62,22 @@ const fake = new FakeR2();
 const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
+/** What a fully migrated database reports, and the tables it then holds. */
+const D1_SCHEMA = 6;
+const D1_TABLES = [
+  "agent_codes",
+  "agent_tokens",
+  "agents",
+  "invites",
+  "leases",
+  "members",
+  "meta",
+  "presence",
+  "search_state",
+  "search_text",
+  "tokens",
+];
+
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const blobHash = (content) => sha256(content).slice(0, 16);
 
@@ -169,19 +185,19 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
 
   const first = await call("/api/meta", { token: OWNER });
   assert.equal(first.status, 200);
-  assert.equal(first.json.d1, 4, "the probe reports the schema version");
+  assert.equal(first.json.d1, D1_SCHEMA, "the probe reports the schema version");
   assert.ok(db.queries.length > 0, "…and the probe is what ran the migration");
   assert.deepEqual(
     db.tables(),
-    ["invites", "leases", "members", "meta", "presence", "tokens"],
-    "people, who is here, what they hold, and the runner's own anchor",
+    D1_TABLES,
+    "people, who is here, what they hold, agents and their credentials, the search mirror, and the runner's own anchor",
   );
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 4);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), D1_SCHEMA);
   assert.equal(db.rows("SELECT * FROM meta").length, 1, "one row, and re-running never adds another");
 
   db.queries.length = 0;
   const again = await call("/api/meta", { token: OWNER });
-  assert.equal(again.json.d1, 4);
+  assert.equal(again.json.d1, D1_SCHEMA);
   // The migration never runs twice in an isolate. Identity does run every
   // time — a probe answers who the caller is and what everyone here is
   // called — but it only ever reads.
@@ -1676,6 +1692,2126 @@ await test("public: the root page serves at /; renders cache under the manifest'
   assert.equal((await pub("/home")).status, 404, "the page itself is a 404 until the file is back");
 });
 
+/* ---------- Agents (docs/cloud.md §8.3–8.5) ---------- */
+
+// An agent has no copy of the folder, so everything below is the worker
+// itself reading and changing the workspace. "A Mac" in these tests is what a
+// Mac is to the worker: blobs PUT under /api/blobs, then the manifest
+// compare-and-swapped — the owner's token doing what the engine does.
+
+const HOUR = 60 * 60 * 1000;
+const ORIGIN = "https://notes.example.com";
+/** A login code the way the app shows one: `dkla-` and four groups of five. */
+const agentCode = (body) => `dkla-${body.slice(0, 5)}-${body.slice(5, 10)}-${body.slice(10, 15)}-${body.slice(15)}`;
+let codeCount = 0;
+/** Twenty Crockford characters no other code in this file has. */
+const nextCodeBody = () => `AGENTC0DE${String((codeCount += 1)).padStart(11, "0")}`;
+const loginWith = (typed, host) =>
+  call("/api/agent/login", { method: "POST", device: null, body: { code: typed, ...(host ? { host } : {}) } });
+const newCode = (agentId, body, expiresAt = Date.now() + HOUR) =>
+  call(`/api/auth/agents/${agentId}/code`, { method: "POST", token: OWNER, body: { codeHash: sha256(body), expiresAt } });
+
+/** Add an agent and log one machine in — the only way a `dka_` token exists. */
+async function addAgent(name, scopes) {
+  const body = nextCodeBody();
+  const made = await call("/api/auth/agents", {
+    method: "POST",
+    token: OWNER,
+    body: { name, scopes, codeHash: sha256(body), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(made.status, 201, made.text);
+  const login = await loginWith(agentCode(body), "test-runner");
+  assert.equal(login.status, 201, login.text);
+  return { id: made.json.agent.id, name, token: login.json.token, scopes: login.json.scopes };
+}
+/** One request the way an agent's machine makes it: its token, and no device. */
+const as = (agent) => (path, opts = {}) => call(path, { token: agent.token, device: null, ...opts });
+
+/* What the bucket holds, read directly — never the worker's own answer. */
+const storedManifest = () => JSON.parse(fake.store.get("manifest.json").bytes.toString("utf8"));
+const etagNow = () => fake.store.get("manifest.json").etag;
+/** `[fid, entry]` of the file at a path, or undefined. */
+const entryAt = (m, p) => Object.entries(m.files).find(([, f]) => f.path === p);
+const pathsOf = (m) => Object.values(m.files).map((f) => f.path).sort();
+/** A file's text as the bucket holds it now, or undefined when the manifest has no such file. */
+const textAt = (p) => {
+  const hit = entryAt(storedManifest(), p);
+  return hit ? fake.store.get(`blobs/${hit[0]}/${hit[1].hash}`)?.bytes.toString("utf8") : undefined;
+};
+const blobKeys = () => [...fake.store.keys()].filter((k) => k.startsWith("blobs/"));
+/** Every blob the manifest names. */
+const liveBlobKeys = (m) => new Set(Object.entries(m.files).map(([fid, f]) => `blobs/${fid}/${f.hash}`));
+
+let macFiles = 0;
+/**
+ * A Mac's write: its blobs go up first, then the manifest is compare-and-
+ * swapped over what is there. `change` edits the current manifest, with
+ * `put(path, content, extra)` to add a file or give one new content.
+ */
+async function macWrite(change) {
+  const m = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const uploads = [];
+  const put = (p, content, extra = {}) => {
+    const bytes = Buffer.from(content);
+    const hit = entryAt(m, p);
+    const fid = hit?.[0] ?? `f-mac${String((macFiles += 1)).padStart(6, "0")}`;
+    const hash = blobHash(bytes);
+    m.files[fid] = { path: p, rev: (hit?.[1].rev ?? 0) + 1, hash, size: bytes.length, mtime: Date.now(), by: ALICE.id, ...extra };
+    uploads.push({ fid, hash, bytes });
+    return fid;
+  };
+  await change(m, put);
+  for (const u of uploads) {
+    const stored = await call(`/api/blobs/${u.fid}/${u.hash}`, { method: "PUT", token: OWNER, body: u.bytes });
+    assert.equal(stored.status, 200, stored.text);
+  }
+  m.seq += 1;
+  const res = await putManifest(m);
+  assert.equal(res.status, 200, res.text);
+  return res.json.etag;
+}
+/** Start from a workspace holding exactly these files — `{path: content}`. */
+const freshWorkspace = (files, extra = {}) =>
+  macWrite((m, put) => {
+    m.files = {};
+    m.tombstones = {};
+    m.public = {};
+    for (const [p, content] of Object.entries(files)) put(p, content, extra[p] ?? {});
+  });
+/** The sidecar as the app writes one: a header, then a record a line. */
+const sidecar = (...records) => [`{"doklin":"meta","v":1}`, ...records.map((r) => JSON.stringify(r))].join("\n") + "\n";
+const recordsOf = (text) =>
+  (text ?? "")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line))
+    .filter((r) => r.doklin === undefined);
+
+await test("agents: the owner adds one with its first code; the code is redeemed once, by its hash, for a dka_ token; unknown, used and expired are one answer", async () => {
+  const body = nextCodeBody();
+  const before = Date.now();
+  const made = await call("/api/auth/agents", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "  Grok bot  ", scopes: ["edit"], codeHash: sha256(body), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(made.status, 201);
+  const agent = made.json.agent;
+  assert.ok(/^a-[a-f0-9]{8}$/.test(agent.id));
+  assert.equal(agent.name, "Grok bot", "the name is trimmed");
+  assert.deepEqual(agent.scopes, ["read", "edit"], "read is always held, and the order is canonical");
+  assert.equal(agent.lastUsedAt, null);
+  assert.deepEqual(agent.machines, []);
+  assert.ok(/^c-[a-f0-9]{8}$/.test(agent.code.id) && agent.code.expiresAt > before);
+  assert.equal(
+    db.value("SELECT COUNT(*) FROM agent_codes WHERE hash = ? AND agent_id = ?", sha256(body), agent.id),
+    1,
+    "the row is keyed by the hash of the code — the plaintext never reaches the worker at this end",
+  );
+  assert.ok(!made.text.includes(sha256(body)), "and the hash is not said back");
+
+  // What a request to add one must carry.
+  const add = (over) =>
+    call("/api/auth/agents", {
+      method: "POST",
+      token: OWNER,
+      body: { name: "X", scopes: [], codeHash: sha256("x"), expiresAt: Date.now() + HOUR, ...over },
+    });
+  assert.equal((await add({ name: "   " })).status, 400, "a name");
+  assert.equal((await add({ scopes: "edit" })).status, 400, "scopes as a list");
+  assert.equal((await add({ scopes: ["edit", "admin"] })).status, 400, "…of permissions that exist");
+  assert.equal((await add({ codeHash: "K7QM29XVR48TBHN3WGYD" })).status, 400, "a hash, not a code");
+  assert.equal((await add({ expiresAt: Date.now() - 1 })).status, 400, "a code that has not run out already");
+  assert.equal((await add({ expiresAt: Date.now() + 25 * HOUR })).status, 400, "…and runs out within a day");
+  assert.equal((await add({ expiresAt: "soon" })).status, 400);
+  assert.equal((await call("/api/auth/agents", { method: "POST", token: OWNER, body: "not json" })).status, 400);
+  assert.equal((await call("/api/auth/agents", { method: "PUT", token: OWNER, body: {} })).status, 405);
+  const readOnly = await add({ name: "Reader", scopes: [] });
+  assert.deepEqual(readOnly.json.agent.scopes, ["read"], "an agent with nothing ticked can still read");
+
+  const pending = (await call("/api/auth/agents", { token: OWNER })).json.agents.find((a) => a.id === agent.id);
+  assert.deepEqual(pending.machines, [], "nobody has logged in");
+  assert.equal(pending.code.id, agent.code.id, "the code is listed as pending — by its id, never itself");
+
+  // No bearer — this is the request that produces one.
+  const here = (await call("/api/workspace", { token: OWNER })).json;
+  const login = await loginWith(agentCode(body), "ci-runner-7");
+  assert.equal(login.status, 201);
+  assert.ok(/^dka_[a-f0-9]{64}$/.test(login.json.token), "256 bits behind a prefix that says what it is");
+  assert.deepEqual(login.json.agent, { id: agent.id, name: "Grok bot" });
+  assert.deepEqual(login.json.scopes, ["read", "edit"]);
+  assert.deepEqual(login.json.workspace, { id: here.id, name: here.name });
+  assert.equal(login.json.version, workerVersion);
+  for (const feature of ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search"]) {
+    assert.ok(login.json.features.includes(feature), `the login says the worker has ${feature}`);
+  }
+  const token = login.json.token;
+  assert.equal(db.value("SELECT hash FROM agent_tokens WHERE agent_id = ?", agent.id), sha256(token), "only the hash is kept");
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_codes WHERE agent_id = ?", agent.id), 0, "redeeming spends the code");
+
+  // One-time, and it says the same thing as a code that never existed.
+  const twice = await loginWith(agentCode(body));
+  assert.equal(twice.status, 401);
+  const never = await loginWith(agentCode("0000000000000000000Z"));
+  assert.equal(never.status, 401);
+  assert.deepEqual(never.json, twice.json, "a caller learns whether a code works, never whether it existed");
+  for (const bad of ["dkla-123", "", 42, null, ALICE_CODE]) {
+    assert.equal((await loginWith(bad)).status, 400, `${JSON.stringify(bad)} is not a login code — an invite's prefix included`);
+  }
+  assert.equal((await call("/api/agent/login", { method: "POST", device: null, body: "not json" })).status, 400);
+  assert.equal(
+    (await call("/api/auth/join", { method: "POST", body: { code: agentCode(nextCodeBody()), deviceId: DEVICE } })).status,
+    400,
+    "and a login code is not an invite",
+  );
+
+  // Agents are the database's, and only theirs: without one the routes say
+  // so, an agent's token is nobody's — and the owner's sync API is untouched.
+  for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
+    assert.equal((await call("/api/agent/login", { method: "POST", device: null, body: { code: agentCode(nextCodeBody()) }, bindings })).status, 503);
+    assert.equal((await call("/api/auth/agents", { token: OWNER, bindings })).status, 503);
+    assert.equal((await call("/api/auth/agents", { method: "POST", token: OWNER, bindings, body: { name: "X", scopes: [], codeHash: sha256("x"), expiresAt: Date.now() + HOUR } })).status, 503);
+    assert.equal((await call(`/api/auth/agents/${agent.id}`, { method: "DELETE", token: OWNER, bindings })).status, 503);
+    assert.equal((await call("/api/agent/me", { token, device: null, bindings })).status, 401);
+    assert.equal((await call("/api/manifest", { token: OWNER, bindings })).status, 200, "sync does not need the database");
+  }
+  assert.equal((await call("/api/agent/me", { token, device: null })).status, 200, "and with it back, nothing was lost");
+
+  // Expired: the same 401, and the row goes with the attempt.
+  const lateBody = nextCodeBody();
+  const reissued = await newCode(agent.id, lateBody);
+  assert.equal(reissued.status, 201);
+  assert.ok(/^c-[a-f0-9]{8}$/.test(reissued.json.code.id));
+  db.run("UPDATE agent_codes SET expires_at = ? WHERE agent_id = ?", Date.now() - 1, agent.id);
+  const lapsed = (await call("/api/auth/agents", { token: OWNER })).json.agents.find((a) => a.id === agent.id);
+  assert.equal(lapsed.code, null, "a code that ran out is not pending");
+  const late = await loginWith(agentCode(lateBody));
+  assert.equal(late.status, 401);
+  assert.deepEqual(late.json, never.json, "expired says what unknown says");
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_codes WHERE agent_id = ?", agent.id), 0, "found expired, it is swept");
+
+  // A new code replaces a pending one — the old line stops working.
+  const first = nextCodeBody();
+  const second = nextCodeBody();
+  assert.equal((await newCode(agent.id, first)).status, 201);
+  assert.equal((await newCode(agent.id, second)).status, 201);
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_codes WHERE agent_id = ?", agent.id), 1, "one pending code an agent");
+  assert.equal((await loginWith(agentCode(first))).status, 401, "the replaced code is dead");
+  assert.equal((await newCode(agent.id, nextCodeBody(), Date.now() - 1)).status, 400);
+  assert.equal((await newCode(agent.id, nextCodeBody(), Date.now() + 25 * HOUR)).status, 400);
+  assert.equal((await newCode("a-00000000", nextCodeBody())).status, 404, "no such agent");
+  assert.equal((await newCode("m-00000000", nextCodeBody())).status, 400, "not an agent's id");
+  // However it was typed: case, spacing and the dashes are presentation.
+  const typed = ` ${agentCode(second).toLowerCase().replace(/-/g, "  ")} `;
+  const other = await loginWith(typed);
+  assert.equal(other.status, 201, "a second machine, with its own token");
+  assert.notEqual(other.json.token, token);
+
+  const listed = await call("/api/auth/agents", { token: OWNER });
+  const two = listed.json.agents.find((a) => a.id === agent.id);
+  assert.deepEqual(two.machines.map((m) => m.host).sort(), ["A machine", "ci-runner-7"], "each machine by what it calls itself");
+  assert.ok(two.machines.every((m) => /^t-[a-f0-9]{8}$/.test(m.id) && m.createdAt >= before));
+  assert.equal(two.code, null);
+  assert.ok(!listed.text.includes("dka_") && !listed.text.includes(sha256(token)), "the list never carries a credential or its hash");
+
+  // The token authenticates, and says what it is for.
+  const me = await call("/api/agent/me", { token, device: null });
+  assert.equal(me.status, 200);
+  assert.deepEqual(me.json, {
+    agent: { id: agent.id, name: "Grok bot" },
+    scopes: ["read", "edit"],
+    workspace: { id: here.id, name: here.name },
+    version: workerVersion,
+    features: login.json.features,
+  });
+
+  // "Last used" is a date in a list: the first request writes it, and then
+  // nothing does for an hour — a request is one row read and no write.
+  const used = db.value("SELECT last_used_at FROM agents WHERE id = ?", agent.id);
+  assert.ok(used >= before, "the first request said the agent was here");
+  db.queries.length = 0;
+  assert.equal((await call("/api/agent/me", { token, device: null })).status, 200);
+  assert.ok(
+    db.queries.length === 1 && /^\s*SELECT/i.test(db.queries[0]),
+    `a request within the hour is one read: ${db.queries.join(" | ")}`,
+  );
+  db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", Date.now() - 2 * HOUR, agent.id);
+  await call("/api/agent/me", { token, device: null });
+  assert.ok(db.value("SELECT last_used_at FROM agents WHERE id = ?", agent.id) > Date.now() - HOUR, "an hour on, the next request moves it");
+  const seen = (await call("/api/auth/agents", { token: OWNER })).json.agents.find((a) => a.id === agent.id);
+  assert.ok(seen.lastUsedAt > Date.now() - HOUR, "which is what the People view shows");
+});
+
+await test("agents: a rename and new permissions apply on the next request; a machine is revoked on its own; a logout revokes itself; removing the agent takes everything", async () => {
+  const bot = await addAgent("Two machines", ["comment", "edit"]);
+  const secondBody = nextCodeBody();
+  await newCode(bot.id, secondBody);
+  const second = (await loginWith(agentCode(secondBody), "laptop")).json.token;
+  const machines = (await call("/api/auth/agents", { token: OWNER })).json.agents.find((a) => a.id === bot.id).machines;
+  const laptop = machines.find((m) => m.host === "laptop");
+  const runner = machines.find((m) => m.host === "test-runner");
+  const me = (token) => call("/api/agent/me", { token, device: null });
+  const change = (id, body) => call(`/api/auth/agents/${id}`, { method: "POST", token: OWNER, body });
+
+  // Permissions are read off the row every time: there is no session to outlive them.
+  const changed = await change(bot.id, { name: "  Reviewer ", scopes: ["comment"] });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(changed.json, { updated: true });
+  const now = (await me(bot.token)).json;
+  assert.deepEqual(now.agent, { id: bot.id, name: "Reviewer" }, "the same agent under its new name");
+  assert.deepEqual(now.scopes, ["read", "comment"]);
+  const refused = await call("/api/agent/doc?path=Somewhere/new&dry=1", { method: "PUT", token: bot.token, device: null, body: "# New\n" });
+  assert.equal(refused.status, 403, "edit was unticked, so the very next write is refused");
+  assert.equal((await change(bot.id, { name: "Reviewer two" })).status, 200, "a name alone");
+  assert.deepEqual((await me(bot.token)).json.scopes, ["read", "comment"], "…leaves the permissions as they were");
+  assert.equal((await change(bot.id, { scopes: ["publish", "edit"] })).status, 200, "permissions alone");
+  const again = (await me(second)).json;
+  assert.equal(again.agent.name, "Reviewer two");
+  assert.deepEqual(again.scopes, ["read", "edit", "publish"], "every machine of the agent, at once");
+  assert.equal((await change(bot.id, { scopes: ["admin"] })).status, 400);
+  assert.equal((await change(bot.id, { name: "  " })).status, 400);
+  assert.equal((await change(bot.id, "not json")).status, 400);
+  assert.equal((await change("a-00000000", { name: "Nobody" })).status, 404);
+  assert.equal((await change("not-an-id", { name: "Nobody" })).status, 400);
+  assert.equal((await call(`/api/auth/agents/${bot.id}`, { token: OWNER })).status, 405);
+  assert.equal((await call(`/api/auth/agents/${bot.id}/code`, { token: OWNER })).status, 405);
+  assert.equal((await call(`/api/auth/agents/${bot.id}/nope`, { token: OWNER })).status, 404);
+
+  // One machine, by the id the list gave it.
+  const other = await addAgent("Somebody else", []);
+  const revoke = (agentId, tokenId) => call(`/api/auth/agents/${agentId}/tokens/${tokenId}`, { method: "DELETE", token: OWNER });
+  assert.equal((await revoke(other.id, laptop.id)).status, 404, "a machine is revoked under its own agent");
+  assert.equal((await revoke(bot.id, "t-nothex")).status, 400);
+  assert.equal((await call(`/api/auth/agents/${bot.id}/tokens/${laptop.id}`, { token: OWNER })).status, 405);
+  assert.equal((await me(second)).status, 200, "nothing has been revoked yet");
+  assert.equal((await revoke(bot.id, laptop.id)).status, 204);
+  assert.equal((await me(second)).status, 401, "the very next request from that machine");
+  assert.equal((await me(bot.token)).status, 200, "the other machine carries on");
+  assert.equal((await revoke(bot.id, laptop.id)).status, 404, "it is gone");
+
+  // `doklin logout`: the token that made the request revokes itself.
+  assert.equal((await call("/api/agent/login", { token: bot.token, device: null })).status, 405);
+  const out = await call("/api/agent/login", { method: "DELETE", token: bot.token, device: null });
+  assert.equal(out.status, 204);
+  assert.equal((await me(bot.token)).status, 401);
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_tokens WHERE agent_id = ?", bot.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_tokens WHERE id = ?", runner.id), 0);
+  const empty = (await call("/api/auth/agents", { token: OWNER })).json.agents.find((a) => a.id === bot.id);
+  assert.deepEqual(empty.machines, [], "the agent is still there, logged in nowhere");
+
+  // Removing the agent: its machines, and a code somebody still holds.
+  const thirdBody = nextCodeBody();
+  await newCode(bot.id, thirdBody);
+  const third = (await loginWith(agentCode(thirdBody))).json.token;
+  const unusedBody = nextCodeBody();
+  await newCode(bot.id, unusedBody);
+  assert.equal((await me(third)).status, 200);
+  const removed = await call(`/api/auth/agents/${bot.id}`, { method: "DELETE", token: OWNER });
+  assert.equal(removed.status, 204);
+  assert.equal((await me(third)).status, 401, "it stops working the moment it is removed");
+  assert.equal((await loginWith(agentCode(unusedBody))).status, 401, "and the line somebody was still holding is worth nothing");
+  for (const table of ["agents WHERE id", "agent_tokens WHERE agent_id", "agent_codes WHERE agent_id"]) {
+    assert.equal(db.value(`SELECT COUNT(*) FROM ${table} = ?`, bot.id), 0, `nothing left in ${table.split(" ")[0]}`);
+  }
+  assert.ok(!(await call("/api/auth/agents", { token: OWNER })).json.agents.some((a) => a.id === bot.id));
+  assert.equal((await call(`/api/auth/agents/${bot.id}`, { method: "DELETE", token: OWNER })).status, 404);
+  assert.equal((await me(other.token)).status, 200, "another agent is not touched");
+
+  // Agents are the owner's to manage, like people.
+  const body = { name: "Mine", scopes: ["edit"], codeHash: sha256("x"), expiresAt: Date.now() + HOUR };
+  for (const [method, path, sent] of [
+    ["GET", "/api/auth/agents"],
+    ["POST", "/api/auth/agents", body],
+    ["POST", `/api/auth/agents/${other.id}`, { scopes: ["publish"] }],
+    ["POST", `/api/auth/agents/${other.id}/code`, { codeHash: sha256("x"), expiresAt: Date.now() + HOUR }],
+    ["DELETE", `/api/auth/agents/${other.id}`],
+    ["DELETE", `/api/auth/agents/${other.id}/tokens/t-00000000`],
+  ]) {
+    const member = await call(path, { method, token: MEMBER, body: sent });
+    assert.equal(member.status, 403, `${method} ${path} is the owner's`);
+    assert.deepEqual(member.json, { error: "owner only" });
+    assert.equal((await call(path, { method, token: other.token, device: null, body: sent })).status, 403, "and never an agent's own");
+    assert.equal((await call(path, { method, body: sent })).status, 401, "auth comes first");
+  }
+  assert.deepEqual((await me(other.token)).json.scopes, ["read"], "none of that changed anything");
+});
+
+await test("agents: the gate — an agent's token is answered on /api/agent and nowhere else, and a person's credential nowhere on it", async () => {
+  await freshWorkspace({ "Gate/note.md": "# Note\n\nWhat the workspace held.\n" });
+  // Everything ticked: no permission reaches the sync API.
+  const bot = await addAgent("Trusted bot", ["comment", "edit", "publish"]);
+  const etag = etagNow();
+  const objects = fake.store.size;
+  const people = db.value("SELECT COUNT(*) FROM members") + db.value("SELECT COUNT(*) FROM agents");
+  const hash = "a".repeat(16);
+  const sync = [
+    ["GET", "/api/meta"],
+    ["GET", "/api/workspace"],
+    ["POST", "/api/workspace", { name: "Mine now" }],
+    ["GET", "/api/poll"],
+    ["POST", "/api/poll", { name: "Bot" }],
+    ["GET", "/api/manifest"],
+    ["PUT", "/api/manifest", manifest(999, {}), { "x-base-etag": etag }],
+    ["GET", "/api/blobs/f-doc1"],
+    ["GET", `/api/blobs/f-doc1/${hash}`],
+    ["PUT", `/api/blobs/f-doc1/${hash}`, "bytes"],
+    ["DELETE", `/api/blobs/f-doc1/${hash}`],
+    ["GET", "/api/versions/index"],
+    ["PUT", "/api/versions/index", {}, { "x-base-etag": "*" }],
+    ["GET", "/api/versions/snapshots/1700000000000-d-macbook"],
+    ["GET", "/api/versions/blobs"],
+    ["GET", "/api/auth/members"],
+    ["GET", "/api/auth/invites"],
+    ["POST", "/api/auth/invites", { email: "bot@example.com", codeHash: sha256("x"), expiresAt: Date.now() + DAY }],
+    ["GET", "/api/auth/tokens"],
+    ["GET", "/api/auth/agents"],
+    ["POST", "/api/auth/agents", { name: "Another", scopes: ["edit"], codeHash: sha256("y"), expiresAt: Date.now() + HOUR }],
+    ["POST", "/api/admin/wipe", { confirm: "wipe" }],
+    ["GET", "/api/nope"],
+  ];
+  for (const [method, path, body, headers] of sync) {
+    const res = await as(bot)(path, { method, body, headers });
+    assert.equal(res.status, 403, `${method} ${path} refuses an agent`);
+    assert.ok(/document API only/.test(res.json.error), "and says where it belongs");
+  }
+  assert.equal(etagNow(), etag, "the manifest was not touched");
+  assert.equal(fake.store.size, objects, "nothing was stored and nothing wiped");
+  assert.equal(db.value("SELECT COUNT(*) FROM members") + db.value("SELECT COUNT(*) FROM agents"), people, "nobody was invited or added");
+
+  // And the other way: a person's credential is not a limited account, so it
+  // has no business on the routes whose whole point is the limit.
+  const documentApi = [
+    ["GET", "/api/agent/me"],
+    ["DELETE", "/api/agent/login"],
+    ["GET", "/api/agent/tree"],
+    ["GET", "/api/agent/doc?path=Gate/note"],
+    ["PUT", "/api/agent/doc?path=Gate/note&force=1", "# Replaced\n"],
+    ["DELETE", "/api/agent/doc?path=Gate/note"],
+    ["POST", "/api/agent/move", { from: "Gate/note", to: "Gate/moved" }],
+    ["GET", "/api/agent/comments?path=Gate/note"],
+    ["POST", "/api/agent/comments", { path: "Gate/note", on: "the workspace", body: "Hm." }],
+    ["DELETE", "/api/agent/comments?path=Gate/note&thread=abc123"],
+    ["GET", "/api/agent/search?q=workspace"],
+    ["GET", "/api/agent/pages"],
+    ["PUT", "/api/agent/pages", { path: "Gate/note" }],
+    ["DELETE", "/api/agent/pages?slug=nothing-here"],
+  ];
+  for (const [method, path, body] of documentApi) {
+    for (const [who, token] of [["the owner", OWNER], ["a member", MEMBER]]) {
+      const res = await call(path, { method, token, body });
+      assert.equal(res.status, 403, `${method} ${path} refuses ${who}`);
+      assert.ok(/for agents/.test(res.json.error));
+    }
+    assert.equal((await call(path, { method, body })).status, 401, `${method} ${path} needs a bearer`);
+  }
+  assert.equal(etagNow(), etag, "none of that changed the workspace either");
+
+  // The login is the whole carve-out: method and path, exactly.
+  assert.equal((await call("/api/agent/login", { device: null })).status, 401);
+  assert.equal((await call("/api/agent/loginx", { method: "POST", device: null, body: { code: "x" } })).status, 401);
+  assert.equal((await call("/api/agent/login/x", { method: "POST", device: null, body: { code: "x" } })).status, 401);
+  assert.equal(
+    (await call("/api/agent/login", { method: "POST", token: OWNER, body: { code: "nope" } })).status,
+    400,
+    "it is answered above the gate — a bearer on it changes nothing",
+  );
+
+  // What is not a token is nobody.
+  assert.equal((await call("/api/agent/me", { token: `dka_${"0".repeat(64)}`, device: null })).status, 401);
+  assert.equal((await call("/api/agent/me", { token: bot.token.slice(4), device: null })).status, 401, "the prefix is part of it");
+  assert.equal((await call("/api/meta", { token: bot.token.slice(4) })).status, 401);
+
+  // Under /api/agent: one segment, a known route, a known verb.
+  assert.equal((await as(bot)("/api/agent")).status, 404);
+  assert.equal((await as(bot)("/api/agent/nope")).status, 404);
+  assert.equal((await as(bot)("/api/agent/tree/deeper")).status, 404);
+  assert.equal((await as(bot)("/api/agent/tree", { method: "PATCH" })).status, 405);
+  assert.equal((await as(bot)("/api/agent/me", { method: "POST", body: {} })).status, 405);
+  assert.equal((await as(bot)("/api/agent/search", { method: "POST", body: {} })).status, 405);
+});
+
+await test("agents: each permission — every route and verb is refused without its own, with what it needs, and answered with it", async () => {
+  await freshWorkspace({ "Perm/note.md": "# Note\n\nSome plain words here.\n" });
+  // [permission, verb, path, body, what it answers when allowed]. Every
+  // change is a dry run or names nothing, so "allowed" leaves no mark.
+  const routes = [
+    ["read", "GET", "/api/agent/tree", undefined, 200],
+    ["read", "GET", "/api/agent/doc?path=Perm/note", undefined, 200],
+    ["read", "GET", "/api/agent/comments?path=Perm/note", undefined, 200],
+    ["read", "GET", "/api/agent/search?q=plain", undefined, 200],
+    ["read", "GET", "/api/agent/pages", undefined, 200],
+    ["edit", "PUT", "/api/agent/doc?path=Perm/new&dry=1", "# New\n", 200],
+    ["edit", "DELETE", "/api/agent/doc?path=Perm/note&dry=1", undefined, 200],
+    ["edit", "POST", "/api/agent/move", { from: "Perm/note", to: "Perm/moved", dryRun: true }, 200],
+    ["comment", "POST", "/api/agent/comments", { path: "Perm/note", on: "plain words", body: "Hm.", dryRun: true }, 200],
+    ["comment", "DELETE", "/api/agent/comments?path=Perm/note&thread=nope00&dry=1", undefined, 404],
+    ["publish", "PUT", "/api/agent/pages", { path: "Perm/note", dryRun: true }, 200],
+    ["publish", "DELETE", "/api/agent/pages?slug=nothing-here&dry=1", undefined, 404],
+  ];
+  const agents = [
+    await addAgent("Reader", []),
+    await addAgent("Commenter", ["comment"]),
+    await addAgent("Editor", ["edit"]),
+    await addAgent("Publisher", ["publish"]),
+    await addAgent("Everything", ["comment", "edit", "publish"]),
+  ];
+  assert.deepEqual(agents.map((a) => a.scopes.length), [1, 2, 2, 2, 4]);
+  const etag = etagNow();
+  for (const agent of agents) {
+    for (const [scope, method, path, body, allowed] of routes) {
+      const res = await as(agent)(path, { method, body });
+      if (agent.scopes.includes(scope)) {
+        assert.equal(res.status, allowed, `${agent.name} may ${method} ${path}: ${res.text.slice(0, 200)}`);
+      } else {
+        assert.equal(res.status, 403, `${agent.name} may not ${method} ${path}`);
+        assert.equal(res.json.need, scope, "the refusal names the permission");
+        assert.deepEqual(res.json.scopes, agent.scopes, "…and the ones it holds");
+        assert.ok(/may not .* — the workspace's owner can allow it/.test(res.json.error), "in a sentence that says what to do next");
+      }
+    }
+  }
+  assert.equal(etagNow(), etag, "a refusal and a dry run both leave the workspace as it was");
+
+  // The reviewer: it can say things about a text it cannot change.
+  const reviewer = agents[1];
+  const said = await as(reviewer)("/api/agent/comments", { method: "POST", body: { path: "Perm/note", on: "plain words", body: "Too plain." } });
+  assert.equal(said.status, 201);
+  assert.equal((await as(reviewer)("/api/agent/doc?path=Perm/note&force=1", { method: "PUT", body: "# Mine\n" })).status, 403);
+  assert.ok(textAt("Perm/note.md").includes("{==plain words==}"), "the comment landed; the rewrite did not");
+});
+
+/* ---------- The document API: documents ---------- */
+
+/** `GET /api/agent/doc` for a path and an optional version flag. */
+const docUrl = (p, v = "", more = "") => `/api/agent/doc?path=${encodeURIComponent(p)}${v ? `&v=${v}` : ""}${more}`;
+/** What a read says about what it read, out of its headers. */
+const readHead = (res) => ({
+  kind: res.headers.get("x-doklin-kind"),
+  path: decodeURIComponent(res.headers.get("x-doklin-path") ?? ""),
+  file: decodeURIComponent(res.headers.get("x-doklin-file") ?? ""),
+  version: res.headers.get("x-doklin-version"),
+  rev: Number(res.headers.get("x-doklin-rev")),
+});
+
+await test("documents: a write is a blob and one compare-and-swap — a fresh id at rev 1, rev + 1 after, signed with the agent's id; the same bytes and a dry run write nothing", async () => {
+  await freshWorkspace({ "Notes/kept.md": "# Kept\n" });
+  const bot = await addAgent("Writer", ["edit"]);
+  const api = as(bot);
+  const start = storedManifest();
+  const before = Date.now();
+  const text = "# Hello\n\nWritten by a bot — with ünïcode.\n";
+
+  const made = await api(docUrl("Notes/hello"), { method: "PUT", body: text });
+  assert.equal(made.status, 201);
+  assert.deepEqual(made.json, {
+    kind: "document",
+    path: "Notes/hello",
+    version: "md",
+    file: "hello.md",
+    rev: 1,
+    size: Buffer.byteLength(text),
+    created: true,
+  });
+  const one = storedManifest();
+  assert.equal(one.seq, start.seq + 1, "one manifest write");
+  const [fid, file] = entryAt(one, "Notes/hello.md");
+  assert.ok(/^f-[a-f0-9]{12}$/.test(fid), "an id the way the engine mints one");
+  assert.equal(file.rev, 1);
+  assert.equal(file.hash, blobHash(text), "addressed by its content, as a Mac's upload is");
+  assert.equal(file.size, Buffer.byteLength(text));
+  assert.ok(file.mtime >= before && file.mtime <= Date.now());
+  assert.equal(file.by, bot.id, "signed with the agent's id, the way a Mac signs with a member's");
+  const blob = fake.store.get(`blobs/${fid}/${file.hash}`);
+  assert.equal(blob.bytes.toString("utf8"), text);
+  assert.equal(blob.httpMetadata.contentType, "text/markdown; charset=utf-8");
+  const [keptFid, kept] = entryAt(start, "Notes/kept.md");
+  assert.deepEqual(one.files[keptFid], kept, "nothing else moved");
+  assert.equal((await call(`/api/blobs/${fid}/${file.hash}`, { token: MEMBER })).text, text, "a Mac downloads it like any other device's write");
+
+  const back = await api(docUrl("Notes/hello"));
+  assert.equal(back.status, 200);
+  assert.equal(back.text, text);
+  assert.deepEqual(readHead(back), { kind: "document", path: "Notes/hello", file: "Notes/hello.md", version: "md", rev: 1 });
+  assert.equal(back.headers.get("content-type"), "text/markdown; charset=utf-8");
+  assert.equal(back.headers.get("cache-control"), "no-store");
+
+  // Replacing it: the revision that was read, or nothing.
+  const next = `${text}\nA second paragraph.\n`;
+  const blind = await api(docUrl("Notes/hello"), { method: "PUT", body: next });
+  assert.equal(blind.status, 409, "no silent overwrite");
+  assert.equal(blind.json.code, "needs_rev");
+  assert.equal(blind.json.rev, 1, "the refusal says which revision is there");
+  const replaced = await api(docUrl("Notes/hello"), { method: "PUT", body: next, headers: { "if-rev": "1" } });
+  assert.equal(replaced.status, 200);
+  assert.deepEqual(replaced.json, { kind: "document", path: "Notes/hello", version: "md", file: "hello.md", rev: 2, size: Buffer.byteLength(next), created: false });
+  const two = storedManifest();
+  assert.equal(two.seq, start.seq + 2);
+  assert.equal(two.files[fid].rev, 2, "the same file, one revision on");
+  assert.equal(two.files[fid].hash, blobHash(next));
+  assert.ok(fake.store.has(`blobs/${fid}/${file.hash}`), "the old revision is still in the bucket — collecting it is a Mac's job");
+  const stale = await api(docUrl("Notes/hello"), { method: "PUT", body: "# Late\n", headers: { "if-rev": "1" } });
+  assert.equal(stale.status, 409, "a write over a stale revision is refused");
+  assert.equal(stale.json.rev, 2);
+  assert.ok(/Read it again/.test(stale.json.error));
+  assert.equal(textAt("Notes/hello.md"), next, "and nothing was lost");
+  assert.equal((await api(docUrl("Notes/hello", "", "&force=1"), { method: "PUT", body: "x", headers: { "if-rev": "2" } })).status, 400, "a revision or a force, not both");
+  assert.equal((await api(docUrl("Notes/hello"), { method: "PUT", body: "x", headers: { "if-rev": "two" } })).status, 400);
+  const mustBeNew = await api(docUrl("Notes/hello"), { method: "PUT", body: "x", headers: { "if-rev": "*" } });
+  assert.equal(mustBeNew.status, 409, "* means it must not exist yet");
+  assert.equal(mustBeNew.json.rev, 2);
+  const vanished = await api(docUrl("Notes/never-was"), { method: "PUT", body: "x", headers: { "if-rev": "3" } });
+  assert.equal(vanished.status, 409, "a revision of something that is not there");
+  assert.equal(vanished.json.rev, null);
+
+  // The same bytes are not a new revision, and not a write.
+  const etag = etagNow();
+  const blobs = blobKeys().length;
+  const same = await api(docUrl("Notes/hello", "", "&force=1"), { method: "PUT", body: next });
+  assert.equal(same.status, 200);
+  assert.equal(same.json.unchanged, true);
+  assert.equal(same.json.written, false);
+  assert.equal(same.json.rev, 2);
+  assert.equal(etagNow(), etag, "no new etag, so no Mac wakes up for nothing");
+
+  // A dry run is checked like the real thing, and then thrown away.
+  const dry = await api(docUrl("Notes/hello", "", "&dry=1"), { method: "PUT", body: "# Other\n", headers: { "if-rev": "2" } });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.json.rev, 3, "what it would have become");
+  assert.equal(dry.json.written, false);
+  const dryNew = await api(docUrl("Notes/unborn", "", "&dry=1"), { method: "PUT", body: "# Unborn\n" });
+  assert.equal(dryNew.status, 200, "not a 201: nothing was created");
+  assert.deepEqual([dryNew.json.created, dryNew.json.written], [true, false]);
+  assert.equal((await api(docUrl("Notes/hello", "", "&dry=1"), { method: "PUT", body: "x", headers: { "if-rev": "1" } })).status, 409, "a dry run still says no");
+  assert.equal(etagNow(), etag);
+  assert.equal(blobKeys().length, blobs, "not even a blob");
+  assert.equal(entryAt(storedManifest(), "Notes/unborn.md"), undefined);
+
+  // Removing leaves the tombstone a Mac honours, one revision on.
+  const gone = await api(docUrl("Notes/hello"), { method: "DELETE" });
+  assert.equal(gone.status, 200);
+  assert.deepEqual(gone.json, { kind: "document", path: "Notes/hello", versions: ["md"], stillPublic: [] });
+  const three = storedManifest();
+  assert.equal(three.seq, start.seq + 3);
+  assert.equal(three.files[fid], undefined);
+  const tomb = three.tombstones[fid];
+  assert.deepEqual({ path: tomb.path, rev: tomb.rev, by: tomb.by }, { path: "Notes/hello.md", rev: 3, by: bot.id });
+  assert.ok(tomb.ts >= before && tomb.ts <= Date.now());
+  assert.equal((await api(docUrl("Notes/hello"))).status, 404);
+  // The same name again is a new file, not the old one back.
+  const reborn = await api(docUrl("Notes/hello"), { method: "PUT", body: "# Again\n", headers: { "if-rev": "*" } });
+  assert.equal(reborn.status, 201);
+  assert.equal(reborn.json.rev, 1);
+  const four = storedManifest();
+  assert.notEqual(entryAt(four, "Notes/hello.md")[0], fid);
+  assert.ok(four.tombstones[fid], "and the old one stays deleted");
+
+  // A Mac writes on top of what the worker wrote, by the same check as ever —
+  // and an old tombstone ages out with whoever writes next, as it does there.
+  await macWrite((m, put) => {
+    put("Notes/from-a-mac.md", "# From a Mac\n");
+    m.tombstones["f-old000001"] = { path: "Old/a.md", rev: 4, ts: Date.now() - 31 * DAY, by: ALICE.id };
+    m.tombstones["f-new000001"] = { path: "Old/b.md", rev: 2, ts: Date.now() - 29 * DAY, by: ALICE.id };
+  });
+  assert.equal((await api(docUrl("Notes/another"), { method: "PUT", body: "# Another\n" })).status, 201);
+  const aged = storedManifest();
+  assert.equal(aged.tombstones["f-old000001"], undefined, "past thirty days");
+  assert.ok(aged.tombstones["f-new000001"] && aged.tombstones[fid], "younger ones stay");
+  assert.ok(entryAt(aged, "Notes/from-a-mac.md"), "and the Mac's file is there beside the agent's");
+
+  // A plain file: named in full, its bytes as they are, no versions.
+  const pic = await api(docUrl("Notes/pixel.png"), { method: "PUT", body: PIXEL_PNG });
+  assert.equal(pic.status, 201);
+  assert.deepEqual(pic.json, { kind: "file", path: "Notes/pixel.png", rev: 1, size: PIXEL_PNG.length, created: true });
+  const [picFid, picFile] = entryAt(storedManifest(), "Notes/pixel.png");
+  assert.equal(fake.store.get(`blobs/${picFid}/${picFile.hash}`).httpMetadata.contentType, "image/png");
+  const picBack = await api(docUrl("Notes/pixel.png"));
+  assert.deepEqual(Buffer.from(picBack.bytes), PIXEL_PNG, "byte for byte");
+  assert.equal(picBack.headers.get("content-type"), "image/png");
+  assert.deepEqual(readHead(picBack), { kind: "file", path: "Notes/pixel.png", file: "Notes/pixel.png", version: null, rev: 1 });
+  assert.equal((await api(docUrl("Notes/pixel.png"), { method: "PUT", body: "other" })).json.code, "needs_rev", "the same rule as a document");
+  assert.equal((await api(docUrl("Notes/pixel.png"), { method: "PUT", body: "other", headers: { "if-rev": "1" } })).json.rev, 2);
+  const flagged = await api(docUrl("Notes/pixel.png", "md"));
+  assert.equal(flagged.status, 400);
+  assert.ok(/plain file — it has no versions/.test(flagged.json.error));
+  const picInfo = await api(docUrl("Notes/pixel.png", "", "&info=1"));
+  assert.deepEqual({ ...picInfo.json, changed: 0 }, { kind: "file", path: "Notes/pixel.png", rev: 2, size: 5, changed: 0, by: bot.id, byName: "Writer" });
+  const picGone = await api(docUrl("Notes/pixel.png"), { method: "DELETE" });
+  assert.deepEqual(picGone.json, { kind: "file", path: "Notes/pixel.png", stillPublic: [] });
+  assert.equal(storedManifest().tombstones[picFid].rev, 3);
+
+  assert.equal((await api(docUrl("Notes/huge.bin"), { method: "PUT", body: new Uint8Array(25 * 1024 * 1024 + 1) })).status, 413);
+
+  // No workspace, or one this worker cannot read: nothing is invented.
+  const unbound = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: db };
+  const everything = as(await addAgent("Everything", ["comment", "edit", "publish"]));
+  for (const [method, path, body] of [
+    ["GET", "/api/agent/tree"],
+    ["GET", docUrl("Notes/hello")],
+    ["PUT", docUrl("Notes/hello"), "# Hello\n"],
+    ["DELETE", docUrl("Notes/hello")],
+    ["POST", "/api/agent/move", { from: "a", to: "b" }],
+    ["GET", "/api/agent/comments?path=Notes/hello"],
+    ["POST", "/api/agent/comments", { path: "Notes/hello", on: "Hello", body: "Hm." }],
+    ["DELETE", "/api/agent/comments?path=Notes/hello&thread=abc123"],
+    ["GET", "/api/agent/pages"],
+    ["PUT", "/api/agent/pages", { path: "Notes/hello" }],
+    ["DELETE", "/api/agent/pages?path=Notes/hello"],
+    ["GET", "/api/agent/search?q=hello"],
+  ]) {
+    const res = await everything(path, { method, body, bindings: unbound });
+    assert.equal(res.status, 404, `${method} ${path} on a domain with no workspace`);
+    assert.ok(/holds no workspace yet/.test(res.json.error));
+  }
+  assert.equal(unbound.DATA.store.size, 0);
+  const garbled = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: db };
+  await garbled.DATA.put("manifest.json", "{ not a manifest");
+  const refused = await api(docUrl("Notes/hello"), { method: "PUT", body: "# Hello\n", bindings: garbled });
+  assert.equal(refused.status, 409);
+  assert.ok(/open it in Doklin first/.test(refused.json.error));
+  assert.equal(garbled.DATA.store.size, 1, "and no blob was left beside it");
+});
+
+await test("documents: one name, two versions — reading resolves, a flag or an extension picks, and only a write to an html-only document refuses to guess", async () => {
+  const then = Date.now() - 60_000;
+  await freshWorkspace(
+    {
+      "VT/md-only.md": "# Markdown only\n",
+      "VT/both.md": "# Both, in markdown\n",
+      "VT/both.html": "<h1>Both, as a page</h1>\n",
+      "VT/html-only.html": "<h1>A page and nothing else</h1>\n",
+      "VT/alt.markdown": "# The long extension\n",
+      "VT/twin.md": "# Twin one\n",
+      "VT/twin.mkd": "# Twin two\n",
+    },
+    { "VT/both.md": { mtime: then }, "VT/both.html": { mtime: then } },
+  );
+  const bot = await addAgent("Versions", ["edit"]);
+  const api = as(bot);
+  const put = (p, v, body, headers = {}, more = "") => api(docUrl(p, v, more), { method: "PUT", body, headers });
+
+  // Reading: [document, flag] → the version read, or why not.
+  for (const [doc, flag, want] of [
+    ["VT/md-only", "", "md"],
+    ["VT/md-only", "md", "md"],
+    ["VT/md-only", "html", "no_html"],
+    ["VT/both", "", "md"],
+    ["VT/both", "md", "md"],
+    ["VT/both", "html", "html"],
+    ["VT/html-only", "", "html"],
+    ["VT/html-only", "md", "no_md"],
+    ["VT/html-only", "html", "html"],
+    ["VT/nothing", "", null],
+    ["VT/nothing", "md", null],
+    ["VT/nothing", "html", null],
+  ]) {
+    const res = await api(docUrl(doc, flag));
+    const label = `${doc}${flag ? ` --${flag}` : ""}`;
+    if (want === "md" || want === "html") {
+      assert.equal(res.status, 200, label);
+      const head = readHead(res);
+      assert.equal(head.version, want, `${label} reads the ${want} version, and says so`);
+      assert.equal(head.path, doc, "the document's name, whatever was read");
+      assert.equal(head.file, `${doc}.${want}`);
+      assert.equal(res.headers.get("content-type"), want === "md" ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8");
+      assert.equal(res.text, textAt(`${doc}.${want}`));
+    } else {
+      assert.equal(res.status, 404, label);
+      assert.equal(res.json.code, want ?? undefined, `${label} → ${want ?? "nothing there"}`);
+    }
+  }
+  assert.ok(/writing one with --html creates it/.test((await api(docUrl("VT/md-only", "html"))).json.error));
+  assert.ok(/writing one with --md adds a markdown version/.test((await api(docUrl("VT/html-only", "md"))).json.error));
+
+  // An extension picks a version too — and still names the same document.
+  assert.equal(readHead(await api(docUrl("VT/both.html"))).version, "html");
+  assert.equal(readHead(await api(docUrl("VT/both.md"))).version, "md");
+  assert.equal(readHead(await api(docUrl("VT/both.html"))).path, "VT/both");
+  assert.equal((await api(docUrl("VT/md-only.html"))).json.code, "no_html");
+  assert.equal((await api(docUrl("VT/html-only.md"))).json.code, "no_md");
+  assert.equal((await api(docUrl("VT/both.md", "html"))).status, 400, "a flag that contradicts the extension");
+  assert.equal((await api(docUrl("VT/both.md", "md"))).status, 200, "one that agrees is fine");
+  assert.equal((await api(docUrl("VT/both", "pdf"))).status, 400);
+
+  // Markdown is any of its extensions; two with one stem have to be named in full.
+  const alt = await api(docUrl("VT/alt"));
+  assert.deepEqual(readHead(alt), { kind: "document", path: "VT/alt", file: "VT/alt.markdown", version: "md", rev: 1 });
+  const twin = await api(docUrl("VT/twin"));
+  assert.equal(twin.status, 409);
+  assert.deepEqual(twin.json.candidates, ["VT/twin.md", "VT/twin.mkd"]);
+  assert.equal((await api(docUrl("VT/twin.mkd"))).text, "# Twin two\n");
+  assert.equal((await api(docUrl("VT/twin.md"))).text, "# Twin one\n");
+  const listed = (await api("/api/agent/tree?dir=VT")).json.documents;
+  assert.deepEqual(
+    listed.map((d) => [d.path, d.md?.file ?? null, d.html?.file ?? null]),
+    [
+      ["VT/alt", "alt.markdown", null],
+      ["VT/both", "both.md", "both.html"],
+      ["VT/html-only", null, "html-only.html"],
+      ["VT/md-only", "md-only.md", null],
+      ["VT/twin.md", "twin.md", null],
+      ["VT/twin.mkd", "twin.mkd", null],
+    ],
+    "a listing shows each document once, with the versions it has",
+  );
+  assert.ok(listed.every((d) => d.htmlBehind === undefined), "nothing is behind yet");
+
+  // Writing with no flag. Markdown only: the markdown.
+  const mdOnly = await put("VT/md-only", "", "# Markdown only, edited\n", { "if-rev": "1" });
+  assert.deepEqual([mdOnly.status, mdOnly.json.version, mdOnly.json.file, mdOnly.json.rev], [200, "md", "md-only.md", 2]);
+
+  // Both: the markdown — and the html now describes an older text.
+  const both = await put("VT/both", "", "# Both, edited in markdown\n", { "if-rev": "1" });
+  assert.deepEqual([both.status, both.json.version, both.json.rev], [200, "md", 2]);
+  assert.equal(both.json.htmlBehind, true, "the answer to a markdown write says the html is behind");
+  assert.equal(textAt("VT/both.html"), "<h1>Both, as a page</h1>\n", "the html was not touched");
+  assert.equal((await api("/api/agent/tree?dir=VT")).json.documents.find((d) => d.path === "VT/both").htmlBehind, true, "so does a listing");
+  assert.equal((await api(docUrl("VT/both"))).headers.get("x-doklin-html-behind"), "1", "and a read of either version");
+  assert.equal((await api(docUrl("VT/both", "html"))).headers.get("x-doklin-html-behind"), "1");
+  assert.equal((await api(docUrl("VT/both", "", "&info=1"))).json.htmlBehind, true);
+  const html = await put("VT/both", "html", "<h1>Both, edited</h1>\n", { "if-rev": "1" });
+  assert.deepEqual([html.status, html.json.version, html.json.file, html.json.rev], [200, "html", "both.html", 2]);
+  assert.equal(html.json.htmlBehind, undefined, "writing the html again brings it level");
+  assert.equal((await api(docUrl("VT/both"))).headers.get("x-doklin-html-behind"), null);
+  assert.equal((await api("/api/agent/tree?dir=VT")).json.documents.find((d) => d.path === "VT/both").htmlBehind, undefined);
+
+  // Html only: the one place a default would do harm.
+  const etag = etagNow();
+  for (const [headers, more] of [[{}, ""], [{ "if-rev": "1" }, ""], [{}, "&force=1"]]) {
+    const guess = await put("VT/html-only", "", "# Markdown, by accident\n", headers, more);
+    assert.equal(guess.status, 400, "markdown text never replaces an html page by default");
+    assert.equal(guess.json.code, "html_only");
+    assert.ok(/say --html to replace it, or --md to add a markdown version/.test(guess.json.error));
+  }
+  assert.equal(etagNow(), etag);
+  assert.equal((await put("VT/html-only", "html", "<h1>Replaced</h1>\n")).json.code, "needs_rev");
+  const page = await put("VT/html-only", "html", "<h1>Replaced</h1>\n", { "if-rev": "1" });
+  assert.deepEqual([page.status, page.json.version, page.json.rev, page.json.created], [200, "html", 2, false]);
+  const added = await put("VT/html-only", "md", "# The markdown it never had\n");
+  assert.deepEqual([added.status, added.json.version, added.json.file, added.json.rev, added.json.created], [201, "md", "html-only.md", 1, true]);
+  assert.equal(readHead(await api(docUrl("VT/html-only"))).version, "md", "it has both now, and reads as any document with both");
+  assert.equal((await put("VT/html-only", "", "# Markdown, on purpose\n", { "if-rev": "1" })).status, 200, "and a plain write is the markdown again");
+
+  // Nothing yet: markdown, unless html is said.
+  const fresh = await put("VT/fresh", "", "# Fresh\n");
+  assert.deepEqual([fresh.status, fresh.json.version, fresh.json.file, fresh.json.created], [201, "md", "fresh.md", true]);
+  const pageOnly = await put("VT/page", "html", "<p>A page of its own</p>\n");
+  assert.deepEqual([pageOnly.status, pageOnly.json.version, pageOnly.json.file, pageOnly.json.created], [201, "html", "page.html", true]);
+  assert.equal(entryAt(storedManifest(), "VT/page.md"), undefined, "an html-only document, with no markdown invented beside it");
+  const typed = await put("VT/typed.html", "", "<p>Typed in full</p>\n");
+  assert.deepEqual([typed.status, typed.json.path, typed.json.version], [201, "VT/typed", "html"]);
+  const long = await put("VT/long.markdown", "", "# Long\n");
+  assert.deepEqual([long.status, long.json.path, long.json.file], [201, "VT/long", "long.markdown"], "a markdown extension typed in full is kept");
+  assert.equal((await put("VT/binary", "", new Uint8Array([0xff, 0xfe, 0xfd]))).status, 400, "a version is text");
+
+  // What is known about a document, without reading it.
+  const info = (await api(docUrl("VT/both.html", "", "&info=1"))).json;
+  assert.deepEqual([info.kind, info.path, info.comments], ["document", "VT/both", 0]);
+  assert.deepEqual([info.md.file, info.md.rev, info.md.by, info.md.byName], ["both.md", 2, bot.id, "Versions"]);
+  assert.deepEqual([info.html.file, info.html.rev, info.html.size], ["both.html", 2, 22]);
+  assert.equal((await api(docUrl("VT/nothing", "", "&info=1"))).status, 404);
+});
+
+await test("documents: what a Mac would never see is refused; the sidecar never appears; one name is one file whatever its case", async () => {
+  await freshWorkspace({
+    "Case/Report.md": "# Report\n\nThe {==numbers==}{>>#abc123<<} are in.\n",
+    "Case/Report.meta.jsonl": sidecar({ t: "mthread", id: "abc123", comments: [{ author: "Alice", at: 1757000000000, body: "Which numbers?" }] }),
+    "Case/Data.csv": "a,b\n1,2\n",
+    "Case/Sub/inner.md": "# Inner\n",
+  });
+  const bot = await addAgent("Careful", ["edit"]);
+  const api = as(bot);
+  const etag = etagNow();
+
+  const refused = [
+    ".secret/plan",
+    "Notes/.draft",
+    "node_modules/pkg/readme",
+    "Out/target/notes",
+    "dist/page",
+    "x/build/y",
+    "__pycache__/a",
+    "Notes/a.doklin-sync-tmp",
+    "Case/Report.meta.jsonl",
+    "Case/REPORT.META.JSONL",
+    "Anything/new.meta.jsonl",
+    "../outside",
+    "a/../b",
+    "a//b",
+    "/leading",
+    "a/./b",
+    "back\\slash",
+    "",
+    Array.from({ length: 13 }, (_, i) => `d${i}`).join("/"),
+  ];
+  for (const p of refused) {
+    assert.equal((await api(docUrl(p))).status, 400, `reading ${JSON.stringify(p)}`);
+    assert.equal((await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "x" })).status, 400, `writing ${JSON.stringify(p)}`);
+    assert.equal((await api(docUrl(p), { method: "DELETE" })).status, 400, `removing ${JSON.stringify(p)}`);
+    // (A move reads a leading slash as the workspace's root, as publishing reads "/".)
+    if (p !== "/leading") {
+      assert.equal((await api("/api/agent/move", { method: "POST", body: { from: "Case/Sub/inner", to: p } })).status, 400, `moving onto ${JSON.stringify(p)}`);
+    }
+  }
+  assert.equal(etagNow(), etag, "none of it reached the manifest");
+  assert.ok(/does not sync names that begin with a dot/.test((await api(docUrl(".secret/plan"))).json.error));
+  assert.ok(/a folder Doklin does not sync/.test((await api(docUrl("node_modules/pkg/readme"))).json.error));
+  assert.ok(/comments commands/.test((await api(docUrl("Case/Report.meta.jsonl"))).json.error), "the sidecar's refusal says where comments are");
+
+  // A listing is folders, documents and plain files — never a sidecar.
+  const root = (await api("/api/agent/tree")).json;
+  assert.deepEqual(root, { dir: "", folders: ["Case"], documents: [], files: [] });
+  const deep = (await api("/api/agent/tree?deep=1")).json;
+  assert.deepEqual(deep.folders, ["Case", "Case/Sub"]);
+  assert.deepEqual(deep.documents.map((d) => d.path), ["Case/Report", "Case/Sub/inner"]);
+  assert.deepEqual(deep.files.map((f) => f.path), ["Case/Data.csv"]);
+  assert.ok(!JSON.stringify(deep).includes("meta.jsonl"));
+  const folder = (await api("/api/agent/tree?dir=/Case/")).json;
+  assert.deepEqual([folder.dir, folder.folders, folder.documents.map((d) => d.path), folder.files.map((f) => f.path)], [
+    "Case",
+    ["Case/Sub"],
+    ["Case/Report"],
+    ["Case/Data.csv"],
+  ]);
+  assert.deepEqual((await api("/api/agent/tree?dir=case")).json.documents.map((d) => d.path), ["Case/Report"], "a folder is found whatever case it is typed in");
+  assert.equal((await api("/api/agent/tree?dir=Nope")).status, 404);
+  assert.equal((await api("/api/agent/tree?dir=.git")).status, 400);
+  assert.equal((await api(docUrl("Case/Report", "", "&info=1"))).json.comments, 1, "its comments are counted, not shown");
+
+  // The workspace lives on a case-insensitive disk: a name typed in another
+  // case is the same document, never a second file beside it.
+  const typed = await api(docUrl("case/REPORT"));
+  assert.equal(typed.status, 200);
+  assert.equal(readHead(typed).path, "Case/Report", "answered under the name the files carry");
+  const over = await api(docUrl("case/report.MD", "", "&force=1"), { method: "PUT", body: "# Report, rewritten\n\nThe {==numbers==}{>>#abc123<<} are in.\n" });
+  assert.deepEqual([over.status, over.json.path, over.json.rev, over.json.created], [200, "Case/Report", 2, false]);
+  const csv = await api(docUrl("CASE/DATA.CSV", "", "&force=1"), { method: "PUT", body: "a,b\n3,4\n" });
+  assert.deepEqual([csv.status, csv.json.path, csv.json.rev], [200, "Case/Data.csv", 2]);
+  const page = await api(docUrl("case/report", "html"), { method: "PUT", body: "<h1>Report</h1>\n" });
+  assert.equal(page.status, 201);
+  assert.deepEqual(pathsOf(storedManifest()), ["Case/Data.csv", "Case/Report.html", "Case/Report.md", "Case/Report.meta.jsonl", "Case/Sub/inner.md"], "an html version is spelled as its markdown is");
+
+  // A real collision is a 409.
+  const onto = await api("/api/agent/move", { method: "POST", body: { from: "Case/Sub/inner", to: "Case/REPORT" } });
+  assert.equal(onto.status, 409, "a document moved onto a name that differs only in case");
+  const ontoFile = await api("/api/agent/move", { method: "POST", body: { from: "Case/Data.csv", to: "case/sub/INNER.md" } });
+  assert.equal(ontoFile.status, 409, "and a plain file onto a file that is there");
+  assert.ok(/"Case\/Sub\/inner.md" is already there/.test(ontoFile.json.error), "named as it is spelled");
+  const inside = await api(docUrl("Case/Data.csv/inside"), { method: "PUT", body: "# Inside a file\n" });
+  assert.equal(inside.status, 409, "a file is in the way of the folder");
+  assert.ok(/is a file, so nothing can be put inside it/.test(inside.json.error));
+  assert.deepEqual(pathsOf(storedManifest()), ["Case/Data.csv", "Case/Report.html", "Case/Report.md", "Case/Report.meta.jsonl", "Case/Sub/inner.md"]);
+  // …but changing only the case of a name is a rename like any other.
+  const recased = await api("/api/agent/move", { method: "POST", body: { from: "Case/Report", to: "Case/REPORT" } });
+  assert.deepEqual([recased.status, recased.json.to, recased.json.files], [200, "Case/REPORT", 3]);
+  assert.deepEqual(pathsOf(storedManifest()), ["Case/Data.csv", "Case/REPORT.html", "Case/REPORT.md", "Case/REPORT.meta.jsonl", "Case/Sub/inner.md"]);
+
+  // A new name typed under a folder in another case goes into the folder as
+  // it is spelled — where a Mac's disk would put it anyway, so that no Mac
+  // has to rename it to agree. The name itself stays as typed, and so does
+  // any folder that is new.
+  const made = [];
+  for (const [typed, v, body, landed] of [
+    ["case/SUB/Fresh", "", "# Fresh\n", "Case/Sub/Fresh.md"],
+    ["CASE/sub/Page", "html", "<p>Page</p>\n", "Case/Sub/Page.html"],
+    ["CASE/Pixel.PNG", "", PIXEL_PNG, "Case/Pixel.PNG"],
+    ["case/Brand New/sub/Note", "", "# Note\n", "Case/Brand New/sub/Note.md"],
+    ["Elsewhere/As Typed", "", "# As typed\n", "Elsewhere/As Typed.md"],
+  ]) {
+    const res = await api(docUrl(typed, v), { method: "PUT", body });
+    assert.equal(res.status, 201, typed);
+    assert.ok(entryAt(storedManifest(), landed), `${typed} landed at ${landed}`);
+    assert.equal(res.json.path, landed.replace(/\.(md|html)$/, ""), "and the answer says where");
+    made.push(landed);
+  }
+  assert.deepEqual((await api("/api/agent/tree?deep=1")).json.folders, ["Case", "Case/Brand New", "Case/Brand New/sub", "Case/Sub", "Elsewhere"], "one folder, one spelling");
+  const intoTyped = await api("/api/agent/move", { method: "POST", body: { from: "Elsewhere/As Typed", to: "CASE/sub/" } });
+  assert.deepEqual(intoTyped.json, { kind: "document", from: "Elsewhere/As Typed", to: "Case/Sub/As Typed", files: 1 });
+  const renamedTyped = await api("/api/agent/move", { method: "POST", body: { from: "case/pixel.png", to: "case/SUB/Dot.png" } });
+  assert.deepEqual(renamedTyped.json, { kind: "file", from: "Case/Pixel.PNG", to: "Case/Sub/Dot.png", files: 1 });
+  const folderTyped = await api("/api/agent/move", { method: "POST", body: { from: "case/brand new/", to: "CASE/SUB/" } });
+  assert.deepEqual(folderTyped.json, { kind: "folder", from: "Case/Brand New", to: "Case/Sub/Brand New", files: 1 });
+  // A folder's own name can still change case: nothing else is in it to say otherwise.
+  const recasedFolder = await api("/api/agent/move", { method: "POST", body: { from: "Case/Sub/Brand New", to: "Case/Sub/BRAND NEW" } });
+  assert.deepEqual(recasedFolder.json, { kind: "folder", from: "Case/Sub/Brand New", to: "Case/Sub/BRAND NEW", files: 1 });
+  assert.deepEqual(
+    pathsOf(storedManifest()).filter((p) => p.startsWith("Case/Sub/")),
+    ["Case/Sub/As Typed.md", "Case/Sub/BRAND NEW/sub/Note.md", "Case/Sub/Dot.png", "Case/Sub/Fresh.md", "Case/Sub/Page.html", "Case/Sub/inner.md"],
+  );
+  assert.ok(pathsOf(storedManifest()).every((p) => p.startsWith("Case/")), "everything under the one spelling of the folder");
+});
+
+await test("documents: a document moves and is removed whole — both versions and its comments in one manifest write; one version can go, never the last", async () => {
+  const mthread = (id, body) => ({ t: "mthread", id, comments: [{ author: "Alice", at: 1757000000000, body }] });
+  const hthread = (id, body) => ({ t: "hthread", id, anchor: { path: "0", tag: "h1", text: "The plan" }, comments: [{ author: "Alice", at: 1757000001000, body }] });
+  await freshWorkspace({
+    "Pairs/plan.md": "# The plan\n\nThe boat {==ships in June==}{>>#abc123<<} if the paint dries.\n",
+    "Pairs/plan.html": "<h1>The plan</h1>\n<p>The boat ships in June.</p>\n",
+    "Pairs/plan.meta.jsonl": sidecar(hthread("def456", "Nice page."), mthread("abc123", "Is June still right?")),
+    "Pairs/draft.md": "# Draft\n\nA {==first==}{>>#aaa111<<} draft.\n",
+    "Pairs/draft.html": "<h1>The plan</h1>\n",
+    "Pairs/draft.meta.jsonl": sidecar(hthread("bbb222", "On the page."), mthread("aaa111", "On the text.")),
+    "Pairs/chart.png": PIXEL_PNG,
+    "Pairs/Deep/note.md": "# Deep\n",
+    "Other/taken.md": "# Taken\n",
+  });
+  const bot = await addAgent("Mover", ["edit"]);
+  const api = as(bot);
+  const move = (from, to, extra = {}) => api("/api/agent/move", { method: "POST", body: { from, to, ...extra } });
+  const start = storedManifest();
+  const parts = ["Pairs/plan.md", "Pairs/plan.html", "Pairs/plan.meta.jsonl"].map((p) => entryAt(start, p));
+
+  // Whatever extension was typed, the document moves.
+  const moved = await move("Pairs/plan.html", "Archive/plan-2026");
+  assert.equal(moved.status, 200);
+  assert.deepEqual(moved.json, { kind: "document", from: "Pairs/plan", to: "Archive/plan-2026", files: 3 });
+  const one = storedManifest();
+  assert.equal(one.seq, start.seq + 1, "three files, one manifest write");
+  for (const [[fid, was], suffix] of parts.map((part, i) => [part, [".md", ".html", ".meta.jsonl"][i]])) {
+    const now = one.files[fid];
+    assert.equal(now.path, `Archive/plan-2026${suffix}`, "the same file, by its id, at its new path");
+    assert.equal(now.rev, was.rev + 1, "a move is a revision");
+    assert.deepEqual([now.hash, now.size, now.mtime], [was.hash, was.size, was.mtime], "…of the same bytes — a Mac renames in place, and the content's date stands");
+    assert.equal(now.by, bot.id);
+  }
+  assert.deepEqual(one.tombstones, start.tombstones, "nothing was deleted to do it");
+  assert.equal((await api(docUrl("Pairs/plan"))).status, 404);
+  assert.equal((await api(docUrl("Archive/plan-2026", "", "&info=1"))).json.comments, 2, "its comments came with it");
+
+  // A destination that is a folder, or says it is one, means "into it".
+  const into = await move("Archive/plan-2026.md", "Pairs");
+  assert.deepEqual(into.json, { kind: "document", from: "Archive/plan-2026", to: "Pairs/plan-2026", files: 3 });
+  const intoNew = await move("Pairs/plan-2026", "New place/");
+  assert.deepEqual(intoNew.json, { kind: "document", from: "Pairs/plan-2026", to: "New place/plan-2026", files: 3 });
+  // And one typed with an extension names the document, not a file.
+  const named = await move("New place/plan-2026", "Pairs/plan.md");
+  assert.deepEqual(named.json, { kind: "document", from: "New place/plan-2026", to: "Pairs/plan", files: 3 });
+  assert.deepEqual(
+    pathsOf(storedManifest()).filter((p) => p.includes("plan")),
+    ["Pairs/plan.html", "Pairs/plan.md", "Pairs/plan.meta.jsonl"],
+  );
+
+  const etag = etagNow();
+  assert.equal((await move("Pairs/plan", "Other/taken")).status, 409, "the name is taken");
+  assert.equal((await move("Pairs/draft", "Pairs/plan")).status, 409);
+  assert.equal((await move("Pairs/nope", "Pairs/somewhere")).status, 404);
+  assert.equal((await move("Pairs/plan", ".hidden/plan")).status, 400);
+  assert.equal((await move("Pairs/plan", "")).status, 400);
+  assert.equal((await api("/api/agent/move", { method: "POST", body: "not json" })).status, 400);
+  const dry = await move("Pairs/plan", "Elsewhere/plan", { dryRun: true });
+  assert.deepEqual(dry.json, { kind: "document", from: "Pairs/plan", to: "Elsewhere/plan", files: 3, moved: false });
+  assert.equal(etagNow(), etag, "a refusal and a dry run move nothing");
+
+  // A plain file, and a whole folder.
+  const file = await move("Pairs/chart.png", "Pairs/Deep/");
+  assert.deepEqual(file.json, { kind: "file", from: "Pairs/chart.png", to: "Pairs/Deep/chart.png", files: 1 });
+  const beforeFolder = storedManifest();
+  const folder = await move("Pairs/", "Fleet");
+  assert.deepEqual(folder.json, { kind: "folder", from: "Pairs", to: "Fleet", files: 8 });
+  const afterFolder = storedManifest();
+  assert.equal(afterFolder.seq, beforeFolder.seq + 1, "a folder moves in one write too");
+  assert.deepEqual(pathsOf(afterFolder), [
+    "Fleet/Deep/chart.png",
+    "Fleet/Deep/note.md",
+    "Fleet/draft.html",
+    "Fleet/draft.md",
+    "Fleet/draft.meta.jsonl",
+    "Fleet/plan.html",
+    "Fleet/plan.md",
+    "Fleet/plan.meta.jsonl",
+    "Other/taken.md",
+  ]);
+  assert.equal((await move("Fleet", "Fleet/Inner/")).status, 400, "a folder cannot be moved inside itself");
+  assert.deepEqual((await move("Fleet/Deep", "Other")).json, { kind: "folder", from: "Fleet/Deep", to: "Other/Deep", files: 2 }, "a folder named without its slash, into another");
+
+  // Removing one version: the threads anchored in it go with it.
+  const noHtml = await api(docUrl("Fleet/draft", "html"), { method: "DELETE" });
+  assert.equal(noHtml.status, 200);
+  assert.deepEqual(noHtml.json, { kind: "document", path: "Fleet/draft", versions: ["html"], threadsRemoved: 1 });
+  const afterHtml = storedManifest();
+  assert.equal(entryAt(afterHtml, "Fleet/draft.html"), undefined);
+  assert.ok(Object.values(afterHtml.tombstones).some((t) => t.path === "Fleet/draft.html"));
+  assert.deepEqual(recordsOf(textAt("Fleet/draft.meta.jsonl")).map((r) => [r.t, r.id]), [["mthread", "aaa111"]], "the markdown's thread stays");
+  assert.ok(textAt("Fleet/draft.md").includes("{>>#aaa111<<}"));
+  assert.equal((await api(docUrl("Fleet/draft", "html"), { method: "DELETE" })).status, 404, "it has no html version now");
+  const last = await api(docUrl("Fleet/draft", "md"), { method: "DELETE" });
+  assert.equal(last.status, 409, "the last version is not removed that way");
+  assert.equal(last.json.code, "last_version");
+  assert.ok(entryAt(storedManifest(), "Fleet/draft.md"));
+  assert.equal((await api(docUrl("Fleet/draft.md", "html"), { method: "DELETE" })).status, 400);
+
+  // Removing the markdown of a pair: its threads, and the sidecar when that empties it.
+  assert.equal((await api(docUrl("Fleet/draft", "html"), { method: "PUT", body: "<h1>Draft</h1>\n" })).status, 201);
+  const noMd = await api(docUrl("Fleet/draft", "md"), { method: "DELETE" });
+  assert.deepEqual(noMd.json, { kind: "document", path: "Fleet/draft", versions: ["md"], threadsRemoved: 1 });
+  assert.deepEqual(
+    pathsOf(storedManifest()).filter((p) => p.startsWith("Fleet/draft")),
+    ["Fleet/draft.html"],
+    "an html-only document now, with no empty sidecar left beside it",
+  );
+  assert.equal(readHead(await api(docUrl("Fleet/draft"))).version, "html");
+
+  // Removing the document: every file it is, in one write, each with its tombstone.
+  const dryRm = await api(docUrl("Fleet/plan", "", "&dry=1"), { method: "DELETE" });
+  assert.deepEqual(dryRm.json, { kind: "document", path: "Fleet/plan", versions: ["md", "html"], stillPublic: [], removed: false });
+  const beforeRm = storedManifest();
+  assert.ok(entryAt(beforeRm, "Fleet/plan.md"), "the dry run removed nothing");
+  const rm = await api(docUrl("Fleet/plan.md"), { method: "DELETE" });
+  assert.equal(rm.status, 200);
+  assert.deepEqual(rm.json, { kind: "document", path: "Fleet/plan", versions: ["md", "html"], stillPublic: [] }, "plan.md with no flag means the document, as it does for a move");
+  const afterRm = storedManifest();
+  assert.equal(afterRm.seq, beforeRm.seq + 1);
+  for (const [fid] of parts) {
+    assert.equal(afterRm.files[fid], undefined);
+    const tomb = afterRm.tombstones[fid];
+    assert.deepEqual([tomb.path, tomb.rev, tomb.by], [beforeRm.files[fid].path, beforeRm.files[fid].rev + 1, bot.id]);
+  }
+  assert.equal((await api(docUrl("Fleet/plan"), { method: "DELETE" })).status, 404);
+  assert.equal((await api("/api/agent/comments?path=Fleet/plan")).status, 404, "and its comments are gone with it");
+});
+
+await test("commit: a write that loses the race to another device lands on what that device wrote; a real conflict is still refused; no blob is left behind", async () => {
+  await freshWorkspace({ "Race/doc.md": "# Doc\n\nAs it was.\n" });
+  const bot = await addAgent("Racer", ["edit"]);
+  const api = as(bot);
+  const JSON_META = { httpMetadata: { contentType: "application/json" } };
+
+  /**
+   * Let another device land a manifest between the worker's read and its
+   * put, `times` times: the worker's compare-and-swap then finds a new etag.
+   * `theirs(manifest, n)` is what that device changed.
+   */
+  const racing = async (times, theirs, run) => {
+    const realPut = fake.put.bind(fake);
+    let raced = 0;
+    fake.put = async (key, value, opts = {}) => {
+      if (key === "manifest.json" && opts.onlyIf?.etagMatches !== undefined && raced < times) {
+        raced += 1;
+        const m = storedManifest();
+        theirs(m, raced);
+        m.seq += 1;
+        await realPut(key, JSON.stringify(m), JSON_META);
+      }
+      return realPut(key, value, opts);
+    };
+    try {
+      return { res: await run(), raced };
+    } finally {
+      delete fake.put;
+    }
+  };
+  /** A file another device adds — its blob is already up, as a Mac's is before its manifest. */
+  const theirFile = async (p, content) => {
+    const fid = `f-mac${String((macFiles += 1)).padStart(6, "0")}`;
+    await fake.put(`blobs/${fid}/${blobHash(content)}`, content);
+    return (m) => {
+      m.files[fid] = { path: p, rev: 1, hash: blobHash(content), size: content.length, mtime: Date.now(), by: ALICE.id };
+    };
+  };
+  /** After a request: every blob in the bucket is one the manifest names, or was there before. */
+  const noOrphans = (before, message) => {
+    const live = liveBlobKeys(storedManifest());
+    assert.deepEqual(blobKeys().filter((k) => !before.has(k) && !live.has(k)), [], message);
+  };
+
+  // An unrelated write gets there first: both land.
+  let before = new Set(blobKeys());
+  let start = storedManifest();
+  const addTheirs = await theirFile("Race/theirs.md", "# Theirs\n");
+  before = new Set(blobKeys());
+  const mine = "# Mine\n";
+  const won = await racing(1, addTheirs, () => api(docUrl("Race/mine"), { method: "PUT", body: mine }));
+  assert.equal(won.raced, 1, "the race happened");
+  assert.equal(won.res.status, 201, "a lost race is re-read and re-applied, not failed");
+  let after = storedManifest();
+  assert.equal(after.seq, start.seq + 2, "their write, then this one on top of it");
+  assert.ok(entryAt(after, "Race/theirs.md"), "nothing of the other device's is lost");
+  assert.equal(textAt("Race/mine.md"), mine);
+  assert.equal(entryAt(after, "Race/mine.md")[1].rev, 1);
+  assert.equal(blobKeys().filter((k) => !before.has(k)).length, 1, "one blob for one new file — the first attempt's is gone");
+  noOrphans(before, "no orphan from the attempt that lost");
+
+  // Four lost races in a row are survived.
+  start = storedManifest();
+  before = new Set(blobKeys());
+  const four = await racing(4, (m, n) => {
+    m.name = `Renamed ${n}`;
+  }, () => api(docUrl("Race/doc"), { method: "PUT", body: "# Doc\n\nRewritten.\n", headers: { "if-rev": "1" } }));
+  assert.deepEqual([four.raced, four.res.status, four.res.json.rev], [4, 200, 2]);
+  after = storedManifest();
+  assert.equal(after.seq, start.seq + 5);
+  assert.equal(after.name, "Renamed 4", "each of their writes is under this one");
+  noOrphans(before, "the same blob served every attempt");
+
+  // …and a workspace that never holds still is a 503, with nothing left behind.
+  start = storedManifest();
+  before = new Set(blobKeys());
+  const never = await racing(99, (m, n) => {
+    m.name = `Busy ${n}`;
+  }, () => api(docUrl("Race/unlucky"), { method: "PUT", body: "# Unlucky\n" }));
+  assert.equal(never.res.status, 503);
+  assert.equal(never.raced, 5, "once, and again after each of four lost races");
+  assert.ok(/try again in a moment/.test(never.res.json.error));
+  after = storedManifest();
+  assert.equal(entryAt(after, "Race/unlucky.md"), undefined);
+  assert.equal(after.seq, start.seq + 5, "only their writes landed");
+  noOrphans(before, "five attempts, five blobs, none kept");
+  assert.deepEqual(blobKeys().filter((k) => !before.has(k)), []);
+
+  // The race is for the very document: the precondition is checked again,
+  // against the manifest the retry was handed, and the write is refused.
+  const [docFid, doc] = entryAt(storedManifest(), "Race/doc.md");
+  const theirText = "# Doc\n\nEdited on a Mac meanwhile.\n";
+  await fake.put(`blobs/${docFid}/${blobHash(theirText)}`, theirText);
+  before = new Set(blobKeys());
+  const myText = "# Doc\n\nEdited by the agent, on what it read.\n";
+  const conflict = await racing(
+    1,
+    (m) => {
+      m.files[docFid] = { ...m.files[docFid], rev: doc.rev + 1, hash: blobHash(theirText), size: theirText.length, by: ALICE.id };
+    },
+    () => api(docUrl("Race/doc"), { method: "PUT", body: myText, headers: { "if-rev": String(doc.rev) } }),
+  );
+  assert.equal(conflict.raced, 1);
+  assert.equal(conflict.res.status, 409, "the document changed after it was read");
+  assert.equal(conflict.res.json.rev, doc.rev + 1);
+  assert.equal(textAt("Race/doc.md"), theirText, "the other device's edit stands");
+  assert.ok(!fake.store.has(`blobs/${docFid}/${blobHash(myText)}`), "and the refused text is not left in the bucket");
+  noOrphans(before, "a refusal after a lost race sweeps what the first attempt stored");
+
+  // Two writers creating one name: the second finds it exists.
+  const sameName = await theirFile("Race/same.md", "# Theirs first\n");
+  before = new Set(blobKeys());
+  const second = await racing(1, sameName, () => api(docUrl("Race/same"), { method: "PUT", body: "# Mine second\n", headers: { "if-rev": "*" } }));
+  assert.equal(second.res.status, 409);
+  assert.ok(/already exists/.test(second.res.json.error));
+  assert.equal(textAt("Race/same.md"), "# Theirs first\n");
+  assert.equal(pathsOf(storedManifest()).filter((p) => p.toLowerCase() === "race/same.md").length, 1, "one file, not two");
+  noOrphans(before, "nothing of the loser's is left");
+
+  // A move and a delete ride the same loop.
+  const third = await theirFile("Race/third.md", "# Third\n");
+  const movedRace = await racing(1, third, () => api("/api/agent/move", { method: "POST", body: { from: "Race/mine", to: "Race/moved" } }));
+  assert.equal(movedRace.res.status, 200);
+  const fourth = await theirFile("Race/fourth.md", "# Fourth\n");
+  const removedRace = await racing(1, fourth, () => api(docUrl("Race/moved"), { method: "DELETE" }));
+  assert.equal(removedRace.res.status, 200);
+  assert.deepEqual(pathsOf(storedManifest()), ["Race/doc.md", "Race/fourth.md", "Race/same.md", "Race/theirs.md", "Race/third.md"]);
+});
+
+await test("commit: what a change adds up to is checked the way a Mac's PUT is — a workspace at its file limit refuses one more, and stores nothing", async () => {
+  // Five thousand files: the manifest's own ceiling (layout.ts, MAX_MANIFEST_FILES).
+  await macWrite((m) => {
+    m.files = {};
+    m.tombstones = {};
+    m.public = {};
+    for (let i = 0; i < 5000; i += 1) {
+      const n = String(i).padStart(4, "0");
+      m.files[`f-full${n}`] = { path: `Full/file-${n}.txt`, rev: 1, hash: blobHash(`file ${n}`), size: 9, mtime: 1757000000000, by: ALICE.id };
+    }
+  });
+  const bot = await addAgent("One too many", ["edit"]);
+  const api = as(bot);
+  const etag = etagNow();
+  const blobs = blobKeys().length;
+  const over = await api(docUrl("Full/one-more"), { method: "PUT", body: "# One more\n" });
+  assert.equal(over.status, 409);
+  assert.ok(/too many files/.test(over.json.error), "in the manifest check's own words");
+  assert.equal(etagNow(), etag);
+  assert.equal(blobKeys().length, blobs, "refused before anything was uploaded");
+  // A move adds nothing, and a removal makes room.
+  assert.equal((await api("/api/agent/move", { method: "POST", body: { from: "Full/file-0000.txt", to: "Full/renamed.txt" } })).status, 200);
+  assert.equal((await api(docUrl("Full/file-0001.txt"), { method: "DELETE" })).status, 200);
+  assert.equal((await api(docUrl("Full/one-more"), { method: "PUT", body: "# One more\n" })).status, 201);
+  assert.equal(Object.keys(storedManifest().files).length, 5000);
+  assert.equal((await api("/api/agent/tree?dir=Full")).json.files.length, 4999, "and a listing of all of it still answers");
+});
+
+/* ---------- The document API: publishing ---------- */
+
+await test("pages: publishing is an entry in the public map — it answers at once, keeps its first publisher, and follows its document through a move, a new version and a removal", async () => {
+  await freshWorkspace({
+    "Pub/note.md": "# A note\n\nPublic words.\n",
+    "Pub/page.html": "<h1>Only a page</h1>\n",
+    "Pub/pair.md": "# Pair\n",
+    "Pub/pair.html": "<h1>Pair</h1>\n",
+    "Pub/pic.png": PIXEL_PNG,
+    "Pub/data.csv": "a,b\n",
+    "Pub/Sub/inner.md": "# Inner\n",
+    "Pub/Sub/standalone.html": "<h1>Standalone</h1>\n",
+    "Pub/Sub/Deep/deeper.md": "# Deeper\n",
+    "Elsewhere/other.md": "# Other\n",
+  });
+  const bot = await addAgent("Publisher", ["edit", "publish"]);
+  const api = as(bot);
+  const publish = (body) => api("/api/agent/pages", { method: "PUT", body });
+  const unpublish = (query) => api(`/api/agent/pages?${query}`, { method: "DELETE" });
+  const pagesNow = async () => (await api("/api/agent/pages")).json.pages;
+  const fidAt = (p) => entryAt(storedManifest(), p)[0];
+  const before = Date.now();
+
+  // A document, by whatever name it was typed under.
+  const first = await publish({ path: "Pub/note.md" });
+  assert.equal(first.status, 201);
+  const random = first.json.slug;
+  assert.ok(/^[abcdefghjkmnpqrstuvwxyz23456789]{8}$/.test(random), "a random address with no look-alike characters");
+  assert.deepEqual(first.json, { slug: random, url: `${ORIGIN}/${random}`, kind: "document", path: "Pub/note", documents: ["Pub/note"], created: true });
+  const entry = storedManifest().public[random];
+  assert.deepEqual({ ...entry, at: 0 }, { kind: "file", file: fidAt("Pub/note.md"), path: "Pub/note.md", by: bot.id, at: 0 }, "the entry a Mac writes: the file's id, and a snapshot of its path");
+  assert.ok(entry.at >= before && entry.at <= Date.now());
+  const page = await pub(`/${random}`);
+  assert.equal(page.status, 200, "nothing is uploaded or rendered ahead: the address answers the moment the entry lands");
+  assert.ok(page.text.includes("Public words."));
+
+  // Publishing it again renames or retitles the page; it does not make a second one.
+  const named = await publish({ path: "Pub/note", slug: "  My-Note ", title: "A note, public", desc: "What it says." });
+  assert.equal(named.status, 200);
+  assert.deepEqual([named.json.slug, named.json.url, named.json.created], ["my-note", `${ORIGIN}/my-note`, false]);
+  let map = storedManifest().public;
+  assert.deepEqual(Object.keys(map), ["my-note"], "one page a document");
+  assert.deepEqual(map["my-note"], { ...entry, title: "A note, public", desc: "What it says." }, "who published it first, and when, stay");
+  assert.equal((await pub(`/${random}`)).status, 404);
+  assert.ok((await pub("/my-note")).text.includes("<title>A note, public</title>"));
+  const etag = etagNow();
+  const same = await publish({ path: "Pub/note" });
+  assert.deepEqual([same.status, same.json.slug, same.json.created, same.json.written], [200, "my-note", false, false], "already exactly this: nothing is written");
+  assert.equal(etagNow(), etag);
+  const second = await addAgent("Second publisher", ["publish"]);
+  assert.equal((await as(second)("/api/agent/pages", { method: "PUT", body: { path: "Pub/note", title: "Retitled" } })).status, 200);
+  map = storedManifest().public;
+  assert.deepEqual([map["my-note"].title, map["my-note"].desc, map["my-note"].by, map["my-note"].at], ["Retitled", "What it says.", bot.id, entry.at], "republishing does not take a page over");
+
+  // An address is free, or its own.
+  const taken = await publish({ path: "Pub/pair", slug: "my-note" });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.json.code, "slug_taken");
+  assert.ok(/already the address of Pub\/note.md/.test(taken.json.error));
+  for (const slug of ["ab", "has space", "-leading", "api", "join", "a".repeat(65)]) {
+    assert.equal((await publish({ path: "Pub/pair", slug })).status, 400, `"${slug}" is not an address`);
+  }
+  assert.equal((await publish({})).status, 400, "say what to publish");
+  assert.equal((await publish({ path: "Pub/nothing" })).status, 404);
+  assert.equal((await publish({ path: ".hidden/x" })).status, 400);
+  assert.equal((await api("/api/agent/pages", { method: "PUT", body: "not json" })).status, 400);
+  const csv = await publish({ path: "Pub/data.csv" });
+  assert.equal(csv.status, 400);
+  assert.ok(/cannot be a page of its own/.test(csv.json.error));
+  const pic = await publish({ path: "Pub/pic.png", slug: "the-pic" });
+  assert.deepEqual([pic.status, pic.json.kind, pic.json.path], [201, "file", "Pub/pic.png"], "a picture can be a page");
+  assert.deepEqual(Object.keys(storedManifest().public).sort(), ["my-note", "the-pic"], "none of the refusals left an entry");
+
+  // What is public: as addresses, with who and when.
+  const listed = await pagesNow();
+  assert.deepEqual(listed.map((p) => p.slug), ["my-note", "the-pic"]);
+  assert.deepEqual(listed[0], {
+    slug: "my-note",
+    url: `${ORIGIN}/my-note`,
+    kind: "document",
+    path: "Pub/note",
+    title: "Retitled",
+    desc: "What it says.",
+    by: bot.id,
+    byName: "Publisher",
+    at: entry.at,
+  });
+  assert.deepEqual([listed[1].kind, listed[1].path], ["file", "Pub/pic.png"]);
+  const row = (await api("/api/agent/tree?dir=Pub")).json.documents.find((d) => d.path === "Pub/note");
+  assert.deepEqual(row.public, [`${ORIGIN}/my-note`], "and a listing shows it on the document");
+  assert.deepEqual((await api(docUrl("Pub/note", "", "&info=1"))).json.public, [`${ORIGIN}/my-note`]);
+
+  // The domain's home page is chosen in the app; an agent sees it, and republishing leaves it be.
+  await macWrite((m) => {
+    m.public["my-note"].root = true;
+  });
+  assert.equal((await pagesNow())[0].home, true);
+  assert.deepEqual((await api(docUrl("Pub/note", "", "&info=1"))).json.public, [`${ORIGIN}/`, `${ORIGIN}/my-note`]);
+  assert.equal((await publish({ path: "Pub/note", desc: "Still the home page." })).status, 200);
+  assert.equal(storedManifest().public["my-note"].root, true);
+  await macWrite((m) => {
+    delete m.public["my-note"].root;
+  });
+
+  // The page follows its document when it moves.
+  const noteFid = fidAt("Pub/note.md");
+  assert.equal((await api("/api/agent/move", { method: "POST", body: { from: "Pub/note", to: "Pub/renamed" } })).status, 200);
+  map = storedManifest().public;
+  assert.deepEqual([map["my-note"].file, map["my-note"].path], [noteFid, "Pub/renamed.md"], "the same file, and its new path in the same write");
+  assert.equal((await pub("/my-note")).status, 200);
+  assert.equal((await pagesNow())[0].path, "Pub/renamed");
+
+  // A document's page is its markdown's when it has one, its html's when it has not.
+  const pair = await publish({ path: "Pub/pair.html", slug: "the-pair" });
+  assert.equal(pair.json.kind, "document");
+  assert.equal(storedManifest().public["the-pair"].file, fidAt("Pub/pair.md"), "typed as the html, published as the document");
+  const htmlFid = fidAt("Pub/page.html");
+  const only = await publish({ path: "Pub/page", slug: "the-page" });
+  assert.deepEqual([only.status, only.json.kind, only.json.path], [201, "document", "Pub/page"]);
+  map = storedManifest().public;
+  assert.deepEqual([map["the-page"].file, map["the-page"].path], [htmlFid, "Pub/page.html"]);
+  const htmlPage = await pub("/the-page");
+  assert.equal(htmlPage.status, 200);
+  assert.ok(!htmlPage.text.includes('<nav class="view-pill"'), "html only: nothing to switch to");
+  // It gains a markdown version: the page becomes the markdown's, which is what gives it the switch.
+  assert.equal((await api(docUrl("Pub/page", "md"), { method: "PUT", body: "# Page, in markdown\n" })).status, 201);
+  map = storedManifest().public;
+  assert.deepEqual([map["the-page"].file, map["the-page"].path], [fidAt("Pub/page.md"), "Pub/page.md"]);
+  assert.ok((await pub("/the-page")).text.includes('<nav class="view-pill"'), "both versions, and the pill between them");
+  // And loses it again: back to the html.
+  assert.equal((await api(docUrl("Pub/page", "md"), { method: "DELETE" })).status, 200);
+  map = storedManifest().public;
+  assert.deepEqual([map["the-page"].file, map["the-page"].path], [htmlFid, "Pub/page.html"]);
+  assert.equal((await pub("/the-page")).status, 200);
+
+  // A page a Mac left on the html of a document that has both: when the html goes, the markdown is what it shows.
+  await macWrite((m, put) => {
+    put("Pub/left.md", "# Left behind\n");
+    const leftHtml = put("Pub/left.html", "<h1>Left behind</h1>\n");
+    m.public["left-page"] = { kind: "file", file: leftHtml, path: "Pub/left.html", by: ALICE.id, at: 1757000000000 };
+  });
+  assert.equal((await api(docUrl("Pub/left", "html"), { method: "DELETE" })).status, 200);
+  map = storedManifest().public;
+  assert.deepEqual([map["left-page"].file, map["left-page"].path], [fidAt("Pub/left.md"), "Pub/left.md"]);
+  assert.ok((await pub("/left-page")).text.includes("<h1>Left behind</h1>"), "the page did not die with the version");
+  assert.equal((await unpublish("slug=left-page")).status, 200);
+  assert.equal((await api(docUrl("Pub/left"), { method: "DELETE" })).status, 200);
+
+  // A folder: everything in it. The dry run says what that is, and writes nothing.
+  const dryEtag = etagNow();
+  const dry = await publish({ path: "Pub/Sub/", dryRun: true });
+  assert.equal(dry.status, 200);
+  assert.deepEqual(
+    { ...dry.json, slug: "", url: "" },
+    { slug: "", url: "", kind: "folder", path: "Pub/Sub", documents: ["Pub/Sub/Deep/deeper", "Pub/Sub/inner", "Pub/Sub/standalone"], created: true, written: false },
+    "every document that would become readable — an html-only one is served there too",
+  );
+  assert.equal(etagNow(), dryEtag);
+  const folder = await publish({ path: "pub/sub/", slug: "sub-folder", title: "Sub" });
+  assert.deepEqual([folder.status, folder.json.kind, folder.json.path], [201, "folder", "Pub/Sub"], "the folder as it is spelled, however it was typed");
+  map = storedManifest().public;
+  assert.deepEqual({ ...map["sub-folder"], at: 0 }, { kind: "dir", path: "Pub/Sub", title: "Sub", by: bot.id, at: 0 });
+  assert.ok((await pub("/sub-folder")).text.includes("inner"), "the folder's page lists its notes");
+  assert.ok((await pub("/sub-folder/inner")).text.includes("<h1>Inner</h1>"));
+  assert.equal((await rawGet("/sub-folder/standalone.html")).status, 200, "and the html-only document answers at its own name");
+  const deepFolder = await publish({ path: "Pub/Sub/Deep", slug: "deep-folder" });
+  assert.deepEqual([deepFolder.status, deepFolder.json.kind, deepFolder.json.documents], [201, "folder", ["Pub/Sub/Deep/deeper"]], "a folder named without its slash");
+  assert.equal((await publish({ path: "Pub/Sub/", slug: "sub-folder" })).json.written, false);
+  // Whatever a listing then shows as public under the folder is what the dry run named.
+  const under = (await api("/api/agent/tree?dir=Pub/Sub&deep=1")).json.documents;
+  assert.deepEqual(under.filter((d) => d.public?.some((u) => u.startsWith(`${ORIGIN}/sub-folder/`))).map((d) => d.path), dry.json.documents);
+  assert.deepEqual(under.find((d) => d.path === "Pub/Sub/Deep/deeper").public, [`${ORIGIN}/deep-folder/deeper`, `${ORIGIN}/sub-folder/Deep/deeper`]);
+  assert.deepEqual(under.find((d) => d.path === "Pub/Sub/standalone").public, [`${ORIGIN}/sub-folder/standalone.html`]);
+  // The whole workspace is the folder "/".
+  const allEtag = etagNow();
+  const all = await publish({ path: "/", dryRun: true });
+  assert.deepEqual([all.json.kind, all.json.path, all.json.written], ["folder", "", false]);
+  assert.deepEqual(all.json.documents, ["Elsewhere/other", "Pub/page", "Pub/pair", "Pub/renamed", "Pub/Sub/Deep/deeper", "Pub/Sub/inner", "Pub/Sub/standalone"]);
+  assert.equal(etagNow(), allEtag);
+  assert.equal((await publish({ path: "" })).status, 400);
+  assert.equal((await publish({ path: "." })).status, 400, "the workspace is named by its slash, not by a dot");
+
+  // A published folder follows its folder — and so does one published beneath it, and a page inside it.
+  assert.equal((await publish({ path: "Pub/Sub/inner", slug: "the-inner" })).status, 201);
+  const innerFid = fidAt("Pub/Sub/inner.md");
+  const movedFolder = await api("/api/agent/move", { method: "POST", body: { from: "Pub/Sub/", to: "Pub/Moved" } });
+  assert.equal(movedFolder.status, 200);
+  map = storedManifest().public;
+  assert.equal(map["sub-folder"].path, "Pub/Moved");
+  assert.equal(map["deep-folder"].path, "Pub/Moved/Deep");
+  assert.deepEqual([map["the-inner"].file, map["the-inner"].path], [innerFid, "Pub/Moved/inner.md"]);
+  assert.ok((await pub("/sub-folder/inner")).text.includes("<h1>Inner</h1>"), "the same address, the folder's new place");
+  assert.ok((await pub("/deep-folder/deeper")).text.includes("<h1>Deeper</h1>"));
+
+  // A removed document's page stays: it answers 404 until the document is back.
+  const removed = await api(docUrl("Pub/renamed"), { method: "DELETE" });
+  assert.deepEqual(removed.json.stillPublic, [`${ORIGIN}/my-note`], "the removal says the address is still held");
+  map = storedManifest().public;
+  assert.deepEqual([map["my-note"].file, map["my-note"].path], [noteFid, "Pub/renamed.md"], "the entry outlives its file");
+  assert.equal((await pub("/my-note")).status, 404);
+  const ghost = (await pagesNow()).find((p) => p.slug === "my-note");
+  assert.deepEqual([ghost.path, ghost.kind, ghost.missing], ["Pub/renamed", "document", true]);
+  assert.deepEqual((await api(docUrl("Pub/pic.png"), { method: "DELETE" })).json.stillPublic, [`${ORIGIN}/the-pic`]);
+  // The document comes back at its path: the page adopts the new file.
+  assert.equal((await api(docUrl("Pub/renamed"), { method: "PUT", body: "# Back again\n" })).status, 201);
+  map = storedManifest().public;
+  assert.equal(map["my-note"].file, fidAt("Pub/renamed.md"));
+  assert.notEqual(map["my-note"].file, noteFid);
+  assert.ok((await pub("/my-note")).text.includes("<h1>Back again</h1>"));
+  assert.equal((await pagesNow()).find((p) => p.slug === "my-note").missing, undefined);
+
+  // Stopping: by the document, the folder, the address, or the path a dead page remembers.
+  const stopEtag = etagNow();
+  const dryStop = await unpublish("path=Pub/renamed&dry=1");
+  assert.deepEqual(dryStop.json, { stopped: [{ slug: "my-note", url: `${ORIGIN}/my-note` }], written: false });
+  assert.equal(etagNow(), stopEtag);
+  const stopped = await unpublish("path=Pub/renamed.md");
+  assert.equal(stopped.status, 200);
+  assert.deepEqual(stopped.json, { stopped: [{ slug: "my-note", url: `${ORIGIN}/my-note` }] });
+  assert.equal(storedManifest().public["my-note"], undefined);
+  assert.equal((await pub("/my-note")).status, 404);
+  assert.ok(entryAt(storedManifest(), "Pub/renamed.md"), "the document itself is untouched");
+  const again = await unpublish("path=Pub/renamed");
+  assert.equal(again.status, 404);
+  assert.ok(/is not published/.test(again.json.error));
+  assert.equal((await unpublish("slug=THE-PAGE")).status, 200, "by its address");
+  assert.equal((await unpublish("slug=the-page")).status, 404);
+  assert.equal((await unpublish("")).status, 400);
+  assert.equal((await unpublish("path=.hidden/x")).status, 400);
+  assert.deepEqual((await unpublish("path=deep-folder")).json.stopped.map((s) => s.slug), ["deep-folder"], "an address given where a path goes");
+  assert.deepEqual((await unpublish("path=Pub/Moved/")).json.stopped.map((s) => s.slug), ["sub-folder"], "a folder");
+  assert.deepEqual((await unpublish("path=Pub/pic.png")).json.stopped.map((s) => s.slug), ["the-pic"], "a page whose file is gone, by the path it remembers");
+  assert.deepEqual(Object.keys(storedManifest().public).sort(), ["the-inner", "the-pair"]);
+});
+
+/* ---------- The document API: comments ---------- */
+
+const commentsUrl = (p, more = "") => `/api/agent/comments?path=${encodeURIComponent(p)}${more}`;
+
+// The app's own sidecar module, compiled the way the worker was: what the
+// worker writes has to be what the app would have written, or every Mac that
+// opens the document rewrites it.
+const appMeta = await (async () => {
+  const out = await build({
+    configFile: false,
+    logLevel: "warn",
+    build: {
+      write: false,
+      target: "es2022",
+      lib: { entry: path.join(workerDir, "..", "src", "metaFile.ts"), formats: ["es"], fileName: "metaFile" },
+    },
+  });
+  const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
+  return import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
+})();
+/** Whether the app, opening this document, finds it already in its normal
+ *  form — nothing to migrate in the markdown, nothing to rewrite in the sidecar. */
+const settled = (stem, mdExt = ".md") => {
+  const metaText = textAt(`${stem}.meta.jsonl`) ?? "";
+  const meta = appMeta.parseEntityMeta(metaText);
+  const result = appMeta.migrateEntity({ diskMd: mdExt ? textAt(`${stem}${mdExt}`) : null, meta });
+  return !result.mdChanged && !result.metaChanged && (metaText === "" || appMeta.serializeEntityMeta(meta) === metaText);
+};
+
+await test("comments: a markdown thread is a marker in the text and a record in the sidecar, written together; the words must be plain, and occur once in ordinary text", async () => {
+  const DRAFT = [
+    "---",
+    "title: ships in June",
+    "---",
+    "# The boat ships in June",
+    "",
+    "The boat ships in June if the paint dries. The crew is ready.",
+    "",
+    "Use `launch-window` and `ships in June` in code. See [the plan](https://example.com/the-paint-dries).",
+    "",
+    "- The crew is ready.",
+    "",
+    "```",
+    "if the paint dries",
+    "```",
+    "",
+  ].join("\n");
+  await freshWorkspace({
+    "Talk/draft.md": DRAFT,
+    "Talk/old.md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there.\n",
+    "Talk/chart.png": PIXEL_PNG,
+  });
+  const bot = await addAgent("Reviewer", ["comment", "edit"]);
+  const api = as(bot);
+  const say = (body) => api("/api/agent/comments", { method: "POST", body });
+  const threads = async (p) => (await api(commentsUrl(p))).json.threads;
+  const start = storedManifest();
+  const [mdFid] = entryAt(start, "Talk/draft.md");
+  const before = Date.now();
+
+  assert.deepEqual((await api(commentsUrl("Talk/draft"))).json, { path: "Talk/draft", threads: [] });
+
+  // Where a comment cannot sit. Every refusal lists the places, so the
+  // caller can quote more of the sentence.
+  const twice = await say({ path: "Talk/draft", on: "ships in June", body: "When?" });
+  assert.equal(twice.status, 409);
+  assert.equal(twice.json.code, "anchor");
+  assert.ok(/occurs 2 times/.test(twice.json.error), "the heading and the paragraph — not the properties, not the code");
+  assert.deepEqual(twice.json.occurrences, [
+    { line: 2, text: "title: ships in June", inside: "the properties at the top" },
+    { line: 4, text: "# The boat ships in June" },
+    { line: 6, text: "The boat ships in June if the paint dries. The crew is ready." },
+    { line: 8, text: "Use `launch-window` and `ships in June` in code. See [the plan](https://example.com/the-paint-dries).", inside: "code" },
+  ]);
+  const both = await say({ path: "Talk/draft", on: "The crew is ready", body: "Are they?" });
+  assert.deepEqual([both.status, both.json.code, both.json.occurrences.map((o) => o.line)], [409, "anchor", [6, 10]]);
+  const none = await say({ path: "Talk/draft", on: "no such words", body: "?" });
+  assert.deepEqual([none.status, none.json.code, none.json.occurrences], [404, "anchor", []]);
+  assert.ok(/does not occur in the markdown of Talk\/draft/.test(none.json.error));
+  const inCode = await say({ path: "Talk/draft", on: "launch-window", body: "?" });
+  assert.deepEqual([inCode.status, inCode.json.code], [409, "anchor"]);
+  assert.ok(/only occurs inside code/.test(inCode.json.error));
+  assert.deepEqual(inCode.json.occurrences.map((o) => [o.line, o.inside]), [[8, "code"]]);
+  const inAddress = await say({ path: "Talk/draft", on: "the-paint-dries", body: "?" });
+  assert.ok(/only occurs inside a link's address/.test(inAddress.json.error));
+  const listMark = await say({ path: "Talk/draft", on: "- The crew is ready.", body: "?" });
+  assert.equal(listMark.status, 409);
+  assert.ok(/a heading or list mark — quote the words after it/.test(listMark.json.error));
+  for (const on of ["**bold** words", "a `code` span", "[the plan]", "two\nlines", "the_plan _now_"]) {
+    assert.equal((await say({ path: "Talk/draft", on, body: "?" })).status, 400, `${JSON.stringify(on)} is not plain words on one line`);
+  }
+  assert.equal((await say({ path: "Talk/draft", on: "   ", body: "?" })).status, 400, "which words");
+  assert.equal((await say({ path: "Talk/draft", on: "The boat", body: "  \n " })).status, 400, "and something to say");
+  assert.equal((await say({ path: "Talk/draft", on: "The boat", body: "?", v: "pdf" })).status, 400);
+  assert.equal((await say({ path: "Talk/draft", on: "if the paint dries", body: "?", v: "html" })).status, 404, "it has no html version");
+  assert.equal((await say({ path: "Talk/nothing", on: "words", body: "?" })).status, 404);
+  assert.equal((await say({ path: "Talk/chart.png", on: "words", body: "?" })).status, 400, "a plain file has no comments");
+  assert.equal((await api(commentsUrl("Talk/chart.png"))).status, 400);
+  assert.equal((await api(commentsUrl("Talk/nothing"))).status, 404);
+  assert.equal((await api("/api/agent/comments", { method: "POST", body: "not json" })).status, 400);
+  assert.equal(storedManifest().seq, start.seq, "none of the refusals wrote anything");
+  assert.equal(textAt("Talk/draft.md"), DRAFT);
+
+  // A dry run says where the thread would go, and writes neither half.
+  const dry = await say({ path: "Talk/draft", on: "if the paint dries", body: "Is that still true?", dryRun: true });
+  assert.equal(dry.status, 200);
+  assert.deepEqual([dry.json.version, dry.json.on, dry.json.line, dry.json.written], ["md", "if the paint dries", 6, false]);
+  assert.equal(storedManifest().seq, start.seq);
+  assert.equal(textAt("Talk/draft.md"), DRAFT);
+
+  // The words occur once in ordinary text — the copy inside the code block does not count.
+  const made = await say({ path: "Talk/draft.md", on: "  if the paint dries ", body: "Is that\n\nstill true?" });
+  assert.equal(made.status, 201);
+  const id = made.json.thread;
+  assert.ok(/^[a-z0-9]{6}$/.test(id));
+  assert.deepEqual(made.json, { path: "Talk/draft", thread: id, version: "md", on: "if the paint dries", line: 6 });
+  const one = storedManifest();
+  assert.equal(one.seq, start.seq + 1, "the marker and the record land in one manifest write");
+  const marked = DRAFT.replace("if the paint dries.", `{==if the paint dries==}{>>#${id}<<}.`);
+  assert.equal(textAt("Talk/draft.md"), marked, "a bare marker around the words, and nothing else changed");
+  assert.deepEqual([one.files[mdFid].rev, one.files[mdFid].by], [2, bot.id]);
+  const [metaFid, metaFile] = entryAt(one, "Talk/draft.meta.jsonl");
+  assert.deepEqual([metaFile.rev, metaFile.by], [1, bot.id], "the sidecar is a file like any other to a Mac");
+  assert.ok(/^f-[a-f0-9]{12}$/.test(metaFid));
+  const records = recordsOf(textAt("Talk/draft.meta.jsonl"));
+  assert.equal(records.length, 1);
+  assert.deepEqual({ ...records[0], comments: [{ ...records[0].comments[0], at: 0 }] }, {
+    t: "mthread",
+    id,
+    comments: [{ author: "Reviewer", at: 0, body: "Is that still true?" }],
+  });
+  const at = records[0].comments[0].at;
+  assert.ok(at >= before - 1000 && at <= Date.now());
+  assert.equal(at % 1000, 0, "stamped to the second — all the markdown form of a thread keeps, so a Mac that opens it finds nothing to rewrite");
+  assert.ok(textAt("Talk/draft.meta.jsonl").startsWith('{"doklin":"meta","v":1}\n'), "in the app's own format");
+  assert.ok(settled("Talk/draft"), "and exactly as the app would have written both files");
+  assert.ok(!JSON.stringify((await api("/api/agent/tree?deep=1")).json).includes("meta.jsonl"), "and still never listed");
+
+  assert.deepEqual(await threads("Talk/draft"), [
+    { id, version: "md", on: "if the paint dries", line: 6, comments: [{ author: "Reviewer", at, body: "Is that still true?" }] },
+  ]);
+
+  // Words inside an existing comment cannot carry another.
+  const nested = await say({ path: "Talk/draft", on: "paint dries", body: "?" });
+  assert.equal(nested.status, 409);
+  assert.ok(/only occurs inside an existing comment/.test(nested.json.error));
+
+  // Answering: the sidecar alone changes.
+  const other = await addAgent("Second reviewer", ["comment"]);
+  const reply = await as(other)("/api/agent/comments", { method: "POST", body: { path: "Talk/draft", thread: `#${id}`, body: "Yes." } });
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.json, { path: "Talk/draft", thread: id, version: "md", comments: 2 });
+  const two = storedManifest();
+  assert.equal(two.files[mdFid].rev, 2, "the text was not rewritten for a reply");
+  assert.equal(two.files[metaFid].rev, 2);
+  const afterReply = recordsOf(textAt("Talk/draft.meta.jsonl"))[0].comments;
+  assert.deepEqual(afterReply.map((c) => [c.author, c.body]), [
+    ["Reviewer", "Is that still true?"],
+    ["Second reviewer", "Yes."],
+  ]);
+  assert.equal(afterReply[0].at, at, "what was already there is carried through as it was");
+  assert.ok(settled("Talk/draft"));
+  assert.equal((await say({ path: "Talk/draft", thread: "nope00", body: "?" })).status, 404);
+  const dryReply = await say({ path: "Talk/draft", thread: id, body: "Not written.", dryRun: true });
+  assert.deepEqual([dryReply.status, dryReply.json.comments, dryReply.json.written], [200, 3, false]);
+  assert.equal((await threads("Talk/draft"))[0].comments.length, 2);
+
+  // A second thread; reading shows both markers, and --clean neither.
+  const secondThread = await say({ path: "Talk/draft", on: "in code", body: "Which code?" });
+  assert.deepEqual([secondThread.status, secondThread.json.line], [201, 8]);
+  const id2 = secondThread.json.thread;
+  assert.notEqual(id2, id);
+  const read = await api(docUrl("Talk/draft"));
+  assert.ok(read.text.includes(`{==if the paint dries==}{>>#${id}<<}`) && read.text.includes(`{==in code==}{>>#${id2}<<}`), "a read keeps the markers, so a write back keeps the comments");
+  const clean = await api(docUrl("Talk/draft", "", "&clean=1"));
+  assert.equal(clean.text, DRAFT, "--clean is the text as it was before anyone commented");
+  assert.equal(clean.headers.get("x-doklin-rev"), read.headers.get("x-doklin-rev"));
+  assert.deepEqual((await threads("Talk/draft")).map((t) => [t.id, t.line]), [[id, 6], [id2, 8]]);
+  assert.equal((await api(docUrl("Talk/draft", "", "&info=1"))).json.comments, 2);
+
+  // Rewriting the document. Markers kept: nothing to say.
+  const rev = () => String(entryAt(storedManifest(), "Talk/draft.md")[1].rev);
+  const kept = await api(docUrl("Talk/draft"), { method: "PUT", body: read.text.replace("The crew is ready.", "The crew is rested."), headers: { "if-rev": rev() } });
+  assert.equal(kept.status, 200);
+  assert.equal(kept.json.orphaned, undefined);
+  // A marker of its own making: refused — a thread is started with the comments route.
+  const invented = await api(docUrl("Talk/draft"), { method: "PUT", body: `${read.text}\n{==my own==}{>>#zzz999<<}\n`, headers: { "if-rev": rev() } });
+  assert.equal(invented.status, 400);
+  assert.deepEqual(invented.json.unknownMarkers, ["zzz999"]);
+  assert.ok(/start a thread with the comment command/.test(invented.json.error));
+  assert.equal((await api(docUrl("Talk/fresh"), { method: "PUT", body: "A {==new==}{>>#abc999<<} document.\n" })).status, 400, "in a new document too");
+  // A marker dropped: the thread is kept, without a place, and the answer names it.
+  const current = (await api(docUrl("Talk/draft"))).text;
+  const dropped = await api(docUrl("Talk/draft"), { method: "PUT", body: current.replace(`{==in code==}{>>#${id2}<<}`, "in code"), headers: { "if-rev": rev() } });
+  assert.equal(dropped.status, 200);
+  assert.deepEqual(dropped.json.orphaned, [id2]);
+  const afterDrop = await threads("Talk/draft");
+  assert.deepEqual(afterDrop.map((t) => [t.id, t.orphaned ?? false, t.on]), [[id, false, "if the paint dries"], [id2, true, ""]]);
+  assert.equal(afterDrop[1].comments[0].body, "Which code?", "the conversation is not lost with its place");
+  // Its marker written back puts it in place again — that id is a thread's, not an invention.
+  const restored = await api(docUrl("Talk/draft"), { method: "PUT", body: current, headers: { "if-rev": rev() } });
+  assert.deepEqual([restored.status, restored.json.orphaned], [200, undefined]);
+  assert.deepEqual((await threads("Talk/draft")).map((t) => t.orphaned ?? false), [false, false]);
+  // The clean text written back over the markdown drops every marker.
+  const wiped = await api(docUrl("Talk/draft"), { method: "PUT", body: DRAFT, headers: { "if-rev": rev() } });
+  assert.deepEqual(wiped.json.orphaned.sort(), [id, id2].sort());
+  assert.equal((await api(docUrl("Talk/draft"), { method: "PUT", body: current, headers: { "if-rev": rev() } })).status, 200);
+
+  // Removing a thread unwraps its marker: the words stay.
+  const dryRm = await api(commentsUrl("Talk/draft", `&thread=${id2}&dry=1`), { method: "DELETE" });
+  assert.deepEqual(dryRm.json, { path: "Talk/draft", thread: id2, version: "md", removed: false });
+  assert.equal((await threads("Talk/draft")).length, 2);
+  const rm = await api(commentsUrl("Talk/draft", `&thread=%23${id2}`), { method: "DELETE" });
+  assert.equal(rm.status, 200);
+  assert.deepEqual(rm.json, { path: "Talk/draft", thread: id2, version: "md", removed: true });
+  assert.ok(!textAt("Talk/draft.md").includes(id2) && textAt("Talk/draft.md").includes("`ships in June` in code. See"));
+  assert.deepEqual(recordsOf(textAt("Talk/draft.meta.jsonl")).map((r) => r.id), [id]);
+  assert.ok(settled("Talk/draft"));
+  assert.equal((await api(commentsUrl("Talk/draft", `&thread=${id2}`), { method: "DELETE" })).status, 404);
+  assert.equal((await api(commentsUrl("Talk/draft"), { method: "DELETE" })).status, 400, "which thread");
+  // The last one takes the sidecar with it.
+  const beforeLast = storedManifest();
+  assert.equal((await api(commentsUrl("Talk/draft", `&thread=${id}`), { method: "DELETE" })).status, 200);
+  const afterLast = storedManifest();
+  assert.equal(afterLast.seq, beforeLast.seq + 1);
+  assert.equal(afterLast.files[metaFid], undefined, "no empty sidecar is left on anybody's disk");
+  assert.equal(afterLast.tombstones[metaFid].path, "Talk/draft.meta.jsonl");
+  assert.equal(textAt("Talk/draft.md"), DRAFT.replace("The crew is ready.", "The crew is rested."), "and the text is the text again");
+  assert.deepEqual(await threads("Talk/draft"), []);
+
+  // A thread written inline, the way the app wrote them before the sidecar:
+  // read as it is, and normalized the first time it is changed.
+  const inline = await threads("Talk/old");
+  assert.deepEqual(inline, [
+    { id: "old111", version: "md", on: "old words", line: 1, comments: [{ author: "Alice", at: Date.parse("2026-01-01T10:00:00Z"), body: "an inline thread" }] },
+  ]);
+  assert.equal((await say({ path: "Talk/old", thread: "old111", body: "Still here." })).json.comments, 2);
+  assert.equal(textAt("Talk/old.md"), "Hello {==old words==}{>>#old111<<} there.\n", "the conversation moved out of the prose");
+  assert.deepEqual(recordsOf(textAt("Talk/old.meta.jsonl"))[0].comments.map((c) => c.body), ["an inline thread", "Still here."]);
+  assert.ok(settled("Talk/old"), "which is the migration the app itself would have made");
+});
+
+await test("comments: an html thread sits on the element whose text begins with the words — the innermost one — and lives wholly in the sidecar", async () => {
+  const PAGE = [
+    "<!doctype html>",
+    "<html><head><title>Launch plan</title><style>p { color: red }</style></head>",
+    "<body>",
+    "<h1>Launch plan</h1>",
+    "<ul>",
+    "  <li><p>Paint the hull before June</p></li>",
+    "  <li>Check the sails &amp; the rigging",
+    "</ul>",
+    "<p>Paint the hull twice.</p>",
+    "<script>var hidden = 'Launch plan in a script';</script>",
+    "</body></html>",
+    "",
+  ].join("\n");
+  await freshWorkspace({
+    "Talk/page.html": PAGE,
+    "Talk/both.md": "# Both\n\nSome plain words in markdown.\n",
+    "Talk/both.html": "<h1>Both</h1>\n<p>Some plain words on the page.</p>\n",
+    "Talk/md-only.md": "# Markdown only\n",
+  });
+  const bot = await addAgent("Page reviewer", ["comment", "edit"]);
+  const api = as(bot);
+  const say = (body) => api("/api/agent/comments", { method: "POST", body });
+  const threads = async (p) => (await api(commentsUrl(p))).json.threads;
+  const start = storedManifest();
+  const [htmlFid, htmlFile] = entryAt(start, "Talk/page.html");
+
+  // An html-only document: the html is what a comment is on.
+  const made = await say({ path: "Talk/page", on: "Paint the  hull before", body: "By when?" });
+  assert.equal(made.status, 201);
+  const id = made.json.thread;
+  assert.deepEqual(made.json, { path: "Talk/page", thread: id, version: "html", on: "Paint the hull before June", tag: "p" }, "the paragraph, not the list item or the list around it");
+  const one = storedManifest();
+  assert.equal(one.seq, start.seq + 1);
+  assert.deepEqual(one.files[htmlFid], htmlFile, "the page itself is not touched");
+  const records = recordsOf(textAt("Talk/page.meta.jsonl"));
+  assert.deepEqual(records.map((r) => [r.t, r.id, r.anchor, r.comments.map((c) => [c.author, c.body])]), [
+    ["hthread", id, { path: "", tag: "p", text: "Paint the hull before June" }, [["Page reviewer", "By when?"]]],
+  ]);
+  assert.ok(settled("Talk/page", null), "a sidecar the app reads as its own");
+  assert.deepEqual(await threads("Talk/page.html"), [
+    { id, version: "html", on: "Paint the hull before June", tag: "p", comments: [{ author: "Page reviewer", at: records[0].comments[0].at, body: "By when?" }] },
+  ]);
+
+  // More than one element, or none: refused with the candidates.
+  const two = await say({ path: "Talk/page", on: "Paint the hull", body: "?" });
+  assert.deepEqual([two.status, two.json.code], [409, "anchor"]);
+  assert.deepEqual(two.json.candidates, [
+    { tag: "p", text: "Paint the hull before June" },
+    { tag: "p", text: "Paint the hull twice." },
+  ]);
+  const none = await say({ path: "Talk/page", on: "Nothing like this", body: "?" });
+  assert.deepEqual([none.status, none.json.code, none.json.candidates], [404, "anchor", []]);
+  assert.equal((await say({ path: "Talk/page", on: "var hidden", body: "?" })).status, 404, "what nobody sees is not an element to comment on");
+  assert.equal((await say({ path: "Talk/page", on: "p { color", body: "?" })).status, 404);
+  assert.equal((await say({ path: "Talk/page", on: "Paint the hull before", body: "?", v: "md" })).status, 404, "it has no markdown version");
+  assert.equal((await say({ path: "Talk/md-only", on: "Markdown", body: "?", v: "html" })).status, 404, "and this one no html");
+  assert.equal(storedManifest().seq, one.seq);
+
+  // A heading — its title and the script that repeats it are not it; and an
+  // item nobody closed, with an entity in it.
+  const heading = await say({ path: "Talk/page", on: "Launch plan", body: "Good title." });
+  assert.deepEqual([heading.status, heading.json.tag, heading.json.on], [201, "h1", "Launch plan"]);
+  const item = await say({ path: "Talk/page", on: "Check the sails & the", body: "Both?" });
+  assert.deepEqual([item.status, item.json.tag, item.json.on], [201, "li", "Check the sails & the rigging"]);
+  const dry = await say({ path: "Talk/page", on: "Paint the hull twice", body: "Twice?", dryRun: true });
+  assert.deepEqual([dry.status, dry.json.tag, dry.json.written], [200, "p", false]);
+  assert.equal((await threads("Talk/page")).length, 3);
+
+  const reply = await say({ path: "Talk/page", thread: id, body: "By June." });
+  assert.deepEqual(reply.json, { path: "Talk/page", thread: id, version: "html", comments: 2 });
+
+  // The page is regenerated: a thread whose element is gone has lost its place, and says so.
+  const without = PAGE.replace("  <li><p>Paint the hull before June</p></li>\n", "");
+  assert.equal((await api(docUrl("Talk/page", "html"), { method: "PUT", body: without, headers: { "if-rev": "1" } })).status, 200);
+  assert.deepEqual((await threads("Talk/page")).map((t) => [t.tag, t.orphaned ?? false]).sort(), [["h1", false], ["li", false], ["p", true]]);
+  // …and finds it again when the element is back, wherever in the page it now is.
+  const moved = PAGE.replace("<h1>Launch plan</h1>", "<h1>Launch plan</h1>\n<section><p>Paint the hull before June, weather allowing.</p></section>").replace("  <li><p>Paint the hull before June</p></li>\n", "");
+  assert.equal((await api(docUrl("Talk/page", "html"), { method: "PUT", body: moved, headers: { "if-rev": "2" } })).status, 200);
+  assert.deepEqual((await threads("Talk/page")).map((t) => t.orphaned ?? false), [false, false, false]);
+
+  // Removing: the sidecar only, and the sidecar itself with the last one.
+  const rm = await api(commentsUrl("Talk/page", `&thread=${id}`), { method: "DELETE" });
+  assert.deepEqual(rm.json, { path: "Talk/page", thread: id, version: "html", removed: true });
+  assert.equal((await api(commentsUrl("Talk/page", `&thread=${heading.json.thread}`), { method: "DELETE" })).status, 200);
+  assert.equal((await api(commentsUrl("Talk/page", `&thread=${item.json.thread}`), { method: "DELETE" })).status, 200);
+  assert.equal(entryAt(storedManifest(), "Talk/page.meta.jsonl"), undefined);
+  assert.deepEqual(await threads("Talk/page"), []);
+
+  // A document with both versions: the markdown unless html is said, and one list of threads.
+  const onMd = await say({ path: "Talk/both", on: "Some plain words", body: "In the text." });
+  assert.deepEqual([onMd.status, onMd.json.version, onMd.json.line], [201, "md", 3]);
+  const onHtml = await say({ path: "Talk/both", on: "Some plain words", body: "On the page.", v: "html" });
+  assert.deepEqual([onHtml.status, onHtml.json.version, onHtml.json.tag], [201, "html", "p"]);
+  // The name it is typed under picks a version too, as it does for a read.
+  const viaHtmlName = await say({ path: "Talk/both.html", on: "Both", body: "The heading of the page." });
+  assert.deepEqual([viaHtmlName.status, viaHtmlName.json.version, viaHtmlName.json.tag, viaHtmlName.json.path], [201, "html", "h1", "Talk/both"]);
+  const viaMdName = await say({ path: "Talk/both.md", on: "Both", body: "The heading of the text." });
+  assert.deepEqual([viaMdName.status, viaMdName.json.version, viaMdName.json.line], [201, "md", 1]);
+  assert.equal((await say({ path: "Talk/both.md", on: "Both", body: "?", v: "html" })).status, 400, "a flag that contradicts the name");
+  assert.equal((await say({ path: "Talk/both.html", thread: onMd.json.thread, body: "A reply goes by its thread, whatever the name." })).json.version, "md");
+  const all = await threads("Talk/both.html");
+  assert.deepEqual(all.filter((t) => t.version === "md").map((t) => [t.on, t.line, t.comments.map((c) => c.body)]), [
+    ["Both", 1, ["The heading of the text."]],
+    ["Some plain words", 3, ["In the text.", "A reply goes by its thread, whatever the name."]],
+  ], "the markdown's threads, in the order the text has them");
+  assert.deepEqual(
+    all.filter((t) => t.version === "html").map((t) => [t.tag, t.on, t.comments[0].body]).sort(),
+    [["h1", "Both", "The heading of the page."], ["p", "Some plain words on the page.", "On the page."]],
+    "then the page's — every thread on the document, whichever name it was asked by",
+  );
+  assert.deepEqual(recordsOf(textAt("Talk/both.meta.jsonl")).map((r) => r.t).sort(), ["hthread", "hthread", "mthread", "mthread"]);
+  assert.ok(settled("Talk/both"));
+  assert.equal((await api(docUrl("Talk/both", "", "&info=1"))).json.comments, 4);
+  // The html version removed: its threads go with it, and the markdown's stay.
+  assert.equal((await api(docUrl("Talk/both", "html"), { method: "DELETE" })).json.threadsRemoved, 2);
+  assert.deepEqual((await threads("Talk/both")).map((t) => t.version), ["md", "md"]);
+});
+
+/* ---------- The document API: search ---------- */
+
+const searchUrl = (q, more = "") => `/api/agent/search?q=${encodeURIComponent(q)}${more}`;
+const mirrorEtag = () => db.value("SELECT etag FROM search_state WHERE key = 'mirror'");
+/** Run something, counting the blobs the worker reads from the bucket meanwhile. */
+const countingBlobReads = async (run) => {
+  const realGet = fake.get.bind(fake);
+  let reads = 0;
+  fake.get = (key, opts) => {
+    if (key.startsWith("blobs/")) reads += 1;
+    return realGet(key, opts);
+  };
+  try {
+    return { res: await run(), reads };
+  } finally {
+    delete fake.get;
+  }
+};
+
+await test("search: nothing is mirrored until somebody searches; the first search reads the workspace in rounds one request can afford, answering 202 until it is whole", async () => {
+  const files = {};
+  for (let i = 1; i <= 50; i += 1) {
+    const n = String(i).padStart(2, "0");
+    files[`Lib/doc-${n}.md`] = `# Document ${n}\n\nEvery one has the word Shared.\nOnly this one says needle-${n}.\n`;
+  }
+  files["Lib/many.md"] = ["# Many", "", ...Array.from({ length: 7 }, (_, i) => `Ripple number ${i + 1}.`), ""].join("\n");
+  files["Other/away.md"] = "# Away\n\nAlso shared, elsewhere.\n";
+  await freshWorkspace(files);
+  // A domain nobody has searched yet — what a new database, or a wipe, leaves.
+  db.run("DELETE FROM search_text");
+  db.run("DELETE FROM search_state");
+  const bot = await addAgent("Searcher", ["edit"]);
+  const api = as(bot);
+  const found = async (q, more = "") => (await api(searchUrl(q, more))).json;
+
+  // A write before anyone has searched starts no mirror: until somebody asks, it costs nothing.
+  assert.equal((await api(docUrl("Lib/extra"), { method: "PUT", body: "# Extra\n\nA zebra crossing.\n" })).status, 201);
+  assert.equal(db.value("SELECT COUNT(*) FROM search_state"), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text"), 0);
+  const total = Object.keys(files).length + 1;
+  // How many blobs one catch-up reads (search.ts, CATCH_UP_READS) — under the
+  // fifty subrequests a Worker request may make, with room for the rest.
+  const ROUND = 36;
+
+  const first = await countingBlobReads(() => api(searchUrl("needle-07")));
+  assert.equal(first.res.status, 202, "not an answer yet");
+  assert.deepEqual(first.res.json, { indexing: true, pending: total - ROUND });
+  assert.equal(first.reads, ROUND, "one round: what a request may read and still be one request");
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text"), ROUND);
+  assert.equal(mirrorEtag(), "", "not whole yet, and it says so");
+  const second = await countingBlobReads(() => api(searchUrl("needle-07")));
+  assert.deepEqual(
+    [second.res.status, second.res.json, second.reads],
+    [202, { indexing: true, pending: 0 }, total - ROUND],
+    "whole now — but this request spent its reads catching up, so the lines are cut on the next",
+  );
+  const third = await countingBlobReads(() => api(searchUrl("needle-07")));
+  assert.equal(third.res.status, 200);
+  assert.deepEqual(third.res.json, {
+    query: "needle-07",
+    dir: "",
+    results: [{ path: "Lib/doc-07", version: "md", matches: [{ line: 4, text: "Only this one says needle-07." }] }],
+    total: 1,
+  });
+  assert.equal(third.reads, 1, "the mirror said which document; one blob was read, to cut the line");
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text"), total, "one row a document");
+  assert.equal(mirrorEtag(), etagNow());
+  const [fid07] = entryAt(storedManifest(), "Lib/doc-07.md");
+  assert.equal(db.value("SELECT folded FROM search_text WHERE fid = ?", fid07), files["Lib/doc-07.md"].toLowerCase(), "keyed by file id, lower-cased");
+  assert.equal((await found("zebra")).results[0].path, "Lib/extra", "what was written before the first search was read with everything else");
+
+  // The question the app's own search asks: which documents contain this, whatever the case — with the lines as written.
+  const upper = await found("NEEDLE-07");
+  assert.deepEqual([upper.query, upper.results], ["NEEDLE-07", third.res.json.results]);
+  const shared = await countingBlobReads(() => api(searchUrl("shared")));
+  assert.deepEqual([shared.res.json.total, shared.res.json.results.length, shared.res.json.truncated], [51, 20, true], "twenty documents unless asked");
+  assert.equal(shared.reads, 20, "and only the ones shown are read");
+  assert.deepEqual(shared.res.json.results.slice(0, 3).map((r) => r.path), ["Lib/doc-01", "Lib/doc-02", "Lib/doc-03"], "in the order a listing has them");
+  assert.deepEqual(shared.res.json.results[0].matches, [{ line: 3, text: "Every one has the word Shared." }]);
+  assert.equal((await found("shared", "&limit=5")).results.length, 5);
+  assert.equal((await found("shared", "&limit=100")).results.length, 30, "thirty at most");
+  assert.equal((await found("shared", "&limit=0")).results.length, 20);
+  assert.equal((await found("shared", "&limit=lots")).results.length, 20);
+  const nine = await found("needle-0");
+  assert.deepEqual([nine.total, nine.results.length, nine.truncated], [9, 9, undefined]);
+  const ripple = await found("ripple");
+  assert.deepEqual(ripple.results, [
+    {
+      path: "Lib/many",
+      version: "md",
+      matches: [3, 4, 5, 6, 7].map((line) => ({ line, text: `Ripple number ${line - 2}.` })),
+      moreLines: 2,
+    },
+  ]);
+
+  // Under one folder.
+  assert.deepEqual((await found("shared", "&dir=Other")).results.map((r) => r.path), ["Other/away"]);
+  assert.equal((await found("shared", "&dir=lib")).total, 50, "a folder in whatever case");
+  const away = await found("shared", "&dir=/Other/");
+  assert.deepEqual([away.dir, away.total], ["Other", 1]);
+  assert.deepEqual(await found("shared", "&dir=Nowhere"), { query: "shared", dir: "Nowhere", results: [], total: 0 });
+  assert.equal((await api(searchUrl("shared", "&dir=.git"))).status, 400);
+  assert.equal((await api("/api/agent/search")).status, 400, "say what to search for");
+  assert.equal((await api(searchUrl("   "))).status, 400);
+  assert.equal((await api(searchUrl("two\nlines"))).status, 400);
+  assert.deepEqual(await found("nothing says this"), { query: "nothing says this", dir: "", results: [], total: 0 });
+});
+
+await test("search: an agent's change is mirrored in the request that made it; a Mac's by the next search; comments are searched, a move rewrites nothing, and what cannot be mirrored is said", async () => {
+  await freshWorkspace({
+    "Lib/alpha.md": "# Alpha\n\nThe first letter.\n",
+    "Lib/beta.md": "# Beta\n\nOnly this one says needle.\n",
+    "Lib/pair.md": "# Pair\n\nMarkdown side.\n",
+    "Lib/pair.html": "<p>The quokka is only on the page.</p>\n",
+    "Lib/page.html":
+      "<html><head><title>Hidden title</title><style>p { color: teal }</style></head><body><h1>Sightings</h1><p>An <b>aardvark</b> sighting</p></body></html>\n",
+    "Other/gamma.md": "# Gamma\n",
+  });
+  const bot = await addAgent("Keeper", ["comment", "edit"]);
+  const api = as(bot);
+  const found = async (q, more = "") => (await api(searchUrl(q, more))).json;
+
+  // A handful of stale documents are read and answered in one request.
+  const small = await countingBlobReads(() => api(searchUrl("needle")));
+  assert.equal(small.res.status, 200, "no 202 for a small workspace");
+  assert.deepEqual(small.res.json.results, [{ path: "Lib/beta", version: "md", matches: [{ line: 3, text: "Only this one says needle." }] }]);
+  assert.equal(small.reads, 5 + 1, "five documents mirrored — the html beside a markdown is not one — and one line cut");
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text"), 5, "rows of documents that are gone were dropped in the same round");
+  assert.equal(mirrorEtag(), etagNow());
+
+  // An agent finds what it just wrote: the write itself caught the mirror up.
+  assert.equal((await api(docUrl("Lib/new"), { method: "PUT", body: "# New\n\nA walrus on the ice.\n" })).status, 201);
+  assert.equal(mirrorEtag(), etagNow(), "whole at the manifest the write left");
+  const walrus = await countingBlobReads(() => api(searchUrl("walrus")));
+  assert.deepEqual(walrus.res.json.results, [{ path: "Lib/new", version: "md", matches: [{ line: 3, text: "A walrus on the ice." }] }]);
+  assert.equal(walrus.reads, 1, "nothing left to catch up");
+  assert.equal((await api(docUrl("Lib/new"), { method: "PUT", body: "# New\n\nA narwhal instead.\n", headers: { "if-rev": "1" } })).status, 200);
+  assert.equal((await found("walrus")).total, 0, "the old text is not found any more");
+  assert.equal((await found("narwhal")).total, 1);
+
+  // A Mac's save spends nothing on a mirror nobody may ask; the next search reads what it changed.
+  const whole = mirrorEtag();
+  await macWrite((m, put) => {
+    put("Other/mac.md", "# From a Mac\n\nAn okapi in the garden.\n");
+    put("Lib/alpha.md", "# Alpha\n\nNow about a lemur.\n");
+  });
+  assert.equal(mirrorEtag(), whole, "the manifest moved; the mirror was not touched");
+  assert.notEqual(whole, etagNow());
+  const okapi = await countingBlobReads(() => api(searchUrl("okapi")));
+  assert.equal(okapi.res.status, 200);
+  assert.deepEqual(okapi.res.json.results.map((r) => r.path), ["Other/mac"], "an edit made on a Mac is found after its sync");
+  assert.equal(okapi.reads, 2 + 1, "the two documents that changed, and the line");
+  assert.equal(mirrorEtag(), etagNow());
+  assert.deepEqual([(await found("first letter")).total, (await found("lemur")).results[0].path], [0, "Lib/alpha"]);
+  // More at once than a search answers inline: caught up, and asked again.
+  await macWrite((m, put) => {
+    for (let i = 1; i <= 9; i += 1) put(`Bulk/b${i}.md`, `# B${i}\n\nA heron by the water.\n`);
+  });
+  assert.deepEqual((await api(searchUrl("heron"))).json, { indexing: true, pending: 0 });
+  assert.equal((await found("heron")).total, 9);
+
+  // What was said about a document is searched with it — and a marker never splits a line.
+  const said = await api("/api/agent/comments", { method: "POST", body: { path: "Lib/beta", on: "needle", body: "A platypus would say otherwise." } });
+  assert.equal(said.status, 201);
+  assert.ok(textAt("Lib/beta.md").includes("{==needle==}"));
+  assert.deepEqual((await found("platypus")).results, [{ path: "Lib/beta", version: "md", matches: [], inComments: true }]);
+  assert.deepEqual((await found("says needle.")).results, [{ path: "Lib/beta", version: "md", matches: [{ line: 3, text: "Only this one says needle." }] }]);
+  assert.equal((await found("{==")).total, 0, "markers are not text");
+
+  // A move changes no text: no document is read and no row rewritten.
+  const [betaFid] = entryAt(storedManifest(), "Lib/beta.md");
+  db.queries.length = 0;
+  const moved = await countingBlobReads(() => api("/api/agent/move", { method: "POST", body: { from: "Lib/beta", to: "Archive/beta" } }));
+  assert.equal(moved.res.status, 200);
+  assert.equal(moved.reads, 0);
+  assert.ok(!db.queries.some((sql) => /INTO search_text|DELETE FROM search_text/.test(sql)), "the mirror is keyed by file id, so a move costs it nothing");
+  assert.equal(mirrorEtag(), etagNow(), "only the etag it is whole at moved on");
+  assert.deepEqual((await found("platypus")).results.map((r) => r.path), ["Archive/beta"], "found where it now is");
+  assert.deepEqual([(await found("platypus", "&dir=Lib")).total, (await found("platypus", "&dir=Archive")).total], [0, 1]);
+  // A removal takes the row.
+  assert.equal((await api(docUrl("Archive/beta"), { method: "DELETE" })).status, 200);
+  assert.equal((await found("platypus")).total, 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text WHERE fid = ?", betaFid), 0);
+
+  // An html-only document is searched by what it says — not its markup, its style or its title.
+  assert.deepEqual((await found("aardvark sighting")).results, [{ path: "Lib/page", version: "html", matches: [{ text: "An aardvark sighting" }] }]);
+  assert.equal((await found("color: teal")).total, 0);
+  assert.equal((await found("hidden title")).total, 0);
+  assert.equal((await found("<b>")).total, 0);
+  assert.equal((await api("/api/agent/comments", { method: "POST", body: { path: "Lib/page", on: "Sightings", body: "A capybara, surely." } })).status, 201);
+  assert.deepEqual((await found("capybara")).results, [{ path: "Lib/page", version: "html", matches: [], inComments: true }]);
+  // The html beside a markdown is that document's other version, not a text of its own…
+  assert.equal((await found("quokka")).total, 0);
+  // …until it is all the document has.
+  assert.equal((await api(docUrl("Lib/pair", "md"), { method: "DELETE" })).status, 200);
+  assert.deepEqual((await found("quokka")).results, [{ path: "Lib/pair", version: "html", matches: [{ text: "The quokka is only on the page." }] }]);
+  assert.equal((await found("markdown side")).total, 0);
+
+  // Too large to hold: listed as not searched, rather than silently never found.
+  const huge = `# Huge\n\n${"leviathan ".repeat(110_000)}\n`;
+  let hugeFid;
+  await macWrite((m, put) => {
+    hugeFid = put("Lib/huge.md", huge);
+  });
+  const big = await countingBlobReads(() => api(searchUrl("leviathan")));
+  assert.deepEqual([big.res.status, big.res.json.total, big.res.json.results, big.res.json.notSearched], [200, 0, [], ["Lib/huge"]]);
+  assert.equal(big.reads, 0, "and not read to find that out");
+  assert.equal(db.value("SELECT folded IS NULL FROM search_text WHERE fid = ?", hugeFid), 1);
+  assert.deepEqual((await found("narwhal")).notSearched, ["Lib/huge"], "whatever was asked");
+  assert.equal((await found("okapi", "&dir=Other")).notSearched, undefined, "but only where the search looked");
+
+  // A manifest ahead of one of its blobs — a sync still in flight: asked again, never answered short.
+  const late = "# Late\n\nA dugong, eventually.\n";
+  await macWrite((m) => {
+    m.files["f-late00000001"] = { path: "Lib/late.md", rev: 1, hash: blobHash(late), size: late.length, mtime: Date.now(), by: ALICE.id };
+  });
+  assert.deepEqual((await api(searchUrl("dugong"))).json, { indexing: true, pending: 1 });
+  const early = await api(docUrl("Lib/late"));
+  assert.equal(early.status, 503, "and a read of it says to try again, rather than answering empty");
+  assert.ok(/has not finished syncing/.test(early.json.error));
+  assert.equal((await call(`/api/blobs/f-late00000001/${blobHash(late)}`, { method: "PUT", token: OWNER, body: late })).status, 200);
+  assert.deepEqual((await found("dugong")).results.map((r) => r.path), ["Lib/late"]);
+
+  // The mirror is derived, and the database's: when it cannot answer, search
+  // says so — and a change is never failed for the mirror's sake.
+  const flaky = {
+    prepare(sql) {
+      if (/search_/.test(sql)) throw new Error("D1_ERROR: no such table: search_state");
+      return db.prepare(sql);
+    },
+    batch: (statements) => db.batch(statements),
+    exec: (sql) => db.exec(sql),
+  };
+  const bindings = { OWNER_TOKEN: OWNER, DATA: fake, DB: flaky };
+  const down = await api(searchUrl("narwhal"), { bindings });
+  assert.equal(down.status, 503);
+  assert.ok(/database/.test(down.json.error));
+  const during = await api(docUrl("Lib/during"), { method: "PUT", body: "# During\n\nA manatee, written while search was down.\n", bindings });
+  assert.equal(during.status, 201, "the write landed");
+  assert.equal(textAt("Lib/during.md"), "# During\n\nA manatee, written while search was down.\n");
+  assert.deepEqual((await found("manatee")).results.map((r) => r.path), ["Lib/during"], "and the next search that can, catches up");
+});
+
+/* ---------- Who an `a-` id is ---------- */
+
+await test("directory: /api/meta names agents beside people, so every Mac can put a name to what an agent changed", async () => {
+  await freshWorkspace({ "Dir/note.md": "# Note\n\nSome plain words.\n" });
+  const bot = await addAgent("Grok bot", ["comment", "edit", "publish"]);
+  const api = as(bot);
+  assert.equal((await api(docUrl("Dir/by-bot"), { method: "PUT", body: "# By the bot\n" })).status, 201);
+  assert.equal((await api(docUrl("Dir/note"), { method: "PUT", body: "# Note\n\nSome plain words, edited.\n", headers: { "if-rev": "1" } })).status, 200);
+  assert.equal((await api("/api/agent/comments", { method: "POST", body: { path: "Dir/note", on: "plain words", body: "Mine." } })).status, 201);
+  assert.equal((await api("/api/agent/pages", { method: "PUT", body: { path: "Dir/note", slug: "dir-note" } })).status, 201);
+  assert.equal((await api(docUrl("Dir/by-bot"), { method: "DELETE" })).status, 200);
+
+  // Everything it changed is signed with its id — never its name, which can change.
+  const m = storedManifest();
+  assert.equal(entryAt(m, "Dir/note.md")[1].by, bot.id);
+  assert.equal(entryAt(m, "Dir/note.meta.jsonl")[1].by, bot.id);
+  assert.equal(m.public["dir-note"].by, bot.id);
+  assert.ok(Object.values(m.tombstones).some((t) => t.path === "Dir/by-bot.md" && t.by === bot.id));
+  assert.ok(!JSON.stringify(m).includes("Grok bot"));
+
+  // The directory every Mac already asks for resolves it.
+  const asMember = (await call("/api/meta", { token: MEMBER })).json;
+  assert.ok(asMember.people.some((p) => p.id === bot.id && p.name === "Grok bot"));
+  assert.deepEqual([...new Set(asMember.people.map((p) => Object.keys(p).sort().join(",")))], ["id,name"], "a name, and nothing about what it may do");
+  const firstAgent = asMember.people.findIndex((p) => p.id.startsWith("a-"));
+  assert.ok(firstAgent > 0 && asMember.people.slice(0, firstAgent).every((p) => /^m-/.test(p.id)), "people first");
+  assert.ok(asMember.people.slice(firstAgent).every((p) => /^a-[a-f0-9]{8}$/.test(p.id)), "then agents");
+  assert.deepEqual((await call("/api/meta", { token: OWNER })).json.people, asMember.people, "the same list, whoever asks");
+  assert.equal((await api(docUrl("Dir/note", "", "&info=1"))).json.md.byName, "Grok bot", "and the document API says it back by name");
+
+  // A rename shows everywhere at once, because nothing stored the name…
+  await call(`/api/auth/agents/${bot.id}`, { method: "POST", token: OWNER, body: { name: "Grok, renamed" } });
+  assert.equal((await call("/api/meta", { token: MEMBER })).json.people.find((p) => p.id === bot.id).name, "Grok, renamed");
+  assert.equal((await api("/api/agent/pages")).json.pages[0].byName, "Grok, renamed");
+  // …except a comment, which is signed the way a person's is: with the name it was said under.
+  assert.equal((await api(commentsUrl("Dir/note"))).json.threads[0].comments[0].author, "Grok bot");
+
+  // Removed, it is nobody: what it wrote keeps the id, legible and never wrong.
+  await call(`/api/auth/agents/${bot.id}`, { method: "DELETE", token: OWNER });
+  assert.ok(!(await call("/api/meta", { token: MEMBER })).json.people.some((p) => p.id === bot.id));
+  assert.equal(entryAt(storedManifest(), "Dir/note.md")[1].by, bot.id);
+  const reader = await addAgent("Reader", []);
+  const info = (await as(reader)(docUrl("Dir/note", "", "&info=1"))).json;
+  assert.deepEqual([info.md.by, info.md.byName], [bot.id, undefined]);
+});
+
 // Destroys all state — keep this last.
 await test("wipe: owner-only, confirmed, empties the bucket and frees the domain for a new binding", async () => {
   const member = await call("/api/admin/wipe", { method: "POST", token: MEMBER, body: { confirm: "wipe" } });
@@ -1684,6 +3820,15 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal((await call("/api/admin/wipe", { token: OWNER })).status, 405);
   assert.ok(fake.store.size > 0, "there is data to wipe");
   assert.ok([...fake.store.keys()].some((k) => k.startsWith("versions/")), "the version store is in the bucket");
+  // An agent, a login code nobody has used, and a search mirror: all of it is the domain's.
+  const doomed = await addAgent("Doomed", ["edit"]);
+  const unusedBody = nextCodeBody();
+  assert.equal((await newCode(doomed.id, unusedBody)).status, 201);
+  assert.equal((await as(doomed)(searchUrl("anything"))).status, 200);
+  for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state"]) {
+    assert.ok(db.value(`SELECT COUNT(*) FROM ${table}`) > 0, `${table} holds something to wipe`);
+  }
+  assert.equal((await as(doomed)("/api/admin/wipe", { method: "POST", body: { confirm: "wipe" } })).status, 403, "never an agent's to do");
 
   const res = await call("/api/admin/wipe", { method: "POST", token: OWNER, body: { confirm: "wipe" } });
   assert.equal(res.status, 200);
@@ -1700,6 +3845,13 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal(db.value("SELECT COUNT(*) FROM presence"), 0, "and nobody is here");
   assert.equal(db.value("SELECT COUNT(*) FROM leases"), 0, "…or holding anything");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 401);
+  // Agents go the same way, and the mirror of a workspace that is gone with them.
+  for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state"]) {
+    assert.equal(db.value(`SELECT COUNT(*) FROM ${table}`), 0, `${table} is empty`);
+  }
+  assert.equal((await as(doomed)("/api/agent/me")).status, 401, "an agent's token died with its row");
+  assert.equal((await loginWith(agentCode(unusedBody))).status, 401, "and so did the code somebody was still holding");
+  assert.deepEqual((await call("/api/auth/agents", { token: OWNER })).json.agents, [], "a rebound domain inherits no ghost agents");
   assert.deepEqual((await call("/api/auth/members", { token: OWNER })).json.members, []);
   const meta = await call("/api/meta", { token: OWNER });
   assert.equal(meta.status, 200);
@@ -1708,9 +3860,9 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
 
   // The database is emptied, not dropped: the schema is re-run so the next
   // binding finds a migrated database rather than a half-built one.
-  assert.deepEqual(db.tables(), ["invites", "leases", "members", "meta", "presence", "tokens"]);
-  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), 4);
-  assert.equal(meta.json.d1, 4, "…and the probe still says so");
+  assert.deepEqual(db.tables(), D1_TABLES);
+  assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), D1_SCHEMA);
+  assert.equal(meta.json.d1, D1_SCHEMA, "…and the probe still says so");
 
   const rebound = await call("/api/workspace", {
     method: "POST",

@@ -330,12 +330,13 @@ async function writeFile(
 ): Promise<Written | Refusal> {
   const refusal = checkRevision(pre, force, at.entry, at.path);
   if (refusal) return refusal;
+  const path = at.entry ? at.entry.file.path : index.spelled(at.path);
   if (!at.entry) {
-    const place = index.placeProblem(at.path);
+    const place = index.placeProblem(path);
     if (place) return new Refusal(409, place);
   }
   const before = at.entry?.file.hash;
-  const file = await tx.write(at.entry?.fid ?? newFileId(), at.path, bytes, contentTypeOf(at.path));
+  const file = await tx.write(at.entry?.fid ?? newFileId(), path, bytes, contentTypeOf(path));
   return {
     kind: "file",
     path: file.path,
@@ -373,7 +374,7 @@ async function writeVersion(
 
   const text = utf8(bytes);
   if (text === null) return new Refusal(400, `a ${VERSION_WORD[version]} version is text — that is not UTF-8`);
-  const target = current?.file.path ?? (version === "md" ? at.mdPath : at.htmlPath);
+  const target = current?.file.path ?? index.spelled(version === "md" ? at.mdPath : at.htmlPath);
   if (!current) {
     const place = index.placeProblem(target);
     if (place) return new Refusal(409, place);
@@ -398,7 +399,8 @@ async function writeVersion(
   const after: Doc = { ...doc, [version]: { fid, file } };
   return {
     kind: "document",
-    path: doc.stem,
+    // From the file, not the request: a new document's name is spelled as it landed.
+    path: nameOf(file.path).stem,
     version,
     file: basename(file.path),
     rev: file.rev,
@@ -511,7 +513,10 @@ async function removeVersion(tx: Tx, doc: Doc, version: Version): Promise<Record
     else await tx.write(doc.meta.fid, doc.meta.file.path, new TextEncoder().encode(serializeEntityMeta(meta)), contentTypeOf(doc.meta.file.path));
   }
   tx.remove(entry.fid);
-  if (version === "md") repointPages(tx, entry.fid, other);
+  // A page that showed this file shows the document's other version now —
+  // the markdown's page becoming the html's is the usual case, and a page a
+  // Mac left on the html while the document had both is the other.
+  repointPages(tx, entry.fid, other);
   return { kind: "document", path: doc.stem, versions: [version], ...(threads > 0 ? { threadsRemoved: threads } : {}) };
 }
 
@@ -545,44 +550,59 @@ function move(tx: Tx, rawFrom: string, rawTo: string): Record<string, unknown> |
     const problem = pathProblem(p);
     if (problem) return new Refusal(400, problem);
   }
-  const into = rawTo.endsWith("/") || index.isFolder(to);
+  // "Into it" — unless the destination is the very thing being moved, typed
+  // in another case: that is a rename of its name, not a move inside itself.
+  const into = rawTo.endsWith("/") || (index.isFolder(to) && to.toLowerCase() !== from.toLowerCase());
 
-  // What is being moved: each file's fid and the path it goes to.
+  // What is being moved.
   let kind: "document" | "file" | "folder";
-  let label: { from: string; to: string };
-  const plan: { fid: string; to: string }[] = [];
-
+  let moving: Entry[];
+  let doc: Doc | null = null;
   const at = fromFolder ? null : locate(index, from, null);
   if (at instanceof Refusal) return at;
   if (at && at.kind === "file" && at.entry) {
     kind = "file";
-    const dest = into ? `${to}/${basename(at.entry.file.path)}` : to;
-    plan.push({ fid: at.entry.fid, to: dest });
-    label = { from: at.entry.file.path, to: dest };
+    moving = [at.entry];
   } else if (at && at.kind === "document" && docExists(at.doc)) {
     kind = "document";
-    const { doc } = at;
-    const stem = into ? `${to}/${basename(doc.stem)}` : nameOf(to).stem;
-    if (doc.md) plan.push({ fid: doc.md.fid, to: `${stem}${doc.md.file.path.slice(doc.stem.length)}` });
-    if (doc.html) plan.push({ fid: doc.html.fid, to: `${stem}.html` });
-    if (doc.meta) plan.push({ fid: doc.meta.fid, to: `${stem}${META_SUFFIX}` });
-    label = { from: doc.stem, to: stem };
+    doc = at.doc;
+    moving = [doc.md, doc.html, doc.meta].filter((e): e is Entry => e !== null);
   } else if (index.isFolder(from)) {
     kind = "folder";
-    const dest = into ? `${to}/${basename(from)}` : to;
-    if (`${dest.toLowerCase()}/`.startsWith(`${from.toLowerCase()}/`) && dest.toLowerCase() !== from.toLowerCase()) {
-      return new Refusal(400, "a folder cannot be moved inside itself");
-    }
-    for (const e of index.under(from)) plan.push({ fid: e.fid, to: `${dest}${e.file.path.slice(from.length)}` });
-    label = { from, to: dest };
+    moving = index.under(from);
   } else {
     return new Refusal(404, `there is nothing at "${from}"`);
   }
 
   // Where it lands has to be free — of anything but the files being moved,
-  // which is what lets a rename change only the case of a name.
-  const moving = new Set(plan.map((p) => p.fid));
-  const without = new Index(Object.fromEntries(Object.entries(tx.files).filter(([fid]) => !moving.has(fid))));
+  // which is what lets a rename change only the case of a name — and its
+  // folders are spelled the way the workspace already spells them.
+  const gone = new Set(moving.map((e) => e.fid));
+  const without = new Index(Object.fromEntries(Object.entries(tx.files).filter(([fid]) => !gone.has(fid))));
+  const plan: { fid: string; to: string }[] = [];
+  let label: { from: string; to: string };
+  if (kind === "file") {
+    const entry = moving[0];
+    const dest = without.spelled(into ? `${to}/${basename(entry.file.path)}` : to);
+    plan.push({ fid: entry.fid, to: dest });
+    label = { from: entry.file.path, to: dest };
+  } else if (doc) {
+    const stem = without.spelled(into ? `${to}/${basename(doc.stem)}` : nameOf(to).stem);
+    if (doc.md) plan.push({ fid: doc.md.fid, to: `${stem}${doc.md.file.path.slice(doc.stem.length)}` });
+    if (doc.html) plan.push({ fid: doc.html.fid, to: `${stem}.html` });
+    if (doc.meta) plan.push({ fid: doc.meta.fid, to: `${stem}${META_SUFFIX}` });
+    label = { from: doc.stem, to: stem };
+  } else {
+    // The folder as it is spelled, which is not always how it was typed.
+    const folder = moving[0].file.path.slice(0, from.length);
+    const dest = without.spelled(into ? `${to}/${basename(folder)}` : to);
+    if (`${dest.toLowerCase()}/`.startsWith(`${from.toLowerCase()}/`) && dest.toLowerCase() !== from.toLowerCase()) {
+      return new Refusal(400, "a folder cannot be moved inside itself");
+    }
+    for (const e of moving) plan.push({ fid: e.fid, to: `${dest}${e.file.path.slice(from.length)}` });
+    label = { from: folder, to: dest };
+  }
+
   for (const step of plan) {
     // A sidecar travels with its document; it is checked as the stem it belongs to.
     const sidecar = step.to.toLowerCase().endsWith(META_SUFFIX);

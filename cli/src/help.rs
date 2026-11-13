@@ -3,7 +3,7 @@
 //! text, and what public means. An agent reads `doklin help agent` once and
 //! knows how to behave in a workspace it has never seen.
 
-use crate::{Failure, COMMANDS};
+use crate::{Command, Failure, COMMANDS};
 
 const OVERVIEW: &str = r#"doklin — work with a Doklin workspace from anywhere
 
@@ -188,7 +188,9 @@ on stderr that says what to do next, with an exit code: 2 bad usage, 3 not found
 4 not permitted, 5 conflict (the document changed, or the name is taken), 6 not
 logged in, 7 the workspace's worker is too old for the command."#;
 
-/// Print the overview, a topic, or one command's own help.
+/// Print the overview, a topic, or one command's own help. A topic wins over
+/// a command of the same name: `doklin help comments` is how comments work,
+/// and `doklin comments --help` is how that one command is typed.
 pub fn print(topic: Option<&str>) -> Result<(), Failure> {
     let Some(topic) = topic else {
         println!("{}", OVERVIEW);
@@ -200,22 +202,27 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         "publishing" => PUBLISHING,
         "agent" | "agents" => AGENT,
         name => {
-            let Some(command) = COMMANDS.iter().find(|c| c.name == name) else {
+            let Some(found) = COMMANDS.iter().find(|c| c.name == name) else {
                 return Err(Failure::usage(format!(
                     "there is no help on \"{}\" — try: documents, comments, publishing, agent, or a command's name",
                     name
                 )));
             };
-            println!("{}\n\n{}", command.usage, wrap(command.about, 84));
-            let options = options_of(command.name);
-            if !options.is_empty() {
-                println!("\n{}", options);
-            }
+            command(found);
             return Ok(());
         }
     };
     println!("{}", words);
     Ok(())
+}
+
+/// One command's own help: how it is typed, what it does, its options.
+pub fn command(command: &Command) {
+    println!("{}\n\n{}", command.usage, wrap(command.about, 84));
+    let options = options_of(command.name);
+    if !options.is_empty() {
+        println!("\n{}", options);
+    }
 }
 
 /// What each option of a command means — the ones worth a line of their own.
@@ -231,7 +238,7 @@ fn options_of(command: &str) -> &'static str {
             "  --find \"…\"     the text to change, exactly as `read` shows it\n  --replace \"…\"  what to put there (may be empty)\n  --all          change every occurrence\n  --md, --html   which version\n  --dry-run      say what would happen"
         }
         "comment" => {
-            "  --on \"…\"       the words the thread is on (doklin help comments)\n  -m \"…\"         the comment\n  --md, --html   which version the words are in (default: the markdown)"
+            "  --on \"…\"       the words the thread is on (doklin help comments)\n  -m \"…\"         the comment\n  --md, --html   which version the words are in (default: the markdown, or the one the name's extension picks)"
         }
         "search" => "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30)",
         "publish" => {

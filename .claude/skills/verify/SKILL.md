@@ -114,7 +114,7 @@ node verify-harness/drive-split.mjs        # 21 steps: boots the REAL <App/> (sp
                                            # same real-app boot) following a link between notes:
                                            # a sibling opens in a tab, a missing target does
                                            # nothing, an external url goes to open_external
-node verify-harness/drive-cloud.mjs        # 37 steps: boots the REAL <App/> (cloud.html stubs the
+node verify-harness/drive-cloud.mjs        # 40 steps: boots the REAL <App/> (cloud.html stubs the
                                            # ENGINE: every cloud_* command answers from a scripted
                                            # fake, window.__emit injects the engine's events) and
                                            # walks the cloud surfaces — the not-connected panel, the
@@ -147,6 +147,15 @@ node verify-harness/drive-cloud.mjs        # 37 steps: boots the REAL <App/> (cl
                                            # exactly one thing away; then the same view on a Mac
                                            # that joined on an invite, where the list is the
                                            # owner's and the member is told so, not errored at)
+                                           # — the People view's Agents section (docs/cloud.md
+                                           # §8.3): what each agent may do and where it is logged
+                                           # in, a new one starting without publishing and with
+                                           # reading fixed, the two lines to hand over — install,
+                                           # then login — shown once and copied together or the
+                                           # login alone, a new login code, changing the boxes,
+                                           # logging one machine out, removing the agent, and a
+                                           # worker too old for agents saying so in a line while
+                                           # the people stay manageable; a member sees none of it
                                            # — and publishing: the Live chip's
                                            # not-connected door, a note published at a random then
                                            # a chosen address (Copy, a bad slug refused, the page
@@ -320,7 +329,19 @@ node verify-harness/cloudprompts.test.mjs  # the prompts (src/cloudPrompts.ts) a
                                            # — plus the D1 resources: setup creates the database
                                            # before the config that names its id, teardown deletes
                                            # it, and the script writes the binding, discovers the
-                                           # uuid and takes a D1_NAME= override (159 checks)
+                                           # uuid and takes a D1_NAME= override — and the
+                                           # `doklin` installer (scripts/install-doklin.sh): the
+                                           # line the agent login card hands out, the script's
+                                           # own BASE and the asset names in release.yml held to
+                                           # each other, then the script RUN against a release
+                                           # made up in a temp folder (a curl and a uname of the
+                                           # test's own first on PATH, so nothing is fetched):
+                                           # every platform picks its binary, it lands executable
+                                           # by a rename, Intel Macs / other CPUs / other systems
+                                           # are refused before the disk is touched, and a
+                                           # checksum that does not match, a binary the sums do
+                                           # not list and a missing asset each install nothing
+                                           # (235 checks)
 node verify-harness/doclinks.test.mjs      # resolving a link inside a note to a path
                                            # (src/docLinks.ts): relative/absolute/file:// targets,
                                            # percent escapes, dropped fragments, what is
@@ -354,6 +375,48 @@ node verify-harness/store.test.mjs         # the pure modules a datastore is bui
                                            # view exports (2261 checks)
 ```
 
+## The `doklin` command (`cli/`)
+
+The command line an agent works with a workspace through (docs/cloud.md
+§8.6) — a Rust crate of its own, driven as a built binary against the real
+worker:
+
+```sh
+(cd cli && cargo build --release)          # the app's Rust is not needed; this crate is small
+node verify-harness/drive-cli.mjs          # 49 steps, no browser: starts serve-worker.mjs itself on
+                                           # a free port (and stops it), puts a recording relay in
+                                           # front of it so a step can say what the CLI actually
+                                           # asked, and gives every "machine" a scratch HOME and
+                                           # XDG_CONFIG_HOME, so the real credentials file is never
+                                           # touched. Every command, piped (JSON) and on a
+                                           # pseudo-terminal through script(1) (sentences), and
+                                           # every exit code: help and its topics, bad usage (2)
+                                           # before anything is asked, not logged in (6), login —
+                                           # one-time, loosely typed, unknown / spent / expired
+                                           # alike, a second login replacing the first — whoami,
+                                           # ls / info / read (versions, --clean, -o, never a
+                                           # sidecar), write (stdin, --from, --if-rev, --force,
+                                           # --html, an html-only document, what the workspace
+                                           # cannot hold), a change made on a Mac between the read
+                                           # and the write refused (5), edit, html falling behind,
+                                           # comments on both versions with the markers kept /
+                                           # orphaned / unwrapped, publish / published / unpublish,
+                                           # mv and rm moving and removing a document whole, search
+                                           # through the 202 and after a Mac's change, each
+                                           # permission refused (4) by name, what the owner takes
+                                           # away gone on the next request, -w across two domains,
+                                           # logout revoking the token, and a worker that is
+                                           # behind (7) — a tiny fake of one, inside the script
+```
+
+It builds nothing itself and says so in one sentence when the binary is
+missing. `VERBOSE=1` prints every command with its output. NOT driven, on
+purpose: `doklin` with no arguments and `doklin <path>` — on a Mac those open
+the path in the Doklin app somebody has running, so the script's runner
+refuses any first word that is not a command. Don't run them by hand while
+checking, either. CI runs this drive on every pull request (the `cli` job),
+and the installer is covered by `cloudprompts.test.mjs` above.
+
 ## Cloud worker (`cloud-worker/`)
 
 The Cloudflare Worker behind a connected domain — TypeScript, its own
@@ -361,7 +424,7 @@ tsconfig (Workers runtime types, no DOM), tested without deploying:
 
 ```sh
 pnpm exec tsc -p cloud-worker/tsconfig.json --noEmit
-node cloud-worker/test/run.mjs             # 45 cases against an in-memory R2 fake (test/fake-r2.mjs,
+node cloud-worker/test/run.mjs             # 62 cases against an in-memory R2 fake (test/fake-r2.mjs,
                                            # shared with serve-worker.mjs) and a D1 over node:sqlite
                                            # (test/fake-d1.mjs — real SQL), the sources compiled
                                            # in-process through vite: the schema runner (a fresh
@@ -405,8 +468,31 @@ node cloud-worker/test/run.mjs             # 45 cases against an in-memory R2 fa
                                            # the app's table identity, comment stripping, the
                                            # mermaid hydrator, link rewriting, the root page, the
                                            # cache keyed by manifest etag (a fake caches.default),
-                                           # the landing fallback; wipe freeing the domain and
-                                           # leaving D1 migrated, last
+                                           # the landing fallback; then agents and the document
+                                           # API (docs/cloud.md §8.3–8.5): an agent added with
+                                           # its first code, the code redeemed once for a dka_
+                                           # token, unknown / used / expired answering alike, a
+                                           # rename, new permissions, one machine revoked, a
+                                           # logout, a removal; the gate both ways (an agent's
+                                           # token refused on every sync route, a person's on
+                                           # /api/agent); every route and verb refused without
+                                           # its own permission; a write as a blob and one CAS,
+                                           # the version table (markdown / html / both / html
+                                           # only), hidden and ignored paths and the sidecar
+                                           # refused, a document moving and going whole, a write
+                                           # that loses the race landing on what the other
+                                           # device wrote with no blob left behind, the
+                                           # manifest's limits checked as a Mac's PUT is;
+                                           # publishing (an entry that answers at once and
+                                           # follows its document), comments on markdown and on
+                                           # html — checked against the app's own
+                                           # src/metaFile.ts, so the worker cannot write a
+                                           # sidecar the app would rewrite — and search (no
+                                           # mirror until somebody searches, 202 until it is
+                                           # whole, an agent's change found at once and a Mac's
+                                           # by the next search); /api/meta naming agents; wipe
+                                           # freeing the domain, emptying the agent and search
+                                           # tables and leaving D1 migrated, last
 node scripts/bundle-worker.mjs             # → cloud-worker/dist/doklin-cloud-worker.js (the
                                            # mermaid module spliced in; ~40 s); prints raw +
                                            # gzipped size, fails past 3 MB gzipped
@@ -430,8 +516,18 @@ thing a suite can answer. `scripts/versions.sh <folder>` prints what a
 folder's version store holds.
 
 `cargo test --lib` runs every Rust test: the cloud engine against an
-in-memory worker (`--lib cloud` — 80 tests: the two-device merge / conflict /
-tombstone / rename / CAS-race matrix, the public map (mirroring,
+in-memory worker (`--lib cloud` — 99 tests: the two-device merge / conflict /
+tombstone / rename / CAS-race matrix, a manifest written the way the WORKER
+writes one for an agent (docs/cloud.md §8.4 — a third writer in tests.rs,
+`WorkerTx`, a hand-kept mirror of cloud-worker/src/commit.ts: change both)
+applied by that same matrix — a document created, changed, merged with what
+was typed here meanwhile or kept beside it when the same line changed, moved
+with no bytes fetched and with an unpushed edit riding along, removed (a
+clean copy goes, an edited one stays), a markdown + html + sidecar arriving,
+moving and leaving in one write, a file written again over its own
+tombstone, an `a-` id named through the directory, a page following a
+document or a folder the worker moved, and — except where a merge is owed —
+no manifest PUT from the Mac afterwards — the public map (mirroring,
 rename-follow, re-bind, a folder page following its folder, the custom-slug
 race, the root page), bind-once and the upload / download / resume flows, a
 touched path settling in 1.5 s against a watched one's 5 s under tokio's
