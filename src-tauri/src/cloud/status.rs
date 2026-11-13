@@ -22,6 +22,9 @@ pub const EV_CONFLICT: &str = "cloud-conflict";
 pub const EV_PENDING_DELETES: &str = "cloud-pending-deletes";
 /// `{root, kind: "upload" | "download", done, total}`.
 pub const EV_PROGRESS: &str = "cloud-progress";
+/// A `Removed` — an owner took this Mac's access away, and the workspace's
+/// copy here is gone.
+pub const EV_REMOVED: &str = "cloud-removed";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,6 +56,12 @@ pub struct CloudStatus {
     /// What a surface compares a `by` against to
     /// know whether somebody *else* did a thing.
     pub me: String,
+    /// What this Mac's credential may do here, in the words of the worker's
+    /// role table (`work`, `people.invite`, …) — what every surface hides
+    /// the rest by. Empty until the domain has answered once, and from a
+    /// worker that predates the table; a surface reads that as "not known",
+    /// never as "nothing" (src/cloud.ts `mayOn`).
+    pub can: Vec<String>,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
     /// The version store's mirror — null when this worker has no `versions`
@@ -142,6 +151,22 @@ pub struct LeaseHolder {
     pub until: u64,
 }
 
+/// A workspace taken off this Mac because an owner took its access away —
+/// the `cloud-removed` event's payload, and a row of `cloud_removed`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Removed {
+    pub root: String,
+    pub name: String,
+    pub domain: String,
+    /// False when the folder could not be deleted — it no longer says it is
+    /// that workspace, or the disk refused — so the notice can say so.
+    pub deleted: bool,
+    /// When, in ms: with `root`, what lets a window tell one it has already
+    /// shown from one it has not.
+    pub at: u64,
+}
+
 /// `cloud_probe`: what a domain answered before anything is touched.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,23 +215,35 @@ pub struct Invited {
 
 /// `cloud_people`: everything the People view shows.
 ///
-/// `role` is how *this Mac* authenticates, and it is asked rather than
-/// remembered: the members route answers the owner's credential and refuses
-/// every other, so the `403` a member's token gets is itself the answer.
-/// Nothing on disk records which door a Mac came in by, and nothing needs to.
+/// Who this Mac is here, and what it may do, is asked rather than remembered:
+/// `/api/meta` answers both, and nothing on disk records a role — it is the
+/// person's, and an owner can change it while this Mac is asleep.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct People {
     /// `owner` or `member`.
     pub role: String,
+    /// This Mac holds the domain's own secret: the workspace's creator.
+    pub creator: bool,
+    /// The person this Mac is, by member id — which row in `members` is
+    /// "you". None for a creator who has not yet said who they are.
+    pub me: Option<String>,
+    /// What that role may do, in the worker's words (`people.invite`, …).
+    pub can: Vec<String>,
     /// This Mac's own device id, so the list can mark which Mac is this one.
     pub device_id: String,
-    /// Everyone, newest last. Empty for a member: the list is the owner's.
+    /// The row in `devices` that is the credential this Mac syncs with —
+    /// which may carry another Mac's device id, when the token was handed
+    /// over through *Connect another Mac…*. Never offered for signing out:
+    /// that would delete the copy in hand. None for the creator's secret.
+    pub token_id: Option<String>,
+    /// Everyone, newest last.
     pub members: Vec<MemberRecord>,
-    /// The pending, unexpired invites.
+    /// The pending, unexpired invites. Empty for whoever may not invite.
     pub invites: Vec<InviteRecord>,
-    /// Every signed-in Mac. The owner's own are not among them — their
-    /// credential is the domain's env secret, which has no row (remote.rs).
+    /// Every signed-in Mac. Empty for whoever may not sign one out. The
+    /// creator's own are not among them — their credential is the domain's
+    /// env secret, which has no row (remote.rs).
     pub devices: Vec<TokenRecord>,
 }
 

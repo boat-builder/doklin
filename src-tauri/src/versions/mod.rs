@@ -579,6 +579,12 @@ enum VersionerCmd {
     Flush {
         reply: oneshot::Sender<()>,
     },
+    /// Stop without the closing capture, and answer once nothing more will be
+    /// written: the folder is being taken off this Mac, and its history goes
+    /// with it (`forget_root`).
+    Abandon {
+        reply: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -702,6 +708,13 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                         cadence.captured(Instant::now());
                     }
                     let _ = reply.send(());
+                }
+                Some(VersionerCmd::Abandon { reply }) => {
+                    // Commands are taken one at a time, so any capture that
+                    // was running has finished: from here this task writes
+                    // nothing, which is what the answer promises.
+                    let _ = reply.send(());
+                    return;
                 }
             },
             event = fs.recv(), if watching => match event {
@@ -978,6 +991,45 @@ fn route(app: &AppHandle, path: &str) -> Result<(mpsc::UnboundedSender<Versioner
 /// reads, and never writes.
 pub(crate) fn store_for_root(data_dir: &Path, root: &Path) -> Store {
     Store::open(data_dir, &store_key(root), root)
+}
+
+/// How long `forget_root` waits for a versioner to say it has stopped.
+const ABANDON_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Delete this Mac's whole version history of the folder at `root`, stopping
+/// its versioner first — with no closing capture, which would only write the
+/// store back. For a workspace this Mac has lost access to (`access_removed`,
+/// cloud/mod.rs): the history holds every file's content, so it leaves
+/// with the folder.
+///
+/// `store_dir` is the store as it was found while the folder still existed —
+/// a store's key comes from the folder's canonical path, which cannot be
+/// asked for once the folder is gone.
+pub(crate) async fn forget_root(app: &AppHandle, root: &str, store_dir: PathBuf) {
+    let stopping = with_inner(app, |inner| {
+        let Some(handle) = inner.versioners.remove(root) else { return Ok(None) };
+        if let Some(bus) = inner.app.try_state::<VersionBus>() {
+            bus.unregister(&handle.root);
+        }
+        if let Ok(mut table) = inner.statuses.lock() {
+            table.remove(root);
+        }
+        emit_statuses(&AppEvents(inner.app.clone()), &inner.statuses);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = handle.tx.send(VersionerCmd::Abandon { reply: reply_tx });
+        // The handle drops here, and its watcher with it.
+        Ok(Some(reply_rx))
+    })
+    .ok()
+    .flatten();
+    if let Some(stopped) = stopping {
+        let _ = tokio::time::timeout(ABANDON_TIMEOUT, stopped).await;
+    }
+    // Inside the stores' own directory and nowhere else, whatever was passed.
+    let stores = with_inner(app, |inner| Ok(versions_dir(&inner.data_dir))).ok();
+    if stores.is_some_and(|stores| store_dir.parent() == Some(stores.as_path())) {
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&store_dir)).await;
+    }
 }
 
 /// A store to read from without going through its versioner: reads are pure

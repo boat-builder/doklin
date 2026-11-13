@@ -1,16 +1,22 @@
-// Who is calling. Every /api route but one runs through `authenticate`: the
-// bearer is hashed, compared with the owner secret's hash in constant time,
+// Who is calling. Every /api route but two runs through `authenticate`: the
+// bearer is hashed, compared with the domain secret's hash in constant time,
 // and — when that is not it — resolved against the `tokens` table as the
-// person who holds it.
+// person who holds it, with the role on their row.
 //
-// The order is the design, not an optimization. The owner's credential is the
-// worker's env secret and is matched with NO database read, so a D1 outage
-// degrades a workspace to one credential rather than locking its owner out of
-// their own domain. Only a bearer that is *not* the owner's costs a row read.
+// The order is the design, not an optimization. The creator's credential is
+// the worker's env secret and is matched with NO database read, so a D1
+// outage degrades a workspace to one credential rather than locking its
+// creator out of their own domain. Only a bearer that is *not* the secret
+// costs a row read.
 //
 // Storing tokens by the sha256 of the token makes resolving a bearer one
 // primary-key lookup and makes revocation — delete the row — take effect on
 // the very next request: there is no session, so there is nothing to expire.
+// A change of role lands the same way, for the same reason.
+//
+// A bearer that resolves to nobody is `null` — except one an owner took
+// away, which is "removed": the worker says so in as many words, because a
+// Mac that hears it deletes its copy of the workspace.
 //
 // A bearer that starts `dka_` is an agent's (agents.ts) and resolves through
 // the agents' own table instead: the same one primary-key read, to a role the
@@ -25,18 +31,23 @@ import { AGENT_TOKEN_PREFIX, resolveAgentToken, touchAgent, type Scope } from ".
 import { sha256Hex, timingEq } from "./crypto";
 import type { Env } from "./env";
 import { ID_RE } from "./layout";
-import { resolveToken } from "./members";
+import { isRemovedToken, resolveToken } from "./members";
+import type { PersonRole } from "./roles";
 
-export type Role = "owner" | "member" | "agent";
+export type Role = PersonRole | "agent";
 
 export type Auth = {
+  /** What the caller may do is asked of this, through `can` (roles.ts). */
   role: Role;
+  /** True for the OWNER_TOKEN secret and nothing else: the one credential no
+   *  row confers and none can take away. */
+  creator: boolean;
   /** "owner" for the OWNER_TOKEN secret; a minted token's own id otherwise. */
   tokenId: string;
   /**
-   * The person behind the credential. Null for the owner secret — matching it
-   * reads no row, so the worker knows a request is the owner's without
-   * knowing which *person* that is. The owner's member row exists (they are
+   * The person behind the credential. Null for the domain's secret — matching
+   * it reads no row, so the worker knows a request is the creator's without
+   * knowing which *person* that is. The creator's member row exists (they are
    * in the People list, and attribution names them) but it is identity, never
    * authority: `POST /api/auth/members` is what writes it, and losing it
    * costs a name, not access.
@@ -62,8 +73,9 @@ function deviceIdOf(request: Request): string | null {
   return ID_RE.test(id) ? id : null;
 }
 
-/** Resolve the bearer to an identity, or null. */
-export async function authenticate(request: Request, env: Env): Promise<Auth | null> {
+/** Resolve the bearer to an identity; `null` for nobody, "removed" for a
+ *  credential an owner took away. */
+export async function authenticate(request: Request, env: Env): Promise<Auth | "removed" | null> {
   const header = request.headers.get("authorization") ?? "";
   if (!header.startsWith("Bearer ")) return null;
   const bearer = header.slice("Bearer ".length).trim();
@@ -72,7 +84,16 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | n
 
   const bearerHash = await sha256Hex(bearer);
   if (env.OWNER_TOKEN && timingEq(bearerHash, await sha256Hex(env.OWNER_TOKEN))) {
-    return { role: "owner", tokenId: "owner", memberId: null, email: null, name: "Owner", deviceId, agent: null };
+    return {
+      role: "owner",
+      creator: true,
+      tokenId: "owner",
+      memberId: null,
+      email: null,
+      name: "Owner",
+      deviceId,
+      agent: null,
+    };
   }
 
   if (bearer.startsWith(AGENT_TOKEN_PREFIX)) {
@@ -81,6 +102,7 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | n
     await touchAgent(env, agent);
     return {
       role: "agent",
+      creator: false,
       tokenId: agent.tokenId,
       memberId: null,
       email: null,
@@ -91,13 +113,10 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | n
   }
 
   const identity = await resolveToken(env, bearerHash);
-  if (!identity) return null;
-  // Always `member`, whatever role that person's row carries. The role column
-  // describes a person, for the People list; owner authority comes from the
-  // env secret and from nowhere else, so no row anybody can write — including
-  // the owner's own, invited to their own address — can confer it.
+  if (!identity) return (await isRemovedToken(env, bearerHash)) ? "removed" : null;
   return {
-    role: "member",
+    role: identity.role,
+    creator: false,
     tokenId: identity.tokenId,
     memberId: identity.memberId,
     email: identity.email,

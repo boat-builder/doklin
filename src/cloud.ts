@@ -93,6 +93,18 @@ export type VersionsMirror = {
   horizonDays: number | null;
 };
 
+/** What a role may do on a workspace, in the words of the worker's one table
+ *  (cloud-worker/src/roles.ts) — the domain says which of these this Mac
+ *  holds, and every surface hides the rest by it. */
+export type CloudAction =
+  | "work"
+  | "people.see"
+  | "people.invite"
+  | "people.remove"
+  | "people.roles"
+  | "agents.manage"
+  | "workspace.manage";
+
 export type CloudStatus = {
   root: string;
   domain: string;
@@ -107,6 +119,10 @@ export type CloudStatus = {
    *  says it is, or this Mac's own name when it has not said. What a `by` is
    *  compared against to know whether somebody *else* did a thing. */
   me: string;
+  /** What this Mac's credential may do here, as the domain last said. Empty
+   *  until it has answered, and from a worker that predates roles. Ask it
+   *  with `mayOn`, which reads "not known yet" as it should be read. */
+  can: string[];
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
   /** The version store's mirror; null when the worker predates it — which
@@ -180,9 +196,12 @@ export type CloudMember = {
   id: string;
   email: string;
   name: string;
-  /** What the People list shows — never authority. The owner's credential is
-   *  the domain's env secret, so no row anybody can write confers it. */
+  /** The person's role, carried by every Mac they are signed in on. An owner
+   *  makes another by changing it. */
   role: "owner" | "member";
+  /** The person who made the workspace and holds its domain's own token.
+   *  Always an owner; nobody can remove them or make them a member. */
+  creator: boolean;
   createdAt: number;
   /** When this person's Mac last beat, to the hour — the poll that carries
    *  presence writes it (worker v7). Null until they have been here since. */
@@ -192,8 +211,8 @@ export type CloudMember = {
   devices: number;
 };
 
-/** One signed-in Mac. The owner's own are not among them: their credential is
- *  the domain's env secret, which has no row to list and none to revoke. */
+/** One signed-in Mac. The creator's own are not among them: their credential
+ *  is the domain's env secret, which has no row to list and none to revoke. */
 export type CloudDevice = {
   id: string;
   memberId: string;
@@ -203,16 +222,28 @@ export type CloudDevice = {
   createdAt: number;
 };
 
-/** `cloudPeople`: everything the People view draws. `role` is how *this Mac*
- *  authenticates, and it is asked rather than remembered — the members route
- *  answers the owner's credential and refuses every other, so a member's
- *  lists are empty because they were never asked for. */
+/** `cloudPeople`: everything the People view draws. Who this Mac is here and
+ *  what it may do is asked of the domain each time the view opens, never
+ *  remembered — a role is the person's, and an owner can change it. */
 export type CloudPeople = {
   role: "owner" | "member";
+  /** This Mac holds the domain's own token: the workspace's creator. */
+  creator: boolean;
+  /** Which of `members` is you; null for a creator who has not said yet. */
+  me: string | null;
+  /** What that role may do — the buttons this view offers. */
+  can: string[];
   /** This Mac's own device id, so the list can mark which Mac is this one. */
   deviceId: string;
+  /** Which of `devices` is the credential this Mac syncs with — it can carry
+   *  another Mac's device id, when the token came through *Connect another
+   *  Mac…*. Never offered for signing out. Null for the creator's token. */
+  tokenId: string | null;
+  /** Everyone on the workspace. */
   members: CloudMember[];
+  /** Codes nobody has used yet. Empty for whoever may not invite. */
   invites: CloudInvite[];
+  /** Signed-in Macs. Empty for whoever may not sign one out. */
   devices: CloudDevice[];
 };
 
@@ -247,6 +278,11 @@ export type CloudAppliedEvent = { root: string; paths: string[] };
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };
+/** An owner took this Mac's access to a workspace away, and its copy here is
+ *  gone: the folder, and what Doklin kept for it. `deleted` is false when the
+ *  folder could not be removed — the notice says so rather than pretending.
+ *  `at` is when (ms): with `root`, how a window knows one it already showed. */
+export type CloudRemovedEvent = { root: string; name: string; domain: string; deleted: boolean; at: number };
 
 /* ---------- Commands ---------- */
 
@@ -279,8 +315,8 @@ export const cloudParseInvite = (text: string) =>
 export const cloudRedeem = (endpoint: string, code: string) =>
   invoke<CloudRedeemed>("cloud_redeem", { endpoint, code });
 
-/** Invite someone to a connected workspace by email (owner only). The code is
- *  minted and hashed on this Mac; only its sha256 goes up. */
+/** Invite someone to a connected workspace by email (an owner's to do). The
+ *  code is minted and hashed on this Mac; only its sha256 goes up. */
 export const cloudInvite = (root: string, email: string, name: string | null, days: number | null) =>
   invoke<CloudInvited>("cloud_invite", { root, email, name, days });
 
@@ -288,18 +324,31 @@ export const cloudInvite = (root: string, email: string, name: string | null, da
  *  whole answer, this Mac's own role included. */
 export const cloudPeople = (root: string) => invoke<CloudPeople>("cloud_people", { root });
 
-/** The owner saying who they are. Identity, never authority: the domain's
+/** The creator saying who they are. Identity, never authority: the domain's
  *  token authenticates them either way. */
 export const cloudAdoptOwner = (root: string, email: string, name: string | null) =>
   invoke<CloudMember>("cloud_adopt_owner", { root, email, name });
 
+/** Every workspace taken off this Mac since the app started. The event says
+ *  so as it happens; this answers a window that was not listening yet — an
+ *  engine can hear it on first contact, before the first window is up. */
+export async function cloudRemoved(): Promise<CloudRemovedEvent[]> {
+  const r = await invoke<unknown>("cloud_removed");
+  return Array.isArray(r) ? (r as CloudRemovedEvent[]) : [];
+}
+
+/** Make someone an owner, or a member again. Every Mac they are signed in on
+ *  carries the new role on its next request. */
+export const cloudSetRole = (root: string, memberId: string, role: "owner" | "member") =>
+  invoke<CloudMember>("cloud_set_role", { root, memberId, role });
+
 /** Take a person off the workspace: their row, their pending invite and every
- *  Mac they signed in on. */
+ *  Mac they signed in on. Each of those Macs deletes its copy when it hears. */
 export const cloudRevokePerson = (root: string, memberId: string) =>
   invoke<void>("cloud_revoke_person", { root, memberId });
 
-/** Revoke one Mac, leaving the person and their other Macs alone. It takes
- *  effect on that Mac's very next request. */
+/** Sign one Mac out, leaving the person and their other Macs alone. It takes
+ *  effect on that Mac's very next request, and that Mac deletes its copy. */
 export const cloudRevokeDevice = (root: string, tokenId: string) =>
   invoke<void>("cloud_revoke_device", { root, tokenId });
 
@@ -339,9 +388,10 @@ export const cloudCheckWorker = (root: string) => invoke<void>("cloud_check_work
 export const cloudConnect = (root: string, endpoint: string, token: string, name: string) =>
   invoke<string>("cloud_connect", { root, endpoint, token, name });
 
-/** Download a domain's workspace into `<destParent>/<name>`; resolves to the new folder. */
-export const cloudJoin = (endpoint: string, token: string, destParent: string) =>
-  invoke<string>("cloud_join", { endpoint, token, destParent });
+/** Download a domain's workspace into `~/Doklin/<name>` — no folder is asked
+ *  for — and start syncing it; resolves to the new folder. */
+export const cloudJoin = (endpoint: string, token: string) =>
+  invoke<string>("cloud_join", { endpoint, token });
 
 /** Adopt a folder carrying the domain's marker in place; resolves to the workspace id. */
 export const cloudResume = (root: string, endpoint: string, token: string) =>
@@ -388,6 +438,8 @@ export const onCloudPendingDeletes = (cb: (e: CloudPendingDeletesEvent) => void)
   listen<CloudPendingDeletesEvent>("cloud-pending-deletes", (e) => cb(e.payload));
 export const onCloudProgress = (cb: (e: CloudProgressEvent) => void) =>
   listen<CloudProgressEvent>("cloud-progress", (e) => cb(e.payload));
+export const onCloudRemoved = (cb: (e: CloudRemovedEvent) => void) =>
+  listen<CloudRemovedEvent>("cloud-removed", (e) => cb(e.payload));
 
 /* ---------- Derivations ---------- */
 
@@ -395,6 +447,22 @@ export const onCloudProgress = (cb: (e: CloudProgressEvent) => void) =>
 export function cloudForWorkspace(statuses: CloudStatus[], root: string | null): CloudStatus | null {
   if (!root) return null;
   return statuses.find((s) => s.root === root) ?? null;
+}
+
+/** Whether a role may do `action`, from an answer that states what it may —
+ *  the People view's. The one question asked before a button is drawn. */
+export function may(who: { can: string[] }, action: CloudAction): boolean {
+  return who.can.includes(action);
+}
+
+/** The same question of a workspace's status, whose `can` is empty until the
+ *  domain has answered and from a worker older than roles. Not knowing is not
+ *  a refusal: the domain decides either way, so what cannot be known yet is
+ *  offered, exactly as it was before there was a table to hide it by. */
+export function mayOn(cloud: CloudStatus | null, action: CloudAction): boolean {
+  if (!cloud) return false;
+  const can = cloud.can ?? [];
+  return can.length === 0 || can.includes(action);
 }
 
 /** The lease another Mac holds on the document at `absPath`, with the status
@@ -467,7 +535,7 @@ export function phaseLine(s: CloudStatus, now = Date.now()): string {
     case "pending-deletes":
       return `${s.pendingDeletes} deletion${s.pendingDeletes === 1 ? "" : "s"} waiting for your go`;
     case "revoked":
-      return "access revoked";
+      return "this Mac's token isn't accepted";
     case "worker-outdated":
       return "waiting on a worker update";
     case "error":
@@ -509,7 +577,7 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
     case "worker-outdated":
       return { tone: "warn", text: "Worker update needed" };
     case "revoked":
-      return { tone: "error", text: "Access revoked" };
+      return { tone: "error", text: "Not signed in" };
     case "error":
       return { tone: "error", text: "Can't sync" };
   }
@@ -519,8 +587,9 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
  *  `publish`: no page of its own. `live`: up to date. `updating`: edits
  *  from here are still on their way. `stale`: sync has stopped short of the
  *  page (offline, paused, held, an old worker, an error), so it keeps what
- *  it had. `offline`: the page itself is down (access revoked, or the note
- *  is not in the sync, so the address answers Not found). */
+ *  it had. `offline`: the page itself is down (this Mac's token isn't
+ *  accepted, or the note is not in the sync, so the address answers Not
+ *  found). */
 export type PageState = "publish" | "live" | "updating" | "stale" | "offline";
 
 export function pageState(s: CloudStatus | null, page: PublicPage | null, pending: boolean): PageState {
@@ -541,7 +610,7 @@ export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()
       return "Your latest changes appear once synced.";
     case "offline":
       return s.phase === "revoked"
-        ? "This Mac's access was revoked, so it can't update the page."
+        ? `${s.domain} doesn't accept this Mac's token, so it can't update the page.`
         : "The page answers Not found until this note is synced.";
     case "stale":
       switch (s.phase) {

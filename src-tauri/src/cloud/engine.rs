@@ -274,6 +274,18 @@ pub enum EngineCmd {
     Shutdown,
 }
 
+/// Why an engine's task ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// It was told to stop: the app is quitting, or the workspace was
+    /// disconnected on this Mac.
+    Shutdown,
+    /// The domain said this Mac's access was taken away (`RemoteError::Removed`).
+    /// The engine touches nothing on its way out; whoever spawned it deletes
+    /// this Mac's copy of the workspace (`access_removed`, mod.rs).
+    Removed,
+}
+
 /* ---------- The engine ---------- */
 
 pub struct EngineConfig {
@@ -290,6 +302,12 @@ pub struct EngineConfig {
     pub device_name: String,
     /// Real deletions go to the macOS Trash; tests flip this off.
     pub use_trash: bool,
+    /// This Mac holds the domain's own token, as `cloud.json` last knew
+    /// (`WorkspaceEntry::creator`). Such an engine never acts on `Removed`.
+    pub creator: bool,
+    /// Called the first time the domain says this Mac is the creator and
+    /// `creator` was false, so the manager can write it down.
+    pub on_creator: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 pub struct Engine<R: Remote> {
@@ -314,6 +332,17 @@ pub struct Engine<R: Remote> {
     /// yet, or one whose owner has never adopted an identity — then work is
     /// signed with the Mac's name, exactly as it was before v3.
     me: Option<String>,
+    /// What this Mac's credential may do here, as the same answer spelled it
+    /// (`you.can` — the worker's role table). Empty until the domain has
+    /// answered, and from a worker older than the table.
+    can: Vec<String>,
+    /// The domain answered `Removed`: an owner took this Mac's access away.
+    /// Set wherever a request can hear it (`heard_removed`), read by the task
+    /// loop — which stops the engine and hands the rest to the manager.
+    removed: bool,
+    /// This Mac holds the domain's own token: from `cloud.json`, or the
+    /// moment a probe says so.
+    creator: bool,
     /// id → display name for everyone on this workspace, from the same
     /// answer. What a `by` is read with; a miss is shown as it stands.
     people: BTreeMap<String, String>,
@@ -387,6 +416,7 @@ struct Folded {
 impl<R: Remote> Engine<R> {
     pub fn new(cfg: EngineConfig, remote: Arc<R>, events: Arc<dyn Events>, statuses: StatusTable) -> Self {
         let state: WorkspaceState = read_json(&cfg.state_dir.join("state.json")).unwrap_or_default();
+        let creator = cfg.creator;
         Engine {
             cfg,
             remote,
@@ -401,6 +431,9 @@ impl<R: Remote> Engine<R> {
             worker_version: None,
             worker_features: Vec::new(),
             me: None,
+            can: Vec::new(),
+            removed: false,
+            creator,
             people: BTreeMap::new(),
             people_at: None,
             cloud_versions: None,
@@ -552,6 +585,7 @@ impl<R: Remote> Engine<R> {
             error: self.error.clone(),
             pending_deletes: self.held_deletes.len() as u32,
             me: self.name_of(&self.signature()),
+            can: self.can.clone(),
             worker_version: self.worker_version,
             versions: self.worker_has("versions").then(|| VersionsMirror {
                 mirrored: self.mirror.map(|m| m.mirrored).unwrap_or(0),
@@ -572,23 +606,59 @@ impl<R: Remote> Engine<R> {
     /// `/api/meta`: learn the worker's version — and, after a `426`, whether
     /// the worker has been updated since.
     pub(crate) async fn probe_worker(&mut self) {
-        if let Ok(meta) = self.remote.meta().await {
-            self.worker_version = Some(meta.version);
-            self.worker_features = meta.features;
-            // Identity rides on the probe because the probe is what happens
-            // before this engine writes anything: `me` is what a manifest it
-            // publishes signs with, and `people` is what the `by` in one it
-            // reads is shown as. A worker older than v6 answers neither, and
-            // everything falls back to device names.
-            self.me = meta.you.and_then(|you| you.member_id).filter(|id| !id.is_empty());
-            self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
-            self.people_at = Some(Instant::now());
-            if let Some(seen_at) = self.outdated {
-                if meta.version > seen_at {
-                    self.outdated = None;
+        match self.remote.meta().await {
+            Ok(meta) => {
+                self.worker_version = Some(meta.version);
+                self.worker_features = meta.features;
+                // Identity rides on the probe because the probe is what happens
+                // before this engine writes anything: `me` is what a manifest it
+                // publishes signs with, `can` is what this Mac's role may do,
+                // and `people` is what the `by` in a manifest it reads is shown
+                // as. A worker older than v6 answers none of it, and
+                // attribution falls back to device names.
+                let you = meta.you.unwrap_or_default();
+                self.me = you.member_id.filter(|id| !id.is_empty());
+                self.can = you.can;
+                if you.creator && !self.creator {
+                    self.creator = true;
+                    if let Some(write_down) = &self.cfg.on_creator {
+                        write_down();
+                    }
+                }
+                self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
+                self.people_at = Some(Instant::now());
+                if let Some(seen_at) = self.outdated {
+                    if meta.version > seen_at {
+                        self.outdated = None;
+                    }
                 }
             }
+            Err(RemoteError::Removed) => {
+                self.heard_removed();
+            }
+            Err(_) => {}
         }
+    }
+
+    /// The domain said this Mac's access was removed. Obeyed — the task ends
+    /// and the copy leaves this Mac — unless this Mac holds the domain's own
+    /// token. That credential is no row, so nothing an owner does can take it
+    /// away, and a domain that says so of it is not the worker this Mac
+    /// connected to (an address that changed hands, say). The folder it would
+    /// cost is the user's own, connected in place: it is never deleted on
+    /// anybody's word. True when obeyed.
+    fn heard_removed(&mut self) -> bool {
+        if self.creator {
+            return false;
+        }
+        self.removed = true;
+        true
+    }
+
+    /// Whether the domain has said this Mac's access was taken away.
+    #[cfg(test)]
+    pub(crate) fn was_removed(&self) -> bool {
+        self.removed
     }
 
     /// What this Mac signs its work with on this workspace: the person the
@@ -678,8 +748,17 @@ impl<R: Remote> Engine<R> {
             Err(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
             Err(RemoteError::Unauthorized) => self.set_status(
                 Phase::Revoked,
-                Some("this device's access was revoked or the token rotated".into()),
+                Some("the domain no longer accepts this Mac's token".into()),
             ),
+            // Obeyed, it has no status of its own: the task loop ends the
+            // engine, and the workspace leaves this Mac — row and all — a
+            // moment later. Not obeyed (the creator's Mac), it is a token the
+            // domain would not take, and reads as one.
+            Err(RemoteError::Removed) => {
+                if !self.heard_removed() {
+                    self.set_status(Phase::Revoked, Some("the domain no longer accepts this Mac's token".into()));
+                }
+            }
             Err(RemoteError::Outdated(m)) => {
                 self.outdated = Some(self.worker_version.unwrap_or(0));
                 self.set_status(
@@ -1867,6 +1946,9 @@ impl<R: Remote> Engine<R> {
         let poll = match self.remote.poll(beat.as_ref()).await {
             Ok(poll) => poll,
             Err(e) => {
+                if matches!(e, RemoteError::Removed) {
+                    self.heard_removed();
+                }
                 // A lock nobody can confirm is no lock: an editor kept
                 // view-only by a lease this Mac can no longer hear about
                 // would be the one way a lease could get in anybody's way.
@@ -1990,19 +2072,24 @@ impl<R: Remote> Engine<R> {
     /* ----- the task ----- */
 
     /// The engine task: wake on commands, the edit bus, filesystem events, or
-    /// the poll clock; run cycles when something might have moved.
+    /// the poll clock; run cycles when something might have moved. It ends
+    /// when it is told to, or the moment the domain says this Mac's access
+    /// was removed — which any request it makes may be the one to hear.
     pub async fn run(
         mut self,
         mut cmds: mpsc::UnboundedReceiver<EngineCmd>,
         mut fs_events: mpsc::UnboundedReceiver<()>,
-    ) {
+    ) -> Exit {
         // First contact: learn the worker, then a full cycle brings a stale
         // device current.
         self.probe_worker().await;
-        if self.can_cycle() {
+        if self.can_cycle() && !self.removed {
             let _ = self.cycle().await;
         } else {
             self.refresh_status();
+        }
+        if self.removed {
+            return Exit::Removed;
         }
         let mut fs_dirty_at: Option<Instant> = None;
         let mut touch_dirty_at: Option<Instant> = None;
@@ -2023,7 +2110,7 @@ impl<R: Remote> Engine<R> {
                 cmd = cmds.recv() => match cmd {
                     None | Some(EngineCmd::Shutdown) => {
                         self.leave().await;
-                        return;
+                        return Exit::Shutdown;
                     }
                     Some(EngineCmd::SyncNow) => cycle_now = true,
                     Some(EngineCmd::Probe) => {
@@ -2110,6 +2197,9 @@ impl<R: Remote> Engine<R> {
                 _ = tokio::time::sleep_until(wake) => {}
             }
 
+            if self.removed {
+                return Exit::Removed;
+            }
             if self.paused {
                 continue;
             }
@@ -2137,10 +2227,13 @@ impl<R: Remote> Engine<R> {
                 } else {
                     let _ = self.poll_and_maybe_cycle().await;
                 }
-                if self.mirror_due() {
+                if self.mirror_due() && !self.removed {
                     self.mirror_versions().await;
                 }
                 next_poll = Instant::now() + POLL_INTERVAL;
+            }
+            if self.removed {
+                return Exit::Removed;
             }
         }
     }

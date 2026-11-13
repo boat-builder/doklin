@@ -12,8 +12,10 @@
 //   · A guarded bump. The version only ever moves with
 //     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
-//     the work done. A step that ever moves *data* must lean on that
-//     `changes == 1` rather than on its statements being repeatable.
+//     the work done. A statement that moves *data* cannot lean on being
+//     repeatable, so it carries the guard itself: it names the version it
+//     migrates from in its own WHERE (step 7's does), and moves nothing once
+//     the bump has landed.
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
 //
@@ -206,6 +208,44 @@ const STEPS: readonly Step[] = [
          fid  TEXT PRIMARY KEY,                 -- the card's markdown file
          hash TEXT NOT NULL,                    -- the content hash its block was read from
          head TEXT NOT NULL                     -- the frontmatter block, fences included; '' for none
+       )`,
+    ],
+  },
+  {
+    // Roles as data. Until here `members.role`
+    // was a label and a token always authenticated as a member; from here a
+    // token carries the role on its person's row, so there can be several
+    // owners, and two things that used to be implied need saying.
+    //
+    // `creator` says which person holds the domain's env secret. It used to
+    // be "the one row whose role is owner"; with several owners that no
+    // longer picks anybody out. One row or none — the CHECK is what makes a
+    // second creator impossible to write.
+    //
+    // `removed_tokens` remembers the credentials an owner took away, by the
+    // same sha256 `tokens` held them under. It is what lets the worker tell
+    // a Mac "your access was removed" — the one answer that has that Mac
+    // delete its copy of the workspace — apart from a token it has merely
+    // never heard of (a wiped domain, a rotated secret, a database that
+    // cannot answer), which deletes nothing.
+    to: 8,
+    tables: ["creator", "removed_tokens"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS creator (
+         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
+         member_id TEXT NOT NULL                        -- m-xxxxxxxx: who holds the env secret
+       )`,
+      // One-time move of stored data: before this step exactly one row could
+      // carry the owner role, and it was the creator's. Guarded by the
+      // version it migrates from, so an isolate that runs it after the bump
+      // — when somebody may already have been promoted — moves nothing.
+      `INSERT OR IGNORE INTO creator (id, member_id)
+         SELECT 1, id FROM members
+          WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8
+          ORDER BY created_at, id LIMIT 1`,
+      `CREATE TABLE IF NOT EXISTS removed_tokens (
+         hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
+         removed_at INTEGER NOT NULL
        )`,
     ],
   },

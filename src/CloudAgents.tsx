@@ -11,9 +11,10 @@
 // The order is the People tab's: the door, its form and the prompt it ends
 // in at the top, the list under them.
 //
-// Owner only: the routes behind this are the owner's, like the people routes
-// beside them, and CloudPeople renders this only on the owner's branch. As
-// everywhere in the panel, no `fetch` here — the engine makes every call.
+// For whoever may manage agents — today an owner: the routes behind this ask
+// the same role table as the people routes beside them, and CloudPeople
+// renders this tab only when that table says so. As everywhere in the panel,
+// no `fetch` here — the engine makes every call.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {

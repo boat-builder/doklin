@@ -36,8 +36,13 @@ if (args.includes("--bundle") && !bundlePath) {
   process.exit(2);
 }
 let worker;
+/** The same worker as a module of its own: a second isolate, with the schema
+ *  runner's per-isolate memory blank. `tag` only has to be new each time. */
+let anotherIsolate;
 if (bundlePath) {
-  ({ default: worker } = await import(pathToFileURL(path.resolve(bundlePath)).href));
+  const href = pathToFileURL(path.resolve(bundlePath)).href;
+  ({ default: worker } = await import(href));
+  anotherIsolate = async (tag) => (await import(`${href}?isolate=${tag}`)).default;
   console.log(`testing the bundle at ${bundlePath}`);
 } else {
   const out = await build({
@@ -50,7 +55,9 @@ if (bundlePath) {
     },
   });
   const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
-  ({ default: worker } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`));
+  const source = `data:text/javascript,${encodeURIComponent(chunk.code)}`;
+  ({ default: worker } = await import(source));
+  anotherIsolate = async (tag) => (await import(`${source}${encodeURIComponent(`\n// isolate ${tag}`)}`)).default;
 }
 
 /* ---------- Harness ---------- */
@@ -63,17 +70,19 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 7;
+const D1_SCHEMA = 8;
 const D1_TABLES = [
   "agent_codes",
   "agent_tokens",
   "agents",
   "board_cards",
+  "creator",
   "invites",
   "leases",
   "members",
   "meta",
   "presence",
+  "removed_tokens",
   "search_state",
   "search_text",
   "tokens",
@@ -191,7 +200,7 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
   assert.deepEqual(
     db.tables(),
     D1_TABLES,
-    "people, who is here, what they hold, agents and their credentials, the search mirror, and the runner's own anchor",
+    "people and who made the workspace, who is here, what they hold, the credentials taken away, agents and theirs, the search mirror, and the runner's own anchor",
   );
   assert.equal(db.value("SELECT schema_version FROM meta WHERE key = 'schema'"), D1_SCHEMA);
   assert.equal(db.rows("SELECT * FROM meta").length, 1, "one row, and re-running never adds another");
@@ -412,8 +421,11 @@ await test("identity: removing a person takes every credential they hold with th
   assert.equal(listed.lastSeenAt, null, "written by the presence beat, never by authenticating");
 
   assert.equal((await call(`/api/auth/members/${erin.id}`, { method: "DELETE", token: OWNER })).status, 204);
-  assert.equal((await call("/api/meta", { token: one.json.token })).status, 401);
-  assert.equal((await call("/api/meta", { token: two.json.token })).status, 401);
+  for (const mac of [one, two]) {
+    const refused = await call("/api/meta", { token: mac.json.token });
+    assert.equal(refused.status, 401);
+    assert.equal(refused.json.removed, true, "each of her Macs is told its access was taken away");
+  }
   assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", erin.id), 0, "both tokens went with her");
   assert.equal(db.value("SELECT COUNT(*) FROM invites WHERE member_id = ?", erin.id), 0);
   assert.equal((await call(`/api/auth/members/${erin.id}`, { method: "DELETE", token: OWNER })).status, 404);
@@ -423,7 +435,7 @@ await test("identity: removing a person takes every credential they hold with th
   }
 });
 
-await test("identity: POST /api/auth/join is the whole carve-out, and every other auth route is the owner's", async () => {
+await test("identity: POST /api/auth/join is the whole carve-out, and of the other auth routes only the People list is a member's", async () => {
   // Reaching a 400 without a bearer is the proof it is above the gate: the
   // body was read, so the request was never turned away for being anonymous.
   assert.equal((await call("/api/auth/join", { method: "POST", body: { code: "junk" } })).status, 400);
@@ -449,13 +461,21 @@ await test("identity: POST /api/auth/join is the whole carve-out, and every othe
   for (const [path, method] of [
     ["/api/auth/invites", "POST"],
     ["/api/auth/invites", "GET"],
-    ["/api/auth/members", "GET"],
+    ["/api/auth/invites/i-00000000", "DELETE"],
     ["/api/auth/members", "POST"],
+    [`/api/auth/members/${ALICE.id}`, "PATCH"],
+    [`/api/auth/members/${ALICE.id}`, "DELETE"],
     ["/api/auth/tokens", "GET"],
+    ["/api/auth/tokens/t-00000000", "DELETE"],
   ]) {
     const res = await call(path, { method, token: MEMBER, body: method === "GET" ? undefined : {} });
     assert.equal(res.status, 403, `${method} ${path} as a member`);
   }
+  // Who is here is everybody's to see: a workspace you belong to is one whose
+  // people you can name.
+  const seen = await call("/api/auth/members", { token: MEMBER });
+  assert.equal(seen.status, 200, "the People list answers a member");
+  assert.ok(seen.json.members.some((m) => m.id === ALICE.id && m.role === "member" && m.creator === false));
 
   assert.equal((await call("/api/auth/join", { method: "POST", token: OWNER, body: { code: ALICE_CODE } })).status, 401);
   assert.equal((await call("/api/auth/nonsense", { token: OWNER })).status, 404);
@@ -560,14 +580,18 @@ await test("bind: owner only, once — the second bind is 409 with what the doma
   assert.equal((await call("/api/meta", { token: OWNER })).json.workspace.name, "Notes", "nothing overwritten");
 });
 
-await test("identity: the owner is a person for attribution, and a secret for access", async () => {
+await test("identity: the creator is a person for attribution, and a secret for access", async () => {
   const listed = (await call("/api/auth/members", { token: OWNER })).json.members;
-  const sherin = listed.find((m) => m.role === "owner");
+  const sherin = listed.find((m) => m.creator);
   assert.equal(sherin.email, "sherin@example.com", "the bind wrote the row");
-  assert.equal(listed.filter((m) => m.role === "owner").length, 1);
+  assert.equal(sherin.role, "owner", "whoever holds the domain's secret is an owner");
+  assert.equal(listed.filter((m) => m.creator).length, 1);
+  assert.equal(db.value("SELECT member_id FROM creator"), sherin.id, "one row says which person that is");
 
-  // Adopting a second address moves the role rather than minting a second
-  // owner; the old row survives, because a manifest may already name it.
+  // Adopting a second address moves the mark rather than minting a second
+  // creator; the old row survives as a plain member, because a manifest may
+  // already name it — and an address somebody stopped using should not keep
+  // an owner's authority.
   const moved = await call("/api/auth/members", {
     method: "POST",
     token: OWNER,
@@ -575,18 +599,19 @@ await test("identity: the owner is a person for attribution, and a secret for ac
   });
   assert.equal(moved.status, 200);
   assert.equal(moved.json.member.role, "owner");
+  assert.equal(moved.json.member.creator, true);
   const after = (await call("/api/auth/members", { token: OWNER })).json.members;
-  assert.equal(after.filter((m) => m.role === "owner").length, 1, "exactly one owner row");
+  assert.equal(after.filter((m) => m.creator).length, 1, "exactly one creator");
+  assert.equal(db.value("SELECT COUNT(*) FROM creator"), 1, "…and the table cannot hold a second");
   assert.equal(after.find((m) => m.id === sherin.id).role, "member", "the old address stays as a person");
 
   // Back, so the rest of the suite reads the way it was written.
   await call("/api/auth/members", { method: "POST", token: OWNER, body: { email: "sherin@example.com" } });
-  assert.equal(
-    (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.role === "owner").id,
-    sherin.id,
-  );
+  const back = (await call("/api/auth/members", { token: OWNER })).json.members;
+  assert.equal(back.find((m) => m.creator).id, sherin.id);
+  await call(`/api/auth/members/${moved.json.member.id}`, { method: "DELETE", token: OWNER });
 
-  // Inviting an existing member never promotes, and inviting the owner never
+  // Inviting an existing member never promotes, and inviting an owner never
   // demotes: the role on the row wins over the role an invite implies.
   await call("/api/auth/invites", {
     method: "POST",
@@ -596,38 +621,278 @@ await test("identity: the owner is a person for attribution, and a secret for ac
   assert.equal(
     (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.id === sherin.id).role,
     "owner",
-    "an invite to the owner's own address does not demote them",
+    "an invite to the creator's own address does not demote them",
   );
   assert.equal((await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.id === ALICE.id).role, "member");
 
   assert.equal((await call("/api/auth/members", { method: "POST", token: OWNER, body: { email: "nope" } })).status, 400);
 
-  // And the row is not a way to become the owner. Redeeming a code for the
-  // owner's own address mints an ordinary member credential: owner authority
-  // is the env secret and nothing a row can say.
+  // A role is the person's, so a code redeemed for an owner's address is an
+  // owner's credential — the creator's other Mac, signed in the ordinary way.
+  // What it is NOT is the secret: it has a row, so it can be signed out, and
+  // it cannot say who the secret's holder is.
   const redeemed = await call("/api/auth/join", {
     method: "POST",
     body: { code: code("11111111111111111111"), deviceId: "d-sherin2", deviceName: "Sherin's iMac" },
   });
   assert.equal(redeemed.status, 201);
-  assert.equal(redeemed.json.member.role, "owner", "the person is still the owner…");
-  assert.equal((await call("/api/meta", { token: redeemed.json.token })).status, 200);
+  assert.equal(redeemed.json.member.role, "owner");
+  const you = (await call("/api/meta", { token: redeemed.json.token })).json.you;
+  assert.equal(you.role, "owner", "the token carries the role on its person's row");
+  assert.equal(you.creator, false, "…and only the secret is the creator's credential");
+  assert.equal(you.memberId, sherin.id);
+  assert.equal((await call("/api/auth/invites", { token: redeemed.json.token })).status, 200, "an owner's routes answer it");
   assert.equal(
-    (await call("/api/auth/members", { token: redeemed.json.token })).status,
-    403,
-    "…but the credential they were handed is a member's",
+    (await call("/api/admin/wipe", { method: "POST", token: redeemed.json.token, body: {} })).status,
+    400,
+    "…the wipe included: it got as far as asking for the confirmation",
   );
   assert.equal(
-    (await call("/api/admin/wipe", { method: "POST", token: redeemed.json.token, body: { confirm: "wipe" } })).status,
+    (await call("/api/auth/members", { method: "POST", token: redeemed.json.token, body: { email: "x@example.com" } })).status,
     403,
+    "saying who holds the secret is the secret's alone",
   );
   const mine = (await call("/api/auth/tokens", { token: OWNER })).json.tokens.find((t) => t.deviceId === "d-sherin2");
   assert.equal((await call(`/api/auth/tokens/${mine.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call("/api/meta", { token: redeemed.json.token })).json.removed, true, "signed out like any other Mac");
+});
+
+await test("roles: a role is the person's — an owner makes another, and it lands on their very next request", async () => {
+  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"];
+  const role = (id, to, token = OWNER) =>
+    call(`/api/auth/members/${id}`, { method: "PATCH", token, body: { role: to } });
+  const creator = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
+
+  // What each role may do is one table, and the probe answers the caller's
+  // row of it — the same answer every gated route below is decided by.
+  assert.deepEqual((await call("/api/meta", { token: MEMBER })).json.you.can, ["work", "people.see"]);
+  assert.deepEqual((await call("/api/meta", { token: OWNER })).json.you.can, EVERYTHING);
+
+  assert.equal((await role(ALICE.id, "owner", MEMBER)).status, 403, "a member cannot make an owner — themselves least of all");
+
+  const made = await role(ALICE.id, "owner");
+  assert.equal(made.status, 200);
+  assert.equal(made.json.member.role, "owner");
+  assert.equal(made.json.member.creator, false);
+  // The same token, untouched: the role is read off the row on every request.
+  const you = (await call("/api/meta", { token: MEMBER })).json.you;
+  assert.equal(you.role, "owner");
+  assert.deepEqual(you.can, EVERYTHING);
+  for (const path of ["/api/auth/invites", "/api/auth/tokens", "/api/auth/agents"]) {
+    assert.equal((await call(path, { token: MEMBER })).status, 200, `${path} answers the new owner`);
+  }
+  assert.equal(
+    (await call("/api/auth/members", { token: OWNER })).json.members.filter((m) => m.role === "owner").length,
+    2,
+    "there can be several owners",
+  );
+
+  // What an owner still cannot do. Their own row is another owner's to
+  // change: a slip would otherwise leave them nobody to undo it.
+  assert.equal((await role(ALICE.id, "member", MEMBER)).status, 409, "not their own role");
+  assert.equal((await call(`/api/auth/members/${ALICE.id}`, { method: "DELETE", token: MEMBER })).status, 409, "nor their own removal");
+  // And the creator's row is nobody's to change: the domain's secret keeps
+  // letting them in whatever a row says, so the row may as well say so.
+  assert.equal((await role(creator.id, "member", MEMBER)).status, 409, "the creator stays an owner");
+  assert.equal((await role(creator.id, "member")).status, 409, "…even by their own hand");
+  assert.equal((await call(`/api/auth/members/${creator.id}`, { method: "DELETE", token: MEMBER })).status, 409);
+  assert.equal((await call(`/api/auth/members/${creator.id}`, { method: "DELETE", token: OWNER })).status, 409);
+  const still = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.id === creator.id);
+  assert.equal(still.role, "owner");
+  assert.equal(still.creator, true);
+
+  assert.equal((await role(ALICE.id, "admin")).status, 400, "two roles, and no third");
+  assert.equal((await role("m-00000000", "owner")).status, 404);
+  assert.equal((await role("nope", "owner")).status, 400);
+  assert.equal((await call(`/api/auth/members/${ALICE.id}`, { method: "PUT", token: OWNER, body: {} })).status, 405);
+
+  // A code is a way in as the person it is for, so one for an owner's address
+  // is that owner's to make, or the creator's — never another owner's, who
+  // could keep it and come back as them. Alice may make one for herself.
+  const codeFor = (email, body, token) =>
+    call("/api/auth/invites", { method: "POST", token, body: { email, codeHash: sha256(body), expiresAt: Date.now() + DAY } });
+  const forCreator = await codeFor(creator.email, "CCCCCCCCCCCCCCCCCCCC", MEMBER);
+  assert.equal(forCreator.status, 409, "an owner cannot make a code for the creator's row");
+  assert.equal(db.value("SELECT COUNT(*) FROM invites WHERE member_id = ?", creator.id), 0, "…and none was stored");
+  assert.equal((await codeFor("alice@example.com", "AAAAAAAAAAAAAAAAAAAA", MEMBER)).status, 201, "her own is hers");
+  assert.equal((await codeFor(creator.email, "CCCCCCCCCCCCCCCCCCCC", OWNER)).status, 201, "the creator's is the creator's");
+  assert.equal((await codeFor("someone-new@example.com", "NNNNNNNNNNNNNNNNNNNN", MEMBER)).status, 201, "a new person is any owner's to invite");
+
+  // Nor can anyone sign out the Mac they are on: it would delete the copy in
+  // their hands. The probe says which row is theirs, so the app never offers.
+  const mine = (await call("/api/meta", { token: MEMBER })).json.you.tokenId;
+  assert.ok(/^t-[a-f0-9]{8}$/.test(mine));
+  assert.equal((await call("/api/meta", { token: OWNER })).json.you.tokenId, null, "the secret is no row");
+  assert.equal((await call(`/api/auth/tokens/${mine}`, { method: "DELETE", token: MEMBER })).status, 409);
+  assert.equal((await call("/api/meta", { token: MEMBER })).status, 200, "still signed in");
+
+  // And back: a member again, on the next request, with the same token —
+  // and every code nobody had used goes with the role, whoever it was for:
+  // an owner can make codes for other people's rows, and keep them.
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), 3);
+  assert.equal((await role(ALICE.id, "member")).json.member.role, "member");
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0, "no code an owner made outlives their being one");
+  const kept = await call("/api/auth/join", { method: "POST", body: { code: code("NNNNNNNNNNNNNNNNNNNN"), deviceId: "d-kept" } });
+  assert.equal(kept.status, 401, "the one she kept is dead");
+  await call(`/api/auth/members/${(await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.email === "someone-new@example.com").id}`, { method: "DELETE", token: OWNER });
+  assert.equal((await call("/api/meta", { token: MEMBER })).json.you.role, "member");
+  assert.equal((await call("/api/auth/invites", { token: MEMBER })).status, 403);
+  assert.equal((await call("/api/manifest", { token: MEMBER })).status, 200, "the work was never the role's to take");
+
+  // The same when an owner is removed outright. Dan is made an owner, makes a
+  // code for Alice's row and keeps it; removed, he is out — on his own token
+  // and on the code that would have let him back in as her.
+  await codeFor("dan@example.com", "DDDDDDDDDDDDDDDDDDDD", OWNER);
+  const dan = (await call("/api/auth/join", { method: "POST", body: { code: code("DDDDDDDDDDDDDDDDDDDD"), deviceId: "d-dan" } })).json;
+  assert.equal((await role(dan.member.id, "owner")).status, 200);
+  assert.equal((await codeFor("alice@example.com", "BBBBBBBBBBBBBBBBBBBB", dan.token)).status, 201, "an owner may give a member a new code");
+  assert.equal((await call(`/api/auth/members/${dan.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call("/api/meta", { token: dan.token })).json.removed, true);
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0, "the codes go with the owner who could have kept them");
+  const back = await call("/api/auth/join", { method: "POST", body: { code: code("BBBBBBBBBBBBBBBBBBBB"), deviceId: "d-dan" } });
+  assert.equal(back.status, 401, "…so the one he kept does not let him back in as Alice");
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", ALICE.id), 1, "and her row has the one Mac it had");
+});
+
+await test("removal: a credential an owner took away is told so — and no other refusal ever says it", async () => {
+  await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { email: "zed@example.com", codeHash: sha256("ZZZZZZZZZZZZZZZZZZZZ"), expiresAt: Date.now() + DAY },
+  });
+  const zed = (await call("/api/auth/join", { method: "POST", body: { code: code("ZZZZZZZZZZZZZZZZZZZZ"), deviceId: "d-zed" } })).json;
+  assert.equal((await call("/api/poll", { token: zed.token, device: "d-zed" })).status, 200);
+
+  // Signing one Mac out leaves the person, and tells that Mac why it is
+  // refused — on every route, not just the one it happened to ask first.
+  assert.equal((await call(`/api/auth/tokens/${zed.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal(db.value("SELECT COUNT(*) FROM removed_tokens WHERE hash = ?", sha256(zed.token)), 1, "kept by its hash, as the token was");
+  for (const [path, method] of [
+    ["/api/meta", "GET"],
+    ["/api/poll", "GET"],
+    ["/api/poll", "POST"],
+    ["/api/manifest", "GET"],
+    ["/api/auth/members", "GET"],
+  ]) {
+    const refused = await call(path, { method, token: zed.token, device: "d-zed", body: method === "GET" ? undefined : {} });
+    assert.equal(refused.status, 401, `${method} ${path}`);
+    assert.equal(refused.json.removed, true, `${method} ${path} says the access was removed`);
+  }
+  assert.ok((await call("/api/auth/members", { token: OWNER })).json.members.some((m) => m.id === zed.member.id), "the person stays");
+
+  // Everything else that is refused is refused without it. A Mac deletes its
+  // copy of the workspace on that word, so it is only ever said of a token
+  // the database remembers being taken away.
+  for (const token of [undefined, "nope", "0".repeat(64), `${zed.token}0`]) {
+    const refused = await call("/api/meta", { token });
+    assert.equal(refused.status, 401);
+    assert.deepEqual(refused.json, { error: "unauthorized" }, `a bearer nobody holds: ${token}`);
+  }
+  // …least of all by a database that cannot answer: an outage must never
+  // read as "your access was removed".
+  for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
+    const refused = await call("/api/meta", { token: zed.token, bindings });
+    assert.equal(refused.status, 401);
+    assert.deepEqual(refused.json, { error: "unauthorized" });
+    assert.deepEqual((await call("/api/meta", { token: MEMBER, bindings })).json, { error: "unauthorized" }, "nor a live member's");
+  }
+
+  // Invited again, the same person signs in with a new credential; the old
+  // one stays taken away.
+  await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { email: "zed@example.com", codeHash: sha256("YYYYYYYYYYYYYYYYYYYY"), expiresAt: Date.now() + DAY },
+  });
+  const again = (await call("/api/auth/join", { method: "POST", body: { code: code("YYYYYYYYYYYYYYYYYYYY"), deviceId: "d-zed" } })).json;
+  assert.equal(again.member.id, zed.member.id);
+  assert.equal((await call("/api/meta", { token: again.token })).status, 200);
+  assert.equal((await call("/api/meta", { token: zed.token })).json.removed, true);
+  assert.equal((await call(`/api/auth/members/${zed.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call("/api/meta", { token: again.token })).json.removed, true, "removing the person takes the new one too");
+});
+
+await test("d1: a database from before roles learns who its creator was — once, and never from a later promotion", async () => {
+  // A second isolate over a database the previous worker left: schema 6, the
+  // one row that could carry the owner role, and a member beside it.
+  const old = new FakeD1();
+  old.db.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, schema_version INTEGER NOT NULL);
+    INSERT INTO meta (key, schema_version) VALUES ('schema', 6);
+    CREATE TABLE members (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
+                          created_at INTEGER NOT NULL, last_seen_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE tokens (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL, device_id TEXT,
+                         device_name TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE invites (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL,
+                          created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
+    INSERT INTO members VALUES ('m-0000000b', 'bob@example.com', 'Bob', 'member', 2, NULL, 0);
+  `);
+  old.run("INSERT INTO tokens VALUES (?, 't-0000000b', 'm-0000000b', 'd-bob', 'Air', 3)", sha256("bobs-token"));
+  const bindings = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: old };
+  const fetch = async (isolate, path, token, init = {}) => {
+    const res = await isolate.fetch(
+      new Request(`https://old.example.com${path}`, {
+        ...init,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      }),
+      bindings,
+    );
+    return { status: res.status, json: await res.json().catch(() => null) };
+  };
+
+  const first = await anotherIsolate("upgrade-1");
+  const meta = await fetch(first, "/api/meta", OWNER);
+  assert.equal(meta.json.d1, D1_SCHEMA);
+  assert.equal(old.value("SELECT member_id FROM creator"), "m-0000000a", "the owner row of old was the creator's");
+  assert.equal(meta.json.you.memberId, "m-0000000a");
+  assert.equal(meta.json.you.creator, true);
+  // Bob's token used to authenticate as a member whatever his row said; it
+  // still does, because his row says member.
+  assert.equal((await fetch(first, "/api/meta", "bobs-token")).json.you.role, "member");
+
+  // Bob is made an owner, and then a stale isolate — one that read schema 6
+  // before the bump — runs the step again. The move is guarded by the version
+  // it migrates from, so it cannot crown whoever is an owner by then.
+  const promoted = await fetch(first, "/api/auth/members/m-0000000b", OWNER, {
+    method: "PATCH",
+    body: JSON.stringify({ role: "owner" }),
+  });
+  assert.equal(promoted.json.member.role, "owner");
+  old.run("DELETE FROM creator");
+  old.run("UPDATE meta SET schema_version = 8 WHERE key = 'schema'");
+  old.db.exec(`
+    INSERT OR IGNORE INTO creator (id, member_id)
+      SELECT 1, id FROM members
+       WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8
+       ORDER BY created_at, id LIMIT 1
+  `);
+  assert.equal(old.value("SELECT COUNT(*) FROM creator"), 0, "after the bump the move moves nothing");
+
+  // And a database that had no owner row has no creator until one is adopted.
+  const blank = new FakeD1();
+  blank.db.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, schema_version INTEGER NOT NULL);
+    INSERT INTO meta (key, schema_version) VALUES ('schema', 6);
+    CREATE TABLE members (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
+                          created_at INTEGER NOT NULL, last_seen_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO members VALUES ('m-0000000c', 'cy@example.com', 'Cy', 'member', 1, NULL, 0);
+  `);
+  const second = await anotherIsolate("upgrade-2");
+  const res = await second.fetch(
+    new Request("https://blank.example.com/api/meta", { headers: { authorization: `Bearer ${OWNER}` } }),
+    { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: blank },
+  );
+  const answered = await res.json();
+  assert.equal(answered.d1, D1_SCHEMA);
+  assert.equal(answered.you.memberId, null, "nobody adopted an identity, so nobody is named");
+  assert.equal(blank.value("SELECT COUNT(*) FROM creator"), 0);
 });
 
 await test("meta: the probe says who the bearer is, and what everyone here is called", async () => {
   const owner = (await call("/api/meta", { token: OWNER })).json;
   assert.equal(owner.you.role, "owner");
+  assert.equal(owner.you.creator, true, "the domain's secret is the creator's");
   assert.equal(owner.you.email, "sherin@example.com", "identity is the adopted row; the secret is the access");
   assert.ok(/^m-[a-f0-9]{8}$/.test(owner.you.memberId), "what a manifest this Mac writes signs with");
 
@@ -635,13 +900,14 @@ await test("meta: the probe says who the bearer is, and what everyone here is ca
   // in, so saying it back costs nothing.
   const mine = (await call("/api/meta", { token: MEMBER })).json;
   assert.equal(mine.you.role, "member");
+  assert.equal(mine.you.creator, false);
   assert.equal(mine.you.memberId, ALICE.id);
   assert.equal(mine.you.email, "alice@example.com");
 
-  // The directory is everybody's — a manifest names ids, so every Mac in the
-  // workspace has to be able to put a name to one — and it is names and
-  // nothing else. The People list, with addresses and devices, stays the
-  // owner's.
+  // The directory rides on the probe — a manifest names ids, so every Mac has
+  // to be able to put a name to one without a request of its own — and it is
+  // names and nothing else. The People list, with addresses, roles and
+  // devices, is a route of its own.
   assert.ok(mine.people.length >= 2);
   assert.deepEqual(
     [...new Set(mine.people.map((p) => Object.keys(p).sort().join(",")))],
@@ -2030,7 +2296,7 @@ await test("agents: a rename and new permissions apply on the next request; a ma
   ]) {
     const member = await call(path, { method, token: MEMBER, body: sent });
     assert.equal(member.status, 403, `${method} ${path} is the owner's`);
-    assert.deepEqual(member.json, { error: "owner only" });
+    assert.deepEqual(member.json, { error: "only an owner can do that" });
     assert.equal((await call(path, { method, token: other.token, device: null, body: sent })).status, 403, "and never an agent's own");
     assert.equal((await call(path, { method, body: sent })).status, 401, "auth comes first");
   }
@@ -4306,6 +4572,7 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
     assert.ok(db.value(`SELECT COUNT(*) FROM ${table}`) > 0, `${table} holds something to wipe`);
   }
   assert.equal((await as(doomed)("/api/admin/wipe", { method: "POST", body: { confirm: "wipe" } })).status, 403, "never an agent's to do");
+  assert.ok(db.value("SELECT COUNT(*) FROM removed_tokens") > 0, "credentials were taken away along the way");
 
   const res = await call("/api/admin/wipe", { method: "POST", token: OWNER, body: { confirm: "wipe" } });
   assert.equal(res.status, 200);
@@ -4321,7 +4588,13 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0);
   assert.equal(db.value("SELECT COUNT(*) FROM presence"), 0, "and nobody is here");
   assert.equal(db.value("SELECT COUNT(*) FROM leases"), 0, "…or holding anything");
-  assert.equal((await call("/api/meta", { token: MEMBER })).status, 401);
+  // A wiped domain refuses everybody's token and has taken nobody's away:
+  // Alice's Mac stops syncing and keeps its copy, so it is a bare 401.
+  assert.equal(db.value("SELECT COUNT(*) FROM removed_tokens"), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM creator"), 0);
+  const stranded = await call("/api/meta", { token: MEMBER });
+  assert.equal(stranded.status, 401);
+  assert.deepEqual(stranded.json, { error: "unauthorized" });
   // Agents go the same way, and the mirror and the card copy of a workspace that is gone with them.
   for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state", "board_cards"]) {
     assert.equal(db.value(`SELECT COUNT(*) FROM ${table}`), 0, `${table} is empty`);

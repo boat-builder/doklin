@@ -122,6 +122,12 @@ type Props = {
   // Open the Cloud panel — "Cloud…" in the workspace menu. (The footer's
   // sync line is the other way in; App owns the footer.)
   onOpenCloud?: () => void;
+  // The workspaces this Mac belongs to — the
+  // menu lists them, so switching is one click — and the two things the menu
+  // does with them: open one, and join another with an invite.
+  workspaces?: SidebarWorkspace[];
+  onOpenWorkspace?: (root: string) => void;
+  onJoinWorkspace?: () => void;
   // Version history for a document — the rail, for any workspace: it is
   // no longer a cloud feature.
   onHistory?: (path: string) => void;
@@ -139,6 +145,10 @@ type Props = {
   onStopPublishing?: (page: PublicPage) => void;
   onCopyLink?: (url: string) => void;
 };
+
+/** A workspace this Mac belongs to, as the menu lists it: where its copy is
+ *  on this Mac, and what it is called. */
+export type SidebarWorkspace = { root: string; name: string; domain: string };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
 const DRAG_THRESHOLD_PX = 5;
@@ -194,6 +204,9 @@ export default function Sidebar({
   onDragFileCancel,
   onResizeWidth,
   onOpenCloud,
+  workspaces,
+  onOpenWorkspace,
+  onJoinWorkspace,
   onHistory,
   onWorkspaceHistory,
   deletedCount = 0,
@@ -1007,7 +1020,12 @@ export default function Sidebar({
         />
       )}
       <SidebarHeader
-        name={rootName}
+        // A workspace goes by its own name; a plain folder by the folder's.
+        name={workspaces?.find((w) => w.root === root)?.name ?? rootName}
+        root={root}
+        workspaces={workspaces ?? []}
+        onOpenWorkspace={onOpenWorkspace}
+        onJoinWorkspace={onJoinWorkspace}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         onOpenFolder={onOpenFolder}
@@ -1125,6 +1143,10 @@ export default function Sidebar({
 
 function SidebarHeader({
   name,
+  root,
+  workspaces,
+  onOpenWorkspace,
+  onJoinWorkspace,
   menuOpen,
   setMenuOpen,
   onOpenFolder,
@@ -1139,6 +1161,11 @@ function SidebarHeader({
   onOpenCloud,
 }: {
   name: string;
+  /** The folder this window has open — which of `workspaces` is this one. */
+  root: string;
+  workspaces: SidebarWorkspace[];
+  onOpenWorkspace?: (root: string) => void;
+  onJoinWorkspace?: () => void;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
   onOpenFolder: () => void;
@@ -1194,6 +1221,49 @@ function SidebarHeader({
         </button>
         {menuOpen && (
           <div className="sidebar-menu" role="menu">
+            {/* The workspaces this Mac belongs to, the open one ticked: what
+                makes this a switcher rather than a folder's menu. */}
+            {workspaces.length > 0 && (
+              <>
+                <div className="sidebar-menu-label">Workspaces</div>
+                {workspaces.map((w) => (
+                  <button
+                    key={w.root}
+                    role="menuitemradio"
+                    aria-checked={w.root === root}
+                    className="sidebar-menu-item sidebar-menu-item-check"
+                    data-testid="sidebar-menu-workspace"
+                    title={`${w.domain} — ${w.root}`}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (w.root !== root) onOpenWorkspace?.(w.root);
+                    }}
+                  >
+                    <span className="sidebar-menu-ws">
+                      <span className="ws-tile ws-tile--menu" aria-hidden>
+                        {workspaceInitial(w.name)}
+                      </span>
+                      <span className="sidebar-menu-ws-name">{w.name}</span>
+                    </span>
+                    {w.root === root && <MenuCheckIcon />}
+                  </button>
+                ))}
+              </>
+            )}
+            {onJoinWorkspace && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                data-testid="sidebar-menu-join"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onJoinWorkspace();
+                }}
+              >
+                Join a workspace…
+              </button>
+            )}
+            {(workspaces.length > 0 || onJoinWorkspace) && <div className="sidebar-menu-sep" role="separator" />}
             <button
               role="menuitem"
               className="sidebar-menu-item"

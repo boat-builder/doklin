@@ -209,7 +209,8 @@ const codeHashOf = (raw: unknown): string | null => {
   return HASH_RE.test(hash) ? hash : null;
 };
 
-/** Everything under /api/auth/agents — owner-only, checked by the caller. */
+/** Everything under /api/auth/agents — for whoever may manage agents, which
+ *  the caller has checked (roles.ts). */
 export async function handleAgentAdmin(request: Request, env: Env, parts: string[]): Promise<Response> {
   const method = request.method;
   const id = parts[3];

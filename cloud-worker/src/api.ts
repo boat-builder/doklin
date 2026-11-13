@@ -6,8 +6,9 @@
 // the logs — nothing reads it).
 //
 //   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
-//                                    you: who this bearer is, people: [{id, name}] — the directory
-//                                    a manifest's `by` is read with}
+//                                    you: who this bearer is — {role, creator, memberId, email,
+//                                    name, can: [what that role may do]}, people: [{id, name}] —
+//                                    the directory a manifest's `by` is read with}
 //   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
 //                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
@@ -40,6 +41,9 @@
 //
 //   People. Everything here is the D1 database beside
 //   the bucket; a deployment without one answers 503 and loses nothing else.
+//   Who may call what is one table (roles.ts): "owner" below is anyone whose
+//   role is — the domain's secret, or a person an owner made one — and
+//   "creator" is the secret alone. A refusal is 403.
 //
 //   POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
 //                                    {token, tokenId, member}; 401 when the code is unknown or
@@ -51,16 +55,25 @@
 //                                    invite they already had. The worker never sees the code.
 //   GET    /api/auth/invites         owner; the pending, unexpired ones
 //   DELETE /api/auth/invites/<id>    owner; withdraw one (204)
-//   GET    /api/auth/members         owner; everyone, with a device count and lastSeenAt
-//   POST   /api/auth/members         owner; {email, name?} — adopt or rename the owner's own
-//                                    identity, for attribution and the People list
-//   DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204)
+//   GET    /api/auth/members         everyone, with a role, a device count and lastSeenAt — the
+//                                    People list, which every person here may read
+//   POST   /api/auth/members         creator; {email, name?} — say (or change) who holds the
+//                                    domain's secret, for attribution and the People list
+//   PATCH  /api/auth/members/<id>    owner; {role: "owner" | "member"} → {member}. Never your own
+//                                    row, never the creator's (409)
+//   DELETE /api/auth/members/<id>    owner; the person and every credential they hold (204).
+//                                    Never your own row, never the creator's (409)
 //   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
 //   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
 //
+//   A credential an owner took away — a person removed, a Mac signed out — is answered
+//   `401 {error, removed: true}` on every route from then on, where any other bearer nobody
+//   holds is a bare 401. The difference is the app's cue to delete that Mac's copy
+//   of the workspace, so it is only ever said of a token `removed_tokens` remembers.
+//
 //   Agents. An agent's token is answered under /api/agent and nowhere
 //   else — every route above answers one with 403 — and the routes that manage agents sit
-//   beside the people routes, owner-only like them. Both are listed in agentApi.ts.
+//   beside the people routes, an owner's like them. Both are listed in agentApi.ts.
 //
 //   POST   /api/agent/login          NO BEARER — the second route above the gate
 //   *      /api/agent/…              an agent's token only: the document API
@@ -89,11 +102,12 @@ import {
   ENTITY_ID_RE,
   HASH_RE,
   MAX_INVITE_TTL_MS,
-  adoptOwner,
+  adoptCreator,
   deleteInvite,
   deleteMember,
   deleteToken,
-  findOwner,
+  findCreator,
+  findMemberByEmail,
   listDirectory,
   listInvites,
   listMembers,
@@ -102,10 +116,12 @@ import {
   normalizeEmail,
   putInvite,
   redeemInvite,
+  setMemberRole,
   upsertMember,
 } from "./members";
 import { sha256Hex } from "./crypto";
 import { readHere, recordBeat, type Beat, type Here } from "./presence";
+import { allowed, can } from "./roles";
 import { ensureSchema, wipeSchema } from "./schema";
 import { WORKER_FEATURES, WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
@@ -113,7 +129,8 @@ import { handleVersions } from "./versions";
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 
 const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 405);
-const ownerOnly = (): Response => json({ error: "owner only" }, 403);
+/** What `can` said no to (roles.ts). Today every such action is an owner's. */
+const notAllowed = (): Response => json({ error: "only an owner can do that" }, 403);
 const notBound = (): Response => json({ error: "not bound" }, 404);
 
 export async function handleApi(
@@ -139,6 +156,9 @@ export async function handleApi(
   }
 
   const auth = await authenticate(request, env);
+  // Said only of a credential the database remembers an owner taking away:
+  // the Mac that hears `removed` deletes its copy of the workspace.
+  if (auth === "removed") return json({ error: "your access to this workspace was removed", removed: true }, 401);
   if (!auth) return json({ error: "unauthorized" }, 401);
 
   const section = parts[1];
@@ -183,7 +203,7 @@ export async function handleApi(
 
   if (section === "workspace" && parts.length === 2) {
     if (method === "POST") {
-      if (auth.role !== "owner") return ownerOnly();
+      if (!can(auth.role, "workspace.manage")) return notAllowed();
       return bindWorkspace(request, env, auth);
     }
     if (method === "GET") {
@@ -193,6 +213,11 @@ export async function handleApi(
     }
     return methodNotAllowed();
   }
+
+  // The work itself — the poll, the manifest, the blobs, the version store.
+  // Both roles hold it today; a role that did not would stop here.
+  const working = section === "poll" || section === "manifest" || section === "blobs" || section === "versions";
+  if (working && !can(auth.role, "work")) return notAllowed();
 
   if (section === "poll" && parts.length === 2) {
     if (method !== "GET" && method !== "POST") return methodNotAllowed();
@@ -224,18 +249,17 @@ export async function handleApi(
   }
 
   if (section === "auth" && parts[2] === "agents") {
-    if (auth.role !== "owner") return ownerOnly();
+    if (!can(auth.role, "agents.manage")) return notAllowed();
     return handleAgentAdmin(request, env, parts);
   }
 
   if (section === "auth" && (parts.length === 3 || parts.length === 4)) {
-    if (auth.role !== "owner") return ownerOnly();
-    return handleAuth(request, env, parts);
+    return handleAuth(request, env, parts, auth);
   }
 
   if (section === "admin" && parts[2] === "wipe" && parts.length === 3) {
     if (method !== "POST") return methodNotAllowed();
-    if (auth.role !== "owner") return ownerOnly();
+    if (!can(auth.role, "workspace.manage")) return notAllowed();
     const body = await readJsonObject(request);
     if (body?.confirm !== "wipe") return json({ error: 'body must be {"confirm":"wipe"}' }, 400);
     return wipeBucket(env);
@@ -253,25 +277,31 @@ const noDatabase = (): Response => json({ error: "this domain has no database �
 
 /**
  * Who the bearer is, as the app has to write it down:
- * the id a manifest this Mac writes will carry in `by`.
+ * the id a manifest this Mac writes will carry in `by`, the role they hold,
+ * and `can` — that role's row of the table in roles.ts, which is what the app
+ * hides the rest by.
  *
- * A member's identity came off their token already — `authenticate` resolved
- * it in the row read that let them in — so this costs nothing. The owner's
+ * A person's identity came off their token already — `authenticate` resolved
+ * it in the row read that let them in — so this costs nothing. The creator's
  * takes one read, because matching the env secret deliberately reads nothing:
- * their *authority* is the secret and their *identity* is a row somebody
- * adopted. An owner who never adopted one is `memberId: null`, and their app
- * signs with the Mac's name until they do.
+ * their *authority* is the secret and their *identity* is a row they adopted.
+ * A creator who never adopted one is `memberId: null`, and their app signs
+ * with the Mac's name until they do.
  */
 async function whoIs(env: Env, auth: Auth): Promise<Record<string, unknown>> {
-  if (auth.role !== "owner") {
-    return { role: auth.role, memberId: auth.memberId, email: auth.email, name: auth.name };
+  const role = { role: auth.role, creator: auth.creator, can: allowed(auth.role) };
+  if (!auth.creator) {
+    // `tokenId` is which row of the Macs list this credential is — so the
+    // app never offers to sign out the Mac it is running on.
+    return { ...role, tokenId: auth.tokenId, memberId: auth.memberId, email: auth.email, name: auth.name };
   }
-  const owner = await findOwner(env);
+  const creator = await findCreator(env);
   return {
-    role: "owner",
-    memberId: owner?.id ?? null,
-    email: owner?.email ?? null,
-    name: owner?.name ?? "Owner",
+    ...role,
+    tokenId: null,
+    memberId: creator?.id ?? null,
+    email: creator?.email ?? null,
+    name: creator?.name ?? "Owner",
   };
 }
 
@@ -302,19 +332,21 @@ async function joinWithInvite(request: Request, env: Env): Promise<Response> {
   return json({ token: redeemed.token, tokenId: redeemed.tokenId, member: redeemed.member }, 201);
 }
 
-/** Everything else under /api/auth — owner-only, checked by the caller. */
-async function handleAuth(request: Request, env: Env, parts: string[]): Promise<Response> {
+/** Everything else under /api/auth. Each kind names the action it is, and
+ *  `can` decides (roles.ts) — only the People list is everybody's. */
+async function handleAuth(request: Request, env: Env, parts: string[], auth: Auth): Promise<Response> {
   const kind = parts[2];
   const id = parts[3];
   const method = request.method;
 
   if (kind === "invites") {
+    if (!can(auth.role, "people.invite")) return notAllowed();
     if (id === undefined) {
       if (method === "GET") {
         const invites = await listInvites(env);
         return invites === null ? noDatabase() : json({ invites });
       }
-      if (method === "POST") return createInvite(request, env);
+      if (method === "POST") return createInvite(request, env, auth);
       return methodNotAllowed();
     }
     if (method !== "DELETE") return methodNotAllowed();
@@ -327,20 +359,35 @@ async function handleAuth(request: Request, env: Env, parts: string[]): Promise<
   if (kind === "members") {
     if (id === undefined) {
       if (method === "GET") {
+        if (!can(auth.role, "people.see")) return notAllowed();
         const members = await listMembers(env);
         return members === null ? noDatabase() : json({ members });
       }
-      if (method === "POST") return adoptOwnerIdentity(request, env);
+      if (method === "POST") {
+        // Not a role's to do: it is the holder of the domain's secret saying
+        // who they are, and anybody else already is somebody.
+        if (!auth.creator) return json({ error: "only the domain's own token can say who its holder is" }, 403);
+        return adoptCreatorIdentity(request, env);
+      }
       return methodNotAllowed();
     }
-    if (method !== "DELETE") return methodNotAllowed();
+    if (method !== "DELETE" && method !== "PATCH") return methodNotAllowed();
+    if (!can(auth.role, method === "PATCH" ? "people.roles" : "people.remove")) return notAllowed();
     if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid member id" }, 400);
+    // Never your own row, either way: an owner who removed or demoted
+    // themselves by a slip would have nobody but another owner to undo it.
+    if (auth.memberId === id) {
+      return json({ error: "that is your own row — another owner has to change it" }, 409);
+    }
+    if (method === "PATCH") return changeRole(request, env, id);
     const gone = await deleteMember(env, id);
     if (gone === null) return noDatabase();
-    return gone ? new Response(null, { status: 204 }) : json({ error: "no such member" }, 404);
+    if (gone === "creator") return json({ error: "the workspace's creator cannot be removed" }, 409);
+    return gone === true ? new Response(null, { status: 204 }) : json({ error: "no such member" }, 404);
   }
 
   if (kind === "tokens") {
+    if (!can(auth.role, "people.remove")) return notAllowed();
     if (id === undefined) {
       if (method !== "GET") return methodNotAllowed();
       const tokens = await listTokens(env);
@@ -348,6 +395,12 @@ async function handleAuth(request: Request, env: Env, parts: string[]): Promise<
     }
     if (method !== "DELETE") return methodNotAllowed();
     if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid token id" }, 400);
+    // Never the credential that is asking: a signed-out Mac deletes its copy
+    // of the workspace, and that is not something to do to the Mac in hand.
+    // Disconnecting is how a Mac stops syncing.
+    if (auth.tokenId === id) {
+      return json({ error: "that is the Mac you are on — disconnect it instead of signing it out" }, 409);
+    }
     const gone = await deleteToken(env, id);
     if (gone === null) return noDatabase();
     return gone ? new Response(null, { status: 204 }) : json({ error: "no such token" }, 404);
@@ -364,11 +417,20 @@ async function handleAuth(request: Request, env: Env, parts: string[]): Promise<
  * mints the 100-bit code and hashes it, so a worker log, a D1 backup and this
  * request body are all incapable of letting anyone in.
  */
-async function createInvite(request: Request, env: Env): Promise<Response> {
+async function createInvite(request: Request, env: Env, auth: Auth): Promise<Response> {
   const body = await readJsonObject(request);
   if (!body) return json({ error: "invalid json body" }, 400);
   const email = normalizeEmail(body.email);
   if (!email) return json({ error: "a valid email address is required" }, 400);
+  // A code is a way in as the person it is for. One for an OWNER's address is
+  // therefore that owner's to make, or the creator's — never another owner's,
+  // who could keep it and come back as them after being removed. (For the
+  // creator's own row, which nobody can remove, that would be for good.)
+  const existing = await findMemberByEmail(env, email);
+  if (existing === undefined) return noDatabase();
+  if (existing?.role === "owner" && !auth.creator && auth.memberId !== existing.id) {
+    return json({ error: "a code for an owner is theirs to make, or the workspace's creator's" }, 409);
+  }
   const codeHash = typeof body.codeHash === "string" ? body.codeHash.trim().toLowerCase() : "";
   if (!HASH_RE.test(codeHash)) return json({ error: "codeHash must be the sha256 of the code, in hex" }, 400);
 
@@ -380,7 +442,7 @@ async function createInvite(request: Request, env: Env): Promise<Response> {
     return json({ error: `expiresAt must be a time within the next ${days} days` }, 400);
   }
 
-  // The role is only used when the row is new: inviting the owner by their own
+  // The role is only used when the row is new: inviting an owner by their own
   // address must not demote them.
   const member = await upsertMember(env, email, typeof body.name === "string" ? body.name : null, "member");
   if (!member) return noDatabase();
@@ -388,15 +450,29 @@ async function createInvite(request: Request, env: Env): Promise<Response> {
   return invite === null ? noDatabase() : json({ invite }, 201);
 }
 
-/** The owner saying who they are. Identity, not authority — `OWNER_TOKEN`
+/** The creator saying who they are. Identity, not authority — `OWNER_TOKEN`
  *  keeps authenticating them either way (auth.ts). */
-async function adoptOwnerIdentity(request: Request, env: Env): Promise<Response> {
+async function adoptCreatorIdentity(request: Request, env: Env): Promise<Response> {
   const body = await readJsonObject(request);
   if (!body) return json({ error: "invalid json body" }, 400);
   const email = normalizeEmail(body.email);
   if (!email) return json({ error: "a valid email address is required" }, 400);
-  const member = await adoptOwner(env, email, typeof body.name === "string" ? body.name : null);
+  const member = await adoptCreator(env, email, typeof body.name === "string" ? body.name : null);
   return member === null ? noDatabase() : json({ member });
+}
+
+/** Make someone an owner, or a member again. Every Mac they are signed in on
+ *  carries the new role on its next request. */
+async function changeRole(request: Request, env: Env, id: string): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const role = body.role;
+  if (role !== "owner" && role !== "member") return json({ error: 'role must be "owner" or "member"' }, 400);
+  const member = await setMemberRole(env, id, role);
+  if (member === null) return noDatabase();
+  if (member === "missing") return json({ error: "no such member" }, 404);
+  if (member === "creator") return json({ error: "the workspace's creator is always an owner" }, 409);
+  return json({ member });
 }
 
 /* ---------- The binding ---------- */
@@ -443,13 +519,15 @@ async function bindWorkspace(request: Request, env: Env, auth: Auth): Promise<Re
   });
   if (!put) return json({ error: "already bound", workspace: await readWorkspace(env) }, 409);
 
-  // Who bound it, as a person. Best effort on purpose: the owner's access is
+  // Who bound it, as a person. Best effort on purpose: the creator's access is
   // the env secret, so a domain whose database is missing must still bind —
   // `POST /api/auth/members` adopts an identity afterwards. An owner row is
   // reported when there is one and simply absent when there is not.
-  const ownerEmail = normalizeEmail(body.ownerEmail);
+  // Only the domain's own secret names its holder — the same rule as
+  // `POST /api/auth/members`.
+  const ownerEmail = auth.creator ? normalizeEmail(body.ownerEmail) : null;
   const owner = ownerEmail
-    ? await adoptOwner(env, ownerEmail, typeof body.ownerName === "string" ? body.ownerName : null)
+    ? await adoptCreator(env, ownerEmail, typeof body.ownerName === "string" ? body.ownerName : null)
     : null;
   return json({ ...record, manifestEtag, ...(owner ? { owner } : {}) }, 201);
 }
@@ -610,16 +688,21 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
  * budget; the client repeats the call until `remaining` comes back false.
  *
  * The last round empties D1 as well — otherwise a
- * rebound domain would inherit the old workspace's people. Nothing has to be
- * saved for last any more: a wipe is owner-only, and the owner's credential
- * is the worker's env secret rather than anything in here, so the call cannot
- * cut itself off half-done. Members lose theirs, which is the intent.
+ * rebound domain would inherit the old workspace's people. The database goes
+ * in the round that finishes, never before: an owner whose credential is a
+ * row in it — rather than the env secret — would otherwise cut the call off
+ * half-done. Everyone's tokens go with it, which is the intent, and so does
+ * `removed_tokens`: a wiped domain has taken nobody's access away, so no Mac
+ * is told to delete its copy.
  */
 async function wipeBucket(env: Env): Promise<Response> {
   let deleted = 0;
   const finish = async (): Promise<Response> => {
-    await wipeSchema(env);
-    return json({ wiped: true, purged: deleted, remaining: false });
+    // A database that is bound and did not empty is not done: its people and
+    // their tokens would outlive the workspace they were for. The caller
+    // repeats while `remaining`, so say so and let the next round try again.
+    const emptied = (await wipeSchema(env)) !== null || !env.DB;
+    return json({ wiped: true, purged: deleted, remaining: !emptied });
   };
   for (let round = 0; round < 20; round += 1) {
     const batch = await env.DATA.list({ limit: 1000 });

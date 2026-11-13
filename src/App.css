@@ -2562,6 +2562,40 @@ body.sidebar-resizing {
   flex: none;
 }
 
+/* The workspaces this Mac belongs to, at the top of the switcher's menu:
+   a quiet heading, a row each (tile, name, a tick on the open one), and a
+   rule before what the menu does with the folder itself. */
+.sidebar-menu-label {
+  padding: 6px 10px 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.sidebar-menu-ws {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sidebar-menu-ws-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.ws-tile--menu {
+  width: 18px;
+  height: 18px;
+  font-size: var(--fs-xs);
+}
+.sidebar-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
 /* Visible but inert (e.g. Paste with an empty file clipboard). */
 .sidebar-menu-item:disabled {
   opacity: 0.45;

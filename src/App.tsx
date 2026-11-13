@@ -5,6 +5,7 @@ import {
   cloudForWorkspace,
   cloudNeedsAttention,
   cloudPublish,
+  cloudRemoved,
   cloudSetActivity,
   cloudStatus,
   cloudTakeOver,
@@ -13,9 +14,11 @@ import {
   onCloudApplied,
   onCloudConflict,
   onCloudPendingDeletes,
+  onCloudRemoved,
   onCloudStatus,
   relPathIn,
   type CloudPendingDeletesEvent,
+  type CloudRemovedEvent,
   type CloudStatus,
   type PublicPage,
 } from "./cloud";
@@ -644,6 +647,31 @@ function writeStoredSession(tabs: Tab[], activeId: string | null) {
   }
 }
 
+// The removals this window has already acted on (`root@at`): each is told
+// twice — as an event, and in the list a window asks for once it is up — and
+// must be shown once.
+const shownRemovals = new Set<string>();
+
+// Drop one folder's saved tabs: the folder is gone from this Mac (a workspace
+// this Mac lost access to), so there is nothing left to come back to.
+function forgetStoredSession(root: string) {
+  if (!isMainWindow) return;
+  try {
+    const all = readAllSessions();
+    delete all.sessions[sessionKeyFor(root)];
+    localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        lastRoot: all.lastRoot === root ? null : all.lastRoot,
+        sessions: all.sessions,
+      }),
+    );
+  } catch {
+    // ignore
+  }
+}
+
 // One-time cleanup: builds up to 0.1.89 had a Drafts panel, and kept its
 // numbering and open state under these keys. Nothing reads them any more.
 function forgetDraftsPanelKeys() {
@@ -1000,6 +1028,12 @@ export default function App() {
   const cloudForRoot = useMemo(
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
+  );
+  // The workspaces this Mac belongs to — every connected one has an engine,
+  // so the statuses are the list. What the sidebar's switcher shows.
+  const myWorkspaces = useMemo(
+    () => cloudStatuses.map((s) => ({ root: s.root, name: s.name, domain: s.domain })),
+    [cloudStatuses],
   );
   // The pages of the open workspace, for the glyph on a live page's tab and
   // card (a board inside a note reads it too, from its own React root).
@@ -4935,12 +4969,85 @@ export default function App() {
     const held = activeLeaseRef.current;
     if (held && activeFilePath) void cloudTakeOver(held.status.root, activeFilePath).catch(() => {});
   }, [activeFilePath]);
+  // An owner took this Mac's access to a workspace away. The engine has
+  // already deleted the copy here — the folder, and
+  // what Doklin kept for it — so this window lets go of it: its tabs close,
+  // the folder stops being this window's, and a notice says what happened.
+  // Every window hears the event; one that has nothing of that workspace
+  // open stays quiet, except the main window, so the notice is always seen.
+  const [removedNotice, setRemovedNotice] = useState<CloudRemovedEvent | null>(null);
+  const readyRef = useRef(false);
+  readyRef.current = ready;
+  const leaveRemovedWorkspace = useCallback(
+    async (e: CloudRemovedEvent) => {
+      const key = `${e.root}@${e.at}`;
+      if (shownRemovals.has(key)) return;
+      shownRemovals.add(key);
+      const under = (p: string) => p === e.root || p.startsWith(`${e.root}/`);
+      const here = sessionWorkspaceRoot === e.root;
+      const doomed = tabsRef.current.filter((t) => t.kind !== "untitled" && under(t.path));
+      if (!here && doomed.length === 0 && !isMainWindow) return;
+      // The files are gone, so there is nothing to save. The open document's
+      // writers stand down before its tab closes: closing flushes, and a
+      // flush into a folder that no longer exists is an error about a file
+      // nobody has any more.
+      if (pathRef.current && under(pathRef.current)) {
+        catchUpWithEditor();
+        if (autosaveTimerRef.current != null) {
+          window.clearTimeout(autosaveTimerRef.current);
+          autosaveTimerRef.current = null;
+        }
+        if (sidecarWriteTimerRef.current != null) {
+          window.clearTimeout(sidecarWriteTimerRef.current);
+          sidecarWriteTimerRef.current = null;
+        }
+        lastSavedRef.current = currentMarkdownRef.current;
+      }
+      setHistoryFor(null);
+      setVersionPreview(null);
+      for (const t of doomed) await closeTab(t.id);
+      if (here) {
+        setCloudPanelOpen(false);
+        setPublishedOpen(false);
+        setPublishFolder(null);
+        forgetStoredSession(e.root);
+        sessionWorkspaceRoot = null;
+        setWorkspaceRoot(null);
+        selectSidebarEntries([]);
+        // What is left — untitled notes, files from elsewhere — is the
+        // window's own now, with no folder behind it.
+        writeStoredSession(tabsRef.current, activeIdRef.current);
+      }
+      setRemovedNotice(e);
+    },
+    [catchUpWithEditor, closeTab, selectSidebarEntries],
+  );
   // Sync wrote files: the tree refreshes (open tabs already reload through
   // the file watcher). A merge that left a conflict copy, or a mass
   // deletion the engine is holding, becomes a notice carrying the one
   // action that matters.
+  // A removal can land before this window is listening, or before its tabs
+  // are back: an engine hears it on first contact, at launch. So the event is
+  // only acted on once the session is restored, and the list of everything
+  // removed since the app started is read at that moment — whichever tells
+  // this window first, it acts once.
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    void cloudRemoved()
+      .then(async (removed) => {
+        for (const e of removed) if (live) await leaveRemovedWorkspace(e);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [ready, leaveRemovedWorkspace]);
   useEffect(() => {
     const uns = [
+      onCloudRemoved((e) => {
+        if (readyRef.current) void leaveRemovedWorkspace(e);
+      }),
       onCloudApplied((e) => {
         if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
       }),
@@ -4973,7 +5080,7 @@ export default function App() {
     return () => {
       for (const un of uns) void un.then((f) => f()).catch(() => {});
     };
-  }, [openTab, pushToast, reloadFromDisk]);
+  }, [openTab, pushToast, reloadFromDisk, leaveRemovedWorkspace]);
   // The version rail follows the document: switching tabs while it is open
   // shows the new one's history and drops the old one's preview.
   useEffect(() => {
@@ -5502,6 +5609,7 @@ export default function App() {
               onNewNote={() => void newUntitled()}
               onOpenFile={openFilePicker}
               onOpenFolder={openFolderPicker}
+              onJoinWorkspace={() => setCloudSetup("redeem")}
             />
           )}
         </div>
@@ -5711,6 +5819,9 @@ export default function App() {
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
+          workspaces={myWorkspaces}
+          onOpenWorkspace={(root) => void openWorkspace(root)}
+          onJoinWorkspace={() => setCloudSetup("redeem")}
           onPublishFolder={cloudForRoot ? (dir) => setPublishFolder(dir) : undefined}
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
@@ -5871,6 +5982,39 @@ export default function App() {
           onClose={() => setWorkerUpdateOpen(false)}
           onOpenExternal={openExternal}
         />
+      )}
+      {removedNotice && (
+        <div className="modal-overlay">
+          <div
+            className="modal cloud-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Access removed"
+            data-testid="access-removed"
+          >
+            <div className="modal-header">
+              <div className="modal-title">You no longer have access to {removedNotice.name}</div>
+            </div>
+            <div className="cloud-body">
+              <p className="cloud-hint">
+                An owner removed this Mac from {removedNotice.name} ({removedNotice.domain}).{" "}
+                {removedNotice.deleted
+                  ? "Its copy has been deleted from this Mac: the folder, and the history Doklin kept for it."
+                  : `It no longer syncs, but Doklin could not delete its folder — ${removedNotice.root}.`}{" "}
+                Nothing was deleted in the cloud. To come back, ask an owner for a new invite.
+              </p>
+              <div className="modal-buttons">
+                <button
+                  className="modal-btn is-primary"
+                  data-testid="access-removed-ok"
+                  onClick={() => setRemovedNotice(null)}
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
       <Toasts toasts={toasts} onDismiss={dismissToast} />
       {showSidebar ? (
@@ -6767,10 +6911,13 @@ function ScratchEmptyState({
   onNewNote,
   onOpenFile,
   onOpenFolder,
+  onJoinWorkspace,
 }: {
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
+  /** Somebody sent an invite: the one door a new install needs. */
+  onJoinWorkspace: () => void;
 }) {
   return (
     <div className="scratch-empty" aria-hidden={false}>
@@ -6791,6 +6938,10 @@ function ScratchEmptyState({
             <FolderIcon />
             <span>Open folder</span>
             <span className="scratch-empty-kbd">⌘⇧O</span>
+          </button>
+          <button className="scratch-empty-button" data-testid="join-workspace" onClick={onJoinWorkspace}>
+            <FolderIcon />
+            <span>Join a workspace</span>
           </button>
         </div>
       </div>

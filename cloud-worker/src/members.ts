@@ -13,24 +13,31 @@
 //            sha256(code), one-time, and deleted the moment it is redeemed or
 //            found expired — no cron trigger, no reaper.
 //
-// The owner is not in here on the authenticating path. `OWNER_TOKEN` stays
+// A person's role is data: `members.role`, read off the row their token
+// resolves to, so there can be several owners and one of them can make
+// another (roles.ts says what each role may do).
+//
+// The creator is not in here on the authenticating path. `OWNER_TOKEN` stays
 // the worker's env secret, compared with no database read, so a D1 outage
-// degrades a workspace to one credential instead of locking its owner out.
-// The owner gets a member row all the same — for attribution and for
-// the People list — and `adoptOwner` is what writes it.
+// degrades a workspace to one credential instead of locking its creator out
+// altogether. The creator gets a member row all the same — for
+// attribution and for the People list — `adoptCreator` is what writes it, and
+// the one-row `creator` table says which row it is: that row is never removed
+// and never made a member.
 
 import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MAX_EMAIL_LEN, MAX_NAME_LEN, validName } from "./layout";
+import type { PersonRole } from "./roles";
 import { ensureSchema } from "./schema";
-
-export type MemberRole = "owner" | "member";
 
 export type Member = {
   id: string;
   email: string;
   name: string;
-  role: MemberRole;
+  role: PersonRole;
+  /** The person who holds the domain's env secret. Always an owner. */
+  creator: boolean;
   createdAt: number;
   lastSeenAt: number | null;
   disabled: boolean;
@@ -40,19 +47,17 @@ export type Member = {
 export type MemberWithDevices = Member & { devices: number };
 
 /**
- * What a bearer resolves to when it is a member's token, not the owner's
- * secret. Note what is NOT here: a role. The `members.role` column describes
- * a *person* — it is what the People list shows — and a token is never
- * evidence of it. Owner authority comes from exactly one place, the env
- * secret, so no row anybody can write grants it. Inviting the owner's
- * own address therefore mints an ordinary member credential, which is what
- * it should be: their second Mac already has the real one.
+ * What a bearer resolves to when it is a person's token, not the domain's
+ * secret: who they are, and the role on their row. The role is read on every
+ * request, so making someone an owner — or a member again — takes effect on
+ * their very next call, exactly as a revocation does.
  */
 export type TokenIdentity = {
   tokenId: string;
   memberId: string;
   email: string;
   name: string;
+  role: PersonRole;
 };
 
 export type TokenRow = {
@@ -161,16 +166,26 @@ type MemberRow = {
   email: string;
   name: string;
   role: string;
+  /** 1 when the `creator` table names this row. Every read selects it. */
+  creator: number;
   created_at: number;
   last_seen_at: number | null;
   disabled: number;
 };
 
+/** A member's columns, plus whether the `creator` table names the row. */
+const MEMBER_COLS = `m.id AS id, m.email AS email, m.name AS name, m.role AS role,
+                m.created_at AS created_at, m.last_seen_at AS last_seen_at, m.disabled AS disabled,
+                EXISTS (SELECT 1 FROM creator c WHERE c.member_id = m.id) AS creator`;
+
+const toRole = (raw: string): PersonRole => (raw === "owner" ? "owner" : "member");
+
 const toMember = (r: MemberRow): Member => ({
   id: r.id,
   email: r.email,
   name: r.name,
-  role: r.role === "owner" ? "owner" : "member",
+  role: toRole(r.role),
+  creator: Number(r.creator) !== 0,
   createdAt: Number(r.created_at),
   lastSeenAt: r.last_seen_at == null ? null : Number(r.last_seen_at),
   disabled: Number(r.disabled) !== 0,
@@ -193,26 +208,50 @@ export async function resolveToken(env: Env, bearerHash: string): Promise<TokenI
   return withDb(env, async (db) => {
     const row = await db
       .prepare(
-        `SELECT t.id AS token_id, m.id AS member_id, m.email, m.name
+        `SELECT t.id AS token_id, m.id AS member_id, m.email, m.name, m.role
            FROM tokens t JOIN members m ON m.id = t.member_id
           WHERE t.hash = ? AND m.disabled = 0`,
       )
       .bind(bearerHash)
-      .first<{ token_id: string; member_id: string; email: string; name: string }>();
+      .first<{ token_id: string; member_id: string; email: string; name: string; role: string }>();
     if (!row) return null;
-    return { tokenId: row.token_id, memberId: row.member_id, email: row.email, name: row.name };
+    return {
+      tokenId: row.token_id,
+      memberId: row.member_id,
+      email: row.email,
+      name: row.name,
+      role: toRole(row.role),
+    };
   }).then((v) => v ?? null); // a database that cannot answer has authenticated nobody
+}
+
+/**
+ * Whether this bearer is a credential an owner took away — a person removed,
+ * or one of their Macs signed out. Asked only once a bearer has resolved to
+ * nobody, so it costs a request that was going to be refused anyway.
+ *
+ * The answer is what a Mac acts on by deleting its copy of the workspace
+ * outright, so it has to be a fact the database states, never an
+ * inference: a database that cannot answer says `false`, and so does a token
+ * this domain has simply never heard of.
+ */
+export async function isRemovedToken(env: Env, bearerHash: string): Promise<boolean> {
+  const removed = await withDb(env, async (db) => {
+    const row = await db.prepare("SELECT 1 AS gone FROM removed_tokens WHERE hash = ?").bind(bearerHash).first();
+    return row !== null;
+  });
+  return removed === true;
 }
 
 /* ---------- Members ---------- */
 
-/** Everyone, with how many devices they hold. Newest last, so the owner — who
- *  is written at bind — leads the list. */
+/** Everyone, with how many devices they hold. Newest last, so the creator —
+ *  who is written at bind — leads the list. */
 export async function listMembers(env: Env): Promise<MemberWithDevices[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
       .prepare(
-        `SELECT m.*, (SELECT COUNT(*) FROM tokens t WHERE t.member_id = m.id) AS devices
+        `SELECT ${MEMBER_COLS}, (SELECT COUNT(*) FROM tokens t WHERE t.member_id = m.id) AS devices
            FROM members m ORDER BY m.created_at, m.id`,
       )
       .all<MemberRow & { devices: number }>();
@@ -226,12 +265,10 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
  * agent signs what it changes with its own `a-` id (agents.ts), and a Mac has
  * to be able to put a name to that as well.
  *
- * This is the one piece of the identity tables that is not the owner's, and
- * it is served by `GET /api/meta` rather than a route of its own, so decision
- * 4 holds unchanged: every route under `/api/auth` is still owner-only. A
- * workspace's people have to be able to put a name to each other's ids —
- * attribution is the point — but an address, a device count, a role and an
- * agent's permissions stay where they were.
+ * It is served by `GET /api/meta`, the route every engine already asks, so
+ * putting a name to an id never costs a request of its own. The People list
+ * proper — addresses, roles, device counts — is `GET /api/auth/members`, and
+ * an agent's permissions stay with whoever may manage agents.
  */
 export async function listDirectory(env: Env): Promise<{ id: string; name: string }[] | null> {
   return withDb(env, async (db) => {
@@ -248,12 +285,14 @@ export async function listDirectory(env: Env): Promise<{ id: string; name: strin
   });
 }
 
-/** The row that carries the owner role, if anybody has adopted one. Identity,
- *  never authority: the env secret is what authenticates them, and this is
- *  only how `GET /api/meta` can tell them what they are called. */
-export async function findOwner(env: Env): Promise<Member | null> {
+/** The creator's own row, if they have said who they are. Identity, never
+ *  authority: the env secret is what authenticates them, and this is only how
+ *  `GET /api/meta` can tell them what they are called. */
+export async function findCreator(env: Env): Promise<Member | null> {
   return withDb(env, async (db) => {
-    const row = await db.prepare("SELECT * FROM members WHERE role = 'owner' LIMIT 1").first<MemberRow>();
+    const row = await db
+      .prepare(`SELECT ${MEMBER_COLS} FROM members m JOIN creator c ON c.member_id = m.id LIMIT 1`)
+      .first<MemberRow>();
     return row ? toMember(row) : null;
   });
 }
@@ -262,13 +301,13 @@ export async function findOwner(env: Env): Promise<Member | null> {
  * The member for this email, created if this is the first time it has been
  * seen. A name that comes with it wins, so re-inviting someone is also how
  * they get renamed; the role of an existing row is left alone, because
- * inviting the owner must not demote them.
+ * inviting an owner must not demote them.
  */
 export async function upsertMember(
   env: Env,
   email: string,
   name: string | null,
-  role: MemberRole,
+  role: PersonRole,
 ): Promise<Member | null> {
   // A name that was actually supplied, or null. The distinction matters on
   // the conflict branch: re-inviting Ada without typing her name again must
@@ -280,42 +319,101 @@ export async function upsertMember(
         `INSERT INTO members (id, email, name, role, created_at, last_seen_at, disabled)
          VALUES (?, ?, ?, ?, ?, NULL, 0)
          ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name)
-         RETURNING *`,
+         RETURNING id`,
       )
       .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), role, Date.now(), given)
-      .first<MemberRow>();
-    return row ? toMember(row) : null;
+      .first<{ id: string }>();
+    return row ? readMember(db, row.id) : null;
   });
 }
 
-export async function findMemberByEmail(env: Env, email: string): Promise<Member | null> {
-  return withDb(env, async (db) => {
-    const row = await db.prepare("SELECT * FROM members WHERE email = ?").bind(email).first<MemberRow>();
-    return row ? toMember(row) : null;
+async function readMember(db: D1Database, id: string): Promise<Member | null> {
+  const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.id = ?`).bind(id).first<MemberRow>();
+  return row ? toMember(row) : null;
+}
+
+/** The person at this (normalized) address, if the workspace has one.
+ *  `undefined` when the database cannot answer — which is not "nobody". */
+export async function findMemberByEmail(env: Env, email: string): Promise<Member | null | undefined> {
+  const found = await withDb(env, async (db) => {
+    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(email).first<MemberRow>();
+    return { member: row ? toMember(row) : null };
   });
+  return found === null ? undefined : found.member;
 }
 
 /**
- * Write (or rename) the owner's own member row. The owner authenticates off
- * the env secret, so this is identity, never authority — but it is what makes
- * the owner a *person* in the People list and in attribution.
+ * Write (or rename) the creator's own member row. The creator authenticates
+ * off the env secret, so this is identity, never authority — but it is what
+ * makes the creator a *person* in the People list and in attribution.
  *
- * Exactly one row carries the owner role: adopting a new address demotes the
- * old one to a plain member rather than deleting it, because that row may
- * already be named in a manifest.
+ * One row is the creator's. Adopting a new address moves the mark to it and
+ * makes the old row a plain member rather than deleting it: that row may
+ * already be named in a manifest, and an address somebody stopped using
+ * should not go on holding an owner's authority.
  */
-export async function adoptOwner(env: Env, email: string, name: string | null): Promise<Member | null> {
-  const member = await upsertMember(env, email, name, "owner");
-  if (!member) return null;
+export async function adoptCreator(env: Env, email: string, name: string | null): Promise<Member | null> {
+  const given = typeof name === "string" && name.trim() ? name.trim().slice(0, MAX_NAME_LEN) : null;
   return withDb(env, async (db) => {
-    // The insert only sets the role on a *new* row; a person invited as a
-    // member first has to be promoted, and whoever held the role before has
-    // to let it go.
+    // One batch, keyed by the address throughout: the row, the mark and the
+    // role move together or not at all, so a removal that lands in between
+    // cannot leave the mark on a row that is gone.
     await db.batch([
-      db.prepare("UPDATE members SET role = 'owner' WHERE id = ?").bind(member.id),
-      db.prepare("UPDATE members SET role = 'member' WHERE role = 'owner' AND id != ?").bind(member.id),
+      db
+        .prepare(
+          `INSERT INTO members (id, email, name, role, created_at, last_seen_at, disabled)
+           VALUES (?, ?, ?, 'owner', ?, NULL, 0)
+           ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name)`,
+        )
+        .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), Date.now(), given),
+      db
+        .prepare("UPDATE members SET role = 'member' WHERE id IN (SELECT member_id FROM creator) AND email != ?")
+        .bind(email),
+      // The insert only sets the role on a *new* row; a person invited as a
+      // member first has to be made an owner.
+      db.prepare("UPDATE members SET role = 'owner' WHERE email = ?").bind(email),
+      db
+        .prepare(
+          `INSERT INTO creator (id, member_id) SELECT 1, id FROM members WHERE email = ?
+           ON CONFLICT(id) DO UPDATE SET member_id = excluded.member_id`,
+        )
+        .bind(email),
     ]);
-    return { ...member, role: "owner" as MemberRole };
+    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(email).first<MemberRow>();
+    return row ? toMember(row) : null;
+  });
+}
+
+/** What changing a role, or removing a person, can come to besides done:
+ *  nobody has that id, or the row is the creator's and stays as it is. */
+export type Refusal = "missing" | "creator";
+
+/**
+ * Make someone an owner, or a member again. Their tokens carry the new role
+ * on their next request — it is read off this row every time. The creator's
+ * row is refused: it is an owner's for as long as the domain has a secret.
+ */
+export async function setMemberRole(env: Env, id: string, role: PersonRole): Promise<Member | Refusal | null> {
+  return withDb(env, async (db) => {
+    const results = await db.batch([
+      // An owner who stops being one may have made codes for anybody, and
+      // kept them: every code nobody has used yet is withdrawn with the
+      // role, so none of them outlives it (see `deleteMember`).
+      db
+        .prepare(
+          `DELETE FROM invites
+            WHERE ?1 = 'member'
+              AND EXISTS (SELECT 1 FROM members WHERE id = ?2 AND role = 'owner'
+                             AND id NOT IN (SELECT member_id FROM creator))`,
+        )
+        .bind(role, id),
+      db
+        .prepare("UPDATE members SET role = ?1 WHERE id = ?2 AND id NOT IN (SELECT member_id FROM creator)")
+        .bind(role, id),
+    ]);
+    const member = await readMember(db, id);
+    if (!member) return "missing" as Refusal;
+    return (results.at(-1)?.meta.changes ?? 0) > 0 ? member : ("creator" as Refusal);
   });
 }
 
@@ -326,17 +424,41 @@ export async function adoptOwner(env: Env, email: string, name: string | null): 
  * whether foreign keys are being enforced. Their presence and their leases go
  * with them, so nobody keeps seeing — or being kept out of a document by — a
  * person who is no longer here.
+ *
+ * Every token they held is written down in `removed_tokens` on the way out:
+ * that is what tells each of their Macs, on its next request, that access was
+ * taken away rather than merely lost (`isRemovedToken`). The creator's row is
+ * refused — whoever holds the domain's secret cannot be removed from it.
+ *
+ * Removing an OWNER also withdraws every code nobody has used yet, whoever it
+ * was for. An owner makes codes for other people's rows; one they made and
+ * kept would otherwise let them straight back in as that person. Which codes
+ * were theirs is not recorded, so all of them go, and the owners who remain
+ * make the ones still wanted again.
  */
-export async function deleteMember(env: Env, id: string): Promise<boolean | null> {
+export async function deleteMember(env: Env, id: string): Promise<true | Refusal | null> {
   return withDb(env, async (db) => {
+    // Every statement carries the same guard, so the batch is all or nothing
+    // on the one fact that matters: the row is not the creator's.
+    const free = "NOT IN (SELECT member_id FROM creator)";
     const results = await db.batch([
-      db.prepare("DELETE FROM presence WHERE member_id = ?").bind(id),
-      db.prepare("DELETE FROM leases WHERE member_id = ?").bind(id),
-      db.prepare("DELETE FROM tokens WHERE member_id = ?").bind(id),
-      db.prepare("DELETE FROM invites WHERE member_id = ?").bind(id),
-      db.prepare("DELETE FROM members WHERE id = ?").bind(id),
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO removed_tokens (hash, removed_at)
+             SELECT hash, ?1 FROM tokens WHERE member_id = ?2 AND member_id ${free}`,
+        )
+        .bind(Date.now(), id),
+      db.prepare(`DELETE FROM presence WHERE member_id = ? AND member_id ${free}`).bind(id),
+      db.prepare(`DELETE FROM leases WHERE member_id = ? AND member_id ${free}`).bind(id),
+      db.prepare(`DELETE FROM tokens WHERE member_id = ? AND member_id ${free}`).bind(id),
+      db
+        .prepare(`DELETE FROM invites WHERE EXISTS (SELECT 1 FROM members WHERE id = ? AND role = 'owner' AND id ${free})`)
+        .bind(id),
+      db.prepare(`DELETE FROM invites WHERE member_id = ? AND member_id ${free}`).bind(id),
+      db.prepare(`DELETE FROM members WHERE id = ? AND id ${free}`).bind(id),
     ]);
-    return (results.at(-1)?.meta.changes ?? 0) > 0;
+    if ((results.at(-1)?.meta.changes ?? 0) > 0) return true as const;
+    return (await readMember(db, id)) ? ("creator" as Refusal) : ("missing" as Refusal);
   });
 }
 
@@ -375,10 +497,15 @@ export async function listTokens(env: Env): Promise<TokenRow[] | null> {
  *  bearer resolves through this table, so there is no session to expire.
  *  Its presence row and its lease go in the same batch — a Mac that has just
  *  been shown the door should not stay "here now", or keep a document
- *  view-only for everyone else, for the TTL's minute and a half. */
+ *  view-only for everyone else, for the TTL's minute and a half. The token is
+ *  written down in `removed_tokens` first, so that Mac is told its access was
+ *  taken away and deletes its copy (`isRemovedToken`). */
 export async function deleteToken(env: Env, id: string): Promise<boolean | null> {
   return withDb(env, async (db) => {
     const results = await db.batch([
+      db
+        .prepare("INSERT OR IGNORE INTO removed_tokens (hash, removed_at) SELECT hash, ?1 FROM tokens WHERE id = ?2")
+        .bind(Date.now(), id),
       db
         .prepare("DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)")
         .bind(id),
@@ -469,8 +596,9 @@ export type RedeemResult = Redeemed | "expired" | "unknown";
  * somebody tried to use.
  *
  * The token is minted here, 256 bits, and returned exactly once; the database
- * keeps only its sha256. That is the same strength as the owner's own
- * credential, which matters because a member token is not a limited account.
+ * keeps only its sha256. That is the same strength as the domain's own
+ * secret, which matters because a person's token is not a limited account —
+ * and, on an owner's row, it is an owner's.
  */
 export async function redeemInvite(
   env: Env,
@@ -484,9 +612,7 @@ export async function redeemInvite(
     // `SELECT i.id, m.*` would quietly hand back whichever came last.
     const row = await db
       .prepare(
-        `SELECT i.expires_at AS expires_at,
-                m.id AS id, m.email AS email, m.name AS name, m.role AS role,
-                m.created_at AS created_at, m.last_seen_at AS last_seen_at, m.disabled AS disabled
+        `SELECT i.expires_at AS expires_at, ${MEMBER_COLS}
            FROM invites i JOIN members m ON m.id = i.member_id
           WHERE i.hash = ?`,
       )

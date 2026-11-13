@@ -1837,6 +1837,8 @@ pub fn run() {
             cloud::cloud_invite,
             cloud::cloud_people,
             cloud::cloud_adopt_owner,
+            cloud::cloud_removed,
+            cloud::cloud_set_role,
             cloud::cloud_revoke_person,
             cloud::cloud_revoke_device,
             cloud::cloud_withdraw_invite,

@@ -50,19 +50,34 @@ pub struct Meta {
     #[serde(default)]
     pub you: Option<Identity>,
     /// The directory: every person's id and display name, and nothing else.
-    /// The People list — addresses, devices, roles — stays the owner's.
+    /// The People list — addresses, devices, roles — is a route of its own.
     #[serde(default)]
     pub people: Vec<Person>,
 }
 
 /// Who the bearer is. `member_id` is the id this Mac's work is signed with;
-/// it is None for an owner who has never adopted an identity, whose access
+/// it is None for a creator who has never adopted an identity, whose access
 /// comes from the env secret and needs no row at all.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    /// `owner` or `member` — the role on this person's row, or `owner` for
+    /// the domain's own secret.
     #[serde(default)]
     pub role: String,
+    /// True when the bearer is the domain's secret: the workspace's creator.
+    #[serde(default)]
+    pub creator: bool,
+    /// What that role may do, as the worker's one table spells it
+    /// (cloud-worker/src/roles.ts) — what the app hides the rest by. Empty
+    /// from a worker older than v11, which had no such table to answer from.
+    #[serde(default)]
+    pub can: Vec<String>,
+    /// Which row of the signed-in Macs this credential is (`t-…`); None for
+    /// the domain's own secret, which is no row. What keeps the app from
+    /// offering to sign out the Mac it is running on.
+    #[serde(default)]
+    pub token_id: Option<String>,
     #[serde(default)]
     pub member_id: Option<String>,
     #[serde(default)]
@@ -101,11 +116,14 @@ pub struct MemberRecord {
     pub email: String,
     #[serde(default)]
     pub name: String,
-    /// `owner` or `member` — what the People list shows. Never authority:
-    /// the owner's credential is the worker's env secret, so no row anybody
-    /// can write confers it.
+    /// `owner` or `member`. It is the person's, and every Mac they are signed
+    /// in on carries it: an owner makes another by changing this.
     #[serde(default)]
     pub role: String,
+    /// The person who holds the domain's secret. Always an owner, and the one
+    /// row nobody can remove or make a member.
+    #[serde(default)]
+    pub creator: bool,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -151,12 +169,12 @@ pub struct RedeemedToken {
 }
 
 /// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
-/// credential: the owner is told who holds one and may take it away, never
+/// credential: an owner is told who holds one and may take it away, never
 /// what it is — a list of tokens would be a list of keys.
 ///
-/// The owner's own Macs are not in here at all. They authenticate with the
-/// domain's env secret, which is matched against no row, so there is nothing
-/// to list and nothing to revoke but the secret itself.
+/// The Macs that hold the domain's own secret are not in here at all. It is
+/// matched against no row, so there is nothing to list and nothing to revoke
+/// but the secret itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenRecord {
@@ -240,9 +258,15 @@ pub struct WipeRound {
 pub enum RemoteError {
     /// Transport-level failure — the domain is unreachable, not wrong.
     Offline(String),
-    /// Token rejected: rotated or revoked.
+    /// Token rejected: the domain does not know it — a rotated secret, a
+    /// wiped domain, a database that could not answer.
     Unauthorized,
-    /// A member asked for an owner's route.
+    /// An owner took this credential away: the person was removed, or this
+    /// Mac signed out (`401 {removed: true}`). The one refusal that has this
+    /// Mac delete its copy of the workspace, so it is
+    /// never inferred — only read off the worker's own word.
+    Removed,
+    /// The caller's role may not do that (cloud-worker/src/roles.ts).
     Forbidden,
     /// Not bound, or the object is gone.
     NotFound,
@@ -261,7 +285,8 @@ impl std::fmt::Display for RemoteError {
         match self {
             RemoteError::Offline(m) => write!(f, "offline: {}", m),
             RemoteError::Unauthorized => write!(f, "unauthorized"),
-            RemoteError::Forbidden => write!(f, "owner only"),
+            RemoteError::Removed => write!(f, "your access to this workspace was removed"),
+            RemoteError::Forbidden => write!(f, "only an owner can do that"),
             RemoteError::NotFound => write!(f, "not found"),
             RemoteError::Conflict => write!(f, "manifest conflict"),
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
@@ -385,23 +410,34 @@ pub trait Remote: Send + Sync + 'static {
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send;
 
-    /// `GET /api/auth/members` (owner): everyone, with a device count and a
-    /// last-seen. This is also what tells a Mac which door it came in by —
-    /// only the owner's credential is answered, so a `Forbidden` here is the
-    /// People panel's member branch, not a failure.
+    /// `GET /api/auth/members`: everyone, with a role, a device count and a
+    /// last-seen — the People list, which every person here may read.
     fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
 
-    /// `POST /api/auth/members` (owner): the owner saying who they are.
-    /// Identity, never authority — the env secret keeps authenticating them
-    /// either way, and losing this row costs a name, not access.
+    /// `POST /api/auth/members` (the domain's secret only): the creator
+    /// saying who they are. Identity, never authority — the env secret keeps
+    /// authenticating them either way, and losing this row costs a name, not
+    /// access.
     fn adopt_owner(
         &self,
         email: &str,
         name: Option<&str>,
     ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
 
+    /// `PATCH /api/auth/members/<id>` (owner): make someone an owner, or a
+    /// member again. Every Mac they are signed in on carries the new role on
+    /// its next request. The worker refuses the caller's own row and the
+    /// creator's, with a sentence that says which.
+    fn set_member_role(
+        &self,
+        id: &str,
+        role: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
+
     /// `DELETE /api/auth/members/<id>` (owner): the person and every
-    /// credential they hold, in one batch.
+    /// credential they hold, in one batch. Each of their Macs is told so on
+    /// its next request, and deletes its copy. Refused, like a role change,
+    /// for the caller's own row and the creator's.
     fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
     /// `GET /api/auth/invites` (owner): the pending, unexpired ones.
@@ -414,9 +450,10 @@ pub trait Remote: Send + Sync + 'static {
     /// `GET /api/auth/tokens` (owner): every signed-in Mac.
     fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send;
 
-    /// `DELETE /api/auth/tokens/<id>` (owner): revoke one Mac. It takes
+    /// `DELETE /api/auth/tokens/<id>` (owner): sign one Mac out. It takes
     /// effect on that Mac's very next request — the bearer resolves through
-    /// the table, so there is no session to expire.
+    /// the table, so there is no session to expire — and that Mac deletes its
+    /// copy when it hears.
     fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
@@ -595,7 +632,18 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
     match res.status().as_u16() {
         200..=299 | 304 => Ok(res),
         400 => Err(worker_sentence(res, "the domain refused that").await),
-        401 => Err(RemoteError::Unauthorized),
+        401 => {
+            // Two refusals share the status, and only the body tells them
+            // apart: `removed: true` is said of a credential an owner took
+            // away, and of nothing else. Anything that is not exactly that —
+            // no body, a proxy's page, a worker too old to say it — is the
+            // ordinary one.
+            let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+            Err(match v.get("removed").and_then(|r| r.as_bool()) {
+                Some(true) => RemoteError::Removed,
+                _ => RemoteError::Unauthorized,
+            })
+        }
         403 => Err(RemoteError::Forbidden),
         404 => Err(RemoteError::NotFound),
         409 => {
@@ -1053,6 +1101,28 @@ impl Remote for HttpRemote {
         async move {
             let res = self
                 .auth(self.client.post(self.url("auth/members")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("member").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a person: {}", e)))
+        }
+    }
+
+    fn set_member_role(
+        &self,
+        id: &str,
+        role: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let url = self.url(&format!("auth/members/{}", id));
+        let body = json!({ "role": role });
+        async move {
+            let res = self
+                .auth(self.client.patch(url))
                 .header("content-type", "application/json")
                 .body(serde_json::to_vec(&body).unwrap_or_default())
                 .send()

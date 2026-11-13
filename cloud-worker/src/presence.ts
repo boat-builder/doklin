@@ -128,9 +128,9 @@ export async function readHere(env: Env, now = Date.now()): Promise<Here | null>
  * per beat, one more while a document is open, one an hour per person, plus
  * whatever lapsed.
  *
- * The owner's request carries no member id — the env secret reads no row
- * (auth.ts) — so their row takes the id of whoever holds the owner role, in
- * the same statement. An owner who never adopted one is here as their Mac.
+ * The creator's request carries no member id — the env secret reads no row
+ * (auth.ts) — so their row takes the id the `creator` table names, in the
+ * same statement. A creator who never said who they are is here as their Mac.
  */
 export async function recordBeat(
   env: Env,
@@ -168,7 +168,7 @@ export async function recordBeat(
             db
               .prepare(
                 `INSERT INTO presence (device_id, member_id, device_name, path, ts)
-                 VALUES (?1, COALESCE(?2, (SELECT id FROM members WHERE role = 'owner' AND disabled = 0 LIMIT 1)), ?3, ?4, ?5)
+                 VALUES (?1, COALESCE(?2, (SELECT member_id FROM creator)), ?3, ?4, ?5)
                  ON CONFLICT(device_id) DO UPDATE SET
                    member_id = excluded.member_id, device_name = excluded.device_name,
                    path = excluded.path, ts = excluded.ts`,

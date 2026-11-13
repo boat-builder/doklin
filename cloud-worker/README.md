@@ -8,9 +8,11 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ## Headers and auth
 
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
+- A bearer an owner took away (person removed, Mac signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the Mac delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`.
-- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`; `dka_…` → `agent_tokens` → `agent`; else `tokens` → `member`.
-- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. Owner-only route, member bearer → `403 {"error":"owner only"}`.
+- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`, the **creator** (no D1 read); `dka_…` → `agent_tokens` → `agent`; else `tokens` → the role on that person's `members` row (`owner` | `member`), read every request.
+- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work` and `people.see`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `workspace.manage`.
+- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
 - No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`.
 - No `DB` / D1 down: `/api/auth/*`, search, board routes → `503`; member/agent bearers → `401`; sync unaffected; `/api/meta` `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
@@ -19,7 +21,8 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 
 ```
 GET  /api/meta  {version, features, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
-     you: {role, memberId, email, name}, people: [{id, name}]}  people = members then agents.
+     you: {role, creator, can: [actions], tokenId, memberId, email, name}, people: [{id, name}]}
+     people = members then agents.
      Runs the D1 migration (once per isolate).
 POST /api/workspace  owner; {name, deviceName?, ownerEmail?, ownerName?} → 201 {id, name, createdAt,
      createdBy, manifestEtag, owner?}; 409 {workspace} when bound
@@ -46,20 +49,25 @@ POST /api/admin/wipe  owner; {"confirm":"wipe"}; batched, repeat until remaining
 
 ## Auth routes (`src/api.ts`, `src/agentApi.ts`)
 
-Owner-only except join. Deletes → `204`; unknown id `404`; malformed id `400`.
+Owners only, except join and `GET members`. Deletes → `204`; unknown id `404`; malformed id `400`.
+`409`: changing or removing your own row or the creator's; deleting the token the call is made with.
 
 ```
 POST   /api/auth/join  no bearer; {code, deviceId?, deviceName?} → 201 {token, tokenId, member};
        400 not a code; 401 unknown or expired (identical)
 POST   /api/auth/invites  {email, name?, codeHash, expiresAt ≤ 30 d} → 201 {invite}; creates the
-       member if new, replaces their pending invite
+       member if new, replaces their pending invite; 409 for an owner's address unless the caller
+       is the creator or that owner
 GET    /api/auth/invites  pending, unexpired
 DELETE /api/auth/invites/<id>
-GET    /api/auth/members  everyone, with device count and lastSeenAt
-POST   /api/auth/members  {email, name?} — adopt/rename the owner's identity
-DELETE /api/auth/members/<id>  person + invite + tokens + presence + leases
+GET    /api/auth/members  any person; everyone, with role, creator, device count and lastSeenAt
+POST   /api/auth/members  creator only; {email, name?} — adopt/rename the creator's identity
+PATCH  /api/auth/members/<id>  {role: owner|member} → {member}; owner → member withdraws every
+       pending invite
+DELETE /api/auth/members/<id>  person + invite + tokens + presence + leases; their token hashes
+       go to removed_tokens; removing an owner withdraws every pending invite
 GET    /api/auth/tokens  [{id, memberId, email, deviceName, createdAt}] — never a hash
-DELETE /api/auth/tokens/<id>
+DELETE /api/auth/tokens/<id>  its hash goes to removed_tokens
 POST   /api/auth/agents  {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}
 GET    /api/auth/agents  {agents: [{id, name, scopes, createdAt, lastUsedAt,
        machines: [{id, host, createdAt}], code: {id, createdAt, expiresAt}|null}]}
@@ -196,7 +204,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   reference shape, ≤ 1 `root`. Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 7)
+## D1 (`src/schema.ts`, schema 8)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -211,6 +219,8 @@ agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
 search_text  (fid PK, folded)        md file id, else html; NULL past 1 MB
 search_state (key 'mirror', etag, held)   held = {"<fid>": "<text hash>.<sidecar hash>"}
 board_cards  (fid PK, hash, head)    a card's frontmatter block as last read
+creator        (id = 1 PK, member_id)   whose row holds OWNER_TOKEN; one row or none
+removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe
 ```
 
 `hash` columns are `sha256(token or code)`. Migrations: ordered `STEPS` run

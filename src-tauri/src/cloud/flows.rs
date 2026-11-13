@@ -59,7 +59,7 @@ pub fn describe(domain: &str, e: FlowError) -> String {
         ),
         FlowError::NotBound => format!("{} holds no workspace yet — connect a folder to it first", domain),
         FlowError::Unauthorized => format!("{} rejected this token", domain),
-        FlowError::Forbidden => "only the domain's owner can do that".into(),
+        FlowError::Forbidden => "only an owner of this workspace can do that".into(),
         FlowError::Offline(m) => format!("couldn't reach {}: {}", domain, m),
         FlowError::Other(m) => m,
     }

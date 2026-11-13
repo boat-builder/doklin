@@ -4,9 +4,12 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 
 ## Credentials
 
-- `auth.ts` matches the owner secret first, with no D1 read, so a D1 outage costs people, never the owner.
-- Owner authority is that secret only: a token is always `member`, whatever `members.role` says; the owner's member row (bind, or `cloud_adopt_owner`) is attribution, never authority.
-- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owner-only = bind, wipe, people and agent admin.
+- `auth.ts` matches the owner secret first, with no D1 read, so a D1 outage costs people, never the creator.
+- The secret's holder is the **creator**: always an owner; their member row (bind, or `cloud_adopt_owner`) is the one in `creator` and is never removed or demoted.
+- A token carries its person's `members.role`, read on every request, so a role change bites on the next call. There can be several owners.
+- Who may do what is one table: `can(role, action)` in `roles.ts`. Every gated route asks it; `/api/meta` answers the caller's row as `you.can` and the app hides by it (`may` / `mayOn`, `src/cloud.ts`; an empty `can` on a status means not yet known, so the control shows). Change a permission there, nowhere else.
+- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners only = invite, remove, sign out, roles, agents, bind, wipe.
+- Nobody removes or demotes their own row, or deletes the token the call is made with.
 - Codes are 100 bits (Crockford base32): no throttle, lockout or counter. Revoking a row bites on the next request.
 - `last_seen_at` (beat) and `last_used_at` (agent request) move at most hourly.
 
@@ -15,7 +18,18 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - A member is keyed by normalized email (`m-` + 8 hex): re-inviting an address reaches the same person. Member ids enter the manifest, emails never.
 - Invite: the owner's Mac mints `dkln-XXXXX-XXXXX-XXXXX-XXXXX` (`invite.rs`) and sends only its sha256; 7 days default; cap `MAX_DAYS` ⇄ `MAX_INVITE_TTL_MS`, **change both**. Line: `doklin-invite <endpoint> <code>`. `normalize_code` ⇄ `normalizeCode` (`members.ts`) must match exactly: **change both**.
 - Redeem runs first (`/api/meta` is behind the gate): `cloud_redeem`, then probe, `cloud_join`. The code is spent at redeem; later failures retry the probe only.
-- `CloudPeople.tsx` asks the role, never stores it: a `403` from the members route means member.
+- `CloudPeople.tsx` asks (`cloud_people`), never stores: no role is on disk. Everyone reads the list; lists a role may not act on come back empty.
+- `cloud_join(endpoint, token)` asks for no folder: the workspace lands in `~/Doklin/<name>` (`Name 2` when taken).
+- An owner's unused codes go with them: removing or demoting an owner withdraws **every** pending invite, and a code for an owner's address is only the creator's or that owner's to make. Otherwise a removed owner returns on a code they kept.
+
+## Losing access (`engine.rs`, `mod.rs`)
+
+- **Only `401 {removed: true}` deletes** (`RemoteError::Removed`). Never infer it from another refusal: a D1 outage answers a bare `401` to every member at once.
+- The engine exits `Exit::Removed`; `access_removed` then deletes the folder outright (not the Trash), the local version store and the sync state, drops the `cloud.json` entry and emits `cloud-removed`. Nothing in the cloud is deleted.
+- `remove_copy` deletes only a folder whose marker names that domain and `wsId`, resolved through symlinks, and never a path that holds the home directory.
+- The creator's Mac never obeys it (`creator` in `cloud.json`, written on the first probe that says so): that folder is the user's own.
+- A removal never lapses: an offline Mac deletes when it next reaches the domain. A wipe empties `removed_tokens`, so it deletes nobody's copy.
+- `cloud_removed` returns the removals since launch, for a window that was not listening; a window dedupes by `root` + `at`.
 
 ## Presence and leases (`presence.ts`, `engine.rs`)
 

@@ -16,11 +16,11 @@ manifest, rendered by the worker from the synced files.
 - **Domain** — a worker's hostname (custom or `workers.dev`). "Backend" here means the Tauri side, never the worker.
 - **Engine** — the Rust task syncing a workspace.
 - **Manifest** — the bucket's one mutable object: every file's path, rev, hash, plus the public map.
-- **Owner token** — worker secret `OWNER_TOKEN`, minted by the app at setup.
+- **Owner token** — worker secret `OWNER_TOKEN`, minted by the app at setup; whoever holds it is the workspace's creator.
 
 ## Rules
 
-1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only the owner's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
+1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only an owner's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
 2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS.
 3. **The manifest is the only truth about what is public.** The frontend's view is `CloudStatus.public`; no `localStorage` registry.
 4. **A public page is a rendering of synced files.** The worker stores no page content.
@@ -43,7 +43,7 @@ manifest, rendered by the worker from the synced files.
 
 ## Engine ⇄ frontend contract
 
-- Commands: `cloud_*` in `mod.rs`, wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`.
+- Commands: `cloud_*` in `mod.rs`, wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
 - Payload types: `status.rs` serde structs ⇄ `src/cloud.ts`. **Change both.**
 - `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes revoked worker-outdated error`.
 - A status `by` is already a name (resolved via `/api/meta` `people`).
@@ -76,7 +76,7 @@ manifest, rendered by the worker from the synced files.
 ## Flows (`flows.rs`, `mod.rs`)
 
 - **Connect**: mint token → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` → `cloud_connect` binds, uploads, writes `cloud.json` + marker, spawns the engine.
-- **Already bound** (probe shows a workspace): *Download it here* (`cloud_join` into `<parent>/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
+- **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
 - **Resume**: empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
 - **Disconnect**: stop the engine, drop the `cloud.json` entry and state; folder, marker and cloud stay.
 - **Wipe** (`cloud_wipe`, owner): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
@@ -84,7 +84,7 @@ manifest, rendered by the worker from the synced files.
 
 ## Local files
 
-- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected); the only place a token lives.
+- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token, creator}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected); the only place a token lives.
 - `<root>/.doklin/cloud.json`: the marker `{domain, wsId}`. Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
 - `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops; merge bases.
 

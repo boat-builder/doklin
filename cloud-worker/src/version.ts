@@ -87,7 +87,14 @@
 //       by the app's own store modules, and a card's page is a document
 //       `<board>/<card>` whose properties a read leaves out and a write keeps.
 //       D1 gains `board_cards`, a copy of every card's properties block.
-export const WORKER_VERSION = 11;
+//  12 = roles: a token authenticates with the role on its person's row, so
+//       there can be several owners; every gated route asks one table
+//       (roles.ts) and `/api/meta` answers the caller's row as `you.can`.
+//       The secret's holder is the creator, never removed or demoted. A
+//       credential an owner took away is answered `401 {removed: true}`,
+//       which alone has a Mac delete its copy. D1 gains `creator` and
+//       `removed_tokens`.
+export const WORKER_VERSION = 12;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -100,6 +107,7 @@ export const WORKER_FEATURES: readonly string[] = [
   "boards",
   "versions",
   "members",
+  "roles",
   "presence",
   "leases",
   "agents",
@@ -111,6 +119,11 @@ export const WORKER_FEATURES: readonly string[] = [
 ];
 // "members" is a promise the app can act on: this worker mints and resolves
 // per-person tokens, so the People panel has something to talk to.
+// "roles" is the promise that `/api/meta` says what the caller may do
+// (`you.can`), that the People list answers anyone here, and that a removed
+// credential is told so. The People view asks for it before it draws: against
+// a worker without the name it has no way to know what to offer, and says the
+// worker needs updating instead.
 // "presence" is the promise that `POST /api/poll` carries a beat. Every
 // worker has had presence of some kind; before this one it was a route of its
 // own, and an app that beats into a worker without the name would be POSTing

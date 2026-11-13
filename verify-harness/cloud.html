@@ -75,6 +75,15 @@
         marker: null,
         // What the folder picker answers.
         pickedDir: "/Users/me/Downloads",
+        // Where the engine keeps a workspace this Mac joins: one folder per
+        // workspace under here, and no picker (src-tauri cloud_join).
+        joinParent: "/Users/me/Doklin",
+        // A string here is what the next cloud_join rejects with — once: a
+        // download that died after the invite code was already spent.
+        joinError: null,
+        // What this Mac's credential may do, as the status reports it: every
+        // action for an owner. A drive narrows it to a member's.
+        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"],
         token: "ab".repeat(32),
         // Who this Mac is on the scripted domain — what the engine resolved
         // its own signature to.
@@ -128,18 +137,28 @@
         // than watching a call be made.
         people: {
           role: "owner",
+          // This Mac holds the domain's own token: the workspace's creator…
+          creator: true,
+          // …who has not said who they are yet: a domain bound by an app that
+          // never asked who was binding it. Adopting an identity is the
+          // panel's job, and sets this to the new row's id.
+          me: null,
+          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"],
           // This Mac. A Mac only appears in the list below under its own id
-          // if it redeemed a code before it was handed the domain's own
-          // token — rare, and exactly when "this Mac" is worth saying.
+          // if it redeemed a code rather than holding the domain's own
+          // token — which is exactly when "this Mac" is worth saying.
           deviceId: "d-this-mac",
-          // No owner row yet: a domain bound by an app that never asked who
-          // was binding it. Adopting one is the panel's job.
+          // The row in `devices` that is this Mac's own credential: none,
+          // for the creator. A drive sets it to show that row is never
+          // offered for signing out.
+          tokenId: null,
           members: [
             {
               id: "m-bob",
               email: "bob@example.com",
               name: "Bob",
               role: "member",
+              creator: false,
               createdAt: Date.now() - 6 * 86400000,
               lastSeenAt: Date.now() - 3600000,
               disabled: false,
@@ -295,6 +314,7 @@
         // What this Mac signs with here: the person the domain says it is,
         // or its own name when it has not said.
         me: window.__cloud.me,
+        can: window.__cloud.can,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
         public: [],
@@ -392,6 +412,8 @@
             case "plugin:updater|check":
               return Promise.reject("updater unavailable in harness");
             case "plugin:dialog|open":
+              // Counted, so a drive can show a flow asked for no folder.
+              window.__cloud.pickerOpens = (window.__cloud.pickerOpens ?? 0) + 1;
               return Promise.resolve(window.__cloud.pickedDir);
             case "plugin:event|listen": {
               const id = nextListenerId++;
@@ -428,8 +450,15 @@
               })();
             case "cloud_join":
               return (async () => {
+                if (typeof window.__cloud.joinError === "string") {
+                  const error = window.__cloud.joinError;
+                  window.__cloud.joinError = null;
+                  throw error;
+                }
                 const ws = window.__cloud.probe?.workspace;
-                const dest = `${args.destParent}/${ws?.name ?? "Notes"}`;
+                // No folder is asked for: the engine keeps a joined workspace
+                // in a folder of its own under ~/Doklin.
+                const dest = `${window.__cloud.joinParent}/${ws?.name ?? "Notes"}`;
                 await progress(dest, "download", 3);
                 window.__setStatuses([
                   ...window.__cloud.statuses,
@@ -489,15 +518,26 @@
                 email: args.email,
                 name: args.name || args.email,
                 role: "owner",
+                creator: true,
                 createdAt: Date.now(),
                 lastSeenAt: null,
                 disabled: false,
                 devices: 0,
               };
-              // Exactly one row carries the role, and the old one keeps its
-              // place as an ordinary person.
-              p.members = [owner, ...p.members.map((m) => ({ ...m, role: "member" }))];
+              // One row is the creator's; everybody else's role is their own.
+              p.members = [owner, ...p.members.map((m) => ({ ...m, creator: false }))];
+              p.me = owner.id;
               return Promise.resolve(owner);
+            }
+            case "cloud_removed":
+              // What left this Mac before the window was listening: none,
+              // unless a drive scripts some.
+              return Promise.resolve(window.__cloud.removed ?? []);
+            case "cloud_set_role": {
+              record(cmd, args);
+              const p = window.__cloud.people;
+              p.members = p.members.map((m) => (m.id === args.memberId ? { ...m, role: args.role } : m));
+              return Promise.resolve(p.members.find((m) => m.id === args.memberId) ?? null);
             }
             case "cloud_invite": {
               record(cmd, args);
@@ -512,6 +552,7 @@
                   email,
                   name: args.name || email,
                   role: "member",
+                  creator: false,
                   createdAt: Date.now(),
                   lastSeenAt: null,
                   disabled: false,
@@ -837,6 +878,30 @@
           },
         }),
       );
+      // `?removed-at-launch`: the app starts where a workspace it was last in
+      // has ALREADY been taken off this Mac — the engine heard it on first
+      // contact, before this window was listening, so there is no event to
+      // hear: only the list (`cloud_removed`), and a saved session that
+      // still points at a folder that is gone.
+      if (new URLSearchParams(location.search).has("removed-at-launch")) {
+        const gone = "/Users/me/Doklin/Notes";
+        window.__cloud.removed = [
+          { root: gone, name: "Notes", domain: "notes.example.com", deleted: true, at: 1700000000000 },
+        ];
+        localStorage.setItem(
+          "doklin:session",
+          JSON.stringify({
+            version: 2,
+            lastRoot: gone,
+            sessions: {
+              [gone]: {
+                tabs: [{ id: "t-gone", kind: "file", path: `${gone}/plan.md` }],
+                activeId: "t-gone",
+              },
+            },
+          }),
+        );
+      }
     </script>
     <div id="root"></div>
     <script type="module" src="./cloud.tsx"></script>
