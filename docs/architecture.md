@@ -44,8 +44,18 @@
 
 ## Windows and session
 
-- An externally opened file (Finder, CLI, cold or warm start) always gets its
-  own window. An opened folder focuses its workspace window or opens one.
+- External opens (Finder, `doklin open`, cold or warm start) are placed by
+  `src-tauri/src/external_open.rs` against the connected roots in
+  `cloud.json`. A path inside a connected workspace goes to that workspace's
+  window: a file or board as its tab, a folder selected in the sidebar. A
+  workspace root, or any other folder, focuses its own window or opens one; a
+  file of no workspace is focused where it is already a tab, else gets its
+  own window — never attached to a workspace it is not in.
+- What a window must show is queued per label and drained by the window
+  (`take_window_shows`) once ready and on each `window-shows` ping, never
+  emitted as data: a window still restoring or just spawned has no listener.
+  Before the main window takes its folder, the first folder asked for becomes
+  its own (`PendingOpen`); a window the session restores is reused.
 - `<app_data_dir>/session.json` holds every window's folder, tabs, active tab
   and frame. Non-main windows respawn from it; a window closed mid-session is
   pruned. The main window takes only its frame from it — its tabs restore from

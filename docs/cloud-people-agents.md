@@ -61,6 +61,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Anyone has agents of their own (`agents.own`). Only its person changes one or mints it a login code: a code is a way in as that person, the reason an invite code for somebody who has signed in is theirs to make. An owner (`agents.manage`) is listed everybody's and may remove one or log a machine out, nothing more; to anyone else another person's agent is a `404`.
 - Removing a person deletes their agents. Inviting them again brings none back.
 - `publish` is off unless ticked (a remote agent can't be asked to confirm). Scopes are per route (`ROUTES`, `agentApi.ts`). The home page is set only in the app.
+- **The terminal** (`terminal.rs`): on a Mac the app logs its own `doklin` in to each connected workspace as an agent of the person's, `<name>'s terminal (<Mac>)`, with all four scopes (the person is at the keyboard). It is found by that name among their own agents (`mine`), never remembered — Disconnect forgets the `cloud.json` entry, and a remembered id would make a second agent on reconnect — else made. The code is minted like any other and piped to `doklin login <endpoint> -`, never put in argv; the CLI's `login` stays the one writer of `credentials.json`. A workspace `doklin whoami -w` already answers for is left alone. It runs on *Install Command Line Tool* (every connected workspace; the dialog says how each went) and after connect, join and resume when the terminal runs this app's `doklin`. Disconnect leaves the login.
 - The only way in: a `dkla-…` code (`AGENT_PREFIX` ⇄ `normalizeAgentCode`, **change both**), valid 1 h (`AGENT_CODE_MINUTES`; the worker's looser cap absorbs clock skew), shown once in `buildAgentLoginPrompt` (install line + `doklin login <endpoint> <code>`). Login deletes the code and mints the machine's `dka_` token in one statement.
 - New work goes under `Private/` unless the person names a place — by instruction only: the login prompt and `doklin help agent|sections` say so. Never a setting, a flag or a default folder: a path already says where a thing is.
 
@@ -98,10 +99,12 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 ## CLI (`cli/`)
 
 - Thin: never names a sidecar, pairs md/html, parses a store or builds a manifest.
-- Token only in `~/.config/doklin/credentials.json` (`$XDG_CONFIG_HOME`), 0600 in 0700, one entry per domain; `-w` picks.
+- Token only in `~/.config/doklin/credentials.json` (`$XDG_CONFIG_HOME`), 0600 in 0700, one entry per domain; `-w` picks. Trap: the app runs the bundled `doklin` with the app's environment, so an `XDG_CONFIG_HOME` set only in a shell's startup files is not the one its login writes under.
+- `login <domain> -` takes the code from the first line piped in — how the app hands one over.
 - Exit codes are a contract: `0` ok · `1` other · `2` usage · `3` not found · `4` not permitted · `5` conflict · `6` not logged in/revoked · `7` worker too old (missing feature, or an unknown route's 404/405).
 - JSON when stdout isn't a TTY or with `--json`; `read` puts content on stdout, metadata on stderr. `--dry-run` on every change; re-asks on `202`; board commands read stdin only with `--from -`.
-- On a Mac a non-command argument opens that path in the app. Install: `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`).
+- Every word after `doklin` is a command on every system; an unknown one is exit `2`, `doklin` alone is the overview. `open` is the one command about this Mac: it hands paths on this disk to the app (refused off a Mac, needs no login) and never knows workspaces — the app places them.
+- One `doklin` per Mac. The app carries it at `Doklin.app/Contents/Helpers/doklin` (`bundle.macOS.files`); *Doklin → Install Command Line Tool* (`cli_install.rs`) links `/usr/local/bin/doklin` to it, replacing what is there and naming a `doklin` the terminal finds first. `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`) is for everything else; on a Mac with the app it links to that copy instead of downloading.
 - Concepts: `doklin help agent|sections|documents|comments|publishing|boards`.
 
 ## Limits

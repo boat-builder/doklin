@@ -427,6 +427,8 @@ eq(
             PATH: `${bin}:/usr/bin:/bin`,
             HOME: home,
             DOKLIN_INSTALL_DIR: dir,
+            // Never the Doklin app on the machine running this.
+            DOKLIN_APP: path.join(tmp, "no-such", "Doklin.app"),
             FAKE_OS: osName,
             FAKE_ARCH: arch,
             FAKE_RELEASE: rel,
@@ -524,6 +526,31 @@ eq(
       });
       ok(fs.statSync(r.installed).ino !== before, "running it again puts a new file in place of the old one");
       ok(!again.includes("is not on this shell's PATH"), "…and says nothing about PATH when the folder is on it");
+    }
+    {
+      // A Mac with the app: the command inside it is linked, nothing is
+      // downloaded — the release here has no macOS binary to download.
+      const app = path.join(tmp, "Doklin.app");
+      const helper = path.join(app, "Contents", "Helpers", "doklin");
+      fs.mkdirSync(path.dirname(helper), { recursive: true });
+      fs.writeFileSync(helper, `#!/bin/sh\necho "doklin 9.9.9 (inside the app)"\n`, { mode: 0o755 });
+      writeSums(sums.filter((line) => !line.endsWith("doklin-macos-arm64")));
+      const r = install("Darwin", "arm64", { DOKLIN_APP: app });
+      eq(r.status, 0, `with the app: installs (${r.stderr})`);
+      ok(fs.lstatSync(r.installed).isSymbolicLink(), "…as a link");
+      eq(fs.readlinkSync(r.installed), helper, "…to the command inside the app");
+      eq(fs.readdirSync(r.dir).join(), "doklin", "…with nothing else left beside it");
+      ok(r.stdout.includes(`doklin 9.9.9 (inside the app) installed: ${r.installed}, a link to the one inside the Doklin app`), "…and says so");
+      const again = execFileSync("sh", [script], {
+        encoding: "utf8",
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: r.home, DOKLIN_INSTALL_DIR: r.dir, DOKLIN_APP: app, FAKE_OS: "Darwin", FAKE_ARCH: "arm64", FAKE_RELEASE: rel, FAKE_BASE: path.dirname(CLI_INSTALL_SCRIPT_URL) },
+      });
+      ok(again.includes(`is already installed, with the Doklin app: ${r.installed}`), "running it again changes nothing, and says so");
+      ok(again.includes("doklin login <domain> <code>"), "…and what to run next");
+      eq(fs.readlinkSync(r.installed), helper, "…the link is the same");
+      const linux = install("Linux", "x86_64", { DOKLIN_APP: app });
+      ok(linux.status === 0 && !fs.lstatSync(linux.installed).isSymbolicLink(), "off a Mac the app is no matter: the binary is downloaded");
+      writeSums(sums);
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

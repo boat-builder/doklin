@@ -24,17 +24,21 @@ mod versions;
 mod edits;
 // Untitled notes: the buffers behind tabs that have no file yet.
 mod untitled;
+mod external_open;
+#[cfg(target_os = "macos")]
+mod cli_install;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
-/// Folder waiting to be adopted by the main window on cold start. Files never
-/// go through here — an externally opened file always gets its own window (see
-/// `handle_external_open`), so it can't attach itself to a restored session.
+/// Folder waiting to be adopted by the main window on cold start: the first
+/// one an external open asks for before that window is up
+/// (`external_open::handle_external_open`). What it should then show inside
+/// the folder is queued apart, in `external_open::PendingShows`.
 #[derive(Default)]
 struct PendingOpen {
     folder: Mutex<Option<String>>,
@@ -452,7 +456,7 @@ fn spawn_open_window(app: &AppHandle, folder: Option<String>, file: Option<Strin
         restored: false,
     };
     // Bring the new window (and the app) to the foreground. When the spawn
-    // is triggered from the terminal shim, Doklin is a background app, so the
+    // is triggered from `doklin open`, Doklin is a background app, so the
     // window would otherwise open behind whatever is focused. set_focus
     // activates the app and makes the window key.
     if let Some(win) = spawn_window(app, init, None) {
@@ -473,31 +477,6 @@ fn route_open(app: &AppHandle, folder: Option<String>, file: Option<String>) {
         }
     }
     spawn_open_window(app, folder, file);
-}
-
-/// Entry point for every external open (initial CLI args, CLI second-instance,
-/// macOS file-open). A file open ALWAYS spawns its own window — it is never
-/// routed into an existing window, so a file that doesn't belong to a workspace
-/// can't attach itself to that workspace's window (or to the session the main
-/// window restores on cold start). Folder-only opens keep the focus-or-spawn
-/// routing (a window *is* its workspace), with the cold-start hand-off to the
-/// first window via `PendingOpen`. Must run on the main thread.
-fn handle_external_open(app: &AppHandle, folder: Option<PathBuf>, file: Option<PathBuf>) {
-    let folder = folder.map(|p| p.to_string_lossy().to_string());
-    let file = file.map(|p| p.to_string_lossy().to_string());
-    if file.is_some() {
-        spawn_open_window(app, folder, file);
-        return;
-    }
-    let Some(folder) = folder else { return };
-    let ready = app.state::<AppReady>().0.load(Ordering::SeqCst);
-    if !ready {
-        if let Ok(mut g) = app.state::<PendingOpen>().folder.lock() {
-            *g = Some(folder);
-        }
-        return;
-    }
-    route_open(app, Some(folder), None);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1364,8 +1343,8 @@ fn search_workspace(
 /// The main window, starting up, takes the folder a cold start was asked to
 /// open (if any). That ends the cold start: from here an external folder open
 /// routes to a window instead of waiting here for one. Both this and
-/// `handle_external_open` run on the main thread, so no open can fall between
-/// the take and the flag.
+/// `external_open::handle_external_open` run on the main thread, so no open
+/// can fall between the take and the flag.
 #[tauri::command]
 fn take_pending_folder(state: State<'_, PendingOpen>, ready: State<'_, AppReady>) -> Option<String> {
     let folder = state.folder.lock().ok().and_then(|mut g| g.take());
@@ -1484,6 +1463,12 @@ fn build_app_menu<R: tauri::Runtime>(handle: &AppHandle<R>) -> tauri::Result<Men
             true,
             Some("CmdOrCtrl+Q"),
         )?)?;
+        // After About and its separator: the `doklin` command (cli_install.rs).
+        app_submenu.insert(
+            &MenuItem::with_id(handle, cli_install::MENU_ID, "Install Command Line Tool", true, None::<&str>)?,
+            2,
+        )?;
+        app_submenu.insert(&PredefinedMenuItem::separator(handle)?, 3)?;
     }
 
     // Free ⌘W for the renderer's close-tab handler (src/App.tsx). The default
@@ -1687,47 +1672,9 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
-enum CliPath {
-    File(PathBuf),
-    Folder(PathBuf),
-}
-
-fn classify_arg(arg: &str) -> Option<CliPath> {
-    let pb = if arg.starts_with("file://") {
-        url::Url::parse(arg).ok().and_then(|u| u.to_file_path().ok())?
-    } else if !arg.is_empty() && !arg.starts_with('-') {
-        PathBuf::from(arg)
-    } else {
-        return None;
-    };
-    // Resolve relative args like "." to an absolute path so the UI can show a
-    // real directory name. Falls back to the original for nonexistent paths.
-    let pb = std::fs::canonicalize(&pb).unwrap_or(pb);
-    if pb.is_dir() {
-        Some(CliPath::Folder(pb))
-    } else {
-        Some(CliPath::File(pb))
-    }
-}
-
-/// Returns (folder, file) extracted from argv. A directory arg becomes the
-/// folder; the first non-directory arg becomes the file. Either may be None.
-fn classify_argv(argv: &[String]) -> (Option<PathBuf>, Option<PathBuf>) {
-    let mut folder = None;
-    let mut file = None;
-    for a in argv.iter().skip(1) {
-        match classify_arg(a) {
-            Some(CliPath::Folder(p)) if folder.is_none() => folder = Some(p),
-            Some(CliPath::File(p)) if file.is_none() => file = Some(p),
-            _ => {}
-        }
-    }
-    (folder, file)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (initial_folder, initial_file) = classify_argv(&std::env::args().collect::<Vec<_>>());
+    let initial_paths = external_open::argv_paths(&std::env::args().collect::<Vec<_>>());
 
     let mut builder = tauri::Builder::default();
 
@@ -1735,13 +1682,12 @@ pub fn run() {
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(
             |app, argv, _cwd| {
-                let (folder, file) = classify_argv(&argv);
-                // Handle on the main thread: a second launch with a file spawns
-                // a new window; a folder focuses its workspace window or opens
-                // one. Nothing is ever merged into an existing window.
+                // A second launch (`doklin open`) hands its paths over. On the
+                // main thread: placing them may create or focus windows.
+                let paths = external_open::argv_paths(&argv);
                 let handle = app.clone();
                 let _ = app.run_on_main_thread(move || {
-                    handle_external_open(&handle, folder, file);
+                    external_open::handle_external_open(&handle, paths);
                 });
             },
         ));
@@ -1760,6 +1706,8 @@ pub fn run() {
         builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
             if event.id() == QUIT_MENU_ID {
                 begin_quit_flush(app);
+            } else if event.id() == cli_install::MENU_ID {
+                cli_install::install(app);
             } else if event.id() == CLOSE_WINDOW_MENU_ID {
                 // ⌘⇧W: close the focused window via the normal CloseRequested
                 // path (the renderer flushes its autosave, then destroys it).
@@ -1778,6 +1726,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(QuitFlush::default())
         .manage(PendingOpen::default())
+        .manage(external_open::PendingShows::default())
         .manage(WatcherStore::default())
         .manage(store::DirWatchers::default())
         .manage(WindowRegistry::default())
@@ -1814,6 +1763,7 @@ pub fn run() {
             path_exists,
             search_workspace,
             take_pending_folder,
+            external_open::take_window_shows,
             register_window_content,
             take_window_init,
             open_in_window,
@@ -1899,14 +1849,6 @@ pub fn run() {
             // `reconcile` starts the rest as windows report in.
             versions::init(&handle);
             let saved = read_persisted_session(&handle);
-            let initial_folder_str = initial_folder.as_ref().map(|p| p.to_string_lossy().to_string());
-            let initial_file_str = initial_file.as_ref().map(|p| p.to_string_lossy().to_string());
-            // When a cold-start external open matches a window the session is
-            // about to restore anyway, the restore covers it — spawning a fresh
-            // copy on top would duplicate the folder/file.
-            let mut folder_restored = false;
-            let mut file_restored = false;
-
             for w in &saved.windows {
                 if w.label == "main" {
                     // The config-created main window restores its own tabs from
@@ -1926,20 +1868,9 @@ pub fn run() {
                     }
                     continue;
                 }
-                let mut content = w.content.clone();
+                let content = &w.content;
                 if content.folder.is_none() && content.tabs.is_empty() {
                     continue; // an empty window isn't worth resurrecting
-                }
-                if initial_folder_str.is_some() && content.folder == initial_folder_str {
-                    folder_restored = true;
-                }
-                if let Some(f) = &initial_file_str {
-                    if let Some(id) = content.file_tab(f).map(|t| t.id.clone()) {
-                        // The externally-opened file rides the restored window —
-                        // as its active tab.
-                        content.active_id = Some(id);
-                        file_restored = true;
-                    }
                 }
                 spawn_window(
                     &handle,
@@ -1961,15 +1892,10 @@ pub fn run() {
                 let _ = main.set_focus();
             }
 
-            // Initial CLI args go through the same external-open path as every
-            // later open: a folder is handed to the main window (cold-start
-            // pending-open), a file spawns its own window immediately — unless
-            // a restored window already shows it (see above).
-            handle_external_open(
-                app.handle(),
-                if folder_restored { None } else { initial_folder },
-                if file_restored { None } else { initial_file },
-            );
+            // The launch's own paths go the way every later open does — after
+            // the restore, so a path a restored window already shows goes to
+            // that window instead of a copy of it.
+            external_open::handle_external_open(app.handle(), initial_paths);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1980,15 +1906,8 @@ pub fn run() {
         if let RunEvent::Opened { urls } = &event {
             // The RunEvent loop is already on the main thread, so routing
             // (which may create/focus a window) is safe to call directly.
-            for u in urls {
-                if let Ok(p) = u.to_file_path() {
-                    if p.is_dir() {
-                        handle_external_open(app, Some(p), None);
-                    } else {
-                        handle_external_open(app, None, Some(p));
-                    }
-                }
-            }
+            let paths = urls.iter().filter_map(|u| u.to_file_path().ok()).collect();
+            external_open::handle_external_open(app, paths);
         }
         match &event {
             // The quitting window set is exactly what the next launch restores:

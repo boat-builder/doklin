@@ -18,6 +18,7 @@ You work as one person's agent, and see what they see. A path says where a thing
 
 Getting in
   login <domain> <code>        log this machine in, with the line you were given
+                               (on a Mac where Doklin is connected: Doklin → Install Command Line Tool)
   logout                       log this machine out
   whoami                       which workspace and agent this is, whose, and what it may do
 
@@ -50,6 +51,9 @@ Boards
   board new <path>             a new board                    [--name n]
   board field add|set|rm …     the board's fields             (doklin help boards)
   board option add|set|rm …    a field's options, which are its columns
+
+This Mac
+  open [path…]                 open files or folders here in the Doklin app; no login
 
 Everywhere
   -w <domain>     which workspace, when this machine is logged in to several

@@ -6,13 +6,14 @@
 #
 # Defaults:
 #   - .app installs to /Applications (falls back to sudo when needed)
-#   - doklin installs to /usr/local/bin (or ~/.local/bin if not writable)
+#   - doklin is linked in /usr/local/bin (or ~/.local/bin if not writable) to
+#     the command inside the app, as Doklin → Install Command Line Tool does
 #
 # Env overrides (rarely needed):
 #   APP_DIR=~/Applications  ./scripts/install.sh
 #   CLI_DIR=~/.local/bin    ./scripts/install.sh
 #   SKIP_BUILD=1            ./scripts/install.sh   # re-install without rebuilding
-#   SKIP_CLI=1              ./scripts/install.sh   # only the .app
+#   SKIP_CLI=1              ./scripts/install.sh   # only the .app, no link
 
 set -e
 
@@ -101,19 +102,14 @@ if [ -x "$LSREGISTER" ]; then
 fi
 touch "$REPO_ROOT/src-tauri/target/.metadata_never_index" 2>/dev/null || true
 
-# ---------- 3. Install the `doklin` command ----------
+# ---------- 3. Link the `doklin` command ----------
 #
-# The binary a release ships (cli/). It works with a
-# connected workspace through its domain — `doklin help` — and, given a path
-# instead of a command, opens that file or folder in the app.
+# The command rides inside the app (Contents/Helpers/doklin — the bundle's
+# beforeBuildCommand builds it), so the link updates whenever the app does.
 if [ -z "$SKIP_CLI" ]; then
-  CLI_BIN="$REPO_ROOT/cli/target/release/doklin"
-  if [ -z "$SKIP_BUILD" ]; then
-    echo "==> building the doklin command"
-    cargo build --release --locked --manifest-path "$REPO_ROOT/cli/Cargo.toml"
-  fi
+  CLI_BIN="$DEST_APP/Contents/Helpers/$CLI_NAME"
   if [ ! -x "$CLI_BIN" ]; then
-    echo "error: $CLI_BIN not found — run without SKIP_BUILD." >&2
+    echo "error: $CLI_BIN not found — the app was built without its command." >&2
     exit 1
   fi
 
@@ -130,12 +126,11 @@ if [ -z "$SKIP_CLI" ]; then
   fi
 
   DEST_CLI="$CLI_DIR/$CLI_NAME"
-  echo "==> installing $CLI_NAME to $CLI_DIR"
-  # Copied beside its destination and renamed into place: macOS remembers a
-  # binary's signature by file, and one overwritten where it lies is killed
-  # the next time it runs.
-  cp "$CLI_BIN" "$DEST_CLI.new"
-  chmod 755 "$DEST_CLI.new"
+  echo "==> linking $CLI_NAME in $CLI_DIR"
+  # Made beside its destination and renamed into place, replacing whatever
+  # `doklin` was there whole.
+  rm -f "$DEST_CLI.new"
+  ln -s "$CLI_BIN" "$DEST_CLI.new"
   mv -f "$DEST_CLI.new" "$DEST_CLI"
 
   case ":$PATH:" in

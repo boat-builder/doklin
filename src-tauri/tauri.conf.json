@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm build:cli",
     "frontendDist": "../dist"
   },
   "app": {
@@ -40,7 +40,10 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "macOS": {
-      "minimumSystemVersion": "14.0"
+      "minimumSystemVersion": "14.0",
+      "files": {
+        "Helpers/doklin": "../cli/target/aarch64-apple-darwin/release/doklin"
+      }
     },
     "icon": [
       "icons/32x32.png",

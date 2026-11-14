@@ -33,13 +33,12 @@
 // exit 7 cannot be had from a worker that is current). The terminal steps
 // are skipped, out loud, where there is no script(1).
 //
-// NOT DRIVEN, on purpose: `doklin` with no arguments, and `doklin <path>`.
-// On macOS a first argument that is not a command opens that path in the
-// Doklin app — on the machine running this, in the app somebody has open.
+// NOT DRIVEN, on purpose: `doklin open` without --dry-run. It opens the
+// Doklin app on the machine running this — the app somebody has open.
 // `doklin()` below refuses to run the binary that way.
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
@@ -247,10 +246,8 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
 
 const COMMANDS = [
   "login", "logout", "whoami", "ls", "info", "read", "search", "comments", "comment", "reply",
-  "write", "edit", "mv", "rm", "publish", "unpublish", "published", "board",
+  "write", "edit", "mv", "rm", "publish", "unpublish", "published", "board", "open",
 ];
-/** The only first words this drive may hand the binary. Anything else is, on macOS, a path to open in the app. */
-const FIRST_WORDS = new Set([...COMMANDS, "help", "--help", "-h", "version", "--version", "-V"]);
 
 /** A machine: its own HOME and config directory, and so its own credentials file. */
 function machine(name) {
@@ -280,8 +277,8 @@ const seen = new Set();
  * stdout and stderr together.
  */
 function doklin(box, args, { input = "", tty = false } = {}) {
-  if (!FIRST_WORDS.has(args[0])) {
-    throw new Error(`refusing to run \`doklin ${args[0]}\`: a first word that is not a command opens a path in the Doklin app on macOS`);
+  if (args[0] === "open" && !args.includes("--dry-run") && !args.includes("--help")) {
+    throw new Error("refusing to run `doklin open` for real: it opens the Doklin app on the machine running this");
   }
   const env = { PATH: process.env.PATH ?? "", HOME: box.home, XDG_CONFIG_HOME: box.xdg };
   const [cmd, argv] = tty ? ["script", SCRIPT_ARGS[process.platform]([BIN, ...args])] : [BIN, args];
@@ -395,6 +392,38 @@ await check("help: the overview lists every command; each topic and each command
   return facts;
 });
 
+await check("every word after `doklin` is a command, on every system: alone it is the overview; anything else is bad usage", async () => {
+  const overview = (await doklin(nobody, ["help"])).out;
+  const alone = await doklin(nobody, []);
+  return {
+    "`doklin` alone prints the overview": alone.code === 0 && alone.out === overview,
+    "an unknown word is exit 2": refused(await doklin(nobody, ["raed", "Projects/plan"]), 2, /"raed" is not a doklin command — run `doklin help`/),
+    "so is a path": refused(await doklin(nobody, ["notes.md"]), 2, /"notes\.md" is not a doklin command/),
+    "and an option no command has": refused(await doklin(nobody, ["--nope"]), 2, /there is no --nope option/),
+  };
+});
+
+await check("open: paths on this disk, made absolute and checked, no login; refused off a Mac (--dry-run: nothing is opened)", async () => {
+  const file = scratchFile("open-me.md", "# Hi\n");
+  const mac = process.platform === "darwin";
+  const one = await doklin(nobody, ["open", "--dry-run", "open-me.md", SCRATCH]);
+  const facts = {};
+  if (mac) {
+    // Where it runs is the folder itself (/private/var…), not the link to it
+    // the temp folder's name goes through (/var…); a path given whole is kept.
+    facts["a relative path is resolved where the command runs, a folder is fine too"] =
+      one.code === 0 && JSON.stringify(JSON.parse(one.out)) === JSON.stringify({ opened: false, paths: [realpathSync(file), SCRATCH] });
+    facts["no path is the app itself"] = JSON.parse((await doklin(nobody, ["open", "--dry-run"])).out).paths.length === 0;
+    facts["a path that is not there is exit 3"] = refused(await doklin(nobody, ["open", "--dry-run", "nope.md"]), 3, /there is no file or folder at "nope\.md"/);
+    const tty = await doklin(nobody, ["open", "--dry-run", "open-me.md"], { tty: true });
+    facts["a person reads what would open"] = tty.out.includes("Would open open-me.md in Doklin.");
+  } else {
+    facts["off a Mac it is refused: there is no app here"] = refused(one, 1, /open hands files to the Doklin app, which runs only on a Mac/);
+  }
+  facts["it takes no options of its own"] = refused(await doklin(nobody, ["open", "--dry-run", "--force"]), 2, /--force/);
+  return facts;
+});
+
 await check("version: `--version` is the crate's version", async () => {
   const r = await doklin(nobody, ["--version"]);
   return {
@@ -463,7 +492,15 @@ await check("not logged in: every command that needs the workspace exits 6 and s
     ["board", "show", "Ideas"], ["board", "add", "Ideas", "Rocket"], ["board", "field", "rm", "Ideas", "Status"],
   ];
   for (const args of all) facts[args.join(" ")] = refused(await doklin(nobody, args, { input: "text" }), 6, /not logged in/);
-  facts["-w for a domain this machine never logged in to"] = refused(await doklin(nobody, ["ls", "-w", "nowhere.example.com"]), 6, /not logged in to nowhere\.example\.com/);
+  const named = await doklin(nobody, ["ls", "-w", "nowhere.example.com"]);
+  facts["-w for a domain this machine never logged in to"] = refused(named, 6, /not logged in to nowhere\.example\.com/);
+  // On a Mac the app is the other way in; elsewhere there is no app to name.
+  const app = /Doklin → Install Command Line Tool/;
+  const bare = await doklin(nobody, ["ls"]);
+  facts[process.platform === "darwin" ? "on a Mac, both name the menu item that logs in" : "off a Mac, neither names the app"] =
+    process.platform === "darwin"
+      ? app.test(bare.problem.error) && app.test(named.problem.error)
+      : !app.test(bare.problem.error) && !app.test(named.problem.error);
   facts["no request was made"] = calls.length === from;
   facts["no credentials file was made"] = !existsSync(nobody.creds);
   return facts;
@@ -558,6 +595,28 @@ await check("login again on a machine that is logged in: the new token replaces 
     "still one entry, with a new token": after.workspaces.length === 1 && after.workspaces[0].token !== before,
     "the old login was let go": same(asked(from), ["POST login → 201", "DELETE login → 204"]) && calls[from + 1].headers.authorization === `Bearer ${before}`,
     "the owner sees one machine, by this machine's name": mine.machines.length === 1 && mine.machines[0].host === hostname(),
+  };
+});
+
+await check("login <domain> -: the code is the first line piped in — how the Doklin app hands one over, off the command line; nothing piped in is bad usage that asks nothing", async () => {
+  const terminal = await addAgent("Sherin's terminal (Studio)", ALL_SCOPES);
+  const box = machine("terminal");
+  const empty = calls.length;
+  const nothing = await doklin(box, ["login", BASE, "-"], { input: "" });
+  const blank = await doklin(box, ["login", BASE, "-"], { input: "\n  \n" });
+  const askedNothing = calls.length === empty;
+  const leftNothing = !existsSync(box.creds);
+  const from = calls.length;
+  const r = await doklin(box, ["login", BASE, "-"], { input: `${terminal.code}\n` });
+  const sent = calls[from];
+  return {
+    "nothing piped in is exit 2": refused(nothing, 2, /nothing was piped in/),
+    "a blank line is exit 2": refused(blank, 2, /nothing was piped in/),
+    "neither asked the domain anything": askedNothing,
+    "nor left a credentials file": leftNothing,
+    "the piped code logs in": r.code === 0 && r.json.agent.name === "Sherin's terminal (Studio)" && same(r.json.scopes, ALL_SCOPES),
+    "it sent the code it was piped": same(asked(from), ["POST login → 201"]) && JSON.parse(sent.body).code === terminal.code,
+    "the credentials file holds the login": credsOf(box).workspaces[0].agent === "Sherin's terminal (Studio)",
   };
 });
 

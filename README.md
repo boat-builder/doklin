@@ -101,14 +101,21 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   once.
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
-  or run `doklin path/to/file.md`. A second launch talks to the running app: a
-  file always opens in its own new window (never merged into an existing
-  workspace window), while a folder focuses its workspace window or opens one.
+  or run `doklin open path/to/file.md`. Anything inside a connected workspace
+  opens in that workspace's window — a note as a tab, a folder shown in the
+  sidebar. Any other folder focuses its own window or opens one, and any other
+  file gets a window of its own.
 
 ## Install
 
-One script builds the release bundle, installs `Doklin.app` to `/Applications`, and
-installs the `doklin` command:
+The release `.dmg` holds the app, and the app holds the `doklin` command:
+*Doklin → Install Command Line Tool* puts it on your PATH, at
+`/usr/local/bin/doklin`, and app updates keep it current. It also logs the
+command in to every workspace connected in the app, and to each one you connect
+later, so on your own Mac there is no login code to make.
+
+From source, one script builds the release bundle, installs `Doklin.app` to
+`/Applications`, and links the `doklin` command to the copy inside it:
 
 ```sh
 ./scripts/install.sh
@@ -121,7 +128,7 @@ Optional env overrides:
 
 ```sh
 APP_DIR=~/Applications  ./scripts/install.sh   # install .app elsewhere
-CLI_DIR=~/.local/bin    ./scripts/install.sh   # install the command elsewhere
+CLI_DIR=~/.local/bin    ./scripts/install.sh   # link the command elsewhere
 SKIP_BUILD=1            ./scripts/install.sh   # re-install without rebuilding
 SKIP_CLI=1              ./scripts/install.sh   # only the .app, no command
 ```
@@ -129,9 +136,9 @@ SKIP_CLI=1              ./scripts/install.sh   # only the .app, no command
 Once installed:
 
 ```sh
-doklin notes.md
-doklin ~/notes                # open a folder as a workspace
-doklin                        # empty editor (welcome screen)
+doklin open notes.md
+doklin open ~/notes           # open a folder as a workspace
+doklin open                   # the app itself
 doklin help                   # the commands that work with a connected workspace from anywhere
 ```
 

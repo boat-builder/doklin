@@ -113,8 +113,9 @@ impl Client {
             401 if said == "unauthorized" && self.token.is_some() => (
                 6,
                 format!(
-                    "this machine's login to {} no longer works — the agent was removed, or this machine was logged out. Ask for a new login line.",
-                    self.domain()
+                    "this machine's login to {} no longer works — the agent was removed, or this machine was logged out. Ask for a new login line{}.",
+                    self.domain(),
+                    crate::creds::from_the_app(self.domain())
                 ),
             ),
             401 => (6, said),

@@ -114,7 +114,10 @@ fn normalize_endpoint(raw: &str) -> Result<String, Failure> {
 pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let usage = "the whole line you were given — doklin login <domain> <code>";
     let endpoint = normalize_endpoint(args.need(0, usage)?)?;
-    let code = args.need(1, usage)?;
+    let code = match args.need(1, usage)? {
+        "-" => piped_code()?,
+        code => code.to_string(),
+    };
     args.at_most(2)?;
     let domain = creds::domain_of(&endpoint).to_string();
 
@@ -165,6 +168,22 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         )
     });
     Ok(())
+}
+
+/// `doklin login <domain> -`: the code from the first line piped in, which
+/// is how the Doklin app hands one over — a process list shows the
+/// arguments of a command, never what was piped into it.
+fn piped_code() -> Result<String, Failure> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(Failure::usage("pipe the code in after `-`, or put the code itself in its place"));
+    }
+    let mut piped = String::new();
+    stdin.read_to_string(&mut piped).map_err(|e| Failure::other(format!("could not read what was piped in: {}", e)))?;
+    match piped.lines().next().map(str::trim) {
+        Some(code) if !code.is_empty() => Ok(code.to_string()),
+        _ => Err(Failure::usage("nothing was piped in — pipe the code in after `-`")),
+    }
 }
 
 pub fn logout(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
