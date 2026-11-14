@@ -286,7 +286,11 @@ jobs:
       # signed with the Developer ID and the hardened runtime. So it is signed
       # here, in a keychain of its own that is gone before Tauri imports the
       # same certificate into one of its own: two keychains holding one
-      # identity make codesign refuse it as ambiguous.
+      # identity make codesign refuse it as ambiguous. The keychain goes on
+      # the user's search list, as Tauri's does: --keychain only narrows the
+      # identity search, and codesign fails with "The specified item could
+      # not be found in the keychain" when the keychain is off the list.
+      # delete-keychain takes it off again.
       - name: Build and sign the doklin CLI (macOS arm64)
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -308,6 +312,7 @@ jobs:
           security unlock-keychain -p "$KC_PWD" "$KC"
           security import "$RUNNER_TEMP/cli-signing.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PWD" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
           codesign --force --options runtime --timestamp --keychain "$KC" --sign "$MACOS_SIGNING_IDENTITY" "$BIN"
           security delete-keychain "$KC"
           rm -f "$RUNNER_TEMP/cli-signing.p12"

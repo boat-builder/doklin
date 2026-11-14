@@ -17,7 +17,7 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
   - Apple Developer ID + notarization (`MACOS_*`/`APPLE_*`): Gatekeeper opens the `.app`/`.dmg`.
   - Tauri updater key (`TAURI_SIGNING_*`): installed apps accept the `.app.tar.gz`. It must pair with `plugins.updater.pubkey`; nothing checks, so a mismatch ships green and every install rejects it. Losing it strands every installed copy.
 - Stage assets only in `release-assets/` (all of it is published), never `dist/` (Vite output).
-- The macOS `doklin` rides inside the app (`Contents/Helpers/doklin`). Tauri signs only the app's own binary, so `build-release` signs the CLI with the Developer ID and hardened runtime first, in a keychain it deletes before Tauri imports the certificate (two keychains with one identity: codesign refuses it as ambiguous). Its `tauri build` overrides `beforeBuildCommand` to leave out `pnpm build:cli`: cargo copies a fresh link over the signed binary even when nothing changed. The `doklin-macos-arm64` asset is the copy from inside the notarized app.
+- The macOS `doklin` rides inside the app (`Contents/Helpers/doklin`). Tauri signs only the app's own binary, so `build-release` signs the CLI with the Developer ID and hardened runtime first, in a keychain it deletes before Tauri imports the certificate (two keychains with one identity: codesign refuses it as ambiguous). That keychain must be on the user search list (`security list-keychains -d user -s`), as Tauri's is: `--keychain` only narrows the identity search. Its `tauri build` overrides `beforeBuildCommand` to leave out `pnpm build:cli`: cargo copies a fresh link over the signed binary even when nothing changed. The `doklin-macos-arm64` asset is the copy from inside the notarized app.
 - `verify-harness/cloudprompts.test.mjs` pins `release.yml` lines (installer copy, release-notes install line, `SHA256SUMS`) and is not in CI: run it after touching asset steps.
 
 ## Updater contract
@@ -70,5 +70,6 @@ Team secrets are shared verbatim with other apps on the Apple account (bluesnake
 | Green build, `stapler validate` fails | Tauri skipped notarization: it reads `APPLE_*` env names, not the `MACOS_*` secret names. |
 | `build-cli` `--locked` fails | Commit `cli/Cargo.lock`; the stamp needs `version` right after `name = "doklin-cli"`. |
 | Notarization rejects `Contents/Helpers/doklin` (not Developer ID signed, no hardened runtime) | The bundle carries an unsigned CLI: the signing step was skipped, or `tauri build` rebuilt it — keep its `beforeBuildCommand` override. |
+| Signing the CLI: `error: The specified item could not be found in the keychain.` | Its keychain is off the user search list. A fix to `release.yml` needs a new merge: **Re-run** replays the workflow file of the failed run's commit. |
 | `install-doklin.sh` checksum mismatch | A release landed mid-install: rerun. Never replace an asset by hand without regenerating `SHA256SUMS`. |
 | Apps don't take a good release | Key/pubkey pair, `platforms` key, version drift. |
