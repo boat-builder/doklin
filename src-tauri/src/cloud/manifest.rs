@@ -114,6 +114,12 @@ pub struct Tombstone {
     pub ts: u64,
     #[serde(default)]
     pub by: String,
+    /// Set when the file was not deleted but moved to another section: the
+    /// id of the space it went to, `""` for the shared workspace. A Mac in
+    /// that section moves its copy there; any other deletes it outright
+    /// rather than putting it in the Trash (`Engine::relocate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +183,42 @@ pub struct PollResponse {
     /// "nobody is known to hold anything", which is what no lock looks like.
     #[serde(default)]
     pub leases: Option<Vec<LeaseEntry>>,
+    /// Every space this person is in — their Private and the restricted
+    /// folders they were added to — each with its manifest's etag. The whole
+    /// list every time: an id that is new is a folder to download, one that
+    /// is gone is a folder to take off this Mac. `None` from a worker
+    /// without `spaces` and from a database that could not answer, which
+    /// both mean "change nothing".
+    #[serde(default)]
+    pub spaces: Option<Vec<SpaceEntry>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpaceKind {
+    Restricted,
+    Private,
+}
+
+/// One space as the poll and the spaces routes describe it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceEntry {
+    pub id: String,
+    pub kind: SpaceKind,
+    #[serde(default)]
+    pub name: String,
+    /// Who made it, by member id — what tells two folders of one name apart.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// Its manifest's etag, as the domain last noted it.
+    #[serde(default)]
+    pub etag: String,
+    /// Everyone in it, by member id.
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 /// One device, keyed by its id in `PollResponse::presence`: here, and
@@ -192,15 +234,22 @@ pub struct PresenceEntry {
     pub name: String,
     #[serde(default)]
     pub path: Option<String>,
+    /// The space `path` is in; absent for the shared workspace. The worker
+    /// sends neither for a space the caller is not in.
+    #[serde(default)]
+    pub space: Option<String>,
     #[serde(default)]
     pub ts: u64,
 }
 
-/// One held document. `path` is the lease's key: workspace-relative and
+/// One held document. `path` is the lease's key: relative to its section and
 /// lowercased, so compare it with [`lease_key`] of a path, never directly.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LeaseEntry {
     pub path: String,
+    /// The space the document is in; absent for the shared workspace.
+    #[serde(default)]
+    pub space: Option<String>,
     #[serde(rename = "deviceId")]
     pub device_id: String,
     #[serde(rename = "memberId", default)]
@@ -226,8 +275,9 @@ pub enum Beat {
     /// "This Mac is here" — editing `path` when set, idle otherwise. `name`
     /// is the Mac's; the worker knows whose it is from the bearer. A path
     /// claims that document's lease and lets go of any other; `take` claims
-    /// it from whoever holds it.
-    Here { name: String, path: Option<String>, take: bool },
+    /// it from whoever holds it. `space` is the section the path is in, None
+    /// for the shared workspace.
+    Here { name: String, space: Option<String>, path: Option<String>, take: bool },
     /// The last poll a quitting engine makes.
     Leave,
 }
@@ -236,10 +286,16 @@ impl Beat {
     /// The request body, exactly as the worker reads it.
     pub fn body(&self) -> serde_json::Value {
         match self {
-            Beat::Here { name, path: Some(path), take: true } => {
-                serde_json::json!({ "name": name, "path": path, "take": true })
+            Beat::Here { name, space, path: Some(path), take } => {
+                let mut body = serde_json::json!({ "name": name, "path": path });
+                if let Some(space) = space {
+                    body["space"] = serde_json::json!(space);
+                }
+                if *take {
+                    body["take"] = serde_json::json!(true);
+                }
+                body
             }
-            Beat::Here { name, path: Some(path), take: false } => serde_json::json!({ "name": name, "path": path }),
             Beat::Here { name, path: None, .. } => serde_json::json!({ "name": name }),
             Beat::Leave => serde_json::json!({ "leave": true }),
         }

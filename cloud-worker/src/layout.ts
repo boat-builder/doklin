@@ -101,6 +101,16 @@ export function validName(raw: unknown, fallback: string): string {
   return name || fallback;
 }
 
+
+/** The two names a workspace keeps for itself at its top: where a person's
+ *  Private and their restricted folders are on disk. Nothing in the shared
+ *  manifest lives under either, whatever its case (`RESERVED_DIRS`,
+ *  src-tauri/src/cloud/space.rs: change both). */
+export const RESERVED_FOLDERS: ReadonlySet<string> = new Set(["private", "restricted"]);
+
+/** Whether a workspace-relative path is under one of the reserved names. */
+export const reservedTop = (path: string): boolean => RESERVED_FOLDERS.has(path.split("/", 1)[0].toLowerCase());
+
 /** A name a folder on disk can carry — what a restricted folder is called:
  *  one path segment, trimmed and capped, not hidden. Null when it is not one. */
 export function validFolderName(raw: unknown): string | null {

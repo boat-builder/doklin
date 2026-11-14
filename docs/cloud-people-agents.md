@@ -27,13 +27,15 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 ## Losing access (`engine.rs`, `mod.rs`)
 
 - **Only `401 {removed: true}` deletes** (`RemoteError::Removed`). Never infer it from another refusal: a D1 outage answers a bare `401` to every member at once.
-- The engine exits `Exit::Removed`; `access_removed` then deletes the folder outright (not the Trash), the local version store and the sync state, drops the `cloud.json` entry and emits `cloud-removed`. Nothing in the cloud is deleted.
+- The engine exits `Exit::Removed`; `access_removed` then deletes the folder outright (not the Trash), the local version stores (the workspace's and each section's) and the sync state, drops the `cloud.json` entry and emits `cloud-removed`. Nothing in the cloud is deleted.
 - `remove_copy` deletes only a folder whose marker names that domain and `wsId`, resolved through symlinks, and never a path that holds the home directory.
 - The creator's Mac never obeys it (`creator` in `cloud.json`, written on the first probe that says so): that folder is the user's own.
 - A removal never lapses: an offline Mac deletes when it next reaches the domain. A wipe empties `removed_tokens`, so it deletes nobody's copy.
 - `cloud_removed` returns the removals since launch, for a window that was not listening; a window dedupes by `root` + `at`.
 
 ## Spaces (`spaces.ts`, `addresses.ts`)
+
+What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 
 - A space (restricted folder, or a person's Private) is a workspace of its own under `spaces/<id>/`: the sync handlers run unchanged on an `Env` whose bucket is that prefix (`spaceEnv`). **One gate** (`openSpace`) sits before everything under `/api/spaces/<id>`; a new route goes behind it, never beside it.
 - **Outside a space it does not exist**, for owners too: same `404` as an unknown id, no name, no count. Presence shows a person is here without the path; leases in it are not listed.

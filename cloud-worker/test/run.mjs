@@ -147,7 +147,7 @@ async function test(name, fn) {
 }
 
 const manifest = (seq, files, extra = {}) => ({
-  version: 3,
+  version: 4,
   name: "Notes",
   seq,
   files,
@@ -1006,13 +1006,13 @@ await test("workspace: GET describes the binding with what the manifest holds", 
   assert.equal((await call("/api/workspace", { method: "PUT", token: OWNER })).status, 405);
 });
 
-await test("manifest: the empty v3 manifest, 304 on since, CAS PUT, a stale PUT loses with the current etag", async () => {
+await test("manifest: the empty manifest, 304 on since, CAS PUT, a stale PUT loses with the current etag", async () => {
   const first = await call("/api/manifest", { token: OWNER });
   assert.equal(first.status, 200);
   const etag0 = first.headers.get("x-manifest-etag");
   assert.equal(etag0, ws.manifestEtag, "the etag the bind returned is the manifest's");
   const fresh = JSON.parse(first.text);
-  assert.equal(fresh.version, 3);
+  assert.equal(fresh.version, 4);
   assert.equal(fresh.name, "Notes");
   assert.deepEqual([fresh.seq, fresh.files, fresh.tombstones, fresh.public], [0, {}, {}, {}]);
 
@@ -1062,6 +1062,9 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
     [manifest(3, { "Bad Id": fileEntry("ok.md", 1, "a") }), /file id/],
     [manifest(3, {}, { tombstones: { "f-old": { path: "a/../b.md" } } }), /tombstone/],
     [manifest(3, {}, { tombstones: [] }), /tombstones/],
+    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", to: "the finance folder" } } }), /tombstone to/],
+    [manifest(3, { "f-a": fileEntry("Private/diary.md", 1, "a") }), /kept for/],
+    [manifest(3, { "f-a": fileEntry("restricted/Finance/q3.md", 1, "a") }), /kept for/],
     [manifest(-1, {}), /seq/],
     [manifest(3, {}, { name: "n".repeat(81) }), /name/],
     [{ ...manifest(3, {}), files: [] }, /files/],
@@ -1081,15 +1084,33 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
 });
 
 await test("manifest: either side of a schema skew is 426, and the sentence says which one is behind", async () => {
-  const newer = await putManifest(manifest(3, {}, { version: 4 }));
+  const newer = await putManifest(manifest(3, {}, { version: 5 }));
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
-  // An app still writing v2 — `by` a device name, `hist` an array — is not
-  // corrupt, it is old, and 426 is the status that says so.
-  const older = await putManifest(manifest(3, {}, { version: 2 }));
+  // An app still writing the version before — one that knows nothing of the
+  // reserved folders — is not corrupt, it is old, and 426 is the status that
+  // says so.
+  const older = await putManifest(manifest(3, {}, { version: 3 }));
   assert.equal(older.status, 426);
   assert.match(older.json.error, /update the app/);
-  assert.equal((await putManifest(manifest(3, {}, { version: "3" }))).status, 400, "a version that is not a number is garbage");
+  assert.equal((await putManifest(manifest(3, {}, { version: "4" }))).status, 400, "a version that is not a number is garbage");
+});
+
+await test("manifest: the shared workspace holds nothing under Private or Restricted, a space holds what it likes, and a tombstone may say where its file went", async () => {
+  const etag = await currentEtag();
+  // A folder that only looks like one of them is an ordinary folder.
+  const near = await putManifest(manifest(3, { "f-near01": fileEntry("Private (shared)/diary.md", 1, "n"), "f-near02": fileEntry("Docs/Private/x.md", 1, "m") }));
+  assert.equal(near.status, 200, JSON.stringify(near.json));
+  // A file that moved to a section is a tombstone that says so: a space's id, or "" for the shared workspace.
+  const moved = await putManifest(
+    manifest(4, {}, { tombstones: { "f-near01": { path: "Private (shared)/diary.md", rev: 2, ts: 1700000000000, to: "p-0a1b2c3d" }, "f-near02": { path: "Docs/Private/x.md", rev: 2, ts: 1700000000000, to: "" } } }),
+  );
+  assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  // A tombstone under a reserved name is history, not a file: an old one must not stop the next write.
+  const old = await putManifest(manifest(5, {}, { tombstones: { "f-old001": { path: "Private/gone.md", rev: 3, ts: 1700000000000 } } }));
+  assert.equal(old.status, 200, JSON.stringify(old.json));
+  await putManifest(manifest(6, {}));
+  assert.notEqual(await currentEtag(), etag);
 });
 
 await test("manifest: the public map — slug grammar, reserved words, kinds, references, one root; an entry may outlive its file", async () => {
@@ -1716,7 +1737,7 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
   const sharedBefore = await currentEtag();
   const got = await finance("/manifest", { token: MEMBER });
   assert.equal(got.status, 200);
-  assert.deepEqual(got.json, { version: 3, name: "Finance", seq: 0, files: {}, tombstones: {}, public: {} });
+  assert.deepEqual(got.json, { version: 4, name: "Finance", seq: 0, files: {}, tombstones: {}, public: {} });
   const etag0 = got.headers.get("x-manifest-etag");
   assert.equal(etag0, FINANCE.etag, "the etag the space was made with");
   assert.equal((await finance(`/manifest?since=${etag0}`, { token: MEMBER })).status, 304);
@@ -3214,6 +3235,14 @@ await test("documents: what a Mac would never see is refused; the sidecar never 
     }
   }
   assert.equal(etagNow(), etag, "none of it reached the manifest");
+  // The two folders that are a person's own on a Mac are nobody's to write
+  // into the shared workspace, in any case.
+  for (const p of ["Private/plan", "restricted/Finance/q3"]) {
+    const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
+    assert.equal(kept.status, 409, `writing ${p}`);
+    assert.ok(/kept for a person's own and restricted folders/.test(kept.json.error), kept.json.error);
+  }
+  assert.equal(etagNow(), etag, "nor did those");
   assert.ok(/does not sync names that begin with a dot/.test((await api(docUrl(".secret/plan"))).json.error));
   assert.ok(/a folder Doklin does not sync/.test((await api(docUrl("node_modules/pkg/readme"))).json.error));
   assert.ok(/comments commands/.test((await api(docUrl("Case/Report.meta.jsonl"))).json.error), "the sidecar's refusal says where comments are");
@@ -4968,7 +4997,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   const hash = blobHash(text);
   await sp(`/blobs/f-budget02/${hash}`, { method: "PUT", token: MEMBER, body: text, headers: { "content-type": "text/markdown" } });
   const withPages = (seq, pages) => ({
-    version: 3,
+    version: 4,
     name: "Books",
     seq,
     files: { "f-budget02": { path: "Budget.md", rev: 1, hash, size: Buffer.byteLength(text), mtime: 1700000000000, by: ALICE.id } },
@@ -5015,7 +5044,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     method: "PUT",
     ...jo,
     headers: { "x-base-etag": joPrivate.etag },
-    body: { version: 3, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "" } } },
+    body: { version: 4, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "" } } },
   });
   assert.equal(second.status, 409, "the second claim is told it is taken");
   assert.deepEqual(second.json.taken, ["budget"]);

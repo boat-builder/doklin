@@ -30,10 +30,14 @@ pub struct ScanEntry {
 /// `.doklin/` marker), bounded depth and entry count — but include every
 /// file type (images and assets sync too), skipping only what the worker
 /// would refuse: oversized files and paths outside its grammar.
-pub fn scan_local(root: &Path) -> Result<BTreeMap<String, ScanEntry>, String> {
+///
+/// `skip` names folders at the top of `root` the walk never enters, whatever
+/// their case: the shared workspace passes the two reserved names
+/// (`space::RESERVED_DIRS`), because what is under them is another section's.
+pub fn scan_local(root: &Path, skip: &[&str]) -> Result<BTreeMap<String, ScanEntry>, String> {
     let mut out = BTreeMap::new();
     let mut budget = MAX_SYNC_ENTRIES;
-    scan_dir(root, root, 1, &mut budget, &mut out)?;
+    scan_dir(root, root, 1, skip, &mut budget, &mut out)?;
     Ok(out)
 }
 
@@ -42,6 +46,7 @@ fn scan_dir(
     root: &Path,
     dir: &Path,
     depth: usize,
+    skip: &[&str],
     budget: &mut usize,
     out: &mut BTreeMap<String, ScanEntry>,
 ) -> Result<(), String> {
@@ -61,6 +66,9 @@ fn scan_dir(
         if crate::is_hidden_or_ignored(&name) || name.ends_with(TMP_SUFFIX) {
             continue;
         }
+        if depth == 1 && skip.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -71,7 +79,7 @@ fn scan_dir(
         let path = entry.path();
         if ft.is_dir() {
             if depth < MAX_PATH_DEPTH {
-                scan_dir(root, &path, depth + 1, budget, out)?;
+                scan_dir(root, &path, depth + 1, &[], budget, out)?;
             }
         } else if ft.is_file() {
             let meta = match entry.metadata() {

@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Beat, Manifest, PollResponse};
+use super::manifest::{Beat, Manifest, PollResponse, SpaceEntry};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -277,6 +277,9 @@ pub enum RemoteError {
     Outdated(String),
     /// `409` on a bind: the domain already holds this workspace.
     AlreadyBound(WorkspaceRecord),
+    /// `409 {taken}` on a manifest: these public addresses are another
+    /// section's on this domain, so the manifest naming them was not stored.
+    Taken(Vec<String>),
     Other(String),
 }
 
@@ -291,6 +294,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::Conflict => write!(f, "manifest conflict"),
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
+            RemoteError::Taken(slugs) => write!(f, "already taken on this domain: {}", slugs.join(", ")),
             RemoteError::Other(m) => write!(f, "{}", m),
         }
     }
@@ -315,6 +319,28 @@ pub trait Remote: Send + Sync + 'static {
     /// (worker v7). The engine only hands it a beat
     /// when the worker lists `presence`.
     fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
+
+    /* ----- spaces ----- */
+
+    /// This credential again, with every sync call — the manifest, the
+    /// blobs, the version store — aimed at one space: `/api/spaces/<id>/…`,
+    /// the same routes behind the domain's membership check. A `NotFound`
+    /// from one means this person is not in it, or it is gone; the two are
+    /// one answer.
+    fn space(&self, id: &str) -> Self
+    where
+        Self: Sized;
+
+    /// `PUT /api/spaces/private`: this person's Private, made if it was not
+    /// there. Answers the same space every time.
+    fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `POST /api/spaces`: a restricted folder with only its maker in it.
+    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `PATCH /api/spaces/<id>`: rename a restricted folder, for everyone
+    /// in it.
+    fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -459,11 +485,15 @@ pub trait Remote: Send + Sync + 'static {
 
 /* ---------- HTTP remote (the real worker) ---------- */
 
+#[derive(Clone)]
 pub struct HttpRemote {
     client: reqwest::Client,
     endpoint: String,
     token: String,
     device_id: String,
+    /// `spaces/<id>/` when this remote is one space's (`Remote::space`), and
+    /// empty for the shared workspace: what the sync routes sit under.
+    scope: String,
 }
 
 impl HttpRemote {
@@ -473,11 +503,18 @@ impl HttpRemote {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
             device_id: device_id.to_string(),
+            scope: String::new(),
         }
     }
 
     fn url(&self, tail: &str) -> String {
         format!("{}/api/{}", self.endpoint, tail)
+    }
+
+    /// A sync route — manifest, blobs, versions — of whichever section this
+    /// remote is aimed at.
+    fn sync_url(&self, tail: &str) -> String {
+        format!("{}/api/{}{}", self.endpoint, self.scope, tail)
     }
 
     /// The two attribution headers every request carries: which device
@@ -628,6 +665,16 @@ async fn read_list<T: serde::de::DeserializeOwned>(res: reqwest::Response, key: 
         .map_err(|e| RemoteError::Other(format!("the domain's {} didn't parse: {}", key, e)))
 }
 
+/// `{ "space": {...} }` — what the spaces routes answer a change with.
+fn read_space_value(v: serde_json::Value) -> RemoteResult<SpaceEntry> {
+    serde_json::from_value(v.get("space").cloned().unwrap_or_default())
+        .map_err(|e| RemoteError::Other(format!("the domain's answer about that folder didn't parse: {}", e)))
+}
+
+async fn read_space(res: reqwest::Response) -> RemoteResult<SpaceEntry> {
+    read_space_value(res.json::<serde_json::Value>().await.map_err(transport_err)?)
+}
+
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
     match res.status().as_u16() {
         200..=299 | 304 => Ok(res),
@@ -648,9 +695,13 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
         404 => Err(RemoteError::NotFound),
         409 => {
             let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+            let taken: Option<Vec<String>> = v.get("taken").cloned().and_then(|t| serde_json::from_value(t).ok());
             match v.get("workspace").cloned().and_then(|w| serde_json::from_value(w).ok()) {
                 Some(record) => Err(RemoteError::AlreadyBound(record)),
-                None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
+                None => match taken.filter(|slugs| !slugs.is_empty()) {
+                    Some(slugs) => Err(RemoteError::Taken(slugs)),
+                    None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
+                },
             }
         }
         412 => Err(RemoteError::Conflict),
@@ -738,13 +789,45 @@ impl Remote for HttpRemote {
         }
     }
 
+    fn space(&self, id: &str) -> Self {
+        HttpRemote { scope: format!("spaces/{}/", id), ..self.clone() }
+    }
+
+    fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        async move {
+            let res =
+                self.auth(self.client.put(self.url("spaces/private"))).send().await.map_err(transport_err)?;
+            read_space(expect_status(res).await?).await
+        }
+    }
+
+    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let body = json!({ "name": name });
+        async move { read_space_value(self.post_json("spaces", &body).await?) }
+    }
+
+    fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("spaces/{}", id));
+        let body = serde_json::to_vec(&json!({ "name": name })).unwrap_or_default();
+        async move {
+            let res = self
+                .auth(self.client.patch(url))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
     fn fetch_manifest(
         &self,
         since: Option<&str>,
     ) -> impl std::future::Future<Output = RemoteResult<Option<(Manifest, String)>>> + Send {
         let since = since.map(String::from);
         async move {
-            let mut req = self.client.get(self.url("manifest"));
+            let mut req = self.client.get(self.sync_url("manifest"));
             if let Some(s) = &since {
                 req = req.query(&[("since", s.as_str())]);
             }
@@ -776,7 +859,7 @@ impl Remote for HttpRemote {
         let base = base_etag.to_string();
         async move {
             let res = self
-                .auth(self.client.put(self.url("manifest")))
+                .auth(self.client.put(self.sync_url("manifest")))
                 .header("x-base-etag", base)
                 .header("content-type", "application/json")
                 .body(body)
@@ -794,7 +877,7 @@ impl Remote for HttpRemote {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -809,7 +892,7 @@ impl Remote for HttpRemote {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         let ct = content_type.to_string();
         async move {
             let res = self
@@ -827,7 +910,7 @@ impl Remote for HttpRemote {
         &self,
         file_id: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Vec<(String, u64)>>> + Send {
-        let url = self.url(&format!("blobs/{}", file_id));
+        let url = self.sync_url(&format!("blobs/{}", file_id));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -859,7 +942,7 @@ impl Remote for HttpRemote {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -871,7 +954,7 @@ impl Remote for HttpRemote {
     ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
         async move {
             let res =
-                self.auth(self.client.get(self.url("versions/index"))).send().await.map_err(transport_err)?;
+                self.auth(self.client.get(self.sync_url("versions/index"))).send().await.map_err(transport_err)?;
             match expect_status(res).await {
                 Ok(res) => {
                     let etag = res
@@ -901,7 +984,7 @@ impl Remote for HttpRemote {
         let base = base_etag.to_string();
         async move {
             let res = self
-                .auth(self.client.put(self.url("versions/index")))
+                .auth(self.client.put(self.sync_url("versions/index")))
                 .header("x-base-etag", base)
                 .header("content-type", "application/json")
                 .body(body)
@@ -915,7 +998,7 @@ impl Remote for HttpRemote {
     }
 
     fn get_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -928,7 +1011,7 @@ impl Remote for HttpRemote {
         id: &str,
         gz: Vec<u8>,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self
                 .auth(self.client.put(url))
@@ -942,7 +1025,7 @@ impl Remote for HttpRemote {
     }
 
     fn delete_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -955,7 +1038,7 @@ impl Remote for HttpRemote {
     ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send {
         let cursor = cursor.map(String::from);
         async move {
-            let mut req = self.client.get(self.url("versions/blobs"));
+            let mut req = self.client.get(self.sync_url("versions/blobs"));
             if let Some(c) = &cursor {
                 req = req.query(&[("cursor", c.as_str())]);
             }
@@ -986,7 +1069,7 @@ impl Remote for HttpRemote {
     }
 
     fn get_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -995,7 +1078,7 @@ impl Remote for HttpRemote {
     }
 
     fn put_version_blob(&self, hash: &str, gz: Vec<u8>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self
                 .auth(self.client.put(url))
@@ -1009,7 +1092,7 @@ impl Remote for HttpRemote {
     }
 
     fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())

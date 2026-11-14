@@ -12,6 +12,7 @@ import {
   cloudUnpublish,
   leaseFor,
   onCloudApplied,
+  onCloudAddressTaken,
   onCloudConflict,
   onCloudPendingDeletes,
   onCloudRemoved,
@@ -5065,6 +5066,12 @@ export default function App() {
           label: "Open the copy",
           run: () => void openTab(e.conflictPath, "file"),
         });
+      }),
+      onCloudAddressTaken((e) => {
+        pushToast(
+          "warn",
+          `The address "${e.slug}" is already taken on this domain, so ${basename(e.path)} was not published.`,
+        );
       }),
       onCloudPendingDeletes((e) => {
         setPendingDeletes(e);

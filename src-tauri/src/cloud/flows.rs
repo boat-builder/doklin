@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::engine::{FileState, WorkspaceState};
+use super::space::RESERVED_DIRS;
+use super::unit::{FileState, WorkspaceState};
 use super::manifest::{Manifest, ManifestFile, MANIFEST_VERSION};
 use super::remote::{Bound, Remote, RemoteError, WorkspaceRecord};
 use super::scan::{
@@ -86,7 +87,9 @@ pub async fn seed_upload<R: Remote>(
     events: &Arc<dyn Events>,
     progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
-    let scan = scan_local(root).map_err(FlowError::Other)?;
+    // What is under a reserved name is never the shared workspace's: it is
+    // this person's own, and syncs as their sections do once the engine runs.
+    let scan = scan_local(root, &RESERVED_DIRS).map_err(FlowError::Other)?;
     let total = scan.len();
     let _ = std::fs::create_dir_all(state_dir.join("base"));
 

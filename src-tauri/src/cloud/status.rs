@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use super::manifest::PublicKind;
+use super::manifest::{PublicKind, SpaceKind};
 use super::remote::{AgentRecord, InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
@@ -25,6 +25,9 @@ pub const EV_PROGRESS: &str = "cloud-progress";
 /// A `Removed` — an owner took this Mac's access away, and the workspace's
 /// copy here is gone.
 pub const EV_REMOVED: &str = "cloud-removed";
+/// `{root, slug, path}` — a page asked for an address that is another
+/// section's on this domain, and was not published.
+pub const EV_ADDRESS_TAKEN: &str = "cloud-address-taken";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +80,26 @@ pub struct CloudStatus {
     /// An editor showing one of these opens view-only. Empty when this
     /// Mac cannot hear the domain — a lock nobody can confirm is no lock.
     pub leases: Vec<LeaseHolder>,
+    /// This person's sections besides the shared workspace — their Private
+    /// and the restricted folders they are in — that have a folder on this
+    /// Mac. Empty from a worker without `spaces`.
+    pub spaces: Vec<SpaceStatus>,
+}
+
+/// One section of the workspace that only some people have.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceStatus {
+    pub id: String,
+    pub kind: SpaceKind,
+    pub name: String,
+    /// Its folder on this Mac, workspace-relative: `Private`,
+    /// `Restricted/Finance`.
+    pub path: String,
+    /// Who made it, in words — resolved like every other `by`.
+    pub by: String,
+    /// Everyone in it, by member id.
+    pub members: Vec<String>,
 }
 
 /// How much of this device's version history is in the bucket, and how much
@@ -98,7 +121,8 @@ pub struct VersionsMirror {
 pub struct PublicPage {
     pub slug: String,
     pub kind: PublicKind,
-    /// Workspace-relative; `""` is the workspace root for a folder page.
+    /// Workspace-relative, whichever section the page is in; `""` is the
+    /// workspace root for a folder page.
     pub path: String,
     pub title: Option<String>,
     pub desc: Option<String>,
@@ -139,7 +163,8 @@ pub struct PresenceDevice {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseHolder {
-    /// The lease's key: workspace-relative and lowercased.
+    /// The lease's key: workspace-relative — as this Mac's folders spell the
+    /// section it is in — and lowercased.
     pub path: String,
     pub device_id: String,
     pub member_id: Option<String>,

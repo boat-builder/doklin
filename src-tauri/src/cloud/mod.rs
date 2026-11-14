@@ -8,7 +8,9 @@
 //!
 //! ```text
 //! mod.rs        the manager, the commands, init at boot
-//! engine.rs     Engine<R>: the cycle, fold_public, presence, history, status
+//! engine.rs     Engine<R>: the task, the poll, presence, status, the sections
+//! unit.rs       Unit<R>: one section and its manifest — the cycle, fold_public
+//! space.rs      where a workspace's sections are on disk, and their markers
 //! manifest.rs   the wire types (manifest v2, the public map) + their grammar
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
@@ -34,9 +36,12 @@ mod remote;
 // The versioner reuses the local walk, the hashing and the atomic write
 // (scan) and the event sink (status) — see src/versions/.
 pub(crate) mod scan;
+// The versioner asks which folders are sections of their own.
+pub(crate) mod space;
 pub(crate) mod status;
 #[cfg(test)]
 mod tests;
+mod unit;
 pub(crate) mod versions;
 
 use std::collections::HashMap;
@@ -55,7 +60,7 @@ use config::{
     domain_of, ensure_device, normalize_endpoint, read_cloud_file, read_marker, remove_marker, sanitize_folder_name,
     state_dir, write_cloud_file, write_marker, DeviceIdentity, Marker, WorkspaceEntry,
 };
-use engine::{Engine, EngineCmd, EngineConfig, Exit, PublishRequest};
+use engine::{Engine, EngineCmd, EngineConfig, Exit, PublishRequest, SpacesChanged};
 use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
@@ -95,6 +100,15 @@ pub(crate) fn device_name(data_dir: &Path) -> String {
         .map(|d| d.name)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(device_display_name)
+}
+
+/// The folders inside the workspace at `root` that are sections of their
+/// own — this person's Private and the restricted folders they are in — by
+/// what the folders themselves say. Empty for a folder that is not a
+/// connected workspace.
+pub(crate) fn section_roots(root: &Path) -> Vec<PathBuf> {
+    let Some(marker) = read_marker(root) else { return Vec::new() };
+    space::held(root, &marker.ws_id).into_iter().map(|held| held.dir).collect()
 }
 
 /* ---------- The manager ---------- */
@@ -205,6 +219,10 @@ fn spawn_engine(inner: &mut ManagerInner, ws: &WorkspaceEntry) {
                 let (app, root) = (inner.app.clone(), ws.root.clone());
                 Box::new(move || mark_creator(&app, &root)) as Box<dyn Fn() + Send + Sync>
             }),
+            on_spaces: Some({
+                let app = inner.app.clone();
+                Box::new(move |changed| spaces_changed(&app, changed))
+            }),
         },
         Arc::new(HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id)),
         Arc::new(AppEvents(inner.app.clone())),
@@ -225,6 +243,20 @@ fn spawn_engine(inner: &mut ManagerInner, ws: &WorkspaceEntry) {
         bus.register(root.clone(), cmd_tx.clone());
     }
     inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, _watcher: watcher });
+}
+
+/// A space's folder appeared on this Mac or left it (`EngineConfig::
+/// on_spaces`): what follows a folder follows. A folder that left takes its
+/// local version history with it — the history holds every file's content —
+/// and the versioners are brought in line with the folders that are here.
+fn spaces_changed(app: &AppHandle, changed: SpacesChanged) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for (root, store_dir) in changed.removed {
+            crate::versions::forget_root(&app, &root, store_dir).await;
+        }
+        crate::versions::reconcile(&app);
+    });
 }
 
 /// Write down that this Mac holds the domain's own token for the workspace at
@@ -272,12 +304,22 @@ async fn access_removed(app: AppHandle, entry: WorkspaceEntry) {
 
     let root = PathBuf::from(&entry.root);
     // Found while the folder still exists: a store's key is the folder's
-    // canonical path.
+    // canonical path. Each section inside it has a store of its own.
     let store_dir = crate::versions::store_for_root(&data_dir, &root).dir;
+    let sections: Vec<(String, PathBuf)> = space::held(&root, &entry.ws_id)
+        .into_iter()
+        .map(|held| {
+            let store = crate::versions::store_for_root(&data_dir, &held.dir).dir;
+            (held.dir.to_string_lossy().to_string(), store)
+        })
+        .collect();
     let home = app.path().home_dir().ok();
     let copy = entry.clone();
     let deleted = tokio::task::spawn_blocking(move || remove_copy(&copy, home.as_deref())).await.unwrap_or(false);
     crate::versions::forget_root(&app, &entry.root, store_dir).await;
+    for (section, store) in sections {
+        crate::versions::forget_root(&app, &section, store).await;
+    }
     let _ = std::fs::remove_dir_all(state_dir(&data_dir, &entry.ws_id));
 
     // Said twice, on purpose: the event reaches the windows that are
@@ -1187,22 +1229,21 @@ pub(crate) async fn versions_index_for(
     app: &AppHandle,
     path: &str,
 ) -> Result<Option<crate::cloud::versions::VersionsIndex>, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
-    ask(tx, |reply| EngineCmd::VersionsIndex { reply }).await
+    ask(tx, |reply| EngineCmd::VersionsIndex { rel, reply }).await
 }
 
-/// How far back the bucket keeps for this workspace — a CAS on the cloud
+/// How far back the bucket keeps for the folder at `root` — a workspace, or
+/// one section of one, each with a store of its own. A CAS on the cloud
 /// index, so it is one answer for every device rather than a per-Mac
-/// setting. Errors when the workspace isn't connected: there is no bucket to
+/// setting. Errors when the folder isn't connected: there is no bucket to
 /// set a horizon on.
 pub(crate) async fn set_cloud_horizon(app: &AppHandle, root: &str, days: Option<u32>) -> Result<(), String> {
-    let root = root.to_string();
-    let tx = with_inner(app, |inner| {
-        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "That folder isn't connected.".to_string())
-    })?;
-    ask(tx, |reply| EngineCmd::SetCloudHorizon { days, reply }).await
+    let (tx, rel) =
+        with_inner(app, |inner| route(inner, root).ok_or_else(|| "That folder isn't connected.".to_string()))?;
+    ask(tx, |reply| EngineCmd::SetCloudHorizon { rel, days, reply }).await
 }
 
 /// One mirrored snapshot, downloaded and cached if this Mac hasn't seen it.
@@ -1211,21 +1252,21 @@ pub(crate) async fn version_snapshot(
     path: &str,
     id: &str,
 ) -> Result<crate::versions::store::Snapshot, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
     let id = id.to_string();
-    ask(tx, move |reply| EngineCmd::VersionSnapshot { id, reply }).await
+    ask(tx, move |reply| EngineCmd::VersionSnapshot { rel, id, reply }).await
 }
 
 /// One mirrored version's content, for a document whose blob this Mac's
 /// store no longer holds (or never did).
 pub(crate) async fn version_blob(app: &AppHandle, path: &str, hash: &str) -> Result<Vec<u8>, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
     let hash = hash.to_string();
-    ask(tx, move |reply| EngineCmd::VersionBlob { hash, reply }).await
+    ask(tx, move |reply| EngineCmd::VersionBlob { rel, hash, reply }).await
 }
 
 /// Erase everything on the workspace's domain (owner only) — the step that

@@ -17,15 +17,17 @@ use super::config::{
     WorkspaceEntry,
 };
 use super::engine::{
-    next_wake, Engine, EngineCmd, EngineConfig, Exit, PublishRequest, WorkspaceState, DIRECTORY_MIN_GAP,
-    ACTIVITY_FRESH, LEGACY_BATCH, POLL_INTERVAL, PRESENCE_BEAT,
+    next_wake, Engine, EngineCmd, EngineConfig, Exit, PublishRequest, DIRECTORY_MIN_GAP, ACTIVITY_FRESH,
+    POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
 use super::manifest::*;
 use super::remote::*;
 use super::scan::{hash16, now_ms, random_id, scan_local};
+use super::space::{self, RESERVED_DIRS};
 use super::status::*;
+use super::unit::{WorkspaceState, LEGACY_BATCH};
 use super::versions::{snapshot_id, VersionsEntry, VersionsIndex, CLOUD_GC_GRACE_MS, MIRROR_EVERY, NO_INDEX};
 use crate::versions::store::{
     digest_of, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
@@ -41,9 +43,12 @@ use crate::versions::store::{
 #[derive(Default)]
 struct FakeWorker {
     bound: Option<WorkspaceRecord>,
-    manifest: Manifest,
-    etag: u64,
-    blobs: HashMap<(String, String), (Vec<u8>, u64)>,
+    /// The shared workspace. `FakeWorker` derefs to it, so `be.manifest` is
+    /// the shared manifest, as it was when there was no other.
+    shared: Section,
+    /// Restricted folders and Privates, by id: each a section of its own
+    /// behind its people list (cloud-worker/src/spaces.ts).
+    spaces: BTreeMap<String, FakeSpace>,
     presence: BTreeMap<String, PresenceEntry>,
     /// Lease key (lowercased path) -> who holds it, as the `leases` table
     /// does: one row per document, the upsert's three ways to win spelled out
@@ -57,7 +62,6 @@ struct FakeWorker {
     reject_schema: bool,
     worker_version: u32,
     features: Vec<String>,
-    racer: Option<Manifest>,
     put_manifest_calls: u64,
     /// Every blob a device asked for — what "a move fetches no bytes" is
     /// counted in.
@@ -71,14 +75,6 @@ struct FakeWorker {
     /// How many times `/api/meta` was asked — the directory rides on it, so
     /// this is what makes "ask again, but not every cycle" testable.
     meta_calls: u64,
-    /* The version store: its own CAS'd index,
-       immutable snapshots and blobs, with an upload time per blob so the
-       cloud sweep's grace period is testable. */
-    versions_index: Option<VersionsIndex>,
-    versions_etag: u64,
-    version_snapshots: HashMap<String, Vec<u8>>,
-    version_blobs: HashMap<String, (Vec<u8>, u64)>,
-    versions_racer: Option<VersionsIndex>,
     /* People and the credentials they hold. The
        worker keeps only hashes; so does this — a code is looked up by its
        sha256 here exactly as it is there, which is what makes "the app hashes
@@ -108,6 +104,65 @@ struct FakeWorker {
     /// manifest gets a name the same way an `m-` id does.
     agents: BTreeMap<String, String>,
     next_id: u64,
+}
+
+/// What every section of a workspace has: a manifest with CAS-by-etag,
+/// content-addressed blobs, and a version store — its own CAS'd index,
+/// immutable snapshots and blobs, with an upload time per blob so the cloud
+/// sweep's grace period is testable.
+#[derive(Default)]
+struct Section {
+    manifest: Manifest,
+    etag: u64,
+    blobs: HashMap<(String, String), (Vec<u8>, u64)>,
+    racer: Option<Manifest>,
+    versions_index: Option<VersionsIndex>,
+    versions_etag: u64,
+    version_snapshots: HashMap<String, Vec<u8>>,
+    version_blobs: HashMap<String, (Vec<u8>, u64)>,
+    versions_racer: Option<VersionsIndex>,
+}
+
+impl Section {
+    fn etag_str(&self) -> String {
+        format!("e{}", self.etag)
+    }
+}
+
+struct FakeSpace {
+    kind: SpaceKind,
+    name: String,
+    by: String,
+    created_at: u64,
+    members: BTreeSet<String>,
+    section: Section,
+}
+
+impl FakeSpace {
+    fn entry(&self, id: &str) -> SpaceEntry {
+        SpaceEntry {
+            id: id.to_string(),
+            kind: self.kind,
+            name: self.name.clone(),
+            by: self.by.clone(),
+            created_at: self.created_at,
+            etag: self.section.etag_str(),
+            members: self.members.iter().cloned().collect(),
+        }
+    }
+}
+
+impl std::ops::Deref for FakeWorker {
+    type Target = Section;
+    fn deref(&self) -> &Section {
+        &self.shared
+    }
+}
+
+impl std::ops::DerefMut for FakeWorker {
+    fn deref_mut(&mut self) -> &mut Section {
+        &mut self.shared
+    }
 }
 
 /// The domain's env secret, as the fake holds it: matched with no row read,
@@ -148,8 +203,15 @@ impl Caller {
 }
 
 impl FakeWorker {
-    fn etag_str(&self) -> String {
-        format!("e{}", self.etag)
+    /// Every public address a section holds, for the domain-wide registry:
+    /// (space id, slug), `""` for the shared workspace.
+    fn addresses(&self) -> Vec<(String, String)> {
+        let shared = self.shared.manifest.public.keys().map(|slug| (String::new(), slug.clone()));
+        let spaces = self
+            .spaces
+            .iter()
+            .flat_map(|(id, sp)| sp.section.manifest.public.keys().map(move |slug| (id.clone(), slug.clone())));
+        shared.chain(spaces).collect()
     }
 }
 
@@ -166,6 +228,7 @@ fn fake_worker() -> SharedWorker {
             "roles".into(),
             "presence".into(),
             "leases".into(),
+            "spaces".into(),
         ],
         owner_token: OWNER_TOKEN.into(),
         ..Default::default()
@@ -179,16 +242,40 @@ struct FakeRemote {
     /// The bearer this device speaks with — the owner secret unless a test
     /// says otherwise, which is what most of them are.
     token: String,
+    /// The space the sync calls are aimed at (`Remote::space`); None for the
+    /// shared workspace.
+    space: Option<String>,
 }
 
 impl FakeRemote {
     fn new(be: &SharedWorker, device_id: &str) -> Self {
-        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: OWNER_TOKEN.to_string() }
+        Self::with_token(be, device_id, OWNER_TOKEN)
     }
 
     /// A device holding a token somebody redeemed, rather than the secret.
     fn with_token(be: &SharedWorker, device_id: &str, token: &str) -> Self {
-        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string() }
+        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string(), space: None }
+    }
+
+    /// The section this remote is aimed at, behind the gate the worker puts
+    /// before a space: somebody not in it is told it is not there, exactly
+    /// as for an id nobody has.
+    fn section<'a>(&self, b: &'a mut FakeWorker, caller: Caller) -> RemoteResult<&'a mut Section> {
+        let Some(id) = &self.space else { return Ok(&mut b.shared) };
+        let me = self.member_id(b, caller);
+        match b.spaces.get_mut(id) {
+            Some(space) if me.as_ref().is_some_and(|m| space.members.contains(m)) => Ok(&mut space.section),
+            _ => Err(RemoteError::NotFound),
+        }
+    }
+
+    /// The same section for the routes this fake does not gate (the deletes
+    /// a sweep makes): nothing, when the space is gone.
+    fn section_ungated<'a>(&self, b: &'a mut FakeWorker) -> Option<&'a mut Section> {
+        match &self.space {
+            None => Some(&mut b.shared),
+            Some(id) => b.spaces.get_mut(id).map(|space| &mut space.section),
+        }
     }
 
     fn check_offline(&self) -> RemoteResult<()> {
@@ -323,46 +410,166 @@ impl Remote for FakeRemote {
             }
             b.polls.push(beat.clone());
             if b.d1_down {
-                return Ok(PollResponse { manifest_etag: b.etag_str(), presence: BTreeMap::new(), leases: None });
+                return Ok(PollResponse {
+                    manifest_etag: b.etag_str(),
+                    presence: BTreeMap::new(),
+                    leases: None,
+                    spaces: None,
+                });
             }
             let leasing = b.features.iter().any(|f| f == "leases");
             let now = now_ms();
             let me = this.device_id.clone();
+            // Whose Mac it is, the way the worker decides: off the token for
+            // a person, off the adopted row for the creator.
+            let member_id = this.member_id(&b, caller);
+            // The spaces this person is in: what they may see a path in.
+            let mine: BTreeSet<String> = b
+                .spaces
+                .iter()
+                .filter(|(_, sp)| member_id.as_ref().is_some_and(|m| sp.members.contains(m)))
+                .map(|(id, _)| id.clone())
+                .collect();
             match beat {
                 None => {}
                 Some(Beat::Leave) => {
                     b.presence.remove(&me);
                     b.leases.retain(|_, l| l.device_id != me);
                 }
-                Some(Beat::Here { name, path, take }) => {
-                    // Whose Mac it is, the way the worker decides: off the
-                    // token for a person, off the adopted row for the creator.
-                    let member_id = this.member_id(&b, caller);
+                Some(Beat::Here { name, space, path, take }) => {
+                    // A beat naming a space this person is not in is a beat
+                    // with no path.
+                    let (space, path) = match space {
+                        Some(id) if !mine.contains(&id) => (None, None),
+                        other => (other, path),
+                    };
                     b.presence.insert(
                         me.clone(),
-                        PresenceEntry { member_id: member_id.clone(), name: name.clone(), path: path.clone(), ts: now },
+                        PresenceEntry {
+                            member_id: member_id.clone(),
+                            name: name.clone(),
+                            path: path.clone(),
+                            space: space.clone().filter(|_| path.is_some()),
+                            ts: now,
+                        },
                     );
                     if leasing {
-                        let key = path.as_deref().map(lease_key);
-                        b.leases.retain(|k, l| l.device_id != me || Some(k) == key.as_ref());
-                        if let Some(key) = key {
-                            let free = b
-                                .leases
-                                .get(&key)
-                                .map(|l| l.device_id == me || l.until <= now || take)
-                                .unwrap_or(true);
+                        // One row per document: the key is its space and its
+                        // path — the path alone, in the shared workspace.
+                        let row = path.as_deref().map(|p| match &space {
+                            None => lease_key(p),
+                            Some(id) => format!("{}\u{0}{}", id, lease_key(p)),
+                        });
+                        b.leases.retain(|k, l| l.device_id != me || Some(k) == row.as_ref());
+                        if let (Some(row), Some(path)) = (row, path) {
+                            let free =
+                                b.leases.get(&row).map(|l| l.device_id == me || l.until <= now || take).unwrap_or(true);
                             if free {
                                 b.leases.insert(
-                                    key.clone(),
-                                    LeaseEntry { path: key, device_id: me, member_id, name, until: now + 90_000 },
+                                    row,
+                                    LeaseEntry {
+                                        path: lease_key(&path),
+                                        space,
+                                        device_id: me,
+                                        member_id: member_id.clone(),
+                                        name,
+                                        until: now + 90_000,
+                                    },
                                 );
                             }
                         }
                     }
                 }
             }
-            let leases = leasing.then(|| b.leases.values().filter(|l| l.until > now).cloned().collect());
-            Ok(PollResponse { manifest_etag: b.etag_str(), presence: b.presence.clone(), leases })
+            let seen = |space: &Option<String>| space.as_ref().map(|id| mine.contains(id)).unwrap_or(true);
+            let leases =
+                leasing.then(|| b.leases.values().filter(|l| l.until > now && seen(&l.space)).cloned().collect());
+            let presence = b
+                .presence
+                .iter()
+                .map(|(id, e)| {
+                    let mut e = e.clone();
+                    if !seen(&e.space) {
+                        (e.space, e.path) = (None, None);
+                    }
+                    (id.clone(), e)
+                })
+                .collect();
+            let spaces = b
+                .features
+                .iter()
+                .any(|f| f == "spaces")
+                .then(|| b.spaces.iter().filter(|(id, _)| mine.contains(*id)).map(|(id, sp)| sp.entry(id)).collect());
+            Ok(PollResponse { manifest_etag: b.etag_str(), presence, leases, spaces })
+        }
+    }
+
+    /* ----- spaces ----- */
+
+    fn space(&self, id: &str) -> Self {
+        FakeRemote { space: Some(id.to_string()), ..self.clone() }
+    }
+
+    fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let this = self.clone();
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(me) = this.member_id(&b, caller) else {
+                return Err(RemoteError::Other("nobody to make a Private for".into()));
+            };
+            // After its person's id, so it cannot be made twice.
+            let id = format!("p-{}", &me[2..]);
+            let space = b.spaces.entry(id.clone()).or_insert_with(|| FakeSpace {
+                kind: SpaceKind::Private,
+                name: "Private".into(),
+                by: me.clone(),
+                created_at: now_ms(),
+                members: BTreeSet::from([me.clone()]),
+                section: Section { manifest: Manifest { name: "Private".into(), ..Default::default() }, etag: 1, ..Default::default() },
+            });
+            Ok(space.entry(&id))
+        }
+    }
+
+    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let this = self.clone();
+        let name = name.to_string();
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(me) = this.member_id(&b, caller) else {
+                return Err(RemoteError::Other("nobody to make a folder for".into()));
+            };
+            let id = Self::mint_id(&mut b, "s");
+            let space = FakeSpace {
+                kind: SpaceKind::Restricted,
+                name: name.clone(),
+                by: me.clone(),
+                created_at: now_ms(),
+                members: BTreeSet::from([me]),
+                section: Section { manifest: Manifest { name, ..Default::default() }, etag: 1, ..Default::default() },
+            };
+            let entry = space.entry(&id);
+            b.spaces.insert(id, space);
+            Ok(entry)
+        }
+    }
+
+    fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let (id, name) = (id.to_string(), name.to_string());
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let me = this.member_id(&b, caller);
+            match b.spaces.get_mut(&id) {
+                Some(space) if me.as_ref().is_some_and(|m| space.members.contains(m)) => {
+                    space.name = name;
+                    Ok(())
+                }
+                _ => Err(RemoteError::NotFound),
+            }
         }
     }
 
@@ -373,12 +580,13 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let since = since.map(String::from);
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            if since.as_deref() == Some(b.etag_str().as_str()) {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
+            if since.as_deref() == Some(sec.etag_str().as_str()) {
                 return Ok(None);
             }
-            Ok(Some((b.manifest.clone(), b.etag_str())))
+            Ok(Some((sec.manifest.clone(), sec.etag_str())))
         }
     }
 
@@ -391,7 +599,7 @@ impl Remote for FakeRemote {
         let manifest = manifest.clone();
         let base = base_etag.to_string();
         async move {
-            this.ready()?;
+            let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.put_manifest_calls += 1;
             if b.reject_schema {
@@ -400,16 +608,29 @@ impl Remote for FakeRemote {
                     manifest.version
                 )));
             }
-            if let Some(racer) = b.racer.take() {
-                b.manifest = racer;
-                b.etag += 1;
+            // The address registry: a slug is one section's for the whole
+            // domain, and a manifest naming another's is not stored.
+            let here = this.space.clone().unwrap_or_default();
+            let taken: Vec<String> = b
+                .addresses()
+                .into_iter()
+                .filter(|(holder, slug)| *holder != here && manifest.public.contains_key(slug))
+                .map(|(_, slug)| slug)
+                .collect();
+            let sec = this.section(&mut b, caller)?;
+            if !taken.is_empty() {
+                return Err(RemoteError::Taken(taken));
             }
-            if base != b.etag_str() {
+            if let Some(racer) = sec.racer.take() {
+                sec.manifest = racer;
+                sec.etag += 1;
+            }
+            if base != sec.etag_str() {
                 return Err(RemoteError::Conflict);
             }
-            b.manifest = manifest;
-            b.etag += 1;
-            Ok(b.etag_str())
+            sec.manifest = manifest;
+            sec.etag += 1;
+            Ok(sec.etag_str())
         }
     }
 
@@ -417,10 +638,11 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.ready()?;
+            let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.blob_gets += 1;
-            b.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
+            let sec = this.section(&mut b, caller)?;
+            sec.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
     }
 
@@ -434,8 +656,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let key = (file_id.to_string(), hash.to_string());
         async move {
-            this.ready()?;
-            this.be.lock().unwrap().blobs.entry(key).or_insert((bytes, 0));
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            this.section(&mut b, caller)?.blobs.entry(key).or_insert((bytes, 0));
             Ok(())
         }
     }
@@ -444,9 +667,10 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let fid = file_id.to_string();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            Ok(b.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
+            Ok(sec.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
         }
     }
 
@@ -456,7 +680,9 @@ impl Remote for FakeRemote {
         async move {
             let mut b = this.be.lock().unwrap();
             b.requests += 1;
-            b.blobs.remove(&key);
+            if let Some(sec) = this.section_ungated(&mut b) {
+                sec.blobs.remove(&key);
+            }
             Ok(())
         }
     }
@@ -468,9 +694,10 @@ impl Remote for FakeRemote {
     ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
         let this = self.clone();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            Ok(b.versions_index.clone().map(|i| (i, format!("v{}", b.versions_etag))))
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
+            Ok(sec.versions_index.clone().map(|i| (i, format!("v{}", sec.versions_etag))))
         }
     }
 
@@ -483,22 +710,23 @@ impl Remote for FakeRemote {
         let base = base_etag.to_string();
         let index = index.clone();
         async move {
-            this.ready()?;
+            let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
             // "Another device landed between your read and your write."
-            if let Some(theirs) = b.versions_racer.take() {
-                b.versions_index = Some(theirs);
-                b.versions_etag += 1;
+            if let Some(theirs) = sec.versions_racer.take() {
+                sec.versions_index = Some(theirs);
+                sec.versions_etag += 1;
                 return Err(RemoteError::Conflict);
             }
             let current =
-                if b.versions_index.is_some() { format!("v{}", b.versions_etag) } else { NO_INDEX.to_string() };
+                if sec.versions_index.is_some() { format!("v{}", sec.versions_etag) } else { NO_INDEX.to_string() };
             if base != current {
                 return Err(RemoteError::Conflict);
             }
-            b.versions_index = Some(index);
-            b.versions_etag += 1;
-            Ok(format!("v{}", b.versions_etag))
+            sec.versions_index = Some(index);
+            sec.versions_etag += 1;
+            Ok(format!("v{}", sec.versions_etag))
         }
     }
 
@@ -506,9 +734,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            b.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            this.section(&mut b, caller)?.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
         }
     }
 
@@ -516,9 +744,10 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.ready()?;
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
             // Immutable and create-only, exactly as the worker stores them.
-            this.be.lock().unwrap().version_snapshots.entry(id).or_insert(gz);
+            this.section(&mut b, caller)?.version_snapshots.entry(id).or_insert(gz);
             Ok(())
         }
     }
@@ -529,7 +758,9 @@ impl Remote for FakeRemote {
         async move {
             let mut b = this.be.lock().unwrap();
             b.requests += 1;
-            b.version_snapshots.remove(&id);
+            if let Some(sec) = this.section_ungated(&mut b) {
+                sec.version_snapshots.remove(&id);
+            }
             Ok(())
         }
     }
@@ -541,13 +772,14 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let at: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
             // A deliberately tiny page, so the caller's paging is exercised
             // by every sweep rather than by one test with a thousand blobs.
             const PAGE: usize = 2;
             let mut hashes: Vec<(String, u64)> =
-                b.version_blobs.iter().map(|(h, (_, up))| (h.clone(), *up)).collect();
+                sec.version_blobs.iter().map(|(h, (_, up))| (h.clone(), *up)).collect();
             hashes.sort();
             let page: Vec<(String, u64)> = hashes.iter().skip(at).take(PAGE).cloned().collect();
             let next = (at + PAGE < hashes.len()).then(|| (at + PAGE).to_string());
@@ -559,9 +791,10 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.ready()?;
-            let b = this.be.lock().unwrap();
-            b.version_blobs.get(&hash).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let sec = this.section(&mut b, caller)?;
+            sec.version_blobs.get(&hash).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
         }
     }
 
@@ -569,8 +802,9 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let hash = hash.to_string();
         async move {
-            this.ready()?;
-            this.be.lock().unwrap().version_blobs.entry(hash).or_insert((gz, now_ms()));
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            this.section(&mut b, caller)?.version_blobs.entry(hash).or_insert((gz, now_ms()));
             Ok(())
         }
     }
@@ -581,7 +815,9 @@ impl Remote for FakeRemote {
         async move {
             let mut b = this.be.lock().unwrap();
             b.requests += 1;
-            b.version_blobs.remove(&hash);
+            if let Some(sec) = this.section_ungated(&mut b) {
+                sec.version_blobs.remove(&hash);
+            }
             Ok(())
         }
     }
@@ -600,6 +836,7 @@ impl Remote for FakeRemote {
             b.versions_index = None;
             b.version_snapshots.clear();
             b.version_blobs.clear();
+            b.spaces.clear();
             // The wipe empties the database too: the
             // domain is free for a new binding, and nobody is left on it.
             b.members.clear();
@@ -958,6 +1195,7 @@ fn device_as(
             use_trash: false,
             creator: false,
             on_creator: None,
+            on_spaces: None,
         },
         Arc::new(FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)),
         events.clone(),
@@ -987,10 +1225,16 @@ impl Device {
         std::fs::rename(self.abs(from), to_abs).unwrap();
     }
     fn files(&self) -> Vec<String> {
-        scan_local(self.root.path()).unwrap().keys().cloned().collect()
+        scan_local(self.root.path(), &RESERVED_DIRS).unwrap().keys().cloned().collect()
     }
     async fn cycle(&mut self) {
         self.engine.cycle().await.expect("cycle failed");
+    }
+    /// A full pass, then a poll: what this Mac does over a quarter of a
+    /// minute — and the poll is what says which spaces its person is in.
+    async fn sync(&mut self) {
+        self.cycle().await;
+        self.engine.poll_for_test().await;
     }
     fn status(&self) -> CloudStatus {
         self.statuses
@@ -1039,7 +1283,25 @@ impl Device {
         pinned: bool,
         label: Option<&str>,
     ) -> SnapshotRow {
-        let store = self.store();
+        self.captured_in(&self.store(), ts, reason, files, pinned, label)
+    }
+
+    /// The same, into the store of one section's folder (`Private`,
+    /// `Restricted/Finance`): every section keeps its history apart.
+    fn captured_under(&self, sub: &str, ts: u64, files: &[(&str, &str)]) -> SnapshotRow {
+        let store = crate::versions::store_for_root(self.data.path(), &self.abs(sub));
+        self.captured_in(&store, ts, Reason::Interval, files, false, None)
+    }
+
+    fn captured_in(
+        &self,
+        store: &Store,
+        ts: u64,
+        reason: Reason,
+        files: &[(&str, &str)],
+        pinned: bool,
+        label: Option<&str>,
+    ) -> SnapshotRow {
         let mut map: BTreeMap<String, FileEntry> = BTreeMap::new();
         let mut bytes = 0u64;
         for (path, content) in files {
@@ -1429,6 +1691,29 @@ async fn offline_reports_and_recovers() {
     assert_eq!(manifest_of(&be).files.len(), 1);
 }
 
+/// What a pass could not push while the domain was unreachable goes up as
+/// soon as a poll gets through: nothing has to be typed again to send it.
+#[tokio::test]
+async fn an_edit_made_while_the_domain_was_unreachable_goes_up_when_a_poll_gets_through() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.engine.probe_worker().await;
+    a.write("doc.md", "first\n");
+    a.cycle().await;
+    a.write("doc.md", "first\nwritten offline\n");
+    be.lock().unwrap().offline = true;
+    assert!(a.engine.cycle().await.is_err());
+    assert_eq!(a.phase(), Phase::Offline);
+    a.engine.poll_for_test().await;
+    assert_eq!(a.phase(), Phase::Offline, "still unreachable: nothing to do yet");
+
+    be.lock().unwrap().offline = false;
+    a.engine.poll_for_test().await;
+    assert_eq!(a.phase(), Phase::Idle);
+    let file = manifest_of(&be).files.values().next().cloned().unwrap();
+    assert_eq!((file.rev, file.hash), (2, hash16(b"first\nwritten offline\n")));
+}
+
 #[tokio::test]
 async fn quiet_cycles_change_nothing() {
     let be = fake_worker();
@@ -1491,7 +1776,7 @@ async fn publish_mirrors_to_the_other_device() {
     assert_eq!(page.path, "doc.md");
 
     a.cycle().await;
-    assert!(a.engine.state.public_ops.is_empty(), "carried op must clear");
+    assert!(a.engine.shared().state.public_ops.is_empty(), "carried op must clear");
     {
         let public = public_of(&be);
         assert_eq!(public.len(), 1);
@@ -1657,12 +1942,12 @@ async fn publish_for_missing_file_waits_but_shows_in_effective_view() {
     // Nothing to bind to yet: no CAS wasted, op still queued — but the
     // status already reports it, so the frontend sees the user's page.
     assert_eq!(be.lock().unwrap().put_manifest_calls, before);
-    assert_eq!(a.engine.state.public_ops.len(), 1);
+    assert_eq!(a.engine.shared().state.public_ops.len(), 1);
     assert!(a.page("later").is_some());
 
     a.write("later.md", "# here now\n");
     a.cycle().await;
-    assert!(a.engine.state.public_ops.is_empty());
+    assert!(a.engine.shared().state.public_ops.is_empty());
     let public = public_of(&be);
     assert_eq!(public["later"].path, "later.md");
     assert!(manifest_of(&be).files.contains_key(public["later"].file.as_ref().unwrap()));
@@ -1680,7 +1965,7 @@ async fn root_page_is_one_entry_and_clears() {
     a.engine.queue_set_root(Some("home".into())).unwrap();
     assert!(a.page("home").unwrap().root, "the root shows before the CAS");
     a.cycle().await;
-    assert!(a.engine.state.root_op.is_none());
+    assert!(a.engine.shared().state.root_op.is_none());
     assert!(public_of(&be)["home"].root);
     assert!(!public_of(&be)["about"].root);
 
@@ -1752,7 +2037,7 @@ async fn custom_slug_race_suffixes_the_loser() {
     let public = public_of(&be);
     assert_eq!(public["plan"].path, "a.md");
     assert_eq!(public["plan-2"].path, "b.md");
-    assert!(b.engine.state.public_ops.is_empty());
+    assert!(b.engine.shared().state.public_ops.is_empty());
     assert_eq!(b.page("plan-2").unwrap().path, "b.md", "bob's status tells him his final slug");
 
     // A local check catches the taken slug once the device has pulled.
@@ -1770,7 +2055,7 @@ async fn custom_slug_race_suffixes_the_loser() {
     let public = public_of(&be);
     assert_eq!(public.len(), 2, "no duplicate page for a.md");
     assert_eq!(public["plan"].path, "a.md");
-    assert!(d.engine.state.public_ops.is_empty());
+    assert!(d.engine.shared().state.public_ops.is_empty());
     let _ = c;
 }
 
@@ -1891,7 +2176,7 @@ async fn resume_in_place_converges_without_conflict_copies() {
     let mut files = c.files();
     files.sort();
     assert_eq!(files, vec!["notes/one.md", "notes/two.md", "only-here.md", "three.md"], "no conflict copies");
-    assert_eq!(c.engine.state.files.len(), 4);
+    assert_eq!(c.engine.shared().state.files.len(), 4);
     let m = manifest_of(&be);
     assert_eq!(m.files.len(), 4);
     assert!(m.files.values().filter(|f| f.path != "only-here.md").all(|f| f.rev == 1), "identical files were not re-pushed");
@@ -2508,6 +2793,7 @@ async fn the_creators_mac_never_deletes_on_anybodys_word() {
             use_trash: false,
             creator: false,
             on_creator: Some(Box::new(move || heard.store(true, std::sync::atomic::Ordering::SeqCst))),
+            on_spaces: None,
         },
         Arc::new(FakeRemote::new(&be, "d-alice")),
         Arc::new(Collected::default()),
@@ -3798,7 +4084,7 @@ fn cloud_file_and_marker_round_trip() {
     write_marker(root.path(), &marker).unwrap();
     assert_eq!(read_marker(root.path()), Some(marker));
     assert!(root.path().join(".doklin/cloud.json").exists());
-    assert!(scan_local(root.path()).unwrap().is_empty(), "the marker is invisible to the scan");
+    assert!(scan_local(root.path(), &[]).unwrap().is_empty(), "the marker is invisible to the scan");
     super::config::remove_marker(root.path());
     assert!(read_marker(root.path()).is_none());
 }
@@ -3977,7 +4263,7 @@ async fn cloud_horizon_is_a_cas_on_the_cloud_index() {
     };
     be.lock().unwrap().versions_racer = Some(theirs);
 
-    a.engine.set_cloud_horizon(Some(30)).await.expect("set the cloud horizon");
+    a.engine.set_cloud_horizon("", Some(30)).await.expect("set the cloud horizon");
     let index = cloud_index(&be);
     assert_eq!(index.horizon_days, Some(30), "the loser re-read and landed it anyway");
     assert!(
@@ -4001,7 +4287,7 @@ async fn cloud_horizon_is_a_cas_on_the_cloud_index() {
     );
 
     // Forever is a real answer, not the absence of one.
-    a.engine.set_cloud_horizon(None).await.expect("back to forever");
+    a.engine.set_cloud_horizon("", None).await.expect("back to forever");
     assert_eq!(cloud_index(&be).horizon_days, None);
 }
 
@@ -4053,14 +4339,14 @@ async fn cloud_sweep_spares_young_blobs() {
     let orphan = hash_full(b"a version in flight\n");
     be.lock().unwrap().version_blobs.insert(orphan.clone(), (vec![1, 2, 3], now_ms()));
 
-    a.engine.state.last_cloud_sweep_ms = None; // due again
+    a.engine.shared_mut().state.last_cloud_sweep_ms = None; // due again
     a.engine.mirror_versions().await;
     assert!(be.lock().unwrap().version_blobs.contains_key(&orphan), "an hour's grace, so a race can finish");
 
     // Once it is old enough, and still referenced by nothing, it goes —
     // while the blob a retained snapshot names stays.
     be.lock().unwrap().version_blobs.get_mut(&orphan).unwrap().1 = now_ms() - CLOUD_GC_GRACE_MS - 1;
-    a.engine.state.last_cloud_sweep_ms = None;
+    a.engine.shared_mut().state.last_cloud_sweep_ms = None;
     a.engine.mirror_versions().await;
     let worker = be.lock().unwrap();
     assert!(!worker.version_blobs.contains_key(&orphan));
@@ -4176,12 +4462,12 @@ async fn legacy_cleanup_sweeps_the_retired_blob_backlog_across_polls() {
     // A batch per poll, and the bookmark is persisted between them.
     a.engine.poll_for_test().await;
     assert!(be.lock().unwrap().blobs.len() < blobs_before, "it has started");
-    let held = serde_json::to_value(&a.engine.state).unwrap();
+    let held = serde_json::to_value(&a.engine.shared().state).unwrap();
     assert!(held["legacy_cleanup"]["cursor"].is_string(), "the bookmark is persisted: {}", held["legacy_cleanup"]);
     a.engine.poll_for_test().await;
     a.engine.poll_for_test().await;
 
-    assert!(a.engine.state.legacy_cleanup.done, "the backlog is finished");
+    assert!(a.engine.shared().state.legacy_cleanup.done, "the backlog is finished");
     let b = be.lock().unwrap();
     assert_eq!(b.blobs.len(), LEGACY_BATCH + 4, "one blob per living file, and nothing for the deleted one");
     for (fid, f) in &b.manifest.files {
@@ -4192,7 +4478,7 @@ async fn legacy_cleanup_sweeps_the_retired_blob_backlog_across_polls() {
 
     // Being done is persisted like every other step of it. A device that
     // forgot would walk the whole bucket again on its next launch.
-    let finished = serde_json::to_value(&a.engine.state).unwrap();
+    let finished = serde_json::to_value(&a.engine.shared().state).unwrap();
     let reloaded: WorkspaceState = serde_json::from_value(finished.clone()).unwrap();
     assert!(reloaded.legacy_cleanup.done, "it must survive a restart: {}", finished["legacy_cleanup"]);
     assert!(finished["legacy_cleanup"].get("cursor").is_none(), "and drop the bookmark it no longer needs");
@@ -4227,11 +4513,11 @@ async fn a_bookmark_from_the_archive_pass_does_not_carry_into_the_blob_sweep() {
 
     // What the older release left behind: the archive pass was mid-way.
     let last_fid = manifest_of(&be).files.keys().next_back().unwrap().clone();
-    a.engine.state.legacy_cleanup.archives_done = false;
-    a.engine.state.legacy_cleanup.cursor = Some(last_fid);
+    a.engine.shared_mut().state.legacy_cleanup.archives_done = false;
+    a.engine.shared_mut().state.legacy_cleanup.cursor = Some(last_fid);
 
     a.engine.poll_for_test().await;
-    assert!(a.engine.state.legacy_cleanup.archives_done, "there is only one pass now");
+    assert!(a.engine.shared().state.legacy_cleanup.archives_done, "there is only one pass now");
     a.engine.poll_for_test().await;
     assert_eq!(be.lock().unwrap().blobs.len(), 3, "every file swept, not just the ones past the old cursor");
 }
@@ -4322,7 +4608,7 @@ impl WorkerTx {
         let Some(f) = self.m.files.remove(fid) else { return };
         self.m.tombstones.insert(
             fid.to_string(),
-            Tombstone { path: f.path, rev: f.rev + 1, ts: self.now, by: self.by.clone() },
+            Tombstone { path: f.path, rev: f.rev + 1, ts: self.now, by: self.by.clone(), to: None },
         );
         self.dirty = true;
     }
@@ -5159,4 +5445,504 @@ async fn a_worker_write_that_wins_the_race_on_the_same_document_is_merged_on_the
     assert_eq!(f.hash, hash16(merged.as_bytes()));
     b.cycle().await;
     assert_eq!(b.read("doc.md").as_deref(), Some(merged));
+}
+
+/* ---------- Sections: Private and restricted folders ---------- */
+
+/// Somebody invited to the workspace, on a Mac named after them.
+async fn person(be: &SharedWorker, name: &str) -> Device {
+    person_on(be, name, name).await
+}
+
+/// A Mac of theirs called `mac` — a second one reaches the same person,
+/// because a person is their address.
+async fn person_on(be: &SharedWorker, name: &str, mac: &str) -> Device {
+    let owner = FakeRemote::new(be, "d-owner");
+    let email = format!("{}@example.com", name.to_lowercase());
+    let token = invite_and_redeem(be, &owner, &email, name, &format!("d-{}", mac.to_lowercase())).await;
+    let mut d = device_as(mac, be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
+    d.engine.probe_worker().await;
+    d
+}
+
+fn member_of(d: &Device) -> String {
+    d.engine.me_for_test().expect("a person").to_string()
+}
+
+fn private_of(d: &Device) -> String {
+    format!("p-{}", &member_of(d)[2..])
+}
+
+/// The restricted folder called `name`, by id.
+fn folder_called(be: &SharedWorker, name: &str) -> String {
+    let b = be.lock().unwrap();
+    let found = b.spaces.iter().find(|(_, sp)| sp.kind == SpaceKind::Restricted && sp.name == name);
+    found.map(|(id, _)| id.clone()).unwrap_or_else(|| panic!("no restricted folder called {name}"))
+}
+
+fn manifest_in(be: &SharedWorker, space: &str) -> Manifest {
+    be.lock().unwrap().spaces[space].section.manifest.clone()
+}
+
+fn paths(m: &Manifest) -> Vec<String> {
+    let mut paths: Vec<String> = m.files.values().map(|f| f.path.clone()).collect();
+    paths.sort();
+    paths
+}
+
+fn add_to(be: &SharedWorker, space: &str, d: &Device) {
+    be.lock().unwrap().spaces.get_mut(space).unwrap().members.insert(member_of(d));
+}
+
+fn take_out(be: &SharedWorker, space: &str, d: &Device) {
+    be.lock().unwrap().spaces.get_mut(space).unwrap().members.remove(&member_of(d));
+}
+
+/// Everyone has a Private: a folder at the top of the workspace that syncs
+/// between that person's own Macs and reaches nobody else's. Nothing under
+/// it is ever in the shared manifest.
+#[tokio::test]
+async fn everyone_has_a_private_that_only_their_own_macs_receive() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    assert!(alice.abs("Private").is_dir(), "the first poll makes it");
+
+    alice.write("Private/diary.md", "dear diary\n");
+    alice.write("shared.md", "for everyone\n");
+    alice.cycle().await;
+    let hers = private_of(&alice);
+    assert_eq!(paths(&manifest_in(&be, &hers)), ["diary.md"], "its own manifest, its own paths");
+    assert_eq!(paths(&manifest_of(&be)), ["shared.md"], "and nothing of it in the shared one");
+    assert!(manifest_of(&be).tombstones.is_empty());
+
+    bob.sync().await;
+    assert_eq!(bob.read("shared.md").as_deref(), Some("for everyone\n"));
+    assert!(bob.abs("Private").is_dir(), "Bob has one of his own");
+    assert_eq!(bob.read("Private/diary.md"), None, "and Alice's is not in it");
+
+    let mut air = person_on(&be, "Alice", "Air").await;
+    air.sync().await;
+    assert_eq!(air.read("Private/diary.md").as_deref(), Some("dear diary\n"), "her other Mac is hers");
+
+    let sections = alice.status().spaces;
+    assert_eq!(sections.len(), 1);
+    assert_eq!((sections[0].kind, sections[0].path.as_str()), (SpaceKind::Private, "Private"));
+    assert_eq!(alice.files(), ["shared.md"], "the shared walk never goes in there");
+}
+
+/// A creator who never said who they are has no row to hang a Private on:
+/// none is asked for, and nothing appears.
+#[tokio::test]
+async fn a_creator_with_no_identity_has_no_private_and_is_not_asked_for_one() {
+    let be = fake_worker();
+    let mut owner = device("Owner", &be);
+    owner.engine.probe_worker().await;
+    owner.write("doc.md", "x\n");
+    owner.sync().await;
+    owner.engine.poll_for_test().await;
+    assert!(!owner.abs("Private").exists());
+    assert!(be.lock().unwrap().spaces.is_empty());
+}
+
+/// A shared folder that was called `Private` before the name was reserved is
+/// renamed once, by whichever Mac meets it first, and stays shared. Only
+/// then does the person's own Private take the name.
+#[tokio::test]
+async fn a_shared_folder_called_private_is_renamed_once_and_stays_shared() {
+    let be = fake_worker();
+    {
+        let mut b = be.lock().unwrap();
+        let bytes = b"from before\n".to_vec();
+        let hash = hash16(&bytes);
+        b.blobs.insert(("f-legacy000001".into(), hash.clone()), (bytes.clone(), 0));
+        let file = ManifestFile { path: "private/old.md".into(), rev: 1, hash, size: 12, mtime: 1, by: "Old Mac".into() };
+        b.manifest.files.insert("f-legacy000001".into(), file);
+        b.manifest.seq += 1;
+        b.etag += 1;
+    }
+    let mut alice = person(&be, "Alice").await;
+    alice.cycle().await;
+    assert_eq!(alice.read("Private (shared)/old.md").as_deref(), Some("from before\n"));
+    let shared = manifest_of(&be);
+    assert_eq!(paths(&shared), ["Private (shared)/old.md"], "a move: the same file, somewhere it can stay");
+    assert_eq!(shared.files["f-legacy000001"].rev, 2);
+    assert!(shared.tombstones.is_empty(), "nothing was deleted to do it");
+
+    alice.engine.poll_for_test().await;
+    assert!(alice.abs("Private").is_dir());
+    assert!(space::read_space_marker(&alice.abs("Private")).is_some(), "now the name is her Private's");
+
+    let mut bob = person(&be, "Bob").await;
+    bob.sync().await;
+    assert_eq!(bob.read("Private (shared)/old.md").as_deref(), Some("from before\n"));
+    assert_eq!(bob.read("Private/old.md"), None);
+}
+
+/// Dropping a shared folder into `Restricted/` restricts it: it becomes a
+/// space with only its mover in it, its files leave the shared workspace as
+/// moves — not as a mass deletion — and they are deleted outright from the
+/// Mac of somebody who is not in it, the emptied folder with them.
+#[tokio::test]
+async fn a_folder_dropped_into_restricted_is_restricted_and_leaves_everyone_else() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut carol = person(&be, "Carol").await;
+    for n in 1..=6 {
+        alice.write(&format!("Finance/q{n}.md"), &format!("quarter {n}\n"));
+    }
+    alice.write("Finance/notes/plan.md", "the plan\n");
+    alice.write("readme.md", "hello\n");
+    alice.sync().await;
+    carol.sync().await;
+    assert_eq!(carol.read("Finance/notes/plan.md").as_deref(), Some("the plan\n"));
+
+    std::fs::create_dir_all(alice.abs("Restricted")).unwrap();
+    std::fs::rename(alice.abs("Finance"), alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+
+    let finance = folder_called(&be, "Finance");
+    assert_eq!(manifest_in(&be, &finance).files.len(), 7, "the folder's own manifest holds them now");
+    assert!(paths(&manifest_in(&be, &finance)).contains(&"notes/plan.md".to_string()));
+    let shared = manifest_of(&be);
+    assert_eq!(paths(&shared), ["readme.md"]);
+    assert_eq!(shared.tombstones.len(), 7);
+    assert!(
+        shared.tombstones.values().all(|t| t.to.as_deref() == Some(finance.as_str())),
+        "each says where it went rather than that it was deleted"
+    );
+    assert_eq!(alice.phase(), Phase::Idle, "seven of eight files gone is a move here, not a deletion to confirm");
+    assert!(alice.events.of(EV_PENDING_DELETES).is_empty());
+    assert_eq!(be.lock().unwrap().spaces[&finance].members.len(), 1, "nobody is in it but who made it");
+
+    carol.sync().await;
+    assert!(!carol.abs("Finance").exists(), "gone from her Mac, the emptied folder too");
+    assert!(!carol.abs("Restricted").exists(), "and she is told nothing of where it went");
+    assert_eq!(carol.read("readme.md").as_deref(), Some("hello\n"));
+    assert!(carol.status().spaces.iter().all(|s| s.kind == SpaceKind::Private));
+
+    // Added later, she gets the folder like anything new.
+    add_to(&be, &finance, &carol);
+    carol.engine.poll_for_test().await;
+    assert_eq!(carol.read("Restricted/Finance/notes/plan.md").as_deref(), Some("the plan\n"));
+    assert_eq!(carol.status().spaces.iter().filter(|s| s.path == "Restricted/Finance").count(), 1);
+}
+
+/// On the Mac of somebody who is in the folder a file moves to, their copy
+/// moves with it: nothing is downloaded again, and an edit they had not
+/// synced yet carries on in the moved file.
+#[tokio::test]
+async fn a_file_moved_into_a_folder_stays_in_place_for_the_people_in_it() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.write("Docs/budget.md", "line one\nline two\n");
+    alice.write("Docs/untouched.md", "as it was\n");
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    add_to(&be, &finance, &bob);
+    bob.sync().await;
+    assert!(bob.abs("Restricted/Finance").is_dir());
+    assert_eq!(bob.read("Docs/budget.md").as_deref(), Some("line one\nline two\n"));
+
+    // Bob types something he has not synced; Alice moves both files.
+    bob.write("Docs/budget.md", "line one\nline two\nBob's line\n");
+    for name in ["budget.md", "untouched.md"] {
+        std::fs::rename(alice.abs(&format!("Docs/{name}")), alice.abs(&format!("Restricted/Finance/{name}"))).unwrap();
+    }
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_in(&be, &finance)), ["budget.md", "untouched.md"]);
+
+    let fetched = be.lock().unwrap().blob_gets;
+    bob.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().blob_gets, fetched, "his copies moved; nothing was downloaded");
+    assert!(!bob.abs("Docs").exists(), "and left no empty folder behind");
+    assert_eq!(bob.read("Restricted/Finance/untouched.md").as_deref(), Some("as it was\n"));
+    assert_eq!(bob.read("Restricted/Finance/budget.md").as_deref(), Some("line one\nline two\nBob's line\n"));
+
+    // His edit went up as the next revision of the moved file — in the folder, and nowhere else.
+    let there = manifest_in(&be, &finance);
+    let budget = there.files.values().find(|f| f.path == "budget.md").unwrap();
+    assert_eq!((budget.rev, budget.by.as_str()), (2, member_of(&bob).as_str()));
+    assert!(paths(&manifest_of(&be)).is_empty(), "the shared workspace got nothing back");
+    alice.engine.poll_for_test().await;
+    assert_eq!(alice.read("Restricted/Finance/budget.md").as_deref(), Some("line one\nline two\nBob's line\n"));
+}
+
+/// Taken out of a restricted folder, a Mac deletes it outright — the folder,
+/// what it had synced of it — and touches nothing in the cloud. A folder
+/// deleted by hand, while its person is still in it, comes back whole
+/// instead of deleting everyone's files.
+#[tokio::test]
+async fn a_restricted_folder_leaves_with_its_membership_and_comes_back_if_only_trashed() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    alice.write("Restricted/Plans/roadmap.md", "next year\n");
+    alice.cycle().await;
+    let plans = folder_called(&be, "Plans");
+    add_to(&be, &plans, &bob);
+    bob.sync().await;
+    assert_eq!(bob.read("Restricted/Plans/roadmap.md").as_deref(), Some("next year\n"));
+    let bobs_state = bob._state.path().join("spaces").join(&plans);
+    assert!(bobs_state.join("state.json").exists());
+
+    // Bob trashes the folder himself: it is not his to delete that way.
+    std::fs::remove_dir_all(bob.abs("Restricted/Plans")).unwrap();
+    bob.sync().await;
+    assert_eq!(bob.read("Restricted/Plans/roadmap.md").as_deref(), Some("next year\n"), "back, whole");
+    assert_eq!(paths(&manifest_in(&be, &plans)), ["roadmap.md"]);
+    assert!(manifest_in(&be, &plans).tombstones.is_empty(), "and nobody else lost a file");
+
+    take_out(&be, &plans, &bob);
+    bob.engine.poll_for_test().await;
+    assert!(!bob.abs("Restricted/Plans").exists(), "gone from his Mac");
+    assert!(!bobs_state.exists(), "with what it had synced");
+    assert!(bob.status().spaces.iter().all(|s| s.id != plans));
+    assert_eq!(paths(&manifest_in(&be, &plans)), ["roadmap.md"], "nothing in the cloud was touched");
+    alice.sync().await;
+    assert_eq!(alice.read("Restricted/Plans/roadmap.md").as_deref(), Some("next year\n"));
+
+    // His Private is never taken on a list's word.
+    assert!(bob.abs("Private").is_dir());
+}
+
+/// Renaming a restricted folder on one Mac renames it for everyone in it:
+/// the folder's name is the space's name.
+#[tokio::test]
+async fn renaming_a_restricted_folder_here_renames_it_for_everyone_in_it() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    alice.write("Restricted/Finance/q3.md", "numbers\n");
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    add_to(&be, &finance, &bob);
+    bob.sync().await;
+
+    std::fs::rename(alice.abs("Restricted/Finance"), alice.abs("Restricted/Money")).unwrap();
+    alice.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().spaces[&finance].name, "Money");
+    assert_eq!(alice.read("Restricted/Money/q3.md").as_deref(), Some("numbers\n"));
+    assert!(manifest_in(&be, &finance).tombstones.is_empty(), "a rename, not files leaving and arriving");
+
+    let fetched = be.lock().unwrap().blob_gets;
+    bob.engine.poll_for_test().await;
+    assert_eq!(bob.read("Restricted/Money/q3.md").as_deref(), Some("numbers\n"));
+    assert!(!bob.abs("Restricted/Finance").exists());
+    assert_eq!(be.lock().unwrap().blob_gets, fetched, "his folder was renamed, not fetched again");
+    assert_eq!(bob.status().spaces.iter().find(|s| s.id == finance).unwrap().path, "Restricted/Money");
+}
+
+/// A published note keeps its address when it moves to another section: the
+/// section it left gives the address up, then the one it went to takes it.
+#[tokio::test]
+async fn a_published_note_keeps_its_address_when_it_changes_section() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    alice.write("note.md", "# a note\n");
+    alice.sync().await;
+    alice.publish("note.md", PublicKind::File, Some("the-note")).unwrap();
+    alice.cycle().await;
+    assert!(public_of(&be).contains_key("the-note"));
+
+    std::fs::rename(alice.abs("note.md"), alice.abs("Private/note.md")).unwrap();
+    alice.cycle().await;
+    assert!(!public_of(&be).contains_key("the-note"), "the shared workspace let go of it");
+    let hers = manifest_in(&be, &private_of(&alice));
+    let page = hers.public.get("the-note").expect("her Private holds the address now");
+    assert_eq!(page.path, "note.md");
+    assert_eq!(page.file.as_deref(), hers.files.iter().find(|(_, f)| f.path == "note.md").map(|(fid, _)| fid.as_str()));
+    assert_eq!(alice.page("the-note").unwrap().path, "Private/note.md", "one list, paths as the workspace spells them");
+    assert!(alice.page("the-note").unwrap().alive);
+    assert_eq!(alice.phase(), Phase::Idle);
+    assert!(alice.events.of(EV_ADDRESS_TAKEN).is_empty());
+}
+
+/// An address is one section's for the whole domain. One held by a section
+/// on this Mac is refused before anything is asked; one held by a section
+/// this Mac cannot see is refused by the domain — the page is dropped, the
+/// user is told, and everything else in that cycle still lands.
+#[tokio::test]
+async fn an_address_another_section_holds_is_refused_and_said_so() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    bob.sync().await;
+    bob.write("Private/mine.md", "bob's\n");
+    bob.cycle().await;
+    bob.publish("Private/mine.md", PublicKind::File, Some("bobs-page")).unwrap();
+    bob.cycle().await;
+    assert!(manifest_in(&be, &private_of(&bob)).public.contains_key("bobs-page"));
+
+    alice.write("a.md", "alice's\n");
+    alice.write("b.md", "also hers\n");
+    alice.sync().await;
+    assert_eq!(alice.publish("a.md", PublicKind::File, Some("bobs-page")).unwrap(), "bobs-page");
+    alice.write("c.md", "written meanwhile\n");
+    alice.cycle().await;
+    let taken = alice.events.of(EV_ADDRESS_TAKEN);
+    assert_eq!(taken.len(), 1);
+    assert_eq!((taken[0]["slug"].as_str(), taken[0]["path"].as_str()), (Some("bobs-page"), Some("a.md")));
+    assert!(alice.page("bobs-page").is_none(), "the page was not published");
+    assert!(!public_of(&be).contains_key("bobs-page"));
+    assert_eq!(alice.phase(), Phase::Idle);
+    assert!(paths(&manifest_of(&be)).contains(&"c.md".to_string()), "the rest of the cycle landed");
+
+    // On her own Mac the answer is immediate.
+    alice.publish("b.md", PublicKind::File, Some("hers")).unwrap();
+    alice.cycle().await;
+    alice.write("Private/x.md", "x\n");
+    alice.cycle().await;
+    let refused = alice.publish("Private/x.md", PublicKind::File, Some("hers")).unwrap_err();
+    assert!(refused.contains("already the address"), "{refused}");
+    assert!(alice.engine.queue_set_root(Some("hers".into())).is_ok());
+    alice.publish("Private/x.md", PublicKind::File, Some("only-hers")).unwrap();
+    alice.cycle().await;
+    let no_home = alice.engine.queue_set_root(Some("only-hers".into())).unwrap_err();
+    assert!(no_home.contains("shared workspace"), "{no_home}");
+}
+
+/// A document open in a section says which section: her own other Mac sees
+/// the path and the lease as its folders spell them, and somebody outside
+/// the section sees that she is here and nothing of what she has open.
+#[tokio::test]
+async fn presence_and_leases_in_a_section_are_only_for_the_people_in_it() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut air = person_on(&be, "Alice", "Air").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    alice.write("Private/Diary.md", "dear diary\n");
+    alice.cycle().await;
+    air.sync().await;
+    bob.sync().await;
+
+    open(&mut alice, "Private/Diary.md");
+    alice.engine.poll_for_test().await;
+    let beat = beats(&be).last().cloned();
+    let hers = private_of(&alice);
+    assert!(
+        matches!(&beat, Some(Beat::Here { space: Some(s), path: Some(p), .. }) if *s == hers && p == "Diary.md"),
+        "the beat names the section and the path inside it: {beat:?}"
+    );
+    assert!(alice.engine.holds_for_test("Private/Diary.md"));
+
+    air.engine.poll_for_test().await;
+    let seen = air.status();
+    assert_eq!(seen.presence.iter().find(|p| p.device == "Alice").unwrap().path.as_deref(), Some("Private/Diary.md"));
+    assert_eq!(seen.leases.len(), 1);
+    assert_eq!((seen.leases[0].path.as_str(), seen.leases[0].own), ("private/diary.md", true));
+
+    bob.engine.poll_for_test().await;
+    let outside = bob.status();
+    assert_eq!(outside.presence.iter().find(|p| p.device == "Alice").unwrap().path, None, "here, and that is all");
+    assert!(outside.leases.is_empty());
+}
+
+/// Each section's history is mirrored into that section's own store on the
+/// domain: what was in a Private never reaches the store everyone reads.
+#[tokio::test]
+async fn each_sections_history_is_mirrored_into_its_own_store() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    alice.write("shared.md", "v1\n");
+    alice.sync().await;
+    alice.write("Private/diary.md", "secret v1\n");
+    alice.cycle().await;
+    alice.captured(ago(2 * HOUR), Reason::Interval, &[("shared.md", "v1\n")]);
+    alice.captured_under("Private", ago(HOUR), &[("diary.md", "secret v1\n")]);
+    alice.engine.mirror_versions().await;
+
+    let hers = private_of(&alice);
+    let b = be.lock().unwrap();
+    assert_eq!(b.versions_index.as_ref().unwrap().snapshots.len(), 1);
+    assert_eq!(b.spaces[&hers].section.versions_index.as_ref().unwrap().snapshots.len(), 1);
+    let secret = hash_full(b"secret v1\n");
+    assert!(b.spaces[&hers].section.version_blobs.contains_key(&secret));
+    assert!(!b.version_blobs.contains_key(&secret), "her diary is not in the shared history");
+}
+
+/// Connecting a folder uploads the shared workspace and leaves what is under
+/// the reserved names where it is: that is its person's own.
+#[tokio::test]
+async fn connecting_a_folder_uploads_nothing_from_under_a_reserved_name() {
+    let be = fake_worker();
+    let events: Arc<dyn Events> = Arc::new(Collected::default());
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("Private")).unwrap();
+    std::fs::create_dir_all(root.path().join("restricted/Old")).unwrap();
+    std::fs::write(root.path().join("readme.md"), "shared\n").unwrap();
+    std::fs::write(root.path().join("Private/diary.md"), "mine\n").unwrap();
+    std::fs::write(root.path().join("restricted/Old/x.md"), "ours\n").unwrap();
+    let remote = Arc::new(FakeRemote::new(&be, "d-alice"));
+    let bound = bind_domain(&remote, "Notes", "Alice's Mac").await.unwrap();
+    seed_upload(&remote, root.path(), state.path(), "Notes", &bound.manifest_etag, "Alice's Mac", &events, "a")
+        .await
+        .unwrap();
+    assert_eq!(paths(&manifest_of(&be)), ["readme.md"]);
+}
+
+#[test]
+fn a_space_is_a_folder_that_says_so_and_is_only_deleted_while_it_does() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = |space: &str, name: &str| space::SpaceMarker { ws_id: "w-1".into(), space: space.into(), name: name.into() };
+    for dir in ["Private", "Restricted/Finance", "Restricted/Loose", "Restricted/.hidden", "Elsewhere/Copy"] {
+        std::fs::create_dir_all(root.path().join(dir)).unwrap();
+    }
+    space::write_space_marker(&root.path().join("Private"), &marker("p-00000001", "Private")).unwrap();
+    space::write_space_marker(&root.path().join("Restricted/Finance"), &marker("s-00000002", "Finance")).unwrap();
+    space::write_space_marker(&root.path().join("Elsewhere/Copy"), &marker("s-00000002", "Finance")).unwrap();
+
+    let held = space::held(root.path(), "w-1");
+    assert_eq!(held.iter().map(|h| h.rel.as_str()).collect::<Vec<_>>(), ["Private", "Restricted/Finance"]);
+    assert!(space::held(root.path(), "w-other").is_empty(), "another workspace's folders are nobody's here");
+    assert_eq!(space::unclaimed(root.path(), "w-1"), [root.path().join("Restricted/Loose")]);
+
+    // Names: its own, then its maker's, then a number.
+    assert_eq!(space::free_restricted_dir(root.path(), "Plans", "Bob"), root.path().join("Restricted/Plans"));
+    assert_eq!(space::free_restricted_dir(root.path(), "Finance", "Bob"), root.path().join("Restricted/Finance (Bob)"));
+    assert!(space::names_space("Finance (Bob)", "Finance", "Bob") && space::names_space("Finance 2", "Finance", "Bob"));
+    assert!(!space::names_space("Money", "Finance", "Bob"));
+    assert!(space::valid_folder_name("Q3 plans") && !space::valid_folder_name(".hidden") && !space::valid_folder_name("a/b"));
+    assert_eq!(space::reserved_top("private/x.md"), Some("Private"));
+    assert_eq!(space::reserved_top("Private (shared)/x.md"), None);
+
+    // Deleted only where a space lives, and only while the folder still says it is that space.
+    let stray = space::Held { dir: root.path().join("Elsewhere/Copy"), rel: "Elsewhere/Copy".into(), marker: marker("s-00000002", "Finance") };
+    assert!(!space::remove_space_dir(root.path(), &stray));
+    let mut finance = held[1].clone();
+    finance.marker.space = "s-0000beef".into();
+    assert!(!space::remove_space_dir(root.path(), &finance), "the folder says it is another space");
+    assert!(space::remove_space_dir(root.path(), &held[1]));
+    assert!(!root.path().join("Restricted/Finance").exists());
+    assert!(root.path().join("Elsewhere/Copy").exists());
+}
+
+/// A folder the disk spells `private` is the person's Private all the same,
+/// and its paths are spelled the way the disk — and so the app — spells them.
+#[tokio::test]
+async fn a_private_folder_is_found_however_the_disk_spells_it() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    alice.write("private/diary.md", "dear diary\n");
+    alice.write("shared.md", "for everyone\n");
+    alice.sync().await;
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_of(&be)), ["shared.md"], "never shared, whatever its case");
+    assert_eq!(paths(&manifest_in(&be, &private_of(&alice))), ["diary.md"]);
+    assert_eq!(alice.status().spaces[0].path, "private");
+
+    open(&mut alice, "private/diary.md");
+    alice.engine.poll_for_test().await;
+    assert!(alice.engine.holds_for_test("private/diary.md"));
+    assert_eq!(alice.publish("private/diary.md", PublicKind::File, Some("diary")).unwrap(), "diary");
+    alice.cycle().await;
+    assert_eq!(alice.page("diary").unwrap().path, "private/diary.md");
 }

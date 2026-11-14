@@ -856,6 +856,15 @@ fn open_roots(app: &AppHandle) -> BTreeSet<String> {
             }
         }
     }
+    // A connected workspace's Private and restricted folders are sections of
+    // their own: the workspace's store leaves them out (`shared_skip`), and
+    // each keeps its history in a store only its own people's Macs have.
+    let sections: Vec<String> = roots
+        .iter()
+        .flat_map(|root| crate::cloud::section_roots(Path::new(root)))
+        .map(|dir| dir.to_string_lossy().to_string())
+        .collect();
+    roots.extend(sections);
     roots
 }
 

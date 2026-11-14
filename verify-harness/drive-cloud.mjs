@@ -640,6 +640,17 @@ await page.locator(".toast-btn", { hasText: "Open the copy" }).click();
 await poll(async () =>
   (await page.locator(".ProseMirror h1").first().textContent())?.includes("Conflict copy"),
 );
+/* 14b — an address another section holds: said once, in words */
+await emit("cloud-address-taken", { root: "/docs", slug: "roadmap", path: "Private/plan.md" });
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const takenToast = await page.locator(".toast").textContent();
+await page.locator(".toast-close").click();
+await poll(async () => (await page.locator(".toast").count()) === 0).catch(() => {});
+step(
+  "address taken: the toast names the address and the note that was not published",
+  takenToast.includes('"roadmap"') && takenToast.includes("plan.md") && takenToast.includes("not published"),
+);
+
 step(
   "conflict: the toast names who and what, Open the copy opens the conflict file",
   conflictToast.includes("Bob") && conflictToast.includes("notes.md") && (await page.locator(".toast").count()) === 0,

@@ -104,7 +104,11 @@
 //       list, and a code for somebody who has signed in before is theirs or
 //       the creator's to make. D1 gains `spaces`, `space_members` and
 //       `addresses`; `presence` and `leases` are made again with a space.
-export const WORKER_VERSION = 13;
+//  14 = manifest v4: the shared workspace holds nothing under `Private/` or
+//       `Restricted/` — on a Mac those are where a person's Private and their
+//       restricted folders are — and a tombstone may say which section its
+//       file moved to (`to`) rather than that it was deleted.
+export const WORKER_VERSION = 14;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -160,8 +164,10 @@ export const WORKER_FEATURES: readonly string[] = [
 // sentence naming which side is behind: an app newer than this worker pauses
 // in `worker-outdated` until the worker is updated, and an app older than it
 // is told to update itself (refuse politely, never
-// corrupt). Version 3 is where `by` became a member id.
-export const MANIFEST_VERSION = 3;
+// corrupt). Version 3 is where `by` became a member id; version 4 reserves
+// `Private` and `Restricted` at the top of the shared workspace and gives a
+// tombstone its `to`.
+export const MANIFEST_VERSION = 4;
 
 // The Workers runtime compatibility date wrangler.toml pins — the app writes
 // that file verbatim into the setup prompt, so this is its one source.

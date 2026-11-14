@@ -134,6 +134,23 @@ export type CloudStatus = {
    *  domain, or the worker predates leases: a lock nobody can confirm is no
    *  lock. */
   leases: LeaseHolder[];
+  /** This person's sections besides the shared workspace — their Private and
+   *  the restricted folders they are in — that have a folder on this Mac. */
+  spaces: CloudSpace[];
+};
+
+/** One section of a workspace that only some people have. Mirrors
+ *  `SpaceStatus` in status.rs — change both. */
+export type CloudSpace = {
+  id: string;
+  kind: "private" | "restricted";
+  name: string;
+  /** Its folder on this Mac, workspace-relative: `Private`, `Restricted/Finance`. */
+  path: string;
+  /** Who made it, as a name. */
+  by: string;
+  /** Everyone in it, by member id. */
+  members: string[];
 };
 
 export type CloudWorkspaceRecord = {
@@ -277,6 +294,9 @@ export type CloudAppliedEvent = { root: string; paths: string[] };
  *  copy it names is a real file on disk and had to be called something. */
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
+/** A page asked for an address another section holds on this domain, and was
+ *  not published. `path` is workspace-relative. */
+export type CloudAddressTakenEvent = { root: string; slug: string; path: string };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };
 /** An owner took this Mac's access to a workspace away, and its copy here is
  *  gone: the folder, and what Doklin kept for it. `deleted` is false when the
@@ -436,6 +456,8 @@ export const onCloudConflict = (cb: (e: CloudConflictEvent) => void) =>
   listen<CloudConflictEvent>("cloud-conflict", (e) => cb(e.payload));
 export const onCloudPendingDeletes = (cb: (e: CloudPendingDeletesEvent) => void) =>
   listen<CloudPendingDeletesEvent>("cloud-pending-deletes", (e) => cb(e.payload));
+export const onCloudAddressTaken = (cb: (e: CloudAddressTakenEvent) => void) =>
+  listen<CloudAddressTakenEvent>("cloud-address-taken", (e) => cb(e.payload));
 export const onCloudProgress = (cb: (e: CloudProgressEvent) => void) =>
   listen<CloudProgressEvent>("cloud-progress", (e) => cb(e.payload));
 export const onCloudRemoved = (cb: (e: CloudRemovedEvent) => void) =>

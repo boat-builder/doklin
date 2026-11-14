@@ -202,7 +202,7 @@ anything else            404 page
 
 ```
 workspace.json   {id, name, createdAt, createdBy: {deviceId, deviceName}}; create-only; bound iff present
-manifest.json    manifest v3; CAS on etag
+manifest.json    manifest v4; CAS on etag
 blobs/<fileId>/<hash>   immutable; hash = sha256 hex prefix, 16–64 chars
 versions/index.json     {version, horizonDays, snapshots: [{id, ts, device, reason, files, bytes,
                         digest, pinned?, label?, restoredFrom?}]}; CAS on etag
@@ -217,11 +217,11 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`. Old `presence.json` / `history/` are dead.
 
-## Manifest v3 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
+## Manifest v4 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
 
 ```json
 {
-  "version": 3, "name": "Notes", "seq": 812,
+  "version": 4, "name": "Notes", "seq": 812,
   "files": { "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
                             "mtime": 1757000000000, "by": "m-1a2b3c4d" } },
   "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "m-1a2b3c4d" } },
@@ -234,6 +234,11 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 ```
 
 - `by`: `m-` or `a-` + 8 hex; checked only as a bounded string (v2 device names survive).
+- A tombstone may carry `to`: the file was moved to another section, not
+  deleted — a space id, or `""` for the shared workspace.
+- The shared manifest holds no file under `Private/` or `Restricted/`, in any
+  case (`RESERVED_FOLDERS`, `layout.ts` ⇄ `RESERVED_DIRS`, `space.rs`:
+  **change both**); a space's manifest may. Tombstones are not checked for it.
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
