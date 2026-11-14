@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "doklin-cli"
-version = "0.1.98"
+version = "0.1.99"
 dependencies = [
  "gethostname",
  "serde",
