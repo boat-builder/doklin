@@ -155,6 +155,16 @@ export async function putPage(c: Call): Promise<Response> {
       const index = new Index(tx.files);
       const found = targetAt(index, path);
       if (found instanceof Refusal) return found;
+      // A board is not a folder to publish: it is public where a published
+      // note embeds it, and each card's page can be published on its own.
+      const board = found.target.kind === "dir" ? (index.board(found.target.path) ?? index.boardOf(found.target.path)) : null;
+      if (board) {
+        return new Refusal(
+          400,
+          `${board} is a board — it is public where a published document embeds it; a card's page publishes on its own, as ${board}/<card>`,
+          { code: "board", board },
+        );
+      }
       return publish(tx, index, found.target, found.fids, { wanted, title, desc }, url.origin);
     },
     { dryRun: body.dryRun === true },

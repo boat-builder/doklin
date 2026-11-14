@@ -9,6 +9,13 @@
 // Everything in this file is a pure reading of the manifest: which files make
 // up the document a path names, which version a request means, what a folder
 // holds. Nothing here reads a blob or writes anything.
+//
+// A board is a folder too, on disk and in the manifest: a `store.jsonl` and a
+// markdown file per card (src/store/). An agent never sees it as one.
+// Here a board is one name; a card's page is a
+// document named `<board>/<card>`; and nothing else inside the folder — the
+// definition file, a subfolder, a picture — can be named at all. The board
+// itself is worked on through the board routes (agentBoards.ts).
 
 import { Refusal } from "./commit";
 import { validPath } from "./layout";
@@ -16,6 +23,7 @@ import type { Manifest, ManifestFile } from "./manifest";
 import { nestedUrl } from "./publicMap";
 import { MD_EXT_RE, basename, dirOf, isHtmlPath, isMarkdownPath } from "./workspace";
 import { META_SUFFIX } from "../../src/metaFile";
+import { STORE_FILE } from "../../src/store/storeFile";
 
 export type Version = "md" | "html";
 export const VERSION_WORD: Record<Version, string> = { md: "markdown", html: "html" };
@@ -86,6 +94,9 @@ export type Doc = {
   html: Entry | null;
   /** The sidecar holding its comment threads. Never shown to an agent. */
   meta: Entry | null;
+  /** The board it is a card of, when its folder is one — then it is a card's
+   *  page: markdown only, its properties kept out of its text. */
+  board: string | null;
 };
 
 export const docExists = (doc: Doc): boolean => doc.md !== null || doc.html !== null;
@@ -95,11 +106,24 @@ export const primaryOf = (doc: Doc): Entry | null => doc.md ?? doc.html;
 /** The manifest's files, findable by path the way a case-insensitive disk finds them. */
 export class Index {
   private readonly byLower = new Map<string, string>();
+  /** Every board, lowercased path → as spelled. A folder is one when it holds
+   *  a `store.jsonl` — the app also wants the file's header line, which only a
+   *  blob read can show, and the board routes check it. A folder inside a
+   *  board is part of that board, whatever it holds. */
+  private readonly boards = new Map<string, string>();
 
   constructor(readonly files: Record<string, ManifestFile>) {
+    const stores = new Map<string, string>();
     for (const [fid, f] of Object.entries(files)) {
       const key = f.path.toLowerCase();
       if (!this.byLower.has(key)) this.byLower.set(key, fid);
+      const dir = dirOf(f.path);
+      if (dir && basename(key) === STORE_FILE) stores.set(dir.toLowerCase(), dir);
+    }
+    for (const [key, dir] of stores) {
+      const segs = key.split("/");
+      const nested = segs.slice(1).some((_, i) => stores.has(segs.slice(0, i + 1).join("/")));
+      if (!nested) this.boards.set(key, dir);
     }
   }
 
@@ -111,7 +135,10 @@ export class Index {
   /** The document with this stem — which may turn out to have no files. */
   doc(stem: string): Doc {
     const mds = MD_EXTENSIONS.map((ext) => this.at(`${stem}.${ext}`)).filter((e): e is Entry => e !== null);
-    const html = this.at(`${stem}.html`);
+    // A card's page is markdown; an html file beside it is part of the
+    // board's folder, which nothing shows.
+    const board = this.board(dirOf(stem));
+    const html = board ? null : this.at(`${stem}.html`);
     const meta = this.at(`${stem}${META_SUFFIX}`);
     const known = mds[0] ?? html;
     return {
@@ -120,7 +147,45 @@ export class Index {
       mds,
       html,
       meta,
+      board,
     };
+  }
+
+  /** The board at exactly this path, as spelled — or null. */
+  board(path: string): string | null {
+    return path ? (this.boards.get(path.toLowerCase()) ?? null) : null;
+  }
+
+  /** The board a path lies inside — never the board itself — or null. */
+  boardOf(path: string): string | null {
+    const segs = path.toLowerCase().split("/");
+    for (let i = 1; i < segs.length; i += 1) {
+      const hit = this.boards.get(segs.slice(0, i).join("/"));
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /** Whether a file is a card: a markdown file directly in a board's folder. */
+  isCard(path: string): boolean {
+    return isMarkdownPath(path) && this.board(dirOf(path)) !== null;
+  }
+
+  /** Whether nothing may show a file: it is inside a board, and not a card. */
+  hidden(path: string): boolean {
+    return this.boardOf(path) !== null && !this.isCard(path);
+  }
+
+  /** A board's cards — the markdown files directly in it — by file name. */
+  cards(board: string): Entry[] {
+    const prefix = `${board.toLowerCase()}/`;
+    const out: Entry[] = [];
+    for (const [key, fid] of this.byLower) {
+      if (key.startsWith(prefix) && !key.slice(prefix.length).includes("/") && isMarkdownPath(key)) {
+        out.push({ fid, file: this.files[fid] });
+      }
+    }
+    return out.sort((a, b) => basename(a.file.path).localeCompare(basename(b.file.path)));
   }
 
   /** Whether anything lives under `dir` — which makes `dir` a folder. */
@@ -202,6 +267,8 @@ export type Named =
 export function locate(index: Index, path: string, flag: Version | null): Named | Refusal {
   const problem = pathProblem(path);
   if (problem) return new Refusal(400, problem);
+  const board = index.boardOf(path);
+  if (board) return cardAt(index, board, path, flag);
   const named = nameOf(path);
   const asked = askedVersion(path, flag);
   if (asked instanceof Refusal) return asked;
@@ -236,6 +303,60 @@ export function locate(index: Index, path: string, flag: Version | null): Named 
   };
 }
 
+/** Where a board's own commands are, for a refusal to point at. */
+export const boardHint = (board: string): string => `see it with \`doklin board show ${board}\``;
+
+/**
+ * A path inside a board: a card's page, `<board>/<card>`, which may not
+ * exist yet — or a refusal, because nothing else in a board's folder has a
+ * name an agent can use.
+ */
+function cardAt(index: Index, board: string, path: string, flag: Version | null): Named | Refusal {
+  const rel = path.slice(board.length + 1);
+  const exact = index.at(path);
+  if (rel.includes("/") || (exact && !isMarkdownPath(exact.file.path))) {
+    return new Refusal(400, `"${path}" is inside the board ${board}, which holds cards and nothing else — ${boardHint(board)}`, {
+      code: "board",
+      board,
+    });
+  }
+  const named = nameOf(rel);
+  if (named.version === "html" || flag === "html") {
+    return new Refusal(400, `a card's page is markdown — ${board}/${named.stem} has no html version`, { code: "board", board });
+  }
+  const doc = index.doc(`${board}/${named.stem}`);
+  if (named.version === "md") {
+    const typed = doc.mds.find((e) => e.file.path.toLowerCase() === path.toLowerCase());
+    if (typed) doc.md = typed;
+  } else if (doc.mds.length > 1) {
+    const names = doc.mds.map((e) => basename(e.file.path)).join(", ");
+    return new Refusal(409, `more than one card on ${board} is called "${basename(doc.stem)}" (${names}) — name the one you mean in full`, {
+      candidates: doc.mds.map((e) => e.file.path),
+    });
+  }
+  return { kind: "document", doc, asked: "md", mdPath: doc.md?.file.path ?? `${doc.stem}.md`, htmlPath: `${doc.stem}.html` };
+}
+
+/**
+ * Why nothing can be read at a path: a card the board does not have, a board
+ * named where a document was meant, or simply nothing there.
+ */
+export function absent(index: Index, doc: Doc, typed: string, nothing: string): Refusal {
+  if (doc.board) {
+    const title = basename(doc.stem);
+    return new Refusal(
+      404,
+      `the board ${doc.board} has no card "${title}" — \`doklin board show ${doc.board}\` lists its cards, and \`doklin board add\` makes one`,
+      { code: "no_card", board: doc.board },
+    );
+  }
+  const board = index.board(typed.replace(/\/+$/, ""));
+  if (board) {
+    return new Refusal(400, `${board} is a board, not a document — ${boardHint(board)}`, { code: "board", board });
+  }
+  return new Refusal(404, nothing);
+}
+
 /* ---------- What a listing says ---------- */
 
 export type VersionInfo = {
@@ -261,7 +382,10 @@ export type DocRow = {
 
 export type FileRow = { path: string; public?: string[] } & Omit<VersionInfo, "file">;
 
-export type Listing = { dir: string; folders: string[]; documents: DocRow[]; files: FileRow[] };
+/** A board, as a listing shows one: by its path, with how many cards it has. */
+export type BoardRow = { path: string; cards: number };
+
+export type Listing = { dir: string; folders: string[]; boards: BoardRow[]; documents: DocRow[]; files: FileRow[] };
 
 const versionInfo = (e: Entry): VersionInfo => ({
   file: basename(e.file.path),
@@ -324,7 +448,8 @@ export function fileRow(m: Manifest, origin: string, e: Entry): FileRow {
 
 const byName = (a: string, b: string): number => a.localeCompare(b, undefined, { sensitivity: "base" });
 
-/** Every document under a folder ("" is the whole workspace), sidecars folded away. */
+/** Every document under a folder ("" is the whole workspace), sidecars folded
+ *  away — a board's cards among them, and nothing else inside a board. */
 export function documentsUnder(index: Index, dir: string): Doc[] {
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const seen = new Set<string>();
@@ -333,6 +458,7 @@ export function documentsUnder(index: Index, dir: string): Doc[] {
     const lower = f.path.toLowerCase();
     if (prefix && !lower.startsWith(prefix)) continue;
     if (!isMarkdownPath(f.path) && !isHtmlPath(f.path)) continue;
+    if (index.hidden(f.path)) continue;
     const { stem } = nameOf(f.path);
     if (seen.has(stem.toLowerCase())) continue;
     seen.add(stem.toLowerCase());
@@ -342,15 +468,17 @@ export function documentsUnder(index: Index, dir: string): Doc[] {
 }
 
 /**
- * What a folder holds: its folders, its documents and its plain files. Not
- * deep, only what sits directly in it; deep, everything beneath it. Built
- * from the manifest alone, so it costs no blob read — and so a folder with
- * nothing in it does not exist here, because it does not exist there.
+ * What a folder holds: its folders, its boards, its documents and its plain
+ * files. Not deep, only what sits directly in it; deep, everything beneath
+ * it — but never what is inside a board, which is one row however many files
+ * it is. Built from the manifest alone, so it costs no blob read — and so a
+ * folder with nothing in it does not exist here, because it does not exist there.
  */
 export function listTree(m: Manifest, origin: string, dir: string, deep: boolean): Listing {
   const index = new Index(m.files);
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const folders = new Map<string, string>();
+  const boards = new Map<string, string>();
   const documents: DocRow[] = [];
   const files: FileRow[] = [];
   const seenDocs = new Set<string>();
@@ -360,10 +488,21 @@ export function listTree(m: Manifest, origin: string, dir: string, deep: boolean
     if (prefix && !lower.startsWith(prefix)) continue;
     const rel = file.path.slice(prefix.length);
     const segs = rel.split("/");
-    // Each folder between here and the file: all of them when deep, the first otherwise.
-    for (let i = 1; i < segs.length && (deep || i === 1); i += 1) {
-      const folder = file.path.slice(0, prefix.length + segs.slice(0, i).join("/").length);
+    const folderAt = (i: number): string => file.path.slice(0, prefix.length + segs.slice(0, i).join("/").length);
+    // The first board on the way down: the file is that board's, and the
+    // board is a row of its own rather than a folder.
+    let board = 0;
+    for (let i = 1; i < segs.length && board === 0; i += 1) if (index.board(folderAt(i))) board = i;
+    // Each folder between here and the file (or its board): all of them when deep, the first otherwise.
+    const last = board > 0 ? board - 1 : segs.length - 1;
+    for (let i = 1; i <= last && (deep || i === 1); i += 1) {
+      const folder = folderAt(i);
       if (!folders.has(folder.toLowerCase())) folders.set(folder.toLowerCase(), folder);
+    }
+    if (board > 0) {
+      const at = index.board(folderAt(board))!;
+      if (deep || board === 1) boards.set(at.toLowerCase(), at);
+      continue;
     }
     if (!deep && segs.length > 1) continue;
     if (lower.endsWith(META_SUFFIX)) continue;
@@ -377,9 +516,11 @@ export function listTree(m: Manifest, origin: string, dir: string, deep: boolean
         // Two markdown files with one stem are two documents that have to be
         // named in full; the html beside them belongs to neither by name.
         for (const md of doc.mds) {
-          documents.push(docRow(m, origin, { stem: md.file.path, md, mds: [md], html: null, meta: null }));
+          documents.push(docRow(m, origin, { stem: md.file.path, md, mds: [md], html: null, meta: null, board: null }));
         }
-        if (doc.html) documents.push(docRow(m, origin, { stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null }));
+        if (doc.html) {
+          documents.push(docRow(m, origin, { stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null, board: null }));
+        }
         continue;
       }
       documents.push(docRow(m, origin, doc));
@@ -390,6 +531,7 @@ export function listTree(m: Manifest, origin: string, dir: string, deep: boolean
   return {
     dir,
     folders: [...folders.values()].sort(byName),
+    boards: [...boards.values()].sort(byName).map((path) => ({ path, cards: index.cards(path).length })),
     documents: documents.sort((a, b) => byName(a.path, b.path)),
     files: files.sort((a, b) => byName(a.path, b.path)),
   };

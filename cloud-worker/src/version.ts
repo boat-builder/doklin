@@ -81,7 +81,13 @@
 //       never crosses the wire. `/api/meta`'s directory lists agents too, so
 //       a Mac can name the `a-` id on what an agent changed. D1 gains the
 //       agents' tables and the search mirror.
-export const WORKER_VERSION = 10;
+//  11 = boards for agents: a board is one name
+//       on the document API, never a folder — its cards, fields and options
+//       are read and changed through routes of their own, parsed and written
+//       by the app's own store modules, and a card's page is a document
+//       `<board>/<card>` whose properties a read leaves out and a write keeps.
+//       D1 gains `board_cards`, a copy of every card's properties block.
+export const WORKER_VERSION = 11;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -101,6 +107,7 @@ export const WORKER_FEATURES: readonly string[] = [
   "agent-pages",
   "agent-comments",
   "agent-search",
+  "agent-boards",
 ];
 // "members" is a promise the app can act on: this worker mints and resolves
 // per-person tokens, so the People panel has something to talk to.
@@ -117,7 +124,8 @@ export const WORKER_FEATURES: readonly string[] = [
 // view's Agents section; "agent-docs" reading and changing documents;
 // "agent-pages" publishing; "agent-comments" threads; "agent-search" the
 // mirror and the search over it. They landed together, and stay separate
-// names so a later worker can grow one without the others. A bare
+// names so a later worker can grow one without the others — "agent-boards",
+// the board routes, is the first that did. A bare
 // "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
 // reports it more precisely than a name in this list could.
 

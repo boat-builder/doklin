@@ -402,3 +402,25 @@ function freeViewId(def: StoreDef, base: string): string {
 /** The key order a card's frontmatter is written in: fields, then `rank`. */
 export const RANK_KEY = "rank";
 export const cardKeyOrder = (def: StoreDef) => [...def.fields.map((f) => f.id), RANK_KEY];
+
+/**
+ * An id for a name: lowercase, words joined by underscores, unique among
+ * `taken`. Field ids become frontmatter keys, so the alphabet is deliberately
+ * narrower than the dialect accepts — a key nobody has to quote.
+ */
+export function slugId(name: string, taken: ReadonlySet<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40) || "field";
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+  return id;
+}
+
+/** The id a new field gets: its frontmatter key, slugged once and never
+ *  changed. `rank` is taken from the start — it is where a card sits. */
+export const newFieldId = (def: StoreDef, name: string): string =>
+  slugId(name, new Set([...def.fields.map((f) => f.id), RANK_KEY]));

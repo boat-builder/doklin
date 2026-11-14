@@ -247,7 +247,7 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
 
 const COMMANDS = [
   "login", "logout", "whoami", "ls", "info", "read", "search", "comments", "comment", "reply",
-  "write", "edit", "mv", "rm", "publish", "unpublish", "published",
+  "write", "edit", "mv", "rm", "publish", "unpublish", "published", "board",
 ];
 /** The only first words this drive may hand the binary. Anything else is, on macOS, a path to open in the app. */
 const FIRST_WORDS = new Set([...COMMANDS, "help", "--help", "-h", "version", "--version", "-V"]);
@@ -362,7 +362,7 @@ async function check(name, fn) {
 const canon = (v) =>
   Array.isArray(v) ? v.map(canon) : v !== null && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v;
 const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
-const ALL_FEATURES = ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search"];
+const ALL_FEATURES = ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search", "agent-boards"];
 const ALL_SCOPES = ["read", "comment", "edit", "publish"];
 
 /* ====================================================================== */
@@ -379,7 +379,7 @@ await check("help: the overview lists every command; each topic and each command
     "the overview says the exit codes": /Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflict/.test(overview.out),
   };
   for (const name of COMMANDS) facts[`the overview lists ${name}`] = new RegExp(`^  ${name}\\b`, "m").test(overview.out);
-  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["agent", "FOR AN AGENT"]]) {
+  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["boards", "BOARDS"], ["agent", "FOR AN AGENT"]]) {
     const r = await doklin(nobody, ["help", topic]);
     facts[`help ${topic}`] = r.code === 0 && r.out.startsWith(headline) && overview.out.includes(`doklin help ${topic}`);
   }
@@ -434,6 +434,17 @@ await check("bad usage is exit 2 before anything is asked of a domain: a missing
     "publish with nothing": ["publish"],
     "unpublish with nothing": ["unpublish"],
     "whoami with an argument": ["whoami", "me"],
+    "board with nothing to do": ["board"],
+    "board with a verb it lacks": ["board", "paint", "X"],
+    "board show with no board": ["board", "show"],
+    "board show with a flag it lacks": ["board", "show", "X", "--first"],
+    "board add with no title": ["board", "add", "X"],
+    "board add with a word that is no assignment": ["board", "add", "X", "T", "Done"],
+    "board set in two places": ["board", "set", "X", "T", "--first", "--last"],
+    "board set --from": ["board", "set", "X", "T", "--from", "f.md"],
+    "board field with no verb": ["board", "field", "X", "Y"],
+    "board field add with no --type": ["board", "field", "add", "X", "Y"],
+    "board option with three names missing": ["board", "option", "add", "X"],
   };
   const facts = {};
   for (const [label, args] of Object.entries(cases)) facts[label] = refused(await doklin(nobody, args, { input: "text" }), 2);
@@ -449,6 +460,7 @@ await check("not logged in: every command that needs the workspace exits 6 and s
     ["write", "Home"], ["edit", "Home", "--find", "a", "--replace", "b"], ["mv", "Home", "Away"], ["rm", "Home"],
     ["comment", "Home", "--on", "a", "-m", "b"], ["reply", "Home", "t", "-m", "b"], ["comment", "rm", "Home", "t"],
     ["publish", "Home"], ["unpublish", "Home"], ["logout"],
+    ["board", "show", "Ideas"], ["board", "add", "Ideas", "Rocket"], ["board", "field", "rm", "Ideas", "Status"],
   ];
   for (const args of all) facts[args.join(" ")] = refused(await doklin(nobody, args, { input: "text" }), 6, /not logged in/);
   facts["-w for a domain this machine never logged in to"] = refused(await doklin(nobody, ["ls", "-w", "nowhere.example.com"]), 6, /not logged in to nowhere\.example\.com/);
@@ -573,7 +585,7 @@ await check("whoami: the workspace, the agent, what it may do and what the worke
   };
 });
 
-await check("ls: folders, documents with their versions and public addresses, plain files — and never a sidecar", async () => {
+await check("ls: folders, boards, documents with their versions and public addresses, plain files — never a sidecar, and nothing inside a board", async () => {
   const root = (await doklin(editorBox, ["ls"])).json;
   const projects = (await doklin(editorBox, ["ls", "Projects"])).json;
   const slashed = (await doklin(editorBox, ["ls", "/Projects/"])).json;
@@ -583,19 +595,22 @@ await check("ls: folders, documents with their versions and public addresses, pl
   const home = doc(root, "Home");
   const plan = doc(projects, "Projects/plan");
   return {
-    "the root's folders": same(root.folders, ["Ideas", "Projects"]) && root.dir === "",
+    "the root's folders": same(root.folders, ["Projects"]) && root.dir === "",
+    "Ideas is a board, beside the note of its name": same(root.boards, [{ path: "Ideas", cards: 2 }]),
     "the root's documents": same(root.documents.map((d) => d.path), ["Comments", "Diagram", "Home", "Ideas", "Scratch", "Sizes"]),
     "no plain files at the root": same(root.files, []),
     "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
     "Scratch is not public": doc(root, "Scratch").public === undefined,
     "a version's facts": home.md.file === "Home.md" && home.md.rev === 1 && home.md.size === Buffer.byteLength(SEED_FILES["Home.md"]) && home.html === undefined,
-    "Projects' folders": same(projects.folders, ["Projects/assets", "Projects/Roadmap"]) && projects.dir === "Projects",
+    "Projects' folders": same(projects.folders, ["Projects/assets"]) && projects.dir === "Projects",
+    "…and its board, with its cards counted": same(projects.boards, [{ path: "Projects/Roadmap", cards: 3 }]),
     "plan has both versions, in step": plan.md.file === "plan.md" && plan.html.file === "plan.html" && plan.htmlBehind === undefined,
     "plan's addresses: its own page, and inside the published folder": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
     "board has only markdown": doc(projects, "Projects/board").md.rev === 1 && doc(projects, "Projects/board").html === undefined,
     "slashes around a folder are forgiven": same(slashed, projects),
-    "--deep reaches the plain files": deepProjects.files.some((f) => f.path === "Projects/assets/pic.png" && f.size === PIXEL_PNG.length) && deepProjects.files.some((f) => f.path === "Projects/Roadmap/store.jsonl"),
-    "--deep lists nested documents and folders": deep.documents.some((d) => d.path === "Projects/Roadmap/Ship the boat") && deep.folders.includes("Projects/Roadmap"),
+    "--deep reaches the plain files": same(deepProjects.files.map((f) => [f.path, f.size]), [["Projects/assets/pic.png", PIXEL_PNG.length]]),
+    "--deep lists nested documents and folders": deep.documents.some((d) => d.path === "Projects/plan") && deep.folders.includes("Projects/assets"),
+    "--deep stops at a board: no card, no store.jsonl": same(deep.boards.map((b) => b.path), ["Ideas", "Projects/Roadmap"]) && !JSON.stringify(deep).includes("Roadmap/") && !JSON.stringify(deep).includes("Ideas/"),
     "no sidecar anywhere": !JSON.stringify(deep).includes(".meta.jsonl"),
   };
 });
@@ -642,7 +657,7 @@ await check("read: the text on stdout and what is known about it on stderr; --md
     "--html": html.out === SEED_FILES["Projects/plan.html"] && same(html.meta, { kind: "document", path: "Projects/plan", file: "Projects/plan.html", rev: 1, version: "html" }),
     "the .html name picks the html": byName.out === html.out && byName.meta.version === "html",
     "--md": explicit.out === md.out && same(explicit.meta, md.meta),
-    "a name with spaces": spaced.out === SEED_FILES["Projects/Roadmap/Ship the boat.md"] && spaced.meta.path === "Projects/Roadmap/Ship the boat",
+    "a card's page, by a name with spaces — without its properties": spaced.out === "The hull is done.\n" && same(spaced.meta, { kind: "document", path: "Projects/Roadmap/Ship the boat", file: "Projects/Roadmap/Ship the boat.md", rev: 1, version: "md", board: "Projects/Roadmap" }),
     "comment markers are kept": marked.out === SEED_FILES["Comments.md"] && marked.out.includes("{=="),
     "--clean drops them and keeps the words": clean.code === 0 && !/\{==|==\}|\{>>|<<\}/.test(clean.out) && clean.out.includes("a highlighted phrase"),
     "-o writes the file and prints nothing": toFile.code === 0 && toFile.out === "" && readFileSync(copy, "utf8") === SEED_FILES["Projects/plan.md"] && toFile.meta.rev === 1,
@@ -1190,7 +1205,7 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
     "five lines are shown and the rest counted": inDrive.results[0].matches.length === 5 && inDrive.results[0].moreLines === 2 && same(inDrive.results[0].matches[0], { line: 1, text: "Line 1: the Zebrafish again." }),
     "--limit shows that many": inHerd.total === 60 && inHerd.results.length === 30 && inHerd.truncated === true,
     "--limit is capped at 30": capped.total === 61 && capped.results.length === 30,
-    "words not in quotes are a phrase": same(phrase.results, [{ path: "Ideas/Teleporter", version: "md", matches: [{ line: 5, text: "Beam me up." }] }]) && same(quoted.results, phrase.results),
+    "words not in quotes are a phrase — a card found by its page, numbered from it": same(phrase.results, [{ path: "Ideas/Teleporter", board: "Ideas", version: "md", matches: [{ line: 1, text: "Beam me up." }] }]) && same(quoted.results, phrase.results),
     "what was said in a comment": comment.total === 1 && comment.results[0].path === "Review" && comment.results[0].inComments === true && same(comment.results[0].matches, []),
     "an html-only document, by the text of its page": poster.version === "html" && poster.matches[0].text === "Regatta poster" && poster.matches[0].line === undefined,
     "what a Mac just changed": fromMac.total === 1 && same(fromMac.results[0], { path: "Scratch", version: "md", matches: [{ line: 3, text: "The halyard needs splicing." }] }),
@@ -1458,6 +1473,146 @@ if (!canTty) {
 }
 
 /* ====================================================================== */
+/* 12b — boards                                                           */
+/* ====================================================================== */
+
+/** Each column of a `board show` as `name: titles`. */
+const columnsOf = (show) => show.columns.map((c) => `${c.name}: ${c.cards.map((x) => x.title).join(", ")}`);
+
+await check("board: info, show and card — a board's fields and options, its cards in the columns its own view makes, one card's properties and page; nothing inside it is a folder", async () => {
+  const info = await doklin(editorBox, ["board", "info", "Projects/Roadmap"]);
+  const show = await doklin(editorBox, ["board", "show", "projects/roadmap"]);
+  const byTags = (await doklin(editorBox, ["board", "show", "Projects/Roadmap", "--by", "Tags"])).json;
+  const narrowed = (await doklin(editorBox, ["board", "show", "Projects/Roadmap", "--where", "status!=Done", "--where", "tags=hull"])).json;
+  const card = await doklin(editorBox, ["board", "card", "Projects/Roadmap", "ship the boat"]);
+  const status = info.json.fields.find((f) => f.id === "status");
+  return {
+    "info: the name, how many cards, what it is grouped by": info.code === 0 && info.json.board === "Projects/Roadmap" && info.json.name === "Roadmap" && info.json.cards === 3 && info.json.by === "Status",
+    "info: a field's options in column order": same(status.options.map((o) => o.name), ["Backlog", "In progress", "Done"]),
+    "show: by the board's own view": show.code === 0 && same(columnsOf(show.json), ["Backlog: Paint it", "In progress: Ship the boat", "Done: Launch"]),
+    "show: a card's properties by field name, and never its rank": same(show.json.columns[1].cards[0].props, { Status: "In progress", Owner: "Ada", Tags: ["hull"] }),
+    "--by regroups; a multi-select card sits in a column per value": same(columnsOf(byTags), ["No tags: Launch", "hull: Ship the boat, Paint it", "paint: Paint it"]),
+    "--where twice is both": same(columnsOf(narrowed), ["Backlog: Paint it", "In progress: Ship the boat", "Done: "]) && narrowed.shown === 2,
+    "card: properties and page": card.code === 0 && card.json.title === "Ship the boat" && card.json.page === "The hull is done.\n" && same(card.json.props, { Status: "In progress", Owner: "Ada", Tags: ["hull"] }),
+    "a folder is not a board: exit 3": refused(await doklin(editorBox, ["board", "show", "Projects"]), 3, /Projects is a folder, not a board/),
+    "a card it does not have: exit 3": refused(await doklin(editorBox, ["board", "card", "Projects/Roadmap", "Nope"]), 3, /has no card "Nope"/),
+    "a field it does not have: exit 3": refused(await doklin(editorBox, ["board", "show", "Projects/Roadmap", "--by", "Colour"]), 3, /has no field "Colour" — its fields are/),
+    "ls of a board points at board show: exit 2": refused(await doklin(editorBox, ["ls", "Projects/Roadmap"]), 2, /is a board, not a folder — see it with `doklin board show Projects\/Roadmap`/),
+    "its definition is not a file: exit 2": refused(await doklin(editorBox, ["read", "Projects/Roadmap/store.jsonl"]), 2, /holds cards and nothing else/),
+  };
+});
+
+await check("board: add, set and rm — properties sent as typed and read by the worker against each field's type; a refusal names what exists; a card that changes column goes to its foot", async () => {
+  const R = "Projects/Roadmap";
+  const pageFile = scratchFile("mast.md", "Tall, and straight.\n");
+  const dry = await doklin(editorBox, ["board", "add", R, "Rig the mast", "status=Backlog", "--dry-run"]);
+  const notYet = (await doklin(editorBox, ["board", "card", R, "Rig the mast"])).code;
+  const added = await doklin(editorBox, ["board", "add", R, "Rig the mast", "status=backlog", "tags=hull,PAINT", "due=2026-12-24", "--from", pageFile]);
+  const piped = await doklin(editorBox, ["board", "add", R, "Sand the deck", "Status=Backlog", "--first", "--from", "-"], { input: "From a pipe.\n" });
+  const afterAdd = (await doklin(editorBox, ["board", "show", R])).json;
+  const moved = await doklin(editorBox, ["board", "set", R, "Rig the mast", "status=Done"]);
+  const afterMove = (await doklin(editorBox, ["board", "show", R])).json;
+  const placed = await doklin(editorBox, ["board", "set", R, "Rig the mast", "--before", "Launch", "tags-=paint", "owner=Ada"]);
+  const afterPlace = (await doklin(editorBox, ["board", "show", R])).json;
+  const retitled = await doklin(editorBox, ["board", "set", R, "Rig the mast", "--title", "Rig both masts"]);
+  const page = await doklin(editorBox, ["read", `${R}/Rig both masts`]);
+  return {
+    "--dry-run adds nothing": dry.code === 0 && dry.json.created === true && notYet === 3,
+    "add: the values in the declared spelling": added.code === 0 && same(added.json.props, { Due: "2026-12-24", Status: "Backlog", Tags: ["hull", "paint"] }) && added.json.path === `${R}/Rig the mast`,
+    "add --from - takes the page from the pipe, --first puts it on top": piped.code === 0 && afterAdd.columns[0].cards[0].title === "Sand the deck",
+    "a new card goes to the foot of its column": same(columnsOf(afterAdd)[0], "Backlog: Sand the deck, Paint it, Rig the mast"),
+    "set: a new column, at its foot": moved.code === 0 && same(columnsOf(afterMove)[2], "Done: Launch, Rig the mast"),
+    "set: --before, and two properties at once": placed.code === 0 && same(columnsOf(afterPlace)[2], "Done: Rig the mast, Launch") && same(placed.json.props, { Due: "2026-12-24", Owner: "Ada", Status: "Done", Tags: ["hull"] }),
+    "set --title renames the card and its page": retitled.code === 0 && same(retitled.json.renamed, { from: "Rig the mast", to: "Rig both masts" }) && page.out === "Tall, and straight.\n",
+    "a title that is taken: exit 5": refused(await doklin(editorBox, ["board", "add", R, "ship THE boat"]), 5, /already has a card called "Ship the boat"/),
+    "an option it does not have: exit 3, with the options": refused(await doklin(editorBox, ["board", "set", R, "Launch", "status=Someday"]), 3, /its options are Backlog, In progress, Done/),
+    "a value of the wrong kind: exit 2": refused(await doklin(editorBox, ["board", "set", R, "Launch", "due=tomorrow"]), 2, /Due is a date — write it as 2026-09-12/),
+    "rank is no field: exit 2": refused(await doklin(editorBox, ["board", "set", R, "Launch", "rank=a0"]), 2, /rank is not a field/),
+    "rm: the card goes": (await doklin(editorBox, ["board", "rm", R, "Sand the deck"])).code === 0 && (await doklin(editorBox, ["board", "card", R, "Sand the deck"])).code === 3,
+    "a reader may look": (await doklin(readerBox, ["board", "show", R])).code === 0,
+    "…and not change: exit 4": refused(await doklin(readerBox, ["board", "add", R, "Sneaky"]), 4, /may not change documents/),
+  };
+});
+
+await check("board: a card's page is a document <board>/<card> — write and edit keep its properties, comments count from the page; a board is never written into, and a card moves only on its board", async () => {
+  const R = "Projects/Roadmap";
+  const read = await doklin(editorBox, ["read", `${R}/Launch`]);
+  const written = await doklin(editorBox, ["write", `${R}/Launch`, "--if-rev", String(read.meta.rev)], { input: "We launched, at last.\n" });
+  const edited = await doklin(editorBox, ["edit", `${R}/Launch`, "--find", "at last", "--replace", "on time"]);
+  const editedText = (await doklin(editorBox, ["read", `${R}/Launch`])).out;
+  const props = (await doklin(editorBox, ["board", "card", R, "Launch"])).json.props;
+  const comment = await doklin(editorBox, ["comment", `${R}/Launch`, "--on", "on time", "-m", "Was it?"]);
+  const threads = (await doklin(editorBox, ["comments", `${R}/Launch`])).json.threads;
+  const info = (await doklin(editorBox, ["info", `${R}/Launch`])).json;
+  return {
+    "read is the page": read.code === 0 && read.out === "We launched.\n" && read.meta.board === R,
+    "write replaces the page": written.code === 0 && written.json.board === R,
+    "edit changes it": edited.code === 0 && editedText === "We launched, on time.\n",
+    "…and the properties are as they were": same(props, { Status: "Done" }),
+    "a comment's line is the page's": comment.code === 0 && comment.json.line === 1 && threads[0].line === 1,
+    "info calls it a card's page": info.kind === "document" && info.board === R && info.comments === 1,
+    "a page with properties of its own: exit 2": refused(await doklin(editorBox, ["write", `${R}/Launch`, "--force"], { input: "---\nstatus: Backlog\n---\nHa.\n" }), 2, /set its properties with `doklin board set/),
+    "a new card through write: exit 2": refused(await doklin(editorBox, ["write", `${R}/Brand new`], { input: "x" }), 2, /add a card to it with `doklin board add/),
+    "rm of a card: exit 2": refused(await doklin(editorBox, ["rm", `${R}/Launch`]), 2, /remove it with `doklin board rm/),
+    "mv of a card: exit 2": refused(await doklin(editorBox, ["mv", `${R}/Launch`, "Projects/Launch"]), 2, /--title/),
+    "mv into a board: exit 2": refused(await doklin(editorBox, ["mv", "Projects/plan", R]), 2, /nothing moves into a board/),
+  };
+});
+
+await check("board: new, fields and options — a rename on many cards takes rounds, and the CLI asks again until it is done; removing an option or a field changes no card", async () => {
+  const made = await doklin(editorBox, ["board", "new", "Work/Sprint", "--name", "Sprint 12"]);
+  const field = await doklin(editorBox, ["board", "field", "add", "Work/Sprint", "Priority", "--type", "select", "--options", "Low, High"]);
+  const renamedField = await doklin(editorBox, ["board", "field", "set", "Work/Sprint", "priority", "--name", "Urgency"]);
+  const option = await doklin(editorBox, ["board", "option", "add", "Work/Sprint", "Status", "Review", "--before", "Done", "--color", "purple"]);
+  const cards = {};
+  for (let i = 1; i <= 45; i += 1) cards[`Work/Sprint/Task ${String(i).padStart(2, "0")}.md`] = `---\nstatus: Backlog\n---\nTask ${i}.\n`;
+  await macWrites(cards);
+  const from = calls.length;
+  const rename = await doklin(editorBox, ["board", "option", "set", "Work/Sprint", "Status", "Backlog", "--name", "To do"]);
+  const rounds = calls.slice(from).filter((c) => c.method === "PATCH");
+  const shown = (await doklin(editorBox, ["board", "show", "Work/Sprint"])).json;
+  const gone = await doklin(editorBox, ["board", "option", "rm", "Work/Sprint", "Status", "To do"]);
+  const after = (await doklin(editorBox, ["board", "show", "Work/Sprint"])).json;
+  const urgent = await doklin(editorBox, ["board", "set", "Work/Sprint", "Task 01", "urgency=high"]);
+  const fieldGone = await doklin(editorBox, ["board", "field", "rm", "Work/Sprint", "Urgency"]);
+  const card = (await doklin(editorBox, ["board", "card", "Work/Sprint", "Task 01"])).json;
+  return {
+    "new: the app's columns": made.code === 0 && made.json.board === "Work/Sprint" && made.json.name === "Sprint 12",
+    "a board where something is: exit 5": refused(await doklin(editorBox, ["board", "new", "Projects"]), 5, /already a folder/),
+    "field add, with its options": field.code === 0 && same(field.json.field, { id: "priority", name: "Priority", type: "select", options: [{ name: "Low" }, { name: "High" }] }),
+    "field set renames what people read, not the key": renamedField.code === 0 && renamedField.json.field.id === "priority" && renamedField.json.field.name === "Urgency",
+    "option add, in its place": option.code === 0 && same(option.json.options.map((o) => o.name), ["Backlog", "In progress", "Review", "Done"]),
+    "the rename took more than one request, each answered 202 but the last": rounds.length > 1 && rounds.slice(0, -1).every((c) => c.status === 202) && rounds.at(-1).status === 200,
+    "…and says every card it rewrote": rename.code === 0 && rename.json.cards === 45 && same(rename.json.renamed, { from: "Backlog", to: "To do" }),
+    "every card has the new name": shown.columns.find((c) => c.name === "To do").cards.length === 45,
+    "option rm: the cards keep the value, in a column of their own": gone.code === 0 && after.columns.at(-1).name === "To do" && after.columns.at(-1).cards.length === 45,
+    "a value set by its field's new name": urgent.code === 0 && same(urgent.json.props, { Status: "To do", Urgency: "High" }),
+    "field rm: no card changes — its value is kept, and shown as not the board's": fieldGone.code === 0 && same(card.other, { priority: "High" }) && same(card.props, { Status: "To do" }),
+  };
+});
+
+if (canTty) {
+  const ttyBoard = await addAgent("Board terminal bot", ALL_SCOPES);
+  const boardTty = machine("board-terminal");
+  const bt = (args) => doklin(boardTty, args, { tty: true });
+  await check("board on a terminal: columns and cards in sentences a person reads", async () => {
+    await bt(["login", BASE, ttyBoard.code]);
+    const show = await bt(["board", "show", "Ideas"]);
+    const info = await bt(["board", "info", "Ideas"]);
+    const card = await bt(["board", "card", "Ideas", "Teleporter"]);
+    const ls = await bt(["ls"]);
+    const added = await bt(["board", "add", "Ideas", "Rocket boots", "status=New", "--dry-run"]);
+    return {
+      "show: a heading, then each column and its cards": show.code === 0 && show.out.includes("Ideas — 2 cards, by Status\n\nNo status (1)\n  Jetpack\n\nNew (1)\n  Teleporter\n\nMaybe (0)\n"),
+      "info: the fields and their options": info.code === 0 && info.out.includes("Ideas — the board Ideas · 2 cards, in columns by Status\n  Status (select: New, Maybe)\n"),
+      "card: properties, then the page": card.code === 0 && card.out.includes("Teleporter — a card on Ideas · revision 1") && card.out.includes("  Status  New") && card.out.trimEnd().endsWith("Beam me up."),
+      "ls: a board is one row": ls.out.includes("Ideas  [board · 2 cards]"),
+      "--dry-run says it would": added.code === 0 && added.out.includes('Would add "Rocket boots" to Ideas.\n'),
+    };
+  });
+}
+
+/* ====================================================================== */
 /* 13 — logout                                                            */
 /* ====================================================================== */
 
@@ -1522,6 +1677,9 @@ await check("a worker that is behind: a command it lacks the feature for is exit
   const publish = await doklin(behindBox, ["publish", "Home"]);
   const ls = await doklin(behindBox, ["ls"]);
   const read = await doklin(behindBox, ["read", "Home"]);
+  from = behind.asked.length;
+  const board = await doklin(behindBox, ["board", "show", "Ideas"]);
+  const boardAsked = behind.asked.slice(from);
 
   behind.features = [...behind.features, "agent-search"]; // the owner updates the worker
   from = behind.asked.length;
@@ -1536,6 +1694,7 @@ await check("a worker that is behind: a command it lacks the feature for is exit
     "…it asked what the worker can do, and did not try": same(searchAsked, ["GET me"]),
     "published, comments, comment and publish too": [pages, comments, comment, publish].every((r) => refused(r, 7, /too old/)),
     "the comment was never sent": same(commentAsked, ["GET me"]),
+    "board is exit 7 without being tried": refused(board, 7, /too old for this command/) && same(boardAsked, ["GET me"]),
     "a route the worker does not know": refused(ls, 7, /too old/),
     "a method it does not know": refused(read, 7, /too old/),
     "after the update the command works": updated.code === 0 && updated.json.total === 0 && same(updatedAsked, ["GET me", "GET search"]),

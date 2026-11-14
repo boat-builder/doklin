@@ -10,6 +10,7 @@
 //! (`doklin notes.md`), so an argument that is not a command is still that.
 
 mod args;
+mod board;
 mod commands;
 mod creds;
 mod help;
@@ -97,7 +98,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ls",
         usage: "doklin ls [folder] [--deep]",
-        about: "What a folder holds: its folders, its documents (with their versions and public addresses) and its plain files. --deep lists everything beneath it.",
+        about: "What a folder holds: its folders, its boards, its documents (with their versions and public addresses) and its plain files. --deep lists everything beneath it, but never what is inside a board.",
         accepts: Accepts { values: &[], switches: &["deep"] },
         run: commands::ls,
     },
@@ -170,6 +171,16 @@ pub const COMMANDS: &[Command] = &[
         about: "Remove a document, with its comments — or one version of it with --md or --html, never the last.",
         accepts: Accepts { values: &[], switches: VERSION_FLAGS },
         run: commands::rm,
+    },
+    Command {
+        name: "board",
+        usage: "doklin board info <board>\n       doklin board show <board> [--by <field>] [--where <field>=<value>]…\n       doklin board card <board> <card>\n       doklin board add <board> <title> [<field>=<value>…] [--first] [--from <file|->]\n       doklin board set <board> <card> [<field>=<value>…] [--title <new>] [--first|--last|--before <card>|--after <card>]\n       doklin board rm <board> <card>\n       doklin board new <path> [--name <name>]\n       doklin board field add <board> <name> --type <type> [--options \"a, b, c\"]\n       doklin board field set <board> <field> --name <new name>\n       doklin board field rm <board> <field>\n       doklin board option add <board> <field> <name> [--color <c>] [--first|--last|--before <o>|--after <o>]\n       doklin board option set <board> <field> <name> [--name <new>] [--color <c>] [--first|--last|--before <o>|--after <o>]\n       doklin board option rm <board> <field> <name>",
+        about: "Read and change a board: its cards, their properties and where they sit, and the fields and options that are its columns. A card's page is a document, <board>/<card>. See `doklin help boards`.",
+        accepts: Accepts {
+            values: &["by", "where", "from", "title", "name", "type", "options", "color", "before", "after"],
+            switches: &["first", "last"],
+        },
+        run: board::board,
     },
     Command {
         name: "publish",
