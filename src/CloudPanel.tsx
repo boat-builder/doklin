@@ -14,7 +14,7 @@
 // disconnect, and the danger zone: erase everything on the domain (which
 // frees it), then the teardown prompt for the agent.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BUNDLED_WORKER_VERSION,
   cloudConfirmDeletes,
@@ -32,6 +32,7 @@ import {
   type CloudStatus,
 } from "./cloud";
 import CloudPeople from "./CloudPeople";
+import { useDismiss } from "./dismiss";
 import { buildTeardownPrompt } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
 
@@ -106,15 +107,14 @@ export default function CloudPanel({
   const [tornDown, setTornDown] = useState<{ domain: string; endpoint: string; purged: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (view !== "main" && !wiping) setView("main");
-      else if (!wiping) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, view, wiping]);
+  // Esc steps back out of a drilled-in view, as its back arrow does; a press
+  // outside closes from anywhere. Nothing closes mid-wipe.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss((how) => {
+    if (wiping) return;
+    if (how === "escape" && view !== "main" && view !== "teardown") setView("main");
+    else onClose();
+  }, cardRef);
 
   // "Synced 2 min ago" keeps counting while the panel is open.
   useEffect(() => {
@@ -231,13 +231,13 @@ export default function CloudPanel({
             disabled={!root}
             onClick={onConnect}
           >
-            Connect a domain…
+            Connect a domain
           </button>
           <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
-            Open a workspace from a domain…
+            Open a workspace from a domain
           </button>
           <button className="modal-btn" data-testid="join-with-invite" onClick={onRedeem}>
-            Join with an invite…
+            Join with an invite
           </button>
         </div>
         {!root && <p className="cloud-hint">Open a folder first to connect it.</p>}
@@ -263,7 +263,7 @@ export default function CloudPanel({
     body = (
       <>
         <p className="cloud-hint">
-          On the other Mac: the gear → Cloud… → Open a workspace from a domain…, then paste these
+          On the other Mac: the gear → Cloud… → Open a workspace from a domain, then paste these
           two. It downloads “{cloud.name}” into a folder of its choosing and stays in step.
         </p>
         <div className="modal-field">
@@ -430,7 +430,7 @@ export default function CloudPanel({
             </p>
             <div className="modal-buttons">
               <button className="modal-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
-                Update the worker…
+                Update the worker
               </button>
             </div>
           </div>
@@ -457,7 +457,7 @@ export default function CloudPanel({
               data-testid="cloud-workspace-history"
               onClick={onWorkspaceHistory}
             >
-              Workspace history…
+              Workspace history
             </button>
           </div>
         )}
@@ -486,13 +486,13 @@ export default function CloudPanel({
         <div className="cloud-section-label">People and agents</div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="people-open" onClick={() => setView("people")}>
-            People…
+            People
           </button>
           <span className="cloud-hint">Invite someone by email, or take a Mac’s access away.</span>
         </div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="agents-open" onClick={() => setView("agents")}>
-            Agents…
+            Agents
           </button>
           <span className="cloud-hint">Let a bot work here from another computer, and say what it may do.</span>
         </div>
@@ -500,7 +500,7 @@ export default function CloudPanel({
         <div className="cloud-section-label">Public</div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="published-pages" onClick={onOpenPublished}>
-            Published pages{pages > 0 ? ` (${pages})` : ""}…
+            Published pages{pages > 0 ? ` (${pages})` : ""}
           </button>
           {pages === 0 && <span className="cloud-hint">Nothing is published yet.</span>}
         </div>
@@ -508,16 +508,16 @@ export default function CloudPanel({
         <div className="cloud-section-label">This Mac</div>
         <div className="cloud-actions">
           <button className="modal-btn" data-testid="another-mac" onClick={() => setView("another")}>
-            Connect another Mac…
+            Connect another Mac
           </button>
           {onOpenVersions && (
             <button className="modal-btn" data-testid="cloud-versions-settings" onClick={onOpenVersions}>
-              Version settings…
+              Version settings
             </button>
           )}
           {!behind && (
             <button className="modal-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
-              Update the worker…
+              Update the worker
             </button>
           )}
           {confirmDisconnect ? (
@@ -553,7 +553,7 @@ export default function CloudPanel({
               setView("wipe");
             }}
           >
-            Delete everything on {cloud.domain}…
+            Delete everything on {cloud.domain}
           </button>
         </div>
       </>
@@ -561,13 +561,8 @@ export default function CloudPanel({
   }
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !wiping) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="modal-overlay">
+      <div ref={cardRef} className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           {view !== "main" && view !== "teardown" && (
             <button className="modal-back" onClick={() => setView("main")} aria-label="Back">

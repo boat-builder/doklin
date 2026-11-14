@@ -27,6 +27,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor, { type EditorHandle } from "./Editor";
 import PropertiesHeader from "./PropertiesHeader";
+import { useDismiss } from "./dismiss";
 import { CloseIcon, OpenTabIcon } from "./storeChrome";
 import { useStore } from "./store/useStore";
 import { parseFrontmatter, type PropValue } from "./store/frontmatter";
@@ -177,16 +178,10 @@ export default function CardPeek({
 
   /* ---------- chrome ---------- */
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Esc or a press anywhere off the panel puts it away — the board behind
+  // included, so clicking another card closes this one and peeks that.
+  const panelRef = useRef<HTMLElement>(null);
+  useDismiss(onClose, panelRef);
 
   const title = path.replace(/^.*\//, "").replace(CARD_EXT_RE, "");
 
@@ -207,7 +202,7 @@ export default function CardPeek({
   };
 
   return (
-    <aside className="dk-peek" aria-label={`Card: ${title}`}>
+    <aside ref={panelRef} className="dk-peek" aria-label={`Card: ${title}`}>
       <header className="dk-peek-head">
         {renaming && onRename ? (
           <TitleInput

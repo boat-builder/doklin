@@ -10,7 +10,7 @@
 //
 // Both tabs stay mounted while the view is open — a code that is shown once
 // must not be lost to a look at the other tab. In each, what the owner came
-// to do is at the top: the door ("Invite someone…", "Add an agent…"), its
+// to do is at the top: the door ("Invite someone", "Add an agent"), its
 // form, and the one-time code it ends in; the lists follow.
 //
 // Everything comes from `cloud_people` in one answer — including which door
@@ -163,7 +163,7 @@ export default function CloudPeople({
             Who else is on {domain}, people and agents alike — and inviting anybody, adding an
             agent, or taking access away — is the owner’s to see and do. Your own credential for a
             second Mac of your own is behind{" "}
-            <em>Connect another Mac…</em> — and if you lose it, ask for a fresh invite: it reaches
+            <em>Connect another Mac</em> — and if you lose it, ask for a fresh invite: it reaches
             the same you, a new code rather than a new person.
           </p>
         </div>
@@ -335,7 +335,7 @@ export default function CloudPeople({
                   revealSoon(top);
                 }}
               >
-                Invite someone…
+                Invite someone
               </button>
               <span className="cloud-hint">They get a credential of their own, which you can take back.</span>
             </div>
@@ -463,7 +463,7 @@ export default function CloudPeople({
                         revealSoon(top);
                       }}
                     >
-                      New code…
+                      New code
                     </button>
                     {confirm === `code:${i.id}` ? (
                       <span className="cloud-inline-confirm">

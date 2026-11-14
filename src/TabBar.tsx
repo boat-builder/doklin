@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
 import { LiveGlyph, useLivePages } from "./livePages";
 import { dragWindowFromGap } from "./windowDrag";
@@ -190,23 +191,7 @@ export default function TabBar({
     setMenuOpen(false); // the button is gone; don't leave an orphaned popover
   }, [overflowing]);
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (menuWrapRef.current && !menuWrapRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
+  useDismiss(() => setMenuOpen(false), menuWrapRef, menuOpen);
 
   return (
     // The bar is the window's title row: its empty stretches move the window.

@@ -1521,6 +1521,11 @@ body,
   animation: dk-zoom-fade 0.12s ease-out;
 }
 
+/* Focus is held here only so keys reach the viewer; nothing to ring. */
+.dk-zoom-overlay:focus {
+  outline: none;
+}
+
 .dk-zoom-stage {
   flex: 1;
   position: relative;
@@ -2885,8 +2890,37 @@ body.tree-dragging.tree-drag-invalid * {
   animation: settings-popover-in 0.1s ease-out;
 }
 
-.saveas-title {
+.saveas-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
+}
+
+.saveas-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: -2px -4px -2px 0;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.saveas-close:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+.saveas-title {
+  flex: 1;
+  min-width: 0;
   font-size: var(--fs-sm);
   color: var(--text-3);
   overflow: hidden;
@@ -6346,8 +6380,32 @@ body.tree-dragging.tree-drag-invalid * {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  /* Clear of the close button in the corner. */
+  padding-right: 26px;
   font-size: var(--fs-lg);
   font-weight: 600;
+  color: var(--text-1);
+}
+
+.live-pop-close {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.live-pop-close:hover {
+  background: var(--hover);
   color: var(--text-1);
 }
 

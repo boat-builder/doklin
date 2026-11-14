@@ -187,7 +187,7 @@ export default function CloudAgents({
               The code in it works once, on one machine, and stops working in{" "}
               {timeUntil(login.login.expiresAt, now)}. This is the only time it is shown: {domain} kept
               nothing but its fingerprint. A second machine needs a code of its own —{" "}
-              <em>New login code…</em> on the agent’s row.
+              <em>New login code</em> on the agent’s row.
             </p>
             <div className="modal-buttons">
               <button
@@ -266,7 +266,7 @@ export default function CloudAgents({
                 revealSoon(top);
               }}
             >
-              Add an agent…
+              Add an agent
             </button>
             <span className="cloud-hint">A bot gets an identity of its own, which you can take back.</span>
           </div>
@@ -341,7 +341,7 @@ export default function CloudAgents({
                   disabled={busy}
                   onClick={() => newCode(a)}
                 >
-                  New login code…
+                  New login code
                 </button>
                 <button
                   className="modal-btn"
@@ -352,7 +352,7 @@ export default function CloudAgents({
                     revealSoon(top);
                   }}
                 >
-                  Edit…
+                  Edit
                 </button>
                 {confirm === `agent:${a.id}` ? (
                   <span className="cloud-inline-confirm">

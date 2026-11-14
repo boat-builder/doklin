@@ -9,6 +9,7 @@
 // original, or go back to now.
 
 import { useCallback, useEffect, useState } from "react";
+import { useDismiss } from "./dismiss";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "./Editor";
 import { versionsDiff, versionsRead, type FileVersion } from "./versions";
@@ -140,16 +141,8 @@ export default function VersionPreview({
     };
   }, [showChanges, root, docPath, version, newer]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onBack();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onBack]);
+  // Esc steps back out of the preview, once whatever is above it has gone.
+  useDismiss(onBack);
 
   const makeCopy = useCallback(async () => {
     if (text == null || copying) return;

@@ -25,6 +25,7 @@ import {
   type PointerEvent as RPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { useDismiss } from "./dismiss";
 
 type Transform = { scale: number; x: number; y: number };
 
@@ -95,20 +96,18 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
     fit();
   }, [svg, fit]);
 
-  // Esc closes. Capture phase on window so it runs before (and alongside) the
-  // app's own capture-phase key handlers — matching where they register keeps a
-  // sibling listener firing even if one of them calls stopPropagation — and
-  // stopPropagation here keeps a lower handler from also acting on the same Esc.
+  // Esc closes. The viewer fills the window, so there is no outside to press.
+  // Focus comes into the viewer while it is up — so Esc is the viewer's, not
+  // the editor's behind it — and goes back where it was on close.
+  useDismiss(onClose);
+  const overlayRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
+    const before = document.activeElement;
+    overlayRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (before instanceof HTMLElement) before.focus({ preventScroll: true });
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, []);
 
   // Wheel zoom toward the cursor. Native + non-passive so preventDefault sticks
   // (React's synthetic wheel listener is passive and would let the page scroll).
@@ -173,7 +172,14 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
   };
 
   return createPortal(
-    <div className="dk-zoom-overlay" role="dialog" aria-modal="true" aria-label="Diagram viewer">
+    <div
+      ref={overlayRef}
+      className="dk-zoom-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Diagram viewer"
+      tabIndex={-1}
+    >
       <div
         ref={stageRef}
         className="dk-zoom-stage"
