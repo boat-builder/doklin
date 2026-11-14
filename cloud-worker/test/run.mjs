@@ -4128,29 +4128,41 @@ await test("comments: a markdown thread is a marker in the text and a record in 
   const rev = () => String(entryAt(storedManifest(), "Talk/draft.md")[1].rev);
   const kept = await api(docUrl("Talk/draft"), { method: "PUT", body: read.text.replace("The crew is ready.", "The crew is rested."), headers: { "if-rev": rev() } });
   assert.equal(kept.status, 200);
-  assert.equal(kept.json.orphaned, undefined);
-  // A marker of its own making: refused — a thread is started with the comments route.
-  const invented = await api(docUrl("Talk/draft"), { method: "PUT", body: `${read.text}\n{==my own==}{>>#zzz999<<}\n`, headers: { "if-rev": rev() } });
-  assert.equal(invented.status, 400);
-  assert.deepEqual(invented.json.unknownMarkers, ["zzz999"]);
-  assert.ok(/start a thread with the comment command/.test(invented.json.error));
-  assert.equal((await api(docUrl("Talk/fresh"), { method: "PUT", body: "A {==new==}{>>#abc999<<} document.\n" })).status, 400, "in a new document too");
-  // A marker dropped: the thread is kept, without a place, and the answer names it.
   const current = (await api(docUrl("Talk/draft"))).text;
-  const dropped = await api(docUrl("Talk/draft"), { method: "PUT", body: current.replace(`{==in code==}{>>#${id2}<<}`, "in code"), headers: { "if-rev": rev() } });
-  assert.equal(dropped.status, 200);
-  assert.deepEqual(dropped.json.orphaned, [id2]);
-  const afterDrop = await threads("Talk/draft");
-  assert.deepEqual(afterDrop.map((t) => [t.id, t.orphaned ?? false, t.on]), [[id, false, "if the paint dries"], [id2, true, ""]]);
-  assert.equal(afterDrop[1].comments[0].body, "Which code?", "the conversation is not lost with its place");
-  // Its marker written back puts it in place again — that id is a thread's, not an invention.
-  const restored = await api(docUrl("Talk/draft"), { method: "PUT", body: current, headers: { "if-rev": rev() } });
-  assert.deepEqual([restored.status, restored.json.orphaned], [200, undefined]);
-  assert.deepEqual((await threads("Talk/draft")).map((t) => t.orphaned ?? false), [false, false]);
-  // The clean text written back over the markdown drops every marker.
-  const wiped = await api(docUrl("Talk/draft"), { method: "PUT", body: DRAFT, headers: { "if-rev": rev() } });
-  assert.deepEqual(wiped.json.orphaned.sort(), [id, id2].sort());
+  // A marker may move, with its words.
+  const marker2 = `{==in code==}{>>#${id2}<<}`;
+  const moved = current.replace(`and \`ships in June\` ${marker2}. See`, `${marker2}: and \`ships in June\`. See`);
+  assert.notEqual(moved, current);
+  assert.equal((await api(docUrl("Talk/draft"), { method: "PUT", body: moved, headers: { "if-rev": rev() } })).status, 200);
+  assert.deepEqual((await threads("Talk/draft")).map((t) => [t.id, t.orphaned ?? false, t.on]), [[id, false, "if the paint dries"], [id2, false, "in code"]]);
   assert.equal((await api(docUrl("Talk/draft"), { method: "PUT", body: current, headers: { "if-rev": rev() } })).status, 200);
+
+  // Anything else a write does to a marker is refused, and writes nothing.
+  const refusedWrite = async (body, more = "") => {
+    const before = storedManifest().seq;
+    const res = await api(docUrl("Talk/draft", "", more), { method: "PUT", body, headers: more === "&force=1" ? {} : { "if-rev": rev() } });
+    assert.deepEqual([res.status, res.json.code], [400, "comments"], res.json.error);
+    assert.equal(storedManifest().seq, before);
+    return res.json;
+  };
+  // A marker dropped — no flag gets past that, --force included: a thread is removed with the comments route.
+  const dropped = await refusedWrite(current.replace(marker2, "in code"));
+  assert.deepEqual(dropped.threads, [id2]);
+  assert.ok(dropped.error.includes(`remove the marker of comment #${id2} (on "in code")`) && dropped.error.includes(`doklin comment rm Talk/draft ${id2}`), dropped.error);
+  await refusedWrite(current.replace(marker2, "in code"), "&dry=1");
+  await refusedWrite(current.replace(marker2, "in code"), "&force=1");
+  // Its words changed.
+  const reworded = await refusedWrite(current.replace(marker2, `{==in the code==}{>>#${id2}<<}`));
+  assert.deepEqual([reworded.threads, reworded.added], [[id2], [id2]]);
+  assert.ok(reworded.error.includes(`change the words of comment #${id2}`), reworded.error);
+  // The clean text written back over the markdown: every marker.
+  assert.deepEqual((await refusedWrite(DRAFT)).threads.sort(), [id, id2].sort());
+  // A marker of its own making — a thread is started with the comments route.
+  const invented = await refusedWrite(`${current}\n{==my own==}{>>#zzz999<<}\n`);
+  assert.deepEqual([invented.added, invented.threads], [["zzz999"], undefined]);
+  assert.ok(invented.error.includes("start a thread with `doklin comment`"), invented.error);
+  assert.equal((await api(docUrl("Talk/fresh"), { method: "PUT", body: "A {==new==}{>>#abc999<<} document.\n" })).status, 400, "in a new document too");
+  assert.deepEqual((await threads("Talk/draft")).map((t) => t.orphaned ?? false), [false, false], "every thread is where it was");
 
   // Removing a thread unwraps its marker: the words stay.
   const dryRm = await api(commentsUrl("Talk/draft", `&thread=${id2}&dry=1`), { method: "DELETE" });
@@ -4259,13 +4271,18 @@ await test("comments: an html thread sits on the element whose text begins with 
   const reply = await say({ path: "Talk/page", thread: id, body: "By June." });
   assert.deepEqual(reply.json, { path: "Talk/page", thread: id, version: "html", comments: 2 });
 
-  // The page is regenerated: a thread whose element is gone has lost its place, and says so.
+  // The page is regenerated. Taking away the element a thread is on is refused, whatever the flags…
   const without = PAGE.replace("  <li><p>Paint the hull before June</p></li>\n", "");
-  assert.equal((await api(docUrl("Talk/page", "html"), { method: "PUT", body: without, headers: { "if-rev": "1" } })).status, 200);
-  assert.deepEqual((await threads("Talk/page")).map((t) => [t.tag, t.orphaned ?? false]).sort(), [["h1", false], ["li", false], ["p", true]]);
-  // …and finds it again when the element is back, wherever in the page it now is.
+  const seq = storedManifest().seq;
+  for (const more of ["", "&force=1"]) {
+    const lost = await api(docUrl("Talk/page", "html", more), { method: "PUT", body: without, headers: more ? {} : { "if-rev": "1" } });
+    assert.deepEqual([lost.status, lost.json.code, lost.json.threads], [400, "comments", [id]]);
+    assert.ok(lost.json.error.includes(`the <p> comment #${id} is on ("Paint the hull before June")`) && lost.json.error.includes(`doklin comment rm Talk/page ${id}`), lost.json.error);
+  }
+  assert.equal(storedManifest().seq, seq);
+  // …and moving it is not: the thread finds its element wherever in the page it now is.
   const moved = PAGE.replace("<h1>Launch plan</h1>", "<h1>Launch plan</h1>\n<section><p>Paint the hull before June, weather allowing.</p></section>").replace("  <li><p>Paint the hull before June</p></li>\n", "");
-  assert.equal((await api(docUrl("Talk/page", "html"), { method: "PUT", body: moved, headers: { "if-rev": "2" } })).status, 200);
+  assert.equal((await api(docUrl("Talk/page", "html"), { method: "PUT", body: moved, headers: { "if-rev": "1" } })).status, 200);
   assert.deepEqual((await threads("Talk/page")).map((t) => t.orphaned ?? false), [false, false, false]);
 
   // Removing: the sidecar only, and the sidecar itself with the last one.

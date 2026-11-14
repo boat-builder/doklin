@@ -170,7 +170,7 @@ GET cards?path=&by=&where=  {board, name, cards, shown?, by, fields, columns: [{
 GET card?path=&card=  {board, title, path, rev, changed, by, byName?, size, props, other?, comments, public?, conflict?, page}
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version?,
-       file, rev, size, created, unchanged?, htmlBehind?, orphaned?}; 409 {rev}; 413 > 25 MB
+       file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
 POST   move {from, to, dryRun?}  document/file/folder/board; to ending in / = into → {kind, from, to,
        files, name?, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
@@ -208,11 +208,11 @@ DELETE pages?path= | ?slug= → {stopped: [...]}
 | `anchor` | 404 · 409 | words absent / ambiguous or unplaceable; `occurrences` or `candidates` |
 | `slug_taken` | 409 | slug in use |
 | `board` | 400 | path is a board or inside one |
+| `comments` | 400 | a write would drop, change or add a comment marker, or lose an html thread's element; `threads`, `added` |
 | `no_card` · `no_field` · `no_option` | 404 | not on the board; `fields`/`options` list what is |
 | `taken` | 409 | card title / field / option name in use |
 
-Also `400`: unknown marker id in an md write (`unknownMarkers`); hidden,
-ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision; a
+Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision; a
 `store.jsonl` that isn't Doklin's.
 
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)

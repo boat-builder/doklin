@@ -454,9 +454,6 @@ fn wrote_words(v: &Value, dry: bool) -> String {
     if v.get("htmlBehind").is_some() {
         out.push_str("\nIts html version is now behind: it was made from an older text. Rewrite it with --html, or remove it with `doklin rm --html`.");
     }
-    for id in strings(&v["orphaned"]) {
-        out.push_str(&format!("\nThread #{} lost the words it was on — it is kept, with no place in the text.", id));
-    }
     out
 }
 

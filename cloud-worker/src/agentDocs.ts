@@ -53,13 +53,14 @@ import {
   type Version,
 } from "./documents";
 import type { Env } from "./env";
+import { anchorResolves, elementsOf } from "./htmlText";
 import { json, readJsonObject } from "./http";
 import { MAX_FILE_BYTES, blobKey } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
-import { stripComments } from "../../src/criticMarkup";
-import { META_SUFFIX, emptyMeta, markerIds, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
+import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
+import { META_SUFFIX, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
 import { parseFrontmatter } from "../../src/store/frontmatter";
 import { STORE_FILE, parseStoreDef, serializeStoreDef } from "../../src/store/storeFile";
 
@@ -477,21 +478,17 @@ async function writeVersion(
     if (inTheWay) return new Refusal(409, `"${inTheWay.file.path}" is already there`);
   }
 
-  let orphaned: string[] = [];
-  if (version === "md") {
-    const checked = await checkMarkers(tx, doc, text);
-    if (checked instanceof Refusal) return checked;
-    orphaned = checked;
-  }
-
-  let stored = bytes;
-  if (doc.board && current) {
-    // The card's properties as they are now, not as they were when the page
-    // was read: a change on the board meanwhile is kept, not undone.
-    const now = await tx.readText(current.fid);
-    if (now === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-    stored = new TextEncoder().encode(splitCard(now).head + text);
-  }
+  // The version as it is now, when the write could take something from it:
+  // a comment's place, or a card's properties.
+  let now: string | null = "";
+  if (current && (version === "md" || doc.board || doc.meta)) now = await tx.readText(current.fid);
+  if (now === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
+  // The card's properties as they are now, not as they were when the page
+  // was read: a change on the board meanwhile is kept, not undone.
+  const card = doc.board ? splitCard(now) : null;
+  const lost = version === "md" ? markersKept(card ? card.page : now, text, doc.stem) : await anchorsKept(tx, doc, now, text);
+  if (lost) return lost;
+  const stored = card ? new TextEncoder().encode(card.head + text) : bytes;
 
   const before = current?.file.hash;
   const fid = current?.fid ?? newFileId();
@@ -513,37 +510,100 @@ async function writeVersion(
     created: !current,
     ...(before === file.hash ? { unchanged: true } : {}),
     ...(htmlBehind(after) ? { htmlBehind: true } : {}),
-    ...(orphaned.length > 0 ? { orphaned } : {}),
   };
 }
 
+/* ---------- What a write may not do to comments ---------- */
+//
+// Nothing. Threads are started, answered and removed by the comments routes,
+// which change the text and the sidecar together; a write of content leaves
+// every thread where it was, or is refused. No flag gets past this — not
+// --force, which is about revisions.
+
+type Marker = { whole: string; id: string | null; words: string };
+
+const markersOf = (md: string): Marker[] =>
+  [...md.matchAll(CRITIC_BLOCK_RE)].map((m) => ({ whole: m[0], id: parseSpans(m[2]).id, words: m[1] }));
+
+/** What of `of` is not in `from`, counting repeats. */
+function missing(of: readonly Marker[], from: readonly Marker[]): Marker[] {
+  const left = new Map<string, number>();
+  for (const m of from) left.set(m.whole, (left.get(m.whole) ?? 0) + 1);
+  return of.filter((m) => {
+    const n = left.get(m.whole) ?? 0;
+    if (n > 0) left.set(m.whole, n - 1);
+    return n === 0;
+  });
+}
+
+const quoted = (words: string): string => {
+  const flat = words.replace(/\s+/g, " ").trim();
+  return `"${flat.length > 40 ? `${flat.slice(0, 40)}…` : flat}"`;
+};
+
+const commentRm = (stem: string, thread: string): string =>
+  `\`doklin comment rm ${/\s/.test(stem) ? `"${stem}"` : stem} ${thread}\``;
+
+const andList = (items: readonly string[]): string =>
+  items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+
 /**
- * What a markdown write may do to comment markers. A thread's anchor is a
- * marker in the text — `{==words==}{>>#id<<}`
- * — and its conversation is in the sidecar. So:
- *
- *   · a marker whose id no thread has is refused: a thread is started with
- *     the comments route, which writes both halves together;
- *   · a thread whose marker this write removes is kept, as the app keeps it,
- *     and reported — the answer is the list of ids that just lost theirs.
+ * A markdown thread's place is a marker in the text, `{==words==}{>>#id<<}`.
+ * The new text must carry exactly the markers the old one did, each as it
+ * was, words and all; it may move one with its words. Compared as written,
+ * so a marker of any shape — a stray, a thread still written inline — is
+ * kept like the rest.
  */
-async function checkMarkers(tx: Tx, doc: Doc, text: string): Promise<string[] | Refusal> {
-  const after = markerIds(text);
-  const meta = doc.meta ? parseEntityMeta((await tx.readText(doc.meta.fid)) ?? "") : emptyMeta();
-  const threads = new Set(meta.mthreads.map((t) => t.id));
-  const strangers = [...after].filter((id) => !threads.has(id));
-  if (threads.size === 0 && strangers.length === 0) return [];
-  // Only now is the old text worth a read: it says which markers were there.
-  const before = doc.md ? markerIds((await tx.readText(doc.md.fid)) ?? "") : new Set<string>();
-  const invented = strangers.filter((id) => !before.has(id));
-  if (invented.length > 0) {
-    return new Refusal(
-      400,
-      `the text carries a comment marker no thread has (${invented.map((id) => `#${id}`).join(", ")}) — start a thread with the comment command instead of writing a marker`,
-      { unknownMarkers: invented },
-    );
-  }
-  return [...threads].filter((id) => before.has(id) && !after.has(id));
+function markersKept(before: string, after: string, stem: string): Refusal | null {
+  const was = markersOf(before);
+  const now = markersOf(after);
+  const gone = missing(was, now);
+  const added = missing(now, was);
+  if (gone.length === 0 && added.length === 0) return null;
+  // A marker that is gone while one with its id is new was changed, not removed.
+  const twin = (m: Marker, among: readonly Marker[]): Marker | undefined => (m.id === null ? undefined : among.find((o) => o.id === m.id));
+  const name = (m: Marker): string => (m.id === null ? `the comment on ${quoted(m.words)}` : `comment #${m.id} (on ${quoted(m.words)})`);
+  const ids = (ms: readonly Marker[]): string[] => [...new Set(ms.map((m) => m.id).filter((id): id is string => id !== null))];
+  const removed = gone.filter((m) => !twin(m, added));
+  const changed = gone.filter((m) => twin(m, added));
+  const invented = added.filter((m) => !twin(m, gone));
+  const parts = [
+    ...(removed.length > 0 ? [`remove the marker${removed.length > 1 ? "s" : ""} of ${andList(removed.map(name))}`] : []),
+    ...changed.map((m) => `change ${twin(m, added)?.words === m.words ? "the marker" : "the words"} of ${name(m)}`),
+    ...(invented.length > 0
+      ? [`add ${invented.length > 1 ? "comment markers" : "a comment marker"}${ids(invented).length > 0 ? ` (${ids(invented).map((id) => `#${id}`).join(", ")})` : ""}`]
+      : []),
+  ];
+  const fix =
+    gone.length > 0
+      ? `keep every marker exactly as \`doklin read\` shows it (it may move with its words), or remove the thread first with ${commentRm(stem, gone.length === 1 && gone[0].id ? gone[0].id : "<thread>")}`
+      : "start a thread with `doklin comment` instead of writing a marker";
+  return new Refusal(400, `this write would ${andList(parts)} — ${fix}`, {
+    code: "comments",
+    ...(gone.length > 0 ? { threads: ids(gone) } : {}),
+    ...(added.length > 0 ? { added: ids(added) } : {}),
+  });
+}
+
+/**
+ * An html thread's place is an element of the page, found again by its tag
+ * and opening words. Every thread that has a place now must have one after.
+ * One that has none already is not this write's doing.
+ */
+async function anchorsKept(tx: Tx, doc: Doc, before: string, after: string): Promise<Refusal | null> {
+  if (!doc.meta) return null;
+  const threads = parseEntityMeta((await tx.readText(doc.meta.fid)) ?? "").hthreads;
+  if (threads.length === 0) return null;
+  const was = elementsOf(before);
+  const now = elementsOf(after);
+  const gone = threads.filter((t) => anchorResolves(was, t.anchor) && !anchorResolves(now, t.anchor));
+  if (gone.length === 0) return null;
+  const names = gone.map((t) => `the <${t.anchor.tag}> comment #${t.id} is on (${quoted(t.anchor.text)})`);
+  return new Refusal(
+    400,
+    `this write would take away ${andList(names)} — keep ${gone.length === 1 ? "that element and its opening words" : "those elements and their opening words"}, or remove the thread first with ${commentRm(doc.stem, gone.length === 1 ? gone[0].id : "<thread>")}`,
+    { code: "comments", threads: gone.map((t) => t.id) },
+  );
 }
 
 /* ---------- Removing ---------- */
