@@ -9,15 +9,15 @@
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
 //     instead of colliding. A table whose shape changes is dropped and made
-//     again, and only ever one that holds nothing worth keeping (steps 9 and
-//     10). A table that does hold something gains a column instead, and only
-//     after the runner has looked and found it missing (`columns`).
+//     again, and only ever one that holds nothing worth keeping (step 8
+//     does). A table that does hold something gains a column instead, and
+//     only after the runner has looked and found it missing (`columns`).
 //   · A guarded bump. The version only ever moves with
 //     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
 //     the work done. A statement that moves *data* cannot lean on being
 //     repeatable, so it carries the guard itself: it names the version it
-//     migrates from in its own WHERE (step 7's does), and moves nothing once
+//     migrates from in its own WHERE (step 8's does), and moves nothing once
 //     the bump has landed.
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
@@ -218,10 +218,13 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // Roles as data. Until here `members.role`
-    // was a label and a token always authenticated as a member; from here a
-    // token carries the role on its person's row, so there can be several
-    // owners, and two things that used to be implied need saying.
+    // A workspace with sections: roles, spaces, and agents that are a
+    // person's.
+    //
+    // Roles as data. Until here `members.role` was a label and a token
+    // always authenticated as a member; from here a token carries the role
+    // on its person's row, so there can be several owners, and two things
+    // that used to be implied need saying.
     //
     // `creator` says which person holds the domain's env secret. It used to
     // be "the one row whose role is owner"; with several owners that no
@@ -234,8 +237,37 @@ const STEPS: readonly Step[] = [
     // delete its copy of the workspace — apart from a token it has merely
     // never heard of (a wiped domain, a rotated secret, a database that
     // cannot answer), which deletes nothing.
+    //
+    // Spaces: a restricted folder, or one person's Private, is a small
+    // workspace of its own stored under `spaces/<id>/` in the bucket, with
+    // its own people. The shared workspace is not a row here — it is
+    // everything outside that prefix, and everybody's.
+    //
+    // `spaces.etag` is the space's manifest etag, written by the worker
+    // after each write it makes there: it is how one poll says which of a
+    // person's spaces moved without a bucket read for each.
+    //
+    // `addresses` says which space each public address belongs to ('' the
+    // shared workspace). The primary key is what makes an address one
+    // space's, and it is how the renderer finds a page that is not in the
+    // shared workspace's own map.
+    //
+    // Presence and leases are made again with the space each row is in:
+    // a lease is now one document in one space. Both hold only what the
+    // last minute and a half wrote, so dropping them costs a beat.
+    //
+    // An agent belongs to a person, and sees what that person sees.
+    // `agents.member_id` is whose it is. NULL is the creator's — whoever
+    // holds the domain's secret, whether or not they have said who they are
+    // — which is what every agent made before this step is, with nothing to
+    // move: the creator was the only one who could make them.
+    //
+    // The search mirror is kept once per space ('' the shared workspace), so
+    // a search reads only the text its caller's person may read. Both tables
+    // are derived: dropped here, and filled again by the next search.
     to: 8,
-    tables: ["creator", "removed_tokens"],
+    tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
+    columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
     sql: [
       `CREATE TABLE IF NOT EXISTS creator (
          id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
@@ -253,29 +285,6 @@ const STEPS: readonly Step[] = [
          hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
          removed_at INTEGER NOT NULL
        )`,
-    ],
-  },
-  {
-    // Spaces: a restricted folder, or one person's Private, is a small
-    // workspace of its own stored under `spaces/<id>/` in the bucket, with
-    // its own people. The shared workspace is not a row here — it is
-    // everything outside that prefix, and everybody's.
-    //
-    // `etag` is the space's manifest etag, written by the worker after each
-    // write it makes there: it is how one poll says which of a person's
-    // spaces moved without a bucket read for each.
-    //
-    // `addresses` says which space each public address belongs to ('' the
-    // shared workspace). The primary key is what makes an address one
-    // space's, and it is how the renderer finds a page that is not in the
-    // shared workspace's own map.
-    //
-    // Presence and leases are made again with the space each row is in:
-    // a lease is now one document in one space. Both hold only what the
-    // last minute and a half wrote, so dropping them costs a beat.
-    to: 9,
-    tables: ["space_members", "addresses", "spaces"],
-    sql: [
       `CREATE TABLE IF NOT EXISTS spaces (
          id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
          kind       TEXT NOT NULL,              -- 'restricted' | 'private'
@@ -316,22 +325,6 @@ const STEPS: readonly Step[] = [
          until       INTEGER NOT NULL,
          PRIMARY KEY (space_id, path)
        )`,
-    ],
-  },
-  {
-    // An agent belongs to a person, and sees what that person sees.
-    // `agents.member_id` is whose it is. NULL is the creator's — whoever
-    // holds the domain's secret, whether or not they have said who they are
-    // — which is what every agent made before this step is, with nothing to
-    // move: the creator was the only one who could make them.
-    //
-    // The search mirror is kept once per space ('' the shared workspace), so
-    // a search reads only the text its caller's person may read. Both tables
-    // are derived: dropped here, and filled again by the next search.
-    to: 10,
-    tables: [],
-    columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
-    sql: [
       `DROP TABLE IF EXISTS search_text`,
       `CREATE TABLE IF NOT EXISTS search_text (
          space_id TEXT NOT NULL,                -- '' the shared workspace

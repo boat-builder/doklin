@@ -277,7 +277,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 10)
+## D1 (`src/schema.ts`, schema 8)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe

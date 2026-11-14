@@ -70,7 +70,7 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 10;
+const D1_SCHEMA = 8;
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -91,7 +91,7 @@ const D1_TABLES = [
   "tokens",
 ];
 
-/** The agent tables as a database had them from schema 5 to 9 (schema.ts). */
+/** The agent tables as a database had them from schema 5 to 7 (schema.ts). */
 const AGENT_TABLES_BEFORE_OWNERS = `
     CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
                          last_used_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
