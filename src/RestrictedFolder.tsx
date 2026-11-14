@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cloudPeople, type CloudMember, type CloudStatus } from "./cloud";
 import Avatar from "./Avatar";
+import { useDismiss } from "./dismiss";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -70,13 +71,11 @@ export default function RestrictedFolder({
     };
   }, [cloud.root]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  // Nothing closes while the folder is being made.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(() => {
+    if (!busy) onClose();
+  }, cardRef);
 
   const title =
     source.kind === "new"
@@ -107,13 +106,15 @@ export default function RestrictedFolder({
     });
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title} data-testid="restricted-folder">
+    <div className="modal-overlay">
+      <div
+        ref={cardRef}
+        className="modal cloud-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        data-testid="restricted-folder"
+      >
         <div className="modal-header">
           <div className="modal-title">{title}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>

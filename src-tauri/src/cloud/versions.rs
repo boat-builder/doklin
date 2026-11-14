@@ -113,21 +113,23 @@ pub struct MirrorReport {
 /* ---------- The pass ---------- */
 
 /// Upload what this device has captured and the cloud has not, then — once a
-/// day — thin what is up there. `uploaded` and `last_sweep_ms` live in the
-/// engine's persisted state, so a restart doesn't re-PUT the whole store.
+/// day — thin what is up there. `last_sweep_ms` lives in the engine's
+/// persisted state.
 pub async fn mirror<R: Remote>(
     remote: &R,
     store: &Store,
     device_id: &str,
-    uploaded: &mut BTreeSet<String>,
     last_sweep_ms: &mut Option<u64>,
     now_ms: u64,
 ) -> RemoteResult<MirrorReport> {
     let local = store.read_index();
     let mut held = load(remote).await?;
+    // Blobs this pass has put up. Younger than the sweep's grace, so they are
+    // still there whichever attempt at the index finally lands.
+    let mut sent = BTreeSet::new();
 
     for attempt in 0..CAS_ATTEMPTS {
-        match push(remote, store, &local, &mut held, device_id, uploaded, now_ms).await {
+        match push(remote, store, &local, &mut held, device_id, &mut sent, now_ms).await {
             Ok(()) => break,
             // Another device moved the index between our read and our write.
             // Start again from what it says now; our uploads still stand.
@@ -147,10 +149,6 @@ pub async fn mirror<R: Remote>(
             Err(e) => return Err(e),
         }
     }
-    // Keep "already uploaded" from growing forever: a hash this store no
-    // longer holds is one nothing will ask us to upload again.
-    let here: BTreeSet<String> = store.blob_files().into_iter().map(|(hash, _)| hash).collect();
-    uploaded.retain(|hash| here.contains(hash));
     store.prune_cloud_cache(&held.index.ids());
 
     Ok(report(&local, &held.index, device_id))
@@ -174,9 +172,11 @@ async fn push<R: Remote>(
     local: &Index,
     held: &mut Held,
     device_id: &str,
-    uploaded: &mut BTreeSet<String>,
+    sent: &mut BTreeSet<String>,
     now_ms: u64,
 ) -> RemoteResult<()> {
+    // Read once there is something to send, from the index this attempt holds.
+    let mut named: Option<BTreeSet<String>> = None;
     for row in &local.snapshots {
         let id = snapshot_id(row.ts, device_id);
         if held.index.snapshots.iter().any(|e| e.id == id) {
@@ -190,13 +190,14 @@ async fn push<R: Remote>(
         let (Some(snap), Some(bytes)) = (store.read_snapshot(row.ts), store.read_snapshot_gz(row.ts)) else {
             continue;
         };
+        let named = named.get_or_insert_with(|| named_blobs(store, &held.index, device_id));
         for hash in snap.files.values().map(|f| f.h.clone()).collect::<BTreeSet<String>>() {
-            if uploaded.contains(&hash) {
+            if named.contains(&hash) || sent.contains(&hash) {
                 continue;
             }
             let Some(blob) = store.read_blob_gz(&hash) else { continue };
             remote.put_version_blob(&hash, blob).await?;
-            uploaded.insert(hash);
+            sent.insert(hash);
         }
         remote.put_version_snapshot(&id, bytes).await?;
         held.index.snapshots.push(entry_for(&id, row, device_id));
@@ -204,6 +205,23 @@ async fn push<R: Remote>(
         held.etag = remote.put_versions_index(&held.etag, &held.index).await?;
     }
     Ok(())
+}
+
+/// The blobs no sweep will collect, as far as this device can tell without a
+/// download: every one its own snapshots in the cloud index reference. The
+/// sweep keeps exactly what the index references, so a blob this device put
+/// up once is gone the moment any device's sweep finds nothing naming it —
+/// and this device, still holding it locally, would never hear. Anything
+/// outside this set goes up again; the PUT is create-only, so a blob that
+/// was still there costs one request and stores nothing.
+fn named_blobs(store: &Store, index: &VersionsIndex, device_id: &str) -> BTreeSet<String> {
+    index
+        .snapshots
+        .iter()
+        .filter(|e| e.device == device_id)
+        .filter_map(|e| store.read_snapshot(e.ts))
+        .flat_map(|snap| snap.files.into_values().map(|f| f.h))
+        .collect()
 }
 
 /// Is this content already up there? Two devices in one workspace see the
@@ -287,10 +305,11 @@ pub async fn set_horizon<R: Remote>(remote: &R, days: Option<u32>) -> RemoteResu
 /* ---------- The cloud sweep ---------- */
 
 /// The retention ladder, applied to the bucket: rewrite the index, delete
-/// the snapshots it no longer names, then collect every blob no retained
-/// snapshot references. The index goes first and by CAS, so a pass that dies
-/// halfway leaves objects nothing points at — never a row pointing at
-/// nothing.
+/// the snapshots it no longer names, collect every blob no retained snapshot
+/// references (none, if a retained snapshot can't be read), then put back
+/// any referenced blob the bucket lacks. The index
+/// goes first and by CAS, so a pass that dies halfway leaves objects nothing
+/// points at — never a row pointing at nothing.
 async fn sweep<R: Remote>(remote: &R, store: &Store, held: &mut Held, now_ms: u64) -> RemoteResult<()> {
     let keep = retain(&ladder_rows(&held.index), now_ms, held.index.horizon_days);
     let dropped: Vec<String> =
@@ -307,18 +326,30 @@ async fn sweep<R: Remote>(remote: &R, store: &Store, held: &mut Held, now_ms: u6
     // for one never changes — the cache the rail reads is the same cache
     // that makes this cost one download per snapshot, ever.
     let mut referenced: BTreeSet<String> = BTreeSet::new();
+    let mut unread = 0usize;
     for entry in held.index.snapshots.clone() {
-        if let Some(snap) = snapshot(remote, store, &entry.id).await {
-            referenced.extend(snap.files.into_values().map(|f| f.h));
+        match snapshot(remote, store, &entry.id).await {
+            Some(snap) => referenced.extend(snap.files.into_values().map(|f| f.h)),
+            None => unread += 1,
         }
     }
+    // A retained snapshot this pass could not read may name any blob, so it
+    // collects none. It still counts as done: an error would re-page the
+    // whole listing on every pass, and a day's orphans cost nothing.
+    if unread > 0 {
+        eprintln!("cloud: {} retained version snapshot(s) unreadable; no blobs collected today", unread);
+    }
 
+    let mut missing = referenced.clone();
     let mut cursor: Option<String> = None;
     loop {
         let (blobs, next) = remote.list_version_blobs(cursor.as_deref()).await?;
         for (hash, uploaded_ms) in blobs {
-            let young = now_ms.saturating_sub(uploaded_ms) < CLOUD_GC_GRACE_MS;
-            if young || referenced.contains(&hash) {
+            if referenced.contains(&hash) {
+                missing.remove(&hash);
+                continue;
+            }
+            if unread > 0 || now_ms.saturating_sub(uploaded_ms) < CLOUD_GC_GRACE_MS {
                 continue;
             }
             let _ = remote.delete_version_blob(&hash).await;
@@ -326,6 +357,18 @@ async fn sweep<R: Remote>(remote: &R, store: &Store, held: &mut Held, now_ms: u6
         match next {
             Some(c) => cursor = Some(c),
             None => break,
+        }
+    }
+
+    // A retained snapshot naming a blob the bucket lacks. Deletes sit outside
+    // the index's CAS, so a sweep that read the index before another device
+    // re-referenced an old blob still collects it — the create-only PUT that
+    // device sent never refreshed its age. Any device holding the bytes puts
+    // them back; best effort like the deletes, since the next sweep finds
+    // whatever is still missing.
+    for hash in &missing {
+        if let Some(blob) = store.read_blob_gz(hash) {
+            let _ = remote.put_version_blob(hash, blob).await;
         }
     }
     Ok(())

@@ -599,7 +599,7 @@ pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
 }
 
 /// The endpoint and the owner token of a connected workspace — what a
-/// second Mac needs to download it ("Connect another Mac…" in the panel).
+/// second Mac needs to download it ("Connect another Mac" in the panel).
 #[tauri::command]
 pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, String> {
     with_inner(&app, |inner| {

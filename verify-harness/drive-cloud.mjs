@@ -141,10 +141,10 @@ const pillBefore = await tid("live-chip").textContent();
 await tid("live-chip").click();
 await poll(async () => (await tid("publish-pop").count()) === 1);
 step(
-  "chip (not connected): reads Publish, its popover explains and offers Create a workspace…",
+  "chip (not connected): reads Publish, its popover explains and offers Create a workspace",
   pillBefore === "Publish" &&
     (await tid("live-chip").getAttribute("data-state")) === "publish" &&
-    (await tid("publish-connect").textContent()).trim() === "Create a workspace…" &&
+    (await tid("publish-connect").textContent()).trim() === "Create a workspace" &&
     (await tid("publish-pop").textContent()).includes("connected to a domain"),
   pillBefore,
 );
@@ -165,8 +165,8 @@ await tid("settings-cloud").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const doorNames = (await page.locator(".cloud-doors button").allTextContents()).map((t) => t.trim());
 step(
-  "panel (not connected): Join a workspace…, Create a workspace… (enabled: a folder is open), Open a workspace from a domain…",
-  doorNames.join("|") === "Join a workspace…|Create a workspace…|Open a workspace from a domain…" &&
+  "panel (not connected): Join a workspace, Create a workspace (enabled: a folder is open), Open a workspace from a domain",
+  doorNames.join("|") === "Join a workspace|Create a workspace|Open a workspace from a domain" &&
     (await tid("connect-domain").isEnabled()) &&
     (await tid("open-from-domain").count()) === 1,
   doorNames.join(" · "),
@@ -471,7 +471,7 @@ await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "projec
 await poll(async () => (await tid("published-row").count()) === 1);
 step(
   "published list: the panel's door counts 2, folders sort first, Use as home page sets the root, Stop asks then removes the folder",
-  doorText === "Published pages (2)…" && rowSlugs.join(",") === "projects,team-notes",
+  doorText === "Published pages (2)" && rowSlugs.join(",") === "projects,team-notes",
   `${doorText} · ${rowSlugs.join(",")}`,
 );
 await page.screenshot({ path: SHOTS + "cloud-11-published-list.png" });
@@ -1358,7 +1358,7 @@ const tooOld = (await tid("agents-unavailable").textContent()).trim();
 const stillSaysWhat = await tid("agents-intro").isVisible();
 await tid("tab-people").click();
 step(
-  "Agents (an older worker): Agents… opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
+  "Agents (an older worker): Agents opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
   landedOnAgents &&
     tooOld === TOO_OLD &&
     stillSaysWhat &&
@@ -1381,7 +1381,7 @@ await page.keyboard.press("Escape");
 await poll(async () => (await dialog("People and agents").count()) === 0);
 
 /* 24f — an owner who is not the creator, on a Mac that syncs with a token
-   another of their Macs handed it (Connect another Mac…): the row is this
+   another of their Macs handed it (Connect another Mac): the row is this
    Mac's own sign-in whatever device id it carries, so it is tagged and never
    offered for signing out — that would delete the copy in hand. And of the
    codes nobody has used, they may replace their own and one for somebody who

@@ -15,6 +15,7 @@
 // page.
 
 import { useEffect, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import PropertyControl from "./PropertyControl";
 import type { Props as CardProps, PropValue } from "./store/frontmatter";
 import {
@@ -274,19 +275,7 @@ function AddProperty({
   useEffect(() => {
     ref.current?.focus();
   }, []);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (!formRef.current?.contains(e.target as Node)) onCancel();
-    };
-    // Defer: the click that opened the form is still propagating.
-    const id = window.setTimeout(() => {
-      window.addEventListener("pointerdown", onDown);
-    }, 0);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", onDown);
-    };
-  }, [onCancel]);
+  useDismiss(onCancel, formRef);
   const commit = () => {
     const clean = name.trim();
     if (clean) onCommit(clean, type);
@@ -296,9 +285,6 @@ function AddProperty({
     if (e.key === "Enter") {
       e.preventDefault();
       commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onCancel();
     }
   };
   return (
@@ -356,23 +342,7 @@ function FieldMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const id = window.setTimeout(() => {
-      window.addEventListener("pointerdown", onDown);
-      window.addEventListener("keydown", onKey);
-    }, 0);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(onClose, ref);
   return (
     <div className="dk-popover dk-prop-field-menu" ref={ref}>
       {canRename && (

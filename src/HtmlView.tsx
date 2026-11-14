@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { pressedOutside } from "./dismiss";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Avatar from "./Avatar";
@@ -259,6 +260,9 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
       } else if (msg.type === "scroll") {
         onScrollRatioRef.current?.(msg.ratio);
       } else if (msg.type === "gesture") {
+        // A press inside the frame never reaches the app's window: tell
+        // the open popover, if any, it was pressed outside.
+        pressedOutside();
         onGestureRef.current?.();
       } else if (msg.type === "zoom-key") {
         onZoomKeyRef.current?.(msg.dir);

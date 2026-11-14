@@ -11,7 +11,8 @@
 // tells anyone — its title, who published it, when — and an owner can take
 // any of them down.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import {
   cloudPageTakeDown,
   cloudPages,
@@ -96,13 +97,8 @@ export default function PublishedPages({
     };
   }, [seesAll, cloud.root, everyToken]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(onClose, cardRef);
 
   useEffect(() => {
     const h = window.setInterval(() => setNow(Date.now()), 15000);
@@ -136,13 +132,8 @@ export default function PublishedPages({
   const elsewhere = (every?.pages ?? []).filter((p) => !p.shared && !pages.some((mine) => mine.slug === p.slug));
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label="Published pages">
+    <div className="modal-overlay">
+      <div ref={cardRef} className="modal cloud-modal" role="dialog" aria-modal="true" aria-label="Published pages">
         <div className="modal-header">
           <div className="modal-title">Published pages · {cloud.domain}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close">
@@ -191,7 +182,7 @@ export default function PublishedPages({
                       </button>
                       {page.kind === "dir" && (
                         <button className="modal-btn" data-testid="published-edit" onClick={() => onEditFolder(abs(page))}>
-                          Edit…
+                          Edit
                         </button>
                       )}
                       {/* The home page is chosen from what everyone has. */}

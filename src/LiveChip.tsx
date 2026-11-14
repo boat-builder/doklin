@@ -26,6 +26,8 @@ import {
   type CloudStatus,
   type PageState,
 } from "./cloud";
+import { useDismiss } from "./dismiss";
+import { CloseIcon } from "./storeChrome";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -140,21 +142,8 @@ export default function LiveChip({
     setCopied(false);
   }, [open, absPath, slug]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // The chip is inside the layer: pressing it toggles the card shut.
+  useDismiss(() => setOpen(false), wrapRef, open);
 
   const run = useCallback(async (f: () => Promise<unknown>) => {
     setBusy(true);
@@ -212,7 +201,7 @@ export default function LiveChip({
               onConnect();
             }}
           >
-            Create a workspace…
+            Create a workspace
           </button>
         </div>
       </>
@@ -379,7 +368,7 @@ export default function LiveChip({
             onOpenPublished();
           }}
         >
-          All published pages…
+          All published pages
         </button>
       </>
     );
@@ -409,6 +398,9 @@ export default function LiveChip({
       </button>
       {open && (
         <div className="live-pop" role="dialog" aria-label="Publish" data-testid="publish-pop">
+          <button className="live-pop-close" aria-label="Close" title="Close" onClick={() => setOpen(false)}>
+            <CloseIcon size={14} />
+          </button>
           {body}
         </div>
       )}

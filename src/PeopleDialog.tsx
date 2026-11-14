@@ -3,9 +3,10 @@
 // who is here is the workspace's business, not sync's. The body is
 // CloudPeople, one tab each.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { mayOn, type CloudStatus } from "./cloud";
 import CloudPeople, { type AccessTab } from "./CloudPeople";
+import { useDismiss } from "./dismiss";
 
 function CloseIcon() {
   return (
@@ -29,13 +30,8 @@ export default function PeopleDialog({
 }) {
   const [copied, setCopied] = useState<string | null>(null);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(onClose, cardRef);
 
   const copy = useCallback(async (key: string, text: string) => {
     try {
@@ -49,13 +45,8 @@ export default function PeopleDialog({
 
   const title = mayOn(cloud, "agents.own") ? "People and agents" : "People";
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="modal-overlay">
+      <div ref={cardRef} className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           <div className="modal-title">{title}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close">

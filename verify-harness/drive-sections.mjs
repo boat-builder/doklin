@@ -356,7 +356,7 @@ step(
   leftToast,
 );
 
-/* 13 — Delete it for everyone…: said in full before it happens. */
+/* 13 — Delete it for everyone: said in full before it happens. */
 await menuOn(row("/docs/Restricted/Plans"));
 await pick("Manage access");
 await poll(async () => (await dialog("Who can open “Plans”").count()) === 1);
@@ -367,7 +367,7 @@ await tid("space-delete-yes").click();
 await poll(async () => (await row("/docs/Restricted/Plans").count()) === 0);
 await poll(async () => (await dialog("Who can open “Plans”").count()) === 0);
 step(
-  "Delete it for everyone…: what goes, and from where, is said first; then the folder is gone here, quietly",
+  "Delete it for everyone: what goes, and from where, is said first; then the folder is gone here, quietly",
   deleteAsk.includes("Delete “Plans” for everyone in it?") &&
     deleteAsk.includes("erased from the cloud") &&
     deleteAsk.includes("cannot be undone") &&

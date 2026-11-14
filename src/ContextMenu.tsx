@@ -3,7 +3,8 @@
 // sidebar tree and a tab raise the same one, so "Version history…" reads
 // identically wherever it is reached from.
 
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+import { useDismiss } from "./dismiss";
 
 export type ContextMenuItem = {
   label: string;
@@ -26,20 +27,7 @@ export default function ContextMenu({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(onClose, menuRef);
 
   // Keep the menu on-screen when invoked near the bottom/right edges.
   const estHeight = items.length * 30 + 12;

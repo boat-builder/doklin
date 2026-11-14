@@ -59,8 +59,8 @@ versions/blobs/<sha256>                       create-only, local gzip bytes
 ```
 
 - The index is CAS: GET answers `x-versions-etag`; PUT needs `x-base-etag` (`"*"` creates; 428 without one, 412 on a lost race). Local bookkeeping stays local. `device` is the device id.
-- Mirror (after a changed cycle, and every `MIRROR_EVERY`), per local row the index lacks, oldest first: skip if the nearest older cloud row has the same digest (unless pinned) or the cloud ladder would drop it (`ladder_keeps`; else upload and sweep loop); else PUT blobs not in `versions_uploaded`, the snapshot, then CAS the index.
-- Sweep: daily per device (`last_cloud_sweep_ms`). Index CAS, then dropped snapshots, then unreferenced blobs older than `CLOUD_GC_GRACE_MS`.
+- Mirror (after a changed cycle, and every `MIRROR_EVERY`), per local row the index lacks, oldest first: skip if the nearest older cloud row has the same digest (unless pinned) or the cloud ladder would drop it (`ladder_keeps`; else upload and sweep loop); else PUT blobs that neither this pass sent nor this device's own indexed snapshots reference (`named_blobs`), the snapshot, then CAS the index. Never skip a blob on a persisted "already uploaded" set: any device's sweep deletes a blob once nothing indexed references it, and the uploader, still holding it locally, never hears.
+- Sweep: daily per device (`last_cloud_sweep_ms`). Index CAS, then dropped snapshots, then unreferenced blobs older than `CLOUD_GC_GRACE_MS` (none at all if any retained snapshot can't be read — it may name any blob; the sweep still counts as done, since an error would re-page the listing every pass), then a create-only PUT of every referenced blob the listing lacks that the local store holds. Deletes sit outside the CAS, so a sweep can still collect an old blob another device re-references mid-sweep (a create-only PUT does not refresh its age); this repair is what closes that, within a day.
 - `versions_history` walks local and cloud rows as one set (`history::retained_set`; same ts and digest = one row, local wins). A `cloud` version restores by `text`, a `local` one by `hash`.
 
 ## Contracts (change both sides)

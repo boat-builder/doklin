@@ -66,6 +66,17 @@
 - Zoom (`⌘+`/`⌘-`/`⌘0`) scales the markdown editor through `--doc-zoom` and
   the html rendition through its frame's bridge; app chrome never scales.
 
+## Popups
+
+- Every modal, panel, popover and menu closes through `useDismiss`
+  (`src/dismiss.ts`) — never a keydown or outside-click listener of its own.
+  Only the top layer answers an Esc or a press outside; every layer but a
+  menu also has a close button.
+- A control inside a layer that takes Esc for itself (an inline rename, a
+  find field) calls `preventDefault`, and the layer stays.
+- A layer whose trigger toggles it passes an element that contains the
+  trigger, or the press on the trigger closes it and the click reopens it.
+
 ## Themes
 
 - Every palette, the type scale, radii and motion live in

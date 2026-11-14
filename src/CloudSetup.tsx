@@ -27,7 +27,8 @@
 // carries that workspace's marker (a reinstall, a restore from a backup).
 // There is no "bind anyway": a domain holds one workspace.
 
-import { useCallback, useEffect, useMemo, useState, type ClipboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { useDismiss } from "./dismiss";
 import {
   BUNDLED_WORKER_VERSION,
   WORKER_COMPATIBILITY_DATE,
@@ -118,13 +119,11 @@ export default function CloudSetup({
   const [redeeming, setRedeeming] = useState(false);
   const [joined, setJoined] = useState<{ endpoint: string; token: string; name: string } | null>(null);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !work) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, work]);
+  // Nothing closes while a step is running.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(() => {
+    if (!work) onClose();
+  }, cardRef);
 
   useEffect(() => {
     if (mode !== "connect") return;
@@ -548,13 +547,9 @@ export default function CloudSetup({
   );
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !work) onClose();
-      }}
-    >
+    <div className="modal-overlay">
       <div
+        ref={cardRef}
         className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"
@@ -702,7 +697,7 @@ export default function CloudSetup({
               <li className="cloud-step">
                 <div className="cloud-step-title">Where is it?</div>
                 <div className="cloud-step-note">
-                  On the Mac that has the workspace: the gear → Cloud… → Connect another Mac…
+                  On the Mac that has the workspace: the gear → Cloud… → Connect another Mac
                   shows both. The token is that Mac’s own credential for the domain — keep it to
                   Macs you own.
                 </div>

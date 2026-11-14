@@ -11,7 +11,7 @@
 //
 // Both tabs stay mounted while the view is open — a code that is shown once
 // must not be lost to a look at the other tab. In each, what an owner came to
-// do is at the top: the door ("Invite someone…", "Add an agent…"), its form,
+// do is at the top: the door ("Invite someone", "Add an agent"), its form,
 // and the one-time code it ends in; the lists follow.
 //
 // Everything comes from `cloud_people` in one answer — including who this Mac
@@ -345,7 +345,7 @@ export default function CloudPeople({
                     revealSoon(top);
                   }}
                 >
-                  Invite someone…
+                  Invite someone
                 </button>
                 <span className="cloud-hint">They join with one line you send them.</span>
               </div>
@@ -526,7 +526,7 @@ export default function CloudPeople({
                           revealSoon(top);
                         }}
                       >
-                        New code…
+                        New code
                       </button>
                     )}
                     {confirm === `code:${i.id}` ? (

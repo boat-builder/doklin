@@ -11,7 +11,7 @@
 // The last person cannot leave: a folder is deleted, or handed to somebody
 // first, never abandoned by its own people.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cloudPeople,
   cloudSpaceDelete,
@@ -21,6 +21,7 @@ import {
   type CloudStatus,
 } from "./cloud";
 import Avatar from "./Avatar";
+import { useDismiss } from "./dismiss";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -70,13 +71,11 @@ export default function SpaceAccess({
     };
   }, [cloud.root]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  // Nothing closes while a change is on its way to the domain.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(() => {
+    if (!busy) onClose();
+  }, cardRef);
 
   const act = useCallback(async (f: () => Promise<unknown>) => {
     setBusy(true);
@@ -110,13 +109,15 @@ export default function SpaceAccess({
 
   const title = `Who can open “${space.name}”`;
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title} data-testid="space-access">
+    <div className="modal-overlay">
+      <div
+        ref={cardRef}
+        className="modal cloud-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        data-testid="space-access"
+      >
         <div className="modal-header">
           <div className="modal-title">{title}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>
@@ -236,7 +237,7 @@ export default function SpaceAccess({
                     disabled={busy}
                     onClick={() => setConfirm("delete")}
                   >
-                    Delete it…
+                    Delete it
                   </button>
                   <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
                     Cancel
@@ -288,7 +289,7 @@ export default function SpaceAccess({
           ) : (
             <div className="cloud-actions">
               <button className="modal-btn" data-testid="space-leave" disabled={busy} onClick={() => setConfirm("leave")}>
-                Leave this folder…
+                Leave this folder
               </button>
               <button
                 className="modal-btn is-danger-outline"
@@ -296,7 +297,7 @@ export default function SpaceAccess({
                 disabled={busy}
                 onClick={() => setConfirm("delete")}
               >
-                Delete it for everyone…
+                Delete it for everyone
               </button>
             </div>
           )}
