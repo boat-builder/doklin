@@ -168,7 +168,7 @@ function parseScalar(raw: string): PropValue | undefined {
 
 /**
  * The dialect's key/value reader, over the lines INSIDE a block. Shared by
- * the frontmatter block and the ```kanban embed's config (kanbanEmbed.ts):
+ * the frontmatter block and the ```kanban embed's config (storeEmbed.ts):
  * one grammar, one set of rules about what stays opaque.
  */
 export function parseProps(inner: string[]): {
@@ -321,7 +321,7 @@ function valueText(v: PropValue): string {
 /**
  * One `key: value` line in the dialect — an empty value writes the bare key.
  * Exported because the ```kanban embed writes its config in the same grammar
- * (kanbanEmbed.ts) without a block around it.
+ * (storeEmbed.ts) without a block around it.
  */
 export function propLine(key: string, value: PropValue): string {
   const text = valueText(value);

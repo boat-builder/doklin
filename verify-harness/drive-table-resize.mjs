@@ -3,8 +3,7 @@
 // record set, the markdown stays byte-identical, remounting from those
 // records restores the columns on the first paint, a header rename carries
 // the widths to the table's new identity, and a read-only view resizes
-// without ever emitting. Needs the repo-root vite dev server (port 1420) —
-// see .claude/skills/verify/SKILL.md.
+// without ever emitting. Needs the repo-root vite dev server (port 1420).
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 

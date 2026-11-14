@@ -1,7 +1,7 @@
 #!/bin/sh
 # How much of Cloudflare's free plan one Doklin domain is using — a table for
 # us, while agents are new and nobody yet knows what they cost. Doklin itself
-# puts no limit on an agent (docs/cloud.md §8.7); this is how that decision
+# puts no limit on an agent; this is how that decision
 # is watched. It ships nowhere and nothing calls it.
 #
 #   scripts/cloud-usage.sh notes.example.com        the last 14 days

@@ -103,7 +103,7 @@ touch "$REPO_ROOT/src-tauri/target/.metadata_never_index" 2>/dev/null || true
 
 # ---------- 3. Install the `doklin` command ----------
 #
-# The binary a release ships (cli/, docs/cloud.md §8.6). It works with a
+# The binary a release ships (cli/). It works with a
 # connected workspace through its domain — `doklin help` — and, given a path
 # instead of a command, opens that file or folder in the app.
 if [ -z "$SKIP_CLI" ]; then

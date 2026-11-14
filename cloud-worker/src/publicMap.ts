@@ -1,7 +1,7 @@
 // The public map, resolved against the synced tree: which slug a file
 // answers at, which folder page covers a path, and the one question every
 // link, board card and table-of-contents row asks — "where is this file
-// public?" (docs/cloud.md §5.6, Slugs and paths).
+// public?"
 //
 // A note can be public two ways at once: on its own slug and inside a
 // published folder, at a Notion-style nested URL. Both answer; which one a

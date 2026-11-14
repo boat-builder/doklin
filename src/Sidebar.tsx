@@ -122,17 +122,17 @@ type Props = {
   // Open the Cloud panel — "Cloud…" in the workspace menu. (The footer's
   // sync line is the other way in; App owns the footer.)
   onOpenCloud?: () => void;
-  // Version history for a document — the rail, for any workspace: since
-  // docs/versioning.md it is no longer a cloud feature.
+  // Version history for a document — the rail, for any workspace: it is
+  // no longer a cloud feature.
   onHistory?: (path: string) => void;
-  // The workspace's own timeline, a modal (docs/versioning-plan.md §7.2).
+  // The workspace's own timeline, a modal.
   onWorkspaceHistory?: () => void;
   // Files this folder's history holds and the folder does not: the root's
   // menu offers them when there are any. The footer bar's count (App.tsx)
   // is the main way in; this is the second.
   deletedCount?: number;
   onRecentlyDeleted?: () => void;
-  // Publishing (docs/cloud.md §7.2): the folder dialog for a
+  // Publishing: the folder dialog for a
   // folder (or the root, for the whole workspace), stopping a page, and
   // copying a page's public link. Offered only in a connected workspace.
   onPublishFolder?: (dir: string) => void;
@@ -866,7 +866,7 @@ export default function Sidebar({
       label: "Reveal in Finder",
       onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
     });
-    // Every document has a history, connected or not (docs/versioning.md).
+    // Every document has a history, connected or not.
     if (target.kind === "file" && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }

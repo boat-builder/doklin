@@ -1,5 +1,5 @@
-// The document API — everything an agent says to the worker (docs/cloud.md
-// §8.3–8.5). An agent is a bot with no copy of the folder: it works with a
+// The document API — everything an agent says to the worker.
+// An agent is a bot with no copy of the folder: it works with a
 // workspace through these routes and through nothing else, and what it may do
 // here is what the owner ticked for it.
 //

@@ -3,7 +3,7 @@
 //!
 //! Nothing here knows Doklin's rules — which files make a document, where a
 //! comment's marker goes, what a public page is. Those run in the worker, so
-//! that this program stays a thin way of asking (docs/cloud.md §8.6).
+//! that this program stays a thin way of asking.
 
 use std::io::{IsTerminal, Read, Write};
 

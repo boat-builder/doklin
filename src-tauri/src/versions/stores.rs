@@ -1,5 +1,5 @@
-//! Every store on this Mac, and what the user can do with the set of them
-//! (docs/versioning.md §8, docs/versioning-plan.md §8): how much disk each
+//! Every store on this Mac, and what the user can do with the set of them:
+//! how much disk each
 //! one holds, forgetting one whose folder is gone, and writing a single
 //! archive that holds a workspace and its history together.
 //!

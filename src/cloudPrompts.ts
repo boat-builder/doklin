@@ -1,4 +1,4 @@
-// The agent prompts (docs/cloud.md §7.4) and the naming rule they share, as
+// The agent prompts and the naming rule they share, as
 // pure functions: the setup wizard, the update card and the panel's teardown
 // step render them, and verify-harness/cloudprompts.test.mjs checks that no
 // step is left for the agent to invent. Nothing here touches the app — the
@@ -26,7 +26,7 @@ export const WORKER_BUNDLE_URL =
 export const WORKER_UPDATE_SCRIPT_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh";
 /** scripts/install-doklin.sh, attached to every release beside the `doklin`
- *  binaries it fetches (docs/cloud.md §8.6). */
+ *  binaries it fetches. */
 export const CLI_INSTALL_SCRIPT_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh";
 /** The one line that puts the `doklin` command on an agent's machine — what

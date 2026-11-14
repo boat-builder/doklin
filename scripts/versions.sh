@@ -1,9 +1,8 @@
 #!/bin/sh
-# What a folder's version history holds right now (docs/versioning.md).
+# What a folder's version history holds right now.
 #
-# The store is deliberately invisible in the app until phase 2 puts a surface
-# on it, so this is how you watch it work — and how the manual pass in
-# docs/versioning-plan.md §4.8 is run.
+# The store's own account, for when the app's history surfaces say something
+# you doubt.
 #
 #   scripts/versions.sh ~/Notes        print the history once
 #   scripts/versions.sh -w ~/Notes     print it every 5 s, until ^C
@@ -46,8 +45,8 @@ for s in index["snapshots"]:
     print("  %s  %-11s %5d files %9.1f KB%s%s%s" % (when, s["reason"], s["files"], s["bytes"] / 1024, came_from, pin, name))
 
 blobs = sum(len(files) for _, _, files in os.walk(os.path.join(store, "blobs")))
-# cloud-cache/ holds snapshots other Macs mirrored, pulled down once and kept
-# (docs/versioning.md §6.3). A cache, not the store: it is safe to delete.
+# cloud-cache/ holds snapshots other Macs mirrored, pulled down once and kept.
+# A cache, not the store: it is safe to delete.
 cached = len(next(os.walk(os.path.join(store, "cloud-cache")), (None, None, []))[2])
 disk = sum(os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(store) for f in files)
 mirrored = "  + %d from other Macs" % cached if cached else ""

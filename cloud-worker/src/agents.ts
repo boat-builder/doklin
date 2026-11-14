@@ -1,4 +1,4 @@
-// Agents, and the credentials they hold (docs/cloud.md §8.3).
+// Agents, and the credentials they hold.
 //
 // An agent is an identity that is not a person: a bot on a remote computer, a
 // coding agent in a sandbox. It has the same three lifetimes a person has

@@ -1,4 +1,4 @@
-//! Derivations over the retained snapshots (docs/versioning-plan.md §5.2):
+//! Derivations over the retained snapshots:
 //! every version of one file, the text of a version, and the diff between
 //! two. Nothing here writes — the store is read-only from this module, and
 //! only `retain.rs` ever deletes.
@@ -50,8 +50,7 @@ pub struct FileVersion {
     /// has been renamed since.
     pub path: String,
     /// Where the bytes come from: `local` (a blob in this store) or `cloud`
-    /// (one another Mac mirrored, fetched through the engine). Two values
-    /// since phase 6 retired the sync manifest's own revisions.
+    /// (one another Mac mirrored, fetched through the engine).
     pub source: String,
     /// This version is byte-for-byte the file on disk right now.
     pub current: bool,
@@ -214,7 +213,7 @@ pub fn file_versions(
                         entry
                     }
                     // A restore brought the file back from further down this
-                    // same history (phase 4's *Recently deleted*): step over
+                    // same history (*Recently deleted*): step over
                     // the moments it was missing from instead of starting
                     // the story where it reappeared.
                     None if newer_restored.is_some_and(|from| row.ts >= from) => continue,
@@ -289,8 +288,6 @@ fn renamed_from(older: &Snapshot, newer: &Snapshot, path: &str) -> Option<(Strin
     }
     found
 }
-
-/* ---------- The cloud read-through (phase 6 removes this) ---------- */
 
 /* ---------- Reading and comparing ---------- */
 

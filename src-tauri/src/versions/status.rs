@@ -1,5 +1,5 @@
-//! The versioner's side of the frontend contract
-//! (docs/versioning-plan.md §4.5): the status that is the frontend's whole
+//! The versioner's side of the frontend contract:
+//! the status that is the frontend's whole
 //! model of the local store, the event that carries it, and the snapshot row
 //! the commands answer with. Mirrored in TypeScript by src/versions.ts —
 //! change both.

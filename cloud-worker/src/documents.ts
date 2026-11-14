@@ -1,4 +1,4 @@
-// A document, as the document API speaks of one (docs/cloud.md §8.4).
+// A document, as the document API speaks of one.
 //
 // On disk, and in the manifest, a document is up to three files that share a
 // stem: `plan.md`, its optional `plan.html` rendition, and `plan.meta.jsonl`

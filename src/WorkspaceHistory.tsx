@@ -1,5 +1,5 @@
-// The workspace as it was, as a modal (docs/versioning-plan.md §7.2,
-// §12.3.5). Choosing a moment for a whole folder is a deliberate,
+// The workspace as it was, as a modal.
+// Choosing a moment for a whole folder is a deliberate,
 // occasional act — Dropbox Rewind's shape, not a rail — so it says exactly
 // what a restore would do before anything happens, and confirms with the
 // real counts in the app's own chrome. Never `window.confirm`: the harness

@@ -1,4 +1,4 @@
-// Drives a BOARD INSIDE A NOTE — phase 2 of datastores — in real Chromium
+// Drives a BOARD INSIDE A NOTE in real Chromium
 // (kanban.html boots the real <App/> over an in-memory IPC stub whose /docs
 // workspace holds a board and two notes that embed one).
 //

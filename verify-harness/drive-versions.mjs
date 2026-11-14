@@ -1,8 +1,7 @@
 // Drives the version history rail in Chromium (cloud.html boots the REAL
 // <App/> over an IPC stub whose versions_* commands answer from a scripted
 // store, and whose restore actually writes the file and emits
-// `versions-applied`). What this proves is the shape the design argues for
-// in docs/versioning-plan.md §12.3: history is not a cloud feature, a
+// `versions-applied`). What this proves: history is not a cloud feature, a
 // version is read where the document is, and a restore is undoable.
 //
 // The walk: the rail from the sidebar with NO cloud connected, its day
@@ -67,7 +66,7 @@ await poll(async () => (await page.locator(".sidebar").count()) === 1);
 await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
 
 /* 1 — the entry point exists with nothing connected: history is not a cloud
-      feature any more (§12.3.6). */
+      feature any more. */
 await page.locator('[data-tree-path="/docs/other.md"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
 const menuItems = await page.locator(".sidebar-menu-item").allTextContents();
@@ -100,7 +99,7 @@ step(
   dayLabels.join(" | "),
 );
 
-/* 4 — the trust line: the promise as a sentence (§12.3.7). */
+/* 4 — the trust line: the promise as a sentence. */
 const trust = await tid("history-trust").textContent();
 step("the trust line says how far back this document reaches", /^Every change since \w/.test(trust), trust);
 
@@ -202,7 +201,7 @@ step(
 );
 await page.screenshot({ path: SHOTS + "versions-03-restored.png" });
 
-/* 12 — Undo is another restore, of the state the first one left (§12.3.8). */
+/* 12 — Undo is another restore, of the state the first one left. */
 await page.locator(".toast-btn", { hasText: "Undo" }).click();
 await poll(async () => (await versionCalls("versions_restore_file")).length === 2);
 const undo = await lastVersionCall("versions_restore_file");
@@ -301,7 +300,7 @@ step(
 );
 await page.screenshot({ path: SHOTS + "versions-04-cloud.png" });
 
-/* 18 — phase 6: the sync manifest is out of the history business. Every row
+/* 18 — the sync manifest is out of the history business. Every row
    the rail has shown, on every document walked so far, came out of a version
    store — this Mac's or a mirrored one — and nothing has asked the manifest
    for a revision at any point in this session. */
@@ -315,7 +314,7 @@ step(
     )),
 );
 
-/* ---------- The workspace, as it was (docs/versioning-plan.md §7) -------- */
+/* ---------- The workspace, as it was -------- */
 
 const openRootMenu = async () => {
   await page.keyboard.press("Escape");
@@ -411,7 +410,7 @@ step(
   `${allText} → ${JSON.stringify(whole)}`,
 );
 
-/* 23 — Recently deleted. The row is the point (§12.3.4): it appears at the
+/* 23 — Recently deleted. The row is the point: it appears at the
    foot of the tree only when there is something in it, with the count. */
 await page.locator(".modal-close").click();
 await poll(async () => (await tid("workspace-history").count()) === 0);

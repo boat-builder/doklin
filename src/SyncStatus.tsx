@@ -1,5 +1,5 @@
-// The workspace's sync in words, at the foot of the sidebar — docs/cloud.md
-// §7.2: "Synced", "Syncing…", "Offline", "2 deletions to confirm". The full
+// The workspace's sync in words, at the foot of the sidebar:
+// "Synced", "Syncing…", "Offline", "2 deletions to confirm". The full
 // line (describeCloud: the phase, when it last synced, the domain) is the
 // tooltip, and a click opens the Cloud panel.
 

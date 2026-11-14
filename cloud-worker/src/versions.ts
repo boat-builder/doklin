@@ -1,6 +1,6 @@
-// The version store in the bucket (docs/cloud.md §5.2, docs/versioning.md
-// §6.4): the mirror of what every device keeps locally under
-// `<app_data>/versions/<key>/`, so history outlives the laptop that made it.
+// The version store in the bucket: the mirror of what every device keeps
+// locally under `<app_data>/versions/<key>/`, so history outlives the laptop
+// that made it.
 //
 //   versions/index.json                           the retained set, CAS'd on its etag
 //   versions/snapshots/<ts13>-<deviceId>.json.gz  immutable; the bytes the device wrote

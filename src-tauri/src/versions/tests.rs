@@ -940,7 +940,7 @@ fn restore_never_removes_a_snapshot() {
     }
     assert!(after.len() > before.len());
     // Every state between the restored version and now is still an older
-    // row, not an abandoned branch (docs/versioning-plan.md §12.3).
+    // row, not an abandoned branch.
     let versions = f.history("a.md");
     assert!(versions.iter().any(|v| v.hash == hash_full(b"three, three and three\n")));
     assert!(versions.iter().any(|v| v.hash == hash_full(b"one\n")));

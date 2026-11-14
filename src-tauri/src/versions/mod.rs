@@ -1,4 +1,4 @@
-//! Versioning (docs/versioning.md): every open folder gets a local store
+//! Versioning: every open folder gets a local store
 //! that captures snapshots on the cadence rule, thins them on the retention
 //! ladder, and never deletes anything anywhere else. This file is the
 //! manager — one versioner task per open root, the routing table the edit
@@ -28,7 +28,7 @@
 mod capture;
 mod history;
 // The cloud mirror reads the ladder and the store on disk; nothing outside
-// this module ever writes into one (docs/versioning-plan.md §6.2).
+// this module ever writes into one.
 pub(crate) mod retain;
 mod settings;
 mod status;
@@ -296,7 +296,7 @@ impl Versioner {
     }
 
     /// What restoring one retained snapshot would do to the folder as it
-    /// stands this second (docs/versioning-plan.md §7.1) — the modal shows
+    /// stands this second — the modal shows
     /// this before anything happens, and the restore plans from the same
     /// three lists.
     fn snapshot_diff(&self, ts: u64) -> Result<SnapshotDiff, String> {
@@ -409,7 +409,7 @@ impl Versioner {
     ///
     /// It never removes anything. The versions between the one being
     /// restored and now stay exactly where they are; the restored content
-    /// simply becomes the newest (docs/versioning-plan.md §12.3).
+    /// simply becomes the newest.
     fn restore_file(
         &mut self,
         path: &Path,
@@ -1119,10 +1119,8 @@ async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEn
 }
 
 /// Every version of one document, newest first — the rail's whole model.
-/// This Mac's snapshots and the ones other devices mirrored are one walk
-/// (docs/versioning-plan.md §6.3), and since phase 6 that walk is the whole
-/// answer: the sync manifest no longer carries a history to fold in behind
-/// it.
+/// This Mac's snapshots and the ones other devices mirrored are one walk,
+/// and that walk is the whole answer.
 #[tauri::command]
 pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<FileHistory, String> {
     let (tx, root, rel) = route(&app, &path)?;

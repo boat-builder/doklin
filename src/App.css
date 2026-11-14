@@ -4384,7 +4384,7 @@ body.tree-dragging.tree-drag-invalid * {
    The frame is a block in the prose: it takes the document's measure, not the
    pane's, and the board inside it drops the absolute fill a board tab uses.
    Everything below the bar is React inside a contenteditable=false element —
-   ProseMirror never reads it back (see kanbanEmbed.ts). */
+   ProseMirror never reads it back (see storeEmbed.ts). */
 
 .dk-embed {
   margin: 18px 0;
@@ -5156,7 +5156,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: transparent;
 }
 
-/* ---------- Cloud (docs/cloud.md §7.2) ----------
+/* ---------- Cloud ----------
    The panel, the setup wizard, the update card and the history panel share
    the .modal shell; these are the pieces inside it. The .modal-*
    form pieces are the ones every dialog's fields use. */
@@ -5791,7 +5791,7 @@ body.tree-dragging.tree-drag-invalid * {
   transition: width 0.15s ease-out;
 }
 
-/* ---------- Version history (docs/versioning-plan.md §5.4) ----------
+/* ---------- Version history ----------
    A right rail beside the document, in the place the comments rail takes,
    and — when a version is selected — that version rendered where the
    document is, read-only, under a banner with the three exits. */
@@ -6022,7 +6022,7 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--text-3);
 }
 
-/* A document another Mac holds (LeaseBanner, docs/cloud.md §8.2): the version
+/* A document another Mac holds (LeaseBanner): the version
    banner's frame, tinted with the unsaved-changes colour rather than the
    accent — it is about somebody else having it open, not about a moment. */
 .lease-banner {
@@ -6077,7 +6077,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 /* A unified patch, coloured by line. The rendered block-level diff inside
-   the editor is the refinement §12.3.2 describes; this is the first cut. */
+   the editor is a later refinement; this is the first cut. */
 .version-diff {
   margin: 0;
   padding: 14px 18px;
@@ -6207,7 +6207,7 @@ body.tree-dragging.tree-drag-invalid * {
   background: var(--accent);
 }
 
-/* ---- Publishing (docs/cloud.md §7.2): the Live chip in the title row and
+/* ---- Publishing: the Live chip in the title row and
    its popover (src/LiveChip.tsx), the sidebar's live dots, the folder
    dialog, the list. One vocabulary: green is live, the accent is working,
    amber is waiting, red is broken — and only the working state moves. */
@@ -6647,7 +6647,7 @@ button.published-row-name:hover {
   gap: 6px;
 }
 
-/* ---------- The workspace timeline (docs/versioning-plan.md §7.2) --------- */
+/* ---------- The workspace timeline --------- */
 
 /* Two columns: the moments on the left, what restoring one would do on the
    right. The day groups reuse the rail's own rows, so a timeline of the
@@ -6744,7 +6744,7 @@ button.published-row-name:hover {
   font-weight: 600;
 }
 
-/* ---------- Recently deleted (docs/versioning-plan.md §12.3.4) ----------- */
+/* ---------- Recently deleted ----------- */
 
 .ws-deleted-list {
   list-style: none;

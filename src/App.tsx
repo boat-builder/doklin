@@ -1004,14 +1004,14 @@ export default function App() {
   // The pages of the open workspace, for the glyph on a live page's tab and
   // card (a board inside a note reads it too, from its own React root).
   useEffect(() => setLivePages(livePathsOf(cloudForRoot)), [cloudForRoot]);
-  // The cloud surfaces (docs/cloud.md §7.2): the panel, the setup
+  // The cloud surfaces: the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
   // worker update card, and the transient notices. The held mass-deletion's paths ride the event that
   // announced it; the panel lists them.
   const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
   const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
   const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
-  // Version history (docs/versioning-plan.md §5.4): which document's rail is
+  // Version history: which document's rail is
   // open, and which of its versions is showing in the document area instead
   // of the live editor. `historyToken` re-reads the rail after a restore
   // adds rows to it.
@@ -1049,7 +1049,7 @@ export default function App() {
     (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
   );
-  // Publishing (docs/cloud.md §7.2): the folder dialog (a folder,
+  // Publishing: the folder dialog (a folder,
   // or the root for the whole workspace) and the list of every published
   // page. The Live chip lives in the title row (LiveChip).
   const [publishFolder, setPublishFolder] = useState<string | null>(null);
@@ -2534,7 +2534,7 @@ export default function App() {
     adoptFrontmatter,
   ]);
 
-  /* ---------- Version history (docs/versioning-plan.md §5.4) ---------- */
+  /* ---------- Version history ---------- */
 
   // The rail, for a file reached from the sidebar, a tab or ⌘⌥H. It always
   // opens on the list: a rail is somewhere to look, not a jump to a version.
@@ -2579,8 +2579,8 @@ export default function App() {
     [flushPendingAutosave],
   );
 
-  // Undoing a restore is another restore — of the state the first one left
-  // (docs/versioning-plan.md §12.3.8). The timeline is the undo; ⌘Z is not
+  // Undoing a restore is another restore — of the state the first one left.
+  // The timeline is the undo; ⌘Z is not
   // promised for it.
   const undoRestore = useCallback(
     async (docPath: string, root: string, outcome: RestoreOutcome) => {
@@ -2624,7 +2624,7 @@ export default function App() {
     [pushToast, undoRestore],
   );
 
-  /* ---------- The workspace, as it was (docs/versioning-plan.md §7) ------ */
+  /* ---------- The workspace, as it was ------ */
 
   // Read once, for both surfaces: the sidebar's row wants the count and the
   // column wants the list, and working it out is a walk of the retained
@@ -2694,7 +2694,7 @@ export default function App() {
   );
 
   // Undoing a workspace restore is another workspace restore — of the
-  // snapshot the first one left, with the same paths (§12.3.8).
+  // snapshot the first one left, with the same paths.
   const undoSnapshotRestore = useCallback(
     async (root: string, report: RestoreReport, paths: string[] | null) => {
       if (report.preRestoreTs == null) return;
@@ -4922,7 +4922,7 @@ export default function App() {
   useEffect(() => {
     void cloudSetActivity(activeFilePath).catch(() => {});
   }, [activeFilePath]);
-  // Leases (docs/cloud.md §8.2): the same report is this Mac's claim on the
+  // Leases: the same report is this Mac's claim on the
   // document, and the status says which documents another Mac holds. One of
   // those opens view-only under a banner with *Take over*; it is advisory, so
   // nothing here refuses a write — the editor simply stops taking input, and
@@ -5252,7 +5252,7 @@ export default function App() {
 
     // An old version shows in the document area itself, read-only, with the
     // live editor hidden behind it — so nothing typed here can ever be
-    // autosaved over the newer text (§12.3.1).
+    // autosaved over the newer text.
     const previewHere =
       focused &&
       versionPreview != null &&
@@ -5425,7 +5425,7 @@ export default function App() {
               // showing, so a note in another folder links to its own
               // neighbours correctly.
               onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
-              // A ```kanban fence in this note becomes a board (kanbanEmbed.ts).
+              // A ```kanban fence in this note becomes a board (storeEmbed.ts).
               kanban={kanbanHostFor(paneTab)}
             />
           )}
@@ -5605,7 +5605,7 @@ export default function App() {
                 testid="note-facepile"
               />
               {/* Publishing: a file inside the open workspace only — not an
-                  untitled note, not a board, not a file from outside (§7.3). */}
+                  untitled note, not a board, not a file from outside. */}
               {activeRel !== null && (
                 <LiveChip
                   cloud={cloudForRoot}
@@ -5767,7 +5767,7 @@ export default function App() {
         )}
         {renderPane("right")}
         {historyFor && (
-          // A right rail beside the document, never over it (§12.3.1).
+          // A right rail beside the document, never over it.
           <HistoryRail
             docPath={historyFor}
             selected={versionPreview?.version.ts ?? null}
@@ -5875,8 +5875,8 @@ export default function App() {
       <Toasts toasts={toasts} onDismiss={dismissToast} />
       {showSidebar ? (
         // The sidebar's footer bar: settings, the folder's deleted
-        // files — a count that is here only when there is something in it
-        // (docs/versioning-plan.md §12.3.4), which toggles the column between
+        // files — a count that is here only when there is something in it,
+        // which toggles the column between
         // the tree and the list — and, for a connected workspace, its sync
         // in words.
         <div className="side-footer">

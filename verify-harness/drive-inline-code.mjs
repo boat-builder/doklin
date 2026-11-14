@@ -2,8 +2,7 @@
 // Chromium: inline code spans hard-wrapped across source lines must parse to
 // a single-space value (no literal newline reaching ProseMirror's pre-wrap
 // surface), render as one line fragment, and serialize back on one line.
-// Needs the repo-root vite dev server (port 1420) — see
-// .claude/skills/verify/SKILL.md.
+// Needs the repo-root vite dev server (port 1420).
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 

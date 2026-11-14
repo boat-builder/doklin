@@ -1,4 +1,4 @@
-//! The invite code and the paste blob (docs/cloud.md §5.4, §8.1): the
+//! The invite code and the paste blob: the
 //! grammar both ends of an invite agree on, and the only place this app ever
 //! holds a code in the clear.
 //!
@@ -81,7 +81,7 @@ fn grouped(prefix: &str, canonical: &str) -> String {
     format!("{}-{}", prefix, groups.join("-"))
 }
 
-/* ---------- An agent's login code (docs/cloud.md §8.3) ---------- */
+/* ---------- An agent's login code ---------- */
 
 /// What an agent's login code announces itself as. A different word from an
 /// invite's on purpose: the two are redeemed by different routes into
@@ -173,8 +173,8 @@ pub fn blob(endpoint: &str, code: &str) -> String {
     format!("{} {} {}", KEYWORD, endpoint, code)
 }
 
-/// The two halves of an invite found in whatever was pasted (docs/cloud.md
-/// §6.8). Either may be missing: the wizard fills what it finds and leaves
+/// The two halves of an invite found in whatever was pasted.
+/// Either may be missing: the wizard fills what it finds and leaves
 /// the rest to the person.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

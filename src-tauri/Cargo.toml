@@ -64,7 +64,7 @@ tokio = { version = "1", features = ["test-util"] }
 tauri-plugin-updater = "2"
 
 # macOS-only: trashing files via NSFileManager (see trash_file in lib.rs). This
-# app currently targets macOS only — see the README. If we ever go cross-platform,
+# app currently targets macOS only. If we ever go cross-platform,
 # grep for "macOS-only" to find every spot that needs a portable fallback.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = [

@@ -38,7 +38,7 @@ pub struct CreatedBy {
 
 /// `GET /api/meta`: liveness, the credential, "is this domain bound" — and,
 /// since worker v6, identity: who this bearer is and what everyone here is
-/// called (docs/cloud.md §6.6). A worker older than that answers neither
+/// called. A worker older than that answers neither
 /// field, and attribution falls back to device names.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Meta {
@@ -89,7 +89,7 @@ pub struct Bound {
     pub manifest_etag: String,
 }
 
-/* ---------- Who the workspace's people are (docs/cloud.md §8.1) ---------- */
+/* ---------- Who the workspace's people are ---------- */
 
 /// A person, as the identity routes describe one. Never a credential: the
 /// app is told who holds one, never what it is.
@@ -103,7 +103,7 @@ pub struct MemberRecord {
     pub name: String,
     /// `owner` or `member` — what the People list shows. Never authority:
     /// the owner's credential is the worker's env secret, so no row anybody
-    /// can write confers it (docs/cloud.md §5.4).
+    /// can write confers it.
     #[serde(default)]
     pub role: String,
     #[serde(default)]
@@ -152,7 +152,7 @@ pub struct RedeemedToken {
 
 /// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
 /// credential: the owner is told who holds one and may take it away, never
-/// what it is — a list of tokens would be a list of keys (docs/cloud.md §5.4).
+/// what it is — a list of tokens would be a list of keys.
 ///
 /// The owner's own Macs are not in here at all. They authenticate with the
 /// domain's env secret, which is matched against no row, so there is nothing
@@ -175,7 +175,7 @@ pub struct TokenRecord {
     pub created_at: u64,
 }
 
-/* ---------- Agents (docs/cloud.md §8.3) ---------- */
+/* ---------- Agents ---------- */
 
 /// An agent as the owner's routes describe one: an identity that is not a
 /// person, with what it may do, the machines it is logged in on and the
@@ -287,7 +287,7 @@ pub trait Remote: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = RemoteResult<Bound>> + Send;
     /// The 15-second poll. With no beat it is a `GET` and writes nothing;
     /// with one it is a `POST` that also says this Mac is here, or leaving
-    /// (worker v7, docs/cloud.md §5.3). The engine only hands it a beat
+    /// (worker v7). The engine only hands it a beat
     /// when the worker lists `presence`.
     fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
     fn fetch_manifest(
@@ -321,7 +321,7 @@ pub trait Remote: Send + Sync + 'static {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    /* ----- the version store (docs/versioning.md §6.4) ----- */
+    /* ----- the version store ----- */
 
     /// The index and its etag; None when the workspace has never mirrored.
     fn get_versions_index(
@@ -361,7 +361,7 @@ pub trait Remote: Send + Sync + 'static {
 
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
 
-    /* ----- people (docs/cloud.md §5.4, §8.1) ----- */
+    /* ----- people ----- */
 
     /// `POST /api/auth/invites` (owner): put a pending invite on `email`,
     /// creating that person if the address is new, and replacing whatever
@@ -388,7 +388,7 @@ pub trait Remote: Send + Sync + 'static {
     /// `GET /api/auth/members` (owner): everyone, with a device count and a
     /// last-seen. This is also what tells a Mac which door it came in by —
     /// only the owner's credential is answered, so a `Forbidden` here is the
-    /// People panel's member branch, not a failure (docs/cloud.md §7.2).
+    /// People panel's member branch, not a failure.
     fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
 
     /// `POST /api/auth/members` (owner): the owner saying who they are.

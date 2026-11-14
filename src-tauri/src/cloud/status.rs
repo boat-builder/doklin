@@ -1,4 +1,4 @@
-//! The engine's side of the frontend contract (docs/cloud.md §6.7):
+//! The engine's side of the frontend contract:
 //! the status that is the frontend's entire model, the events, and the
 //! small result types the commands answer with. Mirrored in TypeScript by
 //! src/cloud.ts — change both.
@@ -49,8 +49,8 @@ pub struct CloudStatus {
     pub error: Option<String>,
     pub pending_deletes: u32,
     /// What this Mac signs work with here, in words: the person the domain
-    /// says it is, and this Mac's own name when the domain has not said
-    /// (docs/cloud.md §6.6). What a surface compares a `by` against to
+    /// says it is, and this Mac's own name when the domain has not said.
+    /// What a surface compares a `by` against to
     /// know whether somebody *else* did a thing.
     pub me: String,
     /// What `/api/meta` last reported; null until the worker answered once.
@@ -64,14 +64,14 @@ pub struct CloudStatus {
     pub public: Vec<PublicPage>,
     /// Every other device here, from the last poll.
     pub presence: Vec<PresenceDevice>,
-    /// The documents another Mac holds, from the same poll (docs/cloud.md
-    /// §8.2). An editor showing one of these opens view-only. Empty when this
+    /// The documents another Mac holds, from the same poll.
+    /// An editor showing one of these opens view-only. Empty when this
     /// Mac cannot hear the domain — a lock nobody can confirm is no lock.
     pub leases: Vec<LeaseHolder>,
 }
 
 /// How much of this device's version history is in the bucket, and how much
-/// is up there in total (docs/versioning-plan.md §6.2).
+/// is up there in total.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionsMirror {
@@ -188,7 +188,7 @@ pub struct Invited {
     pub invite: InviteRecord,
 }
 
-/// `cloud_people`: everything the People view shows (docs/cloud.md §7.2).
+/// `cloud_people`: everything the People view shows.
 ///
 /// `role` is how *this Mac* authenticates, and it is asked rather than
 /// remembered: the members route answers the owner's credential and refuses
@@ -212,7 +212,7 @@ pub struct People {
 
 /// A fresh login code for an agent, and the line that carries it — the one
 /// moment the code exists in the clear. Shown once; the domain keeps only
-/// its sha256 (docs/cloud.md §8.3).
+/// its sha256.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLogin {

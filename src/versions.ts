@@ -1,5 +1,5 @@
-// The frontend's half of the versioning contract
-// (docs/versioning-plan.md §4.5): the types the versioner's status event and
+// The frontend's half of the versioning contract:
+// the types the versioner's status event and
 // commands carry, one typed wrapper per command, and the listener. No
 // `fetch` and no filesystem here — the Rust versioner owns the store; this
 // file only asks it things. Mirrored by src-tauri/src/versions/status.rs —
@@ -51,8 +51,7 @@ export type FileVersion = {
   /** The path as of that version — different from today's after a rename. */
   path: string;
   /** Where the bytes come from: `local` (a blob on this Mac) or `cloud`
-   *  (one another Mac mirrored, read through the engine). Two values since
-   *  phase 6 retired the sync manifest's own revisions. */
+   *  (one another Mac mirrored, read through the engine). */
   source: "local" | "cloud";
   /** This version is byte-for-byte the file on disk right now. */
   current: boolean;

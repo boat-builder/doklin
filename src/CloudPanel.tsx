@@ -1,4 +1,4 @@
-// The Cloud panel — docs/cloud.md §7.2 (gear → Cloud…, and the dot
+// The Cloud panel (gear → Cloud…, and the dot
 // beside the workspace name). A view over App-owned live state: the status
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
@@ -88,10 +88,10 @@ export default function CloudPanel({
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
   onOpenExternal: (url: string) => void;
-  /** The workspace timeline (docs/versioning-plan.md §7.2). The sidebar
+  /** The workspace timeline. The sidebar
    *  root's menu is the other way in. */
   onWorkspaceHistory?: () => void;
-  /** The Versions settings (docs/versioning-plan.md §8.2) — the two
+  /** The Versions settings — the two
    *  horizons, the space, the export. The gear popover is the other way in. */
   onOpenVersions?: () => void;
 }) {

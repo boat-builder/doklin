@@ -1,4 +1,4 @@
-// The app's right-click menu (docs/development.md): a fixed-position list
+// The app's right-click menu: a fixed-position list
 // that closes on an outside click, Esc, or after running an item. The
 // sidebar tree and a tab raise the same one, so "Version history…" reads
 // identically wherever it is reached from.

@@ -1,4 +1,4 @@
-// The worker as a writer of the manifest (docs/cloud.md §8.4).
+// The worker as a writer of the manifest.
 //
 // Until the document API, the worker only ever stored a manifest a Mac had
 // built. An agent has no engine and no copy of the folder, so its changes are

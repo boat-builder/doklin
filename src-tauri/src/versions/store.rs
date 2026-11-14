@@ -1,4 +1,4 @@
-//! The store on disk (docs/versioning.md §6.3, docs/versioning-plan.md §4.2):
+//! The store on disk:
 //! where a workspace's history lives, what an index row and a snapshot file
 //! say, and the gzip'd, atomically written bytes underneath. Nothing here
 //! decides *when* to capture (capture.rs) or *what* to keep (retain.rs) —
@@ -94,7 +94,7 @@ pub struct SnapshotRow {
     /// same workspace, so a capture that finds one writes nothing.
     pub digest: String,
     /// Never thinned by the ladder. Set by a `manual` capture and by
-    /// `versions_set_pinned` (phase 2's *Name this version*).
+    /// `versions_set_pinned` (*Name this version*).
     pub pinned: bool,
     pub label: Option<String>,
     /// For a `restore`: the `ts` of the snapshot its content came from.
@@ -115,7 +115,7 @@ pub struct Index {
     /// is thirty days, `Some(None)` is forever, and the field's absence
     /// means settings.json's default still applies. Three states, because
     /// "the user chose forever" and "the user has never chosen" must not be
-    /// the same answer for a store written before phase 5.
+    /// the same answer for a store written before horizons existed.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "chosen_horizon")]
     pub horizon_days: Option<Option<u32>>,
     pub snapshots: Vec<SnapshotRow>,

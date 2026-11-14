@@ -71,7 +71,7 @@ struct FakeWorker {
     /// How many times `/api/meta` was asked — the directory rides on it, so
     /// this is what makes "ask again, but not every cycle" testable.
     meta_calls: u64,
-    /* The version store (docs/versioning.md §6.4): its own CAS'd index,
+    /* The version store: its own CAS'd index,
        immutable snapshots and blobs, with an upload time per blob so the
        cloud sweep's grace period is testable. */
     versions_index: Option<VersionsIndex>,
@@ -79,7 +79,7 @@ struct FakeWorker {
     version_snapshots: HashMap<String, Vec<u8>>,
     version_blobs: HashMap<String, (Vec<u8>, u64)>,
     versions_racer: Option<VersionsIndex>,
-    /* People and the credentials they hold (docs/cloud.md §8.1). The
+    /* People and the credentials they hold. The
        worker keeps only hashes; so does this — a code is looked up by its
        sha256 here exactly as it is there, which is what makes "the app hashes
        the canonical form" a thing a test can get wrong. */
@@ -93,7 +93,7 @@ struct FakeWorker {
     /// and it bites on that Mac's next call because every call comes through
     /// `ready` — which is the whole of what a session would have been.
     tokens: BTreeMap<String, TokenRecord>,
-    /// Agent id -> name (docs/cloud.md §8.3). All the engine ever learns of
+    /// Agent id -> name. All the engine ever learns of
     /// an agent: `/api/meta` lists them after the people, so an `a-` id in a
     /// manifest gets a name the same way an `m-` id does.
     agents: BTreeMap<String, String>,
@@ -104,7 +104,7 @@ struct FakeWorker {
 /// so it keeps working whatever happens to the people above.
 const OWNER_TOKEN: &str = "owner-secret-token";
 
-/// Who a bearer is, the way the worker decides it (docs/cloud.md §5.4).
+/// Who a bearer is, the way the worker decides it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Caller {
     Owner,
@@ -555,7 +555,7 @@ impl Remote for FakeRemote {
             b.versions_index = None;
             b.version_snapshots.clear();
             b.version_blobs.clear();
-            // The wipe empties the database too (docs/cloud.md §5.7): the
+            // The wipe empties the database too: the
             // domain is free for a new binding, and nobody is left on it.
             b.members.clear();
             b.invites.clear();
@@ -1787,7 +1787,7 @@ async fn resume_in_place_converges_without_conflict_copies() {
     assert_eq!(a.files().len(), 4);
 }
 
-/* ---------- The invite code and the redeem flow (docs/cloud.md §8.1) ---------- */
+/* ---------- The invite code and the redeem flow ---------- */
 
 #[test]
 fn a_minted_code_reads_back_the_way_it_was_written() {
@@ -1998,7 +1998,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
     assert_eq!(state.files.len(), 1);
     assert_eq!(std::fs::read_to_string(dest.join("readme.md")).unwrap(), "root doc\n");
 
-    // And it writes: a member is not a limited account (docs/cloud.md §5.4).
+    // And it writes: a member is not a limited account.
     // What it cannot do is administer the domain.
     let (manifest, etag) = bob.fetch_manifest(None).await.unwrap().unwrap();
     assert!(bob.put_manifest(&manifest, &etag).await.is_ok(), "the manifest is not role-gated");
@@ -2018,7 +2018,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
     assert!(alice.meta().await.is_ok());
 }
 
-/* ---------- Attribution by person (docs/cloud.md §6.6) ---------- */
+/* ---------- Attribution by person ---------- */
 
 #[tokio::test]
 async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
@@ -2141,7 +2141,7 @@ async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
     assert_eq!(a.status().public[0].by, "Alice");
 }
 
-/* ---------- The People panel (docs/cloud.md §7.2) ---------- */
+/* ---------- The People panel ---------- */
 
 /// Invite `email`, redeem the code on `device_id`, and answer the token that
 /// Mac now holds — the whole of "somebody joined", as the two commands behind
@@ -2658,7 +2658,7 @@ async fn the_beat_rides_every_third_poll_and_a_new_path_brings_the_poll_forward(
     drop(root_dir);
 }
 
-/// The budget this phase exists for (docs/cloud.md §11.2): an idle Mac is
+/// The request budget: an idle Mac is
 /// four polls a minute and nothing else. The beat used to be two more.
 #[tokio::test(start_paused = true)]
 async fn an_idle_device_makes_exactly_four_requests_a_minute() {
@@ -2757,7 +2757,7 @@ async fn a_worker_without_presence_is_polled_and_never_beaten_at_until_it_is_upd
     drop(root_dir);
 }
 
-/// "Who else is here" names people (docs/cloud.md §5.3): the worker says
+/// "Who else is here" names people: the worker says
 /// whose Mac each one is and the engine puts the directory's name to it —
 /// except your own other Mac, which is named as a Mac, because "Ada is
 /// editing" tells Ada nothing.
@@ -2857,7 +2857,7 @@ async fn a_beat_lost_with_its_poll_rides_the_next_one() {
     drop(root_dir);
 }
 
-/* ---------- Leases (docs/cloud.md §8.2) ---------- */
+/* ---------- Leases ---------- */
 
 /// Two Macs with a document between them, both synced and probed.
 async fn two_with_a_doc(be: &SharedWorker) -> (Device, Device) {
@@ -3377,7 +3377,7 @@ fn endpoints_normalize() {
     assert_eq!(super::config::sanitize_folder_name(" .. "), "Workspace");
 }
 
-/* ---------- The version store's mirror (docs/versioning-plan.md §6.2) ---------- */
+/* ---------- The version store's mirror ---------- */
 
 const MINUTE: u64 = 60 * 1000;
 const HOUR: u64 = 60 * MINUTE;
@@ -3694,7 +3694,7 @@ async fn read_through_caches_another_devices_snapshot() {
     );
 }
 
-/* ---------- The retired manifest history (docs/versioning-plan.md §9) ---------- */
+/* ---------- The retired manifest history ---------- */
 
 /// The one-time clean-up: every `history/<fid>.json`, then every blob but
 /// each file's current one, `LEGACY_BATCH` fileIds at a time — archives
@@ -3792,7 +3792,7 @@ async fn a_bookmark_from_the_archive_pass_does_not_carry_into_the_blob_sweep() {
     assert_eq!(be.lock().unwrap().blobs.len(), 3, "every file swept, not just the ones past the old cursor");
 }
 
-/* ---------- The worker as a writer: what an agent changes (docs/cloud.md §8.4) ---------- */
+/* ---------- The worker as a writer: what an agent changes ---------- */
 
 /// The id an agent signs with: `a-` and eight hex, as the worker mints one
 /// (cloud-worker/src/agents.ts).
@@ -4016,8 +4016,7 @@ fn fid_at(be: &SharedWorker, path: &str) -> String {
 /// A cycle that is only allowed to listen. What the worker wrote is applied
 /// and this Mac says nothing back: no manifest PUT, so no new etag. That is
 /// what makes an agent's write cost each Mac one cycle and not two — a Mac
-/// that "corrected" the worker's manifest would wake every other Mac again
-/// (docs/cloud.md §8.7).
+/// that "corrected" the worker's manifest would wake every other Mac again.
 async fn applies_quietly(d: &mut Device, be: &SharedWorker) {
     let (calls, etag) = {
         let b = be.lock().unwrap();

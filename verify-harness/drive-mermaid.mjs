@@ -2,8 +2,7 @@
 // Chromium: gallery rendering across diagram types, live re-render while
 // typing, error-card recovery, theme flips, the slash-menu Diagram item, the
 // language-picker entry, read-only preview-only mode, and markdown
-// round-trip. Needs the repo-root vite dev server (port 1420) — see
-// .claude/skills/verify/SKILL.md.
+// round-trip. Needs the repo-root vite dev server (port 1420).
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 

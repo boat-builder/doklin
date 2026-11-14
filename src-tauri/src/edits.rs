@@ -5,9 +5,9 @@
 //! `restore_trashed` — each finishes with `edits::touched(&app, &path)`,
 //! which fans the hint out to the two things that care when a file changed:
 //!
-//! - the **cloud engine** whose root contains the path (docs/cloud.md §6.4),
+//! - the **cloud engine** whose root contains the path,
 //!   which settles 1.5 s after the last touch instead of the watcher's 5 s;
-//! - the **versioner** for that root (docs/versioning.md §6.1), which uses it
+//! - the **versioner** for that root, which uses it
 //!   to know a session is under way — one snapshot every ten minutes while
 //!   it lasts, and one two minutes after it ends.
 //!

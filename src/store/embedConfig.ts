@@ -26,7 +26,7 @@
 //
 // Pure string work — no editor, no filesystem — so the round trip can be
 // tested on its own (verify-harness/store.test.mjs). The milkdown plumbing
-// that turns a fence into a node lives in kanbanEmbed.ts.
+// that turns a fence into a node lives in storeEmbed.ts.
 
 import { parseProps, propLine, propList } from "./frontmatter";
 import type { ViewKind } from "./storeFile";

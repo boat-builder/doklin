@@ -10,7 +10,7 @@
 //! app; the CDP client below is the ~10 methods we need, hand-rolled over a
 //! websocket.
 //!
-//! The contract (docs/pdf-export.md): reproduce the document exactly —
+//! The contract: reproduce the document exactly —
 //! same page size, same fonts and wrapping, backgrounds intact, nothing
 //! scaled — and REFUSE to emit a PDF we can detect is wrong. The exporter
 //! never repairs a broken document; it renders faithfully and validates
@@ -28,7 +28,7 @@
 //!
 //! Upgrading ENGINE_VERSION changes layout in ways Chromium doesn't promise
 //! to keep stable — treat a bump like a rendering change and re-verify the
-//! fixture corpus (`DOKLIN_PDF_ENGINE=... cargo test -- --ignored pdf_e2e`).
+//! fixture corpus (`cargo test --test pdf_export_e2e -- --ignored`).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write as _};
@@ -63,7 +63,7 @@ const ENGINE_URL: &str = "https://storage.googleapis.com/chrome-for-testing-publ
 const ENGINE_SHA256: &str = "4cca5044201c5472469d26bef44a24aa2ec2e0ce2d1ef4959b8dae3fa662cec1";
 const ENGINE_ZIP_BYTES: u64 = 97_949_765; // progress fallback if no Content-Length
 
-// Pinned PDF rasterizer for the visual-diff check (spec §6.6): pdfium — the
+// Pinned PDF rasterizer for the visual-diff check: pdfium — the
 // same PDF library Chrome ships — prebuilt at bblanchon/pdfium-binaries.
 // Pinned and hash-verified like the engine; the yardstick must not drift
 // under us either. Upgrade alongside ENGINE_VERSION and re-verify.
@@ -432,7 +432,7 @@ pub async fn run_export(
 }
 
 async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts), String> {
-    // The @page decision (spec §2) comes from the source, not the engine:
+    // The @page decision comes from the source, not the engine:
     // declared size → use it verbatim; none → content-sized custom page.
     let at_page_pt = at_page_size(html)?;
 
@@ -475,7 +475,7 @@ async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts)
     cdp.wait_network_idle(Duration::from_millis(500), Duration::from_secs(30))
         .await?;
 
-    // Spec §4: fonts ready, every image decoded, every same-document SVG
+    // The wait: fonts ready, every image decoded, every same-document SVG
     // <use> resolved, then two rAF ticks. Decode failures and dangling
     // references are refusals, not warnings.
     let settled: Value = parse_json_result(cdp.eval(SETTLE_JS, true).await?)?;
@@ -499,7 +499,7 @@ async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts)
     // Measure to a fixed point: growing the viewport to the content can
     // reflow the content (width-responsive layouts), so re-measure until
     // stable. The final pass leaves the viewport at least content-sized —
-    // nothing lazy-renders or collapses (spec §2).
+    // nothing lazy-renders or collapses.
     let measure = measure_js();
     let mut measured: Value = parse_json_result(cdp.eval(&measure, false).await?)?;
     for _ in 0..3 {
@@ -532,13 +532,13 @@ async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts)
     let containers = measured["containers"].as_u64().unwrap_or(0) as usize;
     let samples = string_vec(&measured["samples"]);
 
-    // The font gate (spec §3): every sampled element's dominant rendered
+    // The font gate: every sampled element's dominant rendered
     // font must be a family the document actually asked for (bundled pack
     // and Calibri↔Carlito aliasing included). Substituted metrics = wrong
     // wrapping = refuse.
     check_fonts(&mut cdp, &measured["fonts"]).await?;
 
-    // Page geometry (spec §2). @page wins verbatim; otherwise the measured
+    // Page geometry. @page wins verbatim; otherwise the measured
     // content box becomes the page, with 2px of height slack so float→layout
     // rounding can't spill a final empty page.
     let (paper_pt, expected_pages) = match at_page_pt {
@@ -549,7 +549,7 @@ async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts)
         }
     };
 
-    // Reference captures for the visual diff (spec §6.6): the browser's own
+    // Reference captures for the visual diff: the browser's own
     // painting of each page region, from the same settled DOM the PDF prints
     // from. Regions are DOM-predictable in exactly the cases the page-count
     // check covers — page-sized containers, or the whole content box of a
@@ -613,13 +613,13 @@ async fn render(engine_bin: &Path, html: &Path) -> Result<(Vec<u8>, RenderFacts)
             json!({
                 "landscape": false,
                 "displayHeaderFooter": false,
-                "printBackground": true,           // §3: fills, tints, coloured blocks
-                "scale": 1,                          // §2: never shrink-to-fit
+                "printBackground": true,           // fills, tints, coloured blocks
+                "scale": 1,                          // never shrink-to-fit
                 "paperWidth": paper_pt.0 / 72.0,
                 "paperHeight": paper_pt.1 / 72.0,
                 "marginTop": 0, "marginBottom": 0, "marginLeft": 0, "marginRight": 0,
-                "preferCSSPageSize": true,           // §2: a declared @page size wins
-                "generateTaggedPDF": true,           // §3: accessibility structure
+                "preferCSSPageSize": true,           // a declared @page size wins
+                "generateTaggedPDF": true,           // accessibility structure
                 "transferMode": "ReturnAsBase64"
             }),
         )
@@ -754,7 +754,7 @@ async fn check_fonts(cdp: &mut Cdp, fonts_meta: &Value) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Validation gate (spec §6): mechanical checks on the exact bytes we ship.
+// Validation gate: mechanical checks on the exact bytes we ship.
 // ---------------------------------------------------------------------------
 
 fn validate(pdf: &[u8], facts: &RenderFacts, pdfium_lib: &Path) -> Result<(), String> {
@@ -1647,7 +1647,7 @@ const INJECT_JS: &str = r#"(() => {
   return 'ok';
 })()"#;
 
-/// Spec §4 wait conditions, reported rather than assumed: fonts ready, every
+/// The wait conditions, reported rather than assumed: fonts ready, every
 /// image decoded (`decode()` forces lazy ones), same-document <use> targets
 /// present, two rAF ticks for final layout.
 const SETTLE_JS: &str = r#"(async () => {

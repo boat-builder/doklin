@@ -1,6 +1,5 @@
 // Who is here, and who holds which document — a row per device and a row per
-// leased path in D1, both written by the poll that carries a beat
-// (docs/cloud.md §5.3, §8.2).
+// leased path in D1, both written by the poll that carries a beat.
 //
 // Presence used to be `presence.json`, one R2 object every device read,
 // mutated and wrote back on its own 25-second request. That was a lost update

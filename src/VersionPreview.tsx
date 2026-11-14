@@ -1,5 +1,5 @@
-// One old version of the open document, shown where the document is
-// (docs/versioning-plan.md §5.4, §12.3.1). The live editor stays mounted
+// One old version of the open document, shown where the document is.
+// The live editor stays mounted
 // and hidden behind this; what renders here is the same editor in read-only
 // mode, so an old version reads exactly like the document it is a version
 // of — and, crucially, has no write path at all. Nothing typed here can be
@@ -43,7 +43,7 @@ export function copyName(path: string, ms: number, n = 1): string {
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 
 /** A unified patch, line by line, so additions and removals can be read at
- *  a glance. The rendered block-level diff inside the editor is §12.3.2's
+ *  a glance. The rendered block-level diff inside the editor is a later
  *  refinement; this is the correct, cheap first cut for a markdown tool. */
 function DiffView({ patch }: { patch: string }) {
   const lines = patch.split("\n");

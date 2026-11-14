@@ -1,4 +1,4 @@
-// Publishing, for an agent (docs/cloud.md §8.4, Publishing).
+// Publishing, for an agent.
 //
 //   GET    /api/agent/pages
 //   PUT    /api/agent/pages           {path, slug?, title?, desc?, dryRun?}
