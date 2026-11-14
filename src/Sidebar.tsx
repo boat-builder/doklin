@@ -13,11 +13,7 @@ export type TreeNode =
   // "show every file" mode, where those rows are listed greyed out so their
   // existence is visible. Absent means openable (the documents-only tree).
   | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
-  // `store: true` marks a DATASTORE folder — a board. The backend returns no
-  // children for one (a board can hold hundreds of cards, and the tree is not
-  // where they belong), so the row has no disclosure triangle: clicking it
-  // opens the board.
-  | { kind: "dir"; name: string; path: string; children: TreeNode[]; store?: boolean };
+  | { kind: "dir"; name: string; path: string; children: TreeNode[] };
 
 // A file row the app can open (markdown, html, or a bundled pair). Folders and
 // documents-only trees are always openable; only "show every file" rows differ.
@@ -49,7 +45,7 @@ export const pruneNestedSelection = (sels: SidebarSelection[]): SidebarSelection
 
 // Where an in-progress "New File…" / "New Folder…" will land. The input row is
 // rendered inline inside `parentDir`, like VS Code's explorer.
-type PendingCreate = { parentDir: string; kind: "file" | "dir" | "board" };
+type PendingCreate = { parentDir: string; kind: "file" | "dir" };
 
 // An in-progress inline rename: the row at `path` is replaced by a name input.
 // `openable: false` (an unsupported file in show-all mode) keeps the row's own
@@ -103,12 +99,6 @@ type Props = {
   refreshToken: number;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
-  // Open a datastore folder as a board tab.
-  onOpenBoard: (dirPath: string) => void;
-  // Write `store.jsonl` into an (already created) folder and open it as a
-  // board. Backs both "New Board…" and "Turn into Board" — the second adds
-  // the definition file to a folder of notes, touching no note's content.
-  onMakeBoard: (dirPath: string) => Promise<string | null>;
   onOpenFolder: () => void;
   onOpenFilePicker: () => void;
   onRevealInFinder: (path: string) => void;
@@ -218,8 +208,6 @@ export default function Sidebar({
   refreshToken,
   onSelect,
   onOpenFile,
-  onOpenBoard,
-  onMakeBoard,
   onOpenFolder,
   onOpenFilePicker,
   onRevealInFinder,
@@ -322,19 +310,6 @@ export default function Sidebar({
       return next;
     });
   }, []);
-
-  // Every board in the tree, by path — the context menu asks whether a folder
-  // is already a board, and the row asks whether to draw a disclosure.
-  const storeDirs = useMemo(() => {
-    const out = new Set<string>();
-    const walk = (n: TreeNode) => {
-      if (n.kind !== "dir") return;
-      if (n.store) out.add(n.path);
-      for (const c of n.children) walk(c);
-    };
-    if (tree) walk(tree);
-    return out;
-  }, [tree]);
 
   /* ---------- Sections ---------- */
 
@@ -782,7 +757,7 @@ export default function Sidebar({
   // Begin inline creation inside `parentDir`, expanding it (and any collapsed
   // ancestors) so the input row is actually visible.
   const startCreate = useCallback(
-    (kind: "file" | "dir" | "board", wantedDir: string) => {
+    (kind: "file" | "dir", wantedDir: string) => {
       // Nothing is made straight under Restricted from here: a note there
       // would be in no folder, and a folder there is made with its people.
       const parentDir = sectioned && wantedDir === restrictedDir ? root : wantedDir;
@@ -832,20 +807,13 @@ export default function Sidebar({
       } catch (e) {
         return String(e);
       }
-      // A board is a folder plus its definition file. If the definition can't
-      // be written the folder stays — an empty folder, not a broken board.
-      if (pc.kind === "board") {
-        const err = await onMakeBoard(path);
-        if (err) return err;
-      }
       setPendingCreate(null);
       await refresh();
-      onSelect([{ path, kind: pc.kind === "file" ? "file" : "dir" }]);
+      onSelect([{ path, kind: pc.kind }]);
       if (pc.kind === "file") onOpenFile(path);
-      if (pc.kind === "board") onOpenBoard(path);
       return null;
     },
-    [pendingCreate, refresh, onSelect, onOpenFile, onOpenBoard, onMakeBoard],
+    [pendingCreate, refresh, onSelect, onOpenFile],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -953,38 +921,15 @@ export default function Sidebar({
     if (target.kind === "section" && target.section === "restricted") {
       return onNewRestricted ? [{ label: "New restricted folder…", onClick: () => onNewRestricted() }] : [];
     }
-    // Cards are created from the board itself, so a board offers no inline
-    // New File / New Folder — its folder is the board's own storage.
-    const insideBoard = storeDirs.has(createDirFor(target));
-    // Nor does a row straight under Restricted: see `startCreate`.
+    // A row straight under Restricted offers no New File / New Folder: see
+    // `startCreate`.
     const underRestricted = sectioned && createDirFor(target) === restrictedDir;
     const items: ContextMenuItem[] = [];
-    if (!insideBoard && !underRestricted) {
+    if (!underRestricted) {
       items.push(
         { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
         { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
-        { label: "New Board…", onClick: () => startCreate("board", createDirFor(target)) },
       );
-    }
-    // An existing folder of notes becomes a board by gaining a definition
-    // file; not one note's content is touched.
-    if (target.kind === "dir" && !storeDirs.has(target.path)) {
-      items.push({
-        label: "Turn into Board",
-        onClick: () => {
-          void (async () => {
-            const err = await onMakeBoard(target.path);
-            if (err) window.alert(err);
-            else {
-              await refresh();
-              onOpenBoard(target.path);
-            }
-          })();
-        },
-      });
-    }
-    if (target.kind === "dir" && storeDirs.has(target.path)) {
-      items.push({ label: "Open Board", onClick: () => onOpenBoard(target.path) });
     }
     items.push({
       label: "Reveal in Finder",
@@ -1090,13 +1035,9 @@ export default function Sidebar({
     ctxMenu,
     selection,
     clipboardHasFiles,
-    storeDirs,
     spacesByAbs,
     sectioned,
     restrictedDir,
-    refresh,
-    onOpenBoard,
-    onMakeBoard,
     startCreate,
     startRename,
     createDirFor,
@@ -1176,7 +1117,6 @@ export default function Sidebar({
       loose={loose}
       onToggle={toggleCollapsed}
       onOpenFile={onOpenFile}
-      onOpenBoard={onOpenBoard}
       onRowClick={handleRowSelect}
       onRowMenu={openRowMenu}
       onCommitCreate={commitCreate}
@@ -1652,7 +1592,6 @@ function TreeItem({
   loose = false,
   onToggle,
   onOpenFile,
-  onOpenBoard,
   onRowClick,
   onRowMenu,
   onCommitCreate,
@@ -1687,7 +1626,6 @@ function TreeItem({
   loose?: boolean;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onOpenBoard: (path: string) => void;
   // Modifier-aware selection; true = a multi-select gesture the row must not
   // also act on (no open/toggle).
   onRowClick: (e: React.MouseEvent, entry: SidebarSelection) => boolean;
@@ -1780,25 +1718,16 @@ function TreeItem({
   }
 
   const space = spaces.get(node.path) ?? null;
-  const isBoard = node.store === true;
-  // A board never expands: the backend hands it no children, and its cards are
-  // reached from the board, from search, and from links.
-  const isCollapsed = isBoard || collapsed.has(node.path);
+  const isCollapsed = collapsed.has(node.path);
   const creatingHere = pendingCreate?.parentDir === node.path;
   const isDropTarget = dropDir === node.path;
-  // With no row of their own, a board's cards borrow the board's: the row
-  // reads as active while a card inside it is the focused tab.
-  const boardActive =
-    isBoard &&
-    currentPath != null &&
-    (currentPath === node.path || currentPath.startsWith(node.path + "/"));
   return (
     <li role="treeitem" aria-expanded={!isCollapsed} aria-selected={isSelected}>
       {renamingHere ? (
         <NameRow
           depth={depth}
-          icon={isBoard ? <BoardIcon /> : <FolderIcon />}
-          placeholder={isBoard ? "Board name" : "Folder name"}
+          icon={<FolderIcon />}
+          placeholder="Folder name"
           ariaLabel={`Rename ${node.name}`}
           initialValue={node.name}
           asListItem={false}
@@ -1807,7 +1736,7 @@ function TreeItem({
         />
       ) : (
         <button
-          className={`tree-row tree-dir ${isBoard ? "tree-board" : ""} ${boardActive ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="dir"
@@ -1815,8 +1744,7 @@ function TreeItem({
           onClick={(e) => {
             if (dnd.suppressClick()) return;
             if (onRowClick(e, { path: node.path, kind: "dir" })) return;
-            if (isBoard) onOpenBoard(node.path);
-            else onToggle(node.path);
+            onToggle(node.path);
           }}
           // A restricted folder stays where it is: it is left, or deleted
           // for everyone, never dragged into another section.
@@ -1827,13 +1755,9 @@ function TreeItem({
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "dir" })}
           title={node.path}
         >
-          {isBoard ? (
-            <BoardIcon />
-          ) : (
-            <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
-              <ChevronRightIcon />
-            </span>
-          )}
+          <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
+            <ChevronRightIcon />
+          </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
           {space && space.members.length > 0 && (
             <span
@@ -1886,7 +1810,6 @@ function TreeItem({
               spaces={spaces}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
-              onOpenBoard={onOpenBoard}
               onRowClick={onRowClick}
               onRowMenu={onRowMenu}
               onCommitCreate={onCommitCreate}
@@ -2183,31 +2106,9 @@ function BundledDocIcon() {
   );
 }
 
-const createRowLabel = (kind: "file" | "dir" | "board") =>
-  kind === "dir" ? "Folder name" : kind === "board" ? "Board name" : "File name";
+const createRowLabel = (kind: "file" | "dir") => (kind === "dir" ? "Folder name" : "File name");
 
-const createRowIcon = (kind: "file" | "dir" | "board") =>
-  kind === "dir" ? <NewFolderIcon /> : kind === "board" ? <BoardIcon /> : <FileIcon />;
-
-// A board: three columns, the shape of the thing the row opens.
-function BoardIcon() {
-  return (
-    <svg
-      className="tree-icon"
-      width="15"
-      height="15"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.3"
-      aria-hidden
-    >
-      <rect x="2" y="3" width="3.2" height="10" rx="1" />
-      <rect x="6.4" y="3" width="3.2" height="7" rx="1" />
-      <rect x="10.8" y="3" width="3.2" height="8.5" rx="1" />
-    </svg>
-  );
-}
+const createRowIcon = (kind: "file" | "dir") => (kind === "dir" ? <NewFolderIcon /> : <FileIcon />);
 
 function FolderIcon() {
   return (

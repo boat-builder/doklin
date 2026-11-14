@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
-import { LiveGlyph, useLivePages } from "./livePages";
 import { dragWindowFromGap } from "./windowDrag";
 import { isUnsaved, tabLabel, type Tab } from "./tabs";
 
@@ -37,10 +36,11 @@ type Props = {
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
   // Version history for this tab's file — the tab's right-click menu is one
-  // of the ways in. A board has no
-  // document to version and an untitled note no history, so neither has the
-  // item.
+  // of the ways in. An untitled note has no history, so it has no item.
   onHistory?: (path: string) => void;
+  // The absolute paths with a page of their own on the workspace's domain:
+  // those tabs carry the live glyph.
+  live: ReadonlySet<string>;
 };
 
 // A press only becomes a drag after moving this far, so plain clicks (switch
@@ -61,10 +61,9 @@ export default function TabBar({
   leading,
   trailing,
   onHistory,
+  live,
 }: Props) {
   const activeRef = useRef<HTMLButtonElement>(null);
-  // Tabs whose note (or board) has a page of its own carry the live glyph.
-  const live = useLivePages();
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const stripRef = useRef<HTMLDivElement>(null);
 
@@ -210,9 +209,9 @@ export default function TabBar({
             <div
               key={t.id}
               data-tab-id={t.id}
-              className={`tab ${t.kind === "store" ? "is-board" : ""} ${
-                active ? "is-active" : ""
-              } ${t.id === draggingId ? "is-dragging" : ""} ${t.missing ? "is-missing" : ""}`}
+              className={`tab ${active ? "is-active" : ""} ${
+                t.id === draggingId ? "is-dragging" : ""
+              } ${t.missing ? "is-missing" : ""}`}
             >
               <button
                 ref={active ? activeRef : undefined}
@@ -244,7 +243,7 @@ export default function TabBar({
                 }}
               >
                 <span className="tab-icon">
-                  {t.kind === "store" ? <BoardIcon /> : <NoteIcon />}
+                  <NoteIcon />
                 </span>
                 <span className="tab-label">{tabLabel(t)}</span>
                 {t.kind !== "untitled" && live.has(t.path) && (
@@ -374,21 +373,21 @@ function NoteIcon() {
   );
 }
 
-// The same three-column mark the sidebar gives a board's row.
-function BoardIcon() {
+// The broadcast mark a live page carries on its tab.
+function LiveGlyph() {
   return (
     <svg
-      width="14"
-      height="14"
+      width="12"
+      height="12"
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.3"
+      strokeWidth="1.6"
+      strokeLinecap="round"
       aria-hidden
     >
-      <rect x="2" y="3" width="3.2" height="10" rx="1" />
-      <rect x="6.4" y="3" width="3.2" height="7" rx="1" />
-      <rect x="10.8" y="3" width="3.2" height="8.5" rx="1" />
+      <circle cx="8" cy="8" r="1.3" fill="currentColor" stroke="none" />
+      <path d="M5.4 5.4a3.7 3.7 0 0 0 0 5.2M10.6 5.4a3.7 3.7 0 0 1 0 5.2M3.3 3.3a6.6 6.6 0 0 0 0 9.4M12.7 3.3a6.6 6.6 0 0 1 0 9.4" />
     </svg>
   );
 }

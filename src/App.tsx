@@ -12,6 +12,7 @@ import {
   cloudTakeOver,
   cloudUnpublish,
   leaseFor,
+  livePathsOf,
   mayOn,
   onCloudApplied,
   onCloudAddressTaken,
@@ -54,7 +55,6 @@ import Toasts, { type Toast, type ToastTone } from "./Toasts";
 import LiveChip from "./LiveChip";
 import SyncStatus from "./SyncStatus";
 import { Facepile } from "./Avatar";
-import { livePathsOf, setLivePages } from "./livePages";
 import PublishFolder from "./PublishFolder";
 import PublishedPages from "./PublishedPages";
 import WorkerUpdate from "./WorkerUpdate";
@@ -111,21 +111,8 @@ import {
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
-import StoreView from "./StoreView";
-import CardPeek from "./CardPeek";
 import { useDismiss } from "./dismiss";
-import { CloseIcon } from "./storeChrome";
-import type { StoreEmbedHost, StoreChoice } from "./StoreEmbedFrame";
-import PropertiesHeader from "./PropertiesHeader";
-import {
-  parseFrontmatter,
-  serializeFrontmatter,
-  type Props as CardProps,
-  type PropValue,
-} from "./store/frontmatter";
-import { cardKeyOrder, RANK_KEY, STORE_FILE } from "./store/storeFile";
-import { createStoreFile } from "./store/model";
-import { useStore } from "./store/useStore";
+import { splitFrontmatter } from "./frontmatter";
 
 type FileSnapshot = { mtime_ms: number; size: number };
 type ReadFileResult = { contents: string; snapshot: FileSnapshot };
@@ -148,7 +135,7 @@ type WindowInit = {
 
 /** Something an open from outside the app asked this window to show
  *  (`Show` in src-tauri/src/external_open.rs — change both). */
-type WindowShow = { path: string; kind: "file" | "board" | "folder" };
+type WindowShow = { path: string; kind: "file" | "folder" };
 
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
@@ -291,10 +278,8 @@ type CompanionDoc = {
   // The pane document's frontmatter block, split off the same way the active
   // document's is: `contents` above is the BODY, so promoting this pane must
   // hand the block back to the writers or the next save would prepend the
-  // other document's properties.
+  // other document's block.
   head: string;
-  props: CardProps;
-  opaque: string[];
   conflict: Conflict | null;
   dirty: boolean;
 };
@@ -598,9 +583,7 @@ function sanitizeTabs(raw: unknown): StoredTab[] {
             !!t &&
             typeof (t as StoredTab).id === "string" &&
             typeof (t as StoredTab).path === "string" &&
-            ((t as StoredTab).kind === "file" ||
-              (t as StoredTab).kind === "store" ||
-              (t as StoredTab).kind === "untitled"),
+            ((t as StoredTab).kind === "file" || (t as StoredTab).kind === "untitled"),
         )
         .map(({ id, kind, path }) => ({ id, kind, path }))
     : [];
@@ -824,34 +807,24 @@ export default function App() {
   // the BODY: a leading frontmatter block never reaches it (see below).
   const lastDiskMdRef = useRef<string>("");
   /* ---------- The frontmatter boundary ----------
-     Milkdown never sees frontmatter. Like expandMarkdown / extractMarkdown
-     for comment bodies, the split happens at the IO boundary: a load parses
-     the block off the top and hands the editor the body; a save prepends the
-     block back, byte for byte, so an edit to the prose can't rewrite someone
-     else's `aliases:` line and a properties-only change from a board (or
-     another device) leaves the body untouched.
+     Milkdown never sees frontmatter (src/frontmatter.ts). Like
+     expandMarkdown / extractMarkdown for comment bodies, the split happens
+     at the IO boundary: a load splits the block off the top and hands the
+     editor the body; a save prepends the block back, byte for byte, so an
+     edit to the prose can't rewrite an agent's `tags:` line, and a change to
+     the block alone (an agent, another device) leaves the body untouched.
 
-     `cardHeadRef` is the exact block text as last seen on disk — what the
-     next write re-attaches. `cardProps` is its parsed form, for the
-     properties header. */
-  const cardHeadRef = useRef<string>("");
-  const cardPropsRef = useRef<CardProps>({});
-  const cardOpaqueRef = useRef<string[]>([]);
-  const [cardProps, setCardProps] = useState<CardProps>({});
-  const [cardOpaque, setCardOpaque] = useState<string[]>([]);
-  // The keys the file itself carries, in file order — what an ordinary note's
-  // properties header shows rows for (a card's rows come from its board).
-  const [cardOrder, setCardOrder] = useState<string[]>([]);
-  // Adopt a document's frontmatter block: the refs the writers read and the
-  // state the header renders, in one place so the two can't drift.
+     `frontmatterRef` is the exact block as last seen on disk — what the next
+     write re-attaches. `frontmatter` is the text between its fences, shown
+     read-only above the note. */
+  const frontmatterRef = useRef<string>("");
+  const [frontmatter, setFrontmatter] = useState<string>("");
+  // Adopt a document's frontmatter block: the ref the writers read and the
+  // state the note shows, in one place so the two can't drift.
   const adoptFrontmatter = useCallback((fullText: string) => {
-    const fm = parseFrontmatter(fullText);
-    cardHeadRef.current = fullText.slice(0, fullText.length - fm.body.length);
-    cardPropsRef.current = fm.props;
-    cardOpaqueRef.current = fm.opaque;
-    setCardProps(fm.props);
-    setCardOpaque(fm.opaque);
-    setCardOrder(fm.order);
+    const fm = splitFrontmatter(fullText);
+    frontmatterRef.current = fm.head;
+    setFrontmatter(fm.inner);
     return fm;
   }, []);
   // Remembered view per document path (session-scoped): a tab you left on HTML
@@ -1057,9 +1030,8 @@ export default function App() {
     () => cloudStatuses.map((s) => ({ root: s.root, name: s.name, domain: s.domain })),
     [cloudStatuses],
   );
-  // The pages of the open workspace, for the glyph on a live page's tab and
-  // card (a board inside a note reads it too, from its own React root).
-  useEffect(() => setLivePages(livePathsOf(cloudForRoot)), [cloudForRoot]);
+  // The pages of the open workspace, for the glyph on a live page's tab.
+  const livePaths = useMemo(() => livePathsOf(cloudForRoot), [cloudForRoot]);
   // The cloud surfaces: the panel, the setup
   // wizard (connect this folder, or open a workspace from a domain), the
   // worker update card, and the transient notices. The held mass-deletion's paths ride the event that
@@ -1338,7 +1310,7 @@ export default function App() {
     // The editor never saw the document's frontmatter block; put it back,
     // byte for byte, in front of what it did see. Captured now, because the
     // active document can change while the write is in flight.
-    const head = pathRef.current === target ? cardHeadRef.current : "";
+    const head = pathRef.current === target ? frontmatterRef.current : "";
     try {
       const isActive = pathRef.current === target;
       let newSnapshot: FileSnapshot | null = null;
@@ -1693,7 +1665,7 @@ export default function App() {
             snapshotRef.current = newSnap;
             // The disk baseline is the body — the migration rewrote the whole
             // file, frontmatter block and all (it only touches CriticMarkup).
-            lastDiskMdRef.current = parseFrontmatter(result.md).body;
+            lastDiskMdRef.current = splitFrontmatter(result.md).body;
           }
         } catch {
           return; // lost to a concurrent edit; retried on the next open
@@ -1888,9 +1860,7 @@ export default function App() {
       mdOrphans: mdOrphansRef.current,
       tcols: tableWidthsRef.current,
       metaForeign: metaForeignRef.current,
-      head: cardHeadRef.current,
-      props: cardPropsRef.current,
-      opaque: cardOpaqueRef.current,
+      head: frontmatterRef.current,
       conflict: conflictRef.current,
       dirty: dirtyRef.current,
     };
@@ -1927,8 +1897,6 @@ export default function App() {
             tcols: [],
             metaForeign: [],
             head: "",
-            props: {},
-            opaque: [],
             conflict: null,
             dirty: false,
           },
@@ -1966,7 +1934,7 @@ export default function App() {
       const { meta, metaExists } = await readEntityMeta(tab.path);
       // The frontmatter boundary again: this pane's editor is handed the body,
       // and the block rides along in the record.
-      const fm = parseFrontmatter(htmlOnly ? "" : contents);
+      const fm = splitFrontmatter(htmlOnly ? "" : contents);
       const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
       const ids = htmlOnly ? new Set<string>() : markerIds(fm.body);
       return {
@@ -1987,9 +1955,7 @@ export default function App() {
             : meta.mthreads.filter((t) => !ids.has(t.id)),
           tcols: meta.tcols,
           metaForeign: meta.foreign,
-          head: htmlOnly ? "" : contents.slice(0, contents.length - fm.body.length),
-          props: fm.props,
-          opaque: fm.opaque,
+          head: htmlOnly ? "" : fm.head,
           conflict: null,
           dirty: false,
         },
@@ -2035,34 +2001,6 @@ export default function App() {
     // (htmlPathRef switches below) — land it first.
     await flushSidecarWrite();
     if (superseded()) return;
-    // A BOARD tab: its path is a folder, and KanbanBoard owns every read and
-    // write inside it. Stand the document machinery down completely — the
-    // same posture an html-only document takes, one step further.
-    if (tab.kind === "store") {
-      const exists = await invoke<boolean>("path_exists", { path: tab.path }).catch(
-        () => false,
-      );
-      if (superseded()) return;
-      setTabMissing(tab.id, !exists);
-      adoptFrontmatter("");
-      baselineCapturedRef.current = false;
-      pathRef.current = null;
-      currentMarkdownRef.current = "";
-      lastSavedRef.current = "";
-      snapshotRef.current = null;
-      lastDiskMdRef.current = "";
-      setInitialMarkdown("");
-      setDirty(false);
-      setConflict(null);
-      htmlPathRef.current = null;
-      setHtmlContent(null);
-      setHasHtml(false);
-      adoptEntityMeta(emptyMeta(), false, null);
-      applyDocView("md");
-      setLoadKey((k) => k + 1);
-      await refreshWatchSet(); // nothing of the board's is watched as a file
-      return;
-    }
     // An html-only document: rendered read-only, never loaded into the
     // markdown editor and never an autosave target (pathRef stays null).
     const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
@@ -2196,8 +2134,8 @@ export default function App() {
     bumpEditorSeq,
   ]);
 
-  // Re-materialize stored tab descriptors against disk: a readable file (or
-  // board) keeps its tab, an unreadable one becomes a visible ghost, and an
+  // Re-materialize stored tab descriptors against disk: a readable file
+  // keeps its tab, an unreadable one becomes a visible ghost, and an
   // untitled note comes back — titled, and unsaved — if its buffer still has
   // text in it. Shared by the startup restore and in-app workspace switches.
   const rebuildTabs = useCallback(async (stored: StoredTab[]): Promise<Tab[]> => {
@@ -2208,13 +2146,10 @@ export default function App() {
         if (note) out.push(note);
         continue;
       }
-      const readable =
-        kind === "store"
-          ? await invoke<boolean>("path_exists", { path }).catch(() => false)
-          : await invoke<ReadFileResult>("read_file", { path }).then(
-              () => true,
-              () => false,
-            );
+      const readable = await invoke<ReadFileResult>("read_file", { path }).then(
+        () => true,
+        () => false,
+      );
       out.push({ id, kind, path, missing: readable ? undefined : true });
     }
     return out;
@@ -2316,14 +2251,14 @@ export default function App() {
     [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
-  // Open a path in a tab (dedupe by path): a file (picker / sidebar / CLI) or
-  // a board.
+  // Open a file in a tab (dedupe by path): from the picker, the sidebar, a
+  // link, the CLI.
   const openTab = useCallback(
-    async (p: string, kind: "file" | "store") => {
+    async (p: string) => {
       // An html file whose markdown sibling exists is a rendition of THAT
       // document — open the pair as one tab keyed on the markdown path,
       // starting on the view the user actually asked for.
-      if (kind === "file" && isHtmlPath(p)) {
+      if (isHtmlPath(p)) {
         const md = mdSiblingOf(p);
         const paired = await invoke<boolean>("path_exists", { path: md }).catch(
           () => false,
@@ -2344,7 +2279,7 @@ export default function App() {
         }
         return;
       }
-      await appendAndActivate({ id: uuid(), kind, path: p });
+      await appendAndActivate({ id: uuid(), kind: "file", path: p });
     },
     [switchTab, appendAndActivate, loadActiveContent],
   );
@@ -2372,7 +2307,7 @@ export default function App() {
   }, []);
 
   // Opens from outside the app (`doklin open`, Finder) that the backend placed
-  // in this window: a file or a board as its tab, a folder of this workspace
+  // in this window: a file as its tab, a folder of this workspace
   // shown in the sidebar. Taken once the window is ready and again on every
   // ping (src-tauri/src/external_open.rs).
   const [revealRequest, setRevealRequest] = useState<{ path: string; seq: number } | null>(null);
@@ -2393,7 +2328,7 @@ export default function App() {
           selectSidebarEntries([{ path: show.path, kind: "dir" }]);
           setRevealRequest((r) => ({ path: show.path, seq: (r?.seq ?? 0) + 1 }));
         } else {
-          await openTabRef.current(show.path, show.kind === "board" ? "store" : "file");
+          await openTabRef.current(show.path);
         }
       }
     };
@@ -2509,7 +2444,7 @@ export default function App() {
           { name: "Documents", extensions: ["md", "markdown", "mdown", "mkd", "html"] },
         ],
       });
-      if (typeof chosen === "string") await openTab(chosen, "file");
+      if (typeof chosen === "string") await openTab(chosen);
     } catch (e) {
       console.error("open file failed", e);
     }
@@ -2588,7 +2523,7 @@ export default function App() {
       if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
       try {
         if (await invoke<boolean>("path_exists", { path: target })) {
-          await openTab(target, "file");
+          await openTab(target);
         }
       } catch (e) {
         console.error("open linked document failed", e);
@@ -2653,7 +2588,7 @@ export default function App() {
       // A version shows in the document area, so the document has to be the
       // one standing in it: opening history for a file in the tree opens the
       // file too.
-      if (historyTargetRef.current !== path) await openTab(path, "file");
+      if (historyTargetRef.current !== path) await openTab(path);
       setHistoryFor(path);
       setHistoryToken((t) => t + 1);
     },
@@ -3011,12 +2946,9 @@ export default function App() {
       setMdOrphans(incoming.mdOrphans);
       // The promoted document's frontmatter block becomes the one the writers
       // re-attach; without this the next save would prepend the demoted
-      // document's properties to this one.
-      cardHeadRef.current = incoming.head;
-      cardPropsRef.current = incoming.props;
-      cardOpaqueRef.current = incoming.opaque;
-      setCardProps(incoming.props);
-      setCardOpaque(incoming.opaque);
+      // document's block to this one.
+      frontmatterRef.current = incoming.head;
+      setFrontmatter(splitFrontmatter(incoming.head).inner);
       // The promoted pane keeps its mounted editor (no remount on a swap), so
       // this only re-points the meta writer at the incoming document's
       // records — the widths on screen are already the ones it mounted with.
@@ -3515,7 +3447,7 @@ export default function App() {
       try {
         snapshot = await invoke<FileSnapshot>("write_file", {
           path: chosen,
-          contents: cardHeadRef.current + hybrid,
+          contents: frontmatterRef.current + hybrid,
           expected: null, // Save As: overwrite the chosen target unconditionally
         });
       } catch (e) {
@@ -3799,7 +3731,7 @@ export default function App() {
       // autosave write and the watcher has already moved to a neighbor tab.
       const affected = tabsRef.current.filter(
         (t) =>
-          (t.kind === "file" || t.kind === "store") &&
+          t.kind === "file" &&
           (t.path === target || (kind === "dir" && t.path.startsWith(target + "/"))),
       );
       for (const t of affected) await closeTab(t.id);
@@ -3894,13 +3826,7 @@ export default function App() {
     }
     if (!restoredAny) return;
     setTreeRefreshToken((t) => t + 1);
-    for (const p of entry.openPaths) {
-      // A restored path is a document or a board folder; ask disk which.
-      const isBoard = await invoke<boolean>("path_exists", {
-        path: `${p}/${STORE_FILE}`,
-      }).catch(() => false);
-      await openTab(p, isBoard ? "store" : "file");
-    }
+    for (const p of entry.openPaths) await openTab(p);
   }, [openTab]);
 
   // Something moved on disk from `from` to `to`: repoint every piece of state
@@ -4283,7 +4209,7 @@ export default function App() {
           }
         } else {
           if (init.folder) setWorkspace(init.folder);
-          if (init.file) await openTab(init.file, "file");
+          if (init.file) await openTab(init.file);
         }
         setReady(true);
         return;
@@ -4412,18 +4338,14 @@ export default function App() {
               bumpEditorSeq(cur.tabId);
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
               const { meta } = await readEntityMeta(sd.path);
-              const fm = parseFrontmatter(htmlOnly ? "" : r.contents);
+              const fm = splitFrontmatter(htmlOnly ? "" : r.contents);
               const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
               setSplitState({
                 ...cur,
                 doc: {
                   ...cur.doc,
                   missing: false,
-                  head: htmlOnly
-                    ? cur.doc.head
-                    : r.contents.slice(0, r.contents.length - fm.body.length),
-                  props: fm.props,
-                  opaque: fm.opaque,
+                  head: htmlOnly ? cur.doc.head : fm.head,
                   contents: full,
                   snapshot: htmlOnly ? null : r.snapshot,
                   htmlContent: htmlOnly ? r.contents : cur.doc.htmlContent,
@@ -4466,7 +4388,7 @@ export default function App() {
               let ids = new Set<string>();
               if (!htmlOnly) {
                 const r = await invoke<ReadFileResult>("read_file", { path: sd.path });
-                const body = parseFrontmatter(r.contents).body;
+                const body = splitFrontmatter(r.contents).body;
                 ids = markerIds(body);
                 contents = expandMarkdown(body, meta.mthreads).md;
                 if (contents !== cur.doc.contents) {
@@ -4556,12 +4478,12 @@ export default function App() {
         return;
       }
       if (e.payload.path !== pathRef.current) return;
-      // The active document changed on disk. A PROPERTIES-ONLY change — a
-      // board dragged this card, a teammate set a field, another window's
-      // header wrote a pill — leaves the body exactly as we last saved it, so
-      // there is nothing to reload: adopt the new block, refresh the header,
-      // take the new snapshot, and leave the editor and its caret alone. Only
-      // a body change from outside still goes through reload / conflict.
+      // The active document changed on disk. A change to the frontmatter
+      // block alone — an agent tagged the note, a teammate's Mac synced one —
+      // leaves the body exactly as we last saved it, so there is nothing to
+      // reload: adopt the new block, take the new snapshot, and leave the
+      // editor and its caret alone. Only a body change from outside still
+      // goes through reload / conflict.
       void (async () => {
         const target = e.payload.path;
         let r: ReadFileResult;
@@ -4571,7 +4493,7 @@ export default function App() {
           return; // mid-rewrite; the next event covers it
         }
         if (pathRef.current !== target) return;
-        const fm = parseFrontmatter(r.contents);
+        const fm = splitFrontmatter(r.contents);
         if (fm.body === lastDiskMdRef.current) {
           adoptFrontmatter(r.contents);
           snapshotRef.current = r.snapshot;
@@ -4844,7 +4766,7 @@ export default function App() {
   const openResult = useCallback(
     async (p: string, query: string) => {
       viewPrefsRef.current.set(p, "md"); // the match lives in the markdown
-      await openTab(p, "file");
+      await openTab(p);
       if (docViewRef.current === "html") await selectDocView("md");
       setFindCase(wsCase);
       setFindQuery(query);
@@ -5278,7 +5200,7 @@ export default function App() {
       onCloudConflict((e) => {
         pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
-          run: () => void openTab(`${e.root}/${e.conflictPath}`, "file"),
+          run: () => void openTab(`${e.root}/${e.conflictPath}`),
         });
       }),
       onCloudSpaceLeft((e) => {
@@ -5318,11 +5240,8 @@ export default function App() {
     }
   }, [activeTab, historyFor]);
 
-  // A board tab: its path is a FOLDER, and the whole document machinery is
-  // standing down for it (see loadActiveContent).
-  const activeIsStore = activeTab?.kind === "store";
   // The open note relative to the workspace: what the Live chip publishes
-  // and whose presence the facepile shows. Null for an untitled note, a board, or a
+  // and whose presence the facepile shows. Null for an untitled note or a
   // file from outside the workspace.
   const activeRel =
     activeTab?.kind === "file" && workspaceRoot ? relPathIn(workspaceRoot, activeTab.path) : null;
@@ -5334,9 +5253,6 @@ export default function App() {
   // dialog has nothing to show and closes.
   const accessSpace: CloudSpace | null =
     (accessSpaceId && cloudForRoot?.spaces.find((sp) => sp.id === accessSpaceId)) || null;
-  // The sidebar's active row. A board's cards have no rows of their own, so
-  // the board's row carries the highlight for whatever inside it is focused.
-  const sidebarCurrentPath = activeIsStore ? activeTab.path : activeFilePath;
   // html-only documents render in the iframe alone; there is no markdown
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
@@ -5358,182 +5274,11 @@ export default function App() {
   const splitTab = split ? tabs.find((t) => t.id === split.tabId) ?? null : null;
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
-  // A board owns the whole pane: it has no second rendition to show beside
-  // itself, and none of the split's document machinery applies to it.
-  const canSplit = activeTab != null && !activeMissing && !activeIsStore;
-  // The store the active note belongs to, if it belongs to one. A note in an
-  // ordinary folder costs a single `path_exists` — the model checks for a
-  // definition file before it reads anything else — so this is cheap to ask
-  // for every note.
-  const activeCardDir =
-    activeFilePath && MD_EXT_RE.test(activeFilePath)
-      ? dirname(activeFilePath)
-      : null;
-  const { state: cardStore, model: cardModel } = useStore(activeCardDir);
-  const activeCardDef = activeCardDir && !activeIsStore ? cardStore.def : null;
-
-  // A card peeked from a board: the panel beside it, not a tab. Held here
-  // rather than inside the board so it survives a re-render of the board and
-  // so the app's own rename / open-in-a-tab plumbing is one call away.
-  const [peekCard, setPeekCard] = useState<string | null>(null);
-
+  const canSplit = activeTab != null && !activeMissing;
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
   // `ready` flips, unmounting the whole app.
   if (!ready) return null;
-
-  // Write one of the ACTIVE CARD's properties. Two writers can touch a card's
-  // frontmatter — this header and any board showing it — and both go through
-  // the same guarded splice in the backend, which keeps the body bytes on
-  // disk exactly as they are. So a pill can't lose a keystroke the editor
-  // hasn't flushed, and the loser of a race fails loudly instead of
-  // clobbering.
-  const setCardProperty = async (key: string, value: PropValue) => {
-    const target = pathRef.current;
-    if (!target) return;
-    const next: CardProps = { ...cardPropsRef.current };
-    if (value === null || value === "" || (Array.isArray(value) && value.length === 0)) {
-      delete next[key];
-    } else {
-      next[key] = value;
-    }
-    const head = serializeFrontmatter(
-      next,
-      cardOpaqueRef.current,
-      activeCardDef ? cardKeyOrder(activeCardDef) : [RANK_KEY],
-    );
-    cardPropsRef.current = next;
-    setCardProps(next);
-    cardHeadRef.current = head;
-    try {
-      const snap = await invoke<FileSnapshot>("write_frontmatter", {
-        path: target,
-        head,
-        expected: snapshotRef.current,
-      });
-      if (pathRef.current === target) snapshotRef.current = snap;
-    } catch (e) {
-      // Someone got there first (a board drag here, a teammate over sync).
-      // Disk wins — re-read the block instead of reloading the editor and
-      // dropping the caret.
-      console.error("property write failed", target, e);
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: target });
-        if (pathRef.current === target) {
-          adoptFrontmatter(r.contents);
-          snapshotRef.current = r.snapshot;
-        }
-      } catch {
-        // unreadable right now; the watcher covers it
-      }
-    }
-  };
-
-  // Clicking a card PEEKS it — the panel beside the board, not a tab. A card
-  // already open in a tab is the exception: the tab is the better answer and
-  // it is already there, so we just go to it.
-  const openCardFromStore = (target: string) => {
-    if (tabsRef.current.some((t) => t.kind === "file" && t.path === target)) {
-      void openTab(target, "file");
-      return;
-    }
-    setPeekCard(target);
-  };
-
-  // A view, as a spreadsheet. StoreView builds the text (it knows which cards
-  // and which columns the view shows); the app only knows where to put it.
-  const exportStoreCsv = async (fileName: string, text: string) => {
-    const chosen = await saveDialog({
-      title: "Export as CSV",
-      defaultPath: workspaceRoot ? `${workspaceRoot}/${fileName}` : fileName,
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-    if (!chosen) return;
-    try {
-      await invoke<FileSnapshot>("write_file", {
-        path: chosen,
-        contents: text,
-        expected: null,
-      });
-    } catch (e) {
-      console.error("csv export failed", chosen, e);
-    }
-  };
-
-  const openBoard = (dirPath: string) => void openTab(dirPath, "store");
-
-  // Turn a folder into a board: write the definition file, nothing else. Not
-  // one note inside it is touched — they simply become cards with no status.
-  const makeBoard = async (dirPath: string): Promise<string | null> => {
-    try {
-      await createStoreFile(dirPath, basename(dirPath));
-      setTreeRefreshToken((t) => t + 1);
-      return null;
-    } catch (e) {
-      return e instanceof Error ? e.message : String(e);
-    }
-  };
-
-  // Every board in the workspace, for an embed's picker. Asked for on demand
-  // (opening the picker) rather than kept in state: the sidebar already owns
-  // the tree, and a board list that is one call old is a worse answer than
-  // one that is one call fresh.
-  const listStores = async (): Promise<StoreChoice[]> => {
-    if (!workspaceRoot) return [];
-    const tree = await invoke<TreeNode>("list_md_tree", {
-      path: workspaceRoot,
-      all: false,
-    });
-    const out: StoreChoice[] = [];
-    const walk = (n: TreeNode) => {
-      if (n.kind !== "dir") return;
-      // A board is a leaf here — the backend hands one no children, and a
-      // board inside a board is not a thing to offer.
-      if (n.store) out.push({ path: n.path, name: n.name });
-      else for (const c of n.children) walk(c);
-    };
-    walk(tree);
-    out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
-  };
-
-  // "New board…" from inside an embed: a folder beside the note, plus its
-  // definition file. Resolves to the folder so the embed can name it.
-  const createStoreBeside = async (parentDir: string, name: string): Promise<string> => {
-    const clean = name.trim().replace(/[/\\:]/g, "-");
-    if (!clean) throw new Error("A name is required.");
-    if (clean.startsWith(".")) throw new Error("Names can't start with a dot.");
-    const path = `${parentDir}/${clean}`;
-    await invoke("create_dir", { path });
-    const err = await makeBoard(path);
-    if (err) throw new Error(err);
-    return path;
-  };
-
-  // What an embed inside a pane's note can reach. Built per pane
-  // because a relative `store:` resolves against the note the embed is
-  // written in — an untitled note has nowhere to resolve against, and says so.
-  const kanbanHostFor = (tab: Tab | null): StoreEmbedHost | null => {
-    if (!tab || tab.kind === "store") return null;
-    const docPath = tab.kind === "file" ? tab.path : null;
-    return {
-      docPath,
-      listStores,
-      createStore: (name) =>
-        docPath
-          ? createStoreBeside(dirname(docPath), name)
-          : // An untitled note has no folder to put one beside. The picker
-            // says so and disables the button; this is the backstop.
-            Promise.reject(new Error("Save this note first.")),
-      // A card peeks, here as on a board tab — clicking one in the middle of
-      // your prose should not yank you out of the note you are reading.
-      openCard: openCardFromStore,
-      openCardTab: (p) => void openTab(p, "file"),
-      renameCard: (from, to) => movePath(from, to, "file"),
-      deleteCard: (p) => void deleteEntries([{ path: p, kind: "file" }]),
-      revealCard: revealInFinder,
-    };
-  };
 
   // One editor pane (either side, either role). BOTH roles render the same
   // slot structure — header?, [FindBar?, Editor?, HtmlView?, Missing?,
@@ -5551,10 +5296,7 @@ export default function App() {
     // A same-document split pane on markdown is a read-only MIRROR of the
     // live editor (see the SplitPane comment).
     const isMirror = !focused && s != null && !s.doc && s.view === "md";
-    const showBoardHere = paneTab?.kind === "store" && !paneMissing;
-    const showEditorHere = showBoardHere
-      ? false
-      : focused
+    const showEditorHere = focused
       ? activeTab != null && !activeMissing && !activeIsHtmlDoc
       : isMirror
         ? !activeMissing
@@ -5660,20 +5402,6 @@ export default function App() {
               focusToken={findFocusToken}
             />
           )}
-          {showBoardHere && (
-            // A store reads and writes its own folder; the pane just hosts it.
-            // An unfocused pane shows the same DOM with writing off.
-            <StoreView
-              dir={paneTab.path}
-              readOnly={!focused}
-              onOpenCard={openCardFromStore}
-              onOpenCardTab={(p) => void openTab(p, "file")}
-              onRenameCard={(from, to) => movePath(from, to, "file")}
-              onDeleteCard={(p) => void deleteEntries([{ path: p, kind: "file" }])}
-              onRevealInFinder={revealInFinder}
-              onExport={exportStoreCsv}
-            />
-          )}
           {focused && conflict && (
             // The open document changed on disk under unsaved edits: the
             // question sits over the document it is about.
@@ -5685,45 +5413,13 @@ export default function App() {
           {leasedHere && activeLease && showEditorHere && paneView === "md" && !previewHere && (
             <LeaseBanner lease={activeLease.lease} onTakeOver={takeOverActive} />
           )}
-          {focused && showEditorHere && paneTab?.kind === "file" && (
-            // This note's properties, above it. Changing a pill writes the
-            // frontmatter block and nothing else — the body never moves. Every
-            // note gets a header: a card's rows are its board's fields, any
-            // other note's are the keys its own file carries. An UNTITLED note
-            // gets none — it has no file to write a property to yet.
-            <PropertiesHeader
-              def={activeCardDef}
-              props={cardProps}
-              order={cardOrder}
-              opaqueCount={cardOpaque.length}
-              readOnly={leasedHere}
-              onChange={setCardProperty}
-              onAddField={
-                activeCardDef && cardModel
-                  ? (name, type) => void cardModel.addField(name, type)
-                  : undefined
-              }
-              onRenameField={
-                activeCardDef && cardModel
-                  ? (id, name) => void cardModel.renameField(id, name)
-                  : undefined
-              }
-              onRetypeField={
-                activeCardDef && cardModel
-                  ? (id, type) => void cardModel.retypeField(id, type)
-                  : undefined
-              }
-              onDeleteField={
-                activeCardDef && cardModel
-                  ? (id) => void cardModel.deleteField(id)
-                  : undefined
-              }
-              onAddOption={
-                activeCardDef && cardModel
-                  ? (field, name) => void cardModel.addOption(field, name)
-                  : undefined
-              }
-            />
+          {focused && showEditorHere && frontmatter && (
+            // The note's frontmatter, as the file has it. Read-only: the
+            // editor never sees the block, and agents and other tools own it
+            // (src/frontmatter.ts).
+            <div className="doc-frontmatter">
+              <pre aria-label="Frontmatter">{frontmatter}</pre>
+            </div>
           )}
           {showEditorHere && (
             // Three wirings, one slot: the live machinery editor (focused),
@@ -5761,8 +5457,6 @@ export default function App() {
               // showing, so a note in another folder links to its own
               // neighbours correctly.
               onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
-              // A ```kanban fence in this note becomes a board (storeEmbed.ts).
-              kanban={kanbanHostFor(paneTab)}
             />
           )}
           {previewHere && versionPreview && (
@@ -5775,7 +5469,7 @@ export default function App() {
               onRestore={(version, text) =>
                 void restoreVersion(versionPreview.docPath, versionPreview.root, version, text)
               }
-              onOpenFile={(path) => void openTab(path, "file")}
+              onOpenFile={(path) => void openTab(path)}
               onError={(message) => pushToast("error", message)}
             />
           )}
@@ -5901,22 +5595,6 @@ export default function App() {
       {zoomDiagramSvg && (
         <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
-      {peekCard && (
-        <CardPeek
-          path={peekCard}
-          dir={dirname(peekCard)}
-          onClose={() => setPeekCard(null)}
-          onOpenTab={(p) => void openTab(p, "file")}
-          // The panel follows the file it is looking at: movePath answers with
-          // an error message, or null once the card has moved.
-          onRename={async (from, to) => {
-            const failed = await movePath(from, to, "file");
-            if (!failed) setPeekCard(to);
-            return failed;
-          }}
-          onWriteThreads={writeMdThreadsToMeta}
-        />
-      )}
       <TabBar
         tabs={tabs}
         activeId={activeId}
@@ -5929,9 +5607,10 @@ export default function App() {
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
         onHistory={(path) => void openHistory(path)}
+        live={livePaths}
         leading={showSidebar ? undefined : titleLead}
         trailing={
-          activeTab && !activeMissing && !activeIsStore ? (
+          activeTab && !activeMissing ? (
             <>
               {/* Who else is in this note: their faces, from the
                   workspace's presence. */}
@@ -5942,7 +5621,7 @@ export default function App() {
                 testid="note-facepile"
               />
               {/* Publishing: a file inside the open workspace only — not an
-                  untitled note, not a board, not a file from outside. */}
+                  untitled note, not a file from outside. */}
               {activeRel !== null && (
                 <LiveChip
                   cloud={cloudForRoot}
@@ -6019,7 +5698,7 @@ export default function App() {
             setTreeRefreshToken((t) => t + 1);
             pushToast("done", `${basename(path)} is back.`, {
               label: "Open",
-              run: () => void openTab(path, "file"),
+              run: () => void openTab(path),
             });
           }}
           onError={(message) => pushToast("error", message)}
@@ -6029,15 +5708,13 @@ export default function App() {
         <Sidebar
           root={workspaceRoot}
           cloud={cloudForRoot}
-          currentPath={sidebarCurrentPath}
+          currentPath={activeFilePath}
           selection={sidebarSelection}
           reveal={revealRequest}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}
-          onOpenFile={(p) => void openTab(p, "file")}
-          onOpenBoard={openBoard}
-          onMakeBoard={makeBoard}
+          onOpenFile={(p) => void openTab(p)}
           onOpenFolder={openFolderPicker}
           onOpenFilePicker={openFilePicker}
           onRevealInFinder={revealInFinder}
@@ -6233,7 +5910,7 @@ export default function App() {
           onOpenExternal={openExternal}
           onOpenFile={(p) => {
             setPublishedOpen(false);
-            void openTab(p, "file");
+            void openTab(p);
           }}
           onEditFolder={(dir) => {
             setPublishedOpen(false);
@@ -6329,6 +6006,23 @@ export default function App() {
 }
 
 /* ---------- Subviews ---------- */
+
+function CloseIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
 
 function TrashIcon() {
   return (
@@ -6639,7 +6333,7 @@ function SaveAsPrompt({
             Save to <span className="saveas-dir">{dirLabel}</span>
           </div>
           <button className="saveas-close" onClick={onCancel} aria-label="Cancel" title="Cancel">
-            <CloseIcon size={12} />
+            <CloseIcon />
           </button>
         </div>
         <div className="saveas-inputwrap">

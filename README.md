@@ -28,29 +28,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   down the page. Hovering shows the URL with edit/copy/remove, so changing a
   link never means opening it — and `⌘`-click puts the caret in the link text
   when you want to type there.
-- **Boards** — a folder of notes can be a kanban board. Right-click a folder for
-  *Turn into Board* (or *New Board…* for a fresh one) and the sidebar row opens
-  a board instead of expanding: one card per note, columns from a `Status`
-  property, drag to move. A card is an ordinary `.md` note whose properties are
-  YAML frontmatter at the top, so vim, Obsidian, and GitHub read the same files
-  — and the board's own columns live in a plain-text `store.jsonl` beside them.
-  Nothing about a board is binary, and nothing needs Doklin to read. The same
-  cards also show as a **table**, and the strip above the board switches
-  between the views you save: each one keeps its own filter, sort, columns and
-  properties, and *Export as CSV…* writes out exactly what it shows. Clicking a
-  card **peeks** it beside the board — its properties above its body, editable,
-  with *Open in a tab* for when it turns out to be the document you came for.
-  A board also goes **inside a note**: `/board` in the slash menu drops a
-  ` ```kanban ` block (or `/board` → *Board as a table* for a ` ```table ` one)
-  that names a folder, and the note shows that view in the middle of the prose
-  — live, not a picture. Every other markdown tool shows the block as three
-  lines of config and leaves it alone.
-- **Properties on any note** — every document has a quiet properties header
-  above it. On a card the rows are its board's fields; on any other note they
-  are the frontmatter keys the file already carries, including ones written by
-  another tool. *Add property* adds a key to a note, or declares a field on the
-  whole board when the note is a card. A note with no properties shows nothing
-  until you go looking.
+- **Frontmatter left alone** — a YAML block at the top of a note, the kind
+  agents and other tools write, shows as it is above the note, and the editor
+  never rewrites it.
 - **Folder workspaces** — open a directory to get a collapsible sidebar of its
   markdown files, with VS Code-style file management: create, rename, and
   delete files and folders from the context menu, and drag rows onto a folder
@@ -85,8 +65,8 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   on your own account, set up by an agent from a prompt the app writes — no
   dashboard, no terminal, no account with anyone else. Publishing is one click: a note, a
   folder, or the whole workspace gets an address on your domain, rendered
-  from the synced files — boards, properties, diagrams, table widths and html
-  renditions included — read-only and `noindex`, exactly as fresh as the
+  from the synced files — diagrams, table widths and html renditions
+  included — read-only and `noindex`, exactly as fresh as the
   sync. Stop publishing and the link stops working. How it is built:
   [docs/cloud.md](docs/cloud.md).
 - **Agents** — a bot on another computer can work with a connected workspace

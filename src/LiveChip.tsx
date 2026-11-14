@@ -27,7 +27,23 @@ import {
   type PageState,
 } from "./cloud";
 import { useDismiss } from "./dismiss";
-import { CloseIcon } from "./storeChrome";
+
+function CloseIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -399,7 +415,7 @@ export default function LiveChip({
       {open && (
         <div className="live-pop" role="dialog" aria-label="Publish" data-testid="publish-pop">
           <button className="live-pop-close" aria-label="Close" title="Close" onClick={() => setOpen(false)}>
-            <CloseIcon size={14} />
+            <CloseIcon />
           </button>
           {body}
         </div>

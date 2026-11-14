@@ -1,7 +1,7 @@
 //! The edit bus. Every write the app makes
-//! already goes through a Rust command — `write_file`, `write_frontmatter`,
-//! `write_body`, `create_card`, `create_file`, `create_dir`, `move_path`,
-//! `copy_path`, `trash_file`, `restore_trashed` — and each ends with
+//! already goes through a Rust command — `write_file`, `create_file`,
+//! `create_dir`, `move_path`, `copy_path`, `trash_file`, `restore_trashed` —
+//! and each ends with
 //! `cloud::touched(&app, &path)`: a hint to the engine whose root contains
 //! the path that something under it just changed. The engine settles 1.5 s
 //! after the last touch instead of the watcher's 5 s, so an edit reaches

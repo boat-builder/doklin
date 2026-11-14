@@ -2,10 +2,9 @@
 // a published workspace — against the real worker served by
 // serve-worker.mjs over the seed workspace (cloud-worker/test/seed.mjs):
 // a note's page, the MD/HTML pill and the sandboxed rendition, a folder's
-// table of contents, a nested note with its crumb, a board drawn with
-// JavaScript off, a diagram hydrating in light and in dark, the app's own
-// type and palettes, a board drawn as the app's embed draws it, links
-// between notes, the root page, and a 404. Run:
+// table of contents, a nested note with its crumb, a note whose frontmatter
+// is left off its page, a diagram hydrating in light and in dark, the app's
+// own type and palettes, links between notes, the root page, and a 404. Run:
 //
 //   node verify-harness/serve-worker.mjs &     # bundles the worker (mermaid included), seeds, serves :8787
 //   node verify-harness/drive-public.mjs
@@ -88,11 +87,11 @@ await page.goto(`${BASE}/projects`);
 await poll(async () => (await page.locator(".toc-card").count()) === 5);
 const tocTitle = await page.locator(".toc-title").textContent();
 const cardPath = await page.locator(".toc-card", { hasText: "Ship the boat" }).locator(".toc-card-path").textContent();
-await page.locator(".toc-card", { hasText: "board" }).click();
-await poll(async () => (await page.locator(".dk-board").count()) === 2);
+await page.locator(".toc-card", { hasText: "status" }).click();
+await poll(async () => (await page.locator("main.doc h1").textContent()) === "Status");
 step(
   "the folder page: the owner's title, five cards, a card wears its subfolder; a card opens the nested note",
-  tocTitle === "Projects" && cardPath === "Roadmap" && page.url().endsWith("/projects/board"),
+  tocTitle === "Projects" && cardPath === "Roadmap" && page.url().endsWith("/projects/status"),
   `${tocTitle} · ${cardPath}`,
 );
 await page.screenshot({ path: SHOTS + "public-03-toc.png" });
@@ -103,24 +102,17 @@ await page.locator(".home-crumb").click();
 await poll(async () => (await page.locator(".toc-title").count()) === 1);
 step("the crumb: '← Projects' on a nested note goes back to the folder page", crumbLabel === "Projects" && page.url().endsWith("/projects"));
 
-/* 5 — a board with JavaScript off: drawn, its cards linking to their pages */
-const noJs = await pageIn({ javaScriptEnabled: false });
-await noJs.goto(`${BASE}/projects/board`);
-await poll(async () => (await noJs.locator(".dk-board").count()) === 2);
-const columns = await noJs.locator(".dk-board").first().locator(".dk-col-name").allTextContents();
-const shipHref = await noJs.locator("a.dk-card-title", { hasText: "Ship the boat" }).getAttribute("href");
-await noJs.locator("a.dk-card-title", { hasText: "Ship the boat" }).click();
-await poll(async () => (await noJs.locator(".dk-props").count()) === 1);
-const chips = await noJs.locator(".dk-props .dk-chip").allTextContents();
+/* 5 — a note that opens with a frontmatter block: the page is its body alone */
+await page.goto(`${BASE}/projects/Roadmap/Ship%20the%20boat`);
+await poll(async () => (await page.locator("main.doc p").count()) === 1);
+const shipText = (await page.locator("main.doc").innerText()).trim();
+const shipRules = await page.locator("main.doc hr").count();
 step(
-  "a board with JavaScript off: three columns, a card links to its nested page, the card page shows its properties",
-  columns.join("|") === "Backlog|In progress|Done" &&
-    shipHref === "/projects/Roadmap/Ship%20the%20boat" &&
-    chips.join("|") === "In progress|Ada|hull",
-  `${columns.join("|")} · ${chips.join("|")}`,
+  "a note's frontmatter is left off its page: the document is the body alone, and the title is the file's name",
+  shipText === "The hull is done." && shipRules === 0 && (await page.title()) === "Ship the boat",
+  JSON.stringify(shipText),
 );
-await noJs.screenshot({ path: SHOTS + "public-05-board-nojs.png" });
-await noJs.context().close();
+await page.screenshot({ path: SHOTS + "public-05-frontmatter.png" });
 
 /* 6 — a diagram hydrates, and takes the page's palette in light and in dark */
 await page.goto(`${BASE}/diagram`);
@@ -187,53 +179,21 @@ step(
   JSON.stringify({ ...type, darkLink }),
 );
 
-/* 6c — a board as the app's embed draws it */
-await page.goto(`${BASE}/projects/board`);
-await poll(async () => (await page.locator(".dk-embed").count()) === 2);
-const board = page.locator(".dk-embed").first();
-const look = await board.evaluate((el) => {
-  const col = el.querySelector(".dk-col.dk-color-blue");
-  return {
-    kind: el.querySelector(".dk-embed-kind").textContent,
-    progress: el.querySelector(".dk-progress")?.textContent ?? null,
-    glyphs: el.querySelectorAll(".dk-col-glyph svg").length,
-    tint: getComputedStyle(col).backgroundColor,
-    excerpt: el.querySelector(".dk-card-excerpt")?.textContent ?? null,
-    done: el.querySelectorAll(".dk-card.is-done .dk-card-check svg").length,
-    date: el.querySelector(".dk-card-date")?.textContent ?? null,
-  };
-});
-await board.screenshot({ path: SHOTS + "public-06c-board.png" });
-const cardBox = await board.locator(".dk-card", { hasText: "Ship the boat" }).boundingBox();
-await page.mouse.click(cardBox.x + cardBox.width - 6, cardBox.y + cardBox.height - 6);
-await poll(async () => page.url().endsWith("/projects/Roadmap/Ship%20the%20boat"));
-step(
-  "a board as the app's embed draws it: the kind in its bar, progress, a stage glyph per column, tinted columns, excerpts, a checked finished card, a date in the foot — and a click anywhere on a card opens its page",
-  look.kind === "Board" &&
-    look.progress === "1 of 3 done" &&
-    look.glyphs === 3 &&
-    look.tint !== "rgba(0, 0, 0, 0)" &&
-    look.excerpt === "After the hull." &&
-    look.done === 1 &&
-    /Dec 4/.test(look.date ?? ""),
-  JSON.stringify(look),
-);
-
 /* 7 — the root page and its links */
 await page.goto(`${BASE}/`);
 await poll(async () => (await page.locator("main.doc h1").count()) === 1);
 const planHref = await page.locator("main.doc a", { hasText: "the plan" }).getAttribute("href");
-const boardHref = await page.locator("main.doc a", { hasText: "board" }).getAttribute("href");
+const statusHref = await page.locator("main.doc a", { hasText: "status" }).getAttribute("href");
 const scratchLinks = await page.locator("main.doc a", { hasText: "scratch note" }).count();
 const picSrc = await page.locator("main.doc img").first().getAttribute("src");
 step(
   "the root page: Home at /, links rewritten to public addresses, an unpublished target left as text, a picture inside the published folder resolves",
   (await page.locator("main.doc h1").textContent()) === "Home" &&
     planHref === "/plan" &&
-    boardHref === "/projects/board" &&
+    statusHref === "/projects/status" &&
     scratchLinks === 0 &&
     picSrc === "/projects/assets/pic.png",
-  `${planHref} ${boardHref} ${picSrc}`,
+  `${planHref} ${statusHref} ${picSrc}`,
 );
 
 /* 8 — what isn't there */

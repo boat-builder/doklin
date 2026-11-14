@@ -23,12 +23,11 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 
 ## Rendering (`cloud-worker/src/`)
 
-`workspace.ts` (synced tree), `publicMap.ts` (where is it public), `pages.ts` (page from files), `render.ts` (HTML), `theme.ts` (app tokens and fonts, imported at build), `public.ts` (routing, cache), `static.ts` (landing, 404, icons, OG, fonts, mermaid). They reuse the app's pure modules (`src/criticMarkup.ts`, `src/store/`, `src/metaFile.ts`, `src/docLinks.ts`) so a page cannot disagree with the app.
+`workspace.ts` (synced tree), `publicMap.ts` (where is it public), `pages.ts` (page from files), `render.ts` (HTML), `theme.ts` (app tokens and fonts, imported at build), `public.ts` (routing, cache), `static.ts` (landing, 404, icons, OG, fonts, mermaid). They reuse the app's pure modules (`src/criticMarkup.ts`, `src/frontmatter.ts`, `src/metaFile.ts`, `src/docLinks.ts`) so a page cannot disagree with the app.
 
 - Comment markers stripped; thread bodies never leave the sidecar. From `<stem>.meta.jsonl` only table widths are used, under the app's table identity (`tableSignature` in `render.ts` ⇄ `src/tableWidths.ts`, byte-compatible).
-- Frontmatter → properties table coloured by the folder's `store.jsonl`; `rank` never shown.
-- kanban/table fences drawn with `boardSnapshot`; at most 40 cards read (`MAX_STORE_CARDS`), the rest counted — a bigger read would blow the per-request subrequest cap.
-- Links: relative targets resolve against the note's folder (`..` can't escape the workspace). Public target → its URL (`urlFor` order); unpublished → plain text; relative image → `<img>` if reachable, else alt text; other schemes, anchors, absolute paths untouched. Board card links follow the same rule.
+- The frontmatter block is left off the page (`splitFrontmatter`, `src/frontmatter.ts`): only the body is rendered.
+- Links: relative targets resolve against the note's folder (`..` can't escape the workspace). Public target → its URL (`urlFor` order); unpublished → plain text; relative image → `<img>` if reachable, else alt text; other schemes, anchors, absolute paths untouched.
 - A note over 4 MB is refused. The manifest is read tolerantly: unknown fields never break a page.
 - Every page: `<meta name="robots" content="noindex">` + `x-robots-tag`. No access codes, web editor or web comments. OG image is one static PNG.
 

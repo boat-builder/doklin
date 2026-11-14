@@ -1,10 +1,9 @@
 // What a public URL resolves to, read from the synced tree and handed to the
-// renderer: a note (its blob, comments stripped, frontmatter split off into
-// properties, its boards derived from the folder's datastore, widths from
-// its sidecar, links resolved against the public map), its html rendition
-// framed or raw, a folder's table of contents, or a plain file inside a
-// published folder served by exact path. public.ts decides which of these a
-// request means; render.ts turns the result into HTML.
+// renderer: a note (its blob, frontmatter left off, comments stripped, widths
+// from its sidecar, links resolved against the public map), its html
+// rendition framed or raw, a folder's table of contents, or a plain file
+// inside a published folder served by exact path. public.ts decides which of
+// these a request means; render.ts turns the result into HTML.
 
 import { WEB_ASSETS } from "./assets";
 import { notFoundPage } from "./static";
@@ -15,10 +14,8 @@ import {
   leadTitle,
   markdownHtml,
   notePageHtml,
-  propsHtml,
   tocPageHtml,
   type Crumb,
-  type DrawnBoard,
   type LinkOutcome,
   type PageMeta,
   type TocItem,
@@ -35,13 +32,7 @@ import {
 } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { normalizePath } from "../../src/docLinks";
-import { boardSnapshot, clipText, snapKeyOf, type PageProp, type PagePropValue } from "../../src/store/board";
-import { parseEmbedConfig, storeFences } from "../../src/store/embedConfig";
-import { parseFrontmatter, propList, propText, type Props } from "../../src/store/frontmatter";
-import { RANK_KEY, type StoreDef } from "../../src/store/storeFile";
-
-/** A page is a document, not a database export: this many boards, at most. */
-const MAX_BOARDS = 20;
+import { splitFrontmatter } from "../../src/frontmatter";
 
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -96,11 +87,10 @@ export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: N
   const sibling = ws.fileAt(htmlSiblingOf(path));
   const hasHtml = sibling !== null;
 
-  // Comments never leave the sidecar: only their markers are in the file,
-  // and those go too. The frontmatter is the properties table, not prose.
-  const clean = stripComments(text);
-  const fm = parseFrontmatter(clean);
-  const body = fm.present ? fm.body : clean;
+  // The frontmatter is the business of agents and other tools, not of a
+  // reader: a page leaves it off. Comments never leave the sidecar: only
+  // their markers are in the file, and those go too.
+  const body = stripComments(splitFrontmatter(text).body);
   const title = o.title?.trim() || leadTitle(body) || stemName;
   const description = o.desc?.trim() || deriveDescription(body) || `${title} on ${o.url.hostname}`;
   const meta: PageMeta = { title, description, hostname: o.url.hostname, pageUrl, ogType: "article" };
@@ -109,55 +99,9 @@ export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: N
     return html(framedPageHtml({ meta, crumb: o.crumb, hasMd: true, rawUrl }));
   }
 
-  const dir = dirOf(path);
-  const [props, tcols, boards] = await Promise.all([
-    fm.present && fm.order.length > 0 ? pageProps(ws, dir, fm.props, fm.order) : Promise.resolve([]),
-    ws.meta(stemOf(path)).then((m) => m?.tcols ?? []),
-    drawBoards(ws, pub, body, dir, o.dirSlug),
-  ]);
-  const bodyHtml = markdownHtml(body, { tcols, boards, links: linkResolver(ws, pub, dir, o.dirSlug) });
-  return html(
-    notePageHtml({
-      meta,
-      crumb: o.crumb,
-      hasHtml,
-      propsHtml: propsHtml(props),
-      bodyHtml,
-      mermaidTag: mermaidTag(),
-    }),
-  );
-}
-
-/**
- * The properties a published note shows above its body. A CARD's rows are
- * its board's declared fields, in the board's order, named and coloured the
- * way the desktop's properties header names and colours them; any other
- * note with frontmatter falls back to its own keys in file order,
- * uncoloured. Unset values are left out, and `rank` (a card's position on
- * its board, not a property) never shows.
- */
-async function pageProps(ws: Workspace, dir: string, props: Props, order: string[]): Promise<PageProp[]> {
-  const store = await ws.storeAt(dir);
-  const def: StoreDef | null = store?.def ?? null;
-  const values = (key: string): PagePropValue[] => {
-    const raw = props[key];
-    const field = def?.fields.find((f) => f.id === key) ?? null;
-    const list = field?.type === "multi_select" || Array.isArray(raw) ? propList(raw) : [propText(raw)];
-    return list
-      .filter((text) => text !== "")
-      .map((text) => {
-        const opt = def?.options.find((o) => o.field === key && o.name === text);
-        return { text: clipText(text), ...(opt?.color ? { color: opt.color } : {}) };
-      });
-  };
-  const keys = def ? def.fields.map((f) => f.id) : order.filter((k) => k !== RANK_KEY);
-  const rows: PageProp[] = [];
-  for (const key of keys) {
-    const vs = values(key);
-    if (vs.length === 0) continue;
-    rows.push({ name: clipText(def?.fields.find((f) => f.id === key)?.name ?? key), values: vs });
-  }
-  return rows;
+  const tcols = (await ws.meta(stemOf(path)))?.tcols ?? [];
+  const bodyHtml = markdownHtml(body, { tcols, links: linkResolver(ws, pub, dirOf(path), o.dirSlug) });
+  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, mermaidTag: mermaidTag() }));
 }
 
 /** Resolve a link written inside a note (`./plan.md`, `../x/y.md`) to a workspace path, or null when it isn't one. */
@@ -184,8 +128,8 @@ function relativeTarget(href: string, fromDir: string): { path: string; fragment
 /**
  * A relative link in a public page is rewritten to the target's public URL
  * when the target is public — inside this published folder, on its own slug, or
- * inside another — and dropped to plain text otherwise (the same rule a
- * board's card links follow). Anything that isn't a path is left alone.
+ * inside another — and dropped to plain text otherwise. Anything that isn't
+ * a path is left alone.
  */
 function linkResolver(ws: Workspace, pub: PublicMap, fromDir: string, dirSlug: string | null) {
   return (href: string): LinkOutcome => {
@@ -201,43 +145,6 @@ function linkResolver(ws: Workspace, pub: PublicMap, fromDir: string, dirSlug: s
     if (folder) return { kind: "rewrite", href: `/${folder.slug}${target.fragment}` };
     return { kind: "text" };
   };
-}
-
-/** Every board and table the note embeds, derived from the synced datastores its fences name. */
-async function drawBoards(
-  ws: Workspace,
-  pub: PublicMap,
-  body: string,
-  fromDir: string,
-  dirSlug: string | null,
-): Promise<Map<string, DrawnBoard>> {
-  const out = new Map<string, DrawnBoard>();
-  const fences = storeFences(body);
-  if (fences.length === 0) return out;
-  const stores = new Map<string, ReturnType<Workspace["storeAt"]>>();
-  for (const { kind, text } of fences) {
-    const key = snapKeyOf(kind, text);
-    if (out.has(key)) continue; // one picture serves every embed writing this config
-    if (out.size >= MAX_BOARDS) break;
-    const cfg = parseEmbedConfig(text);
-    if (!cfg.store) continue; // a fence still waiting for its picker
-    const target = relativeTarget(cfg.store, fromDir);
-    if (!target) continue;
-    const dir = target.path === "." ? "" : target.path;
-    if (!stores.has(dir)) stores.set(dir, ws.storeAt(dir));
-    const read = await stores.get(dir)!;
-    if (!read) continue; // no board there — the fence stays a code block
-    const snap = boardSnapshot(
-      text,
-      kind,
-      read.def,
-      read.cards,
-      (cardPath) => pub.urlFor(cardPath, dirSlug) ?? undefined,
-      new Date(),
-    );
-    if (snap) out.set(key, { snap, unread: read.unread });
-  }
-  return out;
 }
 
 /* ---------- Renditions and plain files ---------- */

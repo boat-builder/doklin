@@ -2,7 +2,7 @@
 //! the window each one lands in.
 //!
 //! A path inside a connected workspace goes to that workspace's window: a
-//! file as a tab, a board as its board tab, a folder shown in the sidebar.
+//! file as a tab, a folder shown in the sidebar.
 //! The workspace's own folder is that window. Anything else keeps a window
 //! of its own, so a file never attaches to a workspace it is not part of.
 //!
@@ -30,7 +30,6 @@ const SHOWS_EVENT: &str = "window-shows";
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ShowKind {
     File,
-    Board,
     Folder,
 }
 
@@ -83,13 +82,7 @@ pub(crate) fn handle_external_open(app: &AppHandle, opened: Vec<PathBuf>) {
         .collect();
     for path in opened {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
-        let kind = if !path.is_dir() {
-            ShowKind::File
-        } else if crate::store::is_store_dir(&path) {
-            ShowKind::Board
-        } else {
-            ShowKind::Folder
-        };
+        let kind = if path.is_dir() { ShowKind::Folder } else { ShowKind::File };
         match place(&path, kind, &roots) {
             Placement::Folder(folder) => deliver(app, folder, None),
             Placement::InWorkspace { root, show } => deliver(app, root, Some(show)),
@@ -249,13 +242,6 @@ mod tests {
                 show: show("/Users/a/company-os/Projects", ShowKind::Folder)
             }
         );
-        assert_eq!(
-            place(Path::new("/Users/a/company-os/Roadmap"), ShowKind::Board, &r),
-            Placement::InWorkspace {
-                root: "/Users/a/company-os".into(),
-                show: show("/Users/a/company-os/Roadmap", ShowKind::Board)
-            }
-        );
     }
 
     #[test]
@@ -263,8 +249,6 @@ mod tests {
         let r = roots(&[("/Users/a/company-os", "/Users/a/company-os")]);
         assert_eq!(place(Path::new("/Users/a/notes.md"), ShowKind::File, &r), Placement::LoneFile("/Users/a/notes.md".into()));
         assert_eq!(place(Path::new("/Users/a/notes"), ShowKind::Folder, &r), Placement::Folder("/Users/a/notes".into()));
-        // A board of no workspace opens like any folder.
-        assert_eq!(place(Path::new("/Users/a/Board"), ShowKind::Board, &r), Placement::Folder("/Users/a/Board".into()));
     }
 
     #[test]

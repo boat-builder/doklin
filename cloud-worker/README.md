@@ -14,7 +14,7 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 - Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see` and `agents.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
 - Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
 - No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`.
-- No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search, board routes → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
+- No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
 
 ## Engine routes (`src/api.ts`, `src/versions.ts`)
@@ -129,7 +129,7 @@ DELETE /api/auth/agents/<id>/tokens/<tid>  its person, or an owner
 is not the caller's: `404` to a member; to an owner `403` on the two `POST`s.
 `agents.member_id` NULL is the creator's.
 
-## Document API (`src/agentApi.ts`, `src/agentBoards.ts`; agent bearer only)
+## Document API (`src/agentApi.ts`; agent bearer only)
 
 Under `/api/agent/`. Missing scope → `403 {error, need, scopes}`. JSON except
 document bytes; refusals `{error, code?, …}`. `dry=1` / `dryRun: true`
@@ -151,44 +151,26 @@ POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes
 DELETE login  revoke this token (204)
 GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version, features}
 read:
-GET tree?dir=&deep=1  {dir, folders, boards: [{path, cards}], documents: [{path, md?, html?,
-    htmlBehind?, public?}], files: [{path, rev, size, changed, by, public?}]}; a version is
-    {file, rev, size, changed, by}; deep skips board insides; 404 empty; 400 a board
+GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?, public?}],
+    files: [{path, rev, size, changed, by, public?}]}; a version is {file, rev, size, changed,
+    by}; 404 empty
 GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind (document|file), -path, -file,
-    -rev, -version, -html-behind: 1, -board (card page, sent without its properties block);
-    values percent-encoded. clean=1 strips markers; info=1 → JSON row + {kind, comments}, byName
+    -rev, -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 →
+    JSON row + {kind, comments}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
     moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
     {indexing, pending}; limit ≤ 30
 GET pages  {pages: [{slug, url, kind: document|file|folder, path, title?, desc?, home?, by?, byName?,
     at?, missing?}], notListed?}
-GET board?path=  {board, name, cards, by, fields: [{id, name, type, options?: [{name, color?}]}], conflicts?}
-GET cards?path=&by=&where=  {board, name, cards, shown?, by, fields, columns: [{name, empty?, color?,
-    cards: [{title, props, rev, changed, by, byName?, conflict?}]}], conflicts?} | 202 {indexing,
-    pending}; where: f=v · f!=v · f= · f!= (ANDed)
-GET card?path=&card=  {board, title, path, rev, changed, by, byName?, size, props, other?, comments, public?, conflict?, page}
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version?,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
-POST   move {from, to, dryRun?}  document/file/folder/board; to ending in / = into → {kind, from, to,
-       files, name?, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
+POST   move {from, to, dryRun?}  document/file/folder; to ending in / = into → {kind, from, to,
+       files, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
        file ids) before they are removed with a tombstone `to`; pages re-claimed after, and
        `unpublished` lists addresses that could not be
-POST   board {path, name?} → 201 {board, name, fields, created}
-POST   card {path, title, set?, first?, page?} → 201 {board, title, path, rev, props, created}
-PATCH  card {path, card, set?, title?, <place>} → {board, title, path, rev, props, renamed?, placed?}
-DELETE card?path=&card= → {board, title, path, stillPublic}
-POST   field {path, name, type, options?} → 201 {board, field, created}
-PATCH  field {path, field, name} → {board, field, renamed}
-DELETE field?path=&field= → {board, field}
-POST   option {path, field, name, color?, <place>} → 201 {board, field, option, options, created}
-PATCH  option {path, field, option, name?, color?, <place>} → {…, renamed?, cards?, pending?};
-       202 while a rename has cards left — repeat the request
-DELETE option?path=&field=&option= → {board, field, option, options}
-       set: status=Done · tags=a,b · tags+=a · tags-=a · due= (clears)
-       <place>: first: true | last: true | before: "<name>" | after: "<name>"
 comment:
 POST   comments {path, on, body, v?} → 201 {path, thread, version, on, line?|tag?}
        {path, thread, body} → 200 {path, thread, version, comments}
@@ -207,13 +189,9 @@ DELETE pages?path= | ?slug= → {stopped: [...]}
 | `last_version` | 409 | removing the only version |
 | `anchor` | 404 · 409 | words absent / ambiguous or unplaceable; `occurrences` or `candidates` |
 | `slug_taken` | 409 | slug in use |
-| `board` | 400 | path is a board or inside one |
 | `comments` | 400 | a write would drop, change or add a comment marker, or lose an html thread's element; `threads`, `added` |
-| `no_card` · `no_field` · `no_option` | 404 | not on the board; `fields`/`options` list what is |
-| `taken` | 409 | card title / field / option name in use |
 
-Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision; a
-`store.jsonl` that isn't Doklin's.
+Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision.
 
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)
 
@@ -277,7 +255,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 8)
+## D1 (`src/schema.ts`, schema 7)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -291,7 +269,6 @@ agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expire
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
 search_text  ((space_id, fid) PK, folded)   space_id '' = shared; md file id, else html; NULL past 1 MB
 search_state (space_id PK, etag, held)      held = {"<fid>": "<text hash>.<sidecar hash>"}
-board_cards  (fid PK, hash, head)    a card's frontmatter block as last read
 creator        (id = 1 PK, member_id)   whose row holds OWNER_TOKEN; one row or none
 removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe
 spaces        (id s-…|p-…, kind, name, created_by, created_at, etag)   etag = its manifest's
