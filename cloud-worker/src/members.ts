@@ -5,7 +5,10 @@
 //
 //   member   permanent, one row per person, keyed by their normalized email.
 //            What the manifest, presence and leases name. Survives every
-//            Mac they ever use — lose the laptop, get invited again, same row.
+//            Mac they ever use — lose the laptop, get invited again, same row
+//            — and survives being removed: the row is marked `disabled`, so
+//            their name stays on what they wrote and inviting the address
+//            again is the same person.
 //   token    one per device, disposable, 256 bits. Stored only as
 //            sha256(token): the database is not a list of credentials, and
 //            revoking one is deleting one row.
@@ -29,7 +32,7 @@ import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MAX_EMAIL_LEN, MAX_NAME_LEN, validName } from "./layout";
 import type { PersonRole } from "./roles";
-import { ensureSchema } from "./schema";
+import { withDb } from "./schema";
 
 export type Member = {
   id: string;
@@ -39,8 +42,10 @@ export type Member = {
   /** The person who holds the domain's env secret. Always an owner. */
   creator: boolean;
   createdAt: number;
+  /** When a Mac of theirs last beat, to the hour — and, before any has, when
+   *  they first traded a code in. Null means nobody has ever signed in as
+   *  them: the row is an invitation, not yet a person with anything to keep. */
   lastSeenAt: number | null;
-  disabled: boolean;
 };
 
 /** A member plus how many devices they are signed in on — the People list. */
@@ -140,26 +145,8 @@ export const HASH_RE = /^[a-f0-9]{64}$/;
  *  Short on purpose — a member id is what the manifest, presence and leases
  *  carry, and an email must never enter any of them. */
 export const ENTITY_ID_RE = /^[mti]-[a-f0-9]{8}$/;
-
-/* ---------- The database, or nothing ---------- */
-
-/**
- * Run something against the migrated database, or answer null. Every export
- * below goes through here, so "this deployment has no `DB` binding", "the
- * database could not be migrated" and "the query threw" are one answer the
- * routes turn into a 503 — never a 500, and never a route that throws because
- * somebody deleted a database out from under a deployed worker.
- */
-async function withDb<T>(env: Env, fn: (db: D1Database) => Promise<T>): Promise<T | null> {
-  const db = env.DB;
-  if (!db) return null;
-  try {
-    if ((await ensureSchema(env)) == null) return null;
-    return await fn(db);
-  } catch {
-    return null;
-  }
-}
+/** A member's id alone — what a space lists its people by. */
+export const MEMBER_ID_RE = /^m-[a-f0-9]{8}$/;
 
 type MemberRow = {
   id: string;
@@ -188,7 +175,6 @@ const toMember = (r: MemberRow): Member => ({
   creator: Number(r.creator) !== 0,
   createdAt: Number(r.created_at),
   lastSeenAt: r.last_seen_at == null ? null : Number(r.last_seen_at),
-  disabled: Number(r.disabled) !== 0,
 });
 
 const memberId = (): string => `m-${randomHex(4)}`;
@@ -202,7 +188,8 @@ const memberId = (): string => `m-${randomHex(4)}`;
  *
  * Deliberately NOT written here: `last_seen_at`. A write on every request is
  * 57,600 writes a day for ten Macs; the presence beat carries it instead,
- * at most once an hour per person (presence.ts).
+ * at most once an hour per person (presence.ts), after the redeem that first
+ * sets it.
  */
 export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | null> {
   return withDb(env, async (db) => {
@@ -245,14 +232,15 @@ export async function isRemovedToken(env: Env, bearerHash: string): Promise<bool
 
 /* ---------- Members ---------- */
 
-/** Everyone, with how many devices they hold. Newest last, so the creator —
- *  who is written at bind — leads the list. */
+/** Everyone here, with how many devices they hold — a removed person is not
+ *  among them. Newest last, so the creator — who is written at bind — leads
+ *  the list. */
 export async function listMembers(env: Env): Promise<MemberWithDevices[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
       .prepare(
         `SELECT ${MEMBER_COLS}, (SELECT COUNT(*) FROM tokens t WHERE t.member_id = m.id) AS devices
-           FROM members m ORDER BY m.created_at, m.id`,
+           FROM members m WHERE m.disabled = 0 ORDER BY m.created_at, m.id`,
       )
       .all<MemberRow & { devices: number }>();
     return results.map((r) => ({ ...toMember(r), devices: Number(r.devices) }));
@@ -263,7 +251,8 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
  * Everyone's id and display name, and nothing else — what a `by` in the
  * manifest is read with. People first, then agents: an
  * agent signs what it changes with its own `a-` id (agents.ts), and a Mac has
- * to be able to put a name to that as well.
+ * to be able to put a name to that as well. A removed person is still listed:
+ * what they wrote keeps their name.
  *
  * It is served by `GET /api/meta`, the route every engine already asks, so
  * putting a name to an id never costs a request of its own. The People list
@@ -275,7 +264,7 @@ export async function listDirectory(env: Env): Promise<{ id: string; name: strin
     const { results } = await db
       .prepare(
         `SELECT id, name FROM (
-           SELECT id, name, 0 AS kind, created_at FROM members WHERE disabled = 0
+           SELECT id, name, 0 AS kind, created_at FROM members
            UNION ALL
            SELECT id, name, 1 AS kind, created_at FROM agents WHERE disabled = 0
          ) ORDER BY kind, created_at, id`,
@@ -301,7 +290,8 @@ export async function findCreator(env: Env): Promise<Member | null> {
  * The member for this email, created if this is the first time it has been
  * seen. A name that comes with it wins, so re-inviting someone is also how
  * they get renamed; the role of an existing row is left alone, because
- * inviting an owner must not demote them.
+ * inviting an owner must not demote them. A removed person's row is here
+ * again: the same person, a member, with the Private they had.
  */
 export async function upsertMember(
   env: Env,
@@ -318,7 +308,7 @@ export async function upsertMember(
       .prepare(
         `INSERT INTO members (id, email, name, role, created_at, last_seen_at, disabled)
          VALUES (?, ?, ?, ?, ?, NULL, 0)
-         ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name)
+         ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name), disabled = 0
          RETURNING id`,
       )
       .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), role, Date.now(), given)
@@ -332,8 +322,18 @@ async function readMember(db: D1Database, id: string): Promise<Member | null> {
   return row ? toMember(row) : null;
 }
 
-/** The person at this (normalized) address, if the workspace has one.
- *  `undefined` when the database cannot answer — which is not "nobody". */
+/** The person with this id, unless they were removed. */
+async function readHere(db: D1Database, id: string): Promise<Member | null> {
+  const row = await db
+    .prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.id = ? AND m.disabled = 0`)
+    .bind(id)
+    .first<MemberRow>();
+  return row ? toMember(row) : null;
+}
+
+/** The person at this (normalized) address, if the workspace has a row for
+ *  one — here now, or removed. `undefined` when the database cannot answer,
+ *  which is not "nobody". */
 export async function findMemberByEmail(env: Env, email: string): Promise<Member | null | undefined> {
   const found = await withDb(env, async (db) => {
     const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(email).first<MemberRow>();
@@ -363,7 +363,7 @@ export async function adoptCreator(env: Env, email: string, name: string | null)
         .prepare(
           `INSERT INTO members (id, email, name, role, created_at, last_seen_at, disabled)
            VALUES (?, ?, ?, 'owner', ?, NULL, 0)
-           ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name)`,
+           ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name), disabled = 0`,
         )
         .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), Date.now(), given),
       db
@@ -398,32 +398,35 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
     const results = await db.batch([
       // An owner who stops being one may have made codes for anybody, and
       // kept them: every code nobody has used yet is withdrawn with the
-      // role, so none of them outlives it (see `deleteMember`).
+      // role, so none of them outlives it (see `removeMember`).
       db
         .prepare(
           `DELETE FROM invites
             WHERE ?1 = 'member'
-              AND EXISTS (SELECT 1 FROM members WHERE id = ?2 AND role = 'owner'
+              AND EXISTS (SELECT 1 FROM members WHERE id = ?2 AND role = 'owner' AND disabled = 0
                              AND id NOT IN (SELECT member_id FROM creator))`,
         )
         .bind(role, id),
       db
-        .prepare("UPDATE members SET role = ?1 WHERE id = ?2 AND id NOT IN (SELECT member_id FROM creator)")
+        .prepare(
+          "UPDATE members SET role = ?1 WHERE id = ?2 AND disabled = 0 AND id NOT IN (SELECT member_id FROM creator)",
+        )
         .bind(role, id),
     ]);
-    const member = await readMember(db, id);
+    const member = await readHere(db, id);
     if (!member) return "missing" as Refusal;
     return (results.at(-1)?.meta.changes ?? 0) > 0 ? member : ("creator" as Refusal);
   });
 }
 
 /**
- * Remove a person and everything they can sign in with, atomically: their
- * tokens, their pending invite, then the row itself. The cascade is declared
- * in the schema too, but spelling it out means revocation does not depend on
- * whether foreign keys are being enforced. Their presence and their leases go
- * with them, so nobody keeps seeing — or being kept out of a document by — a
- * person who is no longer here.
+ * Remove a person: everything they can sign in with goes, atomically, and
+ * their row stays, marked `disabled` and a member again. Keeping the row is
+ * what keeps their name on what they wrote, and what makes inviting the same
+ * address later the same person — with the Private they had. The restricted
+ * folders they were in they leave: somebody in each adds them again.
+ * Their presence and their leases go with them, so nobody keeps seeing — or
+ * being kept out of a document by — a person who is no longer here.
  *
  * Every token they held is written down in `removed_tokens` on the way out:
  * that is what tells each of their Macs, on its next request, that access was
@@ -436,29 +439,38 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
  * were theirs is not recorded, so all of them go, and the owners who remain
  * make the ones still wanted again.
  */
-export async function deleteMember(env: Env, id: string): Promise<true | Refusal | null> {
+export async function removeMember(env: Env, id: string): Promise<true | Refusal | null> {
   return withDb(env, async (db) => {
     // Every statement carries the same guard, so the batch is all or nothing
-    // on the one fact that matters: the row is not the creator's.
-    const free = "NOT IN (SELECT member_id FROM creator)";
+    // on the two facts that matter: the row is not the creator's, and the
+    // person is still here. The role is read by the statements above the one
+    // that resets it.
+    const here = "IN (SELECT id FROM members WHERE disabled = 0 AND id NOT IN (SELECT member_id FROM creator))";
     const results = await db.batch([
       db
         .prepare(
           `INSERT OR IGNORE INTO removed_tokens (hash, removed_at)
-             SELECT hash, ?1 FROM tokens WHERE member_id = ?2 AND member_id ${free}`,
+             SELECT hash, ?1 FROM tokens WHERE member_id = ?2 AND member_id ${here}`,
         )
         .bind(Date.now(), id),
-      db.prepare(`DELETE FROM presence WHERE member_id = ? AND member_id ${free}`).bind(id),
-      db.prepare(`DELETE FROM leases WHERE member_id = ? AND member_id ${free}`).bind(id),
-      db.prepare(`DELETE FROM tokens WHERE member_id = ? AND member_id ${free}`).bind(id),
+      db.prepare(`DELETE FROM presence WHERE member_id = ? AND member_id ${here}`).bind(id),
+      db.prepare(`DELETE FROM leases WHERE member_id = ? AND member_id ${here}`).bind(id),
+      db.prepare(`DELETE FROM tokens WHERE member_id = ? AND member_id ${here}`).bind(id),
       db
-        .prepare(`DELETE FROM invites WHERE EXISTS (SELECT 1 FROM members WHERE id = ? AND role = 'owner' AND id ${free})`)
+        .prepare(`DELETE FROM invites WHERE EXISTS (SELECT 1 FROM members WHERE id = ? AND role = 'owner' AND id ${here})`)
         .bind(id),
-      db.prepare(`DELETE FROM invites WHERE member_id = ? AND member_id ${free}`).bind(id),
-      db.prepare(`DELETE FROM members WHERE id = ? AND id ${free}`).bind(id),
+      db.prepare(`DELETE FROM invites WHERE member_id = ? AND member_id ${here}`).bind(id),
+      db
+        .prepare(
+          `DELETE FROM space_members
+            WHERE member_id = ? AND member_id ${here}
+              AND space_id IN (SELECT id FROM spaces WHERE kind = 'restricted')`,
+        )
+        .bind(id),
+      db.prepare(`UPDATE members SET disabled = 1, role = 'member' WHERE id = ? AND id ${here}`).bind(id),
     ]);
     if ((results.at(-1)?.meta.changes ?? 0) > 0) return true as const;
-    return (await readMember(db, id)) ? ("creator" as Refusal) : ("missing" as Refusal);
+    return (await readHere(db, id)) ? ("creator" as Refusal) : ("missing" as Refusal);
   });
 }
 
@@ -633,7 +645,10 @@ export async function redeemInvite(
         )
         .bind(await sha256Hex(token), tokenId, row.id, deviceId, validName(deviceName, "A Mac"), now),
       db.prepare("DELETE FROM invites WHERE hash = ?").bind(codeHash),
+      // From here somebody has signed in as this person (`Member.lastSeenAt`).
+      db.prepare("UPDATE members SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL").bind(now, row.id),
     ]);
-    return { token, tokenId, member: toMember(row) } as RedeemResult;
+    const member = toMember(row);
+    return { token, tokenId, member: { ...member, lastSeenAt: member.lastSeenAt ?? now } } as RedeemResult;
   });
 }

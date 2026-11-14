@@ -36,12 +36,15 @@ const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 4
 const notFound = (): Response => json({ error: "not found" }, 404);
 
 /**
- * `/api/versions/…`. `parts` is the split path — ["api", "versions", section,
- * id?] — so the shape of the URL has already been checked by the caller.
+ * `…/versions/<section>[/<tail>]`, for whichever space `env` is scoped to.
  */
-export async function handleVersions(request: Request, env: Env, url: URL, parts: string[]): Promise<Response> {
-  const section = parts[2];
-  const tail = parts[3];
+export async function handleVersions(
+  request: Request,
+  env: Env,
+  url: URL,
+  section: string,
+  tail: string | undefined,
+): Promise<Response> {
 
   if (section === "index" && tail === undefined) {
     if (request.method === "GET") return getIndex(env);

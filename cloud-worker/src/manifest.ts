@@ -132,9 +132,10 @@ function validateTombstones(tombstones: unknown): string | null {
  * references, at most one root. References are checked for shape, not for
  * existence: an entry deliberately outlives its file (the page 404s while
  * the file is gone and comes back when the file does), and a folder entry
- * may cover a folder that is empty now.
+ * may cover a folder that is empty now. The page at `/` is the shared
+ * workspace's to name: a space's map has none.
  */
-function validatePublic(map: unknown): string | null {
+function validatePublic(map: unknown, space: boolean): string | null {
   if (map === undefined) return null;
   if (!isObject(map)) return "public must be an object";
   const slugs = Object.keys(map);
@@ -161,12 +162,15 @@ function validatePublic(map: unknown): string | null {
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
+  if (roots > 0 && space) return "the home page is chosen from the shared workspace";
   if (roots > 1) return "more than one root page";
   return null;
 }
 
-/** Shape-check a manifest without trusting the client. */
-export function validateManifest(data: unknown): ManifestProblem | null {
+/** Shape-check a manifest without trusting the client. `space` is true for
+ *  the manifest of a restricted folder or a Private, false for the shared
+ *  workspace's. */
+export function validateManifest(data: unknown, space: boolean): ManifestProblem | null {
   const bad = (error: string): ManifestProblem => ({ status: 400, error });
   if (!isObject(data)) return bad("manifest must be an object");
   if (!Number.isInteger(data.version)) return bad("manifest version must be an integer");
@@ -185,6 +189,6 @@ export function validateManifest(data: unknown): ManifestProblem | null {
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
-    validateFiles(data.files) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public);
+    validateFiles(data.files) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public, space);
   return problem ? bad(problem) : null;
 }

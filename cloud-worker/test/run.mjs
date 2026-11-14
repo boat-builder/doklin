@@ -70,8 +70,9 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 8;
+const D1_SCHEMA = 9;
 const D1_TABLES = [
+  "addresses",
   "agent_codes",
   "agent_tokens",
   "agents",
@@ -85,6 +86,8 @@ const D1_TABLES = [
   "removed_tokens",
   "search_state",
   "search_text",
+  "space_members",
+  "spaces",
   "tokens",
 ];
 
@@ -398,7 +401,7 @@ await test("identity: an expired invite is refused and swept, without a reaper",
   }
 });
 
-await test("identity: removing a person takes every credential they hold with them", async () => {
+await test("identity: removing a person takes every credential they hold, and keeps who they were — invited again, they are the same person", async () => {
   await call("/api/auth/invites", {
     method: "POST",
     token: OWNER,
@@ -418,7 +421,8 @@ await test("identity: removing a person takes every credential they hold with th
 
   const listed = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.id === erin.id);
   assert.equal(listed.devices, 2, "the People list counts devices");
-  assert.equal(listed.lastSeenAt, null, "written by the presence beat, never by authenticating");
+  assert.ok(listed.lastSeenAt > 0, "from the moment somebody first signed in as her; the beat moves it from there");
+  assert.equal(listed.disabled, undefined, "a removed person is not in this list, so nothing says which are");
 
   assert.equal((await call(`/api/auth/members/${erin.id}`, { method: "DELETE", token: OWNER })).status, 204);
   for (const mac of [one, two]) {
@@ -429,6 +433,36 @@ await test("identity: removing a person takes every credential they hold with th
   assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", erin.id), 0, "both tokens went with her");
   assert.equal(db.value("SELECT COUNT(*) FROM invites WHERE member_id = ?", erin.id), 0);
   assert.equal((await call(`/api/auth/members/${erin.id}`, { method: "DELETE", token: OWNER })).status, 404);
+
+  // Her row stays: out of the People list, and still the name on what she wrote.
+  const here = async () => (await call("/api/auth/members", { token: OWNER })).json.members;
+  assert.equal(db.value("SELECT disabled FROM members WHERE id = ?", erin.id), 1);
+  assert.ok(!(await here()).some((m) => m.id === erin.id), "not in the People list");
+  assert.ok(
+    (await call("/api/meta", { token: OWNER })).json.people.some((p) => p.id === erin.id && p.name === "Erin"),
+    "what she wrote keeps her name",
+  );
+  assert.equal(
+    (await call(`/api/auth/members/${erin.id}`, { method: "PATCH", token: OWNER, body: { role: "owner" } })).status,
+    404,
+    "and there is nobody there to make an owner",
+  );
+
+  // Inviting the address again is the same person, here again as a member.
+  const again = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { email: " Erin@Example.com ", codeHash: sha256("EEEEEEEEEEEEEEEEEEE2"), expiresAt: Date.now() + DAY },
+  });
+  assert.equal(again.status, 201);
+  assert.equal(again.json.invite.memberId, erin.id, "the row she had");
+  const back = await call("/api/auth/join", { method: "POST", body: { code: code("EEEEEEEEEEEEEEEEEEE2"), deviceId: "d-erin3" } });
+  assert.equal(back.status, 201);
+  assert.equal(back.json.member.id, erin.id);
+  assert.equal(back.json.member.role, "member");
+  assert.equal((await here()).find((m) => m.id === erin.id).devices, 1, "back in the People list, on the one Mac that joined");
+  assert.equal((await call("/api/meta", { token: one.json.token })).json.removed, true, "a Mac she was removed from stays removed");
+  assert.equal((await call(`/api/auth/members/${erin.id}`, { method: "DELETE", token: OWNER })).status, 204);
 
   for (const bad of ["nope", "m-xyz", "m-0123456789", "..%2F..%2Fetc", "t-0123abcd%20"]) {
     assert.equal((await call(`/api/auth/members/${bad}`, { method: "DELETE", token: OWNER })).status, 400, bad);
@@ -745,13 +779,34 @@ await test("roles: a role is the person's — an owner makes another, and it lan
   await codeFor("dan@example.com", "DDDDDDDDDDDDDDDDDDDD", OWNER);
   const dan = (await call("/api/auth/join", { method: "POST", body: { code: code("DDDDDDDDDDDDDDDDDDDD"), deviceId: "d-dan" } })).json;
   assert.equal((await role(dan.member.id, "owner")).status, 200);
-  assert.equal((await codeFor("alice@example.com", "BBBBBBBBBBBBBBBBBBBB", dan.token)).status, 201, "an owner may give a member a new code");
+
+  // The address is never verified, so a code is whoever redeems it. Once
+  // somebody has signed in as a person, a new code for them is theirs to make
+  // or the creator's — another owner's would be a way into what is theirs.
+  const invitesBefore = db.value("SELECT COUNT(*) FROM invites");
+  const forAlice = await codeFor("alice@example.com", "BBBBBBBBBBBBBBBBBBBB", dan.token);
+  assert.equal(forAlice.status, 409, "not another owner's to make");
+  assert.ok(/signed in here before/.test(forAlice.json.error));
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), invitesBefore, "…and none was stored");
+  // The same for somebody who was removed: Erin signed in once, so she is still a person.
+  assert.equal((await codeFor("erin@example.com", "EEEEEEEEEEEEEEEEEEE3", dan.token)).status, 409, "removed is not forgotten");
+  assert.equal(db.value("SELECT disabled FROM members WHERE email = 'erin@example.com'"), 1, "a refused code brings nobody back");
+  // Somebody nobody has signed in as is still only an invitation: any owner
+  // makes their first code, and any owner replaces it when it is lost.
+  assert.equal((await codeFor("pat@example.com", "PPPPPPPPPPPPPPPPPPPP", dan.token)).status, 201);
+  assert.equal((await codeFor("pat@example.com", "PPPPPPPPPPPPPPPPPPP2", OWNER)).status, 201, "the creator replaces it");
+  assert.equal((await codeFor("pat@example.com", "PPPPPPPPPPPPPPPPPPP3", dan.token)).status, 201, "and so does another owner");
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), invitesBefore + 1, "one code a person, whoever made it");
+
   assert.equal((await call(`/api/auth/members/${dan.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.equal((await call("/api/meta", { token: dan.token })).json.removed, true);
   assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0, "the codes go with the owner who could have kept them");
-  const back = await call("/api/auth/join", { method: "POST", body: { code: code("BBBBBBBBBBBBBBBBBBBB"), deviceId: "d-dan" } });
-  assert.equal(back.status, 401, "…so the one he kept does not let him back in as Alice");
-  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", ALICE.id), 1, "and her row has the one Mac it had");
+  const back = await call("/api/auth/join", { method: "POST", body: { code: code("PPPPPPPPPPPPPPPPPPP3"), deviceId: "d-dan" } });
+  assert.equal(back.status, 401, "…so the one he kept does not let him back in as somebody else");
+  const pat = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.email === "pat@example.com");
+  assert.equal(pat.lastSeenAt, null, "nobody ever signed in as them");
+  assert.equal((await call(`/api/auth/members/${pat.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", ALICE.id), 1, "and Alice's row has the one Mac it had");
 });
 
 await test("removal: a credential an owner took away is told so — and no other refusal ever says it", async () => {
@@ -1554,6 +1609,338 @@ await test("leases: a lapsed one is takeable and swept, and take claims a live o
   await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio" } });
 });
 
+/* ---------- Spaces ---------- */
+
+// Jo and Kim, two more members, and the folders the tests below make — each
+// builds on what the one before it left.
+let JO;
+let KIM;
+let FINANCE;
+let PLANS;
+const spaceCall = (id) => (path, opts = {}) => call(`/api/spaces/${id}${path}`, opts);
+const mySpaces = async (token, device = DEVICE) => (await call("/api/spaces", { token, device })).json.spaces;
+const polledSpaces = async (token, device = DEVICE) => (await call("/api/poll", { token, device })).json.spaces;
+/** Invite an address and trade the code in on a Mac: `{token, tokenId, member}`. */
+async function joinAs(email, name, body, deviceId) {
+  const invited = await call("/api/auth/invites", {
+    method: "POST",
+    token: OWNER,
+    body: { email, name, codeHash: sha256(body), expiresAt: Date.now() + DAY },
+  });
+  assert.equal(invited.status, 201, invited.text);
+  const joined = await call("/api/auth/join", { method: "POST", body: { code: code(body), deviceId, deviceName: `${name}'s Air` } });
+  assert.equal(joined.status, 201, joined.text);
+  return joined.json;
+}
+
+await test("spaces: anyone makes a restricted folder — it answers the people in it, and to everyone else, the creator included, it does not exist", async () => {
+  JO = await joinAs("jo@example.com", "Jo", "JJJJJJJJJJJJJJJJJJJJ", "d-jo");
+  KIM = await joinAs("kim@example.com", "Kim", "KKKKKKKKKKKKKKKKKKKK", "d-kim");
+
+  const made = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "  Finance ", members: [JO.member.id] } });
+  assert.equal(made.status, 201, made.text);
+  FINANCE = made.json.space;
+  assert.ok(/^s-[a-f0-9]{8}$/.test(FINANCE.id));
+  assert.equal(FINANCE.kind, "restricted");
+  assert.equal(FINANCE.name, "Finance");
+  assert.equal(FINANCE.by, ALICE.id, "who made it — what tells two folders of one name apart");
+  assert.deepEqual(FINANCE.members, [ALICE.id, JO.member.id].sort(), "a member made it: herself, and whoever she named");
+
+  // A name is a folder's name on every Mac it reaches.
+  for (const name of ["", "   ", "a/b", ".hidden", "..", "x".repeat(81), 7]) {
+    assert.equal((await call("/api/spaces", { method: "POST", token: MEMBER, body: { name } })).status, 400, JSON.stringify(name));
+  }
+  // Only people here can be put in one.
+  const stranger = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members: ["m-00000000"] } });
+  assert.equal(stranger.status, 400);
+  assert.deepEqual(stranger.json.unknown, ["m-00000000"]);
+  const erin = db.value("SELECT id FROM members WHERE email = 'erin@example.com'");
+  const removed = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members: [erin] } });
+  assert.deepEqual(removed.json.unknown, [erin], "a removed person is not here");
+  for (const members of ["jo", ["jo"], [7], { id: JO.member.id }]) {
+    assert.equal((await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members } })).status, 400);
+  }
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces"), 1, "a refused request made nothing");
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith("spaces/")), [`spaces/${FINANCE.id}/manifest.json`]);
+
+  // Names need not be unique: Jo's own Finance is another folder.
+  const twin = (await call("/api/spaces", { method: "POST", token: JO.token, device: "d-jo", body: { name: "Finance" } })).json.space;
+  assert.notEqual(twin.id, FINANCE.id);
+  assert.equal(twin.by, JO.member.id);
+  assert.deepEqual(twin.members, [JO.member.id]);
+
+  // Each person is told about the spaces they are in, and no others.
+  const ids = async (token, device) => (await mySpaces(token, device)).map((s) => s.id).sort();
+  assert.deepEqual(await ids(MEMBER), [FINANCE.id]);
+  assert.deepEqual(await ids(JO.token, "d-jo"), [FINANCE.id, twin.id].sort());
+  assert.deepEqual(await ids(KIM.token, "d-kim"), []);
+  assert.deepEqual(await ids(OWNER), [], "an owner is told nothing: no name, no lock, no count");
+
+  // To anyone not in it, every route is the 404 an id nobody minted gets.
+  const unknown = await call("/api/spaces/s-00000000/manifest", { token: OWNER });
+  assert.equal(unknown.status, 404);
+  const routes = [
+    ["GET", "/manifest"],
+    ["PUT", "/manifest"],
+    ["GET", "/blobs/f-abc123"],
+    ["GET", "/blobs/f-abc123/0123456789abcdef"],
+    ["GET", "/versions/index"],
+    ["PATCH", ""],
+    ["DELETE", ""],
+    ["PUT", `/members/${KIM.member.id}`],
+    ["DELETE", `/members/${ALICE.id}`],
+  ];
+  for (const [who, token, device] of [["the creator", OWNER, DEVICE], ["a member outside it", KIM.token, "d-kim"]]) {
+    for (const [method, path] of routes) {
+      const body = method === "PUT" || method === "PATCH" ? { body: {} } : {};
+      const res = await call(`/api/spaces/${FINANCE.id}${path}`, { method, token, device, ...body });
+      assert.equal(res.status, 404, `${who}: ${method} ${path}`);
+      assert.deepEqual(res.json, unknown.json, "the same answer, to the letter");
+    }
+  }
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`, { token: MEMBER })).status, 200, "the people in it get in");
+  for (const bad of ["nope", "s-123", "m-0123abcd", "s-0123ABCD"]) {
+    assert.equal((await call(`/api/spaces/${bad}/manifest`, { token: OWNER })).status, 400, bad);
+  }
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`)).status, 401, "and nobody without a bearer");
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/nothing`, { token: MEMBER })).status, 404);
+  assert.equal((await call("/api/spaces", { method: "DELETE", token: MEMBER })).status, 405);
+
+  const gone = await call(`/api/spaces/${twin.id}`, { method: "DELETE", token: JO.token, device: "d-jo" });
+  assert.deepEqual(gone.json, { deleted: true, purged: 1, remaining: false });
+});
+
+await test("spaces: a space syncs like the workspace does — its own manifest, blobs and versions under its own prefix — and the poll says where each one is", async () => {
+  const finance = spaceCall(FINANCE.id);
+  const jo = { token: JO.token, device: "d-jo" };
+  const sharedBefore = await currentEtag();
+  const got = await finance("/manifest", { token: MEMBER });
+  assert.equal(got.status, 200);
+  assert.deepEqual(got.json, { version: 3, name: "Finance", seq: 0, files: {}, tombstones: {}, public: {} });
+  const etag0 = got.headers.get("x-manifest-etag");
+  assert.equal(etag0, FINANCE.etag, "the etag the space was made with");
+  assert.equal((await finance(`/manifest?since=${etag0}`, { token: MEMBER })).status, 304);
+
+  const body = "# Budget\n";
+  const hash = blobHash(body);
+  assert.equal((await finance(`/blobs/f-budget01/${hash}`, { method: "PUT", ...jo, body })).status, 200);
+  assert.ok(fake.store.has(`spaces/${FINANCE.id}/blobs/f-budget01/${hash}`), "under the space's own prefix");
+  assert.ok(!fake.store.has(`blobs/f-budget01/${hash}`), "and nowhere the shared workspace reaches");
+  assert.equal((await call(`/api/blobs/f-budget01/${hash}`, { token: MEMBER })).status, 404, "asking the shared workspace for it by id finds nothing");
+  assert.equal((await finance(`/blobs/f-budget01/${hash}`, { token: MEMBER })).text, body);
+  assert.deepEqual((await finance("/blobs/f-budget01", { token: MEMBER })).json.blobs.map((b) => b.hash), [hash]);
+
+  const next = manifest(1, { "f-budget01": fileEntry("Budget.md", 1, body) }, { name: "Finance" });
+  const put = await finance("/manifest", { method: "PUT", ...jo, headers: { "x-base-etag": etag0 }, body: next });
+  assert.equal(put.status, 200, put.text);
+  const etag1 = put.json.etag;
+  const stale = await finance("/manifest", { method: "PUT", token: MEMBER, headers: { "x-base-etag": etag0 }, body: { ...next, seq: 2 } });
+  assert.equal(stale.status, 412);
+  assert.equal(stale.json.etag, etag1);
+  assert.equal(await currentEtag(), sharedBefore, "the shared manifest did not move");
+  assert.ok(!(await call("/api/manifest", { token: OWNER })).text.includes("Budget"), "…and names nothing in the folder");
+
+  // One poll says which spaces the caller is in and where each manifest is.
+  db.queries.length = 0;
+  const polled = await call("/api/poll", { token: MEMBER });
+  assert.deepEqual(writes(), [], "still a poll that only reads");
+  assert.deepEqual(
+    polled.json.spaces.map((s) => [s.id, s.kind, s.name, s.etag]),
+    [[FINANCE.id, "restricted", "Finance", etag1]],
+  );
+  assert.deepEqual(polled.json.spaces[0].members, FINANCE.members);
+  assert.deepEqual(await polledSpaces(KIM.token, "d-kim"), [], "somebody outside it is told nothing");
+  assert.deepEqual(await polledSpaces(OWNER), []);
+
+  // Where the poll thinks a manifest is gets put right by the next read, when a write's note never landed.
+  db.run("UPDATE spaces SET etag = 'lost' WHERE id = ?", FINANCE.id);
+  await finance("/manifest", { token: MEMBER });
+  assert.equal(db.value("SELECT etag FROM spaces WHERE id = ?", FINANCE.id), etag1);
+
+  // The version store is the space's own too.
+  const sharedIndex = fake.store.get("versions/index.json")?.etag;
+  const index = await finance("/versions/index", { method: "PUT", token: MEMBER, headers: { "x-base-etag": "*" }, body: versionsIndex([]) });
+  assert.equal(index.status, 200, index.text);
+  assert.ok(fake.store.has(`spaces/${FINANCE.id}/versions/index.json`));
+  assert.equal(fake.store.get("versions/index.json")?.etag, sharedIndex, "the workspace's own index is as it was");
+  assert.equal((await finance("/versions/index", { token: MEMBER })).status, 200);
+
+  // The home page is the shared workspace's to choose.
+  const home = await finance("/manifest", {
+    method: "PUT",
+    token: MEMBER,
+    headers: { "x-base-etag": etag1 },
+    body: { ...next, seq: 2, public: { front: { kind: "dir", path: "", root: true } } },
+  });
+  assert.equal(home.status, 400);
+  assert.ok(/home page/.test(home.json.error));
+});
+
+await test("spaces: everyone has a Private of their own — made the first time they ask, never anybody else's, and not a folder to rename, share or delete", async () => {
+  const jo = { token: JO.token, device: "d-jo" };
+  const first = await call("/api/spaces/private", { method: "PUT", ...jo });
+  assert.equal(first.status, 200, first.text);
+  const mine = first.json.space;
+  assert.equal(mine.id, `p-${JO.member.id.slice(2)}`, "the person's own id, so asking twice cannot make two");
+  assert.equal(mine.kind, "private");
+  assert.equal(mine.name, "Private");
+  assert.deepEqual(mine.members, [JO.member.id]);
+  assert.deepEqual((await call("/api/spaces/private", { method: "PUT", ...jo })).json.space, mine, "asking again changes nothing");
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE kind = 'private'"), 1);
+  assert.ok((await polledSpaces(JO.token, "d-jo")).some((s) => s.id === mine.id), "and their poll lists it");
+  assert.equal((await call("/api/spaces/private", jo)).status, 405);
+
+  const priv = spaceCall(mine.id);
+  assert.equal((await priv("/manifest", jo)).status, 200);
+  assert.ok(fake.store.has(`spaces/${mine.id}/manifest.json`));
+  for (const [who, token] of [["another member", MEMBER], ["an owner", OWNER]]) {
+    assert.equal((await priv("/manifest", { token })).status, 404, `${who} cannot open it`);
+  }
+  assert.equal((await priv(`/members/${ALICE.id}`, { method: "PUT", ...jo })).status, 409, "one person, never another");
+  assert.equal((await priv(`/members/${JO.member.id}`, { method: "DELETE", ...jo })).status, 409);
+  assert.equal((await priv("", { method: "PATCH", ...jo, body: { name: "Mine" } })).status, 409);
+  assert.equal((await priv("", { method: "DELETE", ...jo })).status, 409);
+
+  // The creator is a person too, once they have said who they are.
+  const me = (await call("/api/meta", { token: OWNER })).json.you.memberId;
+  const own = await call("/api/spaces/private", { method: "PUT", token: OWNER });
+  assert.equal(own.json.space.id, `p-${me.slice(2)}`);
+  // Until then there is nobody for a space to belong to.
+  db.run("DELETE FROM creator");
+  try {
+    assert.equal((await call("/api/spaces/private", { method: "PUT", token: OWNER })).status, 409);
+    assert.equal((await call("/api/spaces", { method: "POST", token: OWNER, body: { name: "Nobody's" } })).status, 409);
+    assert.deepEqual((await call("/api/spaces", { token: OWNER })).json.spaces, []);
+  } finally {
+    db.run("INSERT INTO creator (id, member_id) VALUES (1, ?)", me);
+  }
+  // A space is its rows: with no database there is nothing to answer for one.
+  for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
+    assert.equal((await call("/api/spaces", { token: OWNER, bindings })).status, 503);
+    assert.equal((await call(`/api/spaces/${own.json.space.id}/manifest`, { token: OWNER, bindings })).status, 503);
+  }
+});
+
+await test("spaces: everyone in a folder is equal — any of them adds, removes and renames; the last one cannot leave; a person removed from the workspace leaves their folders and keeps their Private", async () => {
+  const finance = spaceCall(FINANCE.id);
+  const jo = { token: JO.token, device: "d-jo" };
+  const kim = { token: KIM.token, device: "d-kim" };
+
+  const added = await finance(`/members/${KIM.member.id}`, { method: "PUT", ...jo });
+  assert.equal(added.status, 200, "Jo did not make the folder, and adds to it all the same");
+  assert.deepEqual(added.json.space.members, [ALICE.id, JO.member.id, KIM.member.id].sort());
+  const twice = await finance(`/members/${KIM.member.id}`, { method: "PUT", ...jo });
+  assert.deepEqual(twice.json.space.members, added.json.space.members, "adding twice is adding once");
+  assert.equal((await finance("/manifest", kim)).status, 200, "and Kim is in, on her next request");
+  assert.equal((await finance("/members/m-00000000", { method: "PUT", ...jo })).status, 404, "only people in the workspace");
+  assert.equal((await finance("/members/nope", { method: "PUT", ...jo })).status, 400);
+  assert.equal((await finance(`/members/${KIM.member.id}`, { method: "POST", ...jo })).status, 405);
+
+  const renamed = await finance("", { method: "PATCH", ...kim, body: { name: "Finance 2026" } });
+  assert.equal(renamed.json.space.name, "Finance 2026");
+  assert.equal((await finance("", { method: "PATCH", ...kim, body: { name: "a/b" } })).status, 400);
+  assert.equal((await polledSpaces(MEMBER)).find((s) => s.id === FINANCE.id).name, "Finance 2026", "everyone in it hears the new name on their next poll");
+
+  // Kim takes out Alice, who made it.
+  assert.equal((await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim })).status, 204);
+  assert.equal((await finance("/manifest", { token: MEMBER })).status, 404, "to Alice it no longer exists");
+  assert.deepEqual((await polledSpaces(MEMBER)).filter((s) => s.id === FINANCE.id), [], "which is how her Mac learns to delete its copy");
+  assert.equal((await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim })).status, 404, "she is not in it to take out");
+  // Jo leaves; Kim, the last one, cannot.
+  assert.equal((await finance(`/members/${JO.member.id}`, { method: "DELETE", ...jo })).status, 204);
+  const last = await finance(`/members/${KIM.member.id}`, { method: "DELETE", ...kim });
+  assert.equal(last.status, 409);
+  assert.ok(/last person/.test(last.json.error));
+  assert.equal((await finance("/manifest", kim)).status, 200, "still hers");
+
+  // Removed from the workspace, Kim leaves the folder and keeps her Private.
+  const kimPrivate = (await call("/api/spaces/private", { method: "PUT", ...kim })).json.space.id;
+  assert.equal((await call(`/api/auth/members/${KIM.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.deepEqual(db.rows("SELECT space_id FROM space_members WHERE member_id = ?", KIM.member.id), [{ space_id: kimPrivate }]);
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", FINANCE.id), 1, "the folder stays in the cloud, with nobody in it");
+  assert.ok(fake.store.has(`spaces/${FINANCE.id}/manifest.json`));
+  // Invited again she is the same person: her Private is there, the folder is not.
+  KIM = await joinAs("kim@example.com", "Kim", "KKKKKKKKKKKKKKKKKKK2", "d-kim");
+  assert.deepEqual((await mySpaces(KIM.token, "d-kim")).map((s) => s.id), [kimPrivate]);
+});
+
+await test("spaces: presence and leases are by space — what somebody has open in a folder is told to the people in it, and to nobody else", async () => {
+  PLANS = (await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "Plans", members: [JO.member.id] } })).json.space;
+  const jo = { token: JO.token, device: "d-jo" };
+  const held = (answer, space) =>
+    answer.json.leases.filter((l) => l.path === "q3.md" && (l.space ?? "") === space).map((l) => l.deviceId);
+
+  const beat = await call("/api/poll", { method: "POST", ...jo, body: { name: "Jo's Air", space: PLANS.id, path: "Q3.md" } });
+  assert.equal(beat.status, 200);
+  assert.equal(beat.json.presence["d-jo"].path, "Q3.md");
+  assert.equal(beat.json.presence["d-jo"].space, PLANS.id);
+  assert.deepEqual(held(beat, PLANS.id), ["d-jo"], "a beat claims the document in its space");
+
+  // Alice is in the folder: she is told what Jo has open, and that it is held.
+  const alice = await call("/api/poll", { token: MEMBER });
+  assert.equal(alice.json.presence["d-jo"].path, "Q3.md");
+  assert.equal(alice.json.presence["d-jo"].space, PLANS.id);
+  assert.deepEqual(held(alice, PLANS.id), ["d-jo"]);
+  // The creator is not: Jo is here, and that is all.
+  const owner = await call("/api/poll", { token: OWNER });
+  assert.equal(owner.json.presence["d-jo"].name, "Jo's Air");
+  assert.equal(owner.json.presence["d-jo"].path, undefined, "not the path");
+  assert.equal(owner.json.presence["d-jo"].space, undefined, "not even which space");
+  assert.deepEqual(owner.json.leases.filter((l) => l.space), [], "and no lease in a space they are not in");
+
+  // The same path in the shared workspace is another document.
+  const shared = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Sherin's MacBook Pro", path: "Q3.md" } });
+  assert.deepEqual(held(shared, ""), [DEVICE], "the owner holds the shared one");
+  const both = await call("/api/poll", { token: MEMBER });
+  assert.deepEqual([held(both, ""), held(both, PLANS.id)], [[DEVICE], ["d-jo"]], "two leases, one a space apart");
+
+  // A beat that names a space the caller is not in is a beat with no document.
+  const sneaky = await call("/api/poll", {
+    method: "POST",
+    token: OWNER,
+    body: { name: "Sherin's MacBook Pro", space: PLANS.id, path: "Q3.md", take: true },
+  });
+  assert.equal(sneaky.status, 200);
+  assert.equal(sneaky.json.presence[DEVICE].path, undefined);
+  assert.equal(db.value("SELECT device_id FROM leases WHERE space_id = ? AND path = 'q3.md'", PLANS.id), "d-jo", "Jo still holds it, take or no take");
+  assert.equal(db.value("SELECT COUNT(*) FROM leases WHERE device_id = ?", DEVICE), 0, "and the Mac that asked holds nothing");
+
+  // Taken out of the folder, what Jo had open there stops being his.
+  assert.equal((await call(`/api/spaces/${PLANS.id}/members/${JO.member.id}`, { method: "DELETE", token: MEMBER })).status, 204);
+  assert.equal(db.value("SELECT COUNT(*) FROM leases WHERE space_id = ?", PLANS.id), 0);
+  assert.deepEqual(db.rows("SELECT space_id, path FROM presence WHERE device_id = 'd-jo'"), [{ space_id: "", path: null }]);
+  for (const who of [jo, { token: OWNER }]) await call("/api/poll", { method: "POST", ...who, body: { leave: true } });
+});
+
+await test("spaces: deleting a folder takes everything it stored — its rows last — and leaves the rest of the bucket as it was", async () => {
+  const plans = spaceCall(PLANS.id);
+  const body = "# Plan\n";
+  const hash = blobHash(body);
+  await plans(`/blobs/f-plan0001/${hash}`, { method: "PUT", token: MEMBER, body });
+  const put = await plans("/manifest", {
+    method: "PUT",
+    token: MEMBER,
+    headers: { "x-base-etag": PLANS.etag },
+    body: manifest(1, { "f-plan0001": fileEntry("Plan.md", 1, body) }, { name: "Plans" }),
+  });
+  assert.equal(put.status, 200, put.text);
+  const others = () => [...fake.store.keys()].filter((k) => !k.startsWith(`spaces/${PLANS.id}/`)).sort();
+  const before = others();
+  const sharedBefore = await currentEtag();
+
+  assert.equal((await plans("", { method: "DELETE", token: OWNER })).status, 404, "not an owner's to delete: to them there is no such folder");
+  const gone = await plans("", { method: "DELETE", token: MEMBER });
+  assert.equal(gone.status, 200);
+  assert.deepEqual(gone.json, { deleted: true, purged: 2, remaining: false });
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${PLANS.id}/`)), []);
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", PLANS.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM space_members WHERE space_id = ?", PLANS.id), 0);
+  assert.equal((await plans("/manifest", { token: MEMBER })).status, 404);
+  assert.deepEqual((await polledSpaces(MEMBER)).filter((s) => s.id === PLANS.id), []);
+  assert.deepEqual(others(), before, "nothing else in the bucket was touched");
+  assert.equal(await currentEtag(), sharedBefore);
+});
+
 await test("poll: with no database, or a broken one, the etag still comes back and only presence and leases go quiet", async () => {
   const etag = await currentEtag();
   for (const bindings of [{ OWNER_TOKEN: OWNER, DATA: fake }, { OWNER_TOKEN: OWNER, DATA: fake, DB: brokenD1() }]) {
@@ -1562,6 +1949,7 @@ await test("poll: with no database, or a broken one, the etag still comes back a
     assert.equal(read.json.manifestEtag, etag);
     assert.deepEqual(read.json.presence, {});
     assert.equal(read.json.leases, null, "not 'nobody holds anything' — the database could not say");
+    assert.equal(read.json.spaces, null, "nor which spaces they are in");
     const beat = await call("/api/poll", { method: "POST", token: OWNER, bindings, body: { name: "Mac", path: "Home.md" } });
     assert.equal(beat.status, 200, "…not even when it carries a beat nobody can write");
     assert.equal(beat.json.manifestEtag, etag);
@@ -1922,7 +2310,9 @@ await test("public: the root page serves at /; renders cache under the manifest'
     await pub("/sizes?v=md");
     assert.equal(cache.puts.length, 2, "the query is part of the key");
     assert.equal((await pub("/nope")).status, 404);
-    assert.equal(cache.puts.length, 3, "a 404 for this manifest is cached too");
+    assert.equal(cache.puts.length, 2, "an address nobody holds is not kept: a space could claim it without this manifest moving");
+    assert.equal((await pub("/sizes/nope")).status, 404);
+    assert.equal(cache.puts.length, 3, "a 404 under an address this manifest holds is cached too");
     assert.equal((await pub("/robots.txt")).status, 200);
     assert.equal(cache.puts.length, 3, "statics never go through the cache");
 
@@ -2325,6 +2715,10 @@ await test("agents: the gate — an agent's token is answered on /api/agent and 
     ["DELETE", `/api/blobs/f-doc1/${hash}`],
     ["GET", "/api/versions/index"],
     ["PUT", "/api/versions/index", {}, { "x-base-etag": "*" }],
+    ["GET", "/api/spaces"],
+    ["POST", "/api/spaces", { name: "An agent's" }],
+    ["PUT", "/api/spaces/private"],
+    ["GET", `/api/spaces/${FINANCE.id}/manifest`],
     ["GET", "/api/versions/snapshots/1700000000000-d-macbook"],
     ["GET", "/api/versions/blobs"],
     ["GET", "/api/auth/members"],
@@ -4556,6 +4950,128 @@ await test("directory: /api/meta names agents beside people, so every Mac can pu
 });
 
 // Destroys all state — keep this last.
+await test("addresses: an address is one space's for the whole domain — the second claim is told it is taken — and a page is served from whichever space holds it", async () => {
+  await freshWorkspace({ "Open/note.md": "# An open note\n", "Open/other.md": "# Another\n" });
+  await macWrite((m) => {
+    m.public = { open: { kind: "file", file: entryAt(m, "Open/note.md")[0], path: "Open/note.md", by: ALICE.id, at: 1 } };
+  });
+  assert.deepEqual(
+    db.rows("SELECT slug, space_id FROM addresses ORDER BY slug"),
+    [{ slug: "open", space_id: "" }],
+    "the shared workspace's own are claimed as its manifest is stored, and the ones it dropped let go",
+  );
+
+  // Alice publishes a note from a folder only she is in.
+  const books = (await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "Books" } })).json.space;
+  const sp = spaceCall(books.id);
+  const text = "# The budget\n\nNumbers nobody else can open.\n";
+  const hash = blobHash(text);
+  await sp(`/blobs/f-budget02/${hash}`, { method: "PUT", token: MEMBER, body: text, headers: { "content-type": "text/markdown" } });
+  const withPages = (seq, pages) => ({
+    version: 3,
+    name: "Books",
+    seq,
+    files: { "f-budget02": { path: "Budget.md", rev: 1, hash, size: Buffer.byteLength(text), mtime: 1700000000000, by: ALICE.id } },
+    tombstones: {},
+    public: pages,
+  });
+  const page = { kind: "file", file: "f-budget02", path: "Budget.md", by: ALICE.id, at: 2 };
+  const store = (etag, body) => sp("/manifest", { method: "PUT", token: MEMBER, headers: { "x-base-etag": etag }, body });
+  const put1 = await store(books.etag, withPages(1, { budget: page }));
+  assert.equal(put1.status, 200, put1.text);
+  assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'budget'"), books.id);
+
+  const served = await pub("/budget");
+  assert.equal(served.status, 200);
+  assert.ok(served.text.includes("<h1>The budget</h1>") && served.text.includes("Numbers nobody else can open."), "rendered from the folder's own blobs");
+  assert.equal((await pub("/open")).status, 200, "beside the shared workspace's own pages");
+  assert.equal((await sp("/manifest", { token: OWNER })).status, 404, "publishing opens the page, never the folder");
+
+  // The shared workspace cannot take an address a space holds — a Mac's write, or an agent's.
+  const sharedEtag = await currentEtag();
+  const cur = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const clash = await putManifest({ ...cur, seq: cur.seq + 1, public: { ...cur.public, budget: { kind: "dir", path: "" } } });
+  assert.equal(clash.status, 409);
+  assert.deepEqual(clash.json.taken, ["budget"]);
+  assert.ok(/already taken/.test(clash.json.error));
+  const bot = await addAgent("Claimer", ["edit", "publish"]);
+  const byAgent = await as(bot)("/api/agent/pages", { method: "PUT", body: { path: "Open/other", slug: "budget" } });
+  assert.equal(byAgent.status, 409, byAgent.text);
+  assert.deepEqual(byAgent.json.taken, ["budget"]);
+  assert.equal(await currentEtag(), sharedEtag, "and nothing was stored either time");
+  const free = await as(bot)("/api/agent/pages", { method: "PUT", body: { path: "Open/other", slug: "other-page" } });
+  assert.equal(free.status, 201, free.text);
+  assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'other-page'"), "", "an agent's claim is the shared workspace's");
+  assert.equal((await as(bot)("/api/agent/pages?slug=other-page", { method: "DELETE" })).status, 200);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'other-page'"), 0, "…and is let go with the page");
+
+  // A space cannot take one the shared workspace serves, or one another space holds.
+  const refused = await store(put1.json.etag, withPages(2, { budget: page, open: page }));
+  assert.equal(refused.status, 409);
+  assert.deepEqual(refused.json.taken, ["open"]);
+  const jo = { token: JO.token, device: "d-jo" };
+  const joPrivate = (await call("/api/spaces/private", { method: "PUT", ...jo })).json.space;
+  const second = await call(`/api/spaces/${joPrivate.id}/manifest`, {
+    method: "PUT",
+    ...jo,
+    headers: { "x-base-etag": joPrivate.etag },
+    body: { version: 3, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "" } } },
+  });
+  assert.equal(second.status, 409, "the second claim is told it is taken");
+  assert.deepEqual(second.json.taken, ["budget"]);
+  // Even one the shared workspace published while the database could not hear it.
+  db.run("DELETE FROM addresses WHERE slug = 'open'");
+  assert.deepEqual((await store(put1.json.etag, withPages(2, { budget: page, open: page }))).json.taken, ["open"]);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'open'"), 0, "and no claim was written for it");
+
+  // A space's page is cached under that space's own manifest.
+  const cache = new FakeCache();
+  globalThis.caches = { default: cache };
+  try {
+    await pub("/budget");
+    assert.deepEqual(cache.puts, [`https://cache.doklin/${put1.json.etag}@${books.id}/budget`]);
+    await pub("/budget");
+    assert.equal(cache.hits, 1);
+  } finally {
+    delete globalThis.caches;
+  }
+
+  // Unpublished, the address is free again — and the shared workspace may have it.
+  const put2 = await store(put1.json.etag, withPages(2, {}));
+  assert.equal(put2.status, 200);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'budget'"), 0);
+  assert.equal((await pub("/budget")).status, 404);
+  const now = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const taken = await putManifest({ ...now, seq: now.seq + 1, public: { ...now.public, budget: { kind: "dir", path: "" } } });
+  assert.equal(taken.status, 200, taken.text);
+  assert.deepEqual(
+    db.rows("SELECT slug FROM addresses WHERE space_id = '' ORDER BY slug").map((r) => r.slug),
+    ["budget", "open"],
+    "with the one the database had not heard of claimed at last",
+  );
+
+  // A folder that is deleted lets go of its addresses.
+  const put3 = await store(put2.json.etag, withPages(3, { ledger: page }));
+  assert.equal(put3.status, 200);
+  assert.equal((await pub("/ledger")).status, 200);
+  assert.equal((await sp("", { method: "DELETE", token: MEMBER })).json.remaining, false);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'ledger'"), 0);
+  assert.equal((await pub("/ledger")).status, 404);
+
+  // With no database the shared workspace still syncs: its addresses go unclaimed, and are served all the same.
+  const latest = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
+  const unheard = await call("/api/manifest", {
+    method: "PUT",
+    token: OWNER,
+    bindings: { OWNER_TOKEN: OWNER, DATA: fake },
+    headers: { "x-base-etag": await currentEtag() },
+    body: { ...latest, seq: latest.seq + 1, public: { ...latest.public, quiet: { kind: "dir", path: "" } } },
+  });
+  assert.equal(unheard.status, 200, unheard.text);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'quiet'"), 0);
+  assert.equal((await pub("/quiet")).status, 200);
+});
+
 await test("wipe: owner-only, confirmed, empties the bucket and frees the domain for a new binding", async () => {
   const member = await call("/api/admin/wipe", { method: "POST", token: MEMBER, body: { confirm: "wipe" } });
   assert.equal(member.status, 403);
@@ -4573,6 +5089,11 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   }
   assert.equal((await as(doomed)("/api/admin/wipe", { method: "POST", body: { confirm: "wipe" } })).status, 403, "never an agent's to do");
   assert.ok(db.value("SELECT COUNT(*) FROM removed_tokens") > 0, "credentials were taken away along the way");
+  // Every space is the domain's too: a folder nobody is left in, people's Privates, the addresses.
+  for (const table of ["spaces", "space_members", "addresses"]) {
+    assert.ok(db.value(`SELECT COUNT(*) FROM ${table}`) > 0, `${table} holds something to wipe`);
+  }
+  assert.ok([...fake.store.keys()].some((k) => k.startsWith("spaces/")), "and what they stored is in the bucket");
 
   const res = await call("/api/admin/wipe", { method: "POST", token: OWNER, body: { confirm: "wipe" } });
   assert.equal(res.status, 200);
@@ -4599,6 +5120,12 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state", "board_cards"]) {
     assert.equal(db.value(`SELECT COUNT(*) FROM ${table}`), 0, `${table} is empty`);
   }
+  // And no space outlives the workspace it was in.
+  for (const table of ["spaces", "space_members", "addresses"]) {
+    assert.equal(db.value(`SELECT COUNT(*) FROM ${table}`), 0, `${table} is empty`);
+  }
+  assert.equal((await call("/api/spaces", { token: OWNER })).status, 200);
+  assert.deepEqual((await call("/api/spaces", { token: OWNER })).json.spaces, []);
   assert.equal((await as(doomed)("/api/agent/me")).status, 401, "an agent's token died with its row");
   assert.equal((await loginWith(agentCode(unusedBody))).status, 401, "and so did the code somebody was still holding");
   assert.deepEqual((await call("/api/auth/agents", { token: OWNER })).json.agents, [], "a rebound domain inherits no ghost agents");

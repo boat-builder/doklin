@@ -16,11 +16,13 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 ## People
 
 - A member is keyed by normalized email (`m-` + 8 hex): re-inviting an address reaches the same person. Member ids enter the manifest, emails never.
+- **A removed person's row is never deleted** (`members.disabled`): out of the People list and unable to sign in, still in the directory so what they wrote keeps their name. Inviting the address again is the same person, a member, with their Private; restricted folders they were in are not given back.
+- The address is never verified, so a code is whoever redeems it. Once somebody has signed in as a person (`lastSeenAt` set — the redeem sets it — or the creator's row), a new code for them is only theirs or the creator's to make; before that the row is an invitation any owner may re-issue (`mayInviteAgain`, `src/cloud.ts` ⇄ `createInvite`, `api.ts`: **change both**).
 - Invite: the owner's Mac mints `dkln-XXXXX-XXXXX-XXXXX-XXXXX` (`invite.rs`) and sends only its sha256; 7 days default; cap `MAX_DAYS` ⇄ `MAX_INVITE_TTL_MS`, **change both**. Line: `doklin-invite <endpoint> <code>`. `normalize_code` ⇄ `normalizeCode` (`members.ts`) must match exactly: **change both**.
 - Redeem runs first (`/api/meta` is behind the gate): `cloud_redeem`, then probe, `cloud_join`. The code is spent at redeem; later failures retry the probe only.
 - `CloudPeople.tsx` asks (`cloud_people`), never stores: no role is on disk. Everyone reads the list; lists a role may not act on come back empty.
 - `cloud_join(endpoint, token)` asks for no folder: the workspace lands in `~/Doklin/<name>` (`Name 2` when taken).
-- An owner's unused codes go with them: removing or demoting an owner withdraws **every** pending invite, and a code for an owner's address is only the creator's or that owner's to make. Otherwise a removed owner returns on a code they kept.
+- An owner's unused codes go with them: removing or demoting an owner withdraws **every** pending invite. Otherwise a removed owner returns on a code they kept.
 
 ## Losing access (`engine.rs`, `mod.rs`)
 
@@ -31,11 +33,21 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - A removal never lapses: an offline Mac deletes when it next reaches the domain. A wipe empties `removed_tokens`, so it deletes nobody's copy.
 - `cloud_removed` returns the removals since launch, for a window that was not listening; a window dedupes by `root` + `at`.
 
+## Spaces (`spaces.ts`, `addresses.ts`)
+
+- A space (restricted folder, or a person's Private) is a workspace of its own under `spaces/<id>/`: the sync handlers run unchanged on an `Env` whose bucket is that prefix (`spaceEnv`). **One gate** (`openSpace`) sits before everything under `/api/spaces/<id>`; a new route goes behind it, never beside it.
+- **Outside a space it does not exist**, for owners too: same `404` as an unknown id, no name, no count. Presence shows a person is here without the path; leases in it are not listed.
+- Nothing about a space is in the shared manifest, the shared blobs or the shared version store.
+- Everyone in a restricted folder is equal. The last person cannot leave (`409`); a folder whose last person was removed from the workspace stays stored with nobody in it.
+- A Private's id is its person's (`p-<member hex>`), so it cannot be made twice; it never has a second person. A creator with no member row has none.
+- `spaces.etag` mirrors the space's manifest etag so one poll covers every space. It is written after each manifest write through the worker (`noteEtag`; `commit.ts` too) and repaired by any manifest read that finds it stale. A writer that bypasses both leaves other Macs blind.
+- A public address is one space's for the whole domain: `addresses.slug` is the primary key, claimed before the manifest is stored and released after (`claimAddresses`, called by `putManifest` and `commit`). The registry may hold a claim its space failed to store, never lack one it stored. The shared workspace's claims are best effort (its sync never waits on D1), so a space's claim is also checked against the shared map.
+
 ## Presence and leases (`presence.ts`, `engine.rs`)
 
 - The beat rides `POST /api/poll`; `GET` writes nothing. Owed every 45 s (`PRESENCE_BEAT`; TTL 90 s) and on a new edited path; a failed poll keeps it owed, no early retry. Only a new path, a cycle, the edited document's lease freeing, or a take-over bring a poll forward.
 - "Editing" = opened or typed in within 5 min (`ACTIVITY_FRESH`); `cloud_set_activity` fires per tab switch, never per key.
-- A beat naming a path claims its lease in one upsert (free, lapsed or already this Mac's; `take: true` regardless) and releases this Mac's others. Key = path lowercased (`lease_key` ⇄ `leaseKey`, **change both**). No reaper: reads filter, beats sweep.
+- A beat naming a path claims its lease in one upsert (free, lapsed or already this Mac's; `take: true` regardless) and releases this Mac's others. Key = space + path lowercased (`lease_key` ⇄ `leaseKey`, **change both**). No reaper: reads filter, beats sweep.
 - **Advisory, always**: nothing that writes the manifest reads a lease, agents included. A leased document opens view-only elsewhere (`LeaseBanner.tsx`); merges cover the gaps.
 - Any failure (no DB, D1 error, failed poll, paused engine) shows no lock; never on the sync path.
 

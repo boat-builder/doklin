@@ -30,6 +30,7 @@ import {
   cloudSetRole,
   cloudWithdrawInvite,
   may,
+  mayInviteAgain,
   revealSoon,
   timeAgo,
   timeUntil,
@@ -313,8 +314,10 @@ export default function CloudPeople({
                 </div>
                 <p className="cloud-hint">
                   Only the code runs out. Once they have joined, their access lasts until an owner
-                  removes them. Inviting somebody already here gives them a fresh code — for another
-                  Mac, say — and stops the one they had.
+                  removes them.{" "}
+                  {people.creator
+                    ? "Inviting somebody already here gives them a fresh code — for another Mac, say — and stops the one they had. Inviting somebody who was removed brings them back as the same person."
+                    : "A new code for somebody who has already signed in is theirs to make, or the workspace creator’s."}
                 </p>
                 <div className="modal-buttons">
                   <button
@@ -468,7 +471,7 @@ export default function CloudPeople({
                             <span className="cloud-hint">
                               Their code stops working, and every Mac they signed in on stops syncing and
                               deletes its copy of {name} the next time Doklin runs there. Nothing in the
-                              cloud is deleted.
+                              cloud is deleted, and their name stays on what they wrote.
                               {m.role === "owner" && " Codes nobody has used yet are withdrawn with them."}
                             </span>
                             <button
@@ -512,17 +515,19 @@ export default function CloudPeople({
                   </div>
                   <div className="cloud-hint">the code runs out in {timeUntil(i.expiresAt, now)}</div>
                   <div className="cloud-actions">
-                    <button
-                      className="modal-btn"
-                      data-testid={`reinvite-${i.id}`}
-                      onClick={() => {
-                        setMinted(null);
-                        setDraft({ email: i.email, name: i.name, days: 7 });
-                        revealSoon(top);
-                      }}
-                    >
-                      New code…
-                    </button>
+                    {mayInviteAgain(people, i.memberId) && (
+                      <button
+                        className="modal-btn"
+                        data-testid={`reinvite-${i.id}`}
+                        onClick={() => {
+                          setMinted(null);
+                          setDraft({ email: i.email, name: i.name, days: 7 });
+                          revealSoon(top);
+                        }}
+                      >
+                        New code…
+                      </button>
+                    )}
                     {confirm === `code:${i.id}` ? (
                       <span className="cloud-inline-confirm">
                         <span className="cloud-hint">The code stops working; they stay invited to nothing.</span>

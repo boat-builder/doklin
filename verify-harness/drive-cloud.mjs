@@ -1344,15 +1344,45 @@ await poll(async () => (await dialog("Cloud").count()) === 1);
 /* 24f — an owner who is not the creator, on a Mac that syncs with a token
    another of their Macs handed it (Connect another Mac…): the row is this
    Mac's own sign-in whatever device id it carries, so it is tagged and never
-   offered for signing out — that would delete the copy in hand */
+   offered for signing out — that would delete the copy in hand. And of the
+   codes nobody has used, they may replace their own and one for somebody who
+   has never signed in; one for a person who has is that person's, or the
+   creator's, so no New code is offered for it */
 const peopleBefore = await page.evaluate(() => window.__cloud.people);
+const pendingCode = (id, memberId, email) => ({
+  id,
+  memberId,
+  email,
+  name: email.split("@")[0],
+  createdAt: Date.now() - 3600000,
+  expiresAt: Date.now() + 6 * 86400000,
+});
+const personRow = (id, email, lastSeenAt) => ({
+  id,
+  email,
+  name: email.split("@")[0],
+  role: "member",
+  creator: false,
+  createdAt: Date.now() - 86400000,
+  lastSeenAt,
+  devices: lastSeenAt == null ? 0 : 1,
+});
 await setCloud({
   people: {
     ...peopleBefore,
     creator: false,
     me: "m-bob",
     tokenId: "t-bob-9",
-    members: peopleBefore.members.map((m) => (m.id === "m-bob" ? { ...m, role: "owner", devices: 1 } : m)),
+    members: [
+      ...peopleBefore.members.map((m) => (m.id === "m-bob" ? { ...m, role: "owner", devices: 1 } : m)),
+      personRow("m-dee", "dee@example.com", Date.now() - 7200000),
+      personRow("m-eli", "eli@example.com", null),
+    ],
+    invites: [
+      pendingCode("i-bob", "m-bob", "bob@example.com"),
+      pendingCode("i-dee", "m-dee", "dee@example.com"),
+      pendingCode("i-eli", "m-eli", "eli@example.com"),
+    ],
     devices: [
       {
         id: "t-bob-9",
@@ -1368,11 +1398,15 @@ await setCloud({
 await tid("people-open").click();
 await poll(async () => (await tid("mac-t-bob-9").count()) === 1);
 step(
-  "People (this Mac's own sign-in): the row whose token this Mac syncs with is tagged this Mac and has no Sign out, though another Mac redeemed it",
+  "People (this Mac's own sign-in): the row whose token this Mac syncs with is tagged this Mac and has no Sign out, though another Mac redeemed it; an owner who is not the creator is offered a new code for themselves and for somebody who never signed in, not for a person who has",
   (await tid("mac-t-bob-9").textContent()).includes("this Mac") &&
     (await tid("revoke-mac-t-bob-9").count()) === 0 &&
     (await tid("set-role-m-bob").count()) === 0 &&
-    (await tid("remove-person-m-bob").count()) === 0,
+    (await tid("remove-person-m-bob").count()) === 0 &&
+    (await tid("reinvite-i-bob").count()) === 1 &&
+    (await tid("reinvite-i-eli").count()) === 1 &&
+    (await tid("reinvite-i-dee").count()) === 0 &&
+    (await tid("withdraw-i-dee").count()) === 1,
 );
 await setCloud({ people: peopleBefore });
 await page.keyboard.press("Escape");

@@ -17,17 +17,21 @@
 //   · a delete removes the entry and leaves a tombstone one revision on, so a
 //     Mac moves its clean copy to the Trash and keeps an edited one;
 //   · `seq` goes up by one, and the manifest still passes `validateManifest`
-//     — the same check a Mac's PUT goes through.
+//     — the same check a Mac's PUT goes through;
+//   · an address the change adds to the public map is claimed before the
+//     manifest is stored, and one it drops is let go after (addresses.ts).
 //
 // A lost race is nearly always another device's unrelated write, so the loop
 // re-reads and re-applies rather than failing. That is why a caller's own
 // precondition (`if-rev`) is checked inside `change`, against the manifest it
 // was just handed, and never against the etag.
 
+import { claimAddresses, releaseAddresses, takenError, type Claim } from "./addresses";
 import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, blobKey } from "./layout";
 import { validateManifest, type Manifest, type ManifestFile } from "./manifest";
+import { noteEtag, spaceOf } from "./spaces";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 
@@ -191,6 +195,7 @@ export async function commit<T>(
   const named = (m: Manifest): Set<string> =>
     new Set(Object.entries(m.files).map(([fid, f]) => blobKey(fid, f.hash)));
 
+  const inSpace = spaceOf(env) !== "";
   let lastSeen = new Set<string>();
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const obj = await env.DATA.get(MANIFEST_KEY);
@@ -201,12 +206,13 @@ export async function commit<T>(
     } catch {
       parsed = null;
     }
-    if (validateManifest(parsed) !== null) {
+    if (validateManifest(parsed, inSpace) !== null) {
       return new Refusal(409, "this workspace's manifest is not one this worker can change — open it in Doklin first");
     }
     const tx = new Tx(env, parsed as Manifest, by);
     const before = named(tx.m);
     lastSeen = before;
+    const addresses = new Set(Object.keys(tx.m.public ?? {}));
 
     const value = await change(tx);
     if (value instanceof Refusal) {
@@ -227,7 +233,7 @@ export async function commit<T>(
     }
     // The change itself was well-formed — what it adds up to may not be: one
     // file too many, a name that collides, a path too deep.
-    const problem = validateManifest(next);
+    const problem = validateManifest(next, inSpace);
     const body = JSON.stringify(next);
     const blobs = tx.blobs();
     const refusal = problem
@@ -243,6 +249,24 @@ export async function commit<T>(
     }
     if (opts.dryRun) return { value, etag: obj.etag, manifest: next, wrote: false };
 
+    // Only a change to which addresses the map names is the registry's
+    // business — an ordinary write asks it nothing.
+    const slugs = Object.keys(next.public ?? {});
+    let claim: Claim | null = null;
+    if (slugs.length !== addresses.size || slugs.some((slug) => !addresses.has(slug))) {
+      claim = await claimAddresses(env, slugs);
+      const refused =
+        claim === null && inSpace
+          ? new Refusal(503, "this domain's database is not answering — try again in a moment")
+          : claim && claim.taken.length > 0
+            ? new Refusal(409, takenError(claim.taken).error, { taken: claim.taken })
+            : null;
+      if (refused) {
+        await sweep(before);
+        return refused;
+      }
+    }
+
     // Content first, the manifest last: a manifest must never name a blob
     // that is not there. Content-addressed and create-only, so storing one
     // that is already there is a no-op.
@@ -255,6 +279,8 @@ export async function commit<T>(
     const put = await env.DATA.put(MANIFEST_KEY, body, { ...JSON_OBJECT, onlyIf: { etagMatches: obj.etag } });
     if (put) {
       await sweep(named(next));
+      if (claim) await releaseAddresses(env, claim.stale);
+      await noteEtag(env, put.etag);
       return { value, etag: put.etag, manifest: next, wrote: true };
     }
   }

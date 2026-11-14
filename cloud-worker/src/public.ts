@@ -1,8 +1,9 @@
 // The public surface — no auth, GET/HEAD only.
 // The static assets and the landing page answer without touching the
-// workspace; everything else is resolved against the manifest's public map
-// and rendered from synced blobs (pages.ts), through a cache keyed by the
-// manifest's etag:
+// workspace; everything else is resolved against a public map and rendered
+// from synced blobs (pages.ts), through a cache keyed by that manifest's
+// etag. The map is the shared workspace's own — or, for an address it does
+// not hold, the map of the space the address registry names (addresses.ts):
 //
 //   GET /                        the root page when the map names one, else the landing page
 //   GET /<slug>                  a published note (html rendition when it has one; ?v=md the markdown)
@@ -17,8 +18,9 @@
 //
 // Every page carries <meta name="robots" content="noindex">.
 
+import { spaceAt } from "./addresses";
 import type { Env } from "./env";
-import { validPath } from "./layout";
+import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
 import { dirTitle, fileResponse, notePage, rawRendition, tocPage } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
 import {
@@ -31,6 +33,7 @@ import {
   ogImage,
   robotsTxt,
 } from "./static";
+import { spaceEnv } from "./spaces";
 import { FONT_PATH } from "./theme";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
@@ -57,8 +60,8 @@ function cacheStore(): CacheLike | null {
   return c?.default ?? null;
 }
 
-const cacheKey = (etag: string, url: URL): string =>
-  `https://cache.doklin/${etag}${url.pathname}${url.search}`;
+const cacheKey = (ws: Workspace, url: URL): string =>
+  `https://cache.doklin/${ws.etag}${ws.space ? `@${ws.space}` : ""}${url.pathname}${url.search}`;
 
 const cacheable = (res: Response): boolean =>
   (res.status === 200 || res.status === 404) && !res.headers.has("set-cookie");
@@ -91,11 +94,13 @@ export async function handlePublic(
     return deliver(fontFile(path.slice(FONT_PATH.length)) ?? notFoundPage(), request.method);
   }
 
-  const ws = await openWorkspace(env);
-  if (!ws) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);
+  const shared = await openWorkspace(env);
+  if (!shared) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);
+  const ws = await serving(env, shared, url);
+  if (!ws) return deliver(notFoundPage(), request.method);
 
   const cache = cacheStore();
-  const key = cacheKey(ws.etag, url);
+  const key = cacheKey(ws, url);
   if (cache) {
     const hit = await cache.match(key);
     if (hit) return deliver(withCacheControl(hit, "no-cache"), request.method);
@@ -107,6 +112,25 @@ export async function handlePublic(
     else await put;
   }
   return deliver(res, request.method);
+}
+
+/**
+ * The workspace a path is served from. The shared one answers `/`, its own
+ * addresses, and everything that could not be an address; an address it does
+ * not hold is looked up once and served from the space that does. Null when
+ * nobody holds it — a 404 that is never cached, because no manifest it could
+ * be keyed by moves when some space later claims the address.
+ */
+async function serving(env: Env, shared: Workspace, url: URL): Promise<Workspace | null> {
+  let slug: string;
+  try {
+    slug = decodeURIComponent(url.pathname.split("/")[1] ?? "");
+  } catch {
+    return shared;
+  }
+  if (!SLUG_RE.test(slug) || RESERVED_SLUGS.has(slug) || Object.hasOwn(shared.manifest.public ?? {}, slug)) return shared;
+  const space = await spaceAt(env, slug);
+  return space ? openWorkspace(spaceEnv(env, space), shared.name) : null;
 }
 
 /** The path's segments, percent-decoded; null when one is malformed or would create a segment of its own. */

@@ -11,4 +11,8 @@ export interface Env {
    *  Optional on purpose — a domain deployed before the binding existed has
    *  none, and every route works without one (schema.ts). */
   DB?: D1Database;
+  /** Never bound: the worker sets it on the `Env` it hands a space's routes
+   *  (spaces.ts). `DATA` is then that space's part of the bucket and `whole`
+   *  the bucket itself. Absent for the shared workspace. */
+  SPACE?: { id: string; whole: R2Bucket };
 }

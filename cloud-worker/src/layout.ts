@@ -8,6 +8,8 @@
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
+//   spaces/<spaceId>/…          a restricted folder or a person's Private: the same four kinds of
+//                               object again — manifest.json, blobs/, versions/ — under its own prefix
 //
 // Nothing public is stored here: public pages are rendered from blobs/. And
 // nobody is stored here: people, their tokens and their invites live in the
@@ -25,14 +27,19 @@ export const VERSIONS_PREFIX = "versions/";
 export const VERSIONS_INDEX_KEY = "versions/index.json";
 export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
 export const VERSION_BLOBS_PREFIX = "versions/blobs/";
+export const SPACES_PREFIX = "spaces/";
 
 export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
 export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
 export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;
+/** Everything one space stores. The trailing slash is what keeps `s-1` from covering `s-10`. */
+export const spacePrefix = (spaceId: string): string => `${SPACES_PREFIX}${spaceId}/`;
 
 /** File, device and workspace ids — what the engine mints. */
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
+/** A space: `s-` a restricted folder, `p-` a person's Private. */
+export const SPACE_ID_RE = /^[sp]-[a-f0-9]{8}$/;
 /** A content address: a hex prefix (16 characters and up) of the blob's sha256. */
 export const BLOB_HASH_RE = /^[a-f0-9]{16,64}$/;
 /** A mirrored snapshot: the millisecond it was taken, then the device that took it. */
@@ -92,4 +99,12 @@ export function validPath(p: unknown): p is string {
 export function validName(raw: unknown, fallback: string): string {
   const name = typeof raw === "string" ? raw.trim().slice(0, MAX_NAME_LEN) : "";
   return name || fallback;
+}
+
+/** A name a folder on disk can carry — what a restricted folder is called:
+ *  one path segment, trimmed and capped, not hidden. Null when it is not one. */
+export function validFolderName(raw: unknown): string | null {
+  const name = typeof raw === "string" ? raw.trim() : "";
+  if (name.length > MAX_NAME_LEN || name.includes("/") || name.startsWith(".")) return null;
+  return validPath(name) ? name : null;
 }

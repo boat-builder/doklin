@@ -1,4 +1,5 @@
-// The worker's view of the synced tree: the
+// The worker's view of a synced tree — the shared workspace's, or one
+// space's, whichever the `Env` is scoped to (spaces.ts): the
 // manifest — one `head` per request for its etag, the body only when the
 // etag moved past the isolate's memoized copy — the files it lists by path
 // and by id, their blobs, the notes under a folder, a folder's datastore and
@@ -10,6 +11,7 @@ import { readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
 import { MANIFEST_KEY, blobKey, validPath } from "./layout";
 import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
+import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
 import { META_SUFFIX, parseEntityMeta, type EntityMeta } from "../../src/metaFile";
 import { cardExcerpt, type Card } from "../../src/store/board";
@@ -113,13 +115,22 @@ type Loaded = {
   byLowerPath: Map<string, string>;
 };
 
-// The isolate's copy: re-read only when the manifest's etag moved.
-let memo: Loaded | null = null;
+// The isolate's copies, by space ("" the shared workspace): each re-read only
+// when its manifest's etag moved. Bounded, oldest out first; the shared
+// workspace's is asked for on every public request and never goes.
+const memos = new Map<string, Loaded>();
+const MAX_MEMOS = 16;
 
-/** The synced workspace behind this domain, or null when the domain holds none. */
-export async function openWorkspace(env: Env): Promise<Workspace | null> {
+/**
+ * The synced tree `env` is scoped to, or null when there is none — a domain
+ * that holds no workspace, a space with no manifest. `site` is what a
+ * space's pages are titled with: the workspace's name, never the space's own.
+ */
+export async function openWorkspace(env: Env, site?: string): Promise<Workspace | null> {
+  const space = spaceOf(env);
   const head = await env.DATA.head(MANIFEST_KEY);
   if (!head) return null;
+  let memo = memos.get(space);
   if (!memo || memo.etag !== head.etag) {
     const obj = await env.DATA.get(MANIFEST_KEY);
     if (!obj) return null;
@@ -136,28 +147,41 @@ export async function openWorkspace(env: Env): Promise<Workspace | null> {
       byPath.set(f.path, fid);
       if (!byLowerPath.has(f.path.toLowerCase())) byLowerPath.set(f.path.toLowerCase(), fid);
     }
-    memo = { etag: obj.etag, manifest, record: await readWorkspace(env), byPath, byLowerPath };
+    memo = { etag: obj.etag, manifest, record: space ? null : await readWorkspace(env), byPath, byLowerPath };
+    memos.delete(space);
+    memos.set(space, memo);
+    if (memos.size > MAX_MEMOS) {
+      for (const key of memos.keys()) {
+        if (key === "") continue;
+        memos.delete(key);
+        break;
+      }
+    }
   }
-  return new Workspace(env, memo);
+  return new Workspace(env, memo, site);
 }
 
 export class Workspace {
   readonly etag: string;
   readonly manifest: Manifest;
   readonly record: WorkspaceRecord | null;
+  /** The space this is; "" the shared workspace. */
+  readonly space: string;
 
   constructor(
     private readonly env: Env,
     private readonly loaded: Loaded,
+    private readonly site?: string,
   ) {
     this.etag = loaded.etag;
     this.manifest = loaded.manifest;
     this.record = loaded.record;
+    this.space = spaceOf(env);
   }
 
-  /** The workspace's name: the manifest's, else the binding's. */
+  /** The workspace's name: the one it was opened under, else the manifest's, else the binding's. */
   get name(): string {
-    return this.manifest.name?.trim() || this.record?.name.trim() || "Notes";
+    return this.site?.trim() || this.manifest.name?.trim() || this.record?.name.trim() || "Notes";
   }
 
   /** The file at a workspace-relative path — exact first, then case-insensitive. */

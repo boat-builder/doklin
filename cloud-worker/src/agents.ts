@@ -22,7 +22,7 @@ import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { validName } from "./layout";
 import { canonicalCode } from "./members";
-import { ensureSchema } from "./schema";
+import { withDb } from "./schema";
 
 /** What an agent may do. `read` is not optional — an agent that cannot read
  *  cannot do anything else usefully — so every agent holds it. */
@@ -98,22 +98,6 @@ const readScopes = (stored: string): Scope[] => {
   const have = new Set(stored.split(" "));
   return SCOPES.filter((s) => s === "read" || have.has(s));
 };
-
-/* ---------- The database, or nothing ---------- */
-
-/** Run something against the migrated database, or answer null — the same
- *  posture as members.ts: no binding, no migration and a throwing query are
- *  one answer, which the routes turn into a 503. */
-async function withDb<T>(env: Env, fn: (db: D1Database) => Promise<T>): Promise<T | null> {
-  const db = env.DB;
-  if (!db) return null;
-  try {
-    if ((await ensureSchema(env)) == null) return null;
-    return await fn(db);
-  } catch {
-    return null;
-  }
-}
 
 type AgentRow = {
   id: string;

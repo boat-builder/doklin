@@ -126,10 +126,10 @@ pub struct MemberRecord {
     pub creator: bool,
     #[serde(default)]
     pub created_at: u64,
+    /// When a Mac of theirs last beat, and before any has, when they first
+    /// traded a code in. `None`: nobody has ever signed in as them.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
-    #[serde(default)]
-    pub disabled: bool,
     /// How many Macs this person is signed in on, counted by the members
     /// route. Zero on a record that came from somewhere else — a redeem
     /// answers with the person, not with a census of them.

@@ -203,10 +203,10 @@ export type CloudMember = {
    *  Always an owner; nobody can remove them or make them a member. */
   creator: boolean;
   createdAt: number;
-  /** When this person's Mac last beat, to the hour — the poll that carries
-   *  presence writes it (worker v7). Null until they have been here since. */
+  /** When a Mac of theirs last beat, to the hour — and, before any has, when
+   *  they first traded a code in. Null means nobody has ever signed in as
+   *  them: they are invited, and that is all. */
   lastSeenAt: number | null;
-  disabled: boolean;
   /** How many Macs this person is signed in on. */
   devices: number;
 };
@@ -453,6 +453,17 @@ export function cloudForWorkspace(statuses: CloudStatus[], root: string | null):
  *  the People view's. The one question asked before a button is drawn. */
 export function may(who: { can: string[] }, action: CloudAction): boolean {
   return who.can.includes(action);
+}
+
+/** Whether this Mac may make a new code for somebody the workspace already
+ *  lists. Once anybody has signed in as a person, a code for them is theirs to
+ *  make, or the creator's — the domain refuses anyone else's. Until then they
+ *  are only invited, and whoever may invite may replace the code. */
+export function mayInviteAgain(people: CloudPeople, memberId: string): boolean {
+  if (!may(people, "people.invite")) return false;
+  const person = people.members.find((m) => m.id === memberId);
+  const signedIn = !!person && (person.creator || person.lastSeenAt != null);
+  return !signedIn || people.creator || people.me === memberId;
 }
 
 /** The same question of a workspace's status, whose `can` is empty until the

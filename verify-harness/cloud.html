@@ -161,7 +161,6 @@
               creator: false,
               createdAt: Date.now() - 6 * 86400000,
               lastSeenAt: Date.now() - 3600000,
-              disabled: false,
               devices: 1,
             },
           ],
@@ -521,7 +520,6 @@
                 creator: true,
                 createdAt: Date.now(),
                 lastSeenAt: null,
-                disabled: false,
                 devices: 0,
               };
               // One row is the creator's; everybody else's role is their own.
@@ -555,7 +553,6 @@
                   creator: false,
                   createdAt: Date.now(),
                   lastSeenAt: null,
-                  disabled: false,
                   devices: 0,
                 };
                 p.members = [...p.members, member];

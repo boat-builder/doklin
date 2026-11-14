@@ -94,7 +94,17 @@
 //       credential an owner took away is answered `401 {removed: true}`,
 //       which alone has a Mac delete its copy. D1 gains `creator` and
 //       `removed_tokens`.
-export const WORKER_VERSION = 12;
+//  13 = spaces: a restricted folder, or a person's Private, is a workspace of
+//       its own under `spaces/<id>/`, served by the sync routes again at
+//       `/api/spaces/<id>/…` to the people in it and a 404 to everyone else.
+//       The poll answers the caller's spaces with each one's manifest etag,
+//       and presence and leases are by space. A public address is one
+//       space's for the whole domain (`addresses`), and a page is served from
+//       whichever holds it. A removed person's row is kept, out of the People
+//       list, and a code for somebody who has signed in before is theirs or
+//       the creator's to make. D1 gains `spaces`, `space_members` and
+//       `addresses`; `presence` and `leases` are made again with a space.
+export const WORKER_VERSION = 13;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -108,6 +118,7 @@ export const WORKER_FEATURES: readonly string[] = [
   "versions",
   "members",
   "roles",
+  "spaces",
   "presence",
   "leases",
   "agents",
@@ -124,6 +135,8 @@ export const WORKER_FEATURES: readonly string[] = [
 // credential is told so. The People view asks for it before it draws: against
 // a worker without the name it has no way to know what to offer, and says the
 // worker needs updating instead.
+// "spaces" is the promise that `/api/spaces` answers, that the poll lists the
+// caller's spaces, and that a beat may name the space its document is in.
 // "presence" is the promise that `POST /api/poll` carries a beat. Every
 // worker has had presence of some kind; before this one it was a route of its
 // own, and an app that beats into a worker without the name would be POSTing

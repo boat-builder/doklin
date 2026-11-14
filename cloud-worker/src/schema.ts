@@ -8,7 +8,8 @@
 //
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
-//     instead of colliding.
+//     instead of colliding. A table whose shape changes is dropped and made
+//     again, and only ever one that holds nothing worth keeping (step 9's).
 //   · A guarded bump. The version only ever moves with
 //     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
@@ -249,6 +250,69 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // Spaces: a restricted folder, or one person's Private, is a small
+    // workspace of its own stored under `spaces/<id>/` in the bucket, with
+    // its own people. The shared workspace is not a row here — it is
+    // everything outside that prefix, and everybody's.
+    //
+    // `etag` is the space's manifest etag, written by the worker after each
+    // write it makes there: it is how one poll says which of a person's
+    // spaces moved without a bucket read for each.
+    //
+    // `addresses` says which space each public address belongs to ('' the
+    // shared workspace). The primary key is what makes an address one
+    // space's, and it is how the renderer finds a page that is not in the
+    // shared workspace's own map.
+    //
+    // Presence and leases are made again with the space each row is in:
+    // a lease is now one document in one space. Both hold only what the
+    // last minute and a half wrote, so dropping them costs a beat.
+    to: 9,
+    tables: ["space_members", "addresses", "spaces"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS spaces (
+         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
+         kind       TEXT NOT NULL,              -- 'restricted' | 'private'
+         name       TEXT NOT NULL,
+         created_by TEXT NOT NULL,              -- m-xxxxxxxx
+         created_at INTEGER NOT NULL,
+         etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
+       )`,
+      `CREATE TABLE IF NOT EXISTS space_members (
+         member_id TEXT NOT NULL,
+         space_id  TEXT NOT NULL,
+         added_by  TEXT NOT NULL,               -- m-xxxxxxxx
+         added_at  INTEGER NOT NULL,
+         PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
+       )`,
+      `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
+      `CREATE TABLE IF NOT EXISTS addresses (
+         slug     TEXT PRIMARY KEY,
+         space_id TEXT NOT NULL                 -- '' is the shared workspace
+       )`,
+      `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
+      `DROP TABLE IF EXISTS presence`,
+      `CREATE TABLE IF NOT EXISTS presence (
+         device_id   TEXT PRIMARY KEY,          -- x-doklin-device
+         member_id   TEXT,                      -- the person; null for a creator nobody named
+         device_name TEXT NOT NULL,
+         space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
+         path        TEXT,                      -- what they are editing, when anything
+         ts          INTEGER NOT NULL
+       )`,
+      `DROP TABLE IF EXISTS leases`,
+      `CREATE TABLE IF NOT EXISTS leases (
+         space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
+         path        TEXT NOT NULL,             -- relative to its space, lowercased
+         device_id   TEXT NOT NULL,             -- the Mac that holds it
+         member_id   TEXT,                      -- whose Mac; null for a creator nobody named
+         device_name TEXT NOT NULL,
+         until       INTEGER NOT NULL,
+         PRIMARY KEY (space_id, path)
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
@@ -288,6 +352,24 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     }
     migrated = version >= SCHEMA_VERSION;
     return version;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run something against the migrated database, or answer null: "this
+ * deployment has no `DB` binding", "the database could not be migrated" and
+ * "the query threw" are one answer, which a route turns into a 503 or into
+ * going without — never a 500, and never a route that throws because
+ * somebody deleted a database out from under a deployed worker.
+ */
+export async function withDb<T>(env: Env, fn: (db: D1Database) => Promise<T>): Promise<T | null> {
+  const db = env.DB;
+  if (!db) return null;
+  try {
+    if ((await ensureSchema(env)) == null) return null;
+    return await fn(db);
   } catch {
     return null;
   }
