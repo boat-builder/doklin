@@ -1,4 +1,4 @@
-// The Cloud panel's "People and agents" view.
+// The workspace's "People and agents" view (PeopleDialog.tsx draws its frame).
 // Two kinds of access, a tab each, because they are let in differently and
 // nobody should have to scroll past one to find the other:
 //
@@ -53,8 +53,8 @@ const EXPIRY_CHOICES: { days: number; label: string }[] = [
 
 type Draft = { email: string; name: string; days: number };
 
-/** The view's two tabs. The panel owns which one is showing: each has a door
- *  of its own there. */
+/** The view's two tabs. The app owns which one is showing: each has a door
+ *  of its own in the workspace menu. */
 export type AccessTab = "people" | "agents";
 
 const TABS: { tab: AccessTab; label: string }[] = [
@@ -78,7 +78,7 @@ export default function CloudPeople({
   domain: string;
   tab: AccessTab;
   onTab: (tab: AccessTab) => void;
-  /** The panel's clipboard helper, so "Copied ✓" reads the same everywhere. */
+  /** The dialog's clipboard helper, so "Copied ✓" reads the same everywhere. */
   copy: (key: string, text: string) => void;
   copied: string | null;
 }) {

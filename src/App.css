@@ -2812,6 +2812,113 @@ body.sidebar-resizing {
   background: var(--hover);
 }
 
+/* A workspace in sections: Restricted and Private are headings in the tree,
+   each over a list of its own. A drop on a section's empty space lands in
+   that section's folder, so the whole section lights up. */
+.tree-section {
+  border-radius: 8px;
+}
+
+.tree-section + .tree-section {
+  margin-top: 10px;
+}
+
+.tree-section.is-drop-section {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  background: var(--hover);
+}
+
+.tree-section-head {
+  padding: 0 6px 0 12px;
+}
+
+.tree-section-hint {
+  padding: 2px 12px 6px;
+  line-height: 1.45;
+}
+
+.tree-section-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.tree-section-link:hover {
+  text-decoration: underline;
+}
+
+/* How many people a restricted folder holds, after its name. */
+.tree-space-count {
+  flex-shrink: 0;
+  margin-left: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+/* A note straight under Restricted is in no folder, so nobody else has it. */
+.tree-row.is-nowhere .tree-label {
+  color: var(--text-3);
+}
+
+.tree-nowhere {
+  flex-shrink: 0;
+  margin-left: 6px;
+  font-size: var(--fs-xs);
+  color: var(--warn-ink);
+}
+
+/* The people of a restricted folder, and the ones who could be added:
+   one line each, the action at its end. */
+.space-people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.space-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: var(--fs-md);
+  color: var(--text-1);
+}
+
+.space-person label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.space-person-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-person-email {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space-person-gap {
+  flex: 1;
+}
+
 /* The pill that follows the pointer: what's being moved, and where it lands. */
 .tree-drag-ghost {
   position: fixed;

@@ -11,7 +11,7 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 - A bearer an owner took away (person removed, Mac signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the Mac delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`.
 - Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`, the **creator** (no D1 read); `dka_…` → `agent_tokens` → `agent`; else `tokens` → the role on that person's `members` row (`owner` | `member`), read every request.
-- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work` and `people.see`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `workspace.manage`.
+- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work` and `people.see`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
 - Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
 - No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`.
 - No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search, board routes → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
@@ -75,6 +75,20 @@ DELETE /api/spaces/<id>/members/<memberId>  204 (self = leave); 404 not in it; 4
 
 `409`: PATCH, DELETE or members on a Private; any call by a creator with no
 member row. A space's manifest may not name a `root` page (`400`).
+
+## Every public address (`src/everyPage.ts`; `pages.manage`)
+
+```
+GET    /api/pages  {pages: [{slug, kind, title, by, at, shared}], truncated}
+DELETE /api/pages/<slug>  204; 404 nothing is published there
+```
+
+Every page the domain serves, whichever space published it. Of a page in a
+space it says only what the address tells anyone: `title` (the entry's, else
+the file's or folder's name, else the space's), `by` as a name, `at`. Never
+the space, the path or the file. `shared` = in the shared workspace.
+`truncated`: more spaces hold addresses than one request reads (40). The
+`DELETE` edits that space's public map through `commit`.
 
 ## Auth routes (`src/api.ts`, `src/agentApi.ts`)
 

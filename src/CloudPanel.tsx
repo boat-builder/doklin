@@ -6,16 +6,14 @@
 // Not connected: three doors — join a workspace somebody invited you to with
 // the line they sent, create one from this folder on a domain of your own, or
 // open one another Mac of yours created. Connected: the workspace and its
-// phase, sync now / pause, who else is here, the people and the agents on the
-// workspace (one view with a tab each, CloudPeople.tsx — and a door each
-// here, so neither has to be found behind the other), the held
-// mass-deletion waiting for a word, the
-// worker's version against this app's, the credentials a second Mac needs,
-// disconnect, and the danger zone: erase everything on the domain (which
-// frees it), then the teardown prompt for the agent.
+// phase, sync now / pause, who else is here, the held mass-deletion waiting
+// for a word, the worker's version against this app's, the credentials a
+// second Mac needs, disconnect, and the danger zone: erase everything on the
+// domain (which frees it), then the teardown prompt for the agent. Who is in
+// the workspace, and its agents, are the workspace menu's (PeopleDialog.tsx).
 //
-// What only an owner may do — agents, the worker, the danger zone — is hidden
-// from a member by the same table the domain decides with (`mayOn`).
+// What only an owner may do — the worker, the danger zone — is hidden from a
+// member by the same table the domain decides with (`mayOn`).
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -35,7 +33,6 @@ import {
   type CloudCredentials,
   type CloudStatus,
 } from "./cloud";
-import CloudPeople from "./CloudPeople";
 import { buildTeardownPrompt } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
 
@@ -60,8 +57,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
-// "people" and "agents" are one view — CloudPeople, on that tab.
-type View = "main" | "people" | "agents" | "another" | "wipe" | "teardown";
+type View = "main" | "another" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
@@ -178,17 +174,13 @@ export default function CloudPanel({
   }, [cloud]);
 
   const title =
-    view === "people" || view === "agents"
-      ? mayOn(cloud, "agents.manage")
-        ? "People and agents"
-        : "People"
-      : view === "another"
-        ? "Connect another Mac"
-        : view === "wipe"
-          ? `Delete everything on ${cloud?.domain ?? "the domain"}`
-          : view === "teardown"
-            ? "Tear down"
-            : "Cloud";
+    view === "another"
+      ? "Connect another Mac"
+      : view === "wipe"
+        ? `Delete everything on ${cloud?.domain ?? "the domain"}`
+        : view === "teardown"
+          ? "Tear down"
+          : "Cloud";
 
   let body: React.ReactNode;
   if (view === "teardown" && tornDown) {
@@ -251,18 +243,6 @@ export default function CloudPanel({
         </p>
       </>
     );
-  } else if ((view === "people" || view === "agents") && cloud) {
-    body = (
-      <CloudPeople
-        root={cloud.root}
-        name={cloud.name}
-        domain={cloud.domain}
-        tab={view}
-        onTab={setView}
-        copy={(k, t) => void copy(k, t)}
-        copied={copied}
-      />
-    );
   } else if (view === "another") {
     body = (
       <>
@@ -298,7 +278,8 @@ export default function CloudPanel({
         <p className="cloud-hint cloud-warn">
           This is the credential this Mac syncs with: whoever holds it can read and write everything
           on {cloud.domain}. Share it only with Macs you own — to let somebody <em>else</em> in,
-          invite them under People and they get a credential of their own, which you can take back.
+          invite them under People, in the workspace menu, and they get a credential of their own,
+          which you can take back.
         </p>
         {error && <div className="modal-error">{error}</div>}
       </>
@@ -351,8 +332,6 @@ export default function CloudPanel({
     const pages = cloud.public.length;
     // An owner's, hidden from a member — and offered while the domain has not
     // said, which is every worker from before roles (`mayOn`).
-    const invites = mayOn(cloud, "people.invite");
-    const agents = mayOn(cloud, "agents.manage");
     const manages = mayOn(cloud, "workspace.manage");
     body = (
       <>
@@ -494,27 +473,6 @@ export default function CloudPanel({
               </li>
             ))}
           </ul>
-        )}
-        {/* Two doors into one view: a person and an agent are let in, and
-            shut out, in different ways, and each should be findable by name. */}
-        <div className="cloud-section-label">{agents ? "People and agents" : "People"}</div>
-        <div className="cloud-actions">
-          <button className="modal-btn" data-testid="people-open" onClick={() => setView("people")}>
-            People…
-          </button>
-          <span className="cloud-hint">
-            {invites
-              ? "See who is in this workspace, invite someone, or take access away."
-              : "See who is in this workspace."}
-          </span>
-        </div>
-        {agents && (
-          <div className="cloud-actions">
-            <button className="modal-btn" data-testid="agents-open" onClick={() => setView("agents")}>
-              Agents…
-            </button>
-            <span className="cloud-hint">Let a bot work here from another computer, and say what it may do.</span>
-          </div>
         )}
 
         <div className="cloud-section-label">Public</div>

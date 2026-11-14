@@ -20,6 +20,10 @@ pub const EV_APPLIED: &str = "cloud-applied";
 pub const EV_CONFLICT: &str = "cloud-conflict";
 /// `{root, count, total, paths}`.
 pub const EV_PENDING_DELETES: &str = "cloud-pending-deletes";
+/// `{root, name, path}` — a restricted folder left this Mac: this person was
+/// taken out of it, or it was deleted. `path` is where it was,
+/// workspace-relative.
+pub const EV_SPACE_LEFT: &str = "cloud-space-left";
 /// `{root, kind: "upload" | "download", done, total}`.
 pub const EV_PROGRESS: &str = "cloud-progress";
 /// A `Removed` — an owner took this Mac's access away, and the workspace's
@@ -59,6 +63,10 @@ pub struct CloudStatus {
     /// What a surface compares a `by` against to
     /// know whether somebody *else* did a thing.
     pub me: String,
+    /// The same person as the domain's id for them — which of a folder's
+    /// `members` is this Mac. None until the domain has said, and for a
+    /// creator who never said who they are.
+    pub me_id: Option<String>,
     /// What this Mac's credential may do here, in the words of the worker's
     /// role table (`work`, `people.invite`, …) — what every surface hides
     /// the rest by. Empty until the domain has answered once, and from a
@@ -84,6 +92,10 @@ pub struct CloudStatus {
     /// and the restricted folders they are in — that have a folder on this
     /// Mac. Empty from a worker without `spaces`.
     pub spaces: Vec<SpaceStatus>,
+    /// The workspace is in sections here: `Private` and `Restricted` at its
+    /// top are not shared folders. False from a worker without `spaces`, and
+    /// while the shared workspace still holds something under those names.
+    pub sections: bool,
 }
 
 /// One section of the workspace that only some people have.

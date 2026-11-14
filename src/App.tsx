@@ -7,23 +7,34 @@ import {
   cloudPublish,
   cloudRemoved,
   cloudSetActivity,
+  cloudSpaceCreate,
   cloudStatus,
   cloudTakeOver,
   cloudUnpublish,
   leaseFor,
+  mayOn,
   onCloudApplied,
   onCloudAddressTaken,
   onCloudConflict,
   onCloudPendingDeletes,
   onCloudRemoved,
+  onCloudSpaceLeft,
   onCloudStatus,
+  placeOf,
   relPathIn,
+  widerAudience,
   type CloudPendingDeletesEvent,
   type CloudRemovedEvent,
+  type CloudSpace,
+  type CloudSpaceLeftEvent,
   type CloudStatus,
   type PublicPage,
 } from "./cloud";
 import CloudPanel from "./CloudPanel";
+import type { AccessTab } from "./CloudPeople";
+import PeopleDialog from "./PeopleDialog";
+import RestrictedFolder, { type RestrictedSource } from "./RestrictedFolder";
+import SpaceAccess from "./SpaceAccess";
 import { LeaseBanner } from "./LeaseBanner";
 import {
   onVersionsApplied,
@@ -459,6 +470,10 @@ const restoreUntitled = async (id: string, path: string): Promise<UntitledTab | 
 
 // What can be done with an untitled note whose tab is about to close.
 type UnsavedChoice = "save" | "discard" | "cancel";
+
+// A yes-or-no put to the user before something that lets more people see a
+// document, or takes a folder off other people's Macs.
+type Question = { title: string; body: string; confirm: string; answer: (yes: boolean) => void };
 
 // One in-app delete, as undo needs to see it — see deletedStackRef.
 type DeletedRecord = {
@@ -1046,6 +1061,20 @@ export default function App() {
   const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
   const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
   const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
+  // The workspace's own surfaces, reached from its menu and its sections:
+  // who is in it and its agents (one window, a tab each); the dialog that
+  // makes a restricted folder, and what it is being made from; and whose
+  // access is being managed — by id, so the dialog follows the status.
+  const [accessTab, setAccessTab] = useState<AccessTab | null>(null);
+  const [restrictedSource, setRestrictedSource] = useState<RestrictedSource | null>(null);
+  const [accessSpaceId, setAccessSpaceId] = useState<string | null>(null);
+  // A question with one safe answer, asked in the app's own chrome and
+  // answered once (`askUser`).
+  const [question, setQuestion] = useState<Question | null>(null);
+  const askUser = useCallback(
+    (q: Omit<Question, "answer">) => new Promise<boolean>((answer) => setQuestion({ ...q, answer })),
+    [],
+  );
   // Version history: which document's rail is
   // open, and which of its versions is showing in the document area instead
   // of the live editor. `historyToken` re-reads the rail after a restore
@@ -1062,8 +1091,12 @@ export default function App() {
   // The workspace timeline (a modal) and the deleted files (a sidebar
   // column). The app owns the deleted list: the sidebar's row needs the
   // same count, and reading it costs a walk of the retained snapshots.
-  const [workspaceHistoryOpen, setWorkspaceHistoryOpen] = useState(false);
+  // Each is for one folder with a history of its own: the workspace, or a
+  // section of it — its folder is what `historyRoot` and `deletedFor` hold.
+  const [historyRoot, setHistoryRoot] = useState<string | null>(null);
   const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([]);
+  const [deletedFor, setDeletedFor] = useState<string | null>(null);
+  const [sectionDeleted, setSectionDeleted] = useState<DeletedFile[]>([]);
   // Every store's status — the settings surface's whole model, the same way
   // the cloud statuses are the Cloud panel's.
   const [versionStatuses, setVersionStatuses] = useState<VersionsStatus[]>([]);
@@ -2683,6 +2716,24 @@ export default function App() {
       cancelled = true;
     };
   }, [workspaceRoot, treeRefreshToken]);
+  // A section's own deleted files, read while its column is showing.
+  useEffect(() => {
+    if (!deletedFor) {
+      setSectionDeleted([]);
+      return;
+    }
+    let cancelled = false;
+    void versionsDeleted(deletedFor)
+      .then((files) => {
+        if (!cancelled) setSectionDeleted(files);
+      })
+      .catch(() => {
+        if (!cancelled) setSectionDeleted([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deletedFor, treeRefreshToken]);
 
   // The stores' statuses, read when the settings surface opens. The event
   // keeps them current while it is open, and asking at boot would only race
@@ -3811,59 +3862,12 @@ export default function App() {
     }
   }, [openTab]);
 
-  // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
-  // inline Rename both end here), then repoint every piece of state that keys
-  // off the old path: open tabs (including everything inside a moved folder),
-  // the active document's autosave target and watcher, and the sidebar
-  // selection. Returns an error message for the caller to surface
-  // (inline under the rename input, alert for a drop), or null on success.
-  const movePath = useCallback(
-    async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
-      // If the active document is about to move, land any pending autosave at
-      // the OLD path first — a debounced write firing mid-rename would
-      // otherwise recreate the file at the path it just left.
-      if (
-        pathRef.current &&
-        (pathRef.current === from || (kind === "dir" && pathRef.current.startsWith(from + "/")))
-      ) {
-        await flushPendingAutosave();
-      }
-      // Same for a pending comment write: land it before its sidecar (or the
-      // rendition it belongs to) moves out from under it.
-      await flushSidecarWrite();
-      try {
-        await invoke("move_path", { from, to });
-      } catch (e) {
-        return String(e);
-      }
-      // A document's companions move/rename with it — the markdown, its html
-      // rendition and the entity meta are one document, and leaving one
-      // behind would silently split it. Best-effort: the primary file has
-      // already moved.
-      const moveCompanion = async (cFrom: string, cTo: string, label: string) => {
-        const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
-          () => false,
-        );
-        if (!exists) return;
-        try {
-          await invoke("move_path", { from: cFrom, to: cTo });
-        } catch (e) {
-          window.alert(`Moved "${basename(from)}" but not its ${label}.\n${e}`);
-        }
-      };
-      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
-        const fromHtml = htmlSiblingOf(from);
-        const toHtml = htmlSiblingOf(to);
-        await moveCompanion(fromHtml, toHtml, "HTML version");
-        await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
-      } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
-        // A standalone html document carries the entity meta; a rendition of
-        // a pair leaves it with the markdown side.
-        const mdExists = await invoke<boolean>("path_exists", {
-          path: mdSiblingOf(from),
-        }).catch(() => false);
-        if (!mdExists) await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
-      }
+  // Something moved on disk from `from` to `to`: repoint every piece of state
+  // that keys off the old path — open tabs (including everything inside a
+  // moved folder), the active document's autosave target and watcher, the
+  // split pane, and the sidebar selection.
+  const repointMoved = useCallback(
+    async (from: string, to: string, kind: "file" | "dir") => {
       const remap = (p: string) =>
         p === from
           ? to
@@ -3940,15 +3944,142 @@ export default function App() {
       if (remapped.some((s, i) => s !== sels[i])) selectSidebarEntries(remapped);
 
       setTreeRefreshToken((t) => t + 1);
+    },
+    [selectSidebarEntries, refreshWatchSet, setSplitState],
+  );
+
+  // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
+  // inline Rename both end here), then repoint the state that keyed off the
+  // old path (`repointMoved`). Returns an error message for the caller to
+  // surface (inline under the rename input, alert for a drop), or null on
+  // success.
+  const movePath = useCallback(
+    async (from: string, to: string, kind: "file" | "dir"): Promise<string | null> => {
+      // If the active document is about to move, land any pending autosave at
+      // the OLD path first — a debounced write firing mid-rename would
+      // otherwise recreate the file at the path it just left.
+      if (
+        pathRef.current &&
+        (pathRef.current === from || (kind === "dir" && pathRef.current.startsWith(from + "/")))
+      ) {
+        await flushPendingAutosave();
+      }
+      // Same for a pending comment write: land it before its sidecar (or the
+      // rendition it belongs to) moves out from under it.
+      await flushSidecarWrite();
+      try {
+        await invoke("move_path", { from, to });
+      } catch (e) {
+        return String(e);
+      }
+      // A document's companions move/rename with it — the markdown, its html
+      // rendition and the entity meta are one document, and leaving one
+      // behind would silently split it. Best-effort: the primary file has
+      // already moved.
+      const moveCompanion = async (cFrom: string, cTo: string, label: string) => {
+        const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
+          () => false,
+        );
+        if (!exists) return;
+        try {
+          await invoke("move_path", { from: cFrom, to: cTo });
+        } catch (e) {
+          window.alert(`Moved "${basename(from)}" but not its ${label}.\n${e}`);
+        }
+      };
+      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
+        const fromHtml = htmlSiblingOf(from);
+        const toHtml = htmlSiblingOf(to);
+        await moveCompanion(fromHtml, toHtml, "HTML version");
+        await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
+      } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
+        // A standalone html document carries the entity meta; a rendition of
+        // a pair leaves it with the markdown side.
+        const mdExists = await invoke<boolean>("path_exists", {
+          path: mdSiblingOf(from),
+        }).catch(() => false);
+        if (!mdExists) await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
+      }
+      await repointMoved(from, to, kind);
       return null;
     },
-    [
-      flushPendingAutosave,
-      flushSidecarWrite,
-      selectSidebarEntries,
-      refreshWatchSet,
-      setSplitState,
-    ],
+    [flushPendingAutosave, flushSidecarWrite, repointMoved],
+  );
+
+  /* ---------- Sections: who can open what ---------- */
+
+  const cloudForRootRef = useRef(cloudForRoot);
+  cloudForRootRef.current = cloudForRoot;
+
+  // Asked once before anything moves between folders. Two moves change who
+  // can open a thing, and say so first: one that lets more people see it,
+  // and a folder put straight under Restricted, which becomes a restricted
+  // folder and leaves everyone else's Mac. Every other move just happens.
+  const confirmMove = useCallback(
+    async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
+      const cloud = cloudForRootRef.current;
+      const toRel = cloud?.sections ? relPathIn(cloud.root, toDir) : null;
+      if (!cloud || toRel === null || entries.length === 0) return true;
+      const one = entries.length === 1;
+      const label = (en: SidebarSelection) =>
+        en.kind === "file" ? basename(en.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "") : basename(en.path);
+      const what = one ? `“${label(entries[0])}”` : `${entries.length} items`;
+      const to = placeOf(cloud, toRel);
+      if (to.kind === "nowhere") {
+        if (toRel.toLowerCase() !== "restricted") return true;
+        return askUser({
+          title: `Restrict ${what}?`,
+          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s Mac.`,
+          confirm: "Restrict",
+        });
+      }
+      const gains = new Set<string>();
+      for (const en of entries) {
+        const rel = relPathIn(cloud.root, en.path);
+        const who = rel === null ? null : widerAudience(cloud, placeOf(cloud, rel), to);
+        if (who) gains.add(who);
+      }
+      if (gains.size === 0) return true;
+      return askUser({
+        title: `Move ${what} to ${to.kind === "shared" ? "the workspace" : `“${to.space.name}”`}?`,
+        body: `${[...gains][0]} will be able to see ${one ? "it" : "them"}.`,
+        confirm: "Move",
+      });
+    },
+    [askUser],
+  );
+
+  // Make the restricted folder its dialog asked for, and put in it what the
+  // dialog was opened on: a folder becomes it (the engine moves it, so the
+  // people in it keep their copies in place); a note is moved into it.
+  // Resolves to a sentence when it could not be done.
+  const makeRestricted = useCallback(
+    async (source: RestrictedSource, name: string, members: string[]): Promise<string | null> => {
+      const cloud = cloudForRootRef.current;
+      if (!cloud) return "This workspace isn’t connected.";
+      try {
+        if (source.kind === "folder") {
+          // Land what is being typed inside it before the folder moves.
+          if (pathRef.current?.startsWith(`${source.path}/`)) await flushPendingAutosave();
+          await flushSidecarWrite();
+          const made = await cloudSpaceCreate(cloud.root, name, members, source.path);
+          await repointMoved(source.path, `${cloud.root}/${made.path}`, "dir");
+        } else {
+          const made = await cloudSpaceCreate(cloud.root, name, members);
+          if (source.kind === "note") {
+            const to = `${cloud.root}/${made.path}/${basename(source.path)}`;
+            const failed = await movePath(source.path, to, "file");
+            if (failed) return `The folder was made, but the note could not be moved into it: ${failed}`;
+          }
+          setTreeRefreshToken((t) => t + 1);
+        }
+        setRestrictedSource(null);
+        return null;
+      } catch (e) {
+        return errText(e);
+      }
+    },
+    [flushPendingAutosave, flushSidecarWrite, movePath, repointMoved],
   );
 
   /* ---------- File clipboard (sidebar Cut/Copy/Paste) ---------- */
@@ -3994,6 +4125,11 @@ export default function App() {
         return;
       }
       if (!clip || clip.items.length === 0) return;
+      // A cut is a move, and a move can change who sees what.
+      if (clip.cut) {
+        const leaving = clip.items.filter((item) => dirname(item.path) !== destDir);
+        if (!(await confirmMove(leaving, destDir))) return;
+      }
       const pasted: SidebarSelection[] = [];
       let copiedAny = false;
       for (const item of clip.items) {
@@ -4064,7 +4200,7 @@ export default function App() {
       if (copiedAny) setTreeRefreshToken((t) => t + 1); // moves refresh on their own
       if (pasted.length > 0) selectSidebarEntries(pasted);
     },
-    [movePath, selectSidebarEntries],
+    [movePath, selectSidebarEntries, confirmMove],
   );
 
   // Trash a whole selection, outermost entries only — deleting a folder
@@ -4979,19 +5115,12 @@ export default function App() {
   const [removedNotice, setRemovedNotice] = useState<CloudRemovedEvent | null>(null);
   const readyRef = useRef(false);
   readyRef.current = ready;
-  const leaveRemovedWorkspace = useCallback(
-    async (e: CloudRemovedEvent) => {
-      const key = `${e.root}@${e.at}`;
-      if (shownRemovals.has(key)) return;
-      shownRemovals.add(key);
-      const under = (p: string) => p === e.root || p.startsWith(`${e.root}/`);
-      const here = sessionWorkspaceRoot === e.root;
-      const doomed = tabsRef.current.filter((t) => t.kind !== "untitled" && under(t.path));
-      if (!here && doomed.length === 0 && !isMainWindow) return;
-      // The files are gone, so there is nothing to save. The open document's
-      // writers stand down before its tab closes: closing flushes, and a
-      // flush into a folder that no longer exists is an error about a file
-      // nobody has any more.
+  // Close the tabs of files that are gone from this Mac. There is nothing to
+  // save, so the open document's writers stand down before its tab closes:
+  // closing flushes, and a flush into a folder that no longer exists is an
+  // error about a file nobody has any more.
+  const closeGoneTabs = useCallback(
+    async (under: (path: string) => boolean) => {
       if (pathRef.current && under(pathRef.current)) {
         catchUpWithEditor();
         if (autosaveTimerRef.current != null) {
@@ -5004,13 +5133,36 @@ export default function App() {
         }
         lastSavedRef.current = currentMarkdownRef.current;
       }
+      if (historyForRef.current && under(historyForRef.current)) {
+        setHistoryFor(null);
+        setVersionPreview(null);
+      }
+      const doomed = tabsRef.current.filter((t) => t.kind !== "untitled" && under(t.path));
+      for (const t of doomed) await closeTab(t.id);
+    },
+    [catchUpWithEditor, closeTab],
+  );
+  const leaveRemovedWorkspace = useCallback(
+    async (e: CloudRemovedEvent) => {
+      const key = `${e.root}@${e.at}`;
+      if (shownRemovals.has(key)) return;
+      shownRemovals.add(key);
+      const under = (p: string) => p === e.root || p.startsWith(`${e.root}/`);
+      const here = sessionWorkspaceRoot === e.root;
+      const open = tabsRef.current.some((t) => t.kind !== "untitled" && under(t.path));
+      if (!here && !open && !isMainWindow) return;
       setHistoryFor(null);
       setVersionPreview(null);
-      for (const t of doomed) await closeTab(t.id);
+      await closeGoneTabs(under);
       if (here) {
         setCloudPanelOpen(false);
         setPublishedOpen(false);
         setPublishFolder(null);
+        setAccessTab(null);
+        setRestrictedSource(null);
+        setAccessSpaceId(null);
+        setHistoryRoot(null);
+        setDeletedFor(null);
         forgetStoredSession(e.root);
         sessionWorkspaceRoot = null;
         setWorkspaceRoot(null);
@@ -5021,7 +5173,28 @@ export default function App() {
       }
       setRemovedNotice(e);
     },
-    [catchUpWithEditor, closeTab, selectSidebarEntries],
+    [closeGoneTabs, selectSidebarEntries],
+  );
+  // A restricted folder left this Mac: this person was taken out of it, or
+  // it was deleted — the engine has already removed its copy. The tabs of
+  // what was in it close; and unless giving it up was done here, a line says
+  // why it is gone.
+  const givenUpRef = useRef<Set<string>>(new Set());
+  const leaveSpaceFolder = useCallback(
+    async (e: CloudSpaceLeftEvent) => {
+      const dir = `${e.root}/${e.path}`;
+      const under = (p: string) => p === dir || p.startsWith(`${dir}/`);
+      await closeGoneTabs(under);
+      const mine = givenUpRef.current.delete(dir);
+      if (e.root !== sessionWorkspaceRoot) return;
+      setHistoryRoot((r) => (r && under(r) ? null : r));
+      setDeletedFor((d) => (d && under(d) ? null : d));
+      setTreeRefreshToken((t) => t + 1);
+      if (!mine) {
+        pushToast("info", `“${e.name}” is no longer on this Mac — you were taken out of it, or it was deleted.`);
+      }
+    },
+    [closeGoneTabs, pushToast],
   );
   // Sync wrote files: the tree refreshes (open tabs already reload through
   // the file watcher). A merge that left a conflict copy, or a mass
@@ -5067,6 +5240,9 @@ export default function App() {
           run: () => void openTab(`${e.root}/${e.conflictPath}`, "file"),
         });
       }),
+      onCloudSpaceLeft((e) => {
+        if (readyRef.current) void leaveSpaceFolder(e);
+      }),
       onCloudAddressTaken((e) => {
         pushToast(
           "warn",
@@ -5087,7 +5263,7 @@ export default function App() {
     return () => {
       for (const un of uns) void un.then((f) => f()).catch(() => {});
     };
-  }, [openTab, pushToast, reloadFromDisk, leaveRemovedWorkspace]);
+  }, [openTab, pushToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder]);
   // The version rail follows the document: switching tabs while it is open
   // shows the new one's history and drops the old one's preview.
   useEffect(() => {
@@ -5112,6 +5288,11 @@ export default function App() {
   const hereNow = [
     ...new Set((cloudForRoot?.presence ?? []).filter((p) => p.path === activeRel).map((p) => p.name)),
   ];
+  // The restricted folder whose people are being managed, as the status
+  // lists it now — gone from the list (left, deleted, taken away), the
+  // dialog has nothing to show and closes.
+  const accessSpace: CloudSpace | null =
+    (accessSpaceId && cloudForRoot?.spaces.find((sp) => sp.id === accessSpaceId)) || null;
   // The sidebar's active row. A board's cards have no rows of their own, so
   // the board's row carries the highlight for whatever inside it is focused.
   const sidebarCurrentPath = activeIsStore ? activeTab.path : activeFilePath;
@@ -5784,10 +5965,15 @@ export default function App() {
       )}
       {showSidebar && workspaceRoot && sidebarMode === "deleted" && (
         <RecentlyDeleted
-          root={workspaceRoot}
-          files={deletedFiles}
-          onBackToFiles={() => setSidebarMode("files")}
-          onOpen={(file) => previewDeleted(file, workspaceRoot)}
+          // The workspace's own, or one section's: each folder with a
+          // history has its own list.
+          root={deletedFor ?? workspaceRoot}
+          files={deletedFor ? sectionDeleted : deletedFiles}
+          onBackToFiles={() => {
+            setSidebarMode("files");
+            setDeletedFor(null);
+          }}
+          onOpen={(file) => previewDeleted(file, deletedFor ?? workspaceRoot)}
           onRestored={(path) => {
             setTreeRefreshToken((t) => t + 1);
             pushToast("done", `${basename(path)} is back.`, {
@@ -5826,6 +6012,16 @@ export default function App() {
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
+          onOpenPeople={cloudForRoot ? () => setAccessTab("people") : undefined}
+          onOpenAgents={mayOn(cloudForRoot, "agents.manage") ? () => setAccessTab("agents") : undefined}
+          onNewRestricted={
+            cloudForRoot?.sections
+              ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })
+              : undefined
+          }
+          onManageAccess={(space) => setAccessSpaceId(space.id)}
+          onShareWith={(path) => setRestrictedSource({ kind: "note", path })}
+          onConfirmMove={confirmMove}
           workspaces={myWorkspaces}
           onOpenWorkspace={(root) => void openWorkspace(root)}
           onJoinWorkspace={() => setCloudSetup("redeem")}
@@ -5833,17 +6029,48 @@ export default function App() {
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onHistory={(path) => void openHistory(path)}
-          onWorkspaceHistory={() => setWorkspaceHistoryOpen(true)}
+          onWorkspaceHistory={(dir) => setHistoryRoot(dir ?? workspaceRoot)}
           deletedCount={deletedFiles.length}
-          onRecentlyDeleted={() => setSidebarMode("deleted")}
+          onRecentlyDeleted={(dir) => {
+            setDeletedFor(dir ?? null);
+            setSidebarMode("deleted");
+          }}
         />
       )}
-      {workspaceHistoryOpen && workspaceRoot && (
+      {historyRoot && workspaceRoot && (
         <WorkspaceHistory
-          root={workspaceRoot}
-          onClose={() => setWorkspaceHistoryOpen(false)}
-          onRestored={(report, paths) => snapshotRestored(workspaceRoot, report, paths)}
+          root={historyRoot}
+          onClose={() => setHistoryRoot(null)}
+          onRestored={(report, paths) => snapshotRestored(historyRoot, report, paths)}
           onError={(message) => pushToast("error", message)}
+        />
+      )}
+      {accessTab && cloudForRoot && (
+        <PeopleDialog cloud={cloudForRoot} tab={accessTab} onTab={setAccessTab} onClose={() => setAccessTab(null)} />
+      )}
+      {restrictedSource && cloudForRoot && (
+        <RestrictedFolder
+          cloud={cloudForRoot}
+          source={restrictedSource}
+          onSubmit={(name, members) => makeRestricted(restrictedSource, name, members)}
+          onClose={() => setRestrictedSource(null)}
+        />
+      )}
+      {accessSpace && cloudForRoot && (
+        <SpaceAccess
+          cloud={cloudForRoot}
+          space={accessSpace}
+          onLeaving={(space) => givenUpRef.current.add(`${cloudForRoot.root}/${space.path}`)}
+          onClose={() => setAccessSpaceId(null)}
+        />
+      )}
+      {question && (
+        <QuestionPrompt
+          question={question}
+          onAnswer={(yes) => {
+            question.answer(yes);
+            setQuestion(null);
+          }}
         />
       )}
       {versionsSettingsOpen && (
@@ -5936,7 +6163,7 @@ export default function App() {
           }}
           onWorkspaceHistory={() => {
             setCloudPanelOpen(false);
-            setWorkspaceHistoryOpen(true);
+            setHistoryRoot(workspaceRoot);
           }}
           onOpenVersions={() => {
             setCloudPanelOpen(false);
@@ -6039,7 +6266,10 @@ export default function App() {
               aria-pressed={sidebarMode === "deleted"}
               aria-label={`Recently deleted (${deletedFiles.length})`}
               title="Recently deleted — files this folder's history still holds"
-              onClick={() => setSidebarMode((m) => (m === "deleted" ? "files" : "deleted"))}
+              onClick={() => {
+                setDeletedFor(null);
+                setSidebarMode((m) => (m === "deleted" && !deletedFor ? "files" : "deleted"));
+              }}
             >
               <TrashIcon />
               <span className="side-footer-count">{deletedFiles.length}</span>
@@ -6403,6 +6633,60 @@ function SaveAsPrompt({
           <span className="saveas-hint">↩ Save &nbsp;·&nbsp; esc Cancel</span>
           <button className="saveas-browse" onClick={() => onBrowse(value)}>
             Choose location…
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A yes-or-no before something that changes who can open a document. Enter
+// is yes — the user just asked for the move — and Esc leaves everything as
+// it is. While it is up it owns the keyboard, like the save question below.
+function QuestionPrompt({ question, onAnswer }: { question: Question; onAnswer: (yes: boolean) => void }) {
+  const yesRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    yesRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onAnswer(false);
+      } else if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onAnswer]);
+
+  return (
+    <div className="modal-overlay">
+      <div
+        className="modal unsaved-prompt"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="question-prompt-title"
+        aria-describedby="question-prompt-body"
+        data-testid="question-prompt"
+      >
+        <div className="unsaved-prompt-title" id="question-prompt-title">
+          {question.title}
+        </div>
+        <div className="unsaved-prompt-body" id="question-prompt-body">
+          {question.body}
+        </div>
+        <div className="modal-buttons unsaved-prompt-buttons">
+          <span className="unsaved-prompt-gap" />
+          <button className="modal-btn" data-testid="question-no" onClick={() => onAnswer(false)}>
+            Cancel
+          </button>
+          <button ref={yesRef} className="modal-btn is-primary" data-testid="question-yes" onClick={() => onAnswer(true)}>
+            {question.confirm}
           </button>
         </div>
       </div>

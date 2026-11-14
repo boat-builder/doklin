@@ -43,6 +43,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Everyone in a restricted folder is equal. The last person cannot leave (`409`); a folder whose last person was removed from the workspace stays stored with nobody in it.
 - A Private's id is its person's (`p-<member hex>`), so it cannot be made twice; it never has a second person. A creator with no member row has none.
 - `spaces.etag` mirrors the space's manifest etag so one poll covers every space. It is written after each manifest write through the worker (`noteEtag`; `commit.ts` too) and repaired by any manifest read that finds it stale. A writer that bypasses both leaves other Macs blind.
+- An owner (`pages.manage`) is told of every public address and can take any page down, including one in a space they are not in — and of such a page only what its address tells anyone (`everyPage.ts`). Nothing else about a space reaches an owner.
 - A public address is one space's for the whole domain: `addresses.slug` is the primary key, claimed before the manifest is stored and released after (`claimAddresses`, called by `putManifest` and `commit`). The registry may hold a claim its space failed to store, never lack one it stored. The shared workspace's claims are best effort (its sync never waits on D1), so a space's claim is also checked against the shared map.
 
 ## Presence and leases (`presence.ts`, `engine.rs`)

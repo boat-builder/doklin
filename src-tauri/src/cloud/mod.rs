@@ -66,7 +66,7 @@ use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, Events, Invited, People,
-    Probe, Redeemed, Removed, StatusTable, EV_REMOVED,
+    Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -1220,6 +1220,95 @@ pub(crate) async fn cloud_set_root(app: AppHandle, root: String, slug: Option<St
         inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
     })?;
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
+}
+
+/* ---------- Restricted folders ---------- */
+
+/// The engine of the workspace at `root`.
+fn engine_of(app: &AppHandle, root: &str) -> Result<mpsc::UnboundedSender<EngineCmd>, String> {
+    with_inner(app, |inner| {
+        inner.engines.get(root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })
+}
+
+/// Make a restricted folder holding whoever is asking and `members` (member
+/// ids — people already in the workspace). With `from`, the absolute path of
+/// a folder in the workspace, that folder becomes it: it leaves the Macs of
+/// everyone not chosen. Answers the folder as the status lists it, so the
+/// caller knows where it is on this Mac.
+#[tauri::command]
+pub(crate) async fn cloud_space_create(
+    app: AppHandle,
+    root: String,
+    name: String,
+    members: Vec<String>,
+    from: Option<String>,
+) -> Result<SpaceStatus, String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::MakeSpace { name, members, from, reply }).await
+}
+
+/// Add a person to a restricted folder (`add`), or take one out. Anyone in a
+/// folder may do either, to anyone in it — themselves included, which is
+/// leaving it: the folder then leaves this Mac. The last person in a folder
+/// cannot be taken out; the domain's sentence says to delete it instead.
+#[tauri::command]
+pub(crate) async fn cloud_space_member(
+    app: AppHandle,
+    root: String,
+    id: String,
+    member_id: String,
+    add: bool,
+) -> Result<(), String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::SpaceMember { id, member: member_id, add, reply }).await
+}
+
+/// Delete a restricted folder for everyone in it: what it stored on the
+/// domain, and its copy on each of their Macs.
+#[tauri::command]
+pub(crate) async fn cloud_space_delete(app: AppHandle, root: String, id: String) -> Result<(), String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::DeleteSpace { id, reply }).await
+}
+
+/* ---------- Every public address ---------- */
+
+/// A failed call about the domain's pages, in words. As with people, the arm
+/// that earns its place is `NotFound` on the list: a worker that predates the
+/// route has none to miss.
+fn describe_pages(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old to list every page — update it from the Cloud panel", domain)
+        }
+        other => flows::describe(domain, other.into()),
+    }
+}
+
+/// Every public address on the workspace's domain (an owner's to read),
+/// including pages published from a section this Mac's person is not in —
+/// of which it says only what the address itself says to anyone.
+#[tauri::command]
+pub(crate) async fn cloud_pages(app: AppHandle, root: String) -> Result<remote::EveryPages, String> {
+    let call = workspace_call(&app, &root)?;
+    call.remote.list_every_page().await.map_err(|e| describe_pages(&call.domain, e))
+}
+
+/// Take a page down, whoever published it (an owner's to do). Already gone
+/// is done. The section that held it hears as it hears any other change —
+/// this Mac's too, on the pass this asks for.
+#[tauri::command]
+pub(crate) async fn cloud_page_take_down(app: AppHandle, root: String, slug: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    match call.remote.take_down_page(slug.trim()).await {
+        Ok(()) | Err(remote::RemoteError::NotFound) => {}
+        Err(e) => return Err(flows::describe(&call.domain, e.into())),
+    }
+    if let Ok(tx) = engine_of(&app, &root) {
+        let _ = tx.send(EngineCmd::SyncNow);
+    }
+    Ok(())
 }
 
 /// The cloud version store's index for the workspace holding `path` — what

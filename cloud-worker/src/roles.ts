@@ -28,6 +28,8 @@ export type Action =
   | "people.roles"
   /** Add, change and remove agents. */
   | "agents.manage"
+  /** See every public address on the domain, and take any page down. */
+  | "pages.manage"
   /** Bind the domain to a workspace, and erase everything on it. */
   | "workspace.manage";
 
@@ -38,6 +40,7 @@ const TABLE: Readonly<Record<Action, readonly PersonRole[]>> = {
   "people.remove": ["owner"],
   "people.roles": ["owner"],
   "agents.manage": ["owner"],
+  "pages.manage": ["owner"],
   "workspace.manage": ["owner"],
 };
 

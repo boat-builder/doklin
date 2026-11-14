@@ -44,7 +44,7 @@ manifest, rendered by the worker from the synced files.
 
 ## Engine ⇄ frontend contract
 
-- Commands: `cloud_*` in `mod.rs`, wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-address-taken`, `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
+- Commands: `cloud_*` in `mod.rs`, wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
 - Every path in a status or an event is workspace-relative, whichever section it is in (`Private/x.md`); a lease's `path` is that, lowercased.
 - Payload types: `status.rs` serde structs ⇄ `src/cloud.ts`. **Change both.**
 - `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes revoked worker-outdated error`.
@@ -73,6 +73,16 @@ manifest, rendered by the worker from the synced files.
 - No space has a folder while the shared manifest holds a file under a reserved name (`reserved_clear`): that folder is renamed `Private (shared)` once, after the remote is applied and before the scan (`rescue_reserved`), so the files move rather than vanish.
 - A file directly under `Restricted/` is in no section and syncs nowhere. Nor does `Private/` for a creator who never adopted an identity: there is no member row to hang a Private on.
 - The reserved names are reserved in any case (`space::top`); a section's paths are spelled as the disk spells its folder (`space::spelled`).
+- A folder's name on a Mac must be one `names_space` accepts for the space's name, or the next reconcile reads it as a rename and `PATCH`es the space. So only the engine names a new restricted folder (`free_restricted_dir`): the app asks it to (`make_space`), and never makes one under `Restricted/` itself.
+- `make_space` with a folder renames that folder into `Restricted/`: its files then leave their section as moves. It refuses while `spaces` is `None`: adding to a list the domain has not given would make every folder missing from it look left.
+- Leaving or deleting a folder on this Mac drops it from `spaces` and reconciles at once; other Macs learn from their poll. Either way the folder's going emits `cloud-space-left`.
+- `CloudStatus.spaces` is drawn from the units, so a Mac that started offline still lists its folders (no members, kind by where the folder is). `sections` is what tells the app that `Private` and `Restricted` are not shared folders.
+
+**Sections in the app** (`Sidebar.tsx`, `App.tsx`, `src/cloud.ts`):
+- `placeOf(cloud, rel)` is the one answer to "who can open this path". `nowhere` = under a reserved name but in no space.
+- A move that lets more people see something is confirmed first (`widerAudience`, `confirmMove`): every drag and every cut-paste goes through it. A move that narrows is not asked about.
+- A restricted folder's row is not dragged, cut or trashed: trashing it would only bring it back whole. It is left or deleted from *Manage access…*.
+- A note is never dropped straight under `Restricted/` (`canDrop`); a folder dropped there is a new restricted folder, and is confirmed.
 
 **A pass** (`Engine::pass`): survey every unit's folder (stat only, no request), then cycle the units that changed, were poked (a queued page, a confirmed deletion) or that the poll said moved. *Sync now* and first contact cycle all. With several units in a pass every manifest is fetched before any is applied.
 

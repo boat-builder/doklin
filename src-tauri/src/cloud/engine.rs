@@ -38,7 +38,7 @@ use super::scan::{hash16, now_ms, read_file_checked, rel_path};
 use super::space::{self, SpaceMarker, PRIVATE_DIR, SHARED};
 use super::status::{
     emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, SpaceStatus, StatusTable,
-    VersionsMirror, EV_APPLIED, EV_CONFLICT,
+    VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_SPACE_LEFT,
 };
 use super::unit::{Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
@@ -138,6 +138,28 @@ pub enum EngineCmd {
         rel: String,
         hash: String,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// Make a restricted folder holding this person and `members` (member
+    /// ids). With `from` — the absolute path of a folder in this workspace —
+    /// that folder becomes it; otherwise it starts empty.
+    MakeSpace {
+        name: String,
+        members: Vec<String>,
+        from: Option<String>,
+        reply: oneshot::Sender<Result<SpaceStatus, String>>,
+    },
+    /// Add a person to a restricted folder, or take one out — this person
+    /// included, which is leaving it.
+    SpaceMember {
+        id: String,
+        member: String,
+        add: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a restricted folder for everyone in it.
+    DeleteSpace {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Shutdown,
 }
@@ -376,11 +398,6 @@ impl<R: Remote> Engine<R> {
         self.units.get_mut(SHARED).expect("the shared unit")
     }
 
-    #[cfg(test)]
-    pub(crate) fn unit(&self, id: &str) -> Option<&Unit<R>> {
-        self.units.get(id)
-    }
-
     /// Which unit a workspace-relative path is in, and the path as that unit
     /// spells it. None for a path that is no section's: `Restricted` itself,
     /// a file directly under it, a folder there that is not a space yet.
@@ -394,11 +411,6 @@ impl<R: Remote> Engine<R> {
 
     /* ----- status ----- */
 
-    #[cfg(test)]
-    pub(crate) fn effective_public(&self) -> BTreeMap<String, super::manifest::PublicEntry> {
-        self.shared().effective_public()
-    }
-
     fn public_pages(&self) -> Vec<PublicPage> {
         let mut pages: Vec<PublicPage> = self.units.values().flat_map(|unit| unit.public_pages(&self.people)).collect();
         // Folders above files, then by path — the Published list's order.
@@ -410,22 +422,33 @@ impl<R: Remote> Engine<R> {
     }
 
     /// The spaces that have a folder on this Mac, as the status lists them.
+    /// A folder says it is one before the domain has said anything this run
+    /// — a Mac that started offline — and is listed by what the folder says:
+    /// where it is, what it is called, and nobody in it that can be named.
     fn space_statuses(&self) -> Vec<SpaceStatus> {
-        let Some(spaces) = &self.spaces else { return Vec::new() };
-        spaces
-            .iter()
-            .filter_map(|s| {
-                let unit = self.units.get(&s.id)?;
-                Some(SpaceStatus {
-                    id: s.id.clone(),
-                    kind: s.kind,
-                    name: s.name.clone(),
+        self.units
+            .values()
+            .filter(|unit| !unit.is_shared())
+            .map(|unit| {
+                let listed = self.spaces.iter().flatten().find(|s| s.id == unit.id);
+                let at_top = unit.root.parent() == Some(self.cfg.root.as_path());
+                SpaceStatus {
+                    id: unit.id.clone(),
+                    kind: listed.map(|s| s.kind).unwrap_or(if at_top { SpaceKind::Private } else { SpaceKind::Restricted }),
+                    name: listed.map(|s| s.name.clone()).unwrap_or_else(|| unit.name.clone()),
                     path: unit.prefix.clone(),
-                    by: self.name_of(&s.by),
-                    members: s.members.clone(),
-                })
+                    by: listed.map(|s| self.name_of(&s.by)).unwrap_or_default(),
+                    members: listed.map(|s| s.members.clone()).unwrap_or_default(),
+                }
             })
             .collect()
+    }
+
+    /// Whether `Private` and `Restricted` are sections here rather than
+    /// shared folders: a folder already says it is one, or the domain can
+    /// make them and the shared workspace holds nothing under those names.
+    fn in_sections(&self) -> bool {
+        self.units.len() > 1 || (self.worker_has("spaces") && self.shared().reserved_clear())
     }
 
     fn set_status(&mut self, phase: Phase, error: Option<String>) {
@@ -448,6 +471,7 @@ impl<R: Remote> Engine<R> {
             error: self.error.clone(),
             pending_deletes: self.units.values().map(|u| u.held_deletes.len() as u32).sum(),
             me: self.name_of(&self.signature()),
+            me_id: self.me.clone(),
             can: self.can.clone(),
             worker_version: self.worker_version,
             versions: self.worker_has("versions").then(|| VersionsMirror {
@@ -460,6 +484,7 @@ impl<R: Remote> Engine<R> {
             presence: self.presence.clone(),
             leases: self.lease_holders(),
             spaces: self.space_statuses(),
+            sections: self.in_sections(),
         };
         if let Ok(mut table) = self.statuses.lock() {
             table.insert(self.root_key(), status);
@@ -981,7 +1006,7 @@ impl<R: Remote> Engine<R> {
             if !space::valid_folder_name(&name) || self.unclaimable.contains(&dir) {
                 continue;
             }
-            match self.remote.create_space(&name).await {
+            match self.remote.create_space(&name, &[]).await {
                 Ok(made) => {
                     let marker = SpaceMarker { ws_id: ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
                     if space::write_space_marker(&dir, &marker).is_ok() {
@@ -1002,6 +1027,7 @@ impl<R: Remote> Engine<R> {
         // Folders of spaces this person is no longer in. A Private is its
         // person's for as long as they are in the workspace, so a list
         // without it is a list to mend (above), never a folder to delete.
+        let mut left: Vec<(String, String)> = Vec::new();
         held.retain(|folder| {
             if listed.contains(&folder.marker.space) || folder.dir.parent() == Some(root.as_path()) {
                 return true;
@@ -1014,9 +1040,13 @@ impl<R: Remote> Engine<R> {
                     .get_or_insert_with(SpacesChanged::default)
                     .removed
                     .push((folder.dir.to_string_lossy().to_string(), store));
+                left.push((folder.marker.name.clone(), folder.rel.clone()));
             }
             false
         });
+        for (name, path) in left {
+            self.events.emit_json(EV_SPACE_LEFT, json!({ "root": self.root_key(), "name": name, "path": path }));
+        }
         // A unit whose folder is gone from this Mac: forget what it had
         // synced, so the folder comes back whole rather than as deletions.
         let present: HashSet<String> = held.iter().map(|folder| folder.marker.space.clone()).collect();
@@ -1104,6 +1134,142 @@ impl<R: Remote> Engine<R> {
             }
             self.refresh_status();
         }
+    }
+
+    /* ----- restricted folders, by hand ----- */
+
+    /// A failed call about a restricted folder, in a sentence.
+    fn describe_space(&self, e: RemoteError) -> String {
+        match e {
+            RemoteError::NotFound => "That folder is not there any more, or you are no longer in it.".to_string(),
+            other => super::flows::describe(&self.cfg.domain, other.into()),
+        }
+    }
+
+    /// Make a restricted folder holding this person and `members`. With
+    /// `from` — a folder in this workspace — that folder becomes it: what was
+    /// in it leaves the section it was in as a move, so it is deleted
+    /// outright from the Macs of everyone not chosen and stays in place on
+    /// the Macs of everyone who is. Otherwise the folder starts empty.
+    pub(crate) async fn make_space(
+        &mut self,
+        name: &str,
+        members: &[String],
+        from: Option<&Path>,
+    ) -> Result<SpaceStatus, String> {
+        if !self.worker_has("spaces") {
+            return Err(format!(
+                "{} runs a worker too old for restricted folders — update it from the Cloud panel.",
+                self.cfg.domain
+            ));
+        }
+        if self.me.is_none() {
+            return Err("Say who you are first — your name and email, under People — so there is somebody for the folder to belong to.".to_string());
+        }
+        // The list of this person's spaces is what decides which folders
+        // stay on this Mac: a folder is only added to one the domain gave.
+        if self.spaces.is_none() || !self.shared().reserved_clear() {
+            return Err("This Mac has not caught up with the workspace yet — try again in a moment.".to_string());
+        }
+        let name = name.trim();
+        if !space::valid_folder_name(name) {
+            return Err("A folder needs a name that can be a folder's: no slashes, and not starting with a dot.".to_string());
+        }
+        let root = self.cfg.root.clone();
+        if let Some(from) = from {
+            let inside = from.starts_with(&root) && from != root.as_path();
+            let real = std::fs::symlink_metadata(from).map(|m| m.file_type().is_dir()).unwrap_or(false);
+            let reserved = from.parent() == Some(root.as_path())
+                && from.file_name().is_some_and(|n| space::reserved_top(&n.to_string_lossy()).is_some());
+            if !inside || !real || reserved {
+                return Err("That is not a folder of this workspace that can be restricted.".to_string());
+            }
+            if self.units.values().any(|unit| !unit.is_shared() && unit.root == from) {
+                return Err("That folder is restricted already.".to_string());
+            }
+        }
+
+        let made = self.remote.create_space(name, members).await.map_err(|e| self.describe_space(e))?;
+        let maker = self.people.get(&made.by).cloned().unwrap_or_default();
+        let dir = space::free_restricted_dir(&root, &made.name, &maker);
+        let marker = SpaceMarker { ws_id: self.cfg.ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
+        let placed = dir
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|_| match from {
+                Some(from) => std::fs::rename(from, &dir),
+                None => std::fs::create_dir_all(&dir),
+            })
+            .map_err(|e| e.to_string())
+            .and_then(|_| space::write_space_marker(&dir, &marker));
+        if let Err(e) = placed {
+            // The domain has the folder; the next poll gives it a folder
+            // here. What was to go into it is where it was.
+            return Err(format!("The folder was made, but this Mac could not put it in place: {}.", e));
+        }
+        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
+        let rel = space::spelled(&root, &dir);
+        self.units.insert(made.id.clone(), Self::space_unit(&self.cfg, &self.remote, &marker, dir, rel));
+        let id = made.id.clone();
+        self.spaces.get_or_insert_with(Vec::new).push(made);
+        if let Some(tell) = &self.cfg.on_spaces {
+            tell(SpacesChanged::default());
+        }
+        self.refresh_status();
+        self.space_statuses()
+            .into_iter()
+            .find(|space| space.id == id)
+            .ok_or_else(|| "The folder was made, and will be here in a moment.".to_string())
+    }
+
+    /// Add a person to a restricted folder, or take one out. Taking this
+    /// person out is leaving it: its folder leaves this Mac with them.
+    pub(crate) async fn change_space_member(&mut self, id: &str, member: &str, add: bool) -> Result<(), String> {
+        if add {
+            let now = self.remote.add_space_member(id, member).await.map_err(|e| match e {
+                RemoteError::NotFound => {
+                    "That person is not in this workspace any more, or the folder is gone.".to_string()
+                }
+                other => self.describe_space(other),
+            })?;
+            if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
+                *entry = now;
+            }
+        } else {
+            self.remote.remove_space_member(id, member).await.map_err(|e| self.describe_space(e))?;
+            if self.me.as_deref() == Some(member) {
+                self.forget_space(id).await;
+            } else if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
+                entry.members.retain(|m| m != member);
+            }
+        }
+        self.refresh_status();
+        Ok(())
+    }
+
+    /// Delete a restricted folder for everyone in it: everything it stored
+    /// on the domain, then its folder here. Each other Mac deletes its copy
+    /// when its next poll no longer lists the folder.
+    pub(crate) async fn delete_space(&mut self, id: &str) -> Result<(), String> {
+        loop {
+            let round = self.remote.delete_space(id).await.map_err(|e| self.describe_space(e))?;
+            if !round.remaining {
+                break;
+            }
+        }
+        self.forget_space(id).await;
+        self.refresh_status();
+        Ok(())
+    }
+
+    /// This person is out of a space, by something done on this Mac: the
+    /// list says so now rather than at the next poll, and the folder goes.
+    async fn forget_space(&mut self, id: &str) {
+        if let Some(list) = &mut self.spaces {
+            list.retain(|s| s.id != id);
+        }
+        self.reconcile_spaces().await;
     }
 
     /* ----- the version store's mirror ----- */
@@ -1664,6 +1830,19 @@ impl<R: Remote> Engine<R> {
                             None => Err("that version isn't reachable right now".to_string()),
                         };
                         let _ = reply.send(got);
+                    }
+                    Some(EngineCmd::MakeSpace { name, members, from, reply }) => {
+                        let made = self.make_space(&name, &members, from.as_deref().map(Path::new)).await;
+                        // What a folder brought with it left another section:
+                        // that is a pass's to carry.
+                        cycle_now = made.is_ok();
+                        let _ = reply.send(made);
+                    }
+                    Some(EngineCmd::SpaceMember { id, member, add, reply }) => {
+                        let _ = reply.send(self.change_space_member(&id, &member, add).await);
+                    }
+                    Some(EngineCmd::DeleteSpace { id, reply }) => {
+                        let _ = reply.send(self.delete_space(&id).await);
                     }
                 },
                 ev = fs_events.recv(), if watching => match ev {

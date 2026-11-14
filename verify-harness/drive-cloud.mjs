@@ -1058,21 +1058,31 @@ await tid("sidebar-menu-workspace").filter({ hasText: "Notes" }).click();
 await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Notes");
 await setStatuses((await page.evaluate(() => window.__cloud.statuses)).filter((s) => s.root !== "/docs"));
 
-/* 24 — People and agents: one view, a tab each, and a door for each in the
-   panel — so that neither has to be found behind the other.
-   People… lands on the People tab, with the invite door above the list */
+/* 24 — People and agents: one window, a tab each, and a door for each in the
+   workspace menu — who is here is the workspace's business, not sync's, and
+   neither has to be found behind the other. The Cloud panel has no door to
+   either. People… lands on the People tab, with the invite door above the list */
+const openAccess = async (door) => {
+  await page.locator(".sidebar-header-button").click();
+  await poll(async () => (await tid(`sidebar-menu-${door}`).count()) === 1);
+  await tid(`sidebar-menu-${door}`).click();
+};
 await tid("sync-status").click();
-await poll(async () => (await tid("people-open").count()) === 1);
-const doorLabel = await dialog("Cloud").locator(".cloud-section-label", { hasText: "People and agents" }).count();
-const doors = [(await tid("people-open").textContent()).trim(), (await tid("agents-open").textContent()).trim()];
-await tid("people-open").click();
+await poll(async () => (await dialog("Cloud").count()) === 1);
+const panelDoors = (await tid("people-open").count()) + (await tid("agents-open").count());
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+await page.locator(".sidebar-header-button").click();
+await poll(async () => (await tid("sidebar-menu-people").count()) === 1);
+const doors = [(await tid("sidebar-menu-people").textContent()).trim(), (await tid("sidebar-menu-agents").textContent()).trim()];
+await tid("sidebar-menu-people").click();
 await poll(async () => (await dialog("People and agents").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
 const selected = async (tab) => (await tid(`tab-${tab}`).getAttribute("aria-selected")) === "true";
 const above = async (a, b) => (await tid(a).boundingBox()).y < (await tid(b).boundingBox()).y;
 step(
-  "People and agents: the panel has a door for each; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
-  doorLabel === 1 &&
+  "People and agents: the workspace menu has a door for each and the Cloud panel none; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
+  panelDoors === 0 &&
     doors.join("|") === "People…|Agents…" &&
     (await tid("tab-people").textContent()).trim() === "People" &&
     (await tid("tab-agents").textContent()).trim() === "Agents" &&
@@ -1314,16 +1324,16 @@ step(
     (await tid("person-m-bob").count()) === 1,
 );
 
-/* 24e — a worker that predates agents, reached by the panel's Agents door:
+/* 24e — a worker that predates agents, reached by the menu's Agents door:
    the tab says so in a line under what an agent is, and the People tab is
    still there to manage */
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("Cloud").count()) === 1);
+await poll(async () => (await dialog("People and agents").count()) === 0);
 const TOO_OLD = "notes.example.com runs a worker too old for agents \u2014 update it from the Cloud panel";
 await page.evaluate((error) => {
   window.__cloud.agents.error = error;
 }, TOO_OLD);
-await tid("agents-open").click();
+await openAccess("agents");
 await poll(async () => (await tid("agents-unavailable").count()) === 1);
 await poll(async () => (await tid("agents-unavailable").textContent()).includes("too old for agents"));
 const landedOnAgents = (await selected("agents")) && (await tid("agents-unavailable").isVisible()) && !(await tid("pane-people").isVisible());
@@ -1346,11 +1356,12 @@ await page.evaluate(() => {
 
 /* 25 — the same workspace on a Mac that joined with an invite: who is here
    is everybody's to see, and nothing that is an owner's to do is offered —
-   not in the panel (no Agents door, no worker update, no danger zone) and not
-   in the view (no tabs, no invite door, no Remove, no role button) */
+   not in the menu (no Agents door), not in the panel (no worker update, no
+   danger zone) and not in the view (no tabs, no invite door, no Remove, no
+   role button) */
 const MEMBER_CAN = ["work", "people.see"];
-await page.keyboard.press("Escape"); // back to the panel's main view
-await poll(async () => (await dialog("Cloud").count()) === 1);
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("People and agents").count()) === 0);
 
 /* 24f — an owner who is not the creator, on a Mac that syncs with a token
    another of their Macs handed it (Connect another Mac…): the row is this
@@ -1406,7 +1417,7 @@ await setCloud({
     ],
   },
 });
-await tid("people-open").click();
+await openAccess("people");
 await poll(async () => (await tid("mac-t-bob-9").count()) === 1);
 step(
   "People (this Mac's own sign-in): the row whose token this Mac syncs with is tagged this Mac and has no Sign out, though another Mac redeemed it; an owner who is not the creator is offered a new code for themselves and for somebody who never signed in, not for a person who has",
@@ -1421,28 +1432,33 @@ step(
 );
 await setCloud({ people: peopleBefore });
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("Cloud").count()) === 1);
+await poll(async () => (await dialog("People and agents").count()) === 0);
 await setCloud({ can: MEMBER_CAN });
 await setStatuses((await page.evaluate(() => window.__cloud.statuses)).map((s) => ({ ...s, can: ["work", "people.see"] })));
 const people = await page.evaluate(() => window.__cloud.people);
 await setCloud({
   people: { ...people, role: "member", creator: false, me: "m-bob", can: MEMBER_CAN, invites: [], devices: [] },
 });
-await poll(async () => (await tid("agents-open").count()) === 0);
+await tid("sync-status").click();
+await poll(async () => (await dialog("Cloud").count()) === 1);
+await poll(async () => (await tid("wipe-open").count()) === 0);
 const memberPanel =
-  (await dialog("Cloud").locator(".cloud-section-label", { hasText: /^People$/ }).count()) === 1 &&
-  (await tid("people-open").count()) === 1 &&
-  (await tid("wipe-open").count()) === 0 &&
   (await tid("update-worker-quiet").count()) === 0 &&
   (await tid("another-mac").count()) === 1 &&
   (await tid("disconnect").count()) === 1;
-await tid("people-open").click();
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Cloud").count()) === 0);
+await page.locator(".sidebar-header-button").click();
+await poll(async () => (await tid("sidebar-menu-people").count()) === 1);
+const memberMenu = (await tid("sidebar-menu-agents").count()) === 0;
+await tid("sidebar-menu-people").click();
 await poll(async () => (await dialog("People").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
 const memberIntro = await tid("people-intro").textContent();
 step(
-  "People (a member): the panel offers People… and nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no tabs, no invite door, no Remove and no role button, and no error",
+  "People (a member): the menu offers People… and no Agents…, the panel nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no tabs, no invite door, no Remove and no role button, and no error",
   memberPanel &&
+    memberMenu &&
     memberIntro.includes("Everyone in Notes") &&
     memberIntro.includes("An owner invites people and removes them") &&
     (await tid("person-m-owner").textContent()).includes("owner") &&
@@ -1467,8 +1483,7 @@ await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
    panel shuts — and a notice says what happened, in words that do not
    pretend anything was deleted in the cloud */
 await page.keyboard.press("Escape");
-await page.keyboard.press("Escape");
-await poll(async () => (await dialog("Cloud").count()) === 0);
+await poll(async () => (await dialog("People").count()) === 0);
 const removedRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
 await setStatuses([]); // the engine forgets the workspace first, then says why
 await emit("cloud-removed", { root: removedRoot, name: "Notes", domain: "notes.example.com", deleted: true, at: Date.now() });

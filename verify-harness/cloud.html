@@ -46,6 +46,52 @@
         path: `${root}/Projects`,
         children: [{ kind: "file", name: "plan.md", path: `${root}/Projects/plan.md` }],
       });
+      // A workspace in sections (`?sections`): what is under `Private` and
+      // `Restricted` on disk. `private` is the files of this person's own
+      // section, or null when they have none; `restricted` is the folders
+      // there, by folder name, each a list of file names; `loose` is notes
+      // straight under Restricted, in no folder. `projectsGone` is set once
+      // the shared Projects folder has been made a restricted one.
+      window.__sections = null;
+      const fileNode = (dir, name) => ({ kind: "file", name, path: `${dir}/${name}` });
+      const sectionNodes = (root) => {
+        const sec = window.__sections;
+        if (!sec || root !== "/docs") return [];
+        const restricted = `${root}/Restricted`;
+        return [
+          ...(sec.private
+            ? [{ kind: "dir", name: "Private", path: `${root}/Private`, children: sec.private.map((f) => fileNode(`${root}/Private`, f)) }]
+            : []),
+          {
+            kind: "dir",
+            name: "Restricted",
+            path: restricted,
+            children: [
+              ...Object.entries(sec.restricted).map(([name, files]) => ({
+                kind: "dir",
+                name,
+                path: `${restricted}/${name}`,
+                children: files.map((f) => fileNode(`${restricted}/${name}`, f)),
+              })),
+              ...sec.loose.map((f) => fileNode(restricted, f)),
+            ],
+          },
+        ];
+      };
+      // The list of file names a path under /docs is in, and its name there —
+      // what creating or moving a note has to touch for the tree to show it.
+      const listOf = (path) => {
+        const sec = window.__sections;
+        const parts = path.startsWith("/docs/") ? path.slice("/docs/".length).split("/") : [];
+        if (parts.length === 1) return { list: window.__treeFiles, name: parts[0] };
+        if (!sec) return null;
+        if (parts[0] === "Private" && parts.length === 2 && sec.private) return { list: sec.private, name: parts[1] };
+        if (parts[0] === "Restricted" && parts.length === 2) return { list: sec.loose, name: parts[1] };
+        if (parts[0] === "Restricted" && parts.length === 3 && sec.restricted[parts[1]]) {
+          return { list: sec.restricted[parts[1]], name: parts[2] };
+        }
+        return null;
+      };
       const treeFor = (path) => {
         if (path.endsWith("/Projects")) return projectsNode(path.slice(0, -"/Projects".length));
         return {
@@ -53,8 +99,9 @@
           name: basename(path),
           path,
           children: [
-            projectsNode(path),
+            ...(window.__sections?.projectsGone ? [] : [projectsNode(path)]),
             ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}` })),
+            ...sectionNodes(path),
           ],
         };
       };
@@ -83,7 +130,7 @@
         joinError: null,
         // What this Mac's credential may do, as the status reports it: every
         // action for an owner. A drive narrows it to a member's.
-        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"],
+        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"],
         token: "ab".repeat(32),
         // Who this Mac is on the scripted domain — what the engine resolved
         // its own signature to.
@@ -143,7 +190,7 @@
           // never asked who was binding it. Adopting an identity is the
           // panel's job, and sets this to the new row's id.
           me: null,
-          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"],
+          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"],
           // This Mac. A Mac only appears in the list below under its own id
           // if it redeemed a code rather than holding the domain's own
           // token — which is exactly when "this Mac" is worth saying.
@@ -313,6 +360,7 @@
         // What this Mac signs with here: the person the domain says it is,
         // or its own name when it has not said.
         me: window.__cloud.me,
+        meId: window.__cloud.people.me,
         can: window.__cloud.can,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
@@ -320,6 +368,7 @@
         presence: [],
         leases: [],
         spaces: [],
+        sections: false,
       });
 
       // The listener registry the app's listen() lands in (see the
@@ -802,6 +851,131 @@
               return Promise.resolve({ preRestoreTs, preRestoreHash, ts: preRestoreTs + 1 });
             }
 
+            /* ----- files, as far as the tree needs them ----- */
+            case "create_file": {
+              const at = listOf(args.path);
+              if (!at) return Promise.reject(`no such folder for ${args.path}`);
+              at.list.push(at.name);
+              window.__fs.set(args.path, "");
+              return Promise.resolve(null);
+            }
+            case "move_path": {
+              (window.__moves ??= []).push({ from: args.from, to: args.to });
+              const sec = window.__sections;
+              const folderOf = (p) => p.match(/^\/docs\/Restricted\/([^/]+)$/)?.[1] ?? null;
+              // A restricted folder renamed in place: the engine renames it
+              // for everyone, so the status follows.
+              if (sec && folderOf(args.from) && folderOf(args.to) && sec.restricted[folderOf(args.from)]) {
+                const [was, now] = [folderOf(args.from), folderOf(args.to)];
+                sec.restricted[now] = sec.restricted[was];
+                delete sec.restricted[was];
+                const s = window.__cloud.statuses.find((st) => st.root === "/docs");
+                patchStatus("/docs", {
+                  spaces: s.spaces.map((sp) =>
+                    sp.path === `Restricted/${was}` ? { ...sp, name: now, path: `Restricted/${now}` } : sp,
+                  ),
+                });
+                return Promise.resolve(null);
+              }
+              // The shared Projects folder dropped under Restricted: the
+              // engine makes it a restricted folder with only its mover.
+              if (sec && args.from === "/docs/Projects" && folderOf(args.to)) {
+                const name = folderOf(args.to);
+                sec.projectsGone = true;
+                sec.restricted[name] = ["plan.md"];
+                window.__dirs.delete("/docs/Projects");
+                window.__dirs.add(args.to);
+                const s = window.__cloud.statuses.find((st) => st.root === "/docs");
+                patchStatus("/docs", {
+                  spaces: [
+                    ...s.spaces,
+                    { id: "s-dropped0", kind: "restricted", name, path: `Restricted/${name}`, by: window.__cloud.me, members: [window.__cloud.people.me] },
+                  ],
+                });
+                return Promise.resolve(null);
+              }
+              const [a, b] = [listOf(args.from), listOf(args.to)];
+              if (!a || !b) return Promise.resolve(null);
+              const i = a.list.indexOf(a.name);
+              if (i >= 0) a.list.splice(i, 1);
+              b.list.push(b.name);
+              const c = window.__fs.get(args.from);
+              if (c !== undefined) {
+                window.__fs.delete(args.from);
+                window.__fs.set(args.to, c);
+              }
+              return Promise.resolve(null);
+            }
+
+            /* ----- restricted folders, as the engine would keep them ----- */
+            case "cloud_space_create": {
+              const sec = window.__sections;
+              const s = window.__cloud.statuses.find((st) => st.root === args.root);
+              if (!sec || !s) return Promise.reject("that workspace isn't connected");
+              if (typeof window.__cloud.spaceError === "string") return Promise.reject(window.__cloud.spaceError);
+              // A second folder of a name this person already has is told
+              // apart by who made it.
+              const dir = sec.restricted[args.name] ? `${args.name} (${window.__cloud.me})` : args.name;
+              sec.restricted[dir] = [];
+              window.__dirs.add(`/docs/Restricted/${dir}`);
+              if (args.from === "/docs/Projects") {
+                // The folder itself becomes it.
+                sec.projectsGone = true;
+                sec.restricted[dir] = ["plan.md"];
+                window.__dirs.delete("/docs/Projects");
+                const c = window.__fs.get("/docs/Projects/plan.md");
+                window.__fs.delete("/docs/Projects/plan.md");
+                window.__fs.set(`/docs/Restricted/${dir}/plan.md`, c);
+              }
+              window.__cloud.spaceSeq = (window.__cloud.spaceSeq ?? 0) + 1;
+              const space = {
+                id: `s-${String(window.__cloud.spaceSeq).padStart(8, "0")}`,
+                kind: "restricted",
+                name: args.name,
+                path: `Restricted/${dir}`,
+                by: window.__cloud.me,
+                members: [window.__cloud.people.me, ...args.members],
+              };
+              patchStatus(args.root, { spaces: [...s.spaces, space] });
+              return Promise.resolve(space);
+            }
+            case "cloud_space_member":
+            case "cloud_space_delete": {
+              const sec = window.__sections;
+              const s = window.__cloud.statuses.find((st) => st.root === args.root);
+              const space = s?.spaces.find((sp) => sp.id === args.id);
+              if (!sec || !space) return Promise.reject("That folder is not there any more, or you are no longer in it.");
+              const me = window.__cloud.people.me;
+              const leaves = cmd === "cloud_space_delete" || (!args.add && args.memberId === me);
+              if (cmd === "cloud_space_member" && !args.add && space.members.length === 1) {
+                return Promise.reject("they are the last person in this folder — delete it, or add somebody first");
+              }
+              if (leaves) {
+                // The folder leaves this Mac with its person: the engine
+                // deletes it, drops it from the status and says so.
+                delete sec.restricted[space.path.slice("Restricted/".length)];
+                patchStatus(args.root, { spaces: s.spaces.filter((sp) => sp.id !== space.id) });
+                window.__emit("cloud-space-left", { root: args.root, name: space.name, path: space.path });
+                return Promise.resolve(null);
+              }
+              const members = args.add
+                ? [...new Set([...space.members, args.memberId])]
+                : space.members.filter((m) => m !== args.memberId);
+              patchStatus(args.root, { spaces: s.spaces.map((sp) => (sp.id === space.id ? { ...sp, members } : sp)) });
+              return Promise.resolve(null);
+            }
+
+            /* ----- every public address, an owner's ----- */
+            case "cloud_pages":
+              return typeof window.__cloud.everyPages === "string"
+                ? Promise.reject(window.__cloud.everyPages)
+                : Promise.resolve(window.__cloud.everyPages ?? { pages: [], truncated: false });
+            case "cloud_page_take_down": {
+              const every = window.__cloud.everyPages;
+              if (every && typeof every !== "string") every.pages = every.pages.filter((p) => p.slug !== args.slug);
+              return Promise.resolve(null);
+            }
+
             /* ----- the public map, as the engine would keep it ----- */
             case "cloud_publish": {
               const s = window.__cloud.statuses.find(
@@ -876,6 +1050,53 @@
           },
         }),
       );
+      // `?sections`: the app starts in a connected workspace that is in
+      // sections — this person (an owner who has said who they are) has a
+      // Private with a note in it and is in one restricted folder with Bob;
+      // Carol is in the workspace and in neither. A note sits straight under
+      // Restricted, in no folder, and somebody's Private has published a
+      // page this owner cannot open.
+      if (new URLSearchParams(location.search).has("sections")) {
+        const me = "m-sherin";
+        const member = (id, name, extra = {}) => ({
+          id,
+          email: `${name.toLowerCase()}@example.com`,
+          name,
+          role: "member",
+          creator: false,
+          createdAt: Date.now() - 6 * 86400000,
+          lastSeenAt: Date.now() - 3600000,
+          devices: 1,
+          ...extra,
+        });
+        window.__cloud.people.me = me;
+        window.__cloud.people.members = [
+          member(me, "Sherin", { role: "owner", creator: true, devices: 0 }),
+          member("m-bob", "Bob"),
+          member("m-carol", "Carol"),
+        ];
+        window.__sections = { private: ["journal.md"], restricted: { Finance: ["budget.md"] }, loose: ["stray.md"], projectsGone: false };
+        window.__fs.set("/docs/Private/journal.md", "# Journal\n\nOnly mine.\n");
+        window.__fs.set("/docs/Restricted/Finance/budget.md", "# Budget\n\nNumbers.\n");
+        window.__fs.set("/docs/Restricted/stray.md", "# Stray\n");
+        for (const dir of ["/docs/Private", "/docs/Restricted", "/docs/Restricted/Finance"]) window.__dirs.add(dir);
+        window.__cloud.everyPages = {
+          pages: [
+            { slug: "carols-notes", kind: "dir", title: "Private", by: "Carol", at: Date.now() - 2 * 86400000, shared: false },
+          ],
+          truncated: false,
+        };
+        window.__cloud.statuses = [
+          {
+            ...statusFor("/docs", "https://notes.example.com", "Notes", "w-1"),
+            sections: true,
+            spaces: [
+              { id: "p-sherin00", kind: "private", name: "Private", path: "Private", by: "Sherin", members: [me] },
+              { id: "s-finance0", kind: "restricted", name: "Finance", path: "Restricted/Finance", by: "Sherin", members: [me, "m-bob"] },
+            ],
+          },
+        ];
+      }
       // `?removed-at-launch`: the app starts where a workspace it was last in
       // has ALREADY been taken off this Mac — the engine heard it on first
       // contact, before this window was listening, so there is no event to

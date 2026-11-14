@@ -692,7 +692,7 @@ await test("identity: the creator is a person for attribution, and a secret for 
 });
 
 await test("roles: a role is the person's — an owner makes another, and it lands on their very next request", async () => {
-  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "workspace.manage"];
+  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"];
   const role = (id, to, token = OWNER) =>
     call(`/api/auth/members/${id}`, { method: "PATCH", token, body: { role: to } });
   const creator = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
@@ -5064,6 +5064,59 @@ await test("addresses: an address is one space's for the whole domain — the se
   } finally {
     delete globalThis.caches;
   }
+
+  // An owner sees every address on the domain — what the internet is told of each page, and nothing
+  // of the section it is in — and can take any of them down.
+  const joPage = await call(`/api/spaces/${joPrivate.id}/manifest`, {
+    method: "PUT",
+    ...jo,
+    headers: { "x-base-etag": joPrivate.etag },
+    body: {
+      version: 4,
+      name: "Private",
+      seq: 1,
+      files: {},
+      tombstones: {},
+      public: { "jo-notes": { kind: "dir", path: "", by: JO.member.id, at: 3 } },
+    },
+  });
+  assert.equal(joPage.status, 200, joPage.text);
+  assert.equal((await pub("/jo-notes")).status, 200);
+  assert.equal((await call("/api/pages", { token: MEMBER })).status, 403, "a member is not told");
+  assert.equal((await call("/api/pages/jo-notes", { method: "DELETE", token: MEMBER })).status, 403);
+  const every = (await call("/api/pages", { token: OWNER })).json;
+  assert.deepEqual(
+    every.pages.map((p) => [p.slug, p.kind, p.title, p.by, p.shared]),
+    [
+      ["budget", "file", "Budget", ALICE.name, false],
+      ["jo-notes", "dir", "Private", JO.member.name, false],
+      ["open", "file", "note", ALICE.name, true],
+    ],
+    "the shared workspace's own pages come from its map, which is the truth even where the registry is not",
+  );
+  assert.equal(every.truncated, false);
+  const told = JSON.stringify(every);
+  assert.ok(!told.includes(books.id) && !told.includes(joPrivate.id) && !told.includes("Budget.md"), "not which section, not the file's path");
+  assert.equal((await call("/api/pages", { method: "POST", token: OWNER })).status, 405);
+  assert.equal((await call("/api/pages/No%20Such", { method: "DELETE", token: OWNER })).status, 400);
+
+  assert.equal((await call("/api/pages/jo-notes", { method: "DELETE", token: OWNER })).status, 204, "a page whose file the owner cannot open");
+  assert.equal((await pub("/jo-notes")).status, 404);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'jo-notes'"), 0, "and the address is free");
+  const joNow = await call(`/api/spaces/${joPrivate.id}/manifest`, { ...jo });
+  assert.deepEqual(JSON.parse(joNow.text).public, {}, "her own Mac hears of it as any other change to her Private");
+  assert.notEqual(joNow.headers.get("x-manifest-etag"), joPage.json.etag);
+  assert.equal((await call("/api/pages/jo-notes", { method: "DELETE", token: OWNER })).status, 404, "nothing is published there now");
+  // One of the shared workspace's own, the same way.
+  const extra = await as(bot)("/api/agent/pages", { method: "PUT", body: { path: "Open/other", slug: "other-page" } });
+  assert.equal(extra.status, 201, extra.text);
+  assert.equal((await call("/api/pages/other-page", { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await pub("/other-page")).status, 404);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'other-page'"), 0);
+  // A claim left behind by a manifest that was never stored is let go when it is met.
+  db.run(`INSERT INTO addresses (slug, space_id) VALUES ('ghost-page', '${books.id}')`);
+  assert.equal((await call("/api/pages/ghost-page", { method: "DELETE", token: OWNER })).status, 404);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'ghost-page'"), 0);
 
   // Unpublished, the address is free again — and the shared workspace may have it.
   const put2 = await store(put1.json.etag, withPages(2, {}));

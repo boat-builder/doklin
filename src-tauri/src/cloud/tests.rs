@@ -532,27 +532,122 @@ impl Remote for FakeRemote {
         }
     }
 
-    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+    fn create_space(
+        &self,
+        name: &str,
+        members: &[String],
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
         let this = self.clone();
         let name = name.to_string();
+        let members = members.to_vec();
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             let Some(me) = this.member_id(&b, caller) else {
                 return Err(RemoteError::Other("nobody to make a folder for".into()));
             };
+            // Only people already here: one stranger and nothing is made.
+            if members.iter().any(|id| !b.members.values().any(|m| &m.id == id)) {
+                return Err(RemoteError::Other("only people in this workspace can be added".into()));
+            }
             let id = Self::mint_id(&mut b, "s");
             let space = FakeSpace {
                 kind: SpaceKind::Restricted,
                 name: name.clone(),
                 by: me.clone(),
                 created_at: now_ms(),
-                members: BTreeSet::from([me]),
+                members: members.into_iter().chain([me]).collect(),
                 section: Section { manifest: Manifest { name, ..Default::default() }, etag: 1, ..Default::default() },
             };
             let entry = space.entry(&id);
             b.spaces.insert(id, space);
             Ok(entry)
+        }
+    }
+
+    fn add_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let this = self.clone();
+        let (id, member) = (id.to_string(), member.to_string());
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let me = this.member_id(&b, caller);
+            let here = b.members.values().any(|m| m.id == member);
+            match b.spaces.get_mut(&id) {
+                Some(space)
+                    if space.kind == SpaceKind::Restricted && me.as_ref().is_some_and(|m| space.members.contains(m)) =>
+                {
+                    if !here {
+                        return Err(RemoteError::NotFound);
+                    }
+                    space.members.insert(member);
+                    Ok(space.entry(&id))
+                }
+                _ => Err(RemoteError::NotFound),
+            }
+        }
+    }
+
+    fn remove_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        let (id, member) = (id.to_string(), member.to_string());
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let me = this.member_id(&b, caller);
+            match b.spaces.get_mut(&id) {
+                Some(space)
+                    if space.kind == SpaceKind::Restricted && me.as_ref().is_some_and(|m| space.members.contains(m)) =>
+                {
+                    if !space.members.contains(&member) {
+                        return Err(RemoteError::NotFound);
+                    }
+                    if space.members.len() == 1 {
+                        return Err(RemoteError::Other(
+                            "they are the last person in this folder — delete it, or add somebody first".into(),
+                        ));
+                    }
+                    space.members.remove(&member);
+                    Ok(())
+                }
+                _ => Err(RemoteError::NotFound),
+            }
+        }
+    }
+
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
+        let this = self.clone();
+        let id = id.to_string();
+        async move {
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let me = this.member_id(&b, caller);
+            let mine = b
+                .spaces
+                .get(&id)
+                .is_some_and(|sp| sp.kind == SpaceKind::Restricted && me.as_ref().is_some_and(|m| sp.members.contains(m)));
+            if !mine {
+                return Err(RemoteError::NotFound);
+            }
+            // Everything it stored first, in rounds, its rows last: the
+            // first call empties it and says there is more to do.
+            let space = b.spaces.get_mut(&id).expect("the space");
+            if !space.section.blobs.is_empty() {
+                let purged = space.section.blobs.len() as u64;
+                space.section.blobs.clear();
+                return Ok(WipeRound { purged, remaining: true });
+            }
+            b.spaces.remove(&id);
+            b.leases.retain(|_, l| l.space.as_deref() != Some(id.as_str()));
+            Ok(WipeRound { purged: 1, remaining: false })
         }
     }
 
@@ -5737,6 +5832,170 @@ async fn renaming_a_restricted_folder_here_renames_it_for_everyone_in_it() {
     assert!(!bob.abs("Restricted/Finance").exists());
     assert_eq!(be.lock().unwrap().blob_gets, fetched, "his folder was renamed, not fetched again");
     assert_eq!(bob.status().spaces.iter().find(|s| s.id == finance).unwrap().path, "Restricted/Money");
+}
+
+/// *New restricted folder…*: made with the people chosen, it is on this Mac
+/// at once and on theirs by their next poll. A second folder of a name this
+/// person already has is told apart by who made it.
+#[tokio::test]
+async fn a_restricted_folder_made_with_people_is_theirs_from_the_start() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    let mut carol = person(&be, "Carol").await;
+    alice.sync().await;
+    bob.sync().await;
+    carol.sync().await;
+    assert!(alice.status().sections, "Private and Restricted are sections here");
+    assert_eq!(alice.status().me_id, Some(member_of(&alice)));
+
+    let made = alice.engine.make_space("Finance", &[member_of(&bob)], None).await.unwrap();
+    assert_eq!((made.path.as_str(), made.kind), ("Restricted/Finance", SpaceKind::Restricted));
+    assert_eq!(made.members.len(), 2);
+    assert!(alice.abs("Restricted/Finance").is_dir(), "here before any poll");
+    assert_eq!(alice.status().spaces.iter().filter(|s| s.id == made.id).count(), 1);
+    alice.write("Restricted/Finance/q3.md", "numbers\n");
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_in(&be, &made.id)), ["q3.md"]);
+    assert!(paths(&manifest_of(&be)).is_empty());
+
+    bob.engine.poll_for_test().await;
+    assert_eq!(bob.read("Restricted/Finance/q3.md").as_deref(), Some("numbers\n"));
+    carol.engine.poll_for_test().await;
+    assert!(!carol.abs("Restricted").exists(), "and nobody else hears of it");
+
+    let second = alice.engine.make_space("Finance", &[], None).await.unwrap();
+    assert_eq!(second.path, "Restricted/Finance (Alice)");
+    alice.engine.poll_for_test().await;
+    assert_eq!(be.lock().unwrap().spaces[&second.id].name, "Finance", "the folder's name here is not a rename");
+
+    // What cannot be a folder is refused before anything is made.
+    let before = be.lock().unwrap().spaces.len();
+    assert!(alice.engine.make_space(".hidden", &[], None).await.is_err());
+    assert!(alice.engine.make_space("a/b", &[], None).await.is_err());
+    assert!(alice.engine.make_space("Strangers", &["m-00000000".to_string()], None).await.is_err());
+    assert_eq!(be.lock().unwrap().spaces.len(), before);
+}
+
+/// *Restrict access…* on a folder everyone has: it becomes a restricted
+/// folder holding the people chosen. On their Macs the files move into it —
+/// nothing downloaded — and on everyone else's they are deleted outright.
+#[tokio::test]
+async fn restricting_a_shared_folder_takes_it_off_everyone_not_chosen() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    let mut carol = person(&be, "Carol").await;
+    for n in 1..=6 {
+        alice.write(&format!("Deals/d{n}.md"), &format!("deal {n}\n"));
+    }
+    alice.write("readme.md", "hello\n");
+    alice.sync().await;
+    bob.sync().await;
+    carol.sync().await;
+
+    let from = alice.abs("Deals");
+    let made = alice.engine.make_space("Deals", &[member_of(&bob)], Some(&from)).await.unwrap();
+    assert_eq!(made.path, "Restricted/Deals");
+    assert!(!alice.abs("Deals").exists());
+    assert_eq!(alice.read("Restricted/Deals/d1.md").as_deref(), Some("deal 1\n"));
+    alice.cycle().await;
+    assert_eq!(manifest_in(&be, &made.id).files.len(), 6);
+    let shared = manifest_of(&be);
+    assert_eq!(paths(&shared), ["readme.md"]);
+    assert!(shared.tombstones.values().all(|t| t.to.as_deref() == Some(made.id.as_str())));
+    assert_eq!(alice.phase(), Phase::Idle, "a move, not a deletion to confirm");
+
+    let fetched = be.lock().unwrap().blob_gets;
+    bob.engine.poll_for_test().await;
+    assert_eq!(bob.read("Restricted/Deals/d6.md").as_deref(), Some("deal 6\n"));
+    assert!(!bob.abs("Deals").exists());
+    assert_eq!(be.lock().unwrap().blob_gets, fetched, "his copies moved; nothing was downloaded");
+
+    carol.engine.poll_for_test().await;
+    assert!(!carol.abs("Deals").exists() && !carol.abs("Restricted").exists());
+    assert_eq!(carol.read("readme.md").as_deref(), Some("hello\n"));
+
+    // A folder that is one already, or a reserved name itself, is not restricted again.
+    let again = alice.abs("Restricted/Deals");
+    assert!(alice.engine.make_space("Deals", &[], Some(&again)).await.is_err());
+    let private = alice.abs("Private");
+    assert!(alice.engine.make_space("Mine", &[], Some(&private)).await.is_err());
+    assert!(alice.abs("Private").is_dir());
+}
+
+/// Everyone in a restricted folder is equal: any of them adds and removes
+/// people. Taken out, a Mac's copy is deleted and it is told so; leaving is
+/// taking yourself out; the last person cannot leave, and deletes instead —
+/// which takes the folder off every Mac that had it.
+#[tokio::test]
+async fn people_are_added_to_a_folder_taken_out_of_it_and_the_last_one_deletes_it() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    bob.sync().await;
+    let plans = alice.engine.make_space("Plans", &[], None).await.unwrap().id;
+    alice.write("Restricted/Plans/roadmap.md", "next year\n");
+    alice.cycle().await;
+    let (a, b) = (member_of(&alice), member_of(&bob));
+
+    alice.engine.change_space_member(&plans, &b, true).await.unwrap();
+    assert_eq!(alice.status().spaces.iter().find(|s| s.id == plans).unwrap().members.len(), 2);
+    bob.engine.poll_for_test().await;
+    assert_eq!(bob.read("Restricted/Plans/roadmap.md").as_deref(), Some("next year\n"));
+
+    alice.engine.change_space_member(&plans, &b, false).await.unwrap();
+    assert_eq!(alice.status().spaces.iter().find(|s| s.id == plans).unwrap().members, [a.clone()]);
+    bob.engine.poll_for_test().await;
+    assert!(!bob.abs("Restricted/Plans").exists());
+    let told = bob.events.of(EV_SPACE_LEFT);
+    assert_eq!(told.len(), 1);
+    assert_eq!((told[0]["name"].as_str(), told[0]["path"].as_str()), (Some("Plans"), Some("Restricted/Plans")));
+
+    // Alone in it, she cannot leave: a folder is deleted, never abandoned.
+    let refused = alice.engine.change_space_member(&plans, &a, false).await.unwrap_err();
+    assert!(refused.contains("last person"), "{refused}");
+    assert!(alice.abs("Restricted/Plans").is_dir());
+
+    // With Bob back in, she leaves: her copy goes now, his stays, the cloud is as it was.
+    alice.engine.change_space_member(&plans, &b, true).await.unwrap();
+    bob.engine.poll_for_test().await;
+    alice.engine.change_space_member(&plans, &a, false).await.unwrap();
+    assert!(!alice.abs("Restricted/Plans").exists(), "without waiting for a poll");
+    assert!(alice.status().spaces.iter().all(|s| s.id != plans));
+    assert_eq!(alice.events.of(EV_SPACE_LEFT).len(), 1);
+    assert_eq!(paths(&manifest_in(&be, &plans)), ["roadmap.md"]);
+    assert_eq!(bob.read("Restricted/Plans/roadmap.md").as_deref(), Some("next year\n"));
+    assert!(alice.engine.change_space_member(&plans, &b, false).await.is_err(), "it is not hers to change any more");
+
+    // Bob deletes it: everything it stored, in as many rounds as it takes.
+    bob.engine.delete_space(&plans).await.unwrap();
+    assert!(!be.lock().unwrap().spaces.contains_key(&plans));
+    assert!(!bob.abs("Restricted/Plans").exists());
+    assert!(bob.status().spaces.iter().all(|s| s.id != plans));
+    assert!(bob.abs("Private").is_dir(), "and nothing else went with it");
+}
+
+/// A creator who never said who they are is nobody a folder could belong
+/// to, and a worker without spaces has no sections at all.
+#[tokio::test]
+async fn a_folder_needs_somebody_to_belong_to_and_a_worker_that_has_them() {
+    let be = fake_worker();
+    let mut nobody = device("Studio", &be);
+    nobody.engine.probe_worker().await;
+    nobody.sync().await;
+    assert_eq!(nobody.status().me_id, None);
+    let refused = nobody.engine.make_space("Finance", &[], None).await.unwrap_err();
+    assert!(refused.contains("Say who you are"), "{refused}");
+    assert!(be.lock().unwrap().spaces.is_empty());
+
+    let old = fake_worker();
+    old.lock().unwrap().features.retain(|f| f != "spaces");
+    let mut alice = person(&old, "Alice").await;
+    alice.sync().await;
+    assert!(!alice.status().sections);
+    assert!(alice.engine.make_space("Finance", &[], None).await.unwrap_err().contains("too old"));
 }
 
 /// A published note keeps its address when it moves to another section: the

@@ -103,6 +103,7 @@ export type CloudAction =
   | "people.remove"
   | "people.roles"
   | "agents.manage"
+  | "pages.manage"
   | "workspace.manage";
 
 export type CloudStatus = {
@@ -119,6 +120,10 @@ export type CloudStatus = {
    *  says it is, or this Mac's own name when it has not said. What a `by` is
    *  compared against to know whether somebody *else* did a thing. */
   me: string;
+  /** The same person as the domain's id for them — which of a folder's
+   *  `members` is you. Null until the domain has said, and for a creator who
+   *  never said who they are. */
+  meId: string | null;
   /** What this Mac's credential may do here, as the domain last said. Empty
    *  until it has answered, and from a worker that predates roles. Ask it
    *  with `mayOn`, which reads "not known yet" as it should be read. */
@@ -137,6 +142,9 @@ export type CloudStatus = {
   /** This person's sections besides the shared workspace — their Private and
    *  the restricted folders they are in — that have a folder on this Mac. */
   spaces: CloudSpace[];
+  /** The workspace is in sections here: `Private` and `Restricted` at its
+   *  top are not shared folders. False from a worker without spaces. */
+  sections: boolean;
 };
 
 /** One section of a workspace that only some people have. Mirrors
@@ -298,6 +306,9 @@ export type CloudPendingDeletesEvent = { root: string; count: number; total: num
 /** A page asked for an address another section holds on this domain, and was
  *  not published. `path` is workspace-relative. */
 export type CloudAddressTakenEvent = { root: string; slug: string; path: string };
+/** A restricted folder left this Mac: you were taken out of it, or it was
+ *  deleted. `path` is where it was, workspace-relative. */
+export type CloudSpaceLeftEvent = { root: string; name: string; path: string };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };
 /** An owner took this Mac's access to a workspace away, and its copy here is
  *  gone: the folder, and what Doklin kept for it. `deleted` is false when the
@@ -444,6 +455,43 @@ export const cloudPublish = (path: string, opts: { slug?: string; title?: string
 export const cloudUnpublish = (root: string, slug: string) => invoke<void>("cloud_unpublish", { root, slug });
 export const cloudSetRoot = (root: string, slug: string | null) => invoke<void>("cloud_set_root", { root, slug });
 
+/** Make a restricted folder holding you and `members` (member ids). With
+ *  `from` — a folder in the workspace, absolute — that folder becomes it and
+ *  leaves the Mac of everyone not chosen. Resolves to the folder as the
+ *  status lists it: `path` is where it is on this Mac. */
+export const cloudSpaceCreate = (root: string, name: string, members: string[], from: string | null = null) =>
+  invoke<CloudSpace>("cloud_space_create", { root, name, members, from });
+
+/** Add a person to a restricted folder (`add`), or take one out — yourself
+ *  included, which is leaving it. The last person cannot be taken out. */
+export const cloudSpaceMember = (root: string, id: string, memberId: string, add: boolean) =>
+  invoke<void>("cloud_space_member", { root, id, memberId, add });
+
+/** Delete a restricted folder for everyone in it. */
+export const cloudSpaceDelete = (root: string, id: string) => invoke<void>("cloud_space_delete", { root, id });
+
+/** One public page as an owner is told of it: what its address tells anyone,
+ *  and nothing of the section it was published from. */
+export type EveryPage = {
+  slug: string;
+  kind: PublicKind;
+  title: string;
+  /** Who published it, as a name. */
+  by: string;
+  at: number;
+  /** In the shared workspace, where everyone here can open its file. */
+  shared: boolean;
+};
+
+/** Every public address on the domain (an owner's to read). `truncated` when
+ *  the domain holds more than one answer carries. */
+export const cloudPages = (root: string) =>
+  invoke<{ pages: EveryPage[]; truncated: boolean }>("cloud_pages", { root });
+
+/** Take a page down, whoever published it (an owner's to do). */
+export const cloudPageTakeDown = (root: string, slug: string) =>
+  invoke<void>("cloud_page_take_down", { root, slug });
+
 /** Erase everything on the workspace's domain and forget it here; resolves to the purged count. */
 export const cloudWipe = (root: string) => invoke<number>("cloud_wipe", { root });
 
@@ -459,6 +507,8 @@ export const onCloudPendingDeletes = (cb: (e: CloudPendingDeletesEvent) => void)
   listen<CloudPendingDeletesEvent>("cloud-pending-deletes", (e) => cb(e.payload));
 export const onCloudAddressTaken = (cb: (e: CloudAddressTakenEvent) => void) =>
   listen<CloudAddressTakenEvent>("cloud-address-taken", (e) => cb(e.payload));
+export const onCloudSpaceLeft = (cb: (e: CloudSpaceLeftEvent) => void) =>
+  listen<CloudSpaceLeftEvent>("cloud-space-left", (e) => cb(e.payload));
 export const onCloudProgress = (cb: (e: CloudProgressEvent) => void) =>
   listen<CloudProgressEvent>("cloud-progress", (e) => cb(e.payload));
 export const onCloudRemoved = (cb: (e: CloudRemovedEvent) => void) =>
@@ -470,6 +520,50 @@ export const onCloudRemoved = (cb: (e: CloudRemovedEvent) => void) =>
 export function cloudForWorkspace(statuses: CloudStatus[], root: string | null): CloudStatus | null {
   if (!root) return null;
   return statuses.find((s) => s.root === root) ?? null;
+}
+
+/* ---------- Sections ---------- */
+
+/** Which part of a workspace a path is in, and so who can open it. */
+export type Place =
+  /** Everyone in the workspace. */
+  | { kind: "shared" }
+  /** Only you, on every Mac of yours. */
+  | { kind: "private"; space: CloudSpace }
+  /** The people in that folder. */
+  | { kind: "restricted"; space: CloudSpace }
+  /** Under a reserved name but in no section: straight under `Restricted`,
+   *  or in a folder there that is not a restricted folder yet. It syncs
+   *  nowhere until it is moved. */
+  | { kind: "nowhere" };
+
+const RESERVED_TOP = new Set(["private", "restricted"]);
+
+/** The section `rel` — workspace-relative — is in. Names are compared
+ *  without case, as the disk compares them. */
+export function placeOf(cloud: CloudStatus | null, rel: string): Place {
+  if (!cloud?.sections) return { kind: "shared" };
+  const lower = rel.toLowerCase();
+  const space = cloud.spaces.find((s) => {
+    const at = s.path.toLowerCase();
+    return lower === at || lower.startsWith(`${at}/`);
+  });
+  if (space) return { kind: space.kind, space };
+  return RESERVED_TOP.has(lower.split("/", 1)[0]) ? { kind: "nowhere" } : { kind: "shared" };
+}
+
+/** Who gains sight of something moved from one section to another —
+ *  "Everyone in Acme", "All 3 people in “Finance”" — or null when nobody
+ *  does, which is every move that keeps the audience or narrows it. */
+export function widerAudience(cloud: CloudStatus, from: Place, to: Place): string | null {
+  if (from.kind === "shared" || to.kind === "nowhere" || to.kind === "private") return null;
+  if (to.kind === "shared") return `Everyone in ${cloud.name}`;
+  if (from.kind !== "nowhere" && from.space.id === to.space.id) return null;
+  const before = from.kind === "nowhere" ? [] : from.space.members;
+  const gained = to.space.members.filter((m) => !before.includes(m) && m !== cloud.meId);
+  if (gained.length === 0) return null;
+  const n = to.space.members.length;
+  return `${n === 2 ? "Both people" : `All ${n} people`} in “${to.space.name}”`;
 }
 
 /** Whether a role may do `action`, from an answer that states what it may —

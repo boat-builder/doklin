@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Beat, Manifest, PollResponse, SpaceEntry};
+use super::manifest::{Beat, Manifest, PollResponse, PublicKind, SpaceEntry};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -243,6 +243,36 @@ pub struct AgentCode {
     pub expires_at: u64,
 }
 
+/// One public page, as an owner is told of it: what its address tells the
+/// internet, and nothing of the section it was published from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryPage {
+    pub slug: String,
+    pub kind: PublicKind,
+    #[serde(default)]
+    pub title: String,
+    /// Who published it, as a name.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: u64,
+    /// In the shared workspace, where everyone here can open its file.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// `GET /api/pages`. `truncated` when more sections hold addresses than one
+/// request reads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryPages {
+    #[serde(default)]
+    pub pages: Vec<EveryPage>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WipeRound {
@@ -335,12 +365,37 @@ pub trait Remote: Send + Sync + 'static {
     /// there. Answers the same space every time.
     fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
 
-    /// `POST /api/spaces`: a restricted folder with only its maker in it.
-    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+    /// `POST /api/spaces`: a restricted folder holding its maker and whoever
+    /// else is named, by member id — people already in the workspace.
+    fn create_space(
+        &self,
+        name: &str,
+        members: &[String],
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
 
     /// `PATCH /api/spaces/<id>`: rename a restricted folder, for everyone
     /// in it.
     fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `PUT /api/spaces/<id>/members/<member>`: add a person to a restricted
+    /// folder. Answers the folder as it now is.
+    fn add_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `DELETE /api/spaces/<id>/members/<member>`: take a person out, the
+    /// caller included. Refused for the last one in it.
+    fn remove_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `DELETE /api/spaces/<id>`: one round of deleting a restricted folder
+    /// and everything it stored; repeat while `remaining`.
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -616,6 +671,20 @@ impl HttpRemote {
         self.revoke(&format!("agents/{}/tokens", agent_id), token_id).await
     }
 
+    /// `GET /api/pages`: every public address on the domain, whichever
+    /// section published the page — an owner's to read.
+    pub async fn list_every_page(&self) -> RemoteResult<EveryPages> {
+        let res = self.auth(self.client.get(self.url("pages"))).send().await.map_err(transport_err)?;
+        let res = expect_status(res).await?;
+        res.json::<EveryPages>().await.map_err(transport_err)
+    }
+
+    /// `DELETE /api/pages/<slug>`: take a page down, whoever published it.
+    pub async fn take_down_page(&self, slug: &str) -> RemoteResult<()> {
+        let res = self.auth(self.client.delete(self.url(&format!("pages/{}", slug)))).send().await.map_err(transport_err)?;
+        expect_status(res).await.map(|_| ())
+    }
+
     /// POST a JSON body with the bearer and read the JSON answer.
     async fn post_json(&self, tail: &str, body: &serde_json::Value) -> RemoteResult<serde_json::Value> {
         let res = self
@@ -801,9 +870,46 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn create_space(&self, name: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
-        let body = json!({ "name": name });
+    fn create_space(
+        &self,
+        name: &str,
+        members: &[String],
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let body = json!({ "name": name, "members": members });
         async move { read_space_value(self.post_json("spaces", &body).await?) }
+    }
+
+    fn add_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let url = self.url(&format!("spaces/{}/members/{}", id, member));
+        async move {
+            let res = self.auth(self.client.put(url)).send().await.map_err(transport_err)?;
+            read_space(expect_status(res).await?).await
+        }
+    }
+
+    fn remove_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("spaces/{}/members/{}", id, member));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
+        let url = self.url(&format!("spaces/{}", id));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            res.json::<WipeRound>().await.map_err(transport_err)
+        }
     }
 
     fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {

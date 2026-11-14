@@ -108,7 +108,10 @@
 //       `Restricted/` — on a Mac those are where a person's Private and their
 //       restricted folders are — and a tombstone may say which section its
 //       file moved to (`to`) rather than that it was deleted.
-export const WORKER_VERSION = 14;
+//  15 = an owner sees every public address on the domain, whichever section
+//       published the page, and can take any of them down (`/api/pages`,
+//       `pages.manage`).
+export const WORKER_VERSION = 15;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map

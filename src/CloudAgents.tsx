@@ -1,4 +1,4 @@
-// The Agents tab of the Cloud panel's "People and agents" view.
+// The Agents tab of the workspace's "People and agents" view.
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
 // copy of the folder. The owner adds one here, ticks what it may do, and is
@@ -13,7 +13,7 @@
 //
 // For whoever may manage agents — today an owner: the routes behind this ask
 // the same role table as the people routes beside them, and CloudPeople
-// renders this tab only when that table says so. As everywhere in the panel,
+// renders this tab only when that table says so. As everywhere in the view,
 // no `fetch` here — the engine makes every call.
 
 import { useCallback, useEffect, useRef, useState } from "react";

@@ -93,6 +93,12 @@
 //                                    409 for the last one — delete the folder instead
 //   *      /api/spaces/<id>/manifest · blobs/… · versions/…   the sync routes above, on that space
 //
+//   Every public address (everyPage.ts) — an owner's, whichever section published the page.
+//
+//   GET    /api/pages                {pages: [{slug, kind, title, by, at, shared}], truncated} —
+//                                    what the internet is told of each page, and no more
+//   DELETE /api/pages/<slug>         take the page down (204); 404 when nothing is published there
+//
 //   Agents. An agent's token is answered under /api/agent and nowhere
 //   else — every route above answers one with 403 — and the routes that manage agents sit
 //   beside the people routes, an owner's like them. Both are listed in agentApi.ts.
@@ -107,6 +113,7 @@ import { authenticate, type Auth } from "./auth";
 import { randomHex } from "./crypto";
 import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
+import { listEveryPage, takeDownPage } from "./everyPage";
 import { json, readJsonObject } from "./http";
 import {
   BLOB_HASH_RE,
@@ -114,6 +121,7 @@ import {
   MANIFEST_KEY,
   MAX_FILE_BYTES,
   MAX_MANIFEST_BYTES,
+  SLUG_RE,
   SPACE_ID_RE,
   WORKSPACE_KEY,
   blobKey,
@@ -268,6 +276,11 @@ export async function handleApi(
 
   const synced = await sync(request, env, url, parts.slice(1));
   if (synced) return synced;
+
+  if (section === "pages" && (parts.length === 2 || parts.length === 3)) {
+    if (!can(auth.role, "pages.manage")) return notAllowed();
+    return handlePages(request, env, parts, auth);
+  }
 
   if (section === "auth" && parts[2] === "agents") {
     if (!can(auth.role, "agents.manage")) return notAllowed();
@@ -684,6 +697,23 @@ async function handleSpaces(request: Request, env: Env, url: URL, parts: string[
   const etag = parts[3] === "manifest" ? res.headers.get("x-manifest-etag") : null;
   if (etag && etag !== space.etag) await noteEtag(scoped, etag);
   return res;
+}
+
+/* ---------- Every public address ---------- */
+
+async function handlePages(request: Request, env: Env, parts: string[], auth: Auth): Promise<Response> {
+  const method = request.method;
+  if (parts.length === 2) {
+    if (method !== "GET") return methodNotAllowed();
+    const every = await listEveryPage(env);
+    return every === null ? noDatabase() : json(every);
+  }
+  if (method !== "DELETE") return methodNotAllowed();
+  const slug = parts[2].toLowerCase();
+  if (!SLUG_RE.test(slug)) return json({ error: "invalid address" }, 400);
+  const done = await takeDownPage(env, auth.memberId ?? auth.name, slug);
+  if (done !== true) return json({ error: done.error, ...done.extra }, done.status);
+  return new Response(null, { status: 204 });
 }
 
 const NAME_RULE = "a folder needs a name that can be a folder's: no slashes, and not starting with a dot";
