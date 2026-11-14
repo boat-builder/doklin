@@ -108,6 +108,16 @@ pub fn save(creds: &Credentials) -> Result<(), Failure> {
     fs::rename(&tmp, &file).map_err(|e| fail("write in", e))
 }
 
+/// The other way in, on a Mac: the Doklin app logs its own `doklin` in to
+/// every workspace connected there. Ends a not-logged-in sentence.
+pub fn from_the_app(workspace: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!(", or, if Doklin on this Mac is connected to {}, choose Doklin → Install Command Line Tool", workspace)
+    } else {
+        String::new()
+    }
+}
+
 /// The workspace a command means: the only one, or the one `-w` names.
 pub fn pick<'a>(creds: &'a Credentials, wanted: Option<&str>) -> Result<&'a Workspace, Failure> {
     let all = &creds.workspaces;
@@ -115,15 +125,18 @@ pub fn pick<'a>(creds: &'a Credentials, wanted: Option<&str>) -> Result<&'a Work
         let wanted = domain_of(wanted.trim_end_matches('/'));
         return all.iter().find(|w| w.domain().eq_ignore_ascii_case(wanted)).ok_or_else(|| {
             Failure::not_logged_in(format!(
-                "this machine is not logged in to {} — run: doklin login {} <code>",
-                wanted, wanted
+                "this machine is not logged in to {} — run: doklin login {} <code>{}",
+                wanted,
+                wanted,
+                from_the_app(wanted)
             ))
         });
     }
     match all.as_slice() {
-        [] => Err(Failure::not_logged_in(
-            "this machine is not logged in — ask the person you work for to add an agent in Doklin (the workspace menu → Agents…) and run the login line it gives them",
-        )),
+        [] => Err(Failure::not_logged_in(format!(
+            "this machine is not logged in — ask the person you work for to add an agent in Doklin (the workspace menu → Agents…) and run the login line it gives them{}",
+            from_the_app("the workspace")
+        ))),
         [one] => Ok(one),
         many => Err(Failure::usage(format!(
             "this machine is logged in to {} — say which with -w <domain>",

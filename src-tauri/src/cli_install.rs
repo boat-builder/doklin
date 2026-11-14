@@ -6,6 +6,9 @@
 //! One `doklin` per Mac: whatever sits at that path (a copy the install
 //! script downloaded, an older link) is replaced, and a `doklin` the
 //! terminal would still find first is named, with an offer to remove it.
+//!
+//! Installing also logs the command in to every workspace connected here,
+//! and from then on connecting one does too (cloud/terminal.rs).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,40 +39,61 @@ fn run(app: &AppHandle) -> Result<(), String> {
     if !already && !make_link(&helper)? {
         return Ok(()); // the password prompt was cancelled: nothing changed
     }
-    let mut words = if already {
+    let mut installed = if already {
         format!("The doklin command is already installed at {}.", LINK)
     } else if before.is_some() {
         format!("Installed the doklin command at {}, in place of the one that was there.", LINK)
     } else {
         format!("Installed the doklin command at {}.", LINK)
     };
-    match first_on_terminal_path() {
-        Found::Same | Found::Unknown => {}
-        Found::Nothing => {
-            words.push_str(&format!(" Your terminal's PATH leaves out {} — add it to use doklin.", LINK_DIR));
-        }
-        Found::Other(other) => {
-            let question = format!(
-                "{} Your terminal finds another doklin first, at {}, and would keep running that one. Remove it?",
-                words,
-                other.display()
-            );
-            let remove = app
-                .dialog()
-                .message(question)
-                .title(TITLE)
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom("Remove It".into(), "Keep It".into()))
-                .blocking_show();
-            if remove {
-                std::fs::remove_file(&other)
-                    .map_err(|e| format!("Could not remove {}: {}.", other.display(), e))?;
-            }
-            return Ok(());
-        }
+    let found = first_on_terminal_path();
+    if matches!(found, Found::Nothing) {
+        installed.push_str(&format!(" Your terminal's PATH leaves out {} — add it to use doklin.", LINK_DIR));
     }
-    say(app, MessageDialogKind::Info, &words);
+    let roots = crate::cloud::connected_roots(app);
+    let logins: Vec<String> = if roots.is_empty() {
+        vec!["Connect a workspace and doklin is logged in to it too.".into()]
+    } else {
+        roots.iter().map(|root| crate::cloud::log_cli_in(app, root, &helper).unwrap_or_else(|why| why)).collect()
+    };
+    let words = format!("{}\n\n{}", installed, logins.join("\n"));
+    let Found::Other(other) = found else {
+        say(app, MessageDialogKind::Info, &words);
+        return Ok(());
+    };
+    let question = format!(
+        "{}\n\nYour terminal finds another doklin first, at {}, and would keep running that one. Remove it?",
+        words,
+        other.display()
+    );
+    let remove = app
+        .dialog()
+        .message(question)
+        .title(TITLE)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Remove It".into(), "Keep It".into()))
+        .blocking_show();
+    if remove {
+        std::fs::remove_file(&other).map_err(|e| format!("Could not remove {}: {}.", other.display(), e))?;
+    }
     Ok(())
+}
+
+/// A workspace was just connected on this Mac (connect, join, resume): when
+/// the terminal runs this app's `doklin`, log it in there too. Quietly, off
+/// the main thread — the command was installed, so nobody is waiting on a
+/// dialog, and a terminal that is not logged in says how to fix it.
+pub(crate) fn after_connect(app: &AppHandle, root: &str) {
+    let (app, root) = (app.clone(), root.to_string());
+    std::thread::spawn(move || {
+        let Some(helper) = bundled_cli() else { return };
+        if !matches!(first_on_terminal_path(), Found::Same) {
+            return;
+        }
+        if let Err(why) = crate::cloud::log_cli_in(&app, &root, &helper) {
+            eprintln!("cli: {}", why);
+        }
+    });
 }
 
 /// `Contents/Helpers/doklin` of the app this is running from.

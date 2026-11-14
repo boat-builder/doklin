@@ -110,7 +110,9 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
 
 The release `.dmg` holds the app, and the app holds the `doklin` command:
 *Doklin → Install Command Line Tool* puts it on your PATH, at
-`/usr/local/bin/doklin`, and app updates keep it current.
+`/usr/local/bin/doklin`, and app updates keep it current. It also logs the
+command in to every workspace connected in the app, and to each one you connect
+later, so on your own Mac there is no login code to make.
 
 From source, one script builds the release bundle, installs `Doklin.app` to
 `/Applications`, and links the `doklin` command to the copy inside it:

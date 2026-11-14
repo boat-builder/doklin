@@ -27,7 +27,8 @@ use serde_json::Value;
 /// Why a command did not do what was asked, and the exit code that says so:
 /// `2` bad usage · `3` not found · `4` not permitted · `5` conflict ·
 /// `6` not logged in, or the login was revoked · `7` the workspace's worker
-/// is too old for this command · `1` anything else.
+/// is too old for this command · `1` anything else. The Doklin app reads `6`
+/// off the bundled copy (src-tauri/src/cloud/terminal.rs) — change both.
 #[derive(Debug)]
 pub struct Failure {
     pub exit: i32,
@@ -78,7 +79,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "login",
         usage: "doklin login <domain> <code>",
-        about: "Log this machine in, with the line you were given. The code works once.",
+        about: "Log this machine in, with the line you were given. The code works once. A `-` in its place reads the code from what is piped in.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::login,
     },
@@ -257,7 +258,9 @@ fn run(raw: &[String], json: bool) -> Result<(), Failure> {
 }
 
 /// A refusal, on stderr: a sentence for a person, or the domain's own JSON
-/// for a program — either way with what is needed to act on it.
+/// for a program — either way with what is needed to act on it. The Doklin
+/// app reads the JSON's `error` (src-tauri/src/cloud/terminal.rs) — change
+/// both.
 fn report(failure: &Failure, json: bool) {
     if json {
         let mut body = match &failure.detail {

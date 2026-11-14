@@ -18,6 +18,7 @@ You work as one person's agent, and see what they see. A path says where a thing
 
 Getting in
   login <domain> <code>        log this machine in, with the line you were given
+                               (on a Mac where Doklin is connected: Doklin → Install Command Line Tool)
   logout                       log this machine out
   whoami                       which workspace and agent this is, whose, and what it may do
 

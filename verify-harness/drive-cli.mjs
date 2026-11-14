@@ -492,7 +492,15 @@ await check("not logged in: every command that needs the workspace exits 6 and s
     ["board", "show", "Ideas"], ["board", "add", "Ideas", "Rocket"], ["board", "field", "rm", "Ideas", "Status"],
   ];
   for (const args of all) facts[args.join(" ")] = refused(await doklin(nobody, args, { input: "text" }), 6, /not logged in/);
-  facts["-w for a domain this machine never logged in to"] = refused(await doklin(nobody, ["ls", "-w", "nowhere.example.com"]), 6, /not logged in to nowhere\.example\.com/);
+  const named = await doklin(nobody, ["ls", "-w", "nowhere.example.com"]);
+  facts["-w for a domain this machine never logged in to"] = refused(named, 6, /not logged in to nowhere\.example\.com/);
+  // On a Mac the app is the other way in; elsewhere there is no app to name.
+  const app = /Doklin → Install Command Line Tool/;
+  const bare = await doklin(nobody, ["ls"]);
+  facts[process.platform === "darwin" ? "on a Mac, both name the menu item that logs in" : "off a Mac, neither names the app"] =
+    process.platform === "darwin"
+      ? app.test(bare.problem.error) && app.test(named.problem.error)
+      : !app.test(bare.problem.error) && !app.test(named.problem.error);
   facts["no request was made"] = calls.length === from;
   facts["no credentials file was made"] = !existsSync(nobody.creds);
   return facts;
@@ -587,6 +595,28 @@ await check("login again on a machine that is logged in: the new token replaces 
     "still one entry, with a new token": after.workspaces.length === 1 && after.workspaces[0].token !== before,
     "the old login was let go": same(asked(from), ["POST login → 201", "DELETE login → 204"]) && calls[from + 1].headers.authorization === `Bearer ${before}`,
     "the owner sees one machine, by this machine's name": mine.machines.length === 1 && mine.machines[0].host === hostname(),
+  };
+});
+
+await check("login <domain> -: the code is the first line piped in — how the Doklin app hands one over, off the command line; nothing piped in is bad usage that asks nothing", async () => {
+  const terminal = await addAgent("Sherin's terminal (Studio)", ALL_SCOPES);
+  const box = machine("terminal");
+  const empty = calls.length;
+  const nothing = await doklin(box, ["login", BASE, "-"], { input: "" });
+  const blank = await doklin(box, ["login", BASE, "-"], { input: "\n  \n" });
+  const askedNothing = calls.length === empty;
+  const leftNothing = !existsSync(box.creds);
+  const from = calls.length;
+  const r = await doklin(box, ["login", BASE, "-"], { input: `${terminal.code}\n` });
+  const sent = calls[from];
+  return {
+    "nothing piped in is exit 2": refused(nothing, 2, /nothing was piped in/),
+    "a blank line is exit 2": refused(blank, 2, /nothing was piped in/),
+    "neither asked the domain anything": askedNothing,
+    "nor left a credentials file": leftNothing,
+    "the piped code logs in": r.code === 0 && r.json.agent.name === "Sherin's terminal (Studio)" && same(r.json.scopes, ALL_SCOPES),
+    "it sent the code it was piped": same(asked(from), ["POST login → 201"]) && JSON.parse(sent.body).code === terminal.code,
+    "the credentials file holds the login": credsOf(box).workspaces[0].agent === "Sherin's terminal (Studio)",
   };
 });
 

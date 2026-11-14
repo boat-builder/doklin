@@ -21,6 +21,7 @@
 //! bus.rs        the edit bus (every write command → the engine)
 //! config.rs     cloud.json, the marker, endpoints and names
 //! status.rs     the status/event contract
+//! terminal.rs   logging the bundled `doklin` in, as this person's agent
 //! tests.rs      the in-memory worker and the two-device matrix
 //! versions.rs   the version store's mirror: upload, the cloud ladder, reads
 //! ```
@@ -39,6 +40,7 @@ pub(crate) mod scan;
 // The versioner asks which folders are sections of their own.
 pub(crate) mod space;
 pub(crate) mod status;
+mod terminal;
 #[cfg(test)]
 mod tests;
 mod unit;
@@ -55,6 +57,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub use bus::{touched, EditBus};
 pub use config::device_display_name;
+pub(crate) use terminal::log_cli_in;
 
 use config::{
     domain_of, ensure_device, normalize_endpoint, read_cloud_file, read_marker, remove_marker, sanitize_folder_name,
@@ -487,7 +490,11 @@ fn record_and_spawn(app: &AppHandle, entry: WorkspaceEntry) -> Result<(), String
         inner.removed.retain(|gone| gone.root != entry.root);
         spawn_engine(inner, &entry);
         Ok(())
-    })
+    })?;
+    // A workspace new on this Mac is one its terminal can work in too.
+    #[cfg(target_os = "macos")] // macOS-only: the command ships inside the app
+    crate::cli_install::after_connect(app, &entry.root);
+    Ok(())
 }
 
 /// What a command aimed at one connected workspace opens with: the credential
