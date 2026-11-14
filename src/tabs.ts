@@ -6,8 +6,6 @@
 // tabs. The kind says whose file that is:
 //
 //   file      a document of the user's, at its real path.
-//   store     a DATASTORE folder shown as a board — a path that is a
-//             directory. The document machinery stands down for one.
 //   untitled  a note that has not been saved to a file yet. Its path is a
 //             buffer of the app's own (src-tauri/src/untitled.rs): the note
 //             belongs to its tab, is unsaved for as long as it has text, and
@@ -16,17 +14,17 @@
 
 import { stripComments } from "./criticMarkup";
 
-export type TabKind = "file" | "store" | "untitled";
+export type TabKind = "file" | "untitled";
 
 /** What is persisted of a tab — in the window session, and in the backend's
  *  window registry. Everything else about one is found again when it loads. */
 export type StoredTab = { id: string; kind: TabKind; path: string };
 
-/** `missing` marks a file (or board) whose path failed to read — the drive is
+/** `missing` marks a file whose path failed to read — the drive is
  *  unmounted, the file moved — kept visible as a "ghost" tab instead of being
  *  silently dropped. Every activation re-checks, so the flag heals itself. */
 export type DocTab = StoredTab & {
-  kind: "file" | "store";
+  kind: "file";
   missing?: boolean;
   title?: never;
   unsaved?: never;
@@ -51,8 +49,8 @@ export const isUntitled = (t: Tab): t is UntitledTab => t.kind === "untitled";
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 
-/** The name a tab goes by: a document's file name without its extension, a
- *  board's folder, an untitled note's first line. */
+/** The name a tab goes by: a document's file name without its extension, an
+ *  untitled note's first line. */
 export const tabLabel = (t: Tab): string =>
   t.kind === "untitled" ? t.title || "Untitled" : basename(t.path).replace(DOC_EXT_RE, "");
 

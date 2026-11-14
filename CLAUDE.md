@@ -35,13 +35,12 @@ Read a doc only when the change is in its area.
 
 | Area | Doc |
 |---|---|
-| App shell, saving, tabs, windows, editor | `docs/architecture.md` |
+| App shell, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
 | `src-tauri/src/cloud/`, `src/cloud.ts`, sync | `docs/cloud.md` |
 | Publishing, public pages | `docs/cloud-publishing.md` |
 | People, spaces, leases, agents, document API, `cli/` | `docs/cloud-people-agents.md` |
 | Worker routes, bucket, D1, manifest format | `cloud-worker/README.md` |
 | `src-tauri/src/versions/`, history | `docs/versioning.md` |
-| `src/store/`, boards, frontmatter | `docs/datastores.md` |
 | `pdf_export.rs` | `docs/pdf-export.md` |
 | `.github/workflows/`, updater | `docs/release.md` |
 

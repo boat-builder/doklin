@@ -81,16 +81,6 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Comments: reads keep markers (`clean=1` strips) so read-then-write keeps them. **A content write never moves a thread** (`markersKept`, `anchorsKept`): md must carry exactly the old markers, compared as written (moving one with its words is fine); html must leave every thread that resolves resolving. Else `400 comments`, `--force` included — threads change only through the comments routes. New md threads need words occurring once in plain text. html threads anchor as `{path: "", tag, text}`, resolved by the app's `resolveAnchor` (`htmlBridge.ts`). Stamps are to the second; finer would make every Mac rewrite the sidecar.
 - No history, presence, lease or sync in the CLI: undo is the Macs' version store.
 
-## Boards (`agentBoards.ts`, `boardCards.ts`)
-
-- **A board is a board, never a folder** of card `.md` files + `store.jsonl`. Views are human-only (no view, filter, sort, hidden columns); `cards` groups by the first kanban view's field, or `by=`.
-- A board = any folder holding `store.jsonl` (nested: part of the outer one). Inside it only cards have names; nothing moves in; it moves whole; it isn't publishable, a card's page is.
-- Uses the app's `src/store/` modules, so bytes match the app's. Values parse against field types; select values must be declared options; `rank` is never a field; undeclared keys are kept, never set.
-- Titles are unique case-insensitively (`taken`, never `Title 2`); `/` `:` → `-`; a retitle moves note, sidecar, html.
-- Board changes take no `if-rev` (commit over latest bytes); page writes do.
-- Card page `<board>/<card>`: reads omit the properties block, writes splice it back as on disk (as `splice_body`, `src-tauri/src/store.rs`), a page starting with its own block is refused; comment and search lines count from the page.
-- `board_cards`: lazy fid + hash cache, written only by reads; ≤ 32 stale cards a request (`CATCH_UP_CARDS`), then `202`. Option renames rewrite cards in `202` rounds; removing an option or field touches none.
-
 ## Search (`search.ts`)
 
 - `search_text`: per document, lower-cased text (markers or tags stripped) + comment bodies; too big → `notSearched`. A search catches up first (≤ 8 inline, else `202` after ≤ 36). API writes catch up via `ctx.waitUntil`; a Mac's PUT never does (no D1 write per save). Query `instr(folded, ?) > 0`.
@@ -98,14 +88,14 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 
 ## CLI (`cli/`)
 
-- Thin: never names a sidecar, pairs md/html, parses a store or builds a manifest.
+- Thin: never names a sidecar, pairs md/html or builds a manifest.
 - Token only in `~/.config/doklin/credentials.json` (`$XDG_CONFIG_HOME`), 0600 in 0700, one entry per domain; `-w` picks. Trap: the app runs the bundled `doklin` with the app's environment, so an `XDG_CONFIG_HOME` set only in a shell's startup files is not the one its login writes under.
 - `login <domain> -` takes the code from the first line piped in — how the app hands one over.
 - Exit codes are a contract: `0` ok · `1` other · `2` usage · `3` not found · `4` not permitted · `5` conflict · `6` not logged in/revoked · `7` worker too old (missing feature, or an unknown route's 404/405).
-- JSON when stdout isn't a TTY or with `--json`; `read` puts content on stdout, metadata on stderr. `--dry-run` on every change; re-asks on `202`; board commands read stdin only with `--from -`.
+- JSON when stdout isn't a TTY or with `--json`; `read` puts content on stdout, metadata on stderr. `--dry-run` on every change; re-asks on `202`.
 - Every word after `doklin` is a command on every system; an unknown one is exit `2`, `doklin` alone is the overview. `open` is the one command about this Mac: it hands paths on this disk to the app (refused off a Mac, needs no login) and never knows workspaces — the app places them.
 - One `doklin` per Mac. The app carries it at `Doklin.app/Contents/Helpers/doklin` (`bundle.macOS.files`); *Doklin → Install Command Line Tool* (`cli_install.rs`) links `/usr/local/bin/doklin` to it, replacing what is there and naming a `doklin` the terminal finds first. `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`) is for everything else; on a Mac with the app it links to that copy instead of downloading.
-- Concepts: `doklin help agent|sections|documents|comments|publishing|boards`.
+- Concepts: `doklin help agent|sections|documents|comments|publishing`.
 
 ## Limits
 

@@ -70,13 +70,12 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 8;
+const D1_SCHEMA = 7;
 const D1_TABLES = [
   "addresses",
   "agent_codes",
   "agent_tokens",
   "agents",
-  "board_cards",
   "creator",
   "invites",
   "leases",
@@ -91,7 +90,7 @@ const D1_TABLES = [
   "tokens",
 ];
 
-/** The agent tables as a database had them from schema 5 to 7 (schema.ts). */
+/** The agent tables as a database had them at schema 5 and 6 (schema.ts). */
 const AGENT_TABLES_BEFORE_OWNERS = `
     CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
                          last_used_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
@@ -943,11 +942,11 @@ await test("d1: a database from before roles learns who its creator was — once
   });
   assert.equal(promoted.json.member.role, "owner");
   old.run("DELETE FROM creator");
-  old.run("UPDATE meta SET schema_version = 8 WHERE key = 'schema'");
+  old.run("UPDATE meta SET schema_version = 7 WHERE key = 'schema'");
   old.db.exec(`
     INSERT OR IGNORE INTO creator (id, member_id)
       SELECT 1, id FROM members
-       WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8
+       WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 7
        ORDER BY created_at, id LIMIT 1
   `);
   assert.equal(old.value("SELECT COUNT(*) FROM creator"), 0, "after the bump the move moves nothing");
@@ -2166,7 +2165,7 @@ await test("public: a folder page lists every note under it; nested URLs render 
   assert.ok(toc.text.includes("5 pages"), toc.text.match(/toc-meta">[^<]*/)?.[0]);
   for (const href of [
     "/projects/plan",
-    "/projects/board",
+    "/projects/status",
     "/projects/Roadmap/Ship%20the%20boat",
     "/projects/Roadmap/Paint%20it",
     "/projects/Roadmap/Launch",
@@ -2175,7 +2174,7 @@ await test("public: a folder page lists every note under it; nested URLs render 
   }
   assert.ok(toc.text.includes('class="toc-tree toc-cards"'), "a handful of pages lists as cards");
   assert.ok(toc.text.includes('<span class="toc-card-path">Roadmap</span>'), "a card wears its folder");
-  assert.ok(!toc.text.includes("store.jsonl") && !toc.text.includes("pic.png"), "only notes are pages");
+  assert.ok(!toc.text.includes("notes.txt") && !toc.text.includes("pic.png"), "only notes are pages");
   assert.ok(toc.text.includes('<meta property="og:type" content="website">'));
 
   const nested = await pub("/projects/plan?v=md");
@@ -2189,10 +2188,10 @@ await test("public: a folder page lists every note under it; nested URLs render 
   assert.equal((await pub("/projects/plan.md?v=md")).status, 200, "the extension may be spelled out");
   assert.ok(!(await pub("/plan?v=md")).text.includes('<a class="home-crumb"'), "reached on its own slug, a note has no crumb");
 
-  const card = await pub("/projects/Roadmap/Ship%20the%20boat");
-  assert.equal(card.status, 200);
-  assert.ok(card.text.includes("<title>Ship the boat</title>"), "a card without a heading is named after its file");
-  assert.ok(card.text.includes("The hull is done."));
+  const unheaded = await pub("/projects/Roadmap/Ship%20the%20boat");
+  assert.equal(unheaded.status, 200);
+  assert.ok(unheaded.text.includes("<title>Ship the boat</title>"), "a note without a heading is named after its file");
+  assert.ok(unheaded.text.includes("The hull is done."));
 
   const pic = await rawGet("/projects/assets/pic.png");
   assert.equal(pic.status, 200);
@@ -2203,8 +2202,7 @@ await test("public: a folder page lists every note under it; nested URLs render 
   assert.equal(rendition.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups");
 
   for (const p of [
-    "/projects/store.jsonl",
-    "/projects/Roadmap/store.jsonl",
+    "/projects/Roadmap/notes.txt",
     "/projects/Roadmap",
     "/projects/nope",
     "/projects/plan/nope",
@@ -2217,72 +2215,15 @@ await test("public: a folder page lists every note under it; nested URLs render 
   }
 });
 
-await test("public: boards and tables derive from the synced datastore; cards link to their pages when they have one; a card page shows its properties", async () => {
-  const page = await pub("/projects/board");
-  assert.equal(page.status, 200);
-  assert.ok(!page.text.includes("language-kanban") && !page.text.includes("language-table"), "the fences became views");
-  assert.ok(!page.text.includes("store: ./Roadmap"), "config text never shows");
-  assert.match(page.text, /<span class="dk-embed-kind"><svg[^>]*>.*?<\/svg>Board<\/span>/, "the embed's bar names its kind");
-  assert.match(page.text, /<span class="dk-embed-kind"><svg[^>]*>.*?<\/svg>Table<\/span>/);
-  assert.ok(page.text.includes('<span class="dk-board-title">Roadmap</span>'));
-  // The board part of the page, before the table view of the same store.
-  const board = page.text.slice(0, page.text.indexOf('<table class="dk-table">'));
-  const column = (color, name, count) =>
-    new RegExp(
-      `<section class="dk-col dk-color-${color}"><header class="dk-col-head"><span class="dk-col-glyph"><svg[^>]*>(.*?)</svg></span><span class="dk-col-name">${name}</span><span class="dk-col-count">${count}</span>`,
-    );
-  // A board grouped by a select with a finished option tracks progress: each
-  // column wears its stage — not started, on the way, done — as the app's glyph.
-  assert.match(board, column("grey", "Backlog", 1), "a column with its option's colour and its count");
-  assert.match(board.match(column("grey", "Backlog", 1))[1], /stroke-dasharray/, "the first stage hasn't started: a dashed ring");
-  assert.match(board.match(column("blue", "In progress", 1))[1], /A3\.5 3\.5 0 0 1 /, "a stage on the way: a ring filling");
-  assert.match(board.match(column("green", "Done", 1))[1], /class="dk-glyph-check"/, "the finished column: a check");
-  assert.ok(board.includes('done</span>') && board.includes("1 of 3 done") && board.includes('style="width:33%"'), "progress over the board");
-  assert.ok(
-    page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Ship%20the%20boat">Ship the boat</a>'),
-    "a card inside the published folder links to its nested page, not its own slug",
-  );
-  assert.ok(page.text.includes('<a class="dk-card-title" href="/projects/Roadmap/Paint%20it">Paint it</a>'));
-  assert.match(
-    board,
-    /<li class="dk-card is-done"><a class="dk-card-title" href="\/projects\/Roadmap\/Launch"><span class="dk-card-check"><svg[^>]*>.*?<\/svg><\/span>Launch<\/a>/,
-    "a card in the finished column is checked",
-  );
-  assert.ok(board.includes('<div class="dk-card-excerpt">The hull is done.</div>'), "a card shows its excerpt, as the view does in the app");
-  assert.match(board, /<span class="dk-card-date(?: is-soon)?" title="Due"><svg[^>]*>.*?<\/svg>Dec 4(?:, 2026)?<\/span>/, "a date sits in the card's foot");
-  assert.ok(!board.includes(">2026-12-04<"), "…not as a pill");
-  assert.ok(page.text.includes('<span class="dk-chip dk-color-green">Ada</span>'), "a chip takes the option's colour");
-  assert.ok(page.text.includes('<span class="dk-chip dk-color-red">paint</span>'));
-  assert.ok(page.text.includes('<span class="dk-board-sub">3 cards</span>'), "the table counts its cards");
-  assert.ok(page.text.includes('<th class="dk-th">Status</th>') && page.text.includes('<th class="dk-th">Due</th>'));
-  assert.ok(page.text.includes('<a class="dk-row-title" href="/projects/Roadmap/Launch">Launch</a>'));
-  assert.ok(page.text.includes("Everything after the board is ordinary prose."));
-
-  // The same kind of store from outside any published folder: its cards have no
-  // page, so they are titles, not dead links.
-  const ideas = await pub("/ideas");
-  assert.equal(ideas.status, 200);
-  assert.ok(ideas.text.includes('<span class="dk-card-title">Teleporter</span>'), "not a link");
-  assert.match(
-    ideas.text,
-    /<section class="dk-col dk-color-yellow"><header class="dk-col-head"><span class="dk-col-glyph"><svg[^>]*><circle cx="8" cy="8" r="3.75" fill="currentColor" stroke="none"\/><\/svg><\/span><span class="dk-col-name">New<\/span>/,
-    "a board with no finished option tracks nothing: a plain dot in the column's colour",
-  );
-  assert.ok(ideas.text.includes('<span class="dk-board-sub">2 cards</span>') && !ideas.text.includes('<span class="dk-progress"'), "no progress claimed");
-  assert.ok(ideas.text.includes('<span class="dk-card-title">Jetpack</span>'), "a note without frontmatter is a card too");
-  assert.ok(!ideas.text.includes('href="/Ideas/'), "no dead links");
-
-  const card = await pub("/ship");
-  assert.equal(card.status, 200);
-  assert.ok(card.text.includes('<div class="dk-props">'));
-  assert.ok(card.text.includes('<div class="dk-prop-label">Status</div><div class="dk-prop-value"><span class="dk-chip dk-color-blue">In progress</span></div>'));
-  assert.ok(card.text.includes('<div class="dk-prop-label">Owner</div><div class="dk-prop-value"><span class="dk-chip dk-color-green">Ada</span></div>'));
-  assert.ok(card.text.includes('<div class="dk-prop-label">Tags</div><div class="dk-prop-value"><span class="dk-chip dk-color-grey">hull</span></div>'));
-  assert.ok(!card.text.includes("rank"), "a card's rank is not a property");
-  assert.ok(!card.text.includes("<hr"), "the frontmatter never reaches marked");
-  assert.ok(between(card.text, '<main class="doc">', '<div class="dk-props">') && between(card.text, '<div class="dk-props">', "<p>The hull is done.</p>"), "properties sit above the body, inside the document");
+await test("public: a note's frontmatter block is left off its page; a note that merely opens with a rule keeps it", async () => {
+  const ship = await pub("/ship");
+  assert.equal(ship.status, 200);
+  for (const words of ["status:", "In progress", "owner:", "tags:"]) assert.ok(!ship.text.includes(words), `${words} stays in the file`);
+  assert.ok(!ship.text.includes("<hr"), "the block never reaches marked");
+  assert.ok(between(ship.text, '<main class="doc">\n<p>The hull is done.</p>', "</main>"), "the document is the body alone");
+  assert.ok(ship.text.includes('<meta name="description" content="The hull is done.">'), "and so is the description");
   const launch = await pub("/projects/Roadmap/Launch");
-  assert.ok(launch.text.includes('dk-color-green">Done</span>') && !launch.text.includes('dk-prop-label">Owner'), "unset values are left out");
+  assert.ok(between(launch.text, "<hr>", "<p>We launched.</p>"), "a rule with no closing fence is the note's own");
 });
 
 await test("public: every page wears the app's own theme — its tokens light and dark, its Newsreader — with nothing the browser can't ask for", async () => {
@@ -2334,18 +2275,18 @@ await test("public: links between notes rewrite to public URLs — inside the fo
   const home = await pub("/home");
   assert.equal(home.status, 200);
   assert.ok(home.text.includes('<a href="/plan">the plan</a>'), "a note with its own slug");
-  assert.ok(home.text.includes('<a href="/projects/board">board</a>'), "a note inside a published folder");
+  assert.ok(home.text.includes('<a href="/projects/status">status</a>'), "a note inside a published folder");
   assert.ok(home.text.includes("or a scratch note;") && !home.text.includes("Scratch.md"), "an unpublished target is plain text");
   assert.ok(home.text.includes('<a href="https://github.com/boat-builder/doklin">source</a>'), "an external link stays");
   assert.ok(home.text.includes('<a href="#home">this page</a>'), "an anchor stays");
   assert.ok(home.text.includes('<img src="/projects/assets/pic.png" alt="a picture">'), "a picture inside a published folder");
   assert.ok(home.text.includes("a missing picture") && !home.text.includes("none.png"), "a picture nobody can reach is its alt text");
 
-  const board = await pub("/projects/board");
-  assert.ok(board.text.includes('<a href="/projects/plan">the plan</a>'), "from inside the folder, the folder's address wins over the note's own slug");
-  assert.ok(board.text.includes('<a href="/home">home</a>'), "a note outside the folder, on its own slug");
+  const status = await pub("/projects/status");
+  assert.ok(status.text.includes('<a href="/projects/plan">the plan</a>'), "from inside the folder, the folder's address wins over the note's own slug");
+  assert.ok(status.text.includes('<a href="/home">home</a>'), "a note outside the folder, on its own slug");
   const plan = await pub("/plan?v=md");
-  assert.ok(plan.text.includes('<a href="/projects/board">board</a>'), "reached on its own slug, a sibling links into the folder that holds it");
+  assert.ok(plan.text.includes('<a href="/projects/status">status</a>'), "reached on its own slug, a sibling links into the folder that holds it");
   assert.ok(plan.text.includes('<a href="/ideas">ideas</a>'), "a link written with ../");
 });
 
@@ -2561,7 +2502,7 @@ await test("agents: the owner adds one with its first code; the code is redeemed
   assert.deepEqual(login.json.scopes, ["read", "edit"]);
   assert.deepEqual(login.json.workspace, { id: here.id, name: here.name });
   assert.equal(login.json.version, workerVersion);
-  for (const feature of ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search", "agent-boards"]) {
+  for (const feature of ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search"]) {
     assert.ok(login.json.features.includes(feature), `the login says the worker has ${feature}`);
   }
   const token = login.json.token;
@@ -3342,7 +3283,7 @@ await test("documents: what a Mac would never see is refused; the sidecar never 
   // A listing is folders, documents and plain files — never a sidecar.
   const root = (await api("/api/agent/tree")).json;
   // (`Private` is the agent's person's own section, beside what is shared.)
-  assert.deepEqual(root, { dir: "", folders: ["Case", "Private"], boards: [], documents: [], files: [] });
+  assert.deepEqual(root, { dir: "", folders: ["Case", "Private"], documents: [], files: [] });
   const deep = (await api("/api/agent/tree?deep=1")).json;
   assert.deepEqual(deep.folders, ["Case", "Case/Sub", "Private"]);
   assert.deepEqual(deep.documents.map((d) => d.path), ["Case/Report", "Case/Sub/inner"]);
@@ -4011,9 +3952,9 @@ await test("comments: a markdown thread is a marker in the text and a record in 
   const twice = await say({ path: "Talk/draft", on: "ships in June", body: "When?" });
   assert.equal(twice.status, 409);
   assert.equal(twice.json.code, "anchor");
-  assert.ok(/occurs 2 times/.test(twice.json.error), "the heading and the paragraph — not the properties, not the code");
+  assert.ok(/occurs 2 times/.test(twice.json.error), "the heading and the paragraph — not the frontmatter, not the code");
   assert.deepEqual(twice.json.occurrences, [
-    { line: 2, text: "title: ships in June", inside: "the properties at the top" },
+    { line: 2, text: "title: ships in June", inside: "the frontmatter at the top" },
     { line: 4, text: "# The boat ships in June" },
     { line: 6, text: "The boat ships in June if the paint dries. The crew is ready." },
     { line: 8, text: "Use `launch-window` and `ships in June` in code. See [the plan](https://example.com/the-paint-dries).", inside: "code" },
@@ -4566,482 +4507,6 @@ await test("search: an agent's change is mirrored in the request that made it; a
   assert.deepEqual((await found("manatee")).results.map((r) => r.path), ["Lib/during"], "and the next search that can, catches up");
 });
 
-/* ---------- The document API: boards ---------- */
-
-const ROADMAP_DEF = [
-  '{"doklin":"store","v":1,"name":"Roadmap"}',
-  '{"t":"field","id":"due","name":"Due","type":"date"}',
-  '{"t":"field","id":"owner","name":"Owner","type":"select"}',
-  '{"t":"field","id":"status","name":"Status","type":"select"}',
-  '{"t":"field","id":"tags","name":"Tags","type":"multi_select"}',
-  '{"t":"option","field":"owner","name":"Ada","rank":"a0","color":"green"}',
-  '{"t":"option","field":"status","name":"Backlog","rank":"a0","color":"grey"}',
-  '{"t":"option","field":"status","name":"Done","rank":"a2","color":"green"}',
-  '{"t":"option","field":"status","name":"In progress","rank":"a1","color":"blue"}',
-  '{"t":"option","field":"tags","name":"hull","rank":"a0"}',
-  '{"t":"option","field":"tags","name":"paint","rank":"a1","color":"red"}',
-  '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}',
-  "",
-].join("\n");
-const IDEAS_DEF = '{"doklin":"store","v":1,"name":"Ideas"}\n{"t":"field","id":"status","name":"Status","type":"select"}\n{"t":"option","field":"status","name":"New","rank":"a0"}\n';
-const SHIP = "---\nstatus: In progress\nowner: Ada\ntags: [hull]\nrank: a0\n---\nThe hull is done.\n";
-const PAINT = "---\nstatus: Backlog\ntags: [paint, hull]\ndue: 2026-12-04\naliases: [Painting]\nrank: a1\n---\nAfter the hull.\n";
-const LAUNCH = "---\nstatus: Done\nrank: a2\n---\nWe launched.\n";
-/** A workspace with two boards in it, and what a board's folder holds that no agent should see. */
-const BOARD_FILES = {
-  "Projects/plan.md": "# Plan\n",
-  "Projects/Roadmap/store.jsonl": ROADMAP_DEF,
-  "Projects/Roadmap/Ship the boat.md": SHIP,
-  "Projects/Roadmap/Paint it.md": PAINT,
-  "Projects/Roadmap/Launch.md": LAUNCH,
-  "Projects/Roadmap/Launch.html": "<p>An html rendition nobody shows.</p>",
-  "Projects/Roadmap/pics/hull.png": PIXEL_PNG,
-  "Projects/Roadmap/store (conflict — Alice, Sep 2 14.32).jsonl": ROADMAP_DEF,
-  "Ideas.md": "# Ideas\n\n```kanban\nstore: ./Ideas\n```\n",
-  "Ideas/store.jsonl": IDEAS_DEF,
-  "Ideas/Teleporter.md": "---\nstatus: New\nrank: a0\n---\nBeam me up.\n",
-  "Ideas/Jetpack.md": "Just a note in a board folder.\n",
-};
-const qs = (params) =>
-  Object.entries(params)
-    .flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).map((x) => `${k}=${encodeURIComponent(x)}`))
-    .join("&");
-const boardApi = (api) => ({
-  info: (path) => api(`/api/agent/board?${qs({ path })}`),
-  show: (path, more = {}) => api(`/api/agent/cards?${qs({ path, ...more })}`),
-  card: (path, card) => api(`/api/agent/card?${qs({ path, card })}`),
-  make: (body) => api("/api/agent/board", { method: "POST", body }),
-  add: (body) => api("/api/agent/card", { method: "POST", body }),
-  set: (body) => api("/api/agent/card", { method: "PATCH", body }),
-  rm: (path, card, more = {}) => api(`/api/agent/card?${qs({ path, card, ...more })}`, { method: "DELETE" }),
-  field: (method, body) =>
-    method === "DELETE" ? api(`/api/agent/field?${qs(body)}`, { method }) : api("/api/agent/field", { method, body }),
-  option: (method, body) =>
-    method === "DELETE" ? api(`/api/agent/option?${qs(body)}`, { method }) : api("/api/agent/option", { method, body }),
-});
-/** A new board's definition, as the app writes one (storeFile.ts, defaultStoreDef). */
-const serializedDefault = (name) =>
-  [
-    `{"doklin":"store","v":1,"name":"${name}"}`,
-    '{"t":"field","id":"status","name":"Status","type":"select"}',
-    '{"t":"option","field":"status","name":"Backlog","rank":"a0","color":"grey"}',
-    '{"t":"option","field":"status","name":"Done","rank":"a2","color":"green"}',
-    '{"t":"option","field":"status","name":"In progress","rank":"a1","color":"blue"}',
-    '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}',
-    "",
-  ].join("\n");
-/** Each column of a show as `name: titles`. */
-const columnsOf = (show) => show.json.columns.map((c) => `${c.name}: ${c.cards.map((x) => x.title).join(", ")}`);
-
-await test("boards: a board is one name — ls lists it as a board with its cards counted, never as a folder; --deep stops at it; nothing inside it can be named", async () => {
-  await freshWorkspace(BOARD_FILES);
-  const bot = await addAgent("Board reader", ["read"]);
-  const api = as(bot);
-  const tree = async (dir, deep = false) => (await api(`/api/agent/tree?${qs({ dir, ...(deep ? { deep: "1" } : {}) })}`)).json;
-
-  const root = await tree("");
-  assert.deepEqual(root.folders, ["Private", "Projects"]);
-  assert.deepEqual(root.boards, [{ path: "Ideas", cards: 2 }], "a board beside a note of the same name is still a board");
-  assert.deepEqual(root.documents.map((d) => d.path), ["Ideas"], "and the note is still a note");
-  const projects = await tree("Projects");
-  assert.deepEqual([projects.folders, projects.boards], [[], [{ path: "Projects/Roadmap", cards: 3 }]], "not a folder: a board, with three cards");
-  const deep = await tree("", true);
-  assert.deepEqual(deep.folders, ["Private", "Projects"], "--deep does not go inside a board…");
-  assert.deepEqual(deep.boards.map((b) => b.path), ["Ideas", "Projects/Roadmap"]);
-  assert.deepEqual(deep.documents.map((d) => d.path), ["Ideas", "Projects/plan"], "…so no card is a loose document");
-  assert.deepEqual(deep.files, [], "and store.jsonl, its conflict copy and a picture in it are no files");
-
-  for (const dir of ["Projects/Roadmap", "projects/roadmap", "Projects/Roadmap/pics"]) {
-    const res = await api(`/api/agent/tree?${qs({ dir })}`);
-    assert.equal(res.status, 400, dir);
-    assert.equal(res.json.code, "board");
-    assert.match(res.json.error, /^Projects\/Roadmap is a board, not a folder — see it with `doklin board show Projects\/Roadmap`$/);
-  }
-  // Inside a board, a name is a card or nothing.
-  const read = (p, v = "") => api(docUrl(p, v));
-  for (const p of ["Projects/Roadmap/store.jsonl", "Projects/Roadmap/pics/hull.png", "Projects/Roadmap/store (conflict — Alice, Sep 2 14.32).jsonl"]) {
-    const res = await read(p);
-    assert.equal(res.status, 400, p);
-    assert.match(res.json.error, /is inside the board Projects\/Roadmap, which holds cards and nothing else/);
-  }
-  assert.equal((await read("Projects/Roadmap/Launch.html")).status, 400, "a card has no html version, whatever sits beside it");
-  assert.equal((await read("Projects/Roadmap/Launch", "html")).status, 400);
-  const missing = await read("Projects/Roadmap/Nope");
-  assert.equal(missing.status, 404);
-  assert.equal(missing.json.code, "no_card");
-  const board = await read("Projects/Roadmap");
-  assert.equal(board.status, 400, "a board named where a document was meant");
-  assert.match(board.json.error, /Projects\/Roadmap is a board, not a document/);
-  assert.equal((await api(`/api/agent/doc?path=Projects%2FRoadmap&info=1`)).status, 400);
-  const asNote = await read("Ideas");
-  assert.equal(asNote.status, 200, "a note beside its board is read as the note");
-});
-
-await test("boards: info and show — fields with their options in column order, cards in the columns the board's own view makes, --by and where; each card's block is read into the copy once", async () => {
-  await freshWorkspace(BOARD_FILES);
-  const bot = await addAgent("Board shower", ["read"]);
-  const b = boardApi(as(bot));
-
-  const info = await b.info("projects/roadmap");
-  assert.equal(info.status, 200);
-  assert.deepEqual(info.json, {
-    board: "Projects/Roadmap",
-    name: "Roadmap",
-    cards: 3,
-    by: "Status",
-    fields: [
-      { id: "due", name: "Due", type: "date" },
-      { id: "owner", name: "Owner", type: "select", options: [{ name: "Ada", color: "green" }] },
-      {
-        id: "status",
-        name: "Status",
-        type: "select",
-        options: [
-          { name: "Backlog", color: "grey" },
-          { name: "In progress", color: "blue" },
-          { name: "Done", color: "green" },
-        ],
-      },
-      { id: "tags", name: "Tags", type: "multi_select", options: [{ name: "hull" }, { name: "paint", color: "red" }] },
-    ],
-    conflicts: ["store (conflict — Alice, Sep 2 14.32).jsonl"],
-  });
-  assert.equal((await b.info("Projects")).status, 404, "a folder is not a board");
-  assert.match((await b.info("Projects")).json.error, /^Projects is a folder, not a board/);
-  assert.equal((await b.info("Nowhere")).status, 404);
-
-  db.run("DELETE FROM board_cards");
-  const first = await countingBlobReads(() => b.show("Projects/Roadmap"));
-  assert.equal(first.res.status, 200);
-  assert.equal(first.reads, 4, "the definition, and each card's block once");
-  assert.equal(db.value("SELECT COUNT(*) FROM board_cards"), 3);
-  const again = await countingBlobReads(() => b.show("Projects/Roadmap"));
-  assert.equal(again.reads, 1, "then only the definition: the blocks come from the copy");
-  assert.deepEqual(again.res.json, first.res.json);
-  const show = first.res.json;
-  assert.deepEqual(columnsOf(first.res), ["Backlog: Paint it", "In progress: Ship the boat", "Done: Launch"], "the empty No-status column is left out");
-  assert.deepEqual(show.columns.map((c) => c.color), ["grey", "blue", "green"]);
-  const ship = show.columns[1].cards[0];
-  assert.deepEqual(ship.props, { Owner: "Ada", Status: "In progress", Tags: ["hull"] }, "by field name; rank never shown");
-  assert.equal(ship.rev, 1);
-  assert.equal(ship.by, ALICE.id);
-  assert.deepEqual(show.columns[0].cards[0].props, { Due: "2026-12-04", Status: "Backlog", Tags: ["paint", "hull"] }, "an undeclared key is not a property of the board");
-
-  assert.deepEqual(columnsOf(await b.show("Projects/Roadmap", { by: "tags" })), ["No tags: Launch", "hull: Ship the boat, Paint it", "paint: Paint it"], "a multi-select card sits in a column per value");
-  assert.deepEqual(columnsOf(await b.show("Projects/Roadmap", { by: "Owner" })), ["No owner: Paint it, Launch", "Ada: Ship the boat"]);
-  assert.deepEqual(columnsOf(await b.show("Projects/Roadmap", { by: "due" })), ["No due: Ship the boat, Launch", "2026-12-04: Paint it"]);
-  const notDone = await b.show("Projects/Roadmap", { where: "status!=Done" });
-  assert.deepEqual([columnsOf(notDone), notDone.json.shown], [["Backlog: Paint it", "In progress: Ship the boat", "Done: "], 2], "a declared column stays, empty");
-  assert.deepEqual(columnsOf(await b.show("Projects/Roadmap", { where: ["tags=HULL", "due="] })), ["Backlog: ", "In progress: Ship the boat", "Done: "], "conditions are ANDed; = is carries, any case; field= is empty");
-  assert.equal((await b.show("Projects/Roadmap", { by: "Nope" })).status, 404);
-  assert.equal((await b.show("Projects/Roadmap", { where: "nope=1" })).json.code, "no_field");
-  assert.equal((await b.show("Projects/Roadmap", { where: "status" })).status, 400);
-
-  // A board with no field to group by is a list in board order; a card without frontmatter is a card.
-  db.run("DELETE FROM board_cards");
-  const ideas = await b.show("Ideas");
-  assert.deepEqual(columnsOf(ideas), ["No status: Jetpack", "New: Teleporter"]);
-  // A sync conflict copy of a card is a card, and says so.
-  await macWrite((m, put) => put("Ideas/Teleporter (conflict — Ada, Sep 2 14.32).md", "---\nstatus: New\n---\nBeam me sideways.\n"));
-  const copies = (await b.show("Ideas")).json.columns[1].cards;
-  assert.deepEqual(copies.map((c) => [c.title, c.conflict ?? false]), [["Teleporter", false], ["Teleporter (conflict — Ada, Sep 2 14.32)", true]]);
-});
-
-await test("boards: a card is its properties and its page — read leaves the properties out, a write keeps them as they are at that moment, comments count lines from the page", async () => {
-  await freshWorkspace(BOARD_FILES);
-  const bot = await addAgent("Card editor", ["edit", "comment"]);
-  const api = as(bot);
-  const b = boardApi(api);
-
-  const card = await b.card("Projects/Roadmap", "paint IT");
-  assert.equal(card.status, 200);
-  assert.deepEqual(
-    { ...card.json, changed: undefined },
-    {
-      board: "Projects/Roadmap",
-      title: "Paint it",
-      path: "Projects/Roadmap/Paint it",
-      rev: 1,
-      changed: undefined,
-      by: ALICE.id,
-      byName: "Alice",
-      size: PAINT.length,
-      props: { Due: "2026-12-04", Status: "Backlog", Tags: ["paint", "hull"] },
-      other: { aliases: ["Painting"] },
-      comments: 0,
-      page: "After the hull.\n",
-    },
-  );
-  assert.equal((await b.card("Projects/Roadmap", "Nope")).status, 404);
-
-  const page = await api(docUrl("Projects/Roadmap/Paint it"));
-  assert.equal(page.text, "After the hull.\n", "the page, without the block above it");
-  assert.equal(decodeURIComponent(page.headers.get("x-doklin-board")), "Projects/Roadmap");
-  assert.deepEqual(readHead(page), { kind: "document", path: "Projects/Roadmap/Paint it", file: "Projects/Roadmap/Paint it.md", version: "md", rev: 1 });
-  const info = (await api(`/api/agent/doc?path=${encodeURIComponent("Projects/Roadmap/Paint it")}&info=1`)).json;
-  assert.equal(info.board, "Projects/Roadmap");
-
-  // The page is written; the block stays what it is on disk now — not what it was when the page was read.
-  const moved = await b.set({ path: "Projects/Roadmap", card: "Paint it", set: ["owner=ada"] });
-  assert.equal(moved.status, 200, moved.text);
-  const stale = await api(docUrl("Projects/Roadmap/Paint it"), { method: "PUT", body: "Two coats.\n", headers: { "if-rev": "1" } });
-  assert.equal(stale.status, 409, "the card moved on since it was read");
-  const wrote = await api(docUrl("Projects/Roadmap/Paint it"), { method: "PUT", body: "Two coats.\n", headers: { "if-rev": String(moved.json.rev) } });
-  assert.equal(wrote.status, 200, wrote.text);
-  assert.equal(wrote.json.board, "Projects/Roadmap");
-  assert.equal(textAt("Projects/Roadmap/Paint it.md"), "---\ndue: 2026-12-04\nowner: Ada\nstatus: Backlog\ntags: [paint, hull]\nrank: a1\naliases: [Painting]\n---\nTwo coats.\n");
-  // The same through Jetpack, a card with no properties at all: nothing grows a block.
-  const jet = await api(docUrl("Ideas/Jetpack"), { method: "PUT", body: "Rewritten.\n", headers: { "if-rev": "1" } });
-  assert.equal(jet.status, 200);
-  assert.equal(textAt("Ideas/Jetpack.md"), "Rewritten.\n");
-
-  const sneaky = await api(docUrl("Projects/Roadmap/Launch"), { method: "PUT", body: "---\nstatus: Backlog\n---\nHa.\n", headers: { "if-rev": "1" } });
-  assert.equal(sneaky.status, 400, "a page may not carry properties of its own");
-  assert.match(sneaky.json.error, /set its properties with `doklin board set Projects\/Roadmap "Launch" <field>=<value>`/);
-  const fresh = await api(docUrl("Projects/Roadmap/New card"), { method: "PUT", body: "Hello.\n" });
-  assert.equal(fresh.status, 400, "a card is made on the board");
-  assert.match(fresh.json.error, /add a card to it with `doklin board add Projects\/Roadmap "New card"`/);
-  assert.equal((await api(docUrl("Projects/Roadmap/pics/new.png"), { method: "PUT", body: "x" })).status, 400, "and nothing else goes in");
-  assert.equal((await api(docUrl("Projects/Roadmap/Launch", "html"), { method: "PUT", body: "<p>x</p>" })).status, 400);
-  const edit = await api(docUrl("Projects/Roadmap/Launch"), { method: "DELETE" });
-  assert.equal(edit.status, 400);
-  assert.match(edit.json.error, /remove it with `doklin board rm Projects\/Roadmap "Launch"`/);
-
-  // Comments: on the page, numbered from its first line.
-  const started = await api("/api/agent/comments", { method: "POST", body: { path: "Projects/Roadmap/Paint it", on: "Two coats", body: "Three?" } });
-  assert.equal(started.status, 201, started.text);
-  assert.equal(started.json.line, 1);
-  assert.ok(textAt("Projects/Roadmap/Paint it.md").startsWith("---\ndue: 2026-12-04\nowner: Ada\nstatus: Backlog\n"), "the block is untouched");
-  assert.ok(textAt("Projects/Roadmap/Paint it.md").endsWith(`---\n{==Two coats==}{>>#${started.json.thread}<<}.\n`));
-  const threads = (await api(commentsUrl("Projects/Roadmap/Paint it"))).json;
-  assert.deepEqual([threads.board, threads.threads.map((t) => [t.on, t.line])], ["Projects/Roadmap", [["Two coats", 1]]]);
-  const inBlock = await api("/api/agent/comments", { method: "POST", body: { path: "Projects/Roadmap/Paint it", on: "Backlog", body: "No." } });
-  assert.equal(inBlock.status, 404, "the properties are not words on the page");
-  assert.equal((await b.card("Projects/Roadmap", "Paint it")).json.comments, 1);
-
-  // Moving: a card stays on its board; nothing moves in; the board moves whole and keeps its name in step.
-  const mv = (from, to) => api("/api/agent/move", { method: "POST", body: { from, to } });
-  const cardMove = await mv("Projects/Roadmap/Launch", "Projects/Launch");
-  assert.equal(cardMove.status, 400);
-  assert.match(cardMove.json.error, /rename it with `doklin board set Projects\/Roadmap "Launch" --title "<new title>"`/);
-  assert.equal((await mv("Projects/plan", "Projects/Roadmap")).status, 400, "into a board: refused");
-  assert.match((await mv("Projects/plan", "Projects/Roadmap/plan")).json.error, /nothing moves into a board/);
-  assert.equal((await mv("Projects/Roadmap/pics/", "Projects/pics")).status, 400, "what is inside a board stays inside");
-  const whole = await mv("Projects/Roadmap", "Projects/Q4");
-  assert.equal(whole.status, 200, whole.text);
-  assert.deepEqual([whole.json.kind, whole.json.from, whole.json.to, whole.json.name], ["board", "Projects/Roadmap", "Projects/Q4", "Q4"]);
-  assert.ok(textAt("Projects/Q4/store.jsonl").startsWith('{"doklin":"store","v":1,"name":"Q4"}\n'), "the name it was made with followed the folder");
-  assert.equal(textAt("Projects/Q4/pics/hull.png") !== undefined, true, "everything in it went too");
-  assert.equal((await b.info("Projects/Q4")).json.name, "Q4");
-  await api("/api/agent/board", { method: "POST", body: { path: "Away", name: "Something else" } });
-  const named = await mv("Away", "Elsewhere");
-  assert.equal(named.json.name, undefined, "a board called something of its own keeps it");
-  assert.equal((await b.info("Elsewhere")).json.name, "Something else");
-
-  // Search finds a card by its page and says whose it is — never by its properties.
-  const searched = async (q) => {
-    for (;;) {
-      const res = await api(searchUrl(q));
-      if (res.status !== 202) return res.json;
-    }
-  };
-  assert.deepEqual((await searched("two coats")).results, [{ path: "Projects/Q4/Paint it", board: "Projects/Q4", version: "md", matches: [{ line: 1, text: "Two coats." }] }]);
-  assert.deepEqual((await searched("in progress")).results, [], "a value is not text on a page");
-  assert.deepEqual((await searched("nobody shows")).results, [], "and what else is in a board's folder is not a document");
-});
-
-await test("boards: add, set and rm — a value is read against its field's type, an unknown field or option is refused with what there is, a title is unique, and a card that changes column goes to its foot", async () => {
-  await freshWorkspace(BOARD_FILES);
-  const bot = await addAgent("Card maker", ["edit"]);
-  const b = boardApi(as(bot));
-  const R = "Projects/Roadmap";
-
-  const added = await b.add({ path: R, title: "Rig: the mast", set: ["status=backlog", "tags=PAINT, hull", "due=2026-12-24"], page: "Tall.\n" });
-  assert.equal(added.status, 201, added.text);
-  assert.deepEqual(added.json, {
-    board: R,
-    title: "Rig- the mast",
-    path: `${R}/Rig- the mast`,
-    rev: 1,
-    props: { Due: "2026-12-24", Status: "Backlog", Tags: ["paint", "hull"] },
-    created: true,
-  });
-  assert.equal(
-    textAt(`${R}/Rig- the mast.md`),
-    "---\ndue: 2026-12-24\nstatus: Backlog\ntags: [paint, hull]\nrank: a3\n---\nTall.\n",
-    "the app's own bytes: fields in the order the definition holds them (by id), the declared spelling, a rank after every card's",
-  );
-  assert.deepEqual(columnsOf(await b.show(R)), ["Backlog: Paint it, Rig- the mast", "In progress: Ship the boat", "Done: Launch"]);
-  const top = await b.add({ path: R, title: "Scrub the deck", set: ["status=Backlog"], first: true });
-  assert.equal(top.status, 201);
-  assert.deepEqual(columnsOf(await b.show(R))[0], "Backlog: Scrub the deck, Paint it, Rig- the mast");
-
-  const refusal = async (res, status, code) => {
-    assert.equal(res.status, status, res.text);
-    if (code) assert.equal(res.json.code, code);
-    return res.json;
-  };
-  const taken = await refusal(await b.add({ path: R, title: "ship THE boat" }), 409, "taken");
-  assert.match(taken.error, /already has a card called "Ship the boat"/);
-  const noOption = await refusal(await b.add({ path: R, title: "X", set: ["status=Someday"] }), 404, "no_option");
-  assert.deepEqual(noOption.options, ["Backlog", "In progress", "Done"]);
-  assert.match(noOption.error, /Add one with `doklin board option add Projects\/Roadmap "Status" "Someday"`/);
-  const noField = await refusal(await b.add({ path: R, title: "X", set: ["Priority=High"] }), 404, "no_field");
-  assert.deepEqual(noField.fields, ["Due", "Owner", "Status", "Tags"]);
-  await refusal(await b.add({ path: R, title: "X", set: ["due=12/24/2026"] }), 400);
-  await refusal(await b.add({ path: R, title: "X", set: ["due=2026-02-30"] }), 400);
-  await refusal(await b.add({ path: R, title: "X", set: ["owner+=Ada"] }), 400);
-  await refusal(await b.add({ path: R, title: "X", set: ["rank=a0"] }), 400);
-  await refusal(await b.add({ path: R, title: "X", set: ["status"] }), 400);
-  await refusal(await b.add({ path: R, title: "  " }), 400);
-  await refusal(await b.add({ path: R, title: "X", page: "---\nstatus: Done\n---\n" }), 400);
-  await refusal(await b.add({ path: R, title: ".hidden" }), 400);
-  const before = etagNow();
-  const dry = await b.add({ path: R, title: "Dry", set: ["status=Done"], dryRun: true });
-  assert.equal(dry.status, 200);
-  assert.equal(etagNow(), before, "a dry run writes nothing");
-
-  // Setting: one property, the rest as it was; a column change goes to the foot unless told where.
-  const done = await b.set({ path: R, card: "paint it", set: ["status=Done"] });
-  assert.equal(done.status, 200, done.text);
-  assert.deepEqual(columnsOf(await b.show(R)).slice(1), ["In progress: Ship the boat", "Done: Launch, Paint it"]);
-  assert.equal(
-    textAt(`${R}/Paint it.md`),
-    "---\ndue: 2026-12-04\nstatus: Done\ntags: [paint, hull]\nrank: a4\naliases: [Painting]\n---\nAfter the hull.\n",
-    "a key the board does not declare is kept, after the ones it does",
-  );
-  await b.set({ path: R, card: "Paint it", set: ["status=Done"], before: "Launch" });
-  assert.deepEqual(columnsOf(await b.show(R))[2], "Done: Paint it, Launch");
-  const rankOf = (title) => /rank: (\S+)/.exec(textAt(`${R}/${title}.md`))[1];
-  const shipRank = rankOf("Ship the boat");
-  await b.set({ path: R, card: "Ship the boat", set: ["tags+=paint", "tags+=HULL", "due=2027-01-01"] });
-  assert.equal(rankOf("Ship the boat"), shipRank, "a card that stays in its column stays where it is");
-  assert.match(textAt(`${R}/Ship the boat.md`), /^---\ndue: 2027-01-01\nowner: Ada\nstatus: In progress\ntags: \[hull, paint\]\nrank: /);
-  await b.set({ path: R, card: "Ship the boat", set: ["tags-=hull", "due=", "owner="] });
-  assert.match(textAt(`${R}/Ship the boat.md`), /^---\nstatus: In progress\ntags: \[paint\]\nrank: /);
-  await refusal(await b.set({ path: R, card: "Ship the boat", before: "Ship the boat" }), 400);
-  await refusal(await b.set({ path: R, card: "Ship the boat", before: "Nope" }), 404);
-  await refusal(await b.set({ path: R, card: "Ship the boat", first: true, last: true }), 400);
-  await refusal(await b.set({ path: R, card: "Ship the boat" }), 400);
-  await refusal(await b.set({ path: R, card: "Nope", set: ["status=Done"] }), 404, "no_card");
-  const same = await b.set({ path: R, card: "Launch", set: ["status=Done"] });
-  assert.equal(same.json.changed, false, "a value it already has writes nothing");
-  // Unranked cards — made by some other tool — sort after; nothing can go next to one.
-  const jet = await b.set({ path: "Ideas", card: "Teleporter", after: "Jetpack" });
-  assert.equal(jet.status, 409);
-  const given = await b.set({ path: "Ideas", card: "jetpack", set: ["status=New"] });
-  assert.equal(given.status, 200, given.text);
-  assert.equal(textAt("Ideas/Jetpack.md"), "---\nstatus: New\nrank: a1\n---\nJust a note in a board folder.\n", "a note grows a block when it is given properties");
-
-  // A new title: the file, its comments and its html rendition move together; a taken one is refused.
-  await macWrite((m, put) => put(`${R}/Launch.meta.jsonl`, sidecar({ t: "mthread", id: "k1", comments: [{ author: "Ada", at: 1757000000000, body: "When?" }] })));
-  const retitled = await b.set({ path: R, card: "Launch", title: "Launched" });
-  assert.equal(retitled.status, 200, retitled.text);
-  assert.deepEqual(retitled.json.renamed, { from: "Launch", to: "Launched" });
-  const paths = pathsOf(storedManifest()).filter((p) => p.startsWith(`${R}/Launch`));
-  assert.deepEqual(paths, [`${R}/Launched.html`, `${R}/Launched.md`, `${R}/Launched.meta.jsonl`]);
-  await refusal(await b.set({ path: R, card: "Launched", title: "Paint it" }), 409, "taken");
-
-  // Removing: the card with what the app trashes beside it, as one write.
-  const gone = await b.rm(R, "launched");
-  assert.equal(gone.status, 200, gone.text);
-  assert.deepEqual(gone.json, { board: R, title: "Launched", path: `${R}/Launched`, stillPublic: [] });
-  assert.deepEqual(pathsOf(storedManifest()).filter((p) => p.startsWith(`${R}/Launched`)), []);
-  assert.equal(Object.values(storedManifest().tombstones).filter((t) => t.path.startsWith(`${R}/Launched`)).length, 3, "tombstones, so a Mac moves its copies to the Trash");
-  assert.equal((await b.rm(R, "Launched")).status, 404);
-
-  // Permissions: reading is read, everything else is edit.
-  const reader = boardApi(as(await addAgent("Looker", ["read", "comment"])));
-  assert.equal((await reader.show(R)).status, 200);
-  assert.equal((await reader.add({ path: R, title: "Nope" })).status, 403);
-  assert.equal((await reader.set({ path: R, card: "Paint it", set: ["status=Backlog"] })).status, 403);
-});
-
-await test("boards: new, fields and options — a board starts with the app's columns; a field's id is slugged once; renaming an option rewrites its cards a round at a time, and asking again finishes", async () => {
-  await freshWorkspace(BOARD_FILES);
-  const bot = await addAgent("Board keeper", ["edit"]);
-  const b = boardApi(as(bot));
-
-  const made = await b.make({ path: "work/sprint" });
-  assert.equal(made.status, 201, made.text);
-  assert.deepEqual([made.json.board, made.json.name], ["work/sprint", "sprint"]);
-  assert.equal(textAt("work/sprint/store.jsonl").split("\n")[0], '{"doklin":"store","v":1,"name":"sprint"}');
-  assert.deepEqual(columnsOf(await b.show("work/sprint")), ["Backlog: ", "In progress: ", "Done: "]);
-  assert.equal((await b.make({ path: "Projects" })).status, 409, "a folder that exists");
-  assert.equal((await b.make({ path: "Projects/Roadmap" })).status, 409, "a board that exists");
-  assert.equal((await b.make({ path: "Projects/Roadmap/Inner" })).status, 409, "inside a board");
-  assert.equal((await b.make({ path: "Projects/plan.md" })).status, 409, "a file in the way");
-  assert.equal((await b.make({ path: "PROJECTS/Later", name: "Later on" })).json.board, "Projects/Later", "folders spelled as the workspace spells them");
-
-  const R = "Projects/Roadmap";
-  const field = await b.field("POST", { path: R, name: "Priority level", type: "select", options: "High, low, high, Medium" });
-  assert.equal(field.status, 201, field.text);
-  assert.deepEqual(field.json.field, { id: "priority_level", name: "Priority level", type: "select", options: [{ name: "High" }, { name: "low" }, { name: "Medium" }] });
-  assert.equal((await b.field("POST", { path: R, name: "priority LEVEL", type: "text" })).status, 409);
-  assert.equal((await b.field("POST", { path: R, name: "Rank", type: "text" })).status, 400);
-  assert.equal((await b.field("POST", { path: R, name: "Notes", type: "text", options: ["a"] })).status, 400);
-  assert.equal((await b.field("POST", { path: R, name: "Notes", type: "rich" })).status, 400);
-  assert.equal((await b.field("POST", { path: R, name: "Done?", type: "checkbox" })).json.field.id, "done");
-  assert.equal((await b.add({ path: R, title: "Check", set: ["done?=TRUE", "priority level=medium"] })).status, 201);
-  assert.match(textAt(`${R}/Check.md`), /^---\ndone: true\npriority_level: Medium\nrank: /);
-  const renamed = await b.field("PATCH", { path: R, field: "priority_level", name: "Urgency" });
-  assert.deepEqual([renamed.json.field.id, renamed.json.field.name], ["priority_level", "Urgency"], "the key in every card stays");
-  assert.deepEqual((await b.card(R, "Check")).json.props, { "Done?": true, Urgency: "Medium" });
-
-  const option = await b.option("POST", { path: R, field: "status", name: "Review", color: "Purple", before: "done" });
-  assert.equal(option.status, 201, option.text);
-  assert.deepEqual(option.json.options.map((o) => o.name), ["Backlog", "In progress", "Review", "Done"]);
-  assert.equal((await b.option("POST", { path: R, field: "status", name: "review" })).status, 409);
-  assert.equal((await b.option("POST", { path: R, field: "status", name: "X", color: "teal" })).status, 400);
-  assert.equal((await b.option("POST", { path: R, field: "due", name: "Soon" })).status, 400, "a date's columns are its dates");
-  const recolored = await b.option("PATCH", { path: R, field: "status", option: "review", color: "none", first: true });
-  assert.deepEqual(recolored.json.options[0], { name: "Review" });
-
-  // An option rename is every card carrying it — in rounds a request can afford.
-  const cards = {};
-  // Ranks a1 … aU: one digit each, so their order is the cards' (rank.ts).
-  for (let i = 1; i <= 30; i += 1) cards[`Sprint/Card ${String(i).padStart(2, "0")}.md`] = `---\nstatus: Backlog\nrank: a${"123456789ABCDEFGHIJKLMNOPQRSTU"[i - 1]}\n---\n`;
-  await freshWorkspace({ "Sprint/store.jsonl": serializedDefault("Sprint"), ...cards });
-  db.run("DELETE FROM board_cards");
-  const rounds = [];
-  for (;;) {
-    const res = await b.option("PATCH", { path: "Sprint", field: "Status", option: "Backlog", name: "To do" });
-    rounds.push([res.status, res.json.cards, res.json.pending ?? 0]);
-    if (res.status !== 202 || rounds.length > 10) break;
-  }
-  assert.deepEqual(rounds.at(-1)[0], 200, JSON.stringify(rounds));
-  assert.ok(rounds.length > 1, "more than one request's worth");
-  assert.equal(rounds.reduce((n, r) => n + (r[1] ?? 0), 0), 30, "each card rewritten once");
-  assert.ok(Object.keys(cards).every((p) => textAt(p).startsWith("---\nstatus: To do\n")));
-  assert.deepEqual(columnsOf(await b.show("Sprint")).slice(0, 1), [`To do: ${Object.keys(cards).map((p) => p.slice(7, -3)).join(", ")}`]);
-
-  // Removing an option or a field touches no card: the value stays, and shows as what it is.
-  const before = textAt("Sprint/Card 01.md");
-  assert.equal((await b.option("DELETE", { path: "Sprint", field: "status", option: "to do" })).status, 200);
-  assert.equal(textAt("Sprint/Card 01.md"), before);
-  assert.deepEqual((await b.show("Sprint")).json.columns.map((c) => [c.name, c.cards.length]), [["In progress", 0], ["Done", 0], ["To do", 30]], "a value nothing declares is a column of its own, last");
-  assert.equal((await b.field("DELETE", { path: "Sprint", field: "Status" })).status, 200);
-  assert.equal(textAt("Sprint/Card 01.md"), before);
-  assert.deepEqual((await b.card("Sprint", "Card 01")).json.other, { status: "To do" }, "an undeclared key is kept, and shown as what it is");
-});
-
-await test("boards: a big board is read into the copy in rounds a request can afford — 202 with what is left, until it is whole", async () => {
-  const files = { "Big/store.jsonl": serializedDefault("Big") };
-  for (let i = 1; i <= 70; i += 1) files[`Big/Card ${String(i).padStart(2, "0")}.md`] = `---\nstatus: Done\nrank: a${String(i).padStart(2, "0")}\n---\n`;
-  await freshWorkspace(files);
-  db.run("DELETE FROM board_cards");
-  const b = boardApi(as(await addAgent("Big reader", ["read"])));
-  const first = await countingBlobReads(() => b.show("Big"));
-  assert.deepEqual([first.res.status, first.res.json], [202, { indexing: true, pending: 38 }]);
-  assert.equal(first.reads, 33, "the definition and 32 cards — well under a request's fifty");
-  const second = await b.show("Big");
-  assert.deepEqual([second.status, second.json], [202, { indexing: true, pending: 6 }]);
-  const third = await b.show("Big");
-  assert.equal(third.status, 200);
-  assert.equal(third.json.columns.find((c) => c.name === "Done").cards.length, 70);
-  assert.equal((await b.info("Big")).json.cards, 70, "info counts from the manifest, and reads no card");
-});
-
 /* ---------- Who an `a-` id is ---------- */
 
 await test("directory: /api/meta names agents beside people, so every Mac can put a name to what an agent changed", async () => {
@@ -5355,7 +4820,7 @@ await test("sections: an agent sees what its person sees — a path under Privat
   // A section is there with nothing in it; a folder nobody made is not.
   const empty = await ls(quinn, "Private");
   assert.equal(empty.status, 200);
-  assert.deepEqual(empty.json, { dir: "Private", folders: [], boards: [], documents: [], files: [] });
+  assert.deepEqual(empty.json, { dir: "Private", folders: [], documents: [], files: [] });
   assert.equal((await ls(pat, "Private/nothing")).status, 404);
   assert.deepEqual((await ls(alice)).json.folders, ["Private", "Shared"], "Alice is in no restricted folder, so she is shown none");
   assert.deepEqual((await ls(alice, "Restricted")).json.folders, []);
@@ -5404,7 +4869,7 @@ await test("sections: an agent sees what its person sees — a path under Privat
   assert.equal((await put(reader, "Private/notes/idea", "# Mine\n", "&force=1")).status, 403);
 });
 
-await test("sections: comments, boards and pages work in every section the person can see — a page is published where its document is, and listed and stopped only by those who can see it", async () => {
+await test("sections: comments and pages work in every section the person can see — a page is published where its document is, and listed and stopped only by those who can see it", async () => {
   const [pat, alice] = [as(PAT_BOT), as(ALICE_BOT)];
   const mine = privateOf(PAT);
 
@@ -5418,19 +4883,6 @@ await test("sections: comments, boards and pages work in every section the perso
   const threads = (await pat(commentsUrl("Private/notes/idea"))).json.threads;
   assert.equal(threads.length, 1);
   assert.equal(threads[0].comments[0].author, "Pat's bot");
-
-  // A board, made and worked on where it was put.
-  const b = boardApi(pat);
-  assert.equal((await b.make({ path: "Private/Tasks" })).status, 201);
-  const card = await b.add({ path: "Private/Tasks", title: "Find the cove", set: ["status=Backlog"], page: "Bring a chart.\n" });
-  assert.equal(card.status, 201, card.text);
-  assert.ok(pathsOf(spaceManifest(mine)).includes("Tasks/Find the cove.md"));
-  const shown = await b.show("Private/Tasks");
-  assert.equal(shown.status, 200, shown.text);
-  assert.deepEqual(columnsOf(shown).filter((c) => !c.endsWith(": ")), ["Backlog: Find the cove"]);
-  assert.equal((await pat(docUrl("Private/Tasks/Find the cove"))).text, "Bring a chart.\n");
-  assert.deepEqual((await pat("/api/agent/tree?dir=Private")).json.boards, [{ path: "Private/Tasks", cards: 1 }]);
-  assert.equal((await boardApi(alice).info("Private/Tasks")).status, 404, "Alice's own Private has no such board");
 
   // Publishing: an entry in the map of the section the document is in, and
   // an address that is that section's for the whole domain.
@@ -5476,7 +4928,7 @@ await test("sections: comments, boards and pages work in every section the perso
   const whole = await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/", dryRun: true } });
   assert.equal(whole.status, 200);
   assert.equal(whole.json.path, "Private");
-  assert.deepEqual(whole.json.documents, ["Private/notes/idea", "Private/Tasks/Find the cove"].sort((a, c) => a.localeCompare(c, undefined, { sensitivity: "base" })));
+  assert.deepEqual(whole.json.documents, ["Private/notes/idea"]);
 });
 
 await test("sections: search keeps a mirror per section — the workspace itself is every section its person can see, a folder only its own, and nobody's text is found by an agent that cannot read it", async () => {
@@ -5500,7 +4952,7 @@ await test("sections: search keeps a mirror per section — the workspace itself
   // One mirror a section: the rows of each are its own.
   const rowsIn = (space) => db.value("SELECT COUNT(*) FROM search_text WHERE space_id = ?", space);
   assert.equal(rowsIn(""), pathsOf(storedManifest()).filter((x) => x.endsWith(".md")).length);
-  assert.equal(rowsIn(privateOf(PAT)), 2, "the note and the card");
+  assert.equal(rowsIn(privateOf(PAT)), 1, "the note");
   assert.equal(rowsIn(DEALS.id), 1);
   assert.equal(mirrorEtag(privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag);
   assert.equal(rowsIn(privateOf(QUINN)), 0, "nobody has searched Quinn's");
@@ -5521,9 +4973,6 @@ await test("sections: search keeps a mirror per section — the workspace itself
   assert.deepEqual(paths(await search(pat, "deal", `&dir=${encodeURIComponent("restricted/deals")}`)), ["Restricted/Deals/q3"]);
   assert.deepEqual(paths(await search(quinn, "deal")), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
   assert.equal((await pat(searchUrl("deal", "&dir=Restricted/Nobodys"))).status, 404);
-  // A card is found as a card of its board, where the board is.
-  const chart = (await search(pat, "chart", "&dir=Private")).json.results;
-  assert.deepEqual(chart.map((r) => [r.path, r.board]), [["Private/Tasks/Find the cove", "Private/Tasks"]]);
 
   // What an agent writes is mirrored in the request that wrote it — in the
   // mirror of the section it wrote to.
@@ -5602,13 +5051,6 @@ await test("sections: a move between sections writes where it goes first and lea
   assert.equal(folder.status, 200, folder.text);
   assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Shared/Trips/2026", files: 2 });
   assert.ok(["Shared/Trips/2026/a.md", "Shared/Trips/2026/b.md"].every((x) => pathsOf(storedManifest()).includes(x)));
-  // A board too, with its name following its folder.
-  const board = await move(pat, { from: "Private/Tasks", to: "Shared/Chores" });
-  assert.equal(board.status, 200, board.text);
-  assert.equal(board.json.kind, "board");
-  assert.equal(board.json.name, "Chores");
-  assert.ok(textAt("Shared/Chores/store.jsonl").includes('"name":"Chores"'));
-  assert.ok(pathsOf(storedManifest()).includes("Shared/Chores/Find the cove.md"));
 
   // What does not move.
   const refused = async (body, status, pattern) => {
@@ -5622,7 +5064,6 @@ await test("sections: a move between sections writes where it goes first and lea
   await refused({ from: "Shared/idea", to: "Restricted/Nobodys/idea" }, 404, /no restricted folder/);
   await refused({ from: "Private/nothing", to: "Shared/x" }, 404, /there is nothing at/);
   await refused({ from: "Shared/idea", to: "Restricted/Deals/plan" }, 409, /"Restricted\/Deals\/plan.md" is already there/);
-  await refused({ from: "Shared/Chores/Find the cove", to: "Private/cove" }, 400, /a card does not move off its board/);
   for (let i = 0; i < 17; i += 1) await put(pat, `Private/many/n${String(i).padStart(2, "0")}`, `# ${i}\n`);
   await refused({ from: "Private/many", to: "Shared/many" }, 400, /17 files, and 16 move between sections at a time/);
   assert.ok(!pathsOf(storedManifest()).some((x) => x.startsWith("Shared/many/")), "and nothing of it was written");
@@ -5697,8 +5138,8 @@ await test("wipe: owner-only, confirmed, empties the bucket and frees the domain
   const stranded = await call("/api/meta", { token: MEMBER });
   assert.equal(stranded.status, 401);
   assert.deepEqual(stranded.json, { error: "unauthorized" });
-  // Agents go the same way, and the mirror and the card copy of a workspace that is gone with them.
-  for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state", "board_cards"]) {
+  // Agents go the same way, and the mirror of a workspace that is gone with them.
+  for (const table of ["agents", "agent_tokens", "agent_codes", "search_text", "search_state"]) {
     assert.equal(db.value(`SELECT COUNT(*) FROM ${table}`), 0, `${table} is empty`);
   }
   // And no space outlives the workspace it was in.

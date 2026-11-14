@@ -2,8 +2,7 @@
 // space's, whichever the `Env` is scoped to (spaces.ts): the
 // manifest — one `head` per request for its etag, the body only when the
 // etag moved past the isolate's memoized copy — the files it lists by path
-// and by id, their blobs, the notes under a folder, a folder's datastore and
-// a note's meta sidecar. Every public page is rendered from what comes
+// and by id, their blobs, the notes under a folder and a note's meta sidecar. Every public page is rendered from what comes
 // through here, which is why nothing public is ever stored: a page can never
 // be staler than the sync, and never fresher. Nothing here writes.
 
@@ -14,9 +13,6 @@ import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
 import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
 import { META_SUFFIX, parseEntityMeta, type EntityMeta } from "../../src/metaFile";
-import { cardExcerpt, type Card } from "../../src/store/board";
-import { parseFrontmatter } from "../../src/store/frontmatter";
-import { STORE_FILE, parseStoreDef, type StoreDef } from "../../src/store/storeFile";
 
 /** What the app opens as a note — the same rule as App.tsx's MD_EXT_RE. */
 export const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
@@ -35,25 +31,8 @@ export const dirOf = (p: string): string => {
 
 /** A page is a document, not a dump: past this a blob is not rendered. */
 const MAX_RENDER_BYTES = 4 * 1024 * 1024;
-/**
- * Cards a board reads — each is one blob read, and a Worker on the free plan
- * may make 50 subrequests per request. Cards past the cap are counted on the
- * board, never silently dropped (`unread`).
- */
-export const MAX_STORE_CARDS = 40;
-/** A card's frontmatter lives in its first bytes; the app reads the same window (store.rs). */
-const MAX_HEAD_BYTES = 16 * 1024;
-/** Blob reads in flight at once. */
-const READ_CONCURRENCY = 8;
 
 export type Located = { fid: string; file: ManifestFile };
-
-export type StoreRead = {
-  def: StoreDef;
-  cards: Card[];
-  /** Cards the folder holds beyond MAX_STORE_CARDS — counted, not read. */
-  unread: number;
-};
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -212,15 +191,6 @@ export class Workspace {
     return obj.text();
   }
 
-  /** The first bytes of a blob as text — a card's frontmatter head. */
-  private async head(loc: Located): Promise<string | null> {
-    const obj = await this.env.DATA.get(blobKey(loc.fid, loc.file.hash), {
-      range: { offset: 0, length: MAX_HEAD_BYTES },
-    });
-    if (!obj) return null;
-    return obj.text();
-  }
-
   /** A blob, streamed, with the content type it was uploaded with. */
   async bytes(loc: Located): Promise<R2ObjectBody | null> {
     return this.env.DATA.get(blobKey(loc.fid, loc.file.hash));
@@ -239,47 +209,6 @@ export class Workspace {
     return out;
   }
 
-  /** The notes directly inside a folder — what the app lists as a board's cards (store.rs read_store). */
-  directNotes(dir: string): Located[] {
-    return this.children(dir).filter((loc) => dirOf(loc.file.path) === dir);
-  }
-
-  /**
-   * A folder's datastore: its definition file and its cards' properties, the
-   * way the app reads them (`read_store`) — direct-child notes only, heads
-   * only, cards sorted by name. Null when the folder is not a board.
-   */
-  async storeAt(dir: string): Promise<StoreRead | null> {
-    const defLoc = this.fileAt(dir ? `${dir}/${STORE_FILE}` : STORE_FILE);
-    if (!defLoc) return null;
-    const defText = await this.text(defLoc);
-    if (defText === null) return null;
-    const def = parseStoreDef(defText);
-    if (!def) return null;
-    const notes = this.directNotes(dir).sort((a, b) =>
-      basename(a.file.path).localeCompare(basename(b.file.path)),
-    );
-    const read = notes.slice(0, MAX_STORE_CARDS);
-    const heads = await mapLimited(read, READ_CONCURRENCY, (loc) => this.head(loc));
-    const cards: Card[] = [];
-    read.forEach((loc, i) => {
-      const head = heads[i];
-      if (head === null) return; // vanished between manifest and blob; the next sync mends it
-      const fm = parseFrontmatter(head);
-      const name = basename(loc.file.path);
-      cards.push({
-        path: loc.file.path,
-        name,
-        title: stemOf(name),
-        snapshot: { mtime_ms: loc.file.mtime ?? 0, size: loc.file.size },
-        props: fm.props,
-        opaque: fm.opaque,
-        excerpt: cardExcerpt(fm.body),
-      });
-    });
-    return { def, cards, unread: notes.length - read.length };
-  }
-
   /** A note's meta sidecar (`<stem>.meta.jsonl`), or null when it has none. */
   async meta(stem: string): Promise<EntityMeta | null> {
     const loc = this.fileAt(`${stem}${META_SUFFIX}`);
@@ -287,17 +216,4 @@ export class Workspace {
     const text = await this.text(loc);
     return text === null ? null : parseEntityMeta(text);
   }
-}
-
-async function mapLimited<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
 }

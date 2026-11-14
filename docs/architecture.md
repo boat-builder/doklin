@@ -12,7 +12,6 @@
 - `src-tauri/src/edits.rs` — every write command ends with `edits::touched`,
   which pokes the cloud engine and the versioner (the edit bus).
 - `src-tauri/src/untitled.rs` — untitled-note buffers.
-- `src-tauri/src/store.rs` + `src/store/` — datastores ([datastores.md](datastores.md)).
 - `src-tauri/src/cloud/` + `src/cloud.ts` — sync and publishing ([cloud.md](cloud.md)).
 - `src-tauri/src/versions/` + `src/versions.ts` — history ([versioning.md](versioning.md)).
 - `src-tauri/src/pdf_export.rs` — PDF export ([pdf-export.md](pdf-export.md)).
@@ -24,7 +23,7 @@
   a debounce of its own, so every flush — and every decision on the app's copy
   of the text — first calls `EditorHandle.flushMarkdown` to catch up.
 - `list_md_tree` returns every non-hidden folder (empty ones too) and the
-  markdown inside; a datastore folder is `store: true` with no children.
+  markdown inside.
 - `move_path` refuses to clobber an existing destination, except a case-only
   rename. `create_file`/`create_dir` fail if the name is taken.
 
@@ -47,7 +46,7 @@
 - External opens (Finder, `doklin open`, cold or warm start) are placed by
   `src-tauri/src/external_open.rs` against the connected roots in
   `cloud.json`. A path inside a connected workspace goes to that workspace's
-  window: a file or board as its tab, a folder selected in the sidebar. A
+  window: a file as its tab, a folder selected in the sidebar. A
   workspace root, or any other folder, focuses its own window or opens one; a
   file of no workspace is focused where it is already a tab, else gets its
   own window — never attached to a workspace it is not in.
@@ -60,6 +59,22 @@
   and frame. Non-main windows respawn from it; a window closed mid-session is
   pruned. The main window takes only its frame from it — its tabs restore from
   `localStorage`, keyed by workspace folder.
+- `session.json` parses whole or not at all: a `TabKind` the build doesn't
+  know loses every window's tabs, not just that one. The `localStorage`
+  session filters unknown kinds out.
+
+## Frontmatter
+
+- A note has a block only when line 1 is `---` (trailing whitespace ok) and a
+  later line is `---` (`src/frontmatter.ts`); a note that merely opens with a
+  rule has none.
+- Milkdown never sees it — it would read the block as a rule and a heading.
+  A load splits it off (`adoptFrontmatter`); every write prepends the block as
+  last read, byte for byte. An external change whose body equals
+  `lastDiskMdRef` touched only the block: adopt it and the snapshot, leave the
+  editor and its caret.
+- Shown read-only above the note. Nothing in the app parses or writes inside
+  it; the worker leaves it off published pages with the same splitter.
 
 ## Editor traps
 

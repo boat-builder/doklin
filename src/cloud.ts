@@ -883,6 +883,15 @@ export function publishedByPath(s: CloudStatus | null): Map<string, PublicPage> 
   return out;
 }
 
+/** The absolute paths with a page of their own in this status (none when the
+ *  workspace isn't connected). */
+export function livePathsOf(s: CloudStatus | null): Set<string> {
+  const out = new Set<string>();
+  if (!s) return out;
+  for (const rel of publishedByPath(s).keys()) out.add(rel ? `${s.root}/${rel}` : s.root);
+  return out;
+}
+
 /** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows. */
 export function suggestSlug(name: string): string {
   const base = name

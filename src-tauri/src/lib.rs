@@ -13,7 +13,6 @@ use std::time::{Duration, UNIX_EPOCH};
 
 // pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
 pub mod pdf_export;
-mod store;
 // The cloud: one engine per connected workspace, the only writer to the
 // workspace's domain — see src/cloud/mod.rs.
 mod cloud;
@@ -54,14 +53,13 @@ struct WindowGeometry {
     height: f64,
 }
 
-/// What a tab shows. A `Store` tab's path is a datastore folder (a board); an
-/// `Untitled` tab's is the buffer of a note not saved to a file yet (see
-/// `untitled.rs`). Mirrors `TabKind` in the renderer's src/tabs.ts.
+/// What a tab shows: a file, or an `Untitled` note — its path is the buffer
+/// of a note not saved to a file yet (see `untitled.rs`). Mirrors `TabKind`
+/// in the renderer's src/tabs.ts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TabKind {
     File,
-    Store,
     Untitled,
 }
 
@@ -526,14 +524,6 @@ enum TreeNode {
         name: String,
         path: String,
         children: Vec<TreeNode>,
-        // True when this folder is a DATASTORE — it holds a `store.jsonl`
-        // with the header line that marks one (see store.rs). The sidebar
-        // draws it as a single board row: a board can hold hundreds of cards
-        // and the tree is not the place to list them, so its children are
-        // omitted from the documents-only tree entirely (they are reached
-        // from the board, from search, and from links). "Show every file"
-        // still lists them — that mode's job is the real filesystem.
-        store: bool,
     },
 }
 
@@ -567,18 +557,13 @@ pub(crate) fn meta_file_of(doc_path: &str) -> String {
     format!("{}.meta.jsonl", doc_path)
 }
 
-/// True for the files Doklin writes beside a document to store what the editor
-/// already shows: the entity meta (`<stem>.meta.jsonl`, comment threads and
-/// table widths) and a datastore's definition file (`store.jsonl`, whose
-/// fields and columns reach the user as the board itself). They're part of
-/// the document, not content of the user's own — so even "show every file"
-/// leaves them out.
+/// True for the file Doklin writes beside a document to store what the
+/// editor already shows: the entity meta (`<stem>.meta.jsonl`, comment
+/// threads and table widths). It's part of the document, not content of the
+/// user's own — so even "show every file" leaves it out.
 pub(crate) fn is_app_sidecar(path: &Path) -> bool {
     match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".meta.jsonl") || lower == store::STORE_FILE
-        }
+        Some(name) => name.to_ascii_lowercase().ends_with(".meta.jsonl"),
         None => false,
     }
 }
@@ -618,23 +603,6 @@ pub(crate) fn is_hidden_or_ignored(name: &str) -> bool {
 fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeNode> {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return None;
-    }
-
-    let is_store = store::is_store_dir(dir);
-    // A board is ONE row. Its cards stay out of the documents-only tree (they
-    // would drown it, and a big board would eat the entry budget); the row
-    // itself opens the board. Depth 0 is the workspace root — a board opened
-    // AS a workspace still lists its files, or the sidebar would be empty.
-    if is_store && !all && depth > 0 {
-        return Some(TreeNode::Dir {
-            name: dir
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| dir.to_string_lossy().to_string()),
-            path: dir.to_string_lossy().to_string(),
-            children: Vec::new(),
-            store: true,
-        });
     }
 
     let entries = std::fs::read_dir(dir).ok()?;
@@ -713,7 +681,6 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeN
         name: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.to_string_lossy().to_string()),
         path: dir.to_string_lossy().to_string(),
         children,
-        store: is_store,
     })
 }
 
@@ -1146,7 +1113,6 @@ fn list_md_tree(path: String, all: Option<bool>) -> Result<TreeNode, String> {
             name: root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.to_string_lossy().to_string()),
             path: root.to_string_lossy().to_string(),
             children: Vec::new(),
-            store: store::is_store_dir(&root),
         })
     }
 }
@@ -1728,7 +1694,6 @@ pub fn run() {
         .manage(PendingOpen::default())
         .manage(external_open::PendingShows::default())
         .manage(WatcherStore::default())
-        .manage(store::DirWatchers::default())
         .manage(WindowRegistry::default())
         .manage(WindowSeq::default())
         .manage(AppReady::default())
@@ -1749,12 +1714,6 @@ pub fn run() {
             list_md_tree,
             create_file,
             create_dir,
-            store::read_store,
-            store::write_frontmatter,
-            store::write_body,
-            store::create_card,
-            store::watch_dir,
-            store::unwatch_dir,
             move_path,
             copy_path,
             clipboard_set_files,
@@ -2019,57 +1978,5 @@ mod tree_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// A datastore folder is ONE row: the documents-only tree marks it and
-    /// hands back no children, however many cards it holds. "Show every file"
-    /// still lists them (that mode's job is the real filesystem) but never the
-    /// definition file itself.
-    #[test]
-    fn a_store_folder_is_one_row() {
-        let dir = std::env::temp_dir().join(format!("doklin-tree-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let board = dir.join("Projects");
-        std::fs::create_dir_all(&board).unwrap();
-        std::fs::write(
-            board.join(store::STORE_FILE),
-            "{\"doklin\":\"store\",\"v\":1,\"name\":\"Projects\"}\n",
-        )
-        .unwrap();
-        std::fs::write(board.join("Fix login.md"), "---\nstatus: Done\n---\n").unwrap();
-        std::fs::write(dir.join("Roadmap.md"), "# Roadmap\n").unwrap();
-
-        let dirs = |node: &TreeNode| -> Vec<(String, bool, usize)> {
-            match node {
-                TreeNode::Dir { children, .. } => children
-                    .iter()
-                    .filter_map(|c| match c {
-                        TreeNode::Dir { name, store, children, .. } => {
-                            Some((name.clone(), *store, children.len()))
-                        }
-                        TreeNode::File { .. } => None,
-                    })
-                    .collect(),
-                TreeNode::File { .. } => Vec::new(),
-            }
-        };
-
-        let mut budget = MAX_TREE_ENTRIES;
-        let docs = walk(&dir, 0, &mut budget, false).unwrap();
-        assert_eq!(dirs(&docs), vec![("Projects".to_string(), true, 0)]);
-
-        let mut budget = MAX_TREE_ENTRIES;
-        let all = walk(&dir, 0, &mut budget, true).unwrap();
-        assert_eq!(dirs(&all), vec![("Projects".to_string(), true, 1)]);
-        // ...and the row inside it is the card, not store.jsonl.
-        assert_eq!(rows(&all).len(), 1);
-
-        // A folder with no definition file is an ordinary folder.
-        let plain = dir.join("Notes");
-        std::fs::create_dir_all(&plain).unwrap();
-        let mut budget = MAX_TREE_ENTRIES;
-        let again = walk(&dir, 0, &mut budget, false).unwrap();
-        assert!(dirs(&again).contains(&("Notes".to_string(), false, 0)));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
+

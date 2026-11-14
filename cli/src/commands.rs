@@ -37,16 +37,16 @@ impl Ctx {
 
 /* ---------- The session a command runs in ---------- */
 
-pub(crate) struct Session {
-    pub(crate) client: Client,
-    pub(crate) ws: Workspace,
+struct Session {
+    client: Client,
+    ws: Workspace,
 }
 
 /// The workspace this command means and a client for it — after making sure
 /// its worker can do what the command needs. What the worker could do is
 /// remembered from the last time it was asked, and asked again only when
 /// something is not on the list.
-pub(crate) fn session(ctx: &Ctx, feature: &str) -> Result<Session, Failure> {
+fn session(ctx: &Ctx, feature: &str) -> Result<Session, Failure> {
     let mut all = creds::load()?;
     let ws = creds::pick(&all, ctx.workspace.as_deref())?.clone();
     let client = Client::new(&ws.endpoint, Some(&ws.token));
@@ -68,11 +68,11 @@ pub(crate) fn session(ctx: &Ctx, feature: &str) -> Result<Session, Failure> {
     Ok(Session { client, ws: Workspace { features, ..ws } })
 }
 
-pub(crate) fn strings(v: &Value) -> Vec<String> {
+fn strings(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
-pub(crate) fn text<'a>(v: &'a Value, key: &str) -> &'a str {
+fn text<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
@@ -278,10 +278,6 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         for folder in strings(&v["folders"]) {
             lines.push(format!("{}/", folder));
         }
-        for board in v["boards"].as_array().into_iter().flatten() {
-            let cards = board["cards"].as_u64().unwrap_or(0) as usize;
-            lines.push(format!("{}  [board · {}]", text(board, "path"), plural(cards, "card", "cards")));
-        }
         for doc in v["documents"].as_array().into_iter().flatten() {
             lines.push(format!("{}  {}{}", text(doc, "path"), versions_of(doc), public_of(doc)));
         }
@@ -325,14 +321,6 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         if text(&v, "kind") == "file" {
             lines.push(format!("{} — a plain file", text(&v, "path")));
             lines.push(version_line("content", &v));
-        } else if v.get("board").is_some() {
-            lines.push(format!("{} — a card's page, on the board {}", text(&v, "path"), text(&v, "board")));
-            if let Some(md) = v.get("md") {
-                lines.push(version_line("page", md));
-            }
-            let threads = v["comments"].as_u64().unwrap_or(0) as usize;
-            lines.push(format!("  {:<9} {}", "comments", if threads == 0 { "none".to_string() } else { plural(threads, "thread", "threads") }));
-            lines.push(format!("  {:<9} `doklin board card {} \"{}\"`", "properties", text(&v, "board"), card_title(&v)));
         } else {
             lines.push(format!("{} — a document", text(&v, "path")));
             if let Some(md) = v.get("md") {
@@ -366,16 +354,7 @@ fn read_meta(reply: &Reply) -> Value {
     if reply.header("x-doklin-html-behind").is_some() {
         meta["htmlBehind"] = json!(true);
     }
-    if let Some(board) = reply.header("x-doklin-board") {
-        meta["board"] = json!(board);
-    }
     meta
-}
-
-/// A card's title: the last part of its page's name.
-pub(crate) fn card_title(v: &Value) -> &str {
-    let path = text(v, "path");
-    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub fn read(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
@@ -405,10 +384,9 @@ pub fn read(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if ctx.json {
         eprintln!("{}", meta);
     } else {
-        let what = match (meta.get("board").and_then(Value::as_str), meta.get("version").and_then(Value::as_str)) {
-            (Some(board), _) => format!("{} · the page of a card on {}", text(&meta, "path"), board),
-            (None, Some(v)) => format!("{} · {}", text(&meta, "path"), version_word(v)),
-            (None, None) => text(&meta, "path").to_string(),
+        let what = match meta.get("version").and_then(Value::as_str) {
+            Some(v) => format!("{} · {}", text(&meta, "path"), version_word(v)),
+            None => text(&meta, "path").to_string(),
         };
         let behind = if meta.get("htmlBehind").is_some() { " · its html version is behind this text" } else { "" };
         eprintln!("{} · revision {}{}", what, meta["rev"], behind);
@@ -436,8 +414,6 @@ fn incoming(args: &Args) -> Result<Vec<u8>, Failure> {
 fn wrote_words(v: &Value, dry: bool) -> String {
     let what = if text(v, "kind") == "file" {
         text(v, "path").to_string()
-    } else if v.get("board").is_some() {
-        format!("the page of {}", text(v, "path"))
     } else {
         format!("the {} version of {}", version_word(text(v, "version")), text(v, "path"))
     };
@@ -457,7 +433,7 @@ fn wrote_words(v: &Value, dry: bool) -> String {
     out
 }
 
-pub(crate) fn capitalize(s: &str) -> String {
+fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -523,10 +499,9 @@ pub fn edit(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     }
     let reply = s.client.send("GET", "doc", &query, &[], None)?;
     let meta = read_meta(&reply);
-    let name = match (meta.get("board").is_some(), meta.get("version").and_then(Value::as_str)) {
-        (true, _) => format!("the page of {}", text(&meta, "path")),
-        (false, Some(v)) => format!("the {} version of {}", version_word(v), text(&meta, "path")),
-        (false, None) => text(&meta, "path").to_string(),
+    let name = match meta.get("version").and_then(Value::as_str) {
+        Some(v) => format!("the {} version of {}", version_word(v), text(&meta, "path")),
+        None => text(&meta, "path").to_string(),
     };
     let before = String::from_utf8(reply.bytes).map_err(|_| Failure::usage(format!("{} is not text, so there is nothing to find in it", name)))?;
     let count = before.matches(find).count();
@@ -567,7 +542,6 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     ctx.answer(&v, || {
         let kind = match text(&v, "kind") {
             "folder" => "the folder",
-            "board" => "the board",
             "file" => "the file",
             _ => "the document",
         };
@@ -579,9 +553,6 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             text(&v, "to"),
             plural(v["files"].as_u64().unwrap_or(0) as usize, "file", "files")
         );
-        if let Some(name) = v.get("name").and_then(Value::as_str) {
-            out.push_str(&format!(" It is called {} now.", name));
-        }
         let unpublished = strings(&v["unpublished"]);
         if !unpublished.is_empty() {
             out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
@@ -899,10 +870,9 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let results = v["results"].as_array().cloned().unwrap_or_default();
         let mut lines = Vec::new();
         for r in &results {
-            let html = if text(r, "version") == "html" { " (html)".to_string() } else { String::new() };
-            let card = r.get("board").and_then(Value::as_str).map(|b| format!("  (a card on {})", b)).unwrap_or_default();
+            let html = if text(r, "version") == "html" { " (html)" } else { "" };
             let comments = if r.get("inComments").is_some() { " — in a comment (see `doklin comments`)" } else { "" };
-            lines.push(format!("{}{}{}{}", text(r, "path"), html, card, comments));
+            lines.push(format!("{}{}{}", text(r, "path"), html, comments));
             for m in r["matches"].as_array().into_iter().flatten() {
                 match m.get("line").and_then(Value::as_u64) {
                     Some(line) => lines.push(format!("  {}: {}", line, text(m, "text"))),

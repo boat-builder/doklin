@@ -21,23 +21,14 @@
 // than one: a listing of the workspace itself, or of `Restricted`, and a move
 // from one section to another — which is the one change here that is two
 // manifest writes, the place it goes to first.
-//
-// A card's page is a document here like any other, with one difference: its
-// file begins with the card's properties, and those are the board's business
-// (agentBoards.ts). A read leaves them out and a write puts them back as they
-// are on disk at that moment — the split the app makes (`splice_body`,
-// src-tauri/src/store.rs).
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
-import { splitCard } from "./boardCards";
 import { Refusal, newFileId, type Tx } from "./commit";
 import {
   Index,
   VERSION_WORD,
-  absent,
   basename,
-  boardHint,
   docExists,
   docRow,
   fileRow,
@@ -61,8 +52,6 @@ import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
-import { parseFrontmatter } from "../../src/store/frontmatter";
-import { STORE_FILE, parseStoreDef, serializeStoreDef } from "../../src/store/storeFile";
 
 const CONTENT_TYPES: Record<string, string> = {
   md: "text/markdown; charset=utf-8",
@@ -177,11 +166,8 @@ export async function getTree(c: Call): Promise<Response> {
   if (at && at !== "restricted") {
     const tree = await openTree(inSection(c, at));
     if (!tree) return notBound();
-    const index = new Index(tree.manifest.files);
-    const board = index.board(dir) ?? index.boardOf(dir);
-    if (board) return json({ error: `${board} is a board, not a folder — ${boardHint(board)}`, code: "board", board }, 400);
     const listing = listTree(tree.manifest, url.origin, dir, deep);
-    const nothing = listing.folders.length + listing.boards.length + listing.documents.length + listing.files.length === 0;
+    const nothing = listing.folders.length + listing.documents.length + listing.files.length === 0;
     // A section is there with nothing in it; any other folder is its files.
     if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
     return json(listing);
@@ -191,7 +177,7 @@ export async function getTree(c: Call): Promise<Response> {
   const all = await places.all();
   if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
   const sections = all.filter((s) => (at === "restricted" ? s.kind === "restricted" : s.kind !== "shared"));
-  let listing: Listing = { dir, folders: [], boards: [], documents: [], files: [] };
+  let listing: Listing = { dir, folders: [], documents: [], files: [] };
   if (at === null) {
     const tree = await openTree(c);
     if (!tree) return notBound();
@@ -215,12 +201,10 @@ export async function getTree(c: Call): Promise<Response> {
     if (!tree) continue;
     const inside = listTree(tree.manifest, url.origin, s.mount, true);
     listing.folders.push(...inside.folders);
-    listing.boards.push(...inside.boards);
     listing.documents.push(...inside.documents);
     listing.files.push(...inside.files);
   }
   listing.folders.sort(byName);
-  listing.boards.sort((a, b) => byName(a.path, b.path));
   listing.documents.sort((a, b) => byName(a.path, b.path));
   listing.files.sort((a, b) => byName(a.path, b.path));
   // Said, never left out silently: list one of these on its own.
@@ -228,9 +212,9 @@ export async function getTree(c: Call): Promise<Response> {
 }
 
 /** Which version a read means: the one asked for, else the markdown, else the html. */
-function versionToRead(index: Index, at: Extract<Named, { kind: "document" }>, typed: string): { version: Version; entry: Entry } | Refusal {
+function versionToRead(at: Extract<Named, { kind: "document" }>, typed: string): { version: Version; entry: Entry } | Refusal {
   const { doc } = at;
-  if (!docExists(doc)) return absent(index, doc, typed, `there is no document or file at "${typed}"`);
+  if (!docExists(doc)) return new Refusal(404, `there is no document or file at "${typed}"`);
   const version: Version = at.asked ?? (doc.md ? "md" : "html");
   const entry = version === "md" ? doc.md : doc.html;
   if (entry) return { version, entry };
@@ -262,25 +246,24 @@ export async function getDoc(c: Call): Promise<Response> {
   }
 
   if (wantInfo) {
-    if (!docExists(at.doc)) return refuse(absent(index, at.doc, path, `there is no document or file at "${path}"`));
+    if (!docExists(at.doc)) return json({ error: `there is no document or file at "${path}"` }, 404);
     return json(await docInfo(env, ws.manifest, url.origin, at.doc));
   }
-  const picked = versionToRead(index, at, path);
+  const picked = versionToRead(at, path);
   if (picked instanceof Refusal) return refuse(picked);
   return content(
     env,
     picked.entry,
-    { kind: "document", path: at.doc.stem, version: picked.version, htmlBehind: htmlBehind(at.doc), board: at.doc.board },
+    { kind: "document", path: at.doc.stem, version: picked.version, htmlBehind: htmlBehind(at.doc) },
     picked.version === "md" && url.searchParams.get("clean") === "1",
   );
 }
 
-/** A file's bytes, with what the caller needs to know about them in headers.
- *  A card's are its page: the properties above it are left out. */
+/** A file's bytes, with what the caller needs to know about them in headers. */
 async function content(
   env: Env,
   entry: Entry,
-  what: { kind: "document" | "file"; path: string; version?: Version; htmlBehind?: boolean; board?: string | null },
+  what: { kind: "document" | "file"; path: string; version?: Version; htmlBehind?: boolean },
   clean: boolean,
 ): Promise<Response> {
   const obj = await env.DATA.get(blobKey(entry.fid, entry.file.hash));
@@ -295,11 +278,6 @@ async function content(
   };
   if (what.version) headers["x-doklin-version"] = what.version;
   if (what.htmlBehind) headers["x-doklin-html-behind"] = "1";
-  if (what.board) {
-    headers["x-doklin-board"] = headerText(what.board);
-    const { page } = splitCard(await obj.text());
-    return new Response(clean ? stripComments(page) : page, { headers });
-  }
   if (clean) return new Response(stripComments(await obj.text()), { headers });
   return new Response(obj.body, { headers: { ...headers, "content-length": String(obj.size) } });
 }
@@ -324,10 +302,9 @@ async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise
   return {
     kind: "document",
     ...row,
-    ...(doc.board ? { board: doc.board } : {}),
     ...(row.md ? { md: named(row.md) } : {}),
     ...(row.html ? { html: named(row.html) } : {}),
-    comments: meta.mthreads.length + (doc.board ? 0 : meta.hthreads.length),
+    comments: meta.mthreads.length + meta.hthreads.length,
   };
 }
 
@@ -447,29 +424,12 @@ async function writeVersion(
     );
   }
   const current = version === "md" ? doc.md : doc.html;
-  // What exists on a board, and what a card says about itself, are the
-  // board's: a card is made with `board add`, and its properties set with
-  // `board set`. Its page is written here.
-  const title = basename(doc.stem);
-  if (doc.board && !current) {
-    return new Refusal(400, `${doc.board} is a board — add a card to it with \`doklin board add ${doc.board} "${title}"\``, {
-      code: "board",
-      board: doc.board,
-    });
-  }
-  const label = doc.board ? `the page of ${doc.stem}` : `the ${VERSION_WORD[version]} version of ${doc.stem}`;
+  const label = `the ${VERSION_WORD[version]} version of ${doc.stem}`;
   const refusal = checkRevision(pre, force, current, label);
   if (refusal) return refusal;
 
   const text = utf8(bytes);
   if (text === null) return new Refusal(400, `a ${VERSION_WORD[version]} version is text — that is not UTF-8`);
-  if (doc.board && parseFrontmatter(text).present) {
-    return new Refusal(
-      400,
-      `a card's page cannot begin with a properties block — set its properties with \`doklin board set ${doc.board} "${title}" <field>=<value>\``,
-      { code: "board", board: doc.board },
-    );
-  }
   const target = current?.file.path ?? index.spelled(version === "md" ? at.mdPath : at.htmlPath);
   if (!current) {
     const place = index.placeProblem(target);
@@ -478,21 +438,16 @@ async function writeVersion(
     if (inTheWay) return new Refusal(409, `"${inTheWay.file.path}" is already there`);
   }
 
-  // The version as it is now, when the write could take something from it:
-  // a comment's place, or a card's properties.
+  // The version as it is now, when the write could take a comment's place from it.
   let now: string | null = "";
-  if (current && (version === "md" || doc.board || doc.meta)) now = await tx.readText(current.fid);
+  if (current && (version === "md" || doc.meta)) now = await tx.readText(current.fid);
   if (now === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-  // The card's properties as they are now, not as they were when the page
-  // was read: a change on the board meanwhile is kept, not undone.
-  const card = doc.board ? splitCard(now) : null;
-  const lost = version === "md" ? markersKept(card ? card.page : now, text, doc.stem) : await anchorsKept(tx, doc, now, text);
+  const lost = version === "md" ? markersKept(now, text, doc.stem) : await anchorsKept(tx, doc, now, text);
   if (lost) return lost;
-  const stored = card ? new TextEncoder().encode(card.head + text) : bytes;
 
   const before = current?.file.hash;
   const fid = current?.fid ?? newFileId();
-  const file = await tx.write(fid, target, stored, contentTypeOf(target));
+  const file = await tx.write(fid, target, bytes, contentTypeOf(target));
   // An html-only document that gains its markdown: its page becomes the
   // markdown's, which is what gives it the MD/HTML switch.
   if (version === "md" && !current && doc.html) repointPages(tx, doc.html.fid, { fid, file });
@@ -502,7 +457,6 @@ async function writeVersion(
     kind: "document",
     // From the file, not the request: a new document's name is spelled as it landed.
     path: nameOf(file.path).stem,
-    ...(doc.board ? { board: doc.board } : {}),
     version,
     file: basename(file.path),
     rev: file.rev,
@@ -626,13 +580,7 @@ export async function deleteDoc(c: Call): Promise<Response> {
         return { kind: "file", path: at.entry.file.path, stillPublic: ownPages(tx.m, url.origin, [at.entry.fid]) };
       }
       const { doc } = at;
-      if (!docExists(doc)) return absent(index, doc, path, `there is no document or file at "${path}"`);
-      if (doc.board) {
-        return new Refusal(400, `${doc.stem} is a card — remove it with \`doklin board rm ${doc.board} "${basename(doc.stem)}"\``, {
-          code: "board",
-          board: doc.board,
-        });
-      }
+      if (!docExists(doc)) return new Refusal(404, `there is no document or file at "${path}"`);
       // A version is removed only when the flag says so: `rm plan.md` means
       // the document, exactly as `mv plan.md` does.
       return flag ? removeVersion(tx, doc, flag) : removeDocument(tx, doc, url.origin);
@@ -724,7 +672,7 @@ const trimSlashes = (p: string): string => p.replace(/^\/+|\/+$/g, "");
 
 /** What a move takes with it. */
 type Picked = {
-  kind: "document" | "file" | "folder" | "board";
+  kind: "document" | "file" | "folder";
   /** The path it was named by, without its slashes. */
   from: string;
   moving: Entry[];
@@ -732,25 +680,11 @@ type Picked = {
 };
 
 /** What `rawFrom` names, as something that moves: a document whole — both
- *  versions and its comments — whatever extension was typed, a plain file, a
- *  folder, or a board. What is inside a board stays put. */
+ *  versions and its comments — whatever extension was typed, a plain file, or
+ *  a folder. */
 function pick(index: Index, rawFrom: string): Picked | Refusal {
   const fromFolder = rawFrom.endsWith("/");
   const from = trimSlashes(rawFrom);
-  const inside = index.boardOf(from);
-  if (inside) {
-    const card = fromFolder ? null : locate(index, from, null);
-    if (card instanceof Refusal) return card;
-    if (card && card.kind === "document" && docExists(card.doc)) {
-      const title = basename(card.doc.stem);
-      return new Refusal(
-        400,
-        `${card.doc.stem} is a card on ${inside} — rename it with \`doklin board set ${inside} "${title}" --title "<new title>"\`; a card does not move off its board`,
-        { code: "board", board: inside },
-      );
-    }
-    return new Refusal(400, `"${from}" is inside the board ${inside} — ${boardHint(inside)}`, { code: "board", board: inside });
-  }
   const at = fromFolder ? null : locate(index, from, null);
   if (at instanceof Refusal) return at;
   if (at && at.kind === "file" && at.entry) return { kind: "file", from, moving: [at.entry], doc: null };
@@ -758,7 +692,7 @@ function pick(index: Index, rawFrom: string): Picked | Refusal {
     const doc = at.doc;
     return { kind: "document", from, moving: [doc.md, doc.html, doc.meta].filter((e): e is Entry => e !== null), doc };
   }
-  if (index.isFolder(from)) return { kind: index.board(from) ? "board" : "folder", from, moving: index.under(from), doc: null };
+  if (index.isFolder(from)) return { kind: "folder", from, moving: index.under(from), doc: null };
   return new Refusal(404, `there is nothing at "${from}"`);
 }
 
@@ -770,7 +704,7 @@ type Route = { plan: { fid: string; to: string }[]; label: { from: string; to: s
  * destination — never the files being moved, which is what lets a rename
  * change only the case of a name — and the place has to be free of it. A
  * destination that is a folder means "into it", as `mv` does; folders are
- * spelled the way the place already spells them; nothing moves into a board.
+ * spelled the way the place already spells them.
  */
 function route(there: Index, picked: Picked, to: string, into: boolean): Route | Refusal {
   const { kind, from, moving, doc } = picked;
@@ -792,20 +726,13 @@ function route(there: Index, picked: Picked, to: string, into: boolean): Route |
     const folder = moving[0].file.path.slice(0, from.length);
     const dest = there.spelled(into ? `${to}/${basename(folder)}` : to);
     if (`${dest.toLowerCase()}/`.startsWith(`${from.toLowerCase()}/`) && dest.toLowerCase() !== from.toLowerCase()) {
-      return new Refusal(400, `a ${kind} cannot be moved inside itself`);
+      return new Refusal(400, "a folder cannot be moved inside itself");
     }
     for (const e of moving) plan.push({ fid: e.fid, to: `${dest}${e.file.path.slice(from.length)}` });
     label = { from: folder, to: dest };
   }
 
   for (const step of plan) {
-    const board = there.boardOf(step.to);
-    if (board) {
-      return new Refusal(400, `nothing moves into a board — ${board} holds cards, and \`doklin board add\` makes them`, {
-        code: "board",
-        board,
-      });
-    }
     // A sidecar travels with its document; it is checked as the stem it belongs to.
     const sidecar = step.to.toLowerCase().endsWith(META_SUFFIX);
     const problem = pathProblem(sidecar ? step.to.slice(0, -META_SUFFIX.length) : step.to);
@@ -826,12 +753,8 @@ function route(there: Index, picked: Picked, to: string, into: boolean): Route |
 const within = (path: string, folder: string): boolean =>
   sameName(path, folder) || path.toLowerCase().startsWith(`${folder.toLowerCase()}/`);
 
-/**
- * Move or rename a document, a plain file, a folder or a board inside one
- * section. A board moves whole; what is inside one stays put, and nothing
- * moves into one — its cards are made and renamed on the board.
- */
-async function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): Promise<Record<string, unknown> | Refusal> {
+/** Move or rename a document, a plain file or a folder inside one section. */
+function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): Record<string, unknown> | Refusal {
   const index = new Index(tx.files);
   const picked = pick(index, rawFrom);
   if (picked instanceof Refusal) return picked;
@@ -849,7 +772,7 @@ async function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): P
   const { plan, label } = routed;
 
   for (const step of plan) tx.move(step.fid, step.to);
-  if (kind === "folder" || kind === "board") {
+  if (kind === "folder") {
     // A published folder follows its folder; so does one published beneath it.
     for (const entry of Object.values(tx.m.public ?? {})) {
       if (entry.kind !== "dir" || !within(entry.path, label.from)) continue;
@@ -857,10 +780,8 @@ async function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): P
       tx.touch();
     }
   }
-  const def = kind === "board" ? index.at(`${label.from}/${STORE_FILE}`) : null;
-  const named = def ? await renameBoard(tx, def.fid, label) : null;
   keepPublic(tx);
-  return { kind, ...label, files: plan.length, ...(named ? { name: named } : {}) };
+  return { kind, ...label, files: plan.length };
 }
 
 /**
@@ -909,22 +830,20 @@ async function moveAcross(c: Call, source: Section, dest: Section, rawFrom: stri
         ids.set(step.fid, fid);
         await tx.write(fid, step.to, contents.get(step.fid)!, contentTypeOf(step.to));
       }
-      const def = picked.kind === "board" ? new Index(tx.files).at(`${routed.label.to}/${STORE_FILE}`) : null;
-      const named = def ? await renameBoard(tx, def.fid, routed.label) : null;
       keepPublic(tx);
-      return { label: routed.label, ids: [...ids], named };
+      return { label: routed.label, ids: [...ids] };
     },
     dryRun,
   );
   if (arrived instanceof Refusal) return refuse(arrived);
-  const { label, named } = arrived.value;
-  const answer = { kind: picked.kind, ...label, files: picked.moving.length, ...(named ? { name: named } : {}) };
+  const { label } = arrived.value;
+  const answer = { kind: picked.kind, ...label, files: picked.moving.length };
   if (dryRun) return json({ ...answer, moved: false });
   await mirrorAfter(there, arrived);
 
   // Then out of where it was — as it was read: a file that changed meanwhile
   // is not removed, because what arrived is not what it now says.
-  const folder = picked.kind === "folder" || picked.kind === "board";
+  const folder = picked.kind === "folder";
   const left = await change(here, async (tx) => {
     for (const e of picked.moving) {
       const now = tx.files[e.fid];
@@ -986,25 +905,6 @@ async function moveAcross(c: Call, source: Section, dest: Section, rawFrom: stri
   return json({ ...answer, ...(unpublished.length > 0 ? { unpublished } : {}) });
 }
 
-/**
- * A board is called what its definition says, and the app writes its folder's
- * name there when it makes one. A board renamed by moving is renamed there
- * too, in the same write — unless it was called something of its own.
- * `def` is its definition file. Answers the new name, or null when it keeps
- * the one it had.
- */
-async function renameBoard(tx: Tx, def: string, label: { from: string; to: string }): Promise<string | null> {
-  const was = basename(label.from);
-  const now = basename(label.to);
-  if (was === now) return null;
-  const text = await tx.readText(def);
-  const parsed = text === null ? null : parseStoreDef(text);
-  if (!parsed || parsed.name.trim().toLowerCase() !== was.toLowerCase()) return null;
-  const path = tx.files[def].path;
-  await tx.write(def, path, new TextEncoder().encode(serializeStoreDef({ ...parsed, name: now })), contentTypeOf(path));
-  return now;
-}
-
 /** The document a whole-document route means — comments, publishing — or why
  *  there is none. Shared so each says "no such document" the same way. */
 export function documentAt(index: Index, path: string): Doc | Refusal {
@@ -1015,6 +915,6 @@ export function documentAt(index: Index, path: string): Doc | Refusal {
       ? new Refusal(400, `${at.entry.file.path} is a plain file, not a document`)
       : new Refusal(404, `there is no document at "${path}"`);
   }
-  if (!docExists(at.doc)) return absent(index, at.doc, path, `there is no document at "${path}"`);
+  if (!docExists(at.doc)) return new Refusal(404, `there is no document at "${path}"`);
   return at.doc;
 }

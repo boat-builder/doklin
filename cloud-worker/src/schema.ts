@@ -9,7 +9,7 @@
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
 //     instead of colliding. A table whose shape changes is dropped and made
-//     again, and only ever one that holds nothing worth keeping (step 8
+//     again, and only ever one that holds nothing worth keeping (step 7
 //     does). A table that does hold something gains a column instead, and
 //     only after the runner has looked and found it missing (`columns`).
 //   · A guarded bump. The version only ever moves with
@@ -17,7 +17,7 @@
 //     so exactly one isolate wins each step and the loser re-reads and finds
 //     the work done. A statement that moves *data* cannot lean on being
 //     repeatable, so it carries the guard itself: it names the version it
-//     migrates from in its own WHERE (step 8's does), and moves nothing once
+//     migrates from in its own WHERE (step 7's does), and moves nothing once
 //     the bump has landed.
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
@@ -201,23 +201,6 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // A copy of every board card's properties block, so showing a board is one query rather than a blob read per
-    // card. Keyed by file id, with the content hash the block was read from:
-    // a row whose hash is not the manifest's is stale, and read again. A
-    // card removed on a Mac leaves its row behind until a wipe — a few
-    // hundred bytes, never a wrong answer, since a board only asks for the
-    // cards its manifest holds.
-    to: 7,
-    tables: ["board_cards"],
-    sql: [
-      `CREATE TABLE IF NOT EXISTS board_cards (
-         fid  TEXT PRIMARY KEY,                 -- the card's markdown file
-         hash TEXT NOT NULL,                    -- the content hash its block was read from
-         head TEXT NOT NULL                     -- the frontmatter block, fences included; '' for none
-       )`,
-    ],
-  },
-  {
     // A workspace with sections: roles, spaces, and agents that are a
     // person's.
     //
@@ -265,7 +248,7 @@ const STEPS: readonly Step[] = [
     // The search mirror is kept once per space ('' the shared workspace), so
     // a search reads only the text its caller's person may read. Both tables
     // are derived: dropped here, and filled again by the next search.
-    to: 8,
+    to: 7,
     tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
     columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
     sql: [
@@ -279,7 +262,7 @@ const STEPS: readonly Step[] = [
       // — when somebody may already have been promoted — moves nothing.
       `INSERT OR IGNORE INTO creator (id, member_id)
          SELECT 1, id FROM members
-          WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8
+          WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 7
           ORDER BY created_at, id LIMIT 1`,
       `CREATE TABLE IF NOT EXISTS removed_tokens (
          hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it

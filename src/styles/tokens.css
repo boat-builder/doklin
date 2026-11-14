@@ -36,15 +36,14 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Chrome type scale: five steps, nothing in between.
+  /* Chrome type scale: four steps, nothing in between.
      xs  meta, counts, captions      sm  secondary labels, buttons
      md  the UI default: tabs, rows, menus
-     lg  panel and card titles       xl  page titles (board name) */
+     lg  panel titles */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
-  --fs-xl: 24px;
 
   /* The document. Size is the 100% rung — --doc-zoom multiplies it. The
      measure is in ch of the document font, so it tracks font and zoom. */
@@ -152,17 +151,6 @@
      reads as part of it. */
   --shadow-sheet: 0 0 0 1px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.06);
   --tab-active: #ffffff;
-
-  /* A board (datastore) wherever it is named: sidebar row, tab. */
-  --board: #7c5cd6;
-
-  /* Board option colours: each option name sets a hue (.dk-color-*); the
-     theme sets how dark a pill's ink, how strong its wash, how strongly a
-     column is tinted, and how bright a status glyph. */
-  --dk-ink: 30%;
-  --dk-wash: 0.15;
-  --dk-col-wash: 0.07;
-  --dk-dot: 47%;
 }
 
 /* ---------- Paper ---------- */
@@ -217,13 +205,6 @@
   --shadow-drop: drop-shadow(0 2px 5px rgba(57, 42, 30, 0.3));
   --shadow-sheet: 0 0 0 1px rgba(57, 42, 30, 0.08), 0 1px 3px rgba(57, 42, 30, 0.07);
   --tab-active: #faf3e3;
-
-  --board: #7a55b8;
-
-  --dk-ink: 30%;
-  --dk-wash: 0.15;
-  --dk-col-wash: 0.08;
-  --dk-dot: 44%;
 }
 
 /* ---------- Dark (pitch black) ----------
@@ -283,11 +264,4 @@
      steps up to the raised surface. */
   --shadow-sheet: 0 0 0 1px #232326;
   --tab-active: #121214;
-
-  --board: #a78bfa;
-
-  --dk-ink: 76%;
-  --dk-wash: 0.24;
-  --dk-col-wash: 0.11;
-  --dk-dot: 62%;
 }

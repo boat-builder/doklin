@@ -5,10 +5,11 @@
 //
 //   Home.md                          the root page; links to public, unpublished and external targets
 //   Projects/plan.md + plan.html     a note with an html rendition (the MD/HTML pill)
-//   Projects/board.md                a ```kanban and a ```table fence over the Roadmap store
-//   Projects/Roadmap/store.jsonl     a datastore, three cards with properties
+//   Projects/status.md               a note inside the published folder that links out of it
+//   Projects/Roadmap/…               notes a folder deeper — one opens with a frontmatter
+//                                    block, one with a plain rule — and a file that is no page
 //   Projects/assets/pic.png          a picture a note shows, inside the published folder
-//   Ideas.md + Ideas/…               a board whose cards are NOT public (titles, not links)
+//   Ideas.md                         a note outside the folder, linked with ../
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
 //   Diagram.md                       a ```mermaid block
@@ -39,99 +40,42 @@ export const WIDE_TABLE = `# Sizes
 | Ada | Engineer | London |
 `;
 
-const ROADMAP_STORE = [
-  '{"doklin":"store","v":1,"name":"Roadmap"}',
-  '{"t":"field","id":"status","name":"Status","type":"select"}',
-  '{"t":"field","id":"owner","name":"Owner","type":"select"}',
-  '{"t":"field","id":"tags","name":"Tags","type":"multi_select"}',
-  '{"t":"field","id":"due","name":"Due","type":"date"}',
-  '{"t":"option","field":"status","name":"Backlog","rank":"a0","color":"grey"}',
-  '{"t":"option","field":"status","name":"In progress","rank":"a1","color":"blue"}',
-  '{"t":"option","field":"status","name":"Done","rank":"a2","color":"green"}',
-  '{"t":"option","field":"owner","name":"Ada","rank":"a0","color":"green"}',
-  '{"t":"option","field":"tags","name":"hull","rank":"a0"}',
-  '{"t":"option","field":"tags","name":"paint","rank":"a1","color":"red"}',
-  '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}',
-  '{"t":"view","id":"table","kind":"table","name":"Table"}',
-  "",
-].join("\n");
-
-const IDEAS_STORE = [
-  '{"doklin":"store","v":1,"name":"Ideas"}',
-  '{"t":"field","id":"status","name":"Status","type":"select"}',
-  '{"t":"option","field":"status","name":"New","rank":"a0","color":"yellow"}',
-  '{"t":"option","field":"status","name":"Maybe","rank":"a1"}',
-  '{"t":"view","id":"board","kind":"kanban","name":"Board","groupBy":"status"}',
-  "",
-].join("\n");
-
 /** path → content (a string, or bytes). */
 export const SEED_FILES = {
   "Home.md": `# Home
 
-Welcome. Read [the plan](./Projects/plan.md), the [board](./Projects/board.md) or a [scratch note](./Scratch.md); the [source](https://github.com/boat-builder/doklin) is public and [this page](#home) links to itself.
+Welcome. Read [the plan](./Projects/plan.md), the [status](./Projects/status.md) or a [scratch note](./Scratch.md); the [source](https://github.com/boat-builder/doklin) is public and [this page](#home) links to itself.
 
 ![a picture](./Projects/assets/pic.png) ![a missing picture](./Nope/none.png)
 `,
   "Projects/plan.md": `# The plan
 
-Ship it by June. See the [board](./board.md) and the [ideas](../Ideas.md).
+Ship it by June. See the [status](./status.md) and the [ideas](../Ideas.md).
 `,
   "Projects/plan.html": `<!doctype html><html><head><meta charset="utf-8"><title>The plan</title></head><body><h1>The plan</h1><p id="rendered">Rendered by hand.</p><script>document.body.dataset.ran = "yes";</script></body></html>`,
-  "Projects/board.md": `# Board
+  "Projects/status.md": `# Status
 
-The roadmap as a board:
-
-\`\`\`kanban
-store: ./Roadmap
-\`\`\`
-
-And as a table:
-
-\`\`\`table
-store: ./Roadmap
-\`\`\`
-
-Everything after the board is ordinary prose. See [the plan](./plan.md) and [home](../Home.md).
+Where things stand. See [the plan](./plan.md) and [home](../Home.md).
 `,
-  "Projects/Roadmap/store.jsonl": ROADMAP_STORE,
   "Projects/Roadmap/Ship the boat.md": `---
 status: In progress
 owner: Ada
 tags: [hull]
-rank: a0
 ---
 The hull is done.
 `,
-  "Projects/Roadmap/Paint it.md": `---
-status: Backlog
-tags: [paint, hull]
-due: 2026-12-04
-rank: a1
----
-After the hull.
+  "Projects/Roadmap/Paint it.md": `After the hull.
 `,
   "Projects/Roadmap/Launch.md": `---
-status: Done
-rank: a2
----
+
 We launched.
+`,
+  "Projects/Roadmap/notes.txt": `Loose ends.
 `,
   "Projects/assets/pic.png": PIXEL_PNG,
   "Ideas.md": `# Ideas
 
-\`\`\`kanban
-store: ./Ideas
-\`\`\`
-`,
-  "Ideas/store.jsonl": IDEAS_STORE,
-  "Ideas/Teleporter.md": `---
-status: New
-rank: a0
----
-Beam me up.
-`,
-  "Ideas/Jetpack.md": `Just a note in a board folder, no frontmatter at all.
+A teleporter, or a jetpack.
 `,
   "Sizes.md": WIDE_TABLE,
   "Sizes.meta.jsonl": '{"doklin":"meta","v":1}\n{"t":"tcols","id":"yh4epk11","cols":[260,0,140]}\n',

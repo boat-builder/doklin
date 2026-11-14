@@ -1,8 +1,7 @@
 //! The one call every write the app makes ends with.
 //!
-//! `write_file`, `write_frontmatter`, `write_body`, `create_card`,
-//! `create_file`, `create_dir`, `move_path`, `copy_path`, `trash_file`,
-//! `restore_trashed` — each finishes with `edits::touched(&app, &path)`,
+//! `write_file`, `create_file`, `create_dir`, `move_path`, `copy_path`,
+//! `trash_file`, `restore_trashed` — each finishes with `edits::touched(&app, &path)`,
 //! which fans the hint out to the two things that care when a file changed:
 //!
 //! - the **cloud engine** whose root contains the path,

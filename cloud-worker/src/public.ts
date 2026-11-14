@@ -39,7 +39,7 @@ import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
 /* ---------- The cache ----------
 
-   A render is a handful of R2 reads (a board with forty cards is forty).
+   A render is a handful of R2 reads.
    Rendered responses are kept in the Workers cache under a synthetic key
    that carries the manifest's etag, so a manifest change gives every URL a
    new key: a page is never served stale past one `head`, and old entries
