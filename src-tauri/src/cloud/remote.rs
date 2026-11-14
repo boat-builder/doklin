@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Beat, Manifest, PollResponse};
+use super::manifest::{Beat, Manifest, PollResponse, PublicKind, SpaceEntry};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -50,19 +50,34 @@ pub struct Meta {
     #[serde(default)]
     pub you: Option<Identity>,
     /// The directory: every person's id and display name, and nothing else.
-    /// The People list — addresses, devices, roles — stays the owner's.
+    /// The People list — addresses, devices, roles — is a route of its own.
     #[serde(default)]
     pub people: Vec<Person>,
 }
 
 /// Who the bearer is. `member_id` is the id this Mac's work is signed with;
-/// it is None for an owner who has never adopted an identity, whose access
+/// it is None for a creator who has never adopted an identity, whose access
 /// comes from the env secret and needs no row at all.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    /// `owner` or `member` — the role on this person's row, or `owner` for
+    /// the domain's own secret.
     #[serde(default)]
     pub role: String,
+    /// True when the bearer is the domain's secret: the workspace's creator.
+    #[serde(default)]
+    pub creator: bool,
+    /// What that role may do, as the worker's one table spells it
+    /// (cloud-worker/src/roles.ts) — what the app hides the rest by. Empty
+    /// from a worker older than v11, which had no such table to answer from.
+    #[serde(default)]
+    pub can: Vec<String>,
+    /// Which row of the signed-in Macs this credential is (`t-…`); None for
+    /// the domain's own secret, which is no row. What keeps the app from
+    /// offering to sign out the Mac it is running on.
+    #[serde(default)]
+    pub token_id: Option<String>,
     #[serde(default)]
     pub member_id: Option<String>,
     #[serde(default)]
@@ -101,17 +116,20 @@ pub struct MemberRecord {
     pub email: String,
     #[serde(default)]
     pub name: String,
-    /// `owner` or `member` — what the People list shows. Never authority:
-    /// the owner's credential is the worker's env secret, so no row anybody
-    /// can write confers it.
+    /// `owner` or `member`. It is the person's, and every Mac they are signed
+    /// in on carries it: an owner makes another by changing this.
     #[serde(default)]
     pub role: String,
+    /// The person who holds the domain's secret. Always an owner, and the one
+    /// row nobody can remove or make a member.
+    #[serde(default)]
+    pub creator: bool,
     #[serde(default)]
     pub created_at: u64,
+    /// When a Mac of theirs last beat, and before any has, when they first
+    /// traded a code in. `None`: nobody has ever signed in as them.
     #[serde(default)]
     pub last_seen_at: Option<u64>,
-    #[serde(default)]
-    pub disabled: bool,
     /// How many Macs this person is signed in on, counted by the members
     /// route. Zero on a record that came from somewhere else — a redeem
     /// answers with the person, not with a census of them.
@@ -151,12 +169,12 @@ pub struct RedeemedToken {
 }
 
 /// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
-/// credential: the owner is told who holds one and may take it away, never
+/// credential: an owner is told who holds one and may take it away, never
 /// what it is — a list of tokens would be a list of keys.
 ///
-/// The owner's own Macs are not in here at all. They authenticate with the
-/// domain's env secret, which is matched against no row, so there is nothing
-/// to list and nothing to revoke but the secret itself.
+/// The Macs that hold the domain's own secret are not in here at all. It is
+/// matched against no row, so there is nothing to list and nothing to revoke
+/// but the secret itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenRecord {
@@ -177,16 +195,16 @@ pub struct TokenRecord {
 
 /* ---------- Agents ---------- */
 
-/// An agent as the owner's routes describe one: an identity that is not a
-/// person, with what it may do, the machines it is logged in on and the
-/// login code nobody has used yet. Never a credential.
+/// An agent as the domain lists one: an identity that is not a person and
+/// belongs to one, with what it may do, the machines it is logged in on and
+/// the login code nobody has used yet. Never a credential.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecord {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    /// `read`, `comment`, `edit`, `publish` — the ones the owner ticked.
+    /// `read`, `comment`, `edit`, `publish` — the ones its person ticked.
     /// `read` is always among them.
     #[serde(default)]
     pub scopes: Vec<String>,
@@ -195,8 +213,17 @@ pub struct AgentRecord {
     /// When it last made a request, to the hour. None until it has.
     #[serde(default)]
     pub last_used_at: Option<u64>,
+    /// Whose it is: the member it belongs to. None for a creator who has not
+    /// said who they are.
+    #[serde(default)]
+    pub member_id: Option<String>,
+    /// Whether that is whoever asked. An agent that is somebody else's is
+    /// listed to an owner, who may remove it and nothing more.
+    #[serde(default)]
+    pub mine: bool,
     #[serde(default)]
     pub machines: Vec<AgentMachine>,
+    /// The login code nobody has used yet — only ever on one's own agent.
     #[serde(default)]
     pub code: Option<AgentCode>,
 }
@@ -225,6 +252,36 @@ pub struct AgentCode {
     pub expires_at: u64,
 }
 
+/// One public page, as an owner is told of it: what its address tells the
+/// internet, and nothing of the section it was published from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryPage {
+    pub slug: String,
+    pub kind: PublicKind,
+    #[serde(default)]
+    pub title: String,
+    /// Who published it, as a name.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: u64,
+    /// In the shared workspace, where everyone here can open its file.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// `GET /api/pages`. `truncated` when more sections hold addresses than one
+/// request reads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EveryPages {
+    #[serde(default)]
+    pub pages: Vec<EveryPage>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// One round of `POST /api/admin/wipe`; repeat while `remaining`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct WipeRound {
@@ -240,9 +297,15 @@ pub struct WipeRound {
 pub enum RemoteError {
     /// Transport-level failure — the domain is unreachable, not wrong.
     Offline(String),
-    /// Token rejected: rotated or revoked.
+    /// Token rejected: the domain does not know it — a rotated secret, a
+    /// wiped domain, a database that could not answer.
     Unauthorized,
-    /// A member asked for an owner's route.
+    /// An owner took this credential away: the person was removed, or this
+    /// Mac signed out (`401 {removed: true}`). The one refusal that has this
+    /// Mac delete its copy of the workspace, so it is
+    /// never inferred — only read off the worker's own word.
+    Removed,
+    /// The caller's role may not do that (cloud-worker/src/roles.ts).
     Forbidden,
     /// Not bound, or the object is gone.
     NotFound,
@@ -253,6 +316,9 @@ pub enum RemoteError {
     Outdated(String),
     /// `409` on a bind: the domain already holds this workspace.
     AlreadyBound(WorkspaceRecord),
+    /// `409 {taken}` on a manifest: these public addresses are another
+    /// section's on this domain, so the manifest naming them was not stored.
+    Taken(Vec<String>),
     Other(String),
 }
 
@@ -261,11 +327,13 @@ impl std::fmt::Display for RemoteError {
         match self {
             RemoteError::Offline(m) => write!(f, "offline: {}", m),
             RemoteError::Unauthorized => write!(f, "unauthorized"),
-            RemoteError::Forbidden => write!(f, "owner only"),
+            RemoteError::Removed => write!(f, "your access to this workspace was removed"),
+            RemoteError::Forbidden => write!(f, "only an owner can do that"),
             RemoteError::NotFound => write!(f, "not found"),
             RemoteError::Conflict => write!(f, "manifest conflict"),
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
+            RemoteError::Taken(slugs) => write!(f, "already taken on this domain: {}", slugs.join(", ")),
             RemoteError::Other(m) => write!(f, "{}", m),
         }
     }
@@ -290,6 +358,53 @@ pub trait Remote: Send + Sync + 'static {
     /// (worker v7). The engine only hands it a beat
     /// when the worker lists `presence`.
     fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
+
+    /* ----- spaces ----- */
+
+    /// This credential again, with every sync call — the manifest, the
+    /// blobs, the version store — aimed at one space: `/api/spaces/<id>/…`,
+    /// the same routes behind the domain's membership check. A `NotFound`
+    /// from one means this person is not in it, or it is gone; the two are
+    /// one answer.
+    fn space(&self, id: &str) -> Self
+    where
+        Self: Sized;
+
+    /// `PUT /api/spaces/private`: this person's Private, made if it was not
+    /// there. Answers the same space every time.
+    fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `POST /api/spaces`: a restricted folder holding its maker and whoever
+    /// else is named, by member id — people already in the workspace.
+    fn create_space(
+        &self,
+        name: &str,
+        members: &[String],
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `PATCH /api/spaces/<id>`: rename a restricted folder, for everyone
+    /// in it.
+    fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `PUT /api/spaces/<id>/members/<member>`: add a person to a restricted
+    /// folder. Answers the folder as it now is.
+    fn add_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `DELETE /api/spaces/<id>/members/<member>`: take a person out, the
+    /// caller included. Refused for the last one in it.
+    fn remove_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `DELETE /api/spaces/<id>`: one round of deleting a restricted folder
+    /// and everything it stored; repeat while `remaining`.
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -385,23 +500,34 @@ pub trait Remote: Send + Sync + 'static {
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<RedeemedToken>> + Send;
 
-    /// `GET /api/auth/members` (owner): everyone, with a device count and a
-    /// last-seen. This is also what tells a Mac which door it came in by —
-    /// only the owner's credential is answered, so a `Forbidden` here is the
-    /// People panel's member branch, not a failure.
+    /// `GET /api/auth/members`: everyone, with a role, a device count and a
+    /// last-seen — the People list, which every person here may read.
     fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
 
-    /// `POST /api/auth/members` (owner): the owner saying who they are.
-    /// Identity, never authority — the env secret keeps authenticating them
-    /// either way, and losing this row costs a name, not access.
+    /// `POST /api/auth/members` (the domain's secret only): the creator
+    /// saying who they are. Identity, never authority — the env secret keeps
+    /// authenticating them either way, and losing this row costs a name, not
+    /// access.
     fn adopt_owner(
         &self,
         email: &str,
         name: Option<&str>,
     ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
 
+    /// `PATCH /api/auth/members/<id>` (owner): make someone an owner, or a
+    /// member again. Every Mac they are signed in on carries the new role on
+    /// its next request. The worker refuses the caller's own row and the
+    /// creator's, with a sentence that says which.
+    fn set_member_role(
+        &self,
+        id: &str,
+        role: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
+
     /// `DELETE /api/auth/members/<id>` (owner): the person and every
-    /// credential they hold, in one batch.
+    /// credential they hold, in one batch. Each of their Macs is told so on
+    /// its next request, and deletes its copy. Refused, like a role change,
+    /// for the caller's own row and the creator's.
     fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
     /// `GET /api/auth/invites` (owner): the pending, unexpired ones.
@@ -414,19 +540,24 @@ pub trait Remote: Send + Sync + 'static {
     /// `GET /api/auth/tokens` (owner): every signed-in Mac.
     fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send;
 
-    /// `DELETE /api/auth/tokens/<id>` (owner): revoke one Mac. It takes
+    /// `DELETE /api/auth/tokens/<id>` (owner): sign one Mac out. It takes
     /// effect on that Mac's very next request — the bearer resolves through
-    /// the table, so there is no session to expire.
+    /// the table, so there is no session to expire — and that Mac deletes its
+    /// copy when it hears.
     fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
 /* ---------- HTTP remote (the real worker) ---------- */
 
+#[derive(Clone)]
 pub struct HttpRemote {
     client: reqwest::Client,
     endpoint: String,
     token: String,
     device_id: String,
+    /// `spaces/<id>/` when this remote is one space's (`Remote::space`), and
+    /// empty for the shared workspace: what the sync routes sit under.
+    scope: String,
 }
 
 impl HttpRemote {
@@ -436,11 +567,18 @@ impl HttpRemote {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
             device_id: device_id.to_string(),
+            scope: String::new(),
         }
     }
 
     fn url(&self, tail: &str) -> String {
         format!("{}/api/{}", self.endpoint, tail)
+    }
+
+    /// A sync route — manifest, blobs, versions — of whichever section this
+    /// remote is aimed at.
+    fn sync_url(&self, tail: &str) -> String {
+        format!("{}/api/{}{}", self.endpoint, self.scope, tail)
     }
 
     /// The two attribution headers every request carries: which device
@@ -485,7 +623,7 @@ impl HttpRemote {
     }
 }
 
-/// The owner's agent routes (`/api/auth/agents…`). Inherent rather than part
+/// A person's agent routes (`/api/auth/agents…`). Inherent rather than part
 /// of [`Remote`]: that trait is what the *engine* needs, so that it can run
 /// against an in-memory worker, and the engine never manages agents — only
 /// the People view's commands do (mod.rs), and they hold an `HttpRemote`.
@@ -542,6 +680,20 @@ impl HttpRemote {
         self.revoke(&format!("agents/{}/tokens", agent_id), token_id).await
     }
 
+    /// `GET /api/pages`: every public address on the domain, whichever
+    /// section published the page — an owner's to read.
+    pub async fn list_every_page(&self) -> RemoteResult<EveryPages> {
+        let res = self.auth(self.client.get(self.url("pages"))).send().await.map_err(transport_err)?;
+        let res = expect_status(res).await?;
+        res.json::<EveryPages>().await.map_err(transport_err)
+    }
+
+    /// `DELETE /api/pages/<slug>`: take a page down, whoever published it.
+    pub async fn take_down_page(&self, slug: &str) -> RemoteResult<()> {
+        let res = self.auth(self.client.delete(self.url(&format!("pages/{}", slug)))).send().await.map_err(transport_err)?;
+        expect_status(res).await.map(|_| ())
+    }
+
     /// POST a JSON body with the bearer and read the JSON answer.
     async fn post_json(&self, tail: &str, body: &serde_json::Value) -> RemoteResult<serde_json::Value> {
         let res = self
@@ -591,18 +743,43 @@ async fn read_list<T: serde::de::DeserializeOwned>(res: reqwest::Response, key: 
         .map_err(|e| RemoteError::Other(format!("the domain's {} didn't parse: {}", key, e)))
 }
 
+/// `{ "space": {...} }` — what the spaces routes answer a change with.
+fn read_space_value(v: serde_json::Value) -> RemoteResult<SpaceEntry> {
+    serde_json::from_value(v.get("space").cloned().unwrap_or_default())
+        .map_err(|e| RemoteError::Other(format!("the domain's answer about that folder didn't parse: {}", e)))
+}
+
+async fn read_space(res: reqwest::Response) -> RemoteResult<SpaceEntry> {
+    read_space_value(res.json::<serde_json::Value>().await.map_err(transport_err)?)
+}
+
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
     match res.status().as_u16() {
         200..=299 | 304 => Ok(res),
         400 => Err(worker_sentence(res, "the domain refused that").await),
-        401 => Err(RemoteError::Unauthorized),
+        401 => {
+            // Two refusals share the status, and only the body tells them
+            // apart: `removed: true` is said of a credential an owner took
+            // away, and of nothing else. Anything that is not exactly that —
+            // no body, a proxy's page, a worker too old to say it — is the
+            // ordinary one.
+            let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+            Err(match v.get("removed").and_then(|r| r.as_bool()) {
+                Some(true) => RemoteError::Removed,
+                _ => RemoteError::Unauthorized,
+            })
+        }
         403 => Err(RemoteError::Forbidden),
         404 => Err(RemoteError::NotFound),
         409 => {
             let v = res.json::<serde_json::Value>().await.unwrap_or_default();
+            let taken: Option<Vec<String>> = v.get("taken").cloned().and_then(|t| serde_json::from_value(t).ok());
             match v.get("workspace").cloned().and_then(|w| serde_json::from_value(w).ok()) {
                 Some(record) => Err(RemoteError::AlreadyBound(record)),
-                None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
+                None => match taken.filter(|slugs| !slugs.is_empty()) {
+                    Some(slugs) => Err(RemoteError::Taken(slugs)),
+                    None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
+                },
             }
         }
         412 => Err(RemoteError::Conflict),
@@ -690,13 +867,82 @@ impl Remote for HttpRemote {
         }
     }
 
+    fn space(&self, id: &str) -> Self {
+        HttpRemote { scope: format!("spaces/{}/", id), ..self.clone() }
+    }
+
+    fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        async move {
+            let res =
+                self.auth(self.client.put(self.url("spaces/private"))).send().await.map_err(transport_err)?;
+            read_space(expect_status(res).await?).await
+        }
+    }
+
+    fn create_space(
+        &self,
+        name: &str,
+        members: &[String],
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let body = json!({ "name": name, "members": members });
+        async move { read_space_value(self.post_json("spaces", &body).await?) }
+    }
+
+    fn add_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let url = self.url(&format!("spaces/{}/members/{}", id, member));
+        async move {
+            let res = self.auth(self.client.put(url)).send().await.map_err(transport_err)?;
+            read_space(expect_status(res).await?).await
+        }
+    }
+
+    fn remove_space_member(
+        &self,
+        id: &str,
+        member: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("spaces/{}/members/{}", id, member));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
+        let url = self.url(&format!("spaces/{}", id));
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            res.json::<WipeRound>().await.map_err(transport_err)
+        }
+    }
+
+    fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url(&format!("spaces/{}", id));
+        let body = serde_json::to_vec(&json!({ "name": name })).unwrap_or_default();
+        async move {
+            let res = self
+                .auth(self.client.patch(url))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
+    }
+
     fn fetch_manifest(
         &self,
         since: Option<&str>,
     ) -> impl std::future::Future<Output = RemoteResult<Option<(Manifest, String)>>> + Send {
         let since = since.map(String::from);
         async move {
-            let mut req = self.client.get(self.url("manifest"));
+            let mut req = self.client.get(self.sync_url("manifest"));
             if let Some(s) = &since {
                 req = req.query(&[("since", s.as_str())]);
             }
@@ -728,7 +974,7 @@ impl Remote for HttpRemote {
         let base = base_etag.to_string();
         async move {
             let res = self
-                .auth(self.client.put(self.url("manifest")))
+                .auth(self.client.put(self.sync_url("manifest")))
                 .header("x-base-etag", base)
                 .header("content-type", "application/json")
                 .body(body)
@@ -746,7 +992,7 @@ impl Remote for HttpRemote {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -761,7 +1007,7 @@ impl Remote for HttpRemote {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         let ct = content_type.to_string();
         async move {
             let res = self
@@ -779,7 +1025,7 @@ impl Remote for HttpRemote {
         &self,
         file_id: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Vec<(String, u64)>>> + Send {
-        let url = self.url(&format!("blobs/{}", file_id));
+        let url = self.sync_url(&format!("blobs/{}", file_id));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -811,7 +1057,7 @@ impl Remote for HttpRemote {
         file_id: &str,
         hash: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("blobs/{}/{}", file_id, hash));
+        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -823,7 +1069,7 @@ impl Remote for HttpRemote {
     ) -> impl std::future::Future<Output = RemoteResult<Option<(VersionsIndex, String)>>> + Send {
         async move {
             let res =
-                self.auth(self.client.get(self.url("versions/index"))).send().await.map_err(transport_err)?;
+                self.auth(self.client.get(self.sync_url("versions/index"))).send().await.map_err(transport_err)?;
             match expect_status(res).await {
                 Ok(res) => {
                     let etag = res
@@ -853,7 +1099,7 @@ impl Remote for HttpRemote {
         let base = base_etag.to_string();
         async move {
             let res = self
-                .auth(self.client.put(self.url("versions/index")))
+                .auth(self.client.put(self.sync_url("versions/index")))
                 .header("x-base-etag", base)
                 .header("content-type", "application/json")
                 .body(body)
@@ -867,7 +1113,7 @@ impl Remote for HttpRemote {
     }
 
     fn get_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -880,7 +1126,7 @@ impl Remote for HttpRemote {
         id: &str,
         gz: Vec<u8>,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self
                 .auth(self.client.put(url))
@@ -894,7 +1140,7 @@ impl Remote for HttpRemote {
     }
 
     fn delete_version_snapshot(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/snapshots/{}", id));
+        let url = self.sync_url(&format!("versions/snapshots/{}", id));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -907,7 +1153,7 @@ impl Remote for HttpRemote {
     ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send {
         let cursor = cursor.map(String::from);
         async move {
-            let mut req = self.client.get(self.url("versions/blobs"));
+            let mut req = self.client.get(self.sync_url("versions/blobs"));
             if let Some(c) = &cursor {
                 req = req.query(&[("cursor", c.as_str())]);
             }
@@ -938,7 +1184,7 @@ impl Remote for HttpRemote {
     }
 
     fn get_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<Vec<u8>>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
@@ -947,7 +1193,7 @@ impl Remote for HttpRemote {
     }
 
     fn put_version_blob(&self, hash: &str, gz: Vec<u8>) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self
                 .auth(self.client.put(url))
@@ -961,7 +1207,7 @@ impl Remote for HttpRemote {
     }
 
     fn delete_version_blob(&self, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.url(&format!("versions/blobs/{}", hash));
+        let url = self.sync_url(&format!("versions/blobs/{}", hash));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
@@ -1053,6 +1299,28 @@ impl Remote for HttpRemote {
         async move {
             let res = self
                 .auth(self.client.post(self.url("auth/members")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            let res = expect_status(res).await?;
+            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
+            serde_json::from_value(v.get("member").cloned().unwrap_or_default())
+                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a person: {}", e)))
+        }
+    }
+
+    fn set_member_role(
+        &self,
+        id: &str,
+        role: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
+        let url = self.url(&format!("auth/members/{}", id));
+        let body = json!({ "role": role });
+        async move {
+            let res = self
+                .auth(self.client.patch(url))
                 .header("content-type", "application/json")
                 .body(serde_json::to_vec(&body).unwrap_or_default())
                 .send()

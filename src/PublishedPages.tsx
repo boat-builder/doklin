@@ -1,13 +1,30 @@
-// Every published page of the workspace:
+// Every published page you can open — from the shared workspace, your
+// Private and the restricted folders you are in:
 // folders above files (the engine's order), path · slug · by / when, copy /
 // open / stop, "Use as home page", and a "file missing" flag on an entry
 // whose file is gone (the page 404s until the file returns or the entry is
 // stopped — stopping is explicit). Reached from the Cloud
 // panel and from the Publish popover.
+//
+// An owner also sees the rest: every address on the domain that some other
+// section published. Of those the domain tells only what the address itself
+// tells anyone — its title, who published it, when — and an owner can take
+// any of them down.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
-import { cloudSetRoot, cloudUnpublish, pageUrl, timeAgo, type CloudStatus, type PublicPage } from "./cloud";
+import {
+  cloudPageTakeDown,
+  cloudPages,
+  cloudSetRoot,
+  cloudUnpublish,
+  pageUrl,
+  placeOf,
+  timeAgo,
+  type CloudStatus,
+  type EveryPage,
+  type PublicPage,
+} from "./cloud";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -58,6 +75,27 @@ export default function PublishedPages({
   const [copied, setCopied] = useState<string | null>(null);
   const [stopping, setStopping] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Every address on the domain, for whoever may see them all. Null until
+  // the domain has answered; `elsewhereNote` is why it could not.
+  const seesAll = cloud.can.includes("pages.manage");
+  const [every, setEvery] = useState<{ pages: EveryPage[]; truncated: boolean } | null>(null);
+  const [elsewhereNote, setElsewhereNote] = useState<string | null>(null);
+  const [everyToken, setEveryToken] = useState(0);
+
+  useEffect(() => {
+    if (!seesAll) return;
+    let live = true;
+    void cloudPages(cloud.root)
+      .then((answer) => {
+        if (live) setEvery(answer);
+      })
+      .catch((e) => {
+        if (live) setElsewhereNote(errText(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [seesAll, cloud.root, everyToken]);
 
   const cardRef = useRef<HTMLDivElement>(null);
   useDismiss(onClose, cardRef);
@@ -90,6 +128,8 @@ export default function PublishedPages({
   const nameOf = (page: PublicPage) =>
     page.title?.trim() || (page.kind === "dir" ? basename(page.path) || cloud.name : stemOf(page.path));
   const pages = cloud.public;
+  // The ones published from a section this Mac's person is not in.
+  const elsewhere = (every?.pages ?? []).filter((p) => !p.shared && !pages.some((mine) => mine.slug === p.slug));
 
   return (
     <div className="modal-overlay">
@@ -145,13 +185,16 @@ export default function PublishedPages({
                           Edit
                         </button>
                       )}
-                      <button
-                        className="modal-btn"
-                        data-testid="published-home"
-                        onClick={() => void act(() => cloudSetRoot(cloud.root, page.root ? null : page.slug))}
-                      >
-                        {page.root ? "Unset as home page" : "Use as home page"}
-                      </button>
+                      {/* The home page is chosen from what everyone has. */}
+                      {placeOf(cloud, page.path).kind === "shared" && (
+                        <button
+                          className="modal-btn"
+                          data-testid="published-home"
+                          onClick={() => void act(() => cloudSetRoot(cloud.root, page.root ? null : page.slug))}
+                        >
+                          {page.root ? "Unset as home page" : "Use as home page"}
+                        </button>
+                      )}
                       {stopping === page.slug ? (
                         <>
                           <button
@@ -179,6 +222,75 @@ export default function PublishedPages({
                 );
               })}
             </ul>
+          )}
+          {seesAll && (elsewhere.length > 0 || elsewhereNote) && (
+            <>
+              <div className="cloud-section-label">From sections you are not in</div>
+              <p className="cloud-hint">
+                Published from somebody’s Private or a restricted folder. You cannot open the files, but as an owner
+                you can take a page down.
+              </p>
+              {elsewhereNote && (
+                <p className="cloud-hint cloud-warn" data-testid="published-elsewhere-note">
+                  {elsewhereNote}
+                </p>
+              )}
+              <ul className="published-list" data-testid="published-elsewhere">
+                {elsewhere.map((page) => {
+                  const url = `${cloud.endpoint}/${page.slug}`;
+                  return (
+                    <li className="published-row" key={page.slug} data-testid="published-elsewhere-row" data-slug={page.slug}>
+                      <div className="published-row-main">
+                        <span className="published-row-icon">{page.kind === "dir" ? <FolderIcon /> : <PageIcon />}</span>
+                        <span className="published-row-name">{page.title || page.slug}</span>
+                      </div>
+                      <div className="published-row-sub">
+                        /{page.slug} · {page.by || "someone"}
+                        {page.at > 0 && ` · ${timeAgo(page.at, now)}`}
+                      </div>
+                      <div className="published-row-actions">
+                        <button className="modal-btn" onClick={() => void copy(page.slug, url)}>
+                          {copied === page.slug ? "Copied ✓" : "Copy link"}
+                        </button>
+                        <button className="modal-btn" onClick={() => onOpenExternal(url)}>
+                          Open
+                        </button>
+                        {stopping === page.slug ? (
+                          <>
+                            <button
+                              className="modal-btn is-danger-solid"
+                              data-testid="published-takedown-yes"
+                              onClick={() =>
+                                void act(() => cloudPageTakeDown(cloud.root, page.slug)).then(() => {
+                                  setStopping(null);
+                                  setEveryToken((t) => t + 1);
+                                })
+                              }
+                            >
+                              Take down
+                            </button>
+                            <button className="modal-btn" onClick={() => setStopping(null)}>
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            className="modal-btn is-danger-outline"
+                            data-testid="published-takedown"
+                            onClick={() => setStopping(page.slug)}
+                          >
+                            Take down
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {every?.truncated && (
+                <p className="cloud-hint">There are more than this list shows.</p>
+              )}
+            </>
           )}
           {error && <div className="modal-error">{error}</div>}
         </div>

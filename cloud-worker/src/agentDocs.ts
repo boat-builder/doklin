@@ -16,15 +16,22 @@
 // in one manifest write or not at all, and the public map is kept true in
 // that same write (`keepPublic`).
 //
+// A call is answered in the section its path is in (agentPlace.ts), with
+// every path under the folder that section is at. Two routes look at more
+// than one: a listing of the workspace itself, or of `Restricted`, and a move
+// from one section to another — which is the one change here that is two
+// manifest writes, the place it goes to first.
+//
 // A card's page is a document here like any other, with one difference: its
 // file begins with the card's properties, and those are the board's business
 // (agentBoards.ts). A read leaves them out and a write puts them back as they
 // are on disk at that moment — the split the app makes (`splice_body`,
 // src-tauri/src/store.rs).
 
-import { notBound, refuse, type Call } from "./agentCall";
+import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
+import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
 import { splitCard } from "./boardCards";
-import { Refusal, commit, newFileId, type Tx } from "./commit";
+import { Refusal, newFileId, type Tx } from "./commit";
 import {
   Index,
   VERSION_WORD,
@@ -41,16 +48,16 @@ import {
   pathProblem,
   type Doc,
   type Entry,
+  type Listing,
   type Named,
   type Version,
 } from "./documents";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
 import { MAX_FILE_BYTES, blobKey } from "./layout";
-import type { Manifest } from "./manifest";
+import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
-import { openWorkspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, emptyMeta, markerIds, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
 import { parseFrontmatter } from "../../src/store/frontmatter";
@@ -151,22 +158,72 @@ export const ownPages = (m: Manifest, origin: string, fids: readonly string[]): 
 
 /* ---------- Reading ---------- */
 
-export async function getTree({ env, url }: Call): Promise<Response> {
+const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+const byName = (a: string, b: string): number => a.localeCompare(b, undefined, { sensitivity: "base" });
+
+export async function getTree(c: Call): Promise<Response> {
+  const { url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
+  const deep = url.searchParams.get("deep") === "1";
   if (dir) {
     const problem = pathProblem(dir);
     if (problem) return json({ error: problem }, 400);
   }
-  const ws = await openWorkspace(env);
-  if (!ws) return notBound();
-  const index = new Index(ws.manifest.files);
-  const board = index.board(dir) ?? index.boardOf(dir);
-  if (board) return json({ error: `${board} is a board, not a folder — ${boardHint(board)}`, code: "board", board }, 400);
-  const listing = listTree(ws.manifest, url.origin, dir, url.searchParams.get("deep") === "1");
-  if (dir && listing.folders.length + listing.boards.length + listing.documents.length + listing.files.length === 0) {
-    return json({ error: `there is no folder "${dir}"` }, 404);
+  const at = dir === "" ? null : await places.at(dir);
+  if (at instanceof Refusal) return refuse(at);
+
+  // A folder of one section — which the shared workspace's own are.
+  if (at && at !== "restricted") {
+    const tree = await openTree(inSection(c, at));
+    if (!tree) return notBound();
+    const index = new Index(tree.manifest.files);
+    const board = index.board(dir) ?? index.boardOf(dir);
+    if (board) return json({ error: `${board} is a board, not a folder — ${boardHint(board)}`, code: "board", board }, 400);
+    const listing = listTree(tree.manifest, url.origin, dir, deep);
+    const nothing = listing.folders.length + listing.boards.length + listing.documents.length + listing.files.length === 0;
+    // A section is there with nothing in it; any other folder is its files.
+    if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
+    return json(listing);
   }
-  return json(listing);
+
+  // The workspace itself, or `Restricted`: what is in more than one section.
+  const all = await places.all();
+  if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
+  const sections = all.filter((s) => (at === "restricted" ? s.kind === "restricted" : s.kind !== "shared"));
+  let listing: Listing = { dir, folders: [], boards: [], documents: [], files: [] };
+  if (at === null) {
+    const tree = await openTree(c);
+    if (!tree) return notBound();
+    listing = listTree(tree.manifest, url.origin, "", deep);
+    // The two folders a workspace keeps for itself, when there is something
+    // behind them for this person.
+    for (const s of sections) {
+      const top = s.mount.split("/")[0];
+      if (!listing.folders.includes(top)) listing.folders.push(top);
+    }
+  }
+  const notListed: string[] = [];
+  for (const [i, s] of sections.entries()) {
+    if ((at === "restricted" || deep) && !listing.folders.includes(s.mount)) listing.folders.push(s.mount);
+    if (!deep) continue;
+    if (i >= MAX_SECTIONS_READ) {
+      notListed.push(s.mount);
+      continue;
+    }
+    const tree = await openTree(inSection(c, s));
+    if (!tree) continue;
+    const inside = listTree(tree.manifest, url.origin, s.mount, true);
+    listing.folders.push(...inside.folders);
+    listing.boards.push(...inside.boards);
+    listing.documents.push(...inside.documents);
+    listing.files.push(...inside.files);
+  }
+  listing.folders.sort(byName);
+  listing.boards.sort((a, b) => byName(a.path, b.path));
+  listing.documents.sort((a, b) => byName(a.path, b.path));
+  listing.files.sort((a, b) => byName(a.path, b.path));
+  // Said, never left out silently: list one of these on its own.
+  return json({ ...listing, ...(notListed.length > 0 ? { notListed } : {}) });
 }
 
 /** Which version a read means: the one asked for, else the markdown, else the html. */
@@ -181,11 +238,12 @@ function versionToRead(index: Index, at: Extract<Named, { kind: "document" }>, t
     : new Refusal(404, `${doc.stem} has only an html version — writing one with --md adds a markdown version`, { code: "no_md" });
 }
 
-export async function getDoc({ env, url }: Call): Promise<Response> {
+export async function getDoc(c: Call): Promise<Response> {
+  const { env, url } = c;
   const path = url.searchParams.get("path") ?? "";
   const flag = versionFlag(url.searchParams.get("v"));
   if (flag instanceof Refusal) return refuse(flag);
-  const ws = await openWorkspace(env);
+  const ws = await openTree(c);
   if (!ws) return notBound();
   const index = new Index(ws.manifest.files);
   const at = locate(index, path, flag);
@@ -310,7 +368,7 @@ function checkRevision(pre: Precondition, force: boolean, current: Entry | null,
 }
 
 export async function putDoc(c: Call): Promise<Response> {
-  const { request, env, url, who } = c;
+  const { request, url } = c;
   const path = url.searchParams.get("path") ?? "";
   const flag = versionFlag(url.searchParams.get("v"));
   if (flag instanceof Refusal) return refuse(flag);
@@ -320,9 +378,8 @@ export async function putDoc(c: Call): Promise<Response> {
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > MAX_FILE_BYTES) return json({ error: "that is too large — a file may be 25 MB" }, 413);
 
-  const done = await commit(
-    env,
-    who.id,
+  const done = await change(
+    c,
     async (tx) => {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
@@ -331,7 +388,7 @@ export async function putDoc(c: Call): Promise<Response> {
       if (!(value instanceof Refusal)) keepPublic(tx);
       return value;
     },
-    { dryRun: url.searchParams.get("dry") === "1" },
+    url.searchParams.get("dry") === "1",
   );
   if (done instanceof Refusal) return refuse(done);
   await mirrorAfter(c, done);
@@ -492,14 +549,13 @@ async function checkMarkers(tx: Tx, doc: Doc, text: string): Promise<string[] | 
 /* ---------- Removing ---------- */
 
 export async function deleteDoc(c: Call): Promise<Response> {
-  const { env, url, who } = c;
+  const { url } = c;
   const path = url.searchParams.get("path") ?? "";
   const flag = versionFlag(url.searchParams.get("v"));
   if (flag instanceof Refusal) return refuse(flag);
 
-  const done = await commit(
-    env,
-    who.id,
+  const done = await change(
+    c,
     async (tx) => {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
@@ -521,7 +577,7 @@ export async function deleteDoc(c: Call): Promise<Response> {
       // the document, exactly as `mv plan.md` does.
       return flag ? removeVersion(tx, doc, flag) : removeDocument(tx, doc, url.origin);
     },
-    { dryRun: url.searchParams.get("dry") === "1" },
+    url.searchParams.get("dry") === "1",
   );
   if (done instanceof Refusal) return refuse(done);
   await mirrorAfter(c, done);
@@ -576,44 +632,51 @@ async function removeVersion(tx: Tx, doc: Doc, version: Version): Promise<Record
 
 /* ---------- Moving ---------- */
 
+/** Files a move from one section to another carries: each is read from one
+ *  part of the bucket and written to the other, and a request has a budget. */
+const MAX_FILES_ACROSS = 16;
+
 export async function postMove(c: Call): Promise<Response> {
   const body = await readJsonObject(c.request);
   if (!body) return json({ error: "invalid json body" }, 400);
   const from = typeof body.from === "string" ? body.from : "";
   const to = typeof body.to === "string" ? body.to : "";
-  const done = await commit(c.env, c.who.id, async (tx) => move(tx, from, to), { dryRun: body.dryRun === true });
+  const dryRun = body.dryRun === true;
+  const problem = pathProblem(trimSlashes(from)) ?? pathProblem(trimSlashes(to));
+  if (problem) return json({ error: problem }, 400);
+  const [source, dest] = [await c.places.of(from), await c.places.of(to)];
+  if (source instanceof Refusal) return refuse(source);
+  if (dest instanceof Refusal) return refuse(dest);
+  if (source.mount !== "" && sameName(trimSlashes(from), source.mount)) {
+    return json({ error: `${source.mount} is a section of this workspace, not a folder to move — move what is in it` }, 400);
+  }
+
+  if (source.space !== dest.space) return moveAcross(c, source, dest, from, to, dryRun);
+  const here = inSection(c, source);
+  const done = await change(here, async (tx) => move(tx, from, to, source), dryRun);
   if (done instanceof Refusal) return refuse(done);
   // A move changes no text, but it moves the etag the mirror is whole at.
-  await mirrorAfter(c, done);
+  await mirrorAfter(here, done);
   return json({ ...done.value, ...(done.wrote ? {} : { moved: false }) });
 }
 
 const trimSlashes = (p: string): string => p.replace(/^\/+|\/+$/g, "");
 
-/**
- * Move or rename a document, a plain file, a folder or a board. A document
- * moves whole — both versions and its comments — whatever extension was
- * typed, and a destination that is an existing folder means "into it", as
- * `mv` does. A board moves whole too; what is inside one stays put, and
- * nothing moves into one — its cards are made and renamed on the board.
- */
-async function move(tx: Tx, rawFrom: string, rawTo: string): Promise<Record<string, unknown> | Refusal> {
-  const index = new Index(tx.files);
+/** What a move takes with it. */
+type Picked = {
+  kind: "document" | "file" | "folder" | "board";
+  /** The path it was named by, without its slashes. */
+  from: string;
+  moving: Entry[];
+  doc: Doc | null;
+};
+
+/** What `rawFrom` names, as something that moves: a document whole — both
+ *  versions and its comments — whatever extension was typed, a plain file, a
+ *  folder, or a board. What is inside a board stays put. */
+function pick(index: Index, rawFrom: string): Picked | Refusal {
   const fromFolder = rawFrom.endsWith("/");
   const from = trimSlashes(rawFrom);
-  const to = trimSlashes(rawTo);
-  for (const p of [from, to]) {
-    const problem = pathProblem(p);
-    if (problem) return new Refusal(400, problem);
-  }
-  // "Into it" — unless the destination is the very thing being moved, typed
-  // in another case: that is a rename of its name, not a move inside itself.
-  const into = rawTo.endsWith("/") || (index.isFolder(to) && to.toLowerCase() !== from.toLowerCase());
-
-  // What is being moved.
-  let kind: "document" | "file" | "folder" | "board";
-  let moving: Entry[];
-  let doc: Doc | null = null;
   const inside = index.boardOf(from);
   if (inside) {
     const card = fromFolder ? null : locate(index, from, null);
@@ -630,34 +693,36 @@ async function move(tx: Tx, rawFrom: string, rawTo: string): Promise<Record<stri
   }
   const at = fromFolder ? null : locate(index, from, null);
   if (at instanceof Refusal) return at;
-  if (at && at.kind === "file" && at.entry) {
-    kind = "file";
-    moving = [at.entry];
-  } else if (at && at.kind === "document" && docExists(at.doc)) {
-    kind = "document";
-    doc = at.doc;
-    moving = [doc.md, doc.html, doc.meta].filter((e): e is Entry => e !== null);
-  } else if (index.isFolder(from)) {
-    kind = index.board(from) ? "board" : "folder";
-    moving = index.under(from);
-  } else {
-    return new Refusal(404, `there is nothing at "${from}"`);
+  if (at && at.kind === "file" && at.entry) return { kind: "file", from, moving: [at.entry], doc: null };
+  if (at && at.kind === "document" && docExists(at.doc)) {
+    const doc = at.doc;
+    return { kind: "document", from, moving: [doc.md, doc.html, doc.meta].filter((e): e is Entry => e !== null), doc };
   }
+  if (index.isFolder(from)) return { kind: index.board(from) ? "board" : "folder", from, moving: index.under(from), doc: null };
+  return new Refusal(404, `there is nothing at "${from}"`);
+}
 
-  // Where it lands has to be free — of anything but the files being moved,
-  // which is what lets a rename change only the case of a name — and its
-  // folders are spelled the way the workspace already spells them.
-  const gone = new Set(moving.map((e) => e.fid));
-  const without = new Index(Object.fromEntries(Object.entries(tx.files).filter(([fid]) => !gone.has(fid))));
-  const plan: { fid: string; to: string }[] = [];
-  let label: { from: string; to: string };
+/** Where each file goes, and what the move is called. */
+type Route = { plan: { fid: string; to: string }[]; label: { from: string; to: string } };
+
+/**
+ * Where what was picked lands. `there` is everything already at the
+ * destination — never the files being moved, which is what lets a rename
+ * change only the case of a name — and the place has to be free of it. A
+ * destination that is a folder means "into it", as `mv` does; folders are
+ * spelled the way the place already spells them; nothing moves into a board.
+ */
+function route(there: Index, picked: Picked, to: string, into: boolean): Route | Refusal {
+  const { kind, from, moving, doc } = picked;
+  const plan: Route["plan"] = [];
+  let label: Route["label"];
   if (kind === "file") {
     const entry = moving[0];
-    const dest = without.spelled(into ? `${to}/${basename(entry.file.path)}` : to);
+    const dest = there.spelled(into ? `${to}/${basename(entry.file.path)}` : to);
     plan.push({ fid: entry.fid, to: dest });
     label = { from: entry.file.path, to: dest };
   } else if (doc) {
-    const stem = without.spelled(into ? `${to}/${basename(doc.stem)}` : nameOf(to).stem);
+    const stem = there.spelled(into ? `${to}/${basename(doc.stem)}` : nameOf(to).stem);
     if (doc.md) plan.push({ fid: doc.md.fid, to: `${stem}${doc.md.file.path.slice(doc.stem.length)}` });
     if (doc.html) plan.push({ fid: doc.html.fid, to: `${stem}.html` });
     if (doc.meta) plan.push({ fid: doc.meta.fid, to: `${stem}${META_SUFFIX}` });
@@ -665,7 +730,7 @@ async function move(tx: Tx, rawFrom: string, rawTo: string): Promise<Record<stri
   } else {
     // The folder as it is spelled, which is not always how it was typed.
     const folder = moving[0].file.path.slice(0, from.length);
-    const dest = without.spelled(into ? `${to}/${basename(folder)}` : to);
+    const dest = there.spelled(into ? `${to}/${basename(folder)}` : to);
     if (`${dest.toLowerCase()}/`.startsWith(`${from.toLowerCase()}/`) && dest.toLowerCase() !== from.toLowerCase()) {
       return new Refusal(400, `a ${kind} cannot be moved inside itself`);
     }
@@ -674,7 +739,7 @@ async function move(tx: Tx, rawFrom: string, rawTo: string): Promise<Record<stri
   }
 
   for (const step of plan) {
-    const board = without.boardOf(step.to);
+    const board = there.boardOf(step.to);
     if (board) {
       return new Refusal(400, `nothing moves into a board — ${board} holds cards, and \`doklin board add\` makes them`, {
         code: "board",
@@ -685,48 +750,198 @@ async function move(tx: Tx, rawFrom: string, rawTo: string): Promise<Record<stri
     const sidecar = step.to.toLowerCase().endsWith(META_SUFFIX);
     const problem = pathProblem(sidecar ? step.to.slice(0, -META_SUFFIX.length) : step.to);
     if (problem) return new Refusal(400, problem);
-    const taken = without.at(step.to);
+    const taken = there.at(step.to);
     if (taken) return new Refusal(409, `"${taken.file.path}" is already there`);
-    const place = without.placeProblem(step.to);
+    const place = there.placeProblem(step.to);
     if (place) return new Refusal(409, place);
   }
   if (kind === "document") {
-    const there = without.doc(label.to);
-    if (docExists(there)) return new Refusal(409, `there is already a document at "${there.stem}"`);
+    const already = there.doc(label.to);
+    if (docExists(already)) return new Refusal(409, `there is already a document at "${already.stem}"`);
   }
+  return { plan, label };
+}
+
+/** Whether a published folder's path is the moved folder, or beneath it. */
+const within = (path: string, folder: string): boolean =>
+  sameName(path, folder) || path.toLowerCase().startsWith(`${folder.toLowerCase()}/`);
+
+/**
+ * Move or rename a document, a plain file, a folder or a board inside one
+ * section. A board moves whole; what is inside one stays put, and nothing
+ * moves into one — its cards are made and renamed on the board.
+ */
+async function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): Promise<Record<string, unknown> | Refusal> {
+  const index = new Index(tx.files);
+  const picked = pick(index, rawFrom);
+  if (picked instanceof Refusal) return picked;
+  const { kind, from, moving } = picked;
+  const to = trimSlashes(rawTo);
+  // "Into it" — unless the destination is the very thing being moved, typed
+  // in another case: that is a rename of its name, not a move inside itself.
+  const into =
+    rawTo.endsWith("/") || (!sameName(to, from) && (index.isFolder(to) || (section.mount !== "" && sameName(to, section.mount))));
+
+  const gone = new Set(moving.map((e) => e.fid));
+  const without = new Index(Object.fromEntries(Object.entries(tx.files).filter(([fid]) => !gone.has(fid))));
+  const routed = route(without, picked, to, into);
+  if (routed instanceof Refusal) return routed;
+  const { plan, label } = routed;
 
   for (const step of plan) tx.move(step.fid, step.to);
   if (kind === "folder" || kind === "board") {
     // A published folder follows its folder; so does one published beneath it.
     for (const entry of Object.values(tx.m.public ?? {})) {
-      if (entry.kind !== "dir") continue;
-      const lower = entry.path.toLowerCase();
-      if (lower !== label.from.toLowerCase() && !lower.startsWith(`${label.from.toLowerCase()}/`)) continue;
+      if (entry.kind !== "dir" || !within(entry.path, label.from)) continue;
       entry.path = `${label.to}${entry.path.slice(label.from.length)}`;
       tx.touch();
     }
   }
-  const named = kind === "board" ? await renameBoard(tx, index, label) : null;
+  const def = kind === "board" ? index.at(`${label.from}/${STORE_FILE}`) : null;
+  const named = def ? await renameBoard(tx, def.fid, label) : null;
   keepPublic(tx);
   return { kind, ...label, files: plan.length, ...(named ? { name: named } : {}) };
+}
+
+/**
+ * Move something from one section to another: its files are written where
+ * they go, and only then taken out of where they were — with a tombstone
+ * that says where (`Tombstone.to`), so a Mac in both sections moves its copy
+ * and a Mac that is not in the new one deletes its own outright. A failure
+ * in between leaves the thing in both places, never in neither.
+ *
+ * A page keeps its address: the section it left gives the address up in the
+ * write that removes the file, and the one it went to claims it after.
+ */
+async function moveAcross(c: Call, source: Section, dest: Section, rawFrom: string, rawTo: string, dryRun: boolean): Promise<Response> {
+  const [here, there] = [inSection(c, source), inSection(c, dest)];
+  const tree = await openTree(here);
+  if (!tree) return notBound();
+  const picked = pick(new Index(tree.manifest.files), rawFrom);
+  if (picked instanceof Refusal) return refuse(picked);
+  if (picked.moving.length > MAX_FILES_ACROSS) {
+    return json(
+      {
+        error: `that is ${picked.moving.length} files, and ${MAX_FILES_ACROSS} move between sections at a time — move it in parts, or in Doklin`,
+      },
+      400,
+    );
+  }
+  const to = trimSlashes(rawTo);
+  const contents = new Map<string, Uint8Array>();
+  for (const e of picked.moving) {
+    const obj = await here.env.DATA.get(blobKey(e.fid, e.file.hash));
+    if (!obj) return json({ error: "its content has not finished syncing — try again in a moment" }, 503);
+    contents.set(e.fid, new Uint8Array(await obj.arrayBuffer()));
+  }
+
+  // Where it goes, first. Each file is a new one there, with an id of its own.
+  const arrived = await change(
+    there,
+    async (tx) => {
+      const index = new Index(tx.files);
+      const into = rawTo.endsWith("/") || index.isFolder(to) || (dest.mount !== "" && sameName(to, dest.mount));
+      const routed = route(index, picked, to, into);
+      if (routed instanceof Refusal) return routed;
+      const ids = new Map<string, string>();
+      for (const step of routed.plan) {
+        const fid = newFileId();
+        ids.set(step.fid, fid);
+        await tx.write(fid, step.to, contents.get(step.fid)!, contentTypeOf(step.to));
+      }
+      const def = picked.kind === "board" ? new Index(tx.files).at(`${routed.label.to}/${STORE_FILE}`) : null;
+      const named = def ? await renameBoard(tx, def.fid, routed.label) : null;
+      keepPublic(tx);
+      return { label: routed.label, ids: [...ids], named };
+    },
+    dryRun,
+  );
+  if (arrived instanceof Refusal) return refuse(arrived);
+  const { label, named } = arrived.value;
+  const answer = { kind: picked.kind, ...label, files: picked.moving.length, ...(named ? { name: named } : {}) };
+  if (dryRun) return json({ ...answer, moved: false });
+  await mirrorAfter(there, arrived);
+
+  // Then out of where it was — as it was read: a file that changed meanwhile
+  // is not removed, because what arrived is not what it now says.
+  const folder = picked.kind === "folder" || picked.kind === "board";
+  const left = await change(here, async (tx) => {
+    for (const e of picked.moving) {
+      const now = tx.files[e.fid];
+      if (!now || now.hash !== e.file.hash || now.path !== e.file.path) {
+        return new Refusal(
+          409,
+          `${label.from} changed while it was being moved, so it was left where it is — ${label.to} is a copy of how it was. Remove the copy and move it again.`,
+        );
+      }
+    }
+    const gone = new Set(picked.moving.map((e) => e.fid));
+    const pages: [string, PublicEntry][] = [];
+    const map = tx.m.public ?? {};
+    for (const [slug, entry] of Object.entries(map)) {
+      if (entry.kind === "file" ? !gone.has(entry.file) : !(folder && within(entry.path, label.from))) continue;
+      pages.push([slug, entry]);
+      delete map[slug];
+    }
+    for (const e of picked.moving) tx.remove(e.fid, dest.space);
+    return pages;
+  });
+  if (left instanceof Refusal) {
+    if (left.status === 409) return refuse(left);
+    return json(
+      {
+        error: `${label.to} was written, and ${label.from} could not be taken out of where it was (${left.error}) — it is in both places. Remove ${label.from}.`,
+      },
+      left.status,
+    );
+  }
+  await mirrorAfter(here, left);
+
+  // Its pages, at the addresses they had.
+  const ids = new Map(arrived.value.ids);
+  const pages = left.value;
+  let unpublished: string[] = [];
+  if (pages.length > 0) {
+    const carried = await change(there, async (tx) => {
+      const map = (tx.m.public ??= {});
+      for (const [slug, entry] of pages) {
+        // The home page is chosen from the shared workspace.
+        const { root: _root, ...kept } = entry;
+        const common = dest.space === "" ? entry : kept;
+        if (entry.kind === "file") {
+          const fid = ids.get(entry.file);
+          const file = fid ? tx.files[fid] : undefined;
+          if (!fid || !file) continue;
+          map[slug] = { ...common, kind: "file", file: fid, path: file.path };
+        } else {
+          map[slug] = { ...common, kind: "dir", path: `${label.to}${entry.path.slice(label.from.length)}` };
+        }
+      }
+      tx.touch();
+      return true;
+    });
+    if (carried instanceof Refusal) unpublished = pages.map(([slug]) => `${c.url.origin}/${slug}`).sort();
+  }
+  // Said, because nothing else would: an address stopped answering.
+  return json({ ...answer, ...(unpublished.length > 0 ? { unpublished } : {}) });
 }
 
 /**
  * A board is called what its definition says, and the app writes its folder's
  * name there when it makes one. A board renamed by moving is renamed there
  * too, in the same write — unless it was called something of its own.
- * Answers the new name, or null when it keeps the one it had.
+ * `def` is its definition file. Answers the new name, or null when it keeps
+ * the one it had.
  */
-async function renameBoard(tx: Tx, index: Index, label: { from: string; to: string }): Promise<string | null> {
-  const def = index.at(`${label.from}/${STORE_FILE}`);
+async function renameBoard(tx: Tx, def: string, label: { from: string; to: string }): Promise<string | null> {
   const was = basename(label.from);
   const now = basename(label.to);
-  if (!def || was === now) return null;
-  const text = await tx.readText(def.fid);
+  if (was === now) return null;
+  const text = await tx.readText(def);
   const parsed = text === null ? null : parseStoreDef(text);
   if (!parsed || parsed.name.trim().toLowerCase() !== was.toLowerCase()) return null;
-  const path = tx.files[def.fid].path;
-  await tx.write(def.fid, path, new TextEncoder().encode(serializeStoreDef({ ...parsed, name: now })), contentTypeOf(path));
+  const path = tx.files[def].path;
+  await tx.write(def, path, new TextEncoder().encode(serializeStoreDef({ ...parsed, name: now })), contentTypeOf(path));
   return now;
 }
 

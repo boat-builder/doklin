@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
-import { pageUrl, publishedByPath, type CloudStatus, type PublicPage } from "./cloud";
+import { pageUrl, placeOf, publishedByPath, type CloudSpace, type CloudStatus, type PublicPage } from "./cloud";
 import { invoke } from "@tauri-apps/api/core";
 
 export type TreeNode =
@@ -57,8 +57,16 @@ type PendingCreate = { parentDir: string; kind: "file" | "dir" | "board" };
 type PendingRename = { path: string; kind: "file" | "dir"; openable?: boolean };
 
 // A context-menu invocation: where it was opened and what it targets. "root"
-// is a right-click on empty sidebar space (creation lands at the workspace root).
-type MenuTarget = { path: string; kind: "file" | "dir" | "root"; openable?: boolean };
+// is a right-click on empty sidebar space (creation lands at the workspace
+// root); "section" is empty space under Restricted or Private, whose folder
+// `path` names. `space` marks a restricted folder's own row.
+type MenuTarget = {
+  path: string;
+  kind: "file" | "dir" | "root" | "section";
+  openable?: boolean;
+  space?: CloudSpace;
+  section?: "restricted" | "private";
+};
 type MenuState = { x: number; y: number; target: MenuTarget };
 
 // One row in a drag (pointer-based move, VS Code-style). HTML5 drag events
@@ -123,16 +131,38 @@ type Props = {
   // Open the Cloud panel — "Cloud…" in the workspace menu. (The footer's
   // sync line is the other way in; App owns the footer.)
   onOpenCloud?: () => void;
+  // Who is in the workspace, and its agents — the workspace menu's own
+  // doors. Each is offered only when it is passed.
+  onOpenPeople?: () => void;
+  onOpenAgents?: () => void;
+  // Sections (a connected workspace whose status says `sections`): making a
+  // restricted folder — empty, or out of a folder that is there (`from`) —
+  // seeing and changing who is in one, and putting a private note in a new
+  // folder with somebody.
+  onNewRestricted?: (from?: string) => void;
+  onManageAccess?: (space: CloudSpace) => void;
+  onShareWith?: (path: string) => void;
+  // Asked once before a drag moves anything: false leaves everything where
+  // it is. Where a move would let more people see something, this is where
+  // the user is told.
+  onConfirmMove?: (entries: SidebarSelection[], toDir: string) => Promise<boolean>;
+  // The workspaces this Mac belongs to — the
+  // menu lists them, so switching is one click — and the two things the menu
+  // does with them: open one, and join another with an invite.
+  workspaces?: SidebarWorkspace[];
+  onOpenWorkspace?: (root: string) => void;
+  onJoinWorkspace?: () => void;
   // Version history for a document — the rail, for any workspace: it is
   // no longer a cloud feature.
   onHistory?: (path: string) => void;
-  // The workspace's own timeline, a modal.
-  onWorkspaceHistory?: () => void;
+  // The workspace's own timeline, a modal — or, with a folder, that
+  // section's: each has a history of its own.
+  onWorkspaceHistory?: (dir?: string) => void;
   // Files this folder's history holds and the folder does not: the root's
   // menu offers them when there are any. The footer bar's count (App.tsx)
-  // is the main way in; this is the second.
+  // is the main way in; this is the second. With a folder, that section's.
   deletedCount?: number;
-  onRecentlyDeleted?: () => void;
+  onRecentlyDeleted?: (dir?: string) => void;
   // Publishing: the folder dialog for a
   // folder (or the root, for the whole workspace), stopping a page, and
   // copying a page's public link. Offered only in a connected workspace.
@@ -140,6 +170,10 @@ type Props = {
   onStopPublishing?: (page: PublicPage) => void;
   onCopyLink?: (url: string) => void;
 };
+
+/** A workspace this Mac belongs to, as the menu lists it: where its copy is
+ *  on this Mac, and what it is called. */
+export type SidebarWorkspace = { root: string; name: string; domain: string };
 
 // A press becomes a drag only after moving this far, so plain clicks are untouched.
 const DRAG_THRESHOLD_PX = 5;
@@ -195,6 +229,15 @@ export default function Sidebar({
   onDragFileCancel,
   onResizeWidth,
   onOpenCloud,
+  onOpenPeople,
+  onOpenAgents,
+  onNewRestricted,
+  onManageAccess,
+  onShareWith,
+  onConfirmMove,
+  workspaces,
+  onOpenWorkspace,
+  onJoinWorkspace,
   onHistory,
   onWorkspaceHistory,
   deletedCount = 0,
@@ -271,22 +314,60 @@ export default function Sidebar({
     return out;
   }, [tree]);
 
+  /* ---------- Sections ---------- */
+
+  // A workspace in sections draws three lists instead of one: what everyone
+  // has, the restricted folders this person is in, and their Private. On
+  // disk the last two are the folders `Restricted` and `Private` at the top;
+  // here they are headings, and those two folders have no row of their own.
+  const sectioned = cloud?.sections === true;
+  const layout = useMemo(() => {
+    if (!tree || tree.kind !== "dir") return null;
+    const top = (name: string) =>
+      sectioned
+        ? (tree.children.find(
+            (c): c is Extract<TreeNode, { kind: "dir" }> => c.kind === "dir" && c.name.toLowerCase() === name,
+          ) ?? null)
+        : null;
+    const restricted = top("restricted");
+    const mine = top("private");
+    return {
+      shared: tree.children.filter((c) => c !== restricted && c !== mine),
+      restricted: restricted?.children ?? [],
+      private: mine?.children ?? [],
+      restrictedDir: restricted?.path ?? `${root}/Restricted`,
+      privateDir: mine?.path ?? `${root}/Private`,
+    };
+  }, [tree, sectioned, root]);
+  const restrictedDir = layout?.restrictedDir ?? `${root}/Restricted`;
+  const privateDir = layout?.privateDir ?? `${root}/Private`;
+  // The restricted folders, by where each is on this Mac.
+  const spacesByAbs = useMemo(() => {
+    const out = new Map<string, CloudSpace>();
+    for (const sp of cloud?.spaces ?? []) if (sp.kind === "restricted") out.set(`${root}/${sp.path}`, sp);
+    return out;
+  }, [cloud, root]);
+  const hasPrivate = (cloud?.spaces ?? []).some((sp) => sp.kind === "private");
+
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
   // The rows in on-screen order, respecting collapsed folders — the universe
   // a ⇧-click range spans.
   const visibleEntries = useMemo(() => {
     const out: SidebarSelection[] = [];
-    const walk = (n: TreeNode) => {
-      if (n.kind !== "dir") return;
-      for (const c of n.children) {
+    const walk = (nodes: TreeNode[]) => {
+      for (const c of nodes) {
         out.push({ path: c.path, kind: c.kind });
-        if (c.kind === "dir" && !collapsed.has(c.path)) walk(c);
+        if (c.kind === "dir" && !collapsed.has(c.path)) walk(c.children);
       }
     };
-    if (tree) walk(tree);
+    if (layout) {
+      walk(layout.shared);
+      walk(layout.restricted);
+      walk(layout.private);
+    }
     return out;
-  }, [tree, collapsed]);
+  }, [layout, collapsed]);
 
   // The fixed end of a ⇧-click range: the row last plain- or ⌘-clicked.
   const selectionAnchorRef = useRef<string | null>(null);
@@ -382,14 +463,20 @@ export default function Sidebar({
   // A drop is valid when it actually moves something: at least one entry
   // isn't already in the destination, and the destination is never inside a
   // dragged folder (a folder can't move into itself or its own subtree).
-  const canDrop = useCallback((entries: DragEntry[], toDir: string | null): boolean => {
-    if (!toDir) return false;
-    if (entries.every((en) => dirname(en.path) === toDir)) return false;
-    return !entries.some(
-      (en) =>
-        en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
-    );
-  }, []);
+  const canDrop = useCallback(
+    (entries: DragEntry[], toDir: string | null): boolean => {
+      if (!toDir) return false;
+      if (entries.every((en) => dirname(en.path) === toDir)) return false;
+      // Straight under Restricted is where the restricted folders are: a
+      // folder dropped there becomes one, and a note there would be in none.
+      if (sectioned && toDir === restrictedDir && entries.some((en) => en.kind === "file")) return false;
+      return !entries.some(
+        (en) =>
+          en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
+      );
+    },
+    [sectioned, restrictedDir],
+  );
 
   const setDropState = useCallback((dir: string | null) => {
     dropDirRef.current = dir;
@@ -420,7 +507,8 @@ export default function Sidebar({
           toDir = row.dataset.treeParent ?? null;
         }
       } else if (el && bodyRef.current?.contains(el)) {
-        toDir = root;
+        // Empty space under a heading is that section's own folder.
+        toDir = el.closest<HTMLElement>("[data-section-dir]")?.dataset.sectionDir ?? root;
       }
       const valid = canDrop(drag.entries, toDir);
       setDropState(valid ? toDir : null);
@@ -495,6 +583,8 @@ export default function Sidebar({
 
   const performDrop = useCallback(
     async (entries: DragEntry[], toDir: string) => {
+      const leaving = entries.filter((en) => dirname(en.path) !== toDir);
+      if (onConfirmMove && !(await onConfirmMove(leaving, toDir))) return;
       const moved: SidebarSelection[] = [];
       const errors: string[] = [];
       for (const entry of entries) {
@@ -519,7 +609,7 @@ export default function Sidebar({
         return next;
       });
     },
-    [onMovePath, onSelect],
+    [onMovePath, onSelect, onConfirmMove],
   );
 
   const onRowPointerDown = useCallback(
@@ -670,7 +760,10 @@ export default function Sidebar({
   // Begin inline creation inside `parentDir`, expanding it (and any collapsed
   // ancestors) so the input row is actually visible.
   const startCreate = useCallback(
-    (kind: "file" | "dir" | "board", parentDir: string) => {
+    (kind: "file" | "dir" | "board", wantedDir: string) => {
+      // Nothing is made straight under Restricted from here: a note there
+      // would be in no folder, and a folder there is made with its people.
+      const parentDir = sectioned && wantedDir === restrictedDir ? root : wantedDir;
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
@@ -686,15 +779,15 @@ export default function Sidebar({
       });
       setPendingCreate({ parentDir, kind });
     },
-    [root],
+    [root, sectioned, restrictedDir],
   );
 
   // Where "New File" / "New Folder" should land for a given target: inside a
   // folder, next to a file, at the root for empty-space actions.
   const createDirFor = useCallback(
-    (target: { path: string; kind: "file" | "dir" | "root" } | null) => {
+    (target: { path: string; kind: "file" | "dir" | "root" | "section" } | null) => {
       if (!target || target.kind === "root") return root;
-      return target.kind === "dir" ? target.path : dirname(target.path);
+      return target.kind === "file" ? dirname(target.path) : target.path;
     },
     [root],
   );
@@ -786,11 +879,12 @@ export default function Sidebar({
       // the target is already part of it (the menu then acts on the whole set).
       if (!selection.some((s) => s.path === target.path)) {
         selectionAnchorRef.current = target.path;
-        onSelect([target]);
+        onSelect([{ path: target.path, kind: target.kind }]);
       }
-      setCtxMenu({ x: e.clientX, y: e.clientY, target });
+      const space = target.kind === "dir" ? spacesByAbs.get(target.path) : undefined;
+      setCtxMenu({ x: e.clientX, y: e.clientY, target: { ...target, space } });
     },
-    [selection, onSelect],
+    [selection, onSelect, spacesByAbs],
   );
 
   const rootName = useMemo(() => basename(root), [root]);
@@ -813,30 +907,37 @@ export default function Sidebar({
     return out;
   }, [cloud, root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
+  const showCreateInPrivate = sectioned && pendingCreate?.parentDir === privateDir;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
     if (!ctxMenu) return [];
     const { target } = ctxMenu;
+    const isRow = target.kind === "file" || target.kind === "dir";
     // A right-click on a row that's part of a multi-selection acts on the
     // whole set, with only the operations that make sense for many rows at
     // once (per-document items like Rename need a single target).
-    if (
-      target.kind !== "root" &&
-      selection.length > 1 &&
-      selection.some((s) => s.path === target.path)
-    ) {
-      const entries = [...selection];
+    if (isRow && selection.length > 1 && selection.some((s) => s.path === target.path)) {
+      // A restricted folder is not cut or trashed like the rows beside it:
+      // it is left, or deleted for everyone, from its own dialog.
+      const movable = selection.filter((s) => !spacesByAbs.has(s.path));
       return [
-        { label: "Cut", onClick: () => onCopyEntries(entries, true) },
-        { label: "Copy", onClick: () => onCopyEntries(entries, false) },
-        { label: "Delete", danger: true, onClick: () => onDelete(entries) },
+        { label: "Cut", disabled: movable.length === 0, onClick: () => onCopyEntries(movable, true) },
+        { label: "Copy", onClick: () => onCopyEntries([...selection], false) },
+        { label: "Delete", danger: true, disabled: movable.length === 0, onClick: () => onDelete(movable) },
       ];
+    }
+    // Empty space under Restricted: the one thing made there is a folder
+    // with people in it.
+    if (target.kind === "section" && target.section === "restricted") {
+      return onNewRestricted ? [{ label: "New restricted folder…", onClick: () => onNewRestricted() }] : [];
     }
     // Cards are created from the board itself, so a board offers no inline
     // New File / New Folder — its folder is the board's own storage.
     const insideBoard = storeDirs.has(createDirFor(target));
+    // Nor does a row straight under Restricted: see `startCreate`.
+    const underRestricted = sectioned && createDirFor(target) === restrictedDir;
     const items: ContextMenuItem[] = [];
-    if (!insideBoard) {
+    if (!insideBoard && !underRestricted) {
       items.push(
         { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
         { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
@@ -871,13 +972,37 @@ export default function Sidebar({
     if (target.kind === "file" && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
+    // Who can open it: a restricted folder's people; a folder everyone has,
+    // or a private one, made into one; a private note put in a new folder
+    // with somebody.
+    if (sectioned && isRow && target.path.startsWith(`${root}/`)) {
+      const place = placeOf(cloud, target.path.slice(root.length + 1));
+      if (target.space && onManageAccess) {
+        const space = target.space;
+        items.push({ label: "Manage access…", onClick: () => onManageAccess(space) });
+      } else if (target.kind === "dir" && onNewRestricted && (place.kind === "shared" || place.kind === "private")) {
+        items.push({ label: "Restrict access…", onClick: () => onNewRestricted(target.path) });
+      } else if (target.kind === "file" && onShareWith && place.kind === "private" && target.openable !== false) {
+        items.push({ label: "Share with…", onClick: () => onShareWith(target.path) });
+      }
+    }
     // The whole folder's, on the root — where "put it back to Tuesday" is
-    // asked from.
+    // asked from. Each section has a history of its own, asked for on it.
+    const ownHistory = target.space != null || target.kind === "section";
     if (target.kind === "root" && onWorkspaceHistory) {
-      items.push({ label: "Workspace history…", onClick: onWorkspaceHistory });
+      items.push({ label: "Workspace history…", onClick: () => onWorkspaceHistory() });
+    }
+    if (ownHistory && onWorkspaceHistory) {
+      items.push({
+        label: target.space ? "Folder history…" : "Private history…",
+        onClick: () => onWorkspaceHistory(target.path),
+      });
     }
     if (target.kind === "root" && onRecentlyDeleted && deletedCount > 0) {
-      items.push({ label: `Recently deleted (${deletedCount})`, onClick: onRecentlyDeleted });
+      items.push({ label: `Recently deleted (${deletedCount})`, onClick: () => onRecentlyDeleted() });
+    }
+    if (ownHistory && onRecentlyDeleted) {
+      items.push({ label: "Recently deleted…", onClick: () => onRecentlyDeleted(target.path) });
     }
     // Publishing: a folder (or the whole workspace) publishes every note in
     // it; a note published on its own offers its link and its stop here —
@@ -912,41 +1037,31 @@ export default function Sidebar({
     }
     // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
     // target, next to a file target, at the root for empty space — and stays
-    // visible-but-disabled while the clipboard is empty.
-    if (target.kind !== "root") {
+    // visible-but-disabled while the clipboard is empty. A restricted folder
+    // is copied, never cut: it leaves by its own dialog.
+    if (target.kind === "file" || target.kind === "dir") {
       const entry: SidebarSelection = { path: target.path, kind: target.kind };
-      items.push(
-        { label: "Cut", onClick: () => onCopyEntries([entry], true) },
-        { label: "Copy", onClick: () => onCopyEntries([entry], false) },
-      );
+      if (!target.space) items.push({ label: "Cut", onClick: () => onCopyEntries([entry], true) });
+      items.push({ label: "Copy", onClick: () => onCopyEntries([entry], false) });
     }
     items.push({
       label: "Paste",
       disabled: !clipboardHasFiles,
-      onClick: () =>
-        onPasteEntries(
-          target.kind === "dir"
-            ? target.path
-            : target.kind === "root"
-              ? root
-              : dirname(target.path),
-        ),
+      onClick: () => onPasteEntries(createDirFor(target)),
     });
-    if (target.kind !== "root") {
+    if (target.kind === "file" || target.kind === "dir") {
+      const kind = target.kind;
       items.push({
         label: "Rename…",
-        onClick: () =>
-          startRename({
-            path: target.path,
-            kind: target.kind as "file" | "dir",
-            openable: target.openable,
-          }),
+        onClick: () => startRename({ path: target.path, kind, openable: target.openable }),
       });
-      items.push({
-        label: "Delete",
-        danger: true,
-        onClick: () => onDelete([{ path: target.path, kind: target.kind as "file" | "dir" }]),
-      });
+      if (!target.space) {
+        items.push({
+          label: "Delete",
+          danger: true,
+          onClick: () => onDelete([{ path: target.path, kind }]),
+        });
+      }
     }
     return items;
   }, [
@@ -954,6 +1069,9 @@ export default function Sidebar({
     selection,
     clipboardHasFiles,
     storeDirs,
+    spacesByAbs,
+    sectioned,
+    restrictedDir,
     refresh,
     onOpenBoard,
     onMakeBoard,
@@ -974,6 +1092,9 @@ export default function Sidebar({
     onPublishFolder,
     onStopPublishing,
     onCopyLink,
+    onNewRestricted,
+    onManageAccess,
+    onShareWith,
   ]);
 
   // Right-edge drag handle: the app owns the width (grid CSS variable);
@@ -998,6 +1119,51 @@ export default function Sidebar({
     [onResizeWidth],
   );
 
+  // The inline name input at the top of a section's list.
+  const createRow = pendingCreate && (
+    <NameRow
+      depth={0}
+      icon={createRowIcon(pendingCreate.kind)}
+      placeholder={createRowLabel(pendingCreate.kind)}
+      ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
+      onCommit={commitCreate}
+      onCancel={cancelCreate}
+    />
+  );
+  // A top-level row of one of the lists. `loose` marks a list whose notes
+  // are in no section — straight under Restricted — and so sync nowhere.
+  const sectionDirs = [root, restrictedDir, privateDir];
+  const renderItem = (child: TreeNode, parentDir: string, loose: boolean) => (
+    <TreeItem
+      key={child.path}
+      node={child}
+      depth={0}
+      parentDir={parentDir}
+      currentPath={currentPath}
+      selection={selection}
+      cutPaths={cutPaths}
+      collapsed={collapsed}
+      pendingCreate={pendingCreate}
+      pendingRename={pendingRename}
+      dragPaths={dragPaths}
+      dropDir={dropDir != null && sectionDirs.includes(dropDir) ? null : dropDir}
+      dnd={dnd}
+      presence={presenceByPath}
+      published={publishedByAbs}
+      spaces={spacesByAbs}
+      loose={loose}
+      onToggle={toggleCollapsed}
+      onOpenFile={onOpenFile}
+      onOpenBoard={onOpenBoard}
+      onRowClick={handleRowSelect}
+      onRowMenu={openRowMenu}
+      onCommitCreate={commitCreate}
+      onCancelCreate={cancelCreate}
+      onCommitRename={commitRename}
+      onCancelRename={cancelRename}
+    />
+  );
+
   return (
     <aside className="sidebar" aria-label="File browser" ref={asideRef}>
       {onResizeWidth && (
@@ -1008,7 +1174,12 @@ export default function Sidebar({
         />
       )}
       <SidebarHeader
-        name={rootName}
+        // A workspace goes by its own name; a plain folder by the folder's.
+        name={workspaces?.find((w) => w.root === root)?.name ?? rootName}
+        root={root}
+        workspaces={workspaces ?? []}
+        onOpenWorkspace={onOpenWorkspace}
+        onJoinWorkspace={onJoinWorkspace}
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         onOpenFolder={onOpenFolder}
@@ -1021,10 +1192,13 @@ export default function Sidebar({
         onNewFile={() => startCreate("file", createDirFor(primarySelection))}
         onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
         onOpenCloud={onOpenCloud}
+        onOpenPeople={onOpenPeople}
+        onOpenAgents={onOpenAgents}
+        sectioned={sectioned}
       />
       <div
         ref={bodyRef}
-        className={`sidebar-body ${dropDir === root ? "is-drop-root" : ""}`}
+        className={`sidebar-body ${!sectioned && dropDir === root ? "is-drop-root" : ""}`}
         onClick={(e) => {
           // Clicking empty space clears the selection (root becomes the
           // creation context again).
@@ -1042,50 +1216,119 @@ export default function Sidebar({
         {!error && loading && !tree && (
           <div className="sidebar-message">Loading…</div>
         )}
-        {!error && tree && tree.kind === "dir" && tree.children.length === 0 && !showCreateAtRoot && (
-          <div className="sidebar-message">No files yet</div>
-        )}
-        {!error && tree && tree.kind === "dir" && (tree.children.length > 0 || showCreateAtRoot) && (
-          <ul className="tree" role="tree">
-            {showCreateAtRoot && pendingCreate && (
-              <NameRow
-                depth={0}
-                icon={createRowIcon(pendingCreate.kind)}
-                placeholder={createRowLabel(pendingCreate.kind)}
-                ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
-                onCommit={commitCreate}
-                onCancel={cancelCreate}
-              />
+        {!error && layout && (
+          <div
+            className={`tree-section ${sectioned && dropDir === root ? "is-drop-section" : ""}`}
+            data-section-dir={root}
+            data-testid="section-workspace"
+          >
+            {layout.shared.length === 0 && !showCreateAtRoot && <div className="sidebar-message">No files yet</div>}
+            {(layout.shared.length > 0 || showCreateAtRoot) && (
+              <ul className="tree" role="tree">
+                {showCreateAtRoot && pendingCreate && createRow}
+                {layout.shared.map((child) => renderItem(child, root, false))}
+              </ul>
             )}
-            {tree.children.map((child) => (
-              <TreeItem
-                key={child.path}
-                node={child}
-                depth={0}
-                parentDir={root}
-                currentPath={currentPath}
-                selection={selection}
-                cutPaths={cutPaths}
-                collapsed={collapsed}
-                pendingCreate={pendingCreate}
-                pendingRename={pendingRename}
-                dragPaths={dragPaths}
-                dropDir={dropDir === root ? null : dropDir}
-                dnd={dnd}
-                presence={presenceByPath}
-                published={publishedByAbs}
-                onToggle={toggleCollapsed}
-                onOpenFile={onOpenFile}
-                onOpenBoard={onOpenBoard}
-                onRowClick={handleRowSelect}
-                onRowMenu={openRowMenu}
-                onCommitCreate={commitCreate}
-                onCancelCreate={cancelCreate}
-                onCommitRename={commitRename}
-                onCancelRename={cancelRename}
-              />
-            ))}
-          </ul>
+          </div>
+        )}
+        {!error && layout && sectioned && (
+          <>
+            <div
+              className={`tree-section ${dropDir === restrictedDir ? "is-drop-section" : ""}`}
+              data-section-dir={restrictedDir}
+              data-testid="section-restricted"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelect([]);
+                if (!onNewRestricted) return;
+                setCtxMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  target: { path: restrictedDir, kind: "section", section: "restricted" },
+                });
+              }}
+            >
+              <div className="sidebar-section tree-section-head">
+                <span className="sidebar-section-label">Restricted</span>
+                {onNewRestricted && (
+                  <span className="sidebar-section-actions">
+                    <button
+                      className="sidebar-section-btn"
+                      data-testid="new-restricted"
+                      onClick={() => onNewRestricted()}
+                      title="New restricted folder"
+                      aria-label="New restricted folder"
+                    >
+                      <PlusIcon />
+                    </button>
+                  </span>
+                )}
+              </div>
+              {layout.restricted.length === 0 ? (
+                <div className="sidebar-message tree-section-hint">Folders only the people you choose can open.</div>
+              ) : (
+                <ul className="tree" role="tree">
+                  {/* Straight under Restricted a note is in no folder, so nobody else has it. */}
+                  {layout.restricted.map((child) => renderItem(child, restrictedDir, true))}
+                </ul>
+              )}
+            </div>
+            <div
+              className={`tree-section ${hasPrivate && dropDir === privateDir ? "is-drop-section" : ""}`}
+              data-section-dir={hasPrivate ? privateDir : ""}
+              data-testid="section-private"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelect([]);
+                if (!hasPrivate) return;
+                setCtxMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  target: { path: privateDir, kind: "section", section: "private" },
+                });
+              }}
+            >
+              <div className="sidebar-section tree-section-head">
+                <span className="sidebar-section-label">Private</span>
+                {hasPrivate && (
+                  <span className="sidebar-section-actions">
+                    <button
+                      className="sidebar-section-btn"
+                      data-testid="new-private"
+                      onClick={() => startCreate("file", privateDir)}
+                      title="New private note"
+                      aria-label="New private note"
+                    >
+                      <PlusIcon />
+                    </button>
+                  </span>
+                )}
+              </div>
+              {/* A creator who never said who they are is nobody a Private
+                  could belong to; anybody else gets theirs on the first sync. */}
+              {!hasPrivate && cloud?.workerVersion != null && cloud.meId == null && (
+                <div className="sidebar-message tree-section-hint" data-testid="private-nobody">
+                  Say who you are and you get a section only you can see.{" "}
+                  {onOpenPeople && (
+                    <button className="tree-section-link" onClick={onOpenPeople}>
+                      People…
+                    </button>
+                  )}
+                </div>
+              )}
+              {hasPrivate && layout.private.length === 0 && !showCreateInPrivate && (
+                <div className="sidebar-message tree-section-hint">Only you can see what you put here.</div>
+              )}
+              {(layout.private.length > 0 || showCreateInPrivate) && (
+                <ul className="tree" role="tree">
+                  {showCreateInPrivate && createRow}
+                  {layout.private.map((child) => renderItem(child, privateDir, !hasPrivate))}
+                </ul>
+              )}
+            </div>
+          </>
         )}
       </div>
       {ctxMenu && (
@@ -1126,6 +1369,10 @@ export default function Sidebar({
 
 function SidebarHeader({
   name,
+  root,
+  workspaces,
+  onOpenWorkspace,
+  onJoinWorkspace,
   menuOpen,
   setMenuOpen,
   onOpenFolder,
@@ -1138,8 +1385,16 @@ function SidebarHeader({
   onNewFile,
   onNewFolder,
   onOpenCloud,
+  onOpenPeople,
+  onOpenAgents,
+  sectioned,
 }: {
   name: string;
+  /** The folder this window has open — which of `workspaces` is this one. */
+  root: string;
+  workspaces: SidebarWorkspace[];
+  onOpenWorkspace?: (root: string) => void;
+  onJoinWorkspace?: () => void;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
   onOpenFolder: () => void;
@@ -1154,6 +1409,10 @@ function SidebarHeader({
   onNewFile: () => void;
   onNewFolder: () => void;
   onOpenCloud?: () => void;
+  onOpenPeople?: () => void;
+  onOpenAgents?: () => void;
+  // The tree below is in sections, and this row heads the first of them.
+  sectioned: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -1179,6 +1438,78 @@ function SidebarHeader({
         </button>
         {menuOpen && (
           <div className="sidebar-menu" role="menu">
+            {/* The workspaces this Mac belongs to, the open one ticked: what
+                makes this a switcher rather than a folder's menu. */}
+            {workspaces.length > 0 && (
+              <>
+                <div className="sidebar-menu-label">Workspaces</div>
+                {workspaces.map((w) => (
+                  <button
+                    key={w.root}
+                    role="menuitemradio"
+                    aria-checked={w.root === root}
+                    className="sidebar-menu-item sidebar-menu-item-check"
+                    data-testid="sidebar-menu-workspace"
+                    title={`${w.domain} — ${w.root}`}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (w.root !== root) onOpenWorkspace?.(w.root);
+                    }}
+                  >
+                    <span className="sidebar-menu-ws">
+                      <span className="ws-tile ws-tile--menu" aria-hidden>
+                        {workspaceInitial(w.name)}
+                      </span>
+                      <span className="sidebar-menu-ws-name">{w.name}</span>
+                    </span>
+                    {w.root === root && <MenuCheckIcon />}
+                  </button>
+                ))}
+              </>
+            )}
+            {onJoinWorkspace && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                data-testid="sidebar-menu-join"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onJoinWorkspace();
+                }}
+              >
+                Join a workspace…
+              </button>
+            )}
+            {(workspaces.length > 0 || onJoinWorkspace) && <div className="sidebar-menu-sep" role="separator" />}
+            {/* Who is in this workspace, and its agents: the workspace's
+                own, so they are here rather than behind the sync panel. */}
+            {onOpenPeople && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                data-testid="sidebar-menu-people"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenPeople();
+                }}
+              >
+                People…
+              </button>
+            )}
+            {onOpenAgents && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                data-testid="sidebar-menu-agents"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenAgents();
+                }}
+              >
+                Agents…
+              </button>
+            )}
+            {(onOpenPeople || onOpenAgents) && <div className="sidebar-menu-sep" role="separator" />}
             <button
               role="menuitem"
               className="sidebar-menu-item"
@@ -1256,7 +1587,7 @@ function SidebarHeader({
         </button>
       </div>
       <div className="sidebar-section">
-        <span className="sidebar-section-label">Files</span>
+        <span className="sidebar-section-label">{sectioned ? "Workspace" : "Files"}</span>
         <span className="sidebar-section-actions">
           <button
             className="sidebar-section-btn"
@@ -1295,6 +1626,8 @@ function TreeItem({
   dnd,
   presence,
   published,
+  spaces,
+  loose = false,
   onToggle,
   onOpenFile,
   onOpenBoard,
@@ -1325,6 +1658,11 @@ function TreeItem({
   presence: Map<string, string[]>;
   // Rows with a public page of their own, by absolute path.
   published: Map<string, PublicPage>;
+  // The restricted folders, by absolute path: such a row says how many
+  // people are in it, and is not dragged away.
+  spaces: Map<string, CloudSpace>;
+  // A note at this level is in no section, so it syncs nowhere.
+  loose?: boolean;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   onOpenBoard: (path: string) => void;
@@ -1372,7 +1710,7 @@ function TreeItem({
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
-          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""} ${openable ? "" : "is-unsupported"}`}
+          className={`tree-row tree-file ${active ? "is-active" : ""} ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${inDropDir ? "is-drop-within" : ""} ${openable ? "" : "is-unsupported"} ${loose ? "is-nowhere" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="file"
@@ -1393,6 +1731,15 @@ function TreeItem({
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
+          {loose && (
+            <span
+              className="tree-nowhere"
+              data-testid="tree-nowhere"
+              title="In no restricted folder, so it stays on this Mac — move it into one"
+            >
+              not synced
+            </span>
+          )}
           {page?.kind === "file" && (
             <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
           )}
@@ -1410,6 +1757,7 @@ function TreeItem({
     );
   }
 
+  const space = spaces.get(node.path) ?? null;
   const isBoard = node.store === true;
   // A board never expands: the backend hands it no children, and its cards are
   // reached from the board, from search, and from links.
@@ -1448,7 +1796,9 @@ function TreeItem({
             if (isBoard) onOpenBoard(node.path);
             else onToggle(node.path);
           }}
-          onPointerDown={(e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })}
+          // A restricted folder stays where it is: it is left, or deleted
+          // for everyone, never dragged into another section.
+          onPointerDown={space ? undefined : (e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })}
           onPointerMove={dnd.onPointerMove}
           onPointerUp={dnd.onPointerUp}
           onPointerCancel={dnd.onPointerCancel}
@@ -1463,6 +1813,15 @@ function TreeItem({
             </span>
           )}
           <span className="tree-label tree-dir-label">{node.name}</span>
+          {space && space.members.length > 0 && (
+            <span
+              className="tree-space-count"
+              data-testid="space-count"
+              title={`${space.members.length} ${space.members.length === 1 ? "person" : "people"} can open this folder`}
+            >
+              · {space.members.length}
+            </span>
+          )}
           {published.get(node.path)?.kind === "dir" && (
             <span
               className="tree-published"
@@ -1502,6 +1861,7 @@ function TreeItem({
               dnd={dnd}
               presence={presence}
               published={published}
+              spaces={spaces}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onOpenBoard={onOpenBoard}

@@ -1,57 +1,47 @@
 //! The engine: one task per connected workspace, the only code that holds a
 //! token or talks to the worker.
 //!
-//! Bidirectional, state-based sync between a local workspace folder and its
-//! domain. Disk stays the source of truth; the remote side is a manifest
-//! (updated by compare-and-swap on its R2 etag) plus immutable,
-//! content-addressed blobs — so concurrent writers can never clobber each
-//! other's bytes, and every revision stays retrievable for version history.
-//!
-//! Concurrency model: edits to different files always converge; concurrent
-//! edits to the same file get a three-way text merge against the last-synced
-//! base, and genuinely overlapping edits fall back to a conflict copy next
-//! to the original — nothing is ever lost. Presence ("Alice is editing…")
-//! makes that rare in practice.
+//! A workspace is several *sections* — the shared part everyone has, this
+//! person's Private, each restricted folder they are in — and each one is a
+//! unit (unit.rs): its own folder, its own manifest, its own state. The unit
+//! knows how one folder is kept in step with one manifest; this file is what
+//! a workspace has one of: who the domain says this Mac is, the poll and the
+//! beat that rides it, presence and leases, the status that is the
+//! frontend's entire model, and the task that decides when which unit
+//! cycles. It is also the only place two units meet: a space arriving or
+//! leaving (`reconcile_spaces`), a file moving between sections on this Mac
+//! (`pair_moves`) and on another (`relocate`).
 //!
 //! The engine wakes on four things — the edit bus, the filesystem watcher,
-//! the poll clock, commands — and does one of two: a *cycle* (full
-//! reconcile, `cycle()`, deliberately the only place local and remote state
-//! meet) or a *poll* (etag + presence, and this Mac's own beat when one is
-//! due — the beat has no request of its own). It also owns the public map's queued
-//! ops (folded into the manifest it publishes), history reads, presence, and
-//! the one status event that is the frontend's entire model. Generic over
-//! [`Remote`] so all of it runs in tests against an in-memory worker.
+//! the poll clock, commands — and does one of two: a *pass* (the units with
+//! something to say each run a cycle) or a *poll* (etags + presence, and
+//! this Mac's own beat when one is due — the beat has no request of its
+//! own). Generic over [`Remote`] so all of it runs in tests against an
+//! in-memory worker.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::manifest::{
-    clean_text, dedupe_paths, files_under, is_directory_id, lease_key, random_slug, unique_slug,
-    valid_rel_path, valid_slug, Beat, LeaseEntry, Manifest, ManifestFile, PollResponse, PublicEntry,
-    PublicKind, Target, Tombstone,
-    MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN, MAX_TITLE_LEN,
+    is_directory_id, lease_key, valid_rel_path, Beat, LeaseEntry, Manifest, PollResponse, PublicKind, SpaceEntry,
+    SpaceKind,
 };
-use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
+use super::merge::conflict_copy_path;
 use super::remote::{Remote, RemoteError, RemoteResult};
-use super::versions::{MirrorReport, VersionsIndex, MIRROR_EVERY};
-use super::scan::{
-    content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local,
-    stat_pair, write_atomic, write_json, ScanEntry,
-};
+use super::scan::{hash16, now_ms, read_file_checked, rel_path};
+use super::space::{self, SpaceMarker, PRIVATE_DIR, SHARED};
 use super::status::{
-    emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, StatusTable,
-    VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_DELETES,
+    emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, SpaceStatus, StatusTable,
+    VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_SPACE_LEFT,
 };
-// The cloud half of versioning. `crate::versions` is the local versioner —
-// this module only mirrors what that one wrote.
-use super::versions as version_store;
+use super::unit::{Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
+use super::versions::{VersionsIndex, MIRROR_EVERY};
 use crate::versions::store::Snapshot as VersionSnapshot;
 
 /* ---------- Tunables ---------- */
@@ -61,7 +51,7 @@ use crate::versions::store::Snapshot as VersionSnapshot;
 /// of sync.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// Filesystem events (external editors, git, Finder) batch this long before
-/// a cycle runs.
+/// a pass runs.
 pub const FS_SETTLE: Duration = Duration::from_millis(5000);
 /// The app's own writes (the edit bus) settle this long after the last
 /// touch — autosave is already debounced 600 ms upstream, so an edit reaches
@@ -79,138 +69,15 @@ pub(crate) const PRESENCE_BEAT: Duration = Duration::from_secs(45);
 /// and think without the document going to somebody else; short enough that a
 /// Mac left on with a note open lets go of it by the time anyone minds.
 pub(crate) const ACTIVITY_FRESH: Duration = Duration::from_secs(5 * 60);
-/// Tombstones older than this get dropped from the manifest by whoever
-/// writes it next.
-const TOMBSTONE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-/// Mass-delete valve: if more than this share of the workspace vanishes in
-/// one scan (and more than a handful of files), don't propagate — hold and
-/// ask. Protects against an unmounted/renamed folder nuking the remote.
-const MASS_DELETE_PCT: usize = 30;
-const MASS_DELETE_MIN: usize = 5;
 /// What an engine asks `/api/meta` about again, hourly, while the worker
 /// lacks it — so updating the worker reaches a Mac that is already running.
-const ASKED_AGAIN_FOR: [&str; 3] = ["versions", "presence", "leases"];
-/// Blob GC runs opportunistically on this fraction of cycles.
-const GC_EVERY_N_CYCLES: u64 = 20;
-/// A blob must be at least this old before GC may take it (a racing pusher
-/// may have uploaded it moments ago, ahead of its manifest CAS).
-const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
-/// How many fileIds one poll of the legacy clean-up handles. Small enough
-/// that the pass is invisible beside the poll it rides on; a workspace of
-/// 5000 files finishes in about half an hour of polling.
-pub(crate) const LEGACY_BATCH: usize = 50;
-const CAS_ATTEMPTS: usize = 4;
+const ASKED_AGAIN_FOR: [&str; 4] = ["versions", "presence", "leases", "spaces"];
 /// The least time between two fetches of the workspace's directory. A
 /// manifest naming somebody this engine cannot name asks for it again — a
 /// colleague invited an hour ago should not need a restart to get a name —
 /// but an id belonging to somebody since removed never resolves, and that
 /// must cost one request every so often rather than one per cycle.
 pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
-
-/* ---------- Local persistent state ---------- */
-
-/// Per-file record of the last state this device synced: enough to detect
-/// local edits cheaply (snapshot first, hash only on drift) and to name the
-/// base content for three-way merges (base/<fileId> holds those bytes).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FileState {
-    pub path: String,
-    pub rev: u64,
-    pub hash: String,
-    pub size: u64,
-    pub mtime_ms: u64,
-}
-
-/// A public-map edit this device owes the manifest, keyed by slug. Kept
-/// (and persisted, so a page published offline survives a restart) until a
-/// won CAS carries it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "lowercase")]
-pub enum PublicOp {
-    Put(PendingPublic),
-    Remove,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PendingPublic {
-    pub kind: PublicKind,
-    /// The file id when it was known at queue time; resolved by path at
-    /// fold time otherwise (a file created offline has no id yet).
-    #[serde(default)]
-    pub file: Option<String>,
-    pub path: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub desc: Option<String>,
-    /// The user chose this slug (a race re-keys the loser); a random slug
-    /// yields to an existing page for the same target instead.
-    #[serde(default)]
-    pub custom: bool,
-    #[serde(default)]
-    pub by: String,
-    #[serde(default)]
-    pub at: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct WorkspaceState {
-    pub version: u32,
-    /// Etag of the last manifest this device applied.
-    pub manifest_etag: Option<String>,
-    /// The manifest as of that etag — what remote diffs compare against.
-    pub manifest: Manifest,
-    /// fileId -> last-synced local state.
-    pub files: BTreeMap<String, FileState>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub public_ops: BTreeMap<String, PublicOp>,
-    /// A pending "make this the root page" (`Some(None)` clears the root).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_op: Option<Option<String>>,
-    /// When the cloud version store was last thinned — daily, by whichever
-    /// device gets there first.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_cloud_sweep_ms: Option<u64>,
-    /// How far the one-time clean-up of the retired manifest history has
-    /// got. Absent only on a device that has not started it.
-    #[serde(default, skip_serializing_if = "LegacyCleanup::is_pristine")]
-    pub legacy_cleanup: LegacyCleanup,
-}
-
-/// The bookmark of the one-time clean-up of the retired manifest history:
-/// every file's retired revision blobs. It
-/// had a first pass over the `history/<fid>.json` archives too, until the
-/// routes it called were deleted.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LegacyCleanup {
-    /// What an older release wrote here when it finished deleting archives.
-    /// Kept under its own name so that a state file written by one is read
-    /// the way it meant it: false means that device's cursor belongs to a
-    /// pass that no longer exists, and the blob pass starts over.
-    #[serde(default)]
-    pub archives_done: bool,
-    /// Both passes are finished and this workspace never looks again. It is
-    /// written down and stays written down: a device that forgot it had
-    /// finished would walk the whole bucket again after every restart.
-    #[serde(default)]
-    pub done: bool,
-    /// The last fileId the running pass handled; the next poll starts after
-    /// it. `None` means "from the beginning", which is where each pass
-    /// starts and where the other one leaves it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-impl LegacyCleanup {
-    /// Nothing has happened yet, so there is nothing worth writing down —
-    /// which is what keeps this out of the state file of a workspace
-    /// connected after the manifest history was retired, with none to
-    /// retire in the first place. Every later state is persisted, the
-    /// finished one included.
-    fn is_pristine(&self) -> bool {
-        !self.archives_done && !self.done && self.cursor.is_none()
-    }
-}
 
 /* ---------- Commands ---------- */
 
@@ -251,22 +118,71 @@ pub enum EngineCmd {
     },
     /// The cloud version store, for the history rail's read-through: what
     /// the bucket holds, one mirrored snapshot, one mirrored version's bytes.
+    /// `rel` is a workspace-relative path in the section whose store is
+    /// meant — every section has its own.
     VersionsIndex {
+        rel: String,
         reply: oneshot::Sender<Result<Option<VersionsIndex>, String>>,
     },
     VersionSnapshot {
+        rel: String,
         id: String,
         reply: oneshot::Sender<Result<VersionSnapshot, String>>,
     },
     SetCloudHorizon {
+        rel: String,
         days: Option<u32>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     VersionBlob {
+        rel: String,
         hash: String,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Make a restricted folder holding this person and `members` (member
+    /// ids). With `from` — the absolute path of a folder in this workspace —
+    /// that folder becomes it; otherwise it starts empty.
+    MakeSpace {
+        name: String,
+        members: Vec<String>,
+        from: Option<String>,
+        reply: oneshot::Sender<Result<SpaceStatus, String>>,
+    },
+    /// Add a person to a restricted folder, or take one out — this person
+    /// included, which is leaving it.
+    SpaceMember {
+        id: String,
+        member: String,
+        add: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a restricted folder for everyone in it.
+    DeleteSpace {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
+}
+
+/// Why an engine's task ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// It was told to stop: the app is quitting, or the workspace was
+    /// disconnected on this Mac.
+    Shutdown,
+    /// The domain said this Mac's access was taken away (`RemoteError::Removed`).
+    /// The engine touches nothing on its way out; whoever spawned it deletes
+    /// this Mac's copy of the workspace (`access_removed`, mod.rs).
+    Removed,
+}
+
+/// Which folders on this Mac are spaces just changed.
+#[derive(Default)]
+pub struct SpacesChanged {
+    /// Space folders taken off this Mac: where each was, and where its
+    /// version store is — found while the folder still existed, because a
+    /// store's key is the folder's canonical path.
+    pub removed: Vec<(String, PathBuf)>,
 }
 
 /* ---------- The engine ---------- */
@@ -277,14 +193,45 @@ pub struct EngineConfig {
     pub root: PathBuf,
     pub domain: String,
     pub endpoint: String,
+    /// The shared workspace's `state.json` + `base/`; each space's are under
+    /// `spaces/<id>/` in here.
     pub state_dir: PathBuf,
-    /// `<app_data>`, so the engine can open this workspace's version store —
+    /// `<app_data>`, so the engine can open each section's version store —
     /// read-only, and only to mirror it.
     pub data_dir: PathBuf,
     pub device_id: String,
     pub device_name: String,
     /// Real deletions go to the macOS Trash; tests flip this off.
     pub use_trash: bool,
+    /// This Mac holds the domain's own token, as `cloud.json` last knew
+    /// (`WorkspaceEntry::creator`). Such an engine never acts on `Removed`.
+    pub creator: bool,
+    /// Called the first time the domain says this Mac is the creator and
+    /// `creator` was false, so the manager can write it down.
+    pub on_creator: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called when a space's folder appears on this Mac or leaves it, so the
+    /// manager can start and stop what follows a folder — its versioner.
+    pub on_spaces: Option<Box<dyn Fn(SpacesChanged) + Send + Sync>>,
+}
+
+/// Which units a pass cycles besides the ones whose folder changed.
+pub(crate) enum Which {
+    /// Every one: first contact, *Sync now*.
+    All,
+    /// None: something on this Mac changed, and the survey says where.
+    Dirty,
+    /// The ones a poll said moved on the domain.
+    Moved(BTreeSet<String>),
+}
+
+/// A file that left one unit on this Mac and is the same file in another.
+struct CrossMove {
+    from: String,
+    fid: String,
+    to: String,
+    /// Where it is now, relative to the unit it went to.
+    path: String,
+    hash: String,
 }
 
 pub struct Engine<R: Remote> {
@@ -292,7 +239,19 @@ pub struct Engine<R: Remote> {
     remote: Arc<R>,
     events: Arc<dyn Events>,
     statuses: StatusTable,
-    pub(crate) state: WorkspaceState,
+    /// Every section this Mac holds, by id. The shared workspace is `SHARED`
+    /// and always here; a unit is out of the map only while its cycle runs.
+    units: BTreeMap<String, Unit<R>>,
+    /// The spaces this person is in, as the last poll that could say listed
+    /// them. `None` until one has, and from a worker without `spaces`.
+    spaces: Option<Vec<SpaceEntry>>,
+    /// How many times the domain would not make this person a Private. After
+    /// a few it is not asked again until the app restarts: there is nobody
+    /// to make it for.
+    private_refusals: u8,
+    /// Folders under `Restricted/` the domain would not make a restricted
+    /// folder of, so each is asked about once rather than on every poll.
+    unclaimable: HashSet<PathBuf>,
     phase: Phase,
     error: Option<String>,
     last_sync_ms: Option<u64>,
@@ -309,22 +268,30 @@ pub struct Engine<R: Remote> {
     /// yet, or one whose owner has never adopted an identity — then work is
     /// signed with the Mac's name, exactly as it was before v3.
     me: Option<String>,
+    /// What this Mac's credential may do here, as the same answer spelled it
+    /// (`you.can` — the worker's role table). Empty until the domain has
+    /// answered, and from a worker older than the table.
+    can: Vec<String>,
+    /// The domain answered `Removed`: an owner took this Mac's access away.
+    /// Set wherever a request can hear it (`heard_removed`), read by the task
+    /// loop — which stops the engine and hands the rest to the manager.
+    removed: bool,
+    /// This Mac holds the domain's own token: from `cloud.json`, or the
+    /// moment a probe says so.
+    creator: bool,
     /// id → display name for everyone on this workspace, from the same
     /// answer. What a `by` is read with; a miss is shown as it stands.
     people: BTreeMap<String, String>,
     /// When the directory was last fetched, so meeting an id nobody can name
     /// asks again — once, not once a cycle (`DIRECTORY_MIN_GAP`).
     people_at: Option<Instant>,
-    /// The last cloud version index this device read, so the rail still has
-    /// something to show when the domain is unreachable.
-    cloud_versions: Option<VersionsIndex>,
-    mirror: Option<MirrorReport>,
-    last_mirror: Option<Instant>,
-    last_mirror_ms: Option<u64>,
+    /// When the hourly pass last ran: the mirror's floor, and the probe that
+    /// asks an older worker whether it has been updated.
+    last_hourly: Option<Instant>,
     /// Absolute path the user is actively editing (frontend-reported).
     activity: Option<(String, Instant)>,
-    /// When the last beat that landed was sent, and the path it named — what
-    /// makes the next one due.
+    /// When the last beat that landed was sent, and the workspace-relative
+    /// path it named — what makes the next one due.
     last_beat: Option<Instant>,
     beaconed: Option<String>,
     presence: Vec<PresenceDevice>,
@@ -333,61 +300,40 @@ pub struct Engine<R: Remote> {
     leases: Option<Vec<LeaseEntry>>,
     /// A *Take over* waiting for the beat that carries it (workspace-relative).
     take_over: Option<String>,
-    /// Deletions held back by the mass-delete valve, waiting for a user go.
-    held_deletes: Vec<String>,
-    allow_mass_delete: bool,
-    cycles: u64,
-    /// fileIds pushed since the last GC — the only ones that can have an
-    /// old blob to collect. A set, because twenty cycles of edits to one
-    /// file is still one file to look at.
-    gc_candidates: BTreeSet<String>,
-    /// Paths the edit bus reported since the last cycle — a hint about when,
-    /// never what: the scan decides.
-    dirty: HashSet<String>,
-}
-
-/// What one reconcile pass decided to do. Split out for testability.
-#[derive(Default, Debug)]
-pub(crate) struct Staged {
-    /// fileId -> (relative path, bytes) to upload + point the manifest at.
-    pushes: Vec<StagedPush>,
-    /// fileId -> new relative path (content unchanged).
-    moves: Vec<(String, String)>,
-    /// fileIds to tombstone.
-    deletes: Vec<String>,
-}
-
-#[derive(Debug)]
-struct StagedPush {
-    file_id: String,
-    path: String,
-    bytes: Vec<u8>,
-    hash: String,
-}
-
-impl Staged {
-    fn is_empty(&self) -> bool {
-        self.pushes.is_empty() && self.moves.is_empty() && self.deletes.is_empty()
-    }
-}
-
-/// What `fold_public` folded in: the op keys the caller clears once the CAS
-/// carrying them wins.
-#[derive(Default, Debug)]
-struct Folded {
-    slugs: Vec<String>,
-    root: bool,
 }
 
 impl<R: Remote> Engine<R> {
     pub fn new(cfg: EngineConfig, remote: Arc<R>, events: Arc<dyn Events>, statuses: StatusTable) -> Self {
-        let state: WorkspaceState = read_json(&cfg.state_dir.join("state.json")).unwrap_or_default();
+        let creator = cfg.creator;
+        let mut units = BTreeMap::new();
+        let shared = UnitConfig {
+            id: SHARED.to_string(),
+            name: cfg.name.clone(),
+            root: cfg.root.clone(),
+            prefix: String::new(),
+            state_dir: cfg.state_dir.clone(),
+            data_dir: cfg.data_dir.clone(),
+            device_id: cfg.device_id.clone(),
+        };
+        units.insert(SHARED.to_string(), Unit::new(shared, remote.clone()));
+        // The folders that say they are spaces are the record of which spaces
+        // this Mac holds: each one syncs from where it left off. Whether this
+        // person is still in each is the first poll's to say.
+        for held in space::held(&cfg.root, &cfg.ws_id) {
+            let marker = held.marker;
+            units
+                .entry(marker.space.clone())
+                .or_insert_with(|| Self::space_unit(&cfg, &remote, &marker, held.dir, held.rel));
+        }
         Engine {
             cfg,
             remote,
             events,
             statuses,
-            state,
+            units,
+            spaces: None,
+            private_refusals: 0,
+            unclaimable: HashSet::new(),
             phase: Phase::Idle,
             error: None,
             last_sync_ms: None,
@@ -396,136 +342,113 @@ impl<R: Remote> Engine<R> {
             worker_version: None,
             worker_features: Vec::new(),
             me: None,
+            can: Vec::new(),
+            removed: false,
+            creator,
             people: BTreeMap::new(),
             people_at: None,
-            cloud_versions: None,
-            mirror: None,
-            last_mirror: None,
-            last_mirror_ms: None,
+            last_hourly: None,
             activity: None,
             last_beat: None,
             beaconed: None,
             presence: Vec::new(),
             leases: None,
             take_over: None,
-            held_deletes: Vec::new(),
-            allow_mass_delete: false,
-            cycles: 0,
-            gc_candidates: BTreeSet::new(),
-            dirty: HashSet::new(),
         }
+    }
+
+    fn space_state_dir(cfg: &EngineConfig, id: &str) -> PathBuf {
+        cfg.state_dir.join("spaces").join(id)
+    }
+
+    fn space_unit(cfg: &EngineConfig, remote: &Arc<R>, marker: &SpaceMarker, dir: PathBuf, rel: String) -> Unit<R> {
+        let mut unit = Unit::new(
+            UnitConfig {
+                id: marker.space.clone(),
+                name: marker.name.clone(),
+                root: dir,
+                prefix: rel,
+                state_dir: Self::space_state_dir(cfg, &marker.space),
+                data_dir: cfg.data_dir.clone(),
+                device_id: cfg.device_id.clone(),
+            },
+            Arc::new(remote.space(&marker.space)),
+        );
+        // A space has no history from before the version store: nothing for
+        // the retired-manifest clean-up to walk.
+        unit.state.legacy_cleanup.done = true;
+        unit
     }
 
     fn root_key(&self) -> String {
         self.cfg.root.to_string_lossy().to_string()
     }
 
-    fn base_path(&self, file_id: &str) -> PathBuf {
-        self.cfg.state_dir.join("base").join(file_id)
-    }
-
-    fn persist_state(&self) {
-        let _ = write_json(&self.cfg.state_dir.join("state.json"), &self.state);
-    }
-
     fn can_cycle(&self) -> bool {
         !self.paused && self.outdated.is_none()
     }
 
-    /* ----- status ----- */
-
-    /// The public map as this device believes it: the last applied manifest
-    /// overlaid with the ops queued here — the same resolution `fold_public`
-    /// will apply, so the frontend never sees its own fresh page as missing.
-    pub(crate) fn effective_public(&self) -> BTreeMap<String, PublicEntry> {
-        let mut map = self.state.manifest.public.clone();
-        for (slug, op) in &self.state.public_ops {
-            match op {
-                PublicOp::Remove => {
-                    map.remove(slug);
-                }
-                PublicOp::Put(p) => {
-                    let file = match p.kind {
-                        PublicKind::File => p
-                            .file
-                            .clone()
-                            .filter(|f| self.state.files.contains_key(f))
-                            .or_else(|| self.file_id_at(&p.path)),
-                        PublicKind::Dir => None,
-                    };
-                    let target = match p.kind {
-                        PublicKind::File => file.clone().map(Target::File),
-                        PublicKind::Dir => Some(Target::Dir(p.path.clone())),
-                    };
-                    let mut at = slug.clone();
-                    let mut carried: Option<PublicEntry> = None;
-                    if let Some(t) = &target {
-                        let other = map
-                            .iter()
-                            .find(|(s, e)| *s != slug && e.target().as_ref() == Some(t))
-                            .map(|(s, _)| s.clone());
-                        if let Some(other) = other {
-                            if p.custom {
-                                carried = map.remove(&other);
-                            } else {
-                                at = other;
-                            }
-                        }
-                    }
-                    let prev = map
-                        .get(&at)
-                        .filter(|e| target.is_some() && e.target() == target)
-                        .cloned()
-                        .or(carried);
-                    map.insert(at, merged_entry(p, file, prev));
-                }
-            }
-        }
-        if let Some(op) = &self.state.root_op {
-            for e in map.values_mut() {
-                e.root = false;
-            }
-            if let Some(slug) = op {
-                if let Some(e) = map.get_mut(slug) {
-                    e.root = true;
-                }
-            }
-        }
-        map
+    /// The shared workspace's unit.
+    pub(crate) fn shared(&self) -> &Unit<R> {
+        &self.units[SHARED]
     }
 
+    #[cfg(test)]
+    pub(crate) fn shared_mut(&mut self) -> &mut Unit<R> {
+        self.units.get_mut(SHARED).expect("the shared unit")
+    }
+
+    /// Which unit a workspace-relative path is in, and the path as that unit
+    /// spells it. None for a path that is no section's: `Restricted` itself,
+    /// a file directly under it, a folder there that is not a space yet.
+    fn place(&self, ws_rel: &str) -> Option<(String, String)> {
+        self.units
+            .values()
+            .filter(|unit| !unit.is_shared())
+            .find_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit.id.clone(), rel)))
+            .or_else(|| self.shared().in_unit(ws_rel).map(|rel| (SHARED.to_string(), rel)))
+    }
+
+    /* ----- status ----- */
+
     fn public_pages(&self) -> Vec<PublicPage> {
-        let m = &self.state.manifest;
-        let mut pages: Vec<PublicPage> = self
-            .effective_public()
-            .into_iter()
-            .map(|(slug, e)| {
-                let alive = match e.kind {
-                    PublicKind::File => match &e.file {
-                        Some(fid) => m.files.contains_key(fid) || self.state.files.contains_key(fid),
-                        None => true, // queued for a file that hasn't synced yet
-                    },
-                    PublicKind::Dir => e.path.is_empty() || files_under(m, &e.path).next().is_some(),
-                };
-                PublicPage {
-                    slug,
-                    kind: e.kind,
-                    path: e.path,
-                    title: e.title,
-                    desc: e.desc,
-                    by: self.name_of(&e.by),
-                    at: e.at,
-                    alive,
-                    root: e.root,
-                }
-            })
-            .collect();
+        let mut pages: Vec<PublicPage> = self.units.values().flat_map(|unit| unit.public_pages(&self.people)).collect();
         // Folders above files, then by path — the Published list's order.
         pages.sort_by(|a, b| {
             let rank = |p: &PublicPage| if p.kind == PublicKind::Dir { 0 } else { 1 };
             rank(a).cmp(&rank(b)).then_with(|| a.path.cmp(&b.path)).then_with(|| a.slug.cmp(&b.slug))
         });
         pages
+    }
+
+    /// The spaces that have a folder on this Mac, as the status lists them.
+    /// A folder says it is one before the domain has said anything this run
+    /// — a Mac that started offline — and is listed by what the folder says:
+    /// where it is, what it is called, and nobody in it that can be named.
+    fn space_statuses(&self) -> Vec<SpaceStatus> {
+        self.units
+            .values()
+            .filter(|unit| !unit.is_shared())
+            .map(|unit| {
+                let listed = self.spaces.iter().flatten().find(|s| s.id == unit.id);
+                let at_top = unit.root.parent() == Some(self.cfg.root.as_path());
+                SpaceStatus {
+                    id: unit.id.clone(),
+                    kind: listed.map(|s| s.kind).unwrap_or(if at_top { SpaceKind::Private } else { SpaceKind::Restricted }),
+                    name: listed.map(|s| s.name.clone()).unwrap_or_else(|| unit.name.clone()),
+                    path: unit.prefix.clone(),
+                    by: listed.map(|s| self.name_of(&s.by)).unwrap_or_default(),
+                    members: listed.map(|s| s.members.clone()).unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// Whether `Private` and `Restricted` are sections here rather than
+    /// shared folders: a folder already says it is one, or the domain can
+    /// make them and the shared workspace holds nothing under those names.
+    fn in_sections(&self) -> bool {
+        self.units.len() > 1 || (self.worker_has("spaces") && self.shared().reserved_clear())
     }
 
     fn set_status(&mut self, phase: Phase, error: Option<String>) {
@@ -536,6 +459,7 @@ impl<R: Remote> Engine<R> {
 
     /// Re-emit the current phase (presence moved, an op was queued).
     fn refresh_status(&self) {
+        let mirror = self.shared().mirror;
         let status = CloudStatus {
             root: self.root_key(),
             domain: self.cfg.domain.clone(),
@@ -545,18 +469,22 @@ impl<R: Remote> Engine<R> {
             phase: self.phase,
             last_sync_ms: self.last_sync_ms,
             error: self.error.clone(),
-            pending_deletes: self.held_deletes.len() as u32,
+            pending_deletes: self.units.values().map(|u| u.held_deletes.len() as u32).sum(),
             me: self.name_of(&self.signature()),
+            me_id: self.me.clone(),
+            can: self.can.clone(),
             worker_version: self.worker_version,
             versions: self.worker_has("versions").then(|| VersionsMirror {
-                mirrored: self.mirror.map(|m| m.mirrored).unwrap_or(0),
-                cloud: self.mirror.map(|m| m.cloud).unwrap_or(0),
-                last_mirror_ms: self.last_mirror_ms,
-                horizon_days: self.mirror.and_then(|m| m.horizon_days),
+                mirrored: mirror.map(|m| m.mirrored).unwrap_or(0),
+                cloud: mirror.map(|m| m.cloud).unwrap_or(0),
+                last_mirror_ms: self.shared().last_mirror_ms,
+                horizon_days: mirror.and_then(|m| m.horizon_days),
             }),
             public: self.public_pages(),
             presence: self.presence.clone(),
             leases: self.lease_holders(),
+            spaces: self.space_statuses(),
+            sections: self.in_sections(),
         };
         if let Ok(mut table) = self.statuses.lock() {
             table.insert(self.root_key(), status);
@@ -564,26 +492,64 @@ impl<R: Remote> Engine<R> {
         emit_statuses(self.events.as_ref(), &self.statuses);
     }
 
+    /* ----- who the domain says this Mac is ----- */
+
     /// `/api/meta`: learn the worker's version — and, after a `426`, whether
     /// the worker has been updated since.
     pub(crate) async fn probe_worker(&mut self) {
-        if let Ok(meta) = self.remote.meta().await {
-            self.worker_version = Some(meta.version);
-            self.worker_features = meta.features;
-            // Identity rides on the probe because the probe is what happens
-            // before this engine writes anything: `me` is what a manifest it
-            // publishes signs with, and `people` is what the `by` in one it
-            // reads is shown as. A worker older than v6 answers neither, and
-            // everything falls back to device names.
-            self.me = meta.you.and_then(|you| you.member_id).filter(|id| !id.is_empty());
-            self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
-            self.people_at = Some(Instant::now());
-            if let Some(seen_at) = self.outdated {
-                if meta.version > seen_at {
-                    self.outdated = None;
+        match self.remote.meta().await {
+            Ok(meta) => {
+                self.worker_version = Some(meta.version);
+                self.worker_features = meta.features;
+                // Identity rides on the probe because the probe is what happens
+                // before this engine writes anything: `me` is what a manifest it
+                // publishes signs with, `can` is what this Mac's role may do,
+                // and `people` is what the `by` in a manifest it reads is shown
+                // as. A worker older than v6 answers none of it, and
+                // attribution falls back to device names.
+                let you = meta.you.unwrap_or_default();
+                self.me = you.member_id.filter(|id| !id.is_empty());
+                self.can = you.can;
+                if you.creator && !self.creator {
+                    self.creator = true;
+                    if let Some(write_down) = &self.cfg.on_creator {
+                        write_down();
+                    }
+                }
+                self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
+                self.people_at = Some(Instant::now());
+                if let Some(seen_at) = self.outdated {
+                    if meta.version > seen_at {
+                        self.outdated = None;
+                    }
                 }
             }
+            Err(RemoteError::Removed) => {
+                self.heard_removed();
+            }
+            Err(_) => {}
         }
+    }
+
+    /// The domain said this Mac's access was removed. Obeyed — the task ends
+    /// and the copy leaves this Mac — unless this Mac holds the domain's own
+    /// token. That credential is no row, so nothing an owner does can take it
+    /// away, and a domain that says so of it is not the worker this Mac
+    /// connected to (an address that changed hands, say). The folder it would
+    /// cost is the user's own, connected in place: it is never deleted on
+    /// anybody's word. True when obeyed.
+    fn heard_removed(&mut self) -> bool {
+        if self.creator {
+            return false;
+        }
+        self.removed = true;
+        true
+    }
+
+    /// Whether the domain has said this Mac's access was taken away.
+    #[cfg(test)]
+    pub(crate) fn was_removed(&self) -> bool {
+        self.removed
     }
 
     /// What this Mac signs its work with on this workspace: the person the
@@ -624,12 +590,21 @@ impl<R: Remote> Engine<R> {
         self.probe_worker().await;
     }
 
-    /* ----- the cycle ----- */
+    fn worker_has(&self, feature: &str) -> bool {
+        self.worker_features.iter().any(|f| f == feature)
+    }
 
-    /// The whole engine in one place: pull remote reality, apply what only
-    /// changed there, work out what changed here, merge where both moved,
-    /// then CAS our view in. Loops on a lost CAS with fresh remote state.
+    /* ----- the pass ----- */
+
+    /// Every unit, cycled: what first contact and *Sync now* run.
     pub async fn cycle(&mut self) -> RemoteResult<()> {
+        self.pass(Which::All).await
+    }
+
+    /// One pass over the workspace: the units with something to say each run
+    /// a cycle, in an order that writes a moved file's new section before it
+    /// leaves the old one, and the workspace's one status says how it went.
+    pub(crate) async fn pass(&mut self, which: Which) -> RemoteResult<()> {
         if self.outdated.is_some() {
             return Ok(()); // waiting for the worker update; nothing to do
         }
@@ -638,1060 +613,765 @@ impl<R: Remote> Engine<R> {
             self.set_status(Phase::Error, Some("workspace folder is missing — sync is paused".into()));
             return Ok(());
         }
+        // A folder dropped under `Restricted/` becomes a space before the
+        // shared workspace reads its files as gone, so that they leave it as
+        // a move. And a space whose folder was deleted here is made whole
+        // again before its unit could read every file in it as deleted.
+        let lost = self.units.values().any(|u| !u.is_shared() && !u.root.is_dir());
+        if lost || !space::unclaimed(&self.cfg.root, &self.cfg.ws_id).is_empty() {
+            self.reconcile_spaces().await;
+        }
+
+        // What each folder looks like, with no request made: which units
+        // have something to push, and which files changed section. A unit
+        // with no folder has nothing to say until it has one again.
+        let surveys: BTreeMap<String, Survey> = self
+            .units
+            .values()
+            .filter(|u| !u.gone && u.root.is_dir())
+            .map(|u| (u.id.clone(), u.survey()))
+            .collect();
+        let moves = pair_moves(&surveys);
+        self.carry_pages(&moves);
+
+        // A pass after one that failed goes everywhere again: the phase it
+        // left behind is only cleared by a pass that succeeds.
+        let recovering = !matches!(self.phase, Phase::Idle | Phase::Syncing | Phase::PendingDeletes | Phase::Paused);
+        let wanted = |id: &str| match &which {
+            Which::All => true,
+            Which::Dirty => recovering,
+            Which::Moved(ids) => recovering || ids.contains(id),
+        };
+        let chosen: Vec<String> = surveys
+            .iter()
+            .filter(|(id, survey)| wanted(id) || survey.dirty || self.units.get(*id).is_some_and(|u| u.poke))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if chosen.is_empty() {
+            return Ok(());
+        }
+        // Where files are arriving goes first.
+        let arriving: HashSet<&str> = moves.iter().map(|m| m.to.as_str()).collect();
+        let mut order = chosen;
+        order.sort_by_key(|id| !arriving.contains(id.as_str()));
+
         self.set_status(Phase::Syncing, None);
-        self.cycles += 1;
-        self.dirty.clear();
-
-        // All the fallible work lives in cycle_inner so that EVERY exit —
-        // offline mid-download, a revoked token, a lost CAS — funnels through
-        // this one status report.
-        let result = self.cycle_inner().await;
-
-        match &result {
-            Ok(changed_paths) => {
-                if !changed_paths.is_empty() {
-                    self.events.emit_json(
-                        EV_APPLIED,
-                        json!({ "root": self.root_key(), "paths": changed_paths }),
-                    );
+        // With more than one unit in the pass, where the domain is gets read
+        // for all of them before any is applied: a file that moved between
+        // two sections is then found in the one it went to (`relocate`).
+        if order.len() > 1 {
+            for id in &order {
+                if let Some(unit) = self.units.get_mut(id) {
+                    let _ = unit.fetch().await; // a failure is the cycle's to report
                 }
+            }
+        }
+        let mut changed: Vec<String> = Vec::new();
+        let mut cycled: BTreeSet<String> = BTreeSet::new();
+        let mut failure: Option<RemoteError> = None;
+        // A second round is for what the first one set off: a page whose
+        // address another section has just let go of, a file another
+        // section's relocation put here.
+        for round in 0..2 {
+            let ids: Vec<String> = if round == 0 {
+                order.clone()
+            } else {
+                self.units.values().filter(|u| u.poke && !u.gone && u.root.is_dir()).map(|u| u.id.clone()).collect()
+            };
+            for id in ids {
+                match self.cycle_unit(&id, &moves).await {
+                    Ok(paths) => {
+                        changed.extend(paths);
+                        cycled.insert(id);
+                    }
+                    // A space that answers "not found" is one this person is
+                    // not in any more, or one that is gone. Which, the next
+                    // poll says; until then it is left exactly as it is.
+                    Err(RemoteError::NotFound) if id != SHARED => {
+                        if let Some(unit) = self.units.get_mut(&id) {
+                            unit.gone = true;
+                        }
+                    }
+                    Err(e) => {
+                        let whole = matches!(
+                            e,
+                            RemoteError::Offline(_)
+                                | RemoteError::Unauthorized
+                                | RemoteError::Removed
+                                | RemoteError::Outdated(_)
+                        );
+                        if failure.is_none() {
+                            failure = Some(e);
+                        }
+                        if whole {
+                            break; // the domain, not this section: nothing else will fare better
+                        }
+                    }
+                }
+            }
+            if failure.is_some() {
+                break;
+            }
+        }
+
+        // What a unit read and did not get to apply is stale by the next pass.
+        for unit in self.units.values_mut() {
+            unit.incoming = None;
+        }
+        if !changed.is_empty() {
+            changed.sort();
+            changed.dedup();
+            self.events.emit_json(EV_APPLIED, json!({ "root": self.root_key(), "paths": changed }));
+        }
+        match &failure {
+            None => {
                 self.last_sync_ms = Some(now_ms());
-                if !self.held_deletes.is_empty() {
-                    self.set_status(Phase::PendingDeletes, None);
-                } else {
-                    self.set_status(Phase::Idle, None);
+                let held = self.units.values().any(|u| !u.held_deletes.is_empty());
+                self.set_status(if held { Phase::PendingDeletes } else { Phase::Idle }, None);
+                for id in &cycled {
+                    if let Some(unit) = self.units.get_mut(id).filter(|u| u.gc_due()) {
+                        unit.gc_blobs().await;
+                    }
                 }
-                if self.cycles % GC_EVERY_N_CYCLES == 0 {
-                    self.gc_blobs().await;
-                }
-                if !changed_paths.is_empty() {
+                if !changed.is_empty() {
                     // Something arrived from another device, so the versioner
                     // has (or is about to have) new snapshots worth sending.
                     self.mirror_versions().await;
                 }
             }
-            Err(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
-            Err(RemoteError::Unauthorized) => self.set_status(
+            Some(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
+            Some(RemoteError::Unauthorized) => self.set_status(
                 Phase::Revoked,
-                Some("this device's access was revoked or the token rotated".into()),
+                Some("the domain no longer accepts this Mac's token".into()),
             ),
-            Err(RemoteError::Outdated(m)) => {
+            // Obeyed, it has no status of its own: the task loop ends the
+            // engine, and the workspace leaves this Mac — row and all — a
+            // moment later. Not obeyed (the creator's Mac), it is a token the
+            // domain would not take, and reads as one.
+            Some(RemoteError::Removed) => {
+                if !self.heard_removed() {
+                    self.set_status(Phase::Revoked, Some("the domain no longer accepts this Mac's token".into()));
+                }
+            }
+            Some(RemoteError::Outdated(m)) => {
                 self.outdated = Some(self.worker_version.unwrap_or(0));
                 self.set_status(
                     Phase::WorkerOutdated,
                     Some(format!("this Mac's changes are waiting on a worker update ({})", m)),
                 );
             }
-            Err(RemoteError::NotFound) => self.set_status(
+            Some(RemoteError::NotFound) => self.set_status(
                 Phase::Error,
                 Some(format!("{} no longer holds this workspace", self.cfg.domain)),
             ),
-            Err(e) => self.set_status(Phase::Error, Some(e.to_string())),
+            Some(e) => self.set_status(Phase::Error, Some(e.to_string())),
         }
-        match result {
-            Ok(_) => Ok(()),
-            Err(RemoteError::Conflict) | Err(RemoteError::Outdated(_)) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn cycle_inner(&mut self) -> RemoteResult<Vec<String>> {
-        let mut changed_paths: Vec<String> = Vec::new();
-
-        for attempt in 0..CAS_ATTEMPTS {
-            // 1. Where is remote?
-            let fetched = self.remote.fetch_manifest(self.state.manifest_etag.as_deref()).await?;
-            let (remote_manifest, remote_etag) = match fetched {
-                Some((m, e)) => (m, e),
-                None => (
-                    self.state.manifest.clone(),
-                    self.state.manifest_etag.clone().unwrap_or_default(),
-                ),
-            };
-
-            // 1½. Somebody may have joined since the last probe: a `by` in
-            //     here that nobody can name is what asks for the directory
-            //     again, so a new colleague's name appears without a restart.
-            self.learn_people(&remote_manifest).await;
-
-            // 2. Apply remote-only changes to disk (downloads, renames,
-            //    deletions). Local-vs-remote overlap is decided inside.
-            let applied = self.apply_remote(&remote_manifest).await?;
-            changed_paths.extend(applied);
-
-            // 3. What changed locally?
-            let scan = scan_local(&self.cfg.root).map_err(RemoteError::Other)?;
-            let staged = self.stage_local(&scan, &remote_manifest).await?;
-
-            // 3½. What the manifest would become, the public map folded in
-            //     (folders re-pointed, pages following renames, dead pages
-            //     re-bound, pending ops overlaid).
-            let mut next = remote_manifest.clone();
-            self.build_manifest(&mut next, &staged);
-            let folded = self.fold_public(&mut next, &remote_manifest, &staged);
-            let public_changed = next.public != remote_manifest.public;
-
-            // Remote moved under us but we have nothing to say: adopt theirs.
-            if staged.is_empty() && !public_changed {
-                // Ops that resolved to exactly what the manifest already says
-                // are spent — a CAS carrying no change would be pure waste.
-                self.clear_folded(&folded);
-                self.state.manifest = remote_manifest;
-                self.state.manifest_etag = Some(remote_etag);
-                self.persist_state();
-                return Ok(changed_paths);
-            }
-
-            // 4. Upload content first (idempotent, content-addressed), then
-            //    try to win the manifest.
-            for push in &staged.pushes {
-                self.remote
-                    .put_blob(&push.file_id, &push.hash, push.bytes.clone(), content_type_for(&push.path))
-                    .await?;
-            }
-
-            match self.remote.put_manifest(&next, &remote_etag).await {
-                Ok(new_etag) => {
-                    // The ops the manifest now carries are done; unresolved
-                    // ones (a page for a file that hasn't landed yet) stay
-                    // pending for a later cycle.
-                    self.clear_folded(&folded);
-                    self.commit_staged(&staged, &next, new_etag);
-                    changed_paths.extend(staged.pushes.iter().map(|p| p.path.clone()));
-                    return Ok(changed_paths);
-                }
-                Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => {
-                    // Someone else landed first — reconcile again from their
-                    // reality. Uploaded blobs stay valid either way.
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(changed_paths)
-    }
-
-    fn clear_folded(&mut self, folded: &Folded) {
-        for slug in &folded.slugs {
-            self.state.public_ops.remove(slug);
-        }
-        if folded.root {
-            self.state.root_op = None;
+        match failure {
+            None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) => Ok(()),
+            Some(e) => Err(e),
         }
     }
 
-    /// Bring the local tree up to date with what changed remotely since the
-    /// last applied manifest. Returns relative paths it touched. Files the
-    /// user also edited locally are merged here (that's the one both-sides
-    /// case); everything else is plain download/rename/trash.
-    async fn apply_remote(&mut self, remote: &Manifest) -> RemoteResult<Vec<String>> {
-        let mut touched = Vec::new();
+    /// One unit's cycle. The unit is out of the map while it runs, so what
+    /// the cycle is told about the rest of the workspace is read from the
+    /// units that are in it. Answers the workspace-relative paths written.
+    async fn cycle_unit(&mut self, id: &str, moves: &[CrossMove]) -> RemoteResult<Vec<String>> {
+        let Some(mut unit) = self.units.remove(id) else { return Ok(Vec::new()) };
+        let result = self.cycle_taken(&mut unit, moves).await;
+        self.units.insert(id.to_string(), unit);
+        result
+    }
 
-        // Deletions: in our applied manifest (or state) but tombstoned now.
-        let deleted_ids: Vec<String> = self
-            .state
-            .files
-            .keys()
-            .filter(|fid| !remote.files.contains_key(*fid))
-            .cloned()
-            .collect();
-        for fid in deleted_ids {
-            let Some(fstate) = self.state.files.get(&fid).cloned() else { continue };
-            let tomb_rev = remote.tombstones.get(&fid).map(|t| t.rev).unwrap_or(u64::MAX);
-            if tomb_rev < fstate.rev {
-                continue; // stale tombstone from before what we already hold
-            }
-            let abs = self.cfg.root.join(&fstate.path);
-            let local = read_file_checked(&abs);
-            match local {
-                Some(bytes) if hash16(&bytes) != fstate.hash => {
-                    // Edited here, deleted there: the edit wins. Withdraw the
-                    // tombstone by re-pushing (stage_local sees it as new,
-                    // because we drop our state entry for it below).
-                }
-                Some(_) => {
-                    // Clean local copy — honor the deletion, recoverably.
-                    self.delete_local(&abs);
-                    touched.push(fstate.path.clone());
-                }
-                None => {}
-            }
-            // Either way this fileId's story is over for our state; an
-            // edited survivor re-enters as a brand-new file next scan.
-            self.state.files.remove(&fid);
-            let _ = std::fs::remove_file(self.base_path(&fid));
+    async fn cycle_taken(&mut self, unit: &mut Unit<R>, moves: &[CrossMove]) -> RemoteResult<Vec<String>> {
+        // Where the domain is — read before it is applied, for two things
+        // only the engine can do: put a name to somebody new, and deal with
+        // files that moved to another section.
+        if unit.incoming.is_none() {
+            unit.fetch().await?;
         }
+        self.learn_people(unit.view()).await;
+        let mut touched = self.relocate(unit);
 
-        // New or changed files.
-        let changed: Vec<(String, ManifestFile)> = remote
-            .files
+        let releasing: HashSet<String> = self.units.values().flat_map(|other| removals(other)).collect();
+        let mine: Vec<String> = removals(unit).collect();
+        let moved_out: HashMap<String, MovedOut> = moves
             .iter()
-            .filter(|(fid, rf)| {
-                self.state
-                    .manifest
-                    .files
-                    .get(*fid)
-                    .map(|old| old.rev != rf.rev || old.hash != rf.hash || old.path != rf.path)
-                    .unwrap_or(true)
+            .filter(|m| m.from == unit.id)
+            .map(|m| {
+                let landed = self
+                    .units
+                    .get(&m.to)
+                    .is_some_and(|to| to.state.files.values().any(|st| st.path == m.path && st.hash == m.hash));
+                (m.fid.clone(), MovedOut { to: m.to.clone(), landed })
             })
-            .map(|(fid, rf)| (fid.clone(), rf.clone()))
             .collect();
+        let signature = self.signature();
+        let ws_root = self.root_key();
+        let ctx = Ctx {
+            signature: &signature,
+            people: &self.people,
+            events: self.events.as_ref(),
+            ws_root: &ws_root,
+            use_trash: self.cfg.use_trash,
+            releasing: &releasing,
+            moved_out: &moved_out,
+        };
+        let written = unit.cycle_inner(&ctx).await?;
+        touched.extend(written.iter().map(|p| unit.ws_rel(p)));
+        // What the cycle met as moved away on a manifest it refetched.
+        touched.extend(self.relocate(unit));
 
-        for (fid, rf) in changed {
-            let target = self.cfg.root.join(&rf.path);
-            let prior = self.state.files.get(&fid).cloned();
-
-            // A pure rename of an unedited file: move it, no bytes.
-            if let Some(p) = &prior {
-                if p.hash == rf.hash && p.path != rf.path {
-                    let from = self.cfg.root.join(&p.path);
-                    if from.exists() && !target.exists() {
-                        if let Some(parent) = target.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if std::fs::rename(&from, &target).is_ok() {
-                            self.record_synced(&fid, &rf, None);
-                            // A rename moves no bytes, so the snapshot from
-                            // before it still says whether the file was
-                            // edited here meanwhile; the fresh stat would
-                            // make that edit read as synced and never push.
-                            if let Some(st) = self.state.files.get_mut(&fid) {
-                                (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
-                            }
-                            touched.push(rf.path.clone());
-                            continue;
-                        }
-                    }
-                }
-                if p.hash == rf.hash && p.path == rf.path {
-                    // Only metadata (rev/hist) moved. Adopt the revision but
-                    // DON'T refresh the disk snapshot: right after a merge the
-                    // stored snapshot is deliberately stale so the next scan
-                    // re-hashes the file and pushes the merged content —
-                    // stamping fresh stats here would erase that signal.
-                    if let Some(st) = self.state.files.get_mut(&fid) {
-                        st.rev = rf.rev;
-                    }
-                    continue;
-                }
-            }
-
-            let local_now = read_file_checked(&target);
-            let locally_edited = match (&prior, &local_now) {
-                (Some(p), Some(bytes)) => hash16(bytes) != p.hash,
-                (None, Some(_)) => true, // exists here but we never synced it
-                _ => false,
-            };
-
-            if !locally_edited {
-                // Plain download (or first appearance).
-                let bytes = self.remote.get_blob(&fid, &rf.hash).await?;
-                // The file may have changed in the window since we looked;
-                // if so, leave it — the next cycle will see a merge case.
-                let still = read_file_checked(&target);
-                let safe = match (&local_now, &still) {
-                    (Some(a), Some(b)) => a == b,
-                    (None, None) => true,
-                    _ => false,
-                };
-                if safe {
-                    if let Some(p) = &prior {
-                        if p.path != rf.path {
-                            let old_abs = self.cfg.root.join(&p.path);
-                            if old_abs.exists()
-                                && read_file_checked(&old_abs)
-                                    .map(|b| hash16(&b) == p.hash)
-                                    .unwrap_or(false)
-                            {
-                                self.delete_local_silent(&old_abs);
-                            }
-                        }
-                    }
-                    write_atomic(&target, &bytes)
-                        .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
-                    self.record_synced(&fid, &rf, Some(&bytes));
-                    touched.push(rf.path.clone());
-                }
+        // An address this unit just gave up is free: whoever was waiting for
+        // it goes again.
+        for slug in mine {
+            if unit.state.public_ops.contains_key(&slug) {
                 continue;
             }
-
-            // Both sides have this file. Identical bytes are not a conflict
-            // — a folder resumed in place, or two devices that wrote the
-            // same thing: adopt the revision as synced and move on.
-            let ours = local_now.unwrap_or_default();
-            let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
-            if ours == theirs {
-                self.record_synced(&fid, &rf, Some(&theirs));
-                continue;
-            }
-
-            // Both sides changed: three-way merge against the stored base.
-            let base = std::fs::read(self.base_path(&fid)).ok();
-            let merged = merge_texts(base.as_deref(), &ours, &theirs);
-            match merged {
-                MergeOutcome::Clean(text) => {
-                    write_atomic(&target, text.as_bytes())
-                        .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
-                    // Adopt their revision as the synced point; the merged
-                    // content (≠ theirs) now reads as a local edit and gets
-                    // pushed as rev+1 by stage_local in this same cycle.
-                    self.record_synced_content(&fid, &rf, &theirs);
-                    touched.push(rf.path.clone());
-                }
-                MergeOutcome::Conflicted => {
-                    // Keep ours as the live document; their version lands
-                    // beside it as a conflict copy (a normal file that syncs
-                    // to everyone). Ours pushes as rev+1 this cycle.
-                    // The filename carries a name, so the id is resolved
-                    // here rather than shown: a file called
-                    // "notes (conflict — m-1a2b3c4d…).md" helps nobody.
-                    let author = self.name_of(&rf.by);
-                    let copy = conflict_copy_path(&target, if author.is_empty() { "someone" } else { &author });
-                    write_atomic(&copy, &theirs)
-                        .map_err(|e| RemoteError::Other(format!("write conflict copy: {}", e)))?;
-                    self.record_synced_content(&fid, &rf, &theirs);
-                    let copy_rel = rel_path(&self.cfg.root, &copy).unwrap_or_default();
-                    touched.push(copy_rel.clone());
-                    self.events.emit_json(
-                        EV_CONFLICT,
-                        json!({
-                            "root": self.root_key(),
-                            "path": rf.path,
-                            "by": author,
-                            "conflictPath": copy_rel,
-                        }),
-                    );
+            for other in self.units.values_mut() {
+                if matches!(other.state.public_ops.get(&slug), Some(PublicOp::Put(_))) {
+                    other.poke = true;
                 }
             }
         }
         Ok(touched)
     }
 
-    /// Detect local edits/creates/renames/deletes against the synced state
-    /// and stage them for push. Deletions pass the mass-delete valve.
-    async fn stage_local(
-        &mut self,
-        scan: &BTreeMap<String, ScanEntry>,
-        remote: &Manifest,
-    ) -> RemoteResult<Staged> {
-        let mut staged = Staged::default();
-        let mut vanished: Vec<String> = Vec::new();
-
-        let by_path: HashMap<String, String> = self
-            .state
-            .files
+    /// Files another Mac moved out of `unit` to another section: a tombstone
+    /// that says where its file went (`Tombstone::to`). When this Mac is in
+    /// that section the copy here moves there, so nothing is downloaded
+    /// again and an edit not yet synced goes with its document. When it is
+    /// not, the copy is deleted outright — the file was taken out of this
+    /// person's reach, and a copy in the Trash would still be in it.
+    /// Answers the workspace-relative paths touched.
+    fn relocate(&mut self, unit: &mut Unit<R>) -> Vec<String> {
+        let moved: Vec<(String, String, String)> = unit
+            .view()
+            .tombstones
             .iter()
-            .map(|(fid, st)| (st.path.clone(), fid.clone()))
-            .collect();
-
-        // Pass 1: files we know — modified or gone?
-        let known: Vec<(String, FileState)> =
-            self.state.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (fid, fstate) in known {
-            match scan.get(&fstate.path) {
-                None => vanished.push(fid),
-                Some(entry) => {
-                    if entry.size == fstate.size && entry.mtime_ms == fstate.mtime_ms {
-                        continue; // snapshot says untouched
-                    }
-                    let Some(bytes) = read_file_checked(&entry.abs) else { continue };
-                    let hash = hash16(&bytes);
-                    if hash == fstate.hash {
-                        // touched but identical: refresh the snapshot only
-                        if let Some(st) = self.state.files.get_mut(&fid) {
-                            st.size = entry.size;
-                            st.mtime_ms = entry.mtime_ms;
-                        }
-                        continue;
-                    }
-                    staged.pushes.push(StagedPush { file_id: fid, path: fstate.path.clone(), hash, bytes });
-                }
-            }
-        }
-
-        // Pass 2: paths we don't know — new files (or the far side of a
-        // rename, matched by content below).
-        let mut news: Vec<(String, Vec<u8>, String)> = Vec::new(); // (path, bytes, hash)
-        for (path, entry) in scan {
-            if by_path.contains_key(path) {
-                continue;
-            }
-            let Some(bytes) = read_file_checked(&entry.abs) else { continue };
-            let hash = hash16(&bytes);
-            news.push((path.clone(), bytes, hash));
-        }
-
-        // Pass 3: pair vanished + new with identical content = a move.
-        let mut remaining_news = Vec::new();
-        for (path, bytes, hash) in news {
-            let matched = vanished
-                .iter()
-                .position(|fid| self.state.files.get(fid).map(|st| st.hash == hash).unwrap_or(false));
-            match matched {
-                Some(idx) => {
-                    let fid = vanished.remove(idx);
-                    staged.moves.push((fid, path));
-                }
-                None => remaining_news.push((path, bytes, hash)),
-            }
-        }
-
-        // Mass-delete valve. Renames already left `vanished`.
-        if !vanished.is_empty() {
-            let total = self.state.files.len().max(1);
-            let big = vanished.len() >= MASS_DELETE_MIN && vanished.len() * 100 / total >= MASS_DELETE_PCT;
-            if big && !self.allow_mass_delete {
-                self.held_deletes = vanished.clone();
-                self.events.emit_json(
-                    EV_PENDING_DELETES,
-                    json!({
-                        "root": self.root_key(),
-                        "count": vanished.len(),
-                        "total": total,
-                        "paths": vanished
-                            .iter()
-                            .filter_map(|fid| self.state.files.get(fid).map(|s| s.path.clone()))
-                            .collect::<Vec<_>>(),
-                    }),
-                );
-            } else {
-                self.allow_mass_delete = false;
-                self.held_deletes.clear();
-                staged.deletes = vanished;
-            }
-        }
-
-        // Brand-new files get ids; a path that already exists in the remote
-        // manifest under some fileId we never synced (two devices created the
-        // same name independently) adopts that id instead — apply_remote just
-        // stored their version's state, so this becomes a plain edit push and
-        // the merge machinery owns any content difference next cycle.
-        for (path, bytes, hash) in remaining_news {
-            let existing = remote.files.iter().find(|(_, rf)| rf.path == path);
-            match existing {
-                Some((fid, _)) if self.state.files.contains_key(fid) => {
-                    if self.state.files.get(fid).map(|s| s.hash != hash).unwrap_or(true) {
-                        staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes });
-                    }
-                }
-                _ => staged.pushes.push(StagedPush { file_id: random_id("f"), path, hash, bytes }),
-            }
-        }
-
-        Ok(staged)
-    }
-
-    /// Fold the staged changes into `next` (a clone of the freshest remote
-    /// manifest).
-    ///
-    /// Everything this writes is signed with [`Engine::signature`] — a member
-    /// id since manifest v3. Entries it does not touch keep whatever they
-    /// carry, including the device names a v2 workspace was written with:
-    /// rewriting those would attribute somebody else's edit to whoever
-    /// happened to upgrade first.
-    fn build_manifest(&self, next: &mut Manifest, staged: &Staged) {
-        next.version = MANIFEST_VERSION;
-        next.seq += 1;
-        if next.name.is_empty() {
-            next.name = self.cfg.name.clone();
-        }
-        next.name = super::manifest::cap_utf16(&next.name, MAX_NAME_LEN);
-
-        for push in &staged.pushes {
-            let prev = next.files.get(&push.file_id);
-            let tomb_rev = next.tombstones.get(&push.file_id).map(|t| t.rev).unwrap_or(0);
-            let rev = prev.map(|p| p.rev).unwrap_or(0).max(tomb_rev) + 1;
-            next.tombstones.remove(&push.file_id); // resurrection beats deletion
-            next.files.insert(
-                push.file_id.clone(),
-                ManifestFile {
-                    path: push.path.clone(),
-                    rev,
-                    hash: push.hash.clone(),
-                    size: push.bytes.len() as u64,
-                    mtime: now_ms(),
-                    by: self.signature(),
-                },
-            );
-        }
-
-        for (fid, to) in &staged.moves {
-            if let Some(f) = next.files.get_mut(fid) {
-                // `mtime` stays: it says when the content last changed, and a
-                // move is not an edit. The document API reads it to tell an
-                // html version that has fallen behind its markdown
-                // (cloud-worker/src/documents.ts, `htmlBehind`), and a rename
-                // that restamped both would hide exactly that. The worker's
-                // own move keeps it too (commit.ts). Change both.
-                f.path = to.clone();
-                f.rev += 1;
-                f.by = self.signature();
-            }
-        }
-
-        for fid in &staged.deletes {
-            if let Some(f) = next.files.remove(fid) {
-                next.tombstones.insert(
-                    fid.clone(),
-                    Tombstone { path: f.path, rev: f.rev + 1, ts: now_ms(), by: self.signature() },
-                );
-            }
-        }
-
-        // Duplicate paths can slip in when two devices raced a create between
-        // our fetch and CAS: deterministically suffix the younger id so the
-        // manifest stays valid; the loser's device renames on next apply.
-        dedupe_paths(next);
-
-        // Elderly tombstones age out with whoever writes next.
-        let cutoff = now_ms().saturating_sub(TOMBSTONE_TTL_MS);
-        next.tombstones.retain(|_, t| t.ts >= cutoff);
-    }
-
-    /// Fold this device's public-map bookkeeping into the manifest about to
-    /// be published. Four passes, in order:
-    ///   0. folder re-point — a folder page follows its folder when every
-    ///      file the folder held moved to one new prefix in this cycle.
-    ///   1. rename-follow — file pages are fileId-keyed, so a moved file
-    ///      carries its page; only the recorded path needs re-pointing.
-    ///   2. re-bind — a dead page (fileId gone) whose path holds a page-less
-    ///      file again (delete + recreate, an edit-beats-delete
-    ///      resurrection) adopts the new fileId, so the page keeps flowing.
-    ///   3. pending ops — the user's publish/unpublish/root edits, keyed by
-    ///      slug. A custom slug another device took first yields (`-2`, `-3`,
-    ///      …); a random slug for a target already published yields to the
-    ///      existing page instead of doubling it.
-    /// Returns the ops that made it in; the caller clears them only once the
-    /// CAS carrying them wins.
-    fn fold_public(&self, next: &mut Manifest, remote: &Manifest, staged: &Staged) -> Folded {
-        let mut folded = Folded::default();
-
-        // 0. Folder re-point.
-        if !staged.moves.is_empty() {
-            let moves: HashMap<&str, &str> =
-                staged.moves.iter().map(|(f, p)| (f.as_str(), p.as_str())).collect();
-            let dirs: Vec<(String, String)> = next
-                .public
-                .iter()
-                .filter(|(_, e)| e.kind == PublicKind::Dir && !e.path.is_empty())
-                .map(|(s, e)| (s.clone(), e.path.clone()))
-                .collect();
-            for (slug, dir) in dirs {
-                if let Some(new_dir) = moved_folder(&dir, remote, &moves) {
-                    if let Some(e) = next.public.get_mut(&slug) {
-                        e.path = new_dir;
-                    }
-                }
-            }
-        }
-
-        // 1. Rename-follow.
-        let live: Vec<(String, String)> = next
-            .public
-            .iter()
-            .filter(|(_, e)| e.kind == PublicKind::File)
-            .filter_map(|(s, e)| {
-                let fid = e.file.as_ref()?;
-                next.files.get(fid).map(|f| (s.clone(), f.path.clone()))
+            .filter_map(|(fid, tomb)| {
+                let to = tomb.to.clone()?;
+                let held = unit.state.files.get(fid)?;
+                (tomb.rev >= held.rev).then(|| (fid.clone(), to, tomb.by.clone()))
             })
             .collect();
-        for (slug, path) in live {
-            if let Some(e) = next.public.get_mut(&slug) {
-                e.path = path;
-            }
-        }
-
-        // 2. Re-bind.
-        let mut referenced: HashSet<String> = next
-            .public
-            .values()
-            .filter_map(|e| e.file.clone())
-            .collect();
-        let dead: Vec<(String, String)> = next
-            .public
-            .iter()
-            .filter(|(_, e)| {
-                e.kind == PublicKind::File
-                    && e.file.as_ref().map(|f| !next.files.contains_key(f)).unwrap_or(true)
-            })
-            .map(|(s, e)| (s.clone(), e.path.clone()))
-            .collect();
-        for (slug, path) in dead {
-            let adopt = next
-                .files
-                .iter()
-                .find(|(lfid, lf)| lf.path == path && !referenced.contains(*lfid))
-                .map(|(lfid, _)| lfid.clone());
-            if let Some(lfid) = adopt {
-                referenced.insert(lfid.clone());
-                if let Some(e) = next.public.get_mut(&slug) {
-                    e.file = Some(lfid);
-                }
-            }
-        }
-
-        // 3. Pending ops.
-        let mut renamed: HashMap<String, String> = HashMap::new();
-        for (slug, op) in &self.state.public_ops {
-            match op {
-                PublicOp::Remove => {
-                    next.public.remove(slug);
-                    folded.slugs.push(slug.clone());
-                }
-                PublicOp::Put(p) => {
-                    let resolved: Option<(Option<String>, String)> = match p.kind {
-                        PublicKind::Dir => Some((None, p.path.clone())),
-                        PublicKind::File => {
-                            if let Some(fid) = p.file.as_ref().filter(|f| next.files.contains_key(*f)) {
-                                Some((Some(fid.clone()), next.files[fid].path.clone()))
-                            } else if let Some((fid, _)) = next.files.iter().find(|(_, f)| f.path == p.path) {
-                                Some((Some(fid.clone()), p.path.clone()))
-                            } else if let Some(existing) = next
-                                .public
-                                .get(slug)
-                                .filter(|e| e.kind == PublicKind::File && e.path == p.path && e.file.is_some())
-                            {
-                                // No live file, but the page exists dead at
-                                // this path: update it in place.
-                                Some((existing.file.clone(), p.path.clone()))
-                            } else {
-                                None
+        let mut touched = Vec::new();
+        for (fid, to, by) in moved {
+            let Some(held) = unit.state.files.get(&fid).cloned() else { continue };
+            let from = unit.root.join(&held.path);
+            if let Some(bytes) = read_file_checked(&from) {
+                let base = std::fs::read(unit.base_path(&fid)).ok();
+                let who = self.name_of(&by);
+                match self.units.get_mut(&to) {
+                    None => {
+                        let _ = std::fs::remove_file(&from);
+                    }
+                    Some(dest) => {
+                        match receive(dest, &from, &bytes, &held.hash, base.as_deref(), &who) {
+                            Received::Dropped => {}
+                            Received::Placed(path) => touched.push(dest.ws_rel(&path)),
+                            Received::Beside { path, copy } => {
+                                touched.push(dest.ws_rel(&copy));
+                                self.events.emit_json(
+                                    EV_CONFLICT,
+                                    json!({
+                                        "root": self.cfg.root.to_string_lossy(),
+                                        "path": dest.ws_rel(&path),
+                                        "by": who,
+                                        "conflictPath": dest.ws_rel(&copy),
+                                    }),
+                                );
                             }
                         }
-                    };
-                    // The file hasn't landed in the manifest yet: the op
-                    // stays pending and rides a later cycle.
-                    let Some((file, path)) = resolved else { continue };
-                    let target = match p.kind {
-                        PublicKind::File => Target::File(file.clone().unwrap_or_default()),
-                        PublicKind::Dir => Target::Dir(path.clone()),
-                    };
-
-                    let mut final_slug = slug.clone();
-                    let mut carried: Option<PublicEntry> = None;
-                    // The same page under another slug?
-                    let other = next
-                        .public
-                        .iter()
-                        .find(|(s, e)| *s != slug && e.target().as_ref() == Some(&target))
-                        .map(|(s, _)| s.clone());
-                    if let Some(other) = other {
-                        if p.custom {
-                            // The user re-keyed the page: the old slug goes,
-                            // the page's root flag and dates carry over.
-                            carried = next.public.remove(&other);
-                        } else {
-                            final_slug = other;
-                        }
-                    }
-                    // The slug taken by a different page (a custom-slug race)?
-                    if next.public.get(&final_slug).map(|e| e.target().as_ref() != Some(&target)).unwrap_or(false) {
-                        final_slug = unique_slug(&final_slug, |s| next.public.contains_key(s));
-                    }
-                    if final_slug != *slug {
-                        renamed.insert(slug.clone(), final_slug.clone());
-                    }
-                    let prev = next.public.remove(&final_slug).or(carried);
-                    next.public.insert(final_slug, merged_entry(p, file, prev));
-                    folded.slugs.push(slug.clone());
-                }
-            }
-        }
-
-        // The root page.
-        if let Some(op) = &self.state.root_op {
-            match op {
-                Some(slug) => {
-                    let actual = renamed.get(slug).cloned().unwrap_or_else(|| slug.clone());
-                    if next.public.contains_key(&actual) {
-                        for e in next.public.values_mut() {
-                            e.root = false;
-                        }
-                        if let Some(e) = next.public.get_mut(&actual) {
-                            e.root = true;
-                        }
-                        folded.root = true;
-                    } else if !matches!(self.state.public_ops.get(slug), Some(PublicOp::Put(_))) {
-                        // No such page and none on its way: nothing to do.
-                        folded.root = true;
+                        dest.persist_state();
                     }
                 }
-                None => {
-                    for e in next.public.values_mut() {
-                        e.root = false;
-                    }
-                    folded.root = true;
+                touched.push(unit.ws_rel(&held.path));
+                if let Some(parent) = from.parent() {
+                    space::prune_empty(parent, &unit.root);
                 }
             }
+            unit.forget(&fid);
         }
-
-        folded
+        if !touched.is_empty() {
+            unit.persist_state();
+        }
+        touched
     }
 
-    /// After a won CAS: make local state mirror what we just published.
-    fn commit_staged(&mut self, staged: &Staged, next: &Manifest, etag: String) {
-        for push in &staged.pushes {
-            if let Some(rf) = next.files.get(&push.file_id) {
-                let abs = self.cfg.root.join(&rf.path);
-                let (size, mtime_ms) = stat_pair(&abs);
-                self.state.files.insert(
-                    push.file_id.clone(),
-                    FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
-                );
-                let _ = write_atomic(&self.base_path(&push.file_id), &push.bytes);
-                self.gc_candidates.insert(push.file_id.clone());
+    /// A published file that changed section on this Mac keeps its address:
+    /// the section it left queues giving the address up, the one it went to
+    /// queues asking for it — which waits for the first (`Ctx::releasing`).
+    /// A published folder whose every file went the same way does the same.
+    fn carry_pages(&mut self, moves: &[CrossMove]) {
+        let mut carried: Vec<(String, String, String, PendingPublic)> = Vec::new(); // (from, to, slug, page)
+        for (from, unit) in &self.units {
+            let out: HashMap<&str, (&str, &str)> = moves
+                .iter()
+                .filter(|m| &m.from == from)
+                .map(|m| (m.fid.as_str(), (m.to.as_str(), m.path.as_str())))
+                .collect();
+            if out.is_empty() {
+                continue;
+            }
+            for (slug, entry) in unit.effective_public() {
+                let went: Option<(String, String)> = match entry.kind {
+                    PublicKind::File => entry
+                        .file
+                        .as_deref()
+                        .and_then(|fid| out.get(fid))
+                        .map(|(to, path)| (to.to_string(), path.to_string())),
+                    PublicKind::Dir if entry.path.is_empty() => None,
+                    PublicKind::Dir => folder_went(&entry.path, &unit.state.manifest, &out),
+                };
+                let Some((to, path)) = went else { continue };
+                let page = PendingPublic {
+                    kind: entry.kind,
+                    file: None,
+                    path,
+                    title: entry.title.clone(),
+                    desc: entry.desc.clone(),
+                    custom: true,
+                    by: entry.by.clone(),
+                    at: entry.at,
+                };
+                carried.push((from.clone(), to, slug, page));
             }
         }
-        for (fid, to) in &staged.moves {
-            let abs = self.cfg.root.join(to);
-            let (size, mtime_ms) = stat_pair(&abs);
-            if let (Some(st), Some(rf)) = (self.state.files.get_mut(fid), next.files.get(fid)) {
-                st.path = to.clone();
-                st.rev = rf.rev;
-                st.size = size;
-                st.mtime_ms = mtime_ms;
+        for (from, to, slug, page) in carried {
+            if !self.units.contains_key(&to) {
+                continue;
+            }
+            if let Some(unit) = self.units.get_mut(&from) {
+                unit.state.public_ops.insert(slug.clone(), PublicOp::Remove);
+                if unit.state.root_op.as_ref().and_then(|r| r.as_deref()) == Some(slug.as_str()) {
+                    unit.state.root_op = None;
+                }
+                unit.poke = true;
+                unit.persist_state();
+            }
+            if let Some(unit) = self.units.get_mut(&to) {
+                unit.state.public_ops.insert(slug, PublicOp::Put(page));
+                unit.poke = true;
+                unit.persist_state();
             }
         }
-        for fid in &staged.deletes {
-            self.state.files.remove(fid);
-            let _ = std::fs::remove_file(self.base_path(fid));
+    }
+
+    /* ----- spaces coming and going ----- */
+
+    /// Bring this Mac's folders in line with the spaces this person is in:
+    /// the last poll's list on one side, the folders that say they are
+    /// spaces on the other.
+    ///
+    /// A space with no folder here gets one, and its unit downloads it. A
+    /// restricted folder this person is no longer in is deleted from this
+    /// Mac outright, with its sync state and its local history; nothing in
+    /// the cloud is touched. A folder made under `Restricted/` by hand
+    /// becomes a restricted folder with only this person in it, and one
+    /// renamed here is renamed for everyone in it.
+    pub(crate) async fn reconcile_spaces(&mut self) {
+        if !self.worker_has("spaces") {
+            return;
         }
-        self.state.manifest = next.clone();
-        self.state.manifest_etag = Some(etag);
-        self.persist_state();
-    }
-
-    /// Adopt a remote file's state after applying its content to disk.
-    fn record_synced(&mut self, fid: &str, rf: &ManifestFile, bytes: Option<&[u8]>) {
-        let abs = self.cfg.root.join(&rf.path);
-        let (size, mtime_ms) = stat_pair(&abs);
-        self.state.files.insert(
-            fid.to_string(),
-            FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
-        );
-        if let Some(b) = bytes {
-            let _ = write_atomic(&self.base_path(fid), b);
+        let Some(mut list) = self.spaces.clone() else { return };
+        // Until the shared workspace holds nothing under the reserved names,
+        // the folders spaces would use are still shared content.
+        if !self.units.get(SHARED).is_some_and(|shared| shared.reserved_clear()) {
+            return;
         }
-    }
+        let root = self.cfg.root.clone();
+        if !root.is_dir() {
+            return;
+        }
+        let ws_id = self.cfg.ws_id.clone();
+        let mut changed: Option<SpacesChanged> = None;
 
-    /// Like `record_synced`, but for merge cases where the bytes on disk
-    /// deliberately differ from the remote revision: the base becomes THEIR
-    /// content (the revision we reconciled against), while the snapshot
-    /// fields track the actual disk file so it reads as locally edited.
-    fn record_synced_content(&mut self, fid: &str, rf: &ManifestFile, theirs: &[u8]) {
-        let abs = self.cfg.root.join(&rf.path);
-        let (size, mtime_ms) = stat_pair(&abs);
-        self.state.files.insert(
-            fid.to_string(),
-            FileState {
-                path: rf.path.clone(),
-                rev: rf.rev,
-                hash: rf.hash.clone(),
-                // Deliberately NOT the disk snapshot: forces the next scan to
-                // hash the file, see it differs from `hash`, and push it.
-                size: size.wrapping_add(1),
-                mtime_ms,
-            },
-        );
-        let _ = write_atomic(&self.base_path(fid), theirs);
-    }
-
-    fn delete_local(&self, abs: &Path) {
-        if self.cfg.use_trash {
-            #[cfg(target_os = "macos")]
-            {
-                if crate::trash_path_impl(&abs.to_string_lossy()).is_ok() {
+        // Everyone has a Private. A creator who never said who they are has
+        // no row to hang one on, and is not asked for.
+        if !list.iter().any(|s| s.kind == SpaceKind::Private) && self.me.is_some() && self.private_refusals < 3 {
+            match self.remote.ensure_private().await {
+                Ok(mine) => list.push(mine),
+                Err(RemoteError::Offline(_)) => {}
+                Err(RemoteError::Removed) => {
+                    self.heard_removed();
                     return;
                 }
+                Err(_) => self.private_refusals += 1,
             }
         }
-        let _ = std::fs::remove_file(abs);
-    }
 
-    fn delete_local_silent(&self, abs: &Path) {
-        let _ = std::fs::remove_file(abs);
-    }
-
-    /// Drop every blob of a pushed file but the one the manifest points at
-    /// now, once it is old enough that no racing pusher still needs it.
-    /// There is nothing else to keep: a file's past is the
-    /// version store's, and the sync side needs exactly the current bytes.
-    async fn gc_blobs(&mut self) {
-        let candidates: Vec<String> = std::mem::take(&mut self.gc_candidates).into_iter().collect();
-        self.sweep_blobs(&candidates).await;
-    }
-
-    /// One page of "keep the current hash, drop the rest" over these files.
-    /// A fileId the manifest no longer holds (a deleted file) keeps nothing.
-    async fn sweep_blobs(&self, fids: &[String]) {
-        for fid in fids {
-            let current = self.state.manifest.files.get(fid).map(|f| f.hash.as_str());
-            let Ok(blobs) = self.remote.list_blobs(fid).await else { continue };
-            for (hash, uploaded_ms) in blobs {
-                let old_enough = now_ms().saturating_sub(uploaded_ms) > GC_MIN_AGE_MS;
-                if old_enough && current != Some(hash.as_str()) {
-                    let _ = self.remote.delete_blob(fid, &hash).await;
+        // A folder made under `Restricted/` that is no space yet.
+        for dir in space::unclaimed(&root, &ws_id) {
+            let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if !space::valid_folder_name(&name) || self.unclaimable.contains(&dir) {
+                continue;
+            }
+            match self.remote.create_space(&name, &[]).await {
+                Ok(made) => {
+                    let marker = SpaceMarker { ws_id: ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
+                    if space::write_space_marker(&dir, &marker).is_ok() {
+                        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
+                        list.push(made);
+                    }
+                }
+                Err(RemoteError::Offline(_)) => break,
+                Err(_) => {
+                    self.unclaimable.insert(dir);
                 }
             }
         }
+
+        let listed: HashSet<String> = list.iter().map(|s| s.id.clone()).collect();
+        let mut held = space::held(&root, &ws_id);
+
+        // Folders of spaces this person is no longer in. A Private is its
+        // person's for as long as they are in the workspace, so a list
+        // without it is a list to mend (above), never a folder to delete.
+        let mut left: Vec<(String, String)> = Vec::new();
+        held.retain(|folder| {
+            if listed.contains(&folder.marker.space) || folder.dir.parent() == Some(root.as_path()) {
+                return true;
+            }
+            let store = crate::versions::store_for_root(&self.cfg.data_dir, &folder.dir).dir;
+            self.units.remove(&folder.marker.space);
+            if space::remove_space_dir(&root, folder) {
+                let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &folder.marker.space));
+                changed
+                    .get_or_insert_with(SpacesChanged::default)
+                    .removed
+                    .push((folder.dir.to_string_lossy().to_string(), store));
+                left.push((folder.marker.name.clone(), folder.rel.clone()));
+            }
+            false
+        });
+        for (name, path) in left {
+            self.events.emit_json(EV_SPACE_LEFT, json!({ "root": self.root_key(), "name": name, "path": path }));
+        }
+        // A unit whose folder is gone from this Mac: forget what it had
+        // synced, so the folder comes back whole rather than as deletions.
+        let present: HashSet<String> = held.iter().map(|folder| folder.marker.space.clone()).collect();
+        let orphaned: Vec<String> =
+            self.units.keys().filter(|id| id.as_str() != SHARED && !present.contains(*id)).cloned().collect();
+        for id in orphaned {
+            self.units.remove(&id);
+            let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &id));
+            changed.get_or_insert_with(SpacesChanged::default);
+        }
+
+        for at in 0..list.len() {
+            let entry = list[at].clone();
+            let maker = self.people.get(&entry.by).cloned().unwrap_or_default();
+            let found = held.iter().find(|folder| folder.marker.space == entry.id).cloned();
+            let mut marker = SpaceMarker { ws_id: ws_id.clone(), space: entry.id.clone(), name: entry.name.clone() };
+            let (dir, rel) = match (entry.kind, found) {
+                (SpaceKind::Private, Some(folder)) => (folder.dir, folder.rel),
+                (SpaceKind::Private, None) => {
+                    // Whatever is at `Private/` already is this person's own:
+                    // it was never shared, and it stays theirs.
+                    let dir = space::top(&root, PRIVATE_DIR);
+                    if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
+                        continue;
+                    }
+                    let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
+                    let rel = space::spelled(&root, &dir);
+                    (dir, rel)
+                }
+                (SpaceKind::Restricted, Some(folder)) => {
+                    let actual = folder.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let mut dir = folder.dir.clone();
+                    if entry.name != folder.marker.name {
+                        // Renamed by somebody in it: the folder follows.
+                        if !space::names_space(&actual, &entry.name, &maker) {
+                            let to = space::free_restricted_dir(&root, &entry.name, &maker);
+                            if std::fs::rename(&dir, &to).is_ok() {
+                                dir = to;
+                            }
+                        }
+                        let _ = space::write_space_marker(&dir, &marker);
+                    } else if !space::names_space(&actual, &entry.name, &maker) && space::valid_folder_name(&actual) {
+                        // Renamed here: that is the folder's new name, for
+                        // everyone in it.
+                        if self.remote.rename_space(&entry.id, &actual).await.is_ok() {
+                            list[at].name = actual.clone();
+                            marker.name = actual;
+                            let _ = space::write_space_marker(&dir, &marker);
+                        }
+                    }
+                    let rel = space::spelled(&root, &dir);
+                    (dir, rel)
+                }
+                (SpaceKind::Restricted, None) => {
+                    let dir = space::free_restricted_dir(&root, &entry.name, &maker);
+                    if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
+                        continue;
+                    }
+                    let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
+                    let rel = space::spelled(&root, &dir);
+                    (dir, rel)
+                }
+            };
+            match self.units.get_mut(&entry.id) {
+                Some(unit) => {
+                    if unit.root != dir {
+                        changed.get_or_insert_with(SpacesChanged::default);
+                    }
+                    unit.root = dir;
+                    unit.prefix = rel;
+                    unit.name = list[at].name.clone();
+                    unit.gone = false;
+                }
+                None => {
+                    self.units.insert(entry.id.clone(), Self::space_unit(&self.cfg, &self.remote, &marker, dir, rel));
+                    changed.get_or_insert_with(SpacesChanged::default);
+                }
+            }
+        }
+
+        self.spaces = Some(list);
+        if let Some(changed) = changed {
+            if let Some(tell) = &self.cfg.on_spaces {
+                tell(changed);
+            }
+            self.refresh_status();
+        }
     }
 
-    /* ----- the retired manifest history ----- */
+    /* ----- restricted folders, by hand ----- */
 
-    /// Every fileId this workspace can name, sorted — live files and
-    /// tombstones both, because a deleted file's blobs are exactly what the
-    /// old system left in the bucket. Sorted, so a cursor into it means the
-    /// same thing on the next poll.
-    fn legacy_fids(&self) -> Vec<String> {
-        let m = &self.state.manifest;
-        let mut fids: BTreeSet<&String> = m.files.keys().collect();
-        fids.extend(m.tombstones.keys());
-        fids.into_iter().cloned().collect()
+    /// A failed call about a restricted folder, in a sentence.
+    fn describe_space(&self, e: RemoteError) -> String {
+        match e {
+            RemoteError::NotFound => "That folder is not there any more, or you are no longer in it.".to_string(),
+            other => super::flows::describe(&self.cfg.domain, other.into()),
+        }
     }
 
-    /// The one-time clean-up of what the manifest's history left behind:
-    /// every blob but each file's current one. `LEGACY_BATCH` fileIds per
-    /// poll, so it costs nothing on the hot path, and the bookmark is
-    /// persisted, so it survives a restart and is never done twice.
-    ///
-    /// This used to sweep the `history/<fid>.json` archives first. Those
-    /// routes are gone, and the archives with them:
-    /// a workspace whose first pass never finished keeps a few small objects
-    /// nothing reads, and the wipe takes them. The blobs are the part that
-    /// was worth the walk — a deep revision of a large file is megabytes —
-    /// and nothing else collects them: the per-cycle GC only looks at files
-    /// this device has touched, so a file never edited again would keep its
-    /// old revisions for ever.
-    async fn legacy_cleanup(&mut self) {
-        if self.state.legacy_cleanup.done || self.paused || self.outdated.is_some() {
-            return;
+    /// Make a restricted folder holding this person and `members`. With
+    /// `from` — a folder in this workspace — that folder becomes it: what was
+    /// in it leaves the section it was in as a move, so it is deleted
+    /// outright from the Macs of everyone not chosen and stays in place on
+    /// the Macs of everyone who is. Otherwise the folder starts empty.
+    pub(crate) async fn make_space(
+        &mut self,
+        name: &str,
+        members: &[String],
+        from: Option<&Path>,
+    ) -> Result<SpaceStatus, String> {
+        if !self.worker_has("spaces") {
+            return Err(format!(
+                "{} runs a worker too old for restricted folders — update it from the Cloud panel.",
+                self.cfg.domain
+            ));
         }
-        if !self.state.legacy_cleanup.archives_done {
-            // A device still deleting archives when this release arrived has
-            // a bookmark into a pass that no longer exists. The blob pass
-            // starts from the beginning rather than inheriting it — it is
-            // idempotent, and skipping part of the backlog is not.
-            self.state.legacy_cleanup.archives_done = true;
-            self.state.legacy_cleanup.cursor = None;
-            self.persist_state();
+        if self.me.is_none() {
+            return Err("Say who you are first — your name and email, under People — so there is somebody for the folder to belong to.".to_string());
         }
-        let after = self.state.legacy_cleanup.cursor.clone();
-        let batch: Vec<String> = self
-            .legacy_fids()
+        // The list of this person's spaces is what decides which folders
+        // stay on this Mac: a folder is only added to one the domain gave.
+        if self.spaces.is_none() || !self.shared().reserved_clear() {
+            return Err("This Mac has not caught up with the workspace yet — try again in a moment.".to_string());
+        }
+        let name = name.trim();
+        if !space::valid_folder_name(name) {
+            return Err("A folder needs a name that can be a folder's: no slashes, and not starting with a dot.".to_string());
+        }
+        let root = self.cfg.root.clone();
+        if let Some(from) = from {
+            let inside = from.starts_with(&root) && from != root.as_path();
+            let real = std::fs::symlink_metadata(from).map(|m| m.file_type().is_dir()).unwrap_or(false);
+            let reserved = from.parent() == Some(root.as_path())
+                && from.file_name().is_some_and(|n| space::reserved_top(&n.to_string_lossy()).is_some());
+            if !inside || !real || reserved {
+                return Err("That is not a folder of this workspace that can be restricted.".to_string());
+            }
+            if self.units.values().any(|unit| !unit.is_shared() && unit.root == from) {
+                return Err("That folder is restricted already.".to_string());
+            }
+        }
+
+        let made = self.remote.create_space(name, members).await.map_err(|e| self.describe_space(e))?;
+        let maker = self.people.get(&made.by).cloned().unwrap_or_default();
+        let dir = space::free_restricted_dir(&root, &made.name, &maker);
+        let marker = SpaceMarker { ws_id: self.cfg.ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
+        let placed = dir
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|_| match from {
+                Some(from) => std::fs::rename(from, &dir),
+                None => std::fs::create_dir_all(&dir),
+            })
+            .map_err(|e| e.to_string())
+            .and_then(|_| space::write_space_marker(&dir, &marker));
+        if let Err(e) = placed {
+            // The domain has the folder; the next poll gives it a folder
+            // here. What was to go into it is where it was.
+            return Err(format!("The folder was made, but this Mac could not put it in place: {}.", e));
+        }
+        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
+        let rel = space::spelled(&root, &dir);
+        self.units.insert(made.id.clone(), Self::space_unit(&self.cfg, &self.remote, &marker, dir, rel));
+        let id = made.id.clone();
+        self.spaces.get_or_insert_with(Vec::new).push(made);
+        if let Some(tell) = &self.cfg.on_spaces {
+            tell(SpacesChanged::default());
+        }
+        self.refresh_status();
+        self.space_statuses()
             .into_iter()
-            .filter(|f| after.as_deref().map(|c| f.as_str() > c).unwrap_or(true))
-            .take(LEGACY_BATCH)
-            .collect();
+            .find(|space| space.id == id)
+            .ok_or_else(|| "The folder was made, and will be here in a moment.".to_string())
+    }
 
-        if batch.is_empty() {
-            // Off the end of the list: this workspace never looks again.
-            self.state.legacy_cleanup.done = true;
-            self.state.legacy_cleanup.cursor = None;
-            self.persist_state();
-            return;
+    /// Add a person to a restricted folder, or take one out. Taking this
+    /// person out is leaving it: its folder leaves this Mac with them.
+    pub(crate) async fn change_space_member(&mut self, id: &str, member: &str, add: bool) -> Result<(), String> {
+        if add {
+            let now = self.remote.add_space_member(id, member).await.map_err(|e| match e {
+                RemoteError::NotFound => {
+                    "That person is not in this workspace any more, or the folder is gone.".to_string()
+                }
+                other => self.describe_space(other),
+            })?;
+            if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
+                *entry = now;
+            }
+        } else {
+            self.remote.remove_space_member(id, member).await.map_err(|e| self.describe_space(e))?;
+            if self.me.as_deref() == Some(member) {
+                self.forget_space(id).await;
+            } else if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
+                entry.members.retain(|m| m != member);
+            }
         }
+        self.refresh_status();
+        Ok(())
+    }
 
-        self.sweep_blobs(&batch).await;
-        self.state.legacy_cleanup.cursor = batch.last().cloned();
-        self.persist_state();
+    /// Delete a restricted folder for everyone in it: everything it stored
+    /// on the domain, then its folder here. Each other Mac deletes its copy
+    /// when its next poll no longer lists the folder.
+    pub(crate) async fn delete_space(&mut self, id: &str) -> Result<(), String> {
+        loop {
+            let round = self.remote.delete_space(id).await.map_err(|e| self.describe_space(e))?;
+            if !round.remaining {
+                break;
+            }
+        }
+        self.forget_space(id).await;
+        self.refresh_status();
+        Ok(())
+    }
+
+    /// This person is out of a space, by something done on this Mac: the
+    /// list says so now rather than at the next poll, and the folder goes.
+    async fn forget_space(&mut self, id: &str) {
+        if let Some(list) = &mut self.spaces {
+            list.retain(|s| s.id != id);
+        }
+        self.reconcile_spaces().await;
     }
 
     /* ----- the version store's mirror ----- */
 
-    fn worker_has(&self, feature: &str) -> bool {
-        self.worker_features.iter().any(|f| f == feature)
+    /// Is the hourly pass due? A pass that brought something in mirrors at
+    /// once; this is the floor under a workspace nothing is happening in.
+    fn hourly_due(&self) -> bool {
+        self.last_hourly.map(|t| t.elapsed() >= MIRROR_EVERY).unwrap_or(true)
     }
 
-    /// Put this device's captured history in the bucket, and once a day thin
-    /// what is up there. History is not the document: a mirror that cannot
-    /// finish leaves the sync's phase alone and tries again on the next pass,
-    /// because a version that is late is not a change that is lost.
+    /// Put this device's captured history in the bucket — every section's
+    /// into its own store — and once a day thin what is up there.
     pub(crate) async fn mirror_versions(&mut self) {
         if self.paused || self.outdated.is_some() {
             return;
         }
-        let hourly = self.mirror_due();
-        self.last_mirror = Some(Instant::now());
+        let hourly = self.hourly_due();
+        self.last_hourly = Some(Instant::now());
         if hourly && ASKED_AGAIN_FOR.iter().any(|f| !self.worker_has(f)) {
             // Either `/api/meta` never answered (the app started offline) or
             // the worker predates something this app can use — the version
             // store, the poll that carries a beat, the beat that claims a
-            // lease. Ask again on the hourly pass: each is meant to start the
-            // moment the worker is updated, on every Mac and without a restart
-            // — but never once per cycle.
+            // lease, spaces. Ask again on the hourly pass: each is meant to
+            // start the moment the worker is updated, on every Mac and
+            // without a restart — but never once per cycle.
             self.probe_worker().await;
             self.refresh_status();
         }
         if !self.worker_has("versions") {
             return;
         }
-        let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
-        let remote = self.remote.clone();
-        let mut swept = self.state.last_cloud_sweep_ms;
-        let result =
-            version_store::mirror(remote.as_ref(), &store, &self.cfg.device_id, &mut swept, now_ms()).await;
-        self.state.last_cloud_sweep_ms = swept;
-        self.persist_state();
-        match result {
-            Ok(report) => {
-                self.mirror = Some(report);
-                self.last_mirror_ms = Some(now_ms());
-                self.refresh_status();
-            }
-            Err(e) => eprintln!("cloud: {} could not mirror its version history: {}", self.cfg.domain, e),
+        let mut landed = false;
+        for unit in self.units.values_mut().filter(|u| !u.gone) {
+            landed |= unit.mirror_versions().await;
+        }
+        if landed {
+            self.refresh_status();
         }
     }
 
-    /// How far back the bucket keeps. One CAS on the cloud index, so every
-    /// device that reads it next agrees; the local horizon is separate and
-    /// stays this Mac's business.
-    pub(crate) async fn set_cloud_horizon(&mut self, days: Option<u32>) -> Result<(), String> {
+    /// How far back the bucket keeps, for the section `rel` is in.
+    pub(crate) async fn set_cloud_horizon(&mut self, rel: &str, days: Option<u32>) -> Result<(), String> {
         if !self.worker_has("versions") {
             return Err("This workspace's worker is too old to keep version history.".to_string());
         }
-        let index = version_store::set_horizon(self.remote.as_ref(), days)
-            .await
-            .map_err(|e| format!("Couldn't change what the cloud keeps: {}.", e))?;
-        // The panel shows what the bucket now says without waiting an hour
-        // for the next pass to tell it.
-        if let Some(report) = self.mirror.as_mut() {
-            report.horizon_days = days;
-        }
-        self.cloud_versions = Some(index);
+        let Some((id, _)) = self.place(rel) else { return Err("That folder isn't connected.".to_string()) };
+        let Some(unit) = self.units.get_mut(&id) else { return Err("That folder isn't connected.".to_string()) };
+        unit.set_cloud_horizon(days).await?;
         self.refresh_status();
         Ok(())
     }
 
-    /// Is an hourly mirror due? The cycle mirrors whenever something moved;
-    /// this is the floor under a workspace nothing is happening in, and what
-    /// gets the daily sweep run.
-    fn mirror_due(&self) -> bool {
-        self.last_mirror.map(|t| t.elapsed() >= MIRROR_EVERY).unwrap_or(true)
-    }
-
     /* ----- the public map: queued ops ----- */
 
-    fn file_id_at(&self, rel: &str) -> Option<String> {
-        self.state
-            .files
-            .iter()
-            .find(|(_, st)| st.path == rel)
-            .map(|(fid, _)| fid.clone())
-            .or_else(|| {
-                self.state
-                    .manifest
-                    .files
-                    .iter()
-                    .find(|(_, f)| f.path == rel)
-                    .map(|(fid, _)| fid.clone())
-            })
-    }
-
-    /// Queue "publish this file or folder": validates the slug locally,
-    /// checks uniqueness against the manifest — instantly, no network — and
-    /// answers with the slug the page will have (barring a race another
-    /// device wins first; then the status shows the final slug).
+    /// Queue "publish this file or folder" in whichever section holds it.
     pub(crate) fn queue_publish(&mut self, req: PublishRequest) -> Result<String, String> {
-        let rel = req.rel.trim_matches('/').to_string();
-        match req.kind {
-            PublicKind::File if !valid_rel_path(&rel) => return Err("that path can't be published".into()),
-            PublicKind::Dir if !rel.is_empty() && !valid_rel_path(&rel) => {
-                return Err("that folder can't be published".into())
-            }
-            _ => {}
-        }
-        let file = match req.kind {
-            PublicKind::File => self.file_id_at(&rel),
-            PublicKind::Dir => None,
+        let ws_rel = req.rel.trim_matches('/').to_string();
+        let Some((id, rel)) = self.place(&ws_rel) else {
+            return Err(match req.kind {
+                PublicKind::File => "that path can't be published".to_string(),
+                PublicKind::Dir => "that folder can't be published".to_string(),
+            });
         };
-        let target = match req.kind {
-            PublicKind::File => file.clone().map(Target::File),
-            PublicKind::Dir => Some(Target::Dir(rel.clone())),
-        };
-        let effective = self.effective_public();
-        // The page this target already has, if any: by identity, or — for a
-        // file that hasn't synced yet — by path.
-        let existing = effective
+        let elsewhere: BTreeSet<String> = self
+            .units
             .iter()
-            .find(|(_, e)| match &target {
-                Some(t) => e.target().as_ref() == Some(t),
-                None => e.kind == PublicKind::File && e.path == rel,
-            })
-            .map(|(s, _)| s.clone());
-
-        let custom = req.slug.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let slug = if custom {
-            let s = req.slug.unwrap_or_default().trim().to_lowercase();
-            if !valid_slug(&s) {
-                return Err(
-                    "a slug is 3 to 64 characters: lowercase letters, digits and dashes, starting with a letter or digit"
-                        .into(),
-                );
-            }
-            if let Some(e) = effective.get(&s) {
-                let same = match &target {
-                    Some(t) => e.target().as_ref() == Some(t),
-                    None => e.kind == PublicKind::File && e.path == rel,
-                };
-                if !same {
-                    return Err(format!("\"{}\" is already the address of {}", s, describe(e)));
-                }
-            }
-            s
-        } else {
-            existing.clone().unwrap_or_else(|| unique_slug(&random_slug(), |s| effective.contains_key(s)))
-        };
-
-        let op = PendingPublic {
-            kind: req.kind,
-            file,
-            path: rel,
-            title: clean_text(req.title.as_deref(), MAX_TITLE_LEN),
-            desc: clean_text(req.desc.as_deref(), MAX_DESC_LEN),
-            custom,
-            by: self.signature(),
-            at: now_ms(),
-        };
-        // A re-key: a page still only queued under the old slug is
-        // superseded outright; one the manifest holds is re-keyed by the
-        // fold, which carries its root flag and dates to the new slug (a
-        // queued Remove would drop it before the fold could).
-        if let Some(old) = existing.filter(|old| *old != slug) {
-            if custom && matches!(self.state.public_ops.get(&old), Some(PublicOp::Put(_))) {
-                self.state.public_ops.remove(&old);
-            }
-        }
-        self.state.public_ops.insert(slug.clone(), PublicOp::Put(op));
-        // Persist before anything can go wrong: a page published offline must
-        // survive a restart.
-        self.persist_state();
+            .filter(|(other, _)| **other != id)
+            .flat_map(|(_, unit)| unit.effective_public().into_keys())
+            .collect();
+        let signature = self.signature();
+        let Some(unit) = self.units.get_mut(&id) else { return Err("that path can't be published".to_string()) };
+        let slug = unit.queue_publish(PublishRequest { rel, ..req }, &signature, &elsewhere)?;
+        unit.poke = true;
         self.refresh_status();
         Ok(slug)
     }
 
     pub(crate) fn queue_unpublish(&mut self, slug: &str) -> Result<(), String> {
         let slug = slug.trim().to_lowercase();
-        if !self.effective_public().contains_key(&slug) {
-            return Err("that page isn't published".into());
-        }
-        self.state.public_ops.insert(slug.clone(), PublicOp::Remove);
-        if self.state.root_op.as_ref().and_then(|r| r.as_deref()) == Some(slug.as_str()) {
-            self.state.root_op = None;
-        }
-        self.persist_state();
+        let holder = self.units.values_mut().find(|unit| unit.effective_public().contains_key(&slug));
+        let Some(unit) = holder else { return Err("that page isn't published".into()) };
+        unit.queue_unpublish(&slug)?;
+        unit.poke = true;
         self.refresh_status();
         Ok(())
     }
 
+    /// The page at `/` is chosen from the shared workspace.
     pub(crate) fn queue_set_root(&mut self, slug: Option<String>) -> Result<(), String> {
-        let slug = slug.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
-        if let Some(s) = &slug {
-            if !self.effective_public().contains_key(s) {
-                return Err("that page isn't published".into());
+        let wanted = slug.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+        if let Some(wanted) = &wanted {
+            let elsewhere = self
+                .units
+                .values()
+                .any(|unit| !unit.is_shared() && unit.effective_public().contains_key(wanted));
+            if elsewhere && !self.shared().effective_public().contains_key(wanted) {
+                return Err("the home page is chosen from the shared workspace".into());
             }
         }
-        self.state.root_op = Some(slug);
-        self.persist_state();
+        let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
+        shared.queue_set_root(slug)?;
+        shared.poke = true;
         self.refresh_status();
         Ok(())
     }
@@ -1724,8 +1404,9 @@ impl<R: Remote> Engine<R> {
     }
 
     pub(crate) fn confirm_deletes(&mut self) {
-        self.allow_mass_delete = true;
-        self.held_deletes.clear();
+        for unit in self.units.values_mut() {
+            unit.confirm_deletes();
+        }
     }
 
     pub(crate) fn set_paused(&mut self, paused: bool) {
@@ -1733,14 +1414,20 @@ impl<R: Remote> Engine<R> {
         self.set_status(if paused { Phase::Paused } else { Phase::Idle }, None);
     }
 
-    /// The path this device is editing, if the activity is fresh and inside
-    /// the workspace.
+    /// The workspace-relative path this device is editing, if the activity
+    /// is fresh and inside the workspace.
     fn activity_rel(&self) -> Option<String> {
         let (abs, at) = self.activity.as_ref()?;
         if at.elapsed() >= ACTIVITY_FRESH {
             return None;
         }
         rel_path(&self.cfg.root, Path::new(abs)).filter(|r| !r.is_empty())
+    }
+
+    /// The same, as the domain is told it: the section it is in, and the
+    /// path inside that section. None for a path that is in no section.
+    fn activity_place(&self) -> Option<(String, String)> {
+        self.activity_rel().and_then(|rel| self.place(&rel)).filter(|(_, rel)| !rel.is_empty())
     }
 
     /// Is a beat owed — "this Mac is here (editing <path>)"? On a cadence,
@@ -1785,12 +1472,14 @@ impl<R: Remote> Engine<R> {
         }
         // A path the worker would not take records no claim, so it could
         // never stop being owed one.
-        let Some(rel) = self.activity_rel().filter(|r| valid_rel_path(r)) else { return false };
-        if self.take_over.as_deref() == Some(rel.as_str()) {
+        let Some((id, rel)) = self.activity_place().filter(|(_, rel)| valid_rel_path(rel)) else { return false };
+        if self.take_over.is_some() && self.take_over == self.activity_rel() {
             return true;
         }
         let key = lease_key(&rel);
-        self.leases.as_ref().is_some_and(|all| !all.iter().any(|l| l.path == key))
+        self.leases
+            .as_ref()
+            .is_some_and(|all| !all.iter().any(|l| l.path == key && l.space.as_deref().unwrap_or(SHARED) == id))
     }
 
     /// When to poll next, after anything that was not itself a poll: the
@@ -1839,20 +1528,28 @@ impl<R: Remote> Engine<R> {
         let _ = self.poll_and_maybe_cycle().await;
     }
 
-    /// Poll cheaply; a moved etag is what makes the full cycle worth
-    /// running. This Mac's beat rides along when one is owed, and the
-    /// others' presence comes back in the answer and only re-emits when it
-    /// changed.
+    /// Poll cheaply; a moved etag is what makes a cycle worth running — the
+    /// shared workspace's, or any space's, all in the one answer. This Mac's
+    /// beat rides along when one is owed, and the others' presence comes
+    /// back in the answer and only re-emits when it changed.
     async fn poll_and_maybe_cycle(&mut self) -> RemoteResult<()> {
         let beat = self.beat_due().then(|| {
-            let path = self.activity_rel();
-            let take = path.is_some() && self.take_over == path;
-            Beat::Here { name: self.cfg.device_name.clone(), path, take }
+            let place = self.activity_place();
+            let take = place.is_some() && self.take_over.is_some() && self.take_over == self.activity_rel();
+            let (space, path) = match place {
+                Some((id, rel)) => ((id != SHARED).then_some(id), Some(rel)),
+                None => (None, None),
+            };
+            Beat::Here { name: self.cfg.device_name.clone(), space, path, take }
         });
+        let editing = self.activity_rel();
         let sent = Instant::now();
         let poll = match self.remote.poll(beat.as_ref()).await {
             Ok(poll) => poll,
             Err(e) => {
+                if matches!(e, RemoteError::Removed) {
+                    self.heard_removed();
+                }
                 // A lock nobody can confirm is no lock: an editor kept
                 // view-only by a lease this Mac can no longer hear about
                 // would be the one way a lease could get in anybody's way.
@@ -1862,16 +1559,25 @@ impl<R: Remote> Engine<R> {
                 return Err(e);
             }
         };
-        if let Some(Beat::Here { path, take, .. }) = beat {
+        if let Some(Beat::Here { take, .. }) = beat {
             // From when it was sent, not when it was answered: the next beat
             // is then owed a little early rather than a poll late.
             self.last_beat = Some(sent);
-            self.beaconed = path;
+            self.beaconed = editing;
             if take {
                 self.take_over = None;
             }
         }
         self.learn_people_here(&poll).await;
+
+        // Which spaces this person is in comes first: presence and leases
+        // are read against the folders they have on this Mac.
+        let listed = poll.spaces.is_some();
+        if let Some(spaces) = &poll.spaces {
+            self.spaces = Some(spaces.clone());
+            self.reconcile_spaces().await;
+        }
+
         let presence = self.presence_of(&poll);
         let presence_changed = presence.len() != self.presence.len()
             || presence.iter().zip(self.presence.iter()).any(|(a, b)| {
@@ -1881,19 +1587,42 @@ impl<R: Remote> Engine<R> {
         let holders = self.lease_holders();
         self.leases = poll.leases.clone();
         let leases_changed = self.lease_holders() != holders;
-        if Some(poll.manifest_etag.as_str()) != self.state.manifest_etag.as_deref() {
-            self.cycle().await?;
+
+        let mut moved: BTreeSet<String> = BTreeSet::new();
+        if Some(poll.manifest_etag.as_str()) != self.shared().state.manifest_etag.as_deref() {
+            moved.insert(SHARED.to_string());
+        }
+        if listed {
+            // Read off the list as `reconcile_spaces` left it: a space made a
+            // moment ago is in it, and its unit has everything to download.
+            for entry in self.spaces.iter().flatten() {
+                let behind = self
+                    .units
+                    .get(&entry.id)
+                    .is_some_and(|unit| unit.state.manifest_etag.as_deref() != Some(entry.etag.as_str()));
+                if behind {
+                    moved.insert(entry.id.clone());
+                }
+            }
+        }
+        // The domain answering again after a pass that could not reach it is
+        // itself a reason for one: what that pass was carrying is still here.
+        if !moved.is_empty() || self.phase == Phase::Offline {
+            self.pass(Which::Moved(moved)).await?;
         } else if presence_changed || leases_changed {
             self.refresh_status();
         }
-        self.legacy_cleanup().await;
+        if let Some(shared) = self.units.get_mut(SHARED) {
+            shared.legacy_cleanup().await;
+        }
         Ok(())
     }
 
     /// The documents another Mac holds, in words — resolved the way presence
-    /// is. None at all while this engine is not hearing the domain: a paused
-    /// or outdated engine is not polling, and a lease it last heard about may
-    /// have lapsed a minute ago.
+    /// is, and spelled as this Mac's folders spell them. None at all while
+    /// this engine is not hearing the domain: a paused or outdated engine is
+    /// not polling, and a lease it last heard about may have lapsed a minute
+    /// ago.
     fn lease_holders(&self) -> Vec<LeaseHolder> {
         if self.paused || self.outdated.is_some() {
             return Vec::new();
@@ -1902,35 +1631,41 @@ impl<R: Remote> Engine<R> {
         leases
             .iter()
             .filter(|l| l.device_id != self.cfg.device_id)
-            .map(|l| {
+            .filter_map(|l| {
+                let unit = self.units.get(l.space.as_deref().unwrap_or(SHARED))?;
                 let own = l.member_id.is_some() && l.member_id == self.me;
                 let person = l.member_id.as_deref().filter(|_| !own).and_then(|m| self.people.get(m));
-                LeaseHolder {
-                    path: l.path.clone(),
+                Some(LeaseHolder {
+                    path: lease_key(&unit.ws_rel(&l.path)),
                     device_id: l.device_id.clone(),
                     member_id: l.member_id.clone(),
                     name: person.cloned().unwrap_or_else(|| l.name.clone()),
                     device: l.name.clone(),
                     own,
                     until: l.until,
-                }
+                })
             })
             .collect()
     }
 
-    /// Whether this Mac holds `rel`'s lease, by the last poll.
+    /// Whether this Mac holds the lease of the document at `rel`
+    /// (workspace-relative), by the last poll.
     #[cfg(test)]
     pub(crate) fn holds_for_test(&self, rel: &str) -> bool {
-        let key = lease_key(rel);
-        self.leases
-            .as_ref()
-            .is_some_and(|all| all.iter().any(|l| l.path == key && l.device_id == self.cfg.device_id))
+        let Some((id, rel)) = self.place(rel) else { return false };
+        let key = lease_key(&rel);
+        self.leases.as_ref().is_some_and(|all| {
+            all.iter().any(|l| {
+                l.path == key && l.space.as_deref().unwrap_or(SHARED) == id && l.device_id == self.cfg.device_id
+            })
+        })
     }
 
     /// Everybody else here, in words. The worker says whose Mac each one is;
     /// the directory says what they are called — the same resolution every
     /// `by` gets. Your own other Mac is named as a
-    /// Mac, and so is one whose person the directory cannot name yet.
+    /// Mac, and so is one whose person the directory cannot name yet. A path
+    /// in a space is spelled as that space's folder on this Mac spells it.
     fn presence_of(&self, poll: &PollResponse) -> Vec<PresenceDevice> {
         let mut presence: Vec<PresenceDevice> = poll
             .presence
@@ -1942,12 +1677,15 @@ impl<R: Remote> Engine<R> {
                     .as_deref()
                     .filter(|m| Some(*m) != self.me.as_deref())
                     .and_then(|m| self.people.get(m));
+                let path = e.path.as_ref().and_then(|path| {
+                    self.units.get(e.space.as_deref().unwrap_or(SHARED)).map(|unit| unit.ws_rel(path))
+                });
                 PresenceDevice {
                     device_id: id.clone(),
                     member_id: e.member_id.clone(),
                     name: person.cloned().unwrap_or_else(|| e.name.clone()),
                     device: e.name.clone(),
-                    path: e.path.clone(),
+                    path,
                     ts: e.ts,
                 }
             })
@@ -1976,19 +1714,24 @@ impl<R: Remote> Engine<R> {
     /* ----- the task ----- */
 
     /// The engine task: wake on commands, the edit bus, filesystem events, or
-    /// the poll clock; run cycles when something might have moved.
+    /// the poll clock; run a pass when something might have moved. It ends
+    /// when it is told to, or the moment the domain says this Mac's access
+    /// was removed — which any request it makes may be the one to hear.
     pub async fn run(
         mut self,
         mut cmds: mpsc::UnboundedReceiver<EngineCmd>,
         mut fs_events: mpsc::UnboundedReceiver<()>,
-    ) {
-        // First contact: learn the worker, then a full cycle brings a stale
+    ) -> Exit {
+        // First contact: learn the worker, then a full pass brings a stale
         // device current.
         self.probe_worker().await;
-        if self.can_cycle() {
+        if self.can_cycle() && !self.removed {
             let _ = self.cycle().await;
         } else {
             self.refresh_status();
+        }
+        if self.removed {
+            return Exit::Removed;
         }
         let mut fs_dirty_at: Option<Instant> = None;
         let mut touch_dirty_at: Option<Instant> = None;
@@ -2004,26 +1747,30 @@ impl<R: Remote> Engine<R> {
         loop {
             let wake = next_wake(next_poll, fs_dirty_at, touch_dirty_at);
             let mut cycle_now = false;
+            let mut everywhere = false;
 
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     None | Some(EngineCmd::Shutdown) => {
                         self.leave().await;
-                        return;
+                        return Exit::Shutdown;
                     }
-                    Some(EngineCmd::SyncNow) => cycle_now = true,
+                    Some(EngineCmd::SyncNow) => {
+                        cycle_now = true;
+                        everywhere = true;
+                    }
                     Some(EngineCmd::Probe) => {
                         let was_outdated = self.outdated.is_some();
                         self.probe_worker().await;
                         if was_outdated && self.outdated.is_none() {
                             cycle_now = true;
+                            everywhere = true;
                         } else {
                             self.refresh_status();
                         }
                     }
                     Some(EngineCmd::Touched(rel)) => {
                         self.touch_activity(&rel);
-                        self.dirty.insert(rel);
                         touch_dirty_at = Some(Instant::now());
                     }
                     Some(EngineCmd::SetActivity(p)) => {
@@ -2058,31 +1805,44 @@ impl<R: Remote> Engine<R> {
                         let _ = reply.send(self.queue_set_root(slug));
                         cycle_now = true;
                     }
-                    Some(EngineCmd::VersionsIndex { reply }) => {
-                        if !self.worker_has("versions") {
-                            let _ = reply.send(Ok(None));
-                        } else {
-                            // Fresh when the domain answers, last-known when
-                            // it doesn't: an unreachable bucket should not
-                            // empty a rail that was full a minute ago.
-                            if let Ok(Some((index, _))) = self.remote.get_versions_index().await {
-                                self.cloud_versions = Some(index);
-                            }
-                            let _ = reply.send(Ok(self.cloud_versions.clone()));
-                        }
+                    Some(EngineCmd::VersionsIndex { rel, reply }) => {
+                        let unit = self.place(&rel).map(|(id, _)| id).filter(|_| self.worker_has("versions"));
+                        let found = match unit.and_then(|id| self.units.get_mut(&id)) {
+                            Some(unit) => unit.versions_index().await,
+                            None => None,
+                        };
+                        let _ = reply.send(Ok(found));
                     }
-                    Some(EngineCmd::VersionSnapshot { id, reply }) => {
-                        let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
-                        let found = version_store::snapshot(self.remote.as_ref(), &store, &id).await;
+                    Some(EngineCmd::VersionSnapshot { rel, id, reply }) => {
+                        let found = match self.place(&rel).and_then(|(unit, _)| self.units.get(&unit)) {
+                            Some(unit) => unit.version_snapshot(&id).await,
+                            None => None,
+                        };
                         let _ = reply
                             .send(found.ok_or_else(|| "that version isn't reachable right now".to_string()));
                     }
-                    Some(EngineCmd::SetCloudHorizon { days, reply }) => {
-                        let _ = reply.send(self.set_cloud_horizon(days).await);
+                    Some(EngineCmd::SetCloudHorizon { rel, days, reply }) => {
+                        let _ = reply.send(self.set_cloud_horizon(&rel, days).await);
                     }
-                    Some(EngineCmd::VersionBlob { hash, reply }) => {
-                        let got = version_store::blob(self.remote.as_ref(), &hash).await;
-                        let _ = reply.send(got.map_err(|e| e.to_string()));
+                    Some(EngineCmd::VersionBlob { rel, hash, reply }) => {
+                        let got = match self.place(&rel).and_then(|(unit, _)| self.units.get(&unit)) {
+                            Some(unit) => unit.version_blob(&hash).await.map_err(|e| e.to_string()),
+                            None => Err("that version isn't reachable right now".to_string()),
+                        };
+                        let _ = reply.send(got);
+                    }
+                    Some(EngineCmd::MakeSpace { name, members, from, reply }) => {
+                        let made = self.make_space(&name, &members, from.as_deref().map(Path::new)).await;
+                        // What a folder brought with it left another section:
+                        // that is a pass's to carry.
+                        cycle_now = made.is_ok();
+                        let _ = reply.send(made);
+                    }
+                    Some(EngineCmd::SpaceMember { id, member, add, reply }) => {
+                        let _ = reply.send(self.change_space_member(&id, &member, add).await);
+                    }
+                    Some(EngineCmd::DeleteSpace { id, reply }) => {
+                        let _ = reply.send(self.delete_space(&id).await);
                     }
                 },
                 ev = fs_events.recv(), if watching => match ev {
@@ -2096,6 +1856,9 @@ impl<R: Remote> Engine<R> {
                 _ = tokio::time::sleep_until(wake) => {}
             }
 
+            if self.removed {
+                return Exit::Removed;
+            }
             if self.paused {
                 continue;
             }
@@ -2103,11 +1866,12 @@ impl<R: Remote> Engine<R> {
             let touch_due = touch_dirty_at.map(|t| now >= t + TOUCH_SETTLE).unwrap_or(false);
             let fs_due = fs_dirty_at.map(|t| now >= t + FS_SETTLE).unwrap_or(false);
             if cycle_now || touch_due || fs_due {
-                // One cycle covers every pending hint: it scans everything.
+                // One pass covers every pending hint: it looks at every
+                // section's folder, and cycles the ones that changed.
                 touch_dirty_at = None;
                 fs_dirty_at = None;
                 if self.can_cycle() {
-                    let _ = self.cycle().await;
+                    let _ = self.pass(if everywhere { Which::All } else { Which::Dirty }).await;
                 }
                 next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
@@ -2123,10 +1887,13 @@ impl<R: Remote> Engine<R> {
                 } else {
                     let _ = self.poll_and_maybe_cycle().await;
                 }
-                if self.mirror_due() {
+                if self.hourly_due() && !self.removed {
                     self.mirror_versions().await;
                 }
                 next_poll = Instant::now() + POLL_INTERVAL;
+            }
+            if self.removed {
+                return Exit::Removed;
             }
         }
     }
@@ -2146,67 +1913,156 @@ pub(crate) fn next_wake(next_poll: Instant, fs_dirty_at: Option<Instant>, touch_
     wake
 }
 
-/// Where folder `dir` went, if every file it held (in `remote`, the manifest
-/// before this cycle's moves) moved to one new prefix in `moves`.
-fn moved_folder(dir: &str, remote: &Manifest, moves: &HashMap<&str, &str>) -> Option<String> {
-    let prefix = format!("{}/", dir);
-    let mut target: Option<String> = None;
-    let mut held = 0usize;
-    for (fid, f) in remote.files.iter().filter(|(_, f)| f.path.starts_with(&prefix)) {
-        held += 1;
-        let new_path = moves.get(fid.as_str())?; // not every file moved → no re-point
-        let rest = &f.path[prefix.len()..];
-        let new_dir = new_path.strip_suffix(rest)?.strip_suffix('/')?;
-        if new_dir.is_empty() {
-            return None;
+/// The addresses a unit has queued giving up.
+fn removals<R: Remote>(unit: &Unit<R>) -> impl Iterator<Item = String> + '_ {
+    unit.state.public_ops.iter().filter(|(_, op)| matches!(op, PublicOp::Remove)).map(|(slug, _)| slug.clone())
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Pair each file that vanished from one unit with the same file appearing
+/// in another: same content, same name. That is a move between sections —
+/// made in the sidebar, in Finder, by dropping a folder into `Restricted/` —
+/// and not a deletion and a new file.
+fn pair_moves(surveys: &BTreeMap<String, Survey>) -> Vec<CrossMove> {
+    let mut moves = Vec::new();
+    let mut taken: HashSet<(&str, &str)> = HashSet::new();
+    for (from, survey) in surveys {
+        for (fid, hash, path) in &survey.vanished {
+            let name = file_name(path);
+            let arrival = surveys
+                .iter()
+                .filter(|(to, _)| *to != from)
+                .flat_map(|(to, other)| other.news.iter().map(move |(new_path, new_hash)| (to, new_path, new_hash)))
+                .find(|(to, new_path, new_hash)| {
+                    *new_hash == hash
+                        && file_name(new_path).eq_ignore_ascii_case(name)
+                        && !taken.contains(&(to.as_str(), new_path.as_str()))
+                });
+            if let Some((to, new_path, _)) = arrival {
+                taken.insert((to.as_str(), new_path.as_str()));
+                moves.push(CrossMove {
+                    from: from.clone(),
+                    fid: fid.clone(),
+                    to: to.clone(),
+                    path: new_path.clone(),
+                    hash: hash.clone(),
+                });
+            }
         }
+    }
+    moves
+}
+
+/// Where folder `dir` of a unit went, if every file its manifest held under
+/// it moved to one folder of one other unit: that unit, and the folder there
+/// (`""` when the folder became the unit's own root).
+fn folder_went(dir: &str, manifest: &Manifest, out: &HashMap<&str, (&str, &str)>) -> Option<(String, String)> {
+    let prefix = format!("{}/", dir);
+    let mut target: Option<(String, String)> = None;
+    for (fid, file) in manifest.files.iter().filter(|(_, f)| f.path.starts_with(&prefix)) {
+        let (to, new_path) = out.get(fid.as_str())?; // not every file moved → the page stays
+        let rest = &file.path[prefix.len()..];
+        let new_dir = if *new_path == rest { "" } else { new_path.strip_suffix(rest)?.strip_suffix('/')? };
         match &target {
-            None => target = Some(new_dir.to_string()),
-            Some(t) if t == new_dir => {}
+            None => target = Some((to.to_string(), new_dir.to_string())),
+            Some((t, d)) if t == to && d == new_dir => {}
             Some(_) => return None,
         }
     }
-    if held == 0 {
-        return None;
-    }
-    target.filter(|t| t != dir)
+    target
 }
 
-/// The entry a pending op produces, keeping what an update shouldn't reset
-/// (`root`, `at`, `by`) from the page it updates.
-fn merged_entry(p: &PendingPublic, file: Option<String>, prev: Option<PublicEntry>) -> PublicEntry {
-    let (title, desc) = match &prev {
-        Some(e) => (
-            match &p.title {
-                Some(t) => Some(t.clone()),
-                None => e.title.clone(),
-            },
-            match &p.desc {
-                Some(d) => Some(d.clone()),
-                None => e.desc.clone(),
-            },
-        ),
-        None => (p.title.clone(), p.desc.clone()),
+/// What became of a file another Mac moved into `dest`, a section this Mac
+/// is in.
+enum Received {
+    /// The section already has it, or will download it: this Mac's copy from
+    /// the old section is gone.
+    Dropped,
+    /// This Mac's copy is at this path of the section now.
+    Placed(String),
+    /// An edit made here could not carry on in the moved file, and is beside
+    /// it as a conflict copy.
+    Beside { path: String, copy: String },
+}
+
+/// Bring this Mac's copy of a file that moved to `dest` into `dest`'s
+/// folder. `bytes` is the copy at `from`, `synced` the hash it last synced
+/// at in the section it left, `base` those synced bytes.
+///
+/// The file as `dest` holds it is found by name and content. An untouched
+/// copy takes its place, to be adopted by its hash with nothing downloaded.
+/// A copy edited here since carries on as an edit of the moved file when it
+/// was edited from exactly what `dest` holds; anything else lands beside it,
+/// so no edit is lost and none is pushed over somebody's work.
+fn receive<R: Remote>(
+    dest: &mut Unit<R>,
+    from: &Path,
+    bytes: &[u8],
+    synced: &str,
+    base: Option<&[u8]>,
+    who: &str,
+) -> Received {
+    let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let now = hash16(bytes);
+    let clean = now == synced;
+    let rel_of = |dest: &Unit<R>, abs: &Path| rel_path(&dest.root, abs).unwrap_or_default();
+    let land = |to: &Path| {
+        if let Some(parent) = to.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::rename(from, to).is_ok()
     };
-    PublicEntry {
-        kind: p.kind,
-        file: match p.kind {
-            PublicKind::File => file,
-            PublicKind::Dir => None,
-        },
-        path: p.path.clone(),
-        title,
-        desc,
-        root: prev.as_ref().map(|e| e.root).unwrap_or(false),
-        by: prev.as_ref().map(|e| e.by.clone()).unwrap_or_else(|| p.by.clone()),
-        at: prev.as_ref().map(|e| e.at).unwrap_or(p.at),
-    }
-}
+    let candidate = dest
+        .view()
+        .files
+        .iter()
+        .filter(|(_, f)| file_name(&f.path).eq_ignore_ascii_case(&name))
+        .max_by_key(|(_, f)| (f.hash == synced) as u8 * 2 + (f.hash == now) as u8)
+        .map(|(fid, f)| (fid.clone(), f.clone()));
 
-fn describe(e: &PublicEntry) -> String {
-    match e.kind {
-        PublicKind::File => e.path.clone(),
-        PublicKind::Dir if e.path.is_empty() => "the workspace".to_string(),
-        PublicKind::Dir => format!("the folder {}", e.path),
+    let Some((fid, theirs)) = candidate else {
+        if clean {
+            let _ = std::fs::remove_file(from);
+            return Received::Dropped;
+        }
+        // An edit with nothing to carry on in: it arrives as a document.
+        let wanted = dest.root.join(&name);
+        let to = if wanted.exists() { conflict_copy_path(&wanted, who) } else { wanted };
+        if !land(&to) {
+            return Received::Dropped;
+        }
+        dest.poke = true;
+        return Received::Placed(rel_of(dest, &to));
+    };
+
+    let target = dest.root.join(&theirs.path);
+    let there = read_file_checked(&target);
+    if clean || now == theirs.hash {
+        if there.is_some() {
+            let _ = std::fs::remove_file(from);
+            return Received::Dropped;
+        }
+        if !land(&target) {
+            return Received::Dropped;
+        }
+        dest.poke = true;
+        return Received::Placed(theirs.path);
     }
+    let untouched_there = there.as_ref().map(|t| hash16(t) == theirs.hash).unwrap_or(true);
+    if synced == theirs.hash && untouched_there {
+        if !land(&target) {
+            return Received::Dropped;
+        }
+        dest.plant(&fid, &theirs, base);
+        return Received::Placed(theirs.path);
+    }
+    let copy = conflict_copy_path(&target, who);
+    if !land(&copy) {
+        return Received::Dropped;
+    }
+    dest.poke = true;
+    Received::Beside { path: theirs.path, copy: rel_of(dest, &copy) }
 }

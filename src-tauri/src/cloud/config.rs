@@ -39,6 +39,15 @@ pub struct WorkspaceEntry {
     pub ws_id: String,
     pub name: String,
     pub token: String,
+    /// This Mac holds the domain's own token: it made the workspace (or is
+    /// another Mac of whoever did). Learned from the domain — `/api/meta`
+    /// says so — and written down the first time it does, because it decides
+    /// one thing that must not wait for the domain to be asked again: such a
+    /// Mac never deletes its folder on a `removed` answer. An entry from
+    /// before the field existed reads as `false` until
+    /// its engine's first probe.
+    #[serde(default)]
+    pub creator: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

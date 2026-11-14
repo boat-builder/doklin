@@ -1,28 +1,34 @@
 // The setup wizard. Three entrances:
 //
-//   connect  the open folder goes to a fresh domain: name it, choose where
-//            it lives (a domain of your own or a free workers.dev address),
-//            copy the prompt (it carries the token this app just minted),
-//            paste the endpoint the agent printed, probe, connect & upload;
-//   join     open a workspace another Mac already connected: endpoint and
-//            token from that Mac's Cloud panel, probe, download it here;
-//   redeem   somebody invited you: paste the line they sent, trade the code
-//            for a credential of this Mac's own, then download it here.
+//   connect  create a workspace: the open folder goes to a fresh domain —
+//            name it, choose where it lives (a domain of your own or a free
+//            workers.dev address), copy the prompt (it carries the token this
+//            app just minted), paste the endpoint the agent printed, probe,
+//            connect & upload;
+//   redeem   join a workspace somebody invited you to: paste the line they
+//            sent and click Join. The code is traded for a credential of this
+//            Mac's own, the workspace downloads, and it opens;
+//   join     another Mac of the creator's: the endpoint and the domain's own
+//            token from that Mac's Cloud panel, probe, download it here.
+//
+// A workspace this Mac joins is never asked where it should go: it lands in
+// ~/Doklin/<its name>, a folder of its own (the engine picks it —
+// `cloud_join`), and opens as soon as it is down.
 //
 // Redeem runs the entrance backwards, and has to: /api/meta is inside the
 // worker's auth gate, so an invitee cannot ask the domain anything until the
-// redeem has minted them a token. Once it has, the rest is the join — the
-// same probe, the same download, the same engine.
+// redeem has minted them a token. A code works once, so a download that fails
+// after it has been spent keeps the credential and offers the download again
+// — never another redeem.
 //
-// The probe decides what the domain is, and the wizard says so in words:
-// fresh → "Connect & upload"; already holding a workspace → "Download it
-// here", plus "Resume syncing this folder" when the open folder carries
-// that workspace's marker (a reinstall, a restore from a backup). There is
-// no "bind anyway": a domain holds one workspace.
+// For the other two the probe decides what the domain is, and the wizard says
+// so in words: fresh → "Connect & upload"; already holding a workspace →
+// "Download it", plus "Resume syncing this folder" when the open folder
+// carries that workspace's marker (a reinstall, a restore from a backup).
+// There is no "bind anyway": a domain holds one workspace.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { useDismiss } from "./dismiss";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   BUNDLED_WORKER_VERSION,
   WORKER_COMPATIBILITY_DATE,
@@ -102,15 +108,16 @@ export default function CloudSetup({
   const [probed, setProbed] = useState<Probed | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [work, setWork] = useState<Work | null>(null);
+  // A connect or a resume ends on a card that says so; a download just opens.
   const [done, setDone] = useState<{ root: string; how: CloudSetupOutcome } | null>(null);
   const [copied, setCopied] = useState(false);
-  // Redeem only: the code as typed or pasted, and who the domain says you
-  // are once it has been spent. `member` set is what says this Mac already
-  // holds a credential — the code cannot be traded twice, so nothing after
-  // that point may offer to trade it again.
+  // Redeem only: the code as typed or pasted, and what trading it in came to.
+  // `joined` set is what says this Mac already holds a credential — the code
+  // cannot be traded twice, so nothing after that point may offer to trade it
+  // again, only to download with what it bought.
   const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
-  const [member, setMember] = useState<{ email: string; name: string } | null>(null);
+  const [joined, setJoined] = useState<{ endpoint: string; token: string; name: string } | null>(null);
 
   // Nothing closes while a step is running.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -203,30 +210,48 @@ export default function CloudSetup({
   );
   const probe = useCallback(() => probeWith(endpoint, token), [probeWith, endpoint, token]);
 
+  /** Download the workspace at `at` into its own folder under ~/Doklin and
+   *  open it. Shared by both doors that end in a download. */
+  const download = useCallback(
+    async (at: string, bearer: string) => {
+      setError(null);
+      setWork({ how: "join", progress: null });
+      try {
+        onConnected(await cloudJoin(at, bearer), "join");
+      } catch (e) {
+        setError(errText(e));
+      } finally {
+        setWork(null);
+      }
+    },
+    [onConnected],
+  );
+
   /**
-   * Trade the code for this Mac's own credential, then probe with it.
+   * Join: trade the code for this Mac's own credential, then download with it.
    *
    * The two calls are deliberately separate: the code is spent the moment
-   * the redeem answers, so a probe that fails afterwards must leave the
-   * credential in hand and offer another look — never another redeem.
+   * the redeem answers, so a download that fails afterwards must leave the
+   * credential in hand and offer the download again — never another redeem.
    */
   const redeem = useCallback(async () => {
     setError(null);
-    setProbed(null);
     setRedeeming(true);
+    let got: { endpoint: string; token: string; name: string };
     try {
       const r = await cloudRedeem(endpoint, code);
-      setToken(r.token);
+      got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
+      setJoined(got);
       setEndpointInput(r.endpoint);
       setEndpointTouched(true);
-      setMember({ email: r.email, name: r.name });
-      await probeWith(r.endpoint, r.token);
     } catch (e) {
       setError(errText(e));
+      return;
     } finally {
       setRedeeming(false);
     }
-  }, [endpoint, code, probeWith]);
+    await download(got.endpoint, got.token);
+  }, [endpoint, code, download]);
 
   /** One paste fills both boxes: the line as it was sent, the whole message
    *  around it, or one half on its own — whatever the engine can find in it. */
@@ -284,21 +309,6 @@ export default function CloudSetup({
       return root;
     });
   };
-  const download = async () => {
-    if (!probed) return;
-    let parent: string | null = null;
-    try {
-      const chosen = await openDialog({ directory: true, multiple: false, title: "Download the workspace into…" });
-      if (typeof chosen === "string") parent = chosen;
-    } catch (e) {
-      setError(errText(e));
-      return;
-    }
-    if (!parent) return;
-    const dest = parent;
-    void run("join", () => cloudJoin(probed.endpoint, token, dest));
-  };
-
   /* ---------- pieces ---------- */
 
   const workspace = probed?.result.workspace ?? null;
@@ -332,7 +342,7 @@ export default function CloudSetup({
           <p className="cloud-hint">
             Created on {workspace.createdBy.deviceName}
             {createdAgo(workspace.createdAt)}. A domain holds one workspace — download that one
-            here{markerMatches ? ", or resume syncing this folder, which is that workspace" : ""}.
+            to this Mac{markerMatches ? ", or resume syncing this folder, which is that workspace" : ""}.
           </p>
         </>
       ) : (
@@ -366,8 +376,12 @@ export default function CloudSetup({
             </button>
           )}
           {workspace && (
-            <button className="modal-btn is-primary" onClick={() => void download()} data-testid="download-here">
-              Download it here…
+            <button
+              className="modal-btn is-primary"
+              onClick={() => void download(probed.endpoint, token)}
+              data-testid="download-here"
+            >
+              Download it
             </button>
           )}
           {workspace && markerMatches && (
@@ -382,9 +396,7 @@ export default function CloudSetup({
 
   const doneBlock = done && (
     <div className="cloud-card cloud-card--ok" data-testid="setup-done">
-      <div className="cloud-card-title">
-        {done.how === "join" ? "Downloaded — syncing" : "Syncing"}
-      </div>
+      <div className="cloud-card-title">Syncing</div>
       <p className="cloud-hint">
         {basename(done.root)} and {probeDomain(probed?.endpoint ?? endpoint)} stay in step from
         now on. The dot beside the workspace name shows the sync at a glance; the gear’s Cloud…
@@ -392,7 +404,7 @@ export default function CloudSetup({
       </p>
       <div className="modal-buttons">
         <button className="modal-btn is-primary" onClick={() => onConnected(done.root, done.how)}>
-          {done.how === "join" ? "Open the folder" : "Done"}
+          Done
         </button>
       </div>
     </div>
@@ -464,12 +476,11 @@ export default function CloudSetup({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          disabled={!!member}
+          disabled={!!joined || redeeming}
           onPaste={pasteInvite("endpoint")}
           onChange={(e) => {
             setEndpointInput(e.target.value);
             setEndpointTouched(true);
-            setProbed(null);
           }}
         />
       </div>
@@ -483,36 +494,51 @@ export default function CloudSetup({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          disabled={!!member}
+          disabled={!!joined || redeeming}
           onPaste={pasteInvite("code")}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && endpoint && code && !redeeming && !member) void redeem();
+            if (e.key === "Enter" && endpoint && code && !redeeming && !joined) void redeem();
           }}
         />
       </div>
-      {member ? (
-        <p className="cloud-hint" data-testid="redeemed-as">
-          You’re in as {member.name || member.email} — the code is spent, and this Mac has a
-          credential of its own. Finish the download here: a code works once, so closing now
-          would mean asking for a fresh invite.
-        </p>
+      {work ? (
+        <div className="cloud-progress" role="progressbar" aria-label={progressLine ?? "Working"}>
+          <div className="cloud-progress-text" data-testid="join-progress">
+            {progressLine}
+          </div>
+          {work.progress && work.progress.total > 0 && (
+            <div className="cloud-progress-bar">
+              <span style={{ width: `${Math.round((100 * work.progress.done) / work.progress.total)}%` }} />
+            </div>
+          )}
+        </div>
+      ) : joined ? (
+        <>
+          <p className="cloud-hint" data-testid="redeemed-as">
+            You’re in as {joined.name} — the code is spent, and this Mac has a credential of its
+            own. The download didn’t finish; try it again here. A code works once, so closing now
+            would mean asking for a fresh invite.
+          </p>
+          <div className="modal-buttons">
+            <button
+              className="modal-btn is-primary"
+              data-testid="download-again"
+              onClick={() => void download(joined.endpoint, joined.token)}
+            >
+              Download again
+            </button>
+          </div>
+        </>
       ) : (
         <div className="modal-buttons">
           <button
             className="modal-btn is-primary"
             data-testid="redeem-button"
-            disabled={!endpoint || !code || redeeming || !!work}
+            disabled={!endpoint || !code || redeeming}
             onClick={() => void redeem()}
           >
             {redeeming ? "Joining…" : "Join"}
-          </button>
-        </div>
-      )}
-      {member && !probed && !probing && (
-        <div className="modal-buttons">
-          <button className="modal-btn is-primary" data-testid="probe-button" onClick={() => void probe()}>
-            Check again
           </button>
         </div>
       )}
@@ -541,9 +567,9 @@ export default function CloudSetup({
               <li className="cloud-step">
                 <div className="cloud-step-title">Name it, and say where it will live</div>
                 <div className="cloud-step-note">
-                  The name is what other Macs and the landing page see. The domain is where the
-                  worker answers — a subdomain of one you already use with Cloudflare, or a free
-                  address Cloudflare hands out.
+                  The name is what everyone you invite sees, and the landing page. A workspace
+                  lives at a domain — a subdomain of one you already use with Cloudflare, or a free
+                  address Cloudflare hands out — and this folder becomes what is in it.
                 </div>
                 <div className="modal-field">
                   <div className="modal-field-label">Workspace name</div>
@@ -653,35 +679,35 @@ export default function CloudSetup({
                 {doneBlock}
               </li>
             </ol>
+          ) : mode === "redeem" ? (
+            <ol className="cloud-steps">
+              <li className="cloud-step">
+                <div className="cloud-step-title">Paste the invite</div>
+                <div className="cloud-step-note">
+                  One line from whoever invited you — the address and the code together. Paste it
+                  into either box and both fill in. The workspace downloads to a folder of its own
+                  in <code>~/Doklin</code> and opens; from then on it stays in step with everyone
+                  else’s.
+                </div>
+                {redeemStep}
+              </li>
+            </ol>
           ) : (
             <ol className="cloud-steps">
-              {mode === "redeem" ? (
-                <li className="cloud-step">
-                  <div className="cloud-step-title">Paste the invite</div>
-                  <div className="cloud-step-note">
-                    One line from whoever invited you — the address and the code together. Paste it
-                    into either box and both fill in. The code works once, on this Mac, and the
-                    credential it hands back is yours alone: revoking it later costs nobody else
-                    anything.
-                  </div>
-                  {redeemStep}
-                </li>
-              ) : (
-                <li className="cloud-step">
-                  <div className="cloud-step-title">Where is it?</div>
-                  <div className="cloud-step-note">
-                    On the Mac that has the workspace: the gear → Cloud… → Connect another Mac
-                    shows both. The token is that domain’s owner credential — keep it to Macs you
-                    own.
-                  </div>
-                  {endpointStep}
-                </li>
-              )}
+              <li className="cloud-step">
+                <div className="cloud-step-title">Where is it?</div>
+                <div className="cloud-step-note">
+                  On the Mac that has the workspace: the gear → Cloud… → Connect another Mac
+                  shows both. The token is that Mac’s own credential for the domain — keep it to
+                  Macs you own.
+                </div>
+                {endpointStep}
+              </li>
               <li className={`cloud-step ${probed ? "" : "is-waiting"}`}>
                 <div className="cloud-step-title">Download it</div>
                 <div className="cloud-step-note">
-                  Into a folder you pick: the workspace lands as a new folder named after it, and
-                  stays in step from then on.
+                  The workspace lands in a folder of its own in <code>~/Doklin</code>, named after
+                  it, opens, and stays in step from then on.
                   {root ? " A folder that already is that workspace can be resumed in place instead." : ""}
                 </div>
                 {outcome}
@@ -697,8 +723,8 @@ export default function CloudSetup({
 
 /** What the dialog calls itself, which is the door that was used. */
 function modalTitle(mode: CloudSetupMode): string {
-  if (mode === "connect") return "Connect a domain";
-  return mode === "redeem" ? "Join with an invite" : "Open a workspace from a domain";
+  if (mode === "connect") return "Create a workspace";
+  return mode === "redeem" ? "Join a workspace" : "Open a workspace from a domain";
 }
 
 /** The host of an endpoint, for prose. */

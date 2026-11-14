@@ -26,7 +26,7 @@
 // given a value its board has no place for. Views are the app's: an agent
 // gets the board's own grouping, and `by` to regroup.
 
-import { notBound, refuse, type Call } from "./agentCall";
+import { notBound, openTree, refuse, type Call } from "./agentCall";
 import { contentTypeOf, keepPublic, namesOf, ownPages } from "./agentDocs";
 import { cardHeads, splitCard } from "./boardCards";
 import { Refusal, commit, newFileId, type Committed, type Tx } from "./commit";
@@ -35,7 +35,7 @@ import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
 import { blobKey } from "./layout";
 import { mirrorAfter } from "./search";
-import { basename, dirOf, openWorkspace, stemOf } from "./workspace";
+import { basename, dirOf, stemOf } from "./workspace";
 import { META_SUFFIX, markerIds, parseEntityMeta } from "../../src/metaFile";
 import {
   applyFilter,
@@ -428,8 +428,9 @@ const inRankOrder = (cards: readonly Card[]): Card[] => sortByRank([...cards], c
 
 /* ---------- Reading ---------- */
 
-export async function getBoard({ env, url }: Call): Promise<Response> {
-  const ws = await openWorkspace(env);
+export async function getBoard(c: Call): Promise<Response> {
+  const { env, url } = c;
+  const ws = await openTree(c);
   if (!ws) return notBound();
   const at = boardIn(new Index(ws.manifest.files), url.searchParams.get("path"));
   if (at instanceof Refusal) return refuse(at);
@@ -445,8 +446,9 @@ export async function getBoard({ env, url }: Call): Promise<Response> {
   });
 }
 
-export async function getCards({ env, url }: Call): Promise<Response> {
-  const ws = await openWorkspace(env);
+export async function getCards(c: Call): Promise<Response> {
+  const { env, url } = c;
+  const ws = await openTree(c);
   if (!ws) return notBound();
   const at = boardIn(new Index(ws.manifest.files), url.searchParams.get("path"));
   if (at instanceof Refusal) return refuse(at);
@@ -515,8 +517,9 @@ function cardNamed(at: BoardAt, typed: unknown): Entry | Refusal {
   return hits.find((e) => titleOf(e) === want) ?? hits[0];
 }
 
-export async function getCard({ env, url }: Call): Promise<Response> {
-  const ws = await openWorkspace(env);
+export async function getCard(c: Call): Promise<Response> {
+  const { env, url } = c;
+  const ws = await openTree(c);
   if (!ws) return notBound();
   const index = new Index(ws.manifest.files);
   const at = boardIn(index, url.searchParams.get("path"));
@@ -563,7 +566,7 @@ async function change(
   fn: (tx: Tx, index: Index) => Promise<Record<string, unknown> | Refusal>,
   status: (value: Record<string, unknown>, done: Committed<Record<string, unknown>>) => number = () => 200,
 ): Promise<Response> {
-  const done = await commit(c.env, c.who.id, (tx) => fn(tx, new Index(tx.files)), { dryRun });
+  const done = await commit(c.env, c.who.id, (tx) => fn(tx, new Index(tx.files)), { dryRun, mount: c.mount });
   if (done instanceof Refusal) return refused(done);
   await mirrorAfter(c, done);
   return json({ ...done.value, ...(done.wrote || dryRun ? {} : { changed: false }) }, status(done.value, done));

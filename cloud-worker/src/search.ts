@@ -10,7 +10,12 @@
 // that match — at most `limit` of them — are then read from the bucket to cut
 // the matching lines.
 //
-// The mirror is derived and lazy:
+// There is one mirror per section — the shared workspace's, and one for each
+// space — so a search scans the text of the sections its agent's person can
+// see and of no other. Searching the workspace itself covers every one of
+// them, up to what a request can open (`sectionsNotSearched` names the rest).
+//
+// A mirror is derived and lazy:
 //
 //   · `search_state.held` records, for every row, the content hashes it was
 //     read from. Comparing it with the manifest says what is stale in one
@@ -28,9 +33,10 @@
 // It is the database or nothing: a domain without one answers 503 to a search
 // and loses nothing else.
 
-import type { Call } from "./agentCall";
+import { refuse, type Call } from "./agentCall";
+import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
 import { splitCard } from "./boardCards";
-import type { Committed } from "./commit";
+import { Refusal, type Committed } from "./commit";
 import { Index, nameOf, pathProblem, type Entry } from "./documents";
 import type { Env } from "./env";
 import { json } from "./http";
@@ -38,7 +44,8 @@ import { textOf } from "./htmlText";
 import { blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { ensureSchema } from "./schema";
-import { dirOf, isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
+import { spaceOf } from "./spaces";
+import { dirOf, isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
 
@@ -56,6 +63,9 @@ const MAX_LIMIT = 30;
 const MAX_LINES = 5;
 const LINE_PREVIEW = 200;
 const READ_CONCURRENCY = 6;
+/** Reads of the bucket one search makes at most, of the fifty a request may:
+ *  opening its sections, catching up, and cutting lines. */
+const SEARCH_READS = 44;
 
 type Held = Record<string, string>;
 type State = { etag: string; held: Held };
@@ -115,23 +125,31 @@ function folded(path: string, text: string, metaText: string | null): string {
   return [said, ...bodies].join("\n").toLowerCase();
 }
 
-async function readState(db: D1Database): Promise<State | null> {
-  const row = await db.prepare("SELECT etag, held FROM search_state WHERE key = 'mirror'").first<{ etag: string; held: string }>();
-  if (!row) return null;
+const readHeld = (etag: string, raw: string): State => {
   try {
-    const held: unknown = JSON.parse(row.held);
-    if (held !== null && typeof held === "object" && !Array.isArray(held)) return { etag: row.etag, held: held as Held };
+    const held: unknown = JSON.parse(raw);
+    if (held !== null && typeof held === "object" && !Array.isArray(held)) return { etag, held: held as Held };
   } catch {
     // an unreadable map is an empty mirror: everything is read again
   }
   return { etag: "", held: {} };
+};
+
+/** Where each of these spaces' mirrors is; a space nobody has searched has
+ *  no entry. */
+async function readStates(db: D1Database, spaces: readonly string[]): Promise<Map<string, State>> {
+  const { results } = await db
+    .prepare(`SELECT space_id, etag, held FROM search_state WHERE space_id IN (${spaces.map(() => "?").join(",")})`)
+    .bind(...spaces)
+    .all<{ space_id: string; etag: string; held: string }>();
+  return new Map(results.map((r) => [r.space_id, readHeld(r.etag, r.held)]));
 }
 
 /**
- * Bring the mirror towards the manifest: read what is stale, drop what is
- * gone, and record what the rows now hold — in one batch, so a row and the
- * record of it never disagree. Answers how many documents are still stale
- * and how many blobs this round read.
+ * Bring the mirror of the space `env` is scoped to towards its manifest:
+ * read what is stale, drop what is gone, and record what the rows now hold —
+ * in one batch, so a row and the record of it never disagree. Answers how
+ * many documents are still stale and how many blobs this round read.
  */
 async function catchUp(
   env: Env,
@@ -141,15 +159,21 @@ async function catchUp(
   state: State,
   maxReads: number,
 ): Promise<{ pending: number; reads: number }> {
+  const space = spaceOf(env);
   const want = searchable(m);
   const stale = [...want].filter(([fid, w]) => state.held[fid] !== w.signature);
   const dead = Object.keys(state.held).filter((fid) => !want.has(fid));
   if (stale.length === 0 && dead.length === 0) {
     if (state.etag !== etag) {
-      await db.prepare("UPDATE search_state SET etag = ? WHERE key = 'mirror'").bind(etag).run();
+      await db
+        .prepare("INSERT OR REPLACE INTO search_state (space_id, etag, held) VALUES (?, ?, ?)")
+        .bind(space, etag, JSON.stringify(state.held))
+        .run();
     }
     return { pending: 0, reads: 0 };
   }
+  // This request has read what it can: the next one goes on from here.
+  if (stale.length > 0 && maxReads <= 0) return { pending: stale.length, reads: 0 };
 
   // As many as this round's budget allows — and always one, however large.
   const round: [string, Searchable][] = [];
@@ -184,26 +208,31 @@ async function catchUp(
       continue;
     }
     held[row.fid] = row.w.signature;
-    statements.push(db.prepare("INSERT OR REPLACE INTO search_text (fid, folded) VALUES (?, ?)").bind(row.fid, row.text));
+    statements.push(
+      db.prepare("INSERT OR REPLACE INTO search_text (space_id, fid, folded) VALUES (?, ?, ?)").bind(space, row.fid, row.text),
+    );
   }
   for (let i = 0; i < dead.length; i += 50) {
     const chunk = dead.slice(i, i + 50);
-    statements.push(db.prepare(`DELETE FROM search_text WHERE fid IN (${chunk.map(() => "?").join(",")})`).bind(...chunk));
+    statements.push(
+      db.prepare(`DELETE FROM search_text WHERE space_id = ? AND fid IN (${chunk.map(() => "?").join(",")})`).bind(space, ...chunk),
+    );
   }
   const pending = stale.length - round.length + missed;
   statements.push(
     db
-      .prepare("INSERT OR REPLACE INTO search_state (key, etag, held) VALUES ('mirror', ?, ?)")
-      .bind(pending === 0 ? etag : "", JSON.stringify(held)),
+      .prepare("INSERT OR REPLACE INTO search_state (space_id, etag, held) VALUES (?, ?, ?)")
+      .bind(space, pending === 0 ? etag : "", JSON.stringify(held)),
   );
   await db.batch(statements);
   return { pending, reads };
 }
 
 /**
- * After a change made through the document API: catch the mirror up to the
- * manifest that change just stored — when there is a mirror. Runs after the
- * response where the runtime allows it, and never fails the change it follows.
+ * After a change made through the document API: catch the mirror of the
+ * section it was made in up to the manifest that change just stored — when
+ * there is a mirror. Runs after the response where the runtime allows it,
+ * and never fails the change it follows.
  */
 export async function mirrorAfter(c: Pick<Call, "env" | "ctx">, done: Committed<unknown>): Promise<void> {
   if (!done.wrote) return;
@@ -212,8 +241,8 @@ export async function mirrorAfter(c: Pick<Call, "env" | "ctx">, done: Committed<
     if (!db) return;
     try {
       if ((await ensureSchema(c.env)) == null) return;
-      const state = await readState(db);
-      if (!state) return; // nobody has searched: there is no mirror to keep
+      const state = (await readStates(db, [spaceOf(c.env)])).get(spaceOf(c.env));
+      if (!state) return; // nobody has searched here: there is no mirror to keep
       await catchUp(c.env, db, done.etag, done.manifest, state, INLINE_READS);
     } catch {
       // the next search catches up instead
@@ -241,8 +270,11 @@ function matchingLines(path: string, text: string, needle: string): { matches: M
   return { matches, total };
 }
 
+/** A path in a section, as its person names it. */
+const under = (mount: string, path: string): string => (mount ? `${mount}/${path}` : path);
+
 export async function getSearch(c: Call): Promise<Response> {
-  const { env, url } = c;
+  const { env, url, places } = c;
   const query = (url.searchParams.get("q") ?? "").trim();
   if (query === "") return json({ error: "say what to search for" }, 400);
   if (/[\r\n]/.test(query)) return json({ error: "search for text within one line" }, 400);
@@ -254,50 +286,85 @@ export async function getSearch(c: Call): Promise<Response> {
   }
   const asked = Number(url.searchParams.get("limit") ?? DEFAULT_LIMIT);
   const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, MAX_LIMIT) : DEFAULT_LIMIT;
-
-  const ws = await openWorkspace(env);
-  if (!ws) return json({ error: "this domain holds no workspace yet" }, 404);
-  const db = env.DB;
   const unavailable = (): Response => json({ error: "search needs this domain's database — update the worker" }, 503);
+
+  // A folder is in one section. The workspace itself is all of them, and
+  // `Restricted` every restricted folder.
+  const at = dir === "" ? null : await places.at(dir);
+  if (at instanceof Refusal) return refuse(at);
+  let sections: Section[];
+  if (at && at !== "restricted") {
+    sections = [at];
+  } else {
+    const all = await places.all();
+    if (all === null) return unavailable();
+    sections = at === "restricted" ? all.filter((s) => s.kind === "restricted") : all;
+  }
+  const covered = sections.slice(0, 1 + MAX_SECTIONS_READ);
+  const left = sections.slice(covered.length).map((s) => s.mount);
+
+  const open: { section: Section; ws: Workspace; want: Map<string, Searchable> }[] = [];
+  for (const section of covered) {
+    const ws = await openWorkspace(section.env);
+    if (ws) open.push({ section, ws, want: searchable(ws.manifest) });
+    else if (section.space === "") return json({ error: "this domain holds no workspace yet" }, 404);
+  }
+  const db = env.DB;
   if (!db) return unavailable();
 
-  let rows: { fid: string; big: number }[];
+  let spent = 2 * open.length;
+  let rows: { space_id: string; fid: string; big: number }[] = [];
   try {
     if ((await ensureSchema(env)) == null) return unavailable();
-    const state = (await readState(db)) ?? { etag: "", held: {} };
-    if (state.etag !== ws.etag) {
-      const { pending, reads } = await catchUp(env, db, ws.etag, ws.manifest, state, CATCH_UP_READS);
+    if (open.length > 0) {
+      const states = await readStates(db, open.map((o) => o.section.space));
+      let pending = 0;
+      let reads = 0;
+      for (const { section, ws } of open) {
+        const state = states.get(section.space) ?? { etag: "", held: {} };
+        if (state.etag === ws.etag) continue;
+        const round = await catchUp(section.env, db, ws.etag, ws.manifest, state, CATCH_UP_READS - reads);
+        pending += round.pending;
+        reads += round.reads;
+      }
       // A round that read more than a handful has used this request's
       // budget; the lines are cut on the next one.
       if (pending > 0 || reads > INLINE_READS) return json({ indexing: true, pending }, 202);
+      spent += reads;
+      const found = await db
+        .prepare(
+          `SELECT space_id, fid, folded IS NULL AS big FROM search_text
+            WHERE space_id IN (${open.map(() => "?").join(",")}) AND (folded IS NULL OR instr(folded, ?) > 0)`,
+        )
+        .bind(...open.map((o) => o.section.space), needle)
+        .all<{ space_id: string; fid: string; big: number }>();
+      rows = found.results;
     }
-    const found = await db
-      .prepare("SELECT fid, folded IS NULL AS big FROM search_text WHERE folded IS NULL OR instr(folded, ?) > 0")
-      .bind(needle)
-      .all<{ fid: string; big: number }>();
-    rows = found.results;
   } catch {
     return unavailable();
   }
 
-  const want = searchable(ws.manifest);
+  const bySpace = new Map(open.map((o) => [o.section.space, o]));
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const inDir = rows
-    .map((r) => ({ big: Number(r.big) !== 0, doc: want.get(r.fid) }))
-    .filter((r): r is { big: boolean; doc: Searchable } => r.doc !== undefined && r.doc.text.file.path.toLowerCase().startsWith(prefix))
-    .sort((a, b) => a.doc.text.file.path.localeCompare(b.doc.text.file.path, undefined, { sensitivity: "base" }));
+    .map((r) => {
+      const from = bySpace.get(r.space_id);
+      const doc = from?.want.get(r.fid);
+      return from && doc ? { big: Number(r.big) !== 0, doc, section: from.section, path: under(from.section.mount, doc.text.file.path) } : null;
+    })
+    .filter((r): r is { big: boolean; doc: Searchable; section: Section; path: string } => r !== null && r.path.toLowerCase().startsWith(prefix))
+    .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
   const hits = inDir.filter((r) => !r.big);
-  const shown = hits.slice(0, limit);
+  const shown = hits.slice(0, Math.min(limit, Math.max(1, SEARCH_READS - spent)));
 
-  const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc }) => {
-    const path = doc.text.file.path;
-    const raw = await blobText(env, doc.text);
+  const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc, section, path }) => {
+    const raw = await blobText(section.env, doc.text);
     // A card's lines are its page's, numbered as `read` shows them.
     const text = raw !== null && doc.board ? splitCard(raw).page : raw;
     const { matches, total } = text === null ? { matches: [], total: 0 } : matchingLines(path, text, needle);
     return {
       path: nameOf(path).stem,
-      ...(doc.board ? { board: doc.board } : {}),
+      ...(doc.board ? { board: under(section.mount, doc.board) } : {}),
       version: isMarkdownPath(path) ? "md" : "html",
       matches,
       ...(total > matches.length ? { moreLines: total - matches.length } : {}),
@@ -313,6 +380,8 @@ export async function getSearch(c: Call): Promise<Response> {
     total: hits.length,
     ...(hits.length > shown.length ? { truncated: true } : {}),
     // Too large to mirror — said, rather than silently never found.
-    ...(inDir.some((r) => r.big) ? { notSearched: inDir.filter((r) => r.big).map((r) => nameOf(r.doc.text.file.path).stem) } : {}),
+    ...(inDir.some((r) => r.big) ? { notSearched: inDir.filter((r) => r.big).map((r) => nameOf(r.path).stem) } : {}),
+    // More sections than one request opens: search inside one of these.
+    ...(left.length > 0 ? { sectionsNotSearched: left } : {}),
   });
 }

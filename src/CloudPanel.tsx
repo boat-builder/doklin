@@ -3,16 +3,17 @@
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
 //
-// Not connected: three doors — connect this folder to a domain, open a
-// workspace another Mac of yours connected, or join one somebody invited you
-// to with the line they sent. Connected: the domain and its phase,
-// sync now / pause, who else is here, the people and the agents on the
-// workspace (one view with a tab each, CloudPeople.tsx — and a door each
-// here, so neither has to be found behind the other), the held
-// mass-deletion waiting for a word, the
-// worker's version against this app's, the credentials a second Mac needs,
-// disconnect, and the danger zone: erase everything on the domain (which
-// frees it), then the teardown prompt for the agent.
+// Not connected: three doors — join a workspace somebody invited you to with
+// the line they sent, create one from this folder on a domain of your own, or
+// open one another Mac of yours created. Connected: the workspace and its
+// phase, sync now / pause, who else is here, the held mass-deletion waiting
+// for a word, the worker's version against this app's, the credentials a
+// second Mac needs, disconnect, and the danger zone: erase everything on the
+// domain (which frees it), then the teardown prompt for the agent. Who is in
+// the workspace, and its agents, are the workspace menu's (PeopleDialog.tsx).
+//
+// What only an owner may do — the worker, the danger zone — is hidden from a
+// member by the same table the domain decides with (`mayOn`).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -23,6 +24,7 @@ import {
   cloudSyncNow,
   cloudToken,
   cloudWipe,
+  mayOn,
   phaseLine,
   versionsLine,
   timeAgo,
@@ -31,7 +33,6 @@ import {
   type CloudCredentials,
   type CloudStatus,
 } from "./cloud";
-import CloudPeople from "./CloudPeople";
 import { useDismiss } from "./dismiss";
 import { buildTeardownPrompt } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
@@ -57,8 +58,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
-// "people" and "agents" are one view — CloudPeople, on that tab.
-type View = "main" | "people" | "agents" | "another" | "wipe" | "teardown";
+type View = "main" | "another" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
@@ -174,15 +174,13 @@ export default function CloudPanel({
   }, [cloud]);
 
   const title =
-    view === "people" || view === "agents"
-      ? "People and agents"
-      : view === "another"
-        ? "Connect another Mac"
-        : view === "wipe"
-          ? `Delete everything on ${cloud?.domain ?? "the domain"}`
-          : view === "teardown"
-            ? "Tear down"
-            : "Cloud";
+    view === "another"
+      ? "Connect another Mac"
+      : view === "wipe"
+        ? `Delete everything on ${cloud?.domain ?? "the domain"}`
+        : view === "teardown"
+          ? "Tear down"
+          : "Cloud";
 
   let body: React.ReactNode;
   if (view === "teardown" && tornDown) {
@@ -220,51 +218,38 @@ export default function CloudPanel({
     body = (
       <>
         <p className="cloud-intro">
-          Sync this folder to a domain of your own — one Cloudflare Worker, one bucket and one
-          database on your account, set up by an agent from a prompt this app writes. Every Mac with the token
-          stays in step, and publishing a note is one click once it is there.
+          A workspace is a folder of notes everyone in it shares: each person works on a copy on
+          their own Mac, and the copies stay in step. It lives at a domain of your own — one
+          Cloudflare Worker, one bucket and one database on your account, set up by an agent from
+          a prompt this app writes — and publishing a note from it is one click.
         </p>
         <div className="cloud-doors">
-          <button
-            className="modal-btn is-primary"
-            data-testid="connect-domain"
-            disabled={!root}
-            onClick={onConnect}
-          >
-            Connect a domain
+          <button className="modal-btn is-primary" data-testid="join-with-invite" onClick={onRedeem}>
+            Join a workspace
+          </button>
+          <button className="modal-btn" data-testid="connect-domain" disabled={!root} onClick={onConnect}>
+            Create a workspace
           </button>
           <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
             Open a workspace from a domain
           </button>
-          <button className="modal-btn" data-testid="join-with-invite" onClick={onRedeem}>
-            Join with an invite
-          </button>
         </div>
-        {!root && <p className="cloud-hint">Open a folder first to connect it.</p>}
+        {!root && <p className="cloud-hint">Open a folder first to create a workspace from it.</p>}
         <p className="cloud-hint">
-          The second door is for another Mac of your own — it wants that domain’s token. The third
-          is for a workspace somebody else runs: paste the line they sent and this Mac gets a
-          credential of its own.
+          Joining is for a workspace somebody invited you to: paste the line they sent. Creating
+          one turns the open folder into a workspace you can invite people to. The third door is
+          for another Mac of your own — it wants the token from the Mac that created the
+          workspace.
         </p>
       </>
-    );
-  } else if ((view === "people" || view === "agents") && cloud) {
-    body = (
-      <CloudPeople
-        root={cloud.root}
-        domain={cloud.domain}
-        tab={view}
-        onTab={setView}
-        copy={(k, t) => void copy(k, t)}
-        copied={copied}
-      />
     );
   } else if (view === "another") {
     body = (
       <>
         <p className="cloud-hint">
           On the other Mac: the gear → Cloud… → Open a workspace from a domain, then paste these
-          two. It downloads “{cloud.name}” into a folder of its choosing and stays in step.
+          two. It downloads “{cloud.name}” into its own folder in <code>~/Doklin</code> and stays
+          in step.
         </p>
         <div className="modal-field">
           <div className="modal-field-label">Endpoint</div>
@@ -293,7 +278,8 @@ export default function CloudPanel({
         <p className="cloud-hint cloud-warn">
           This is the credential this Mac syncs with: whoever holds it can read and write everything
           on {cloud.domain}. Share it only with Macs you own — to let somebody <em>else</em> in,
-          invite them under People and they get a credential of their own, which you can take back.
+          invite them under People, in the workspace menu, and they get a credential of their own,
+          which you can take back.
         </p>
         {error && <div className="modal-error">{error}</div>}
       </>
@@ -344,6 +330,9 @@ export default function CloudPanel({
     const paused = cloud.phase === "paused";
     const others = cloud.presence;
     const pages = cloud.public.length;
+    // An owner's, hidden from a member — and offered while the domain has not
+    // said, which is every worker from before roles (`mayOn`).
+    const manages = mayOn(cloud, "workspace.manage");
     body = (
       <>
         <div className="cloud-head">
@@ -378,8 +367,9 @@ export default function CloudPanel({
         {cloud.phase === "error" && cloud.error && <div className="modal-error">{cloud.error}</div>}
         {cloud.phase === "revoked" && (
           <p className="cloud-hint cloud-warn">
-            {cloud.domain} rejected this Mac’s token. If the worker was redeployed with a new
-            token, disconnect and connect this folder again with it.
+            {cloud.domain} doesn’t accept this Mac’s token, so nothing syncs. Your files here are
+            untouched. If the worker was redeployed with a new token, disconnect and connect this
+            folder again with it; if you joined with an invite, ask an owner for a fresh one.
           </p>
         )}
         {cloud.phase === "offline" && (
@@ -427,12 +417,15 @@ export default function CloudPanel({
               {cloud.phase === "worker-outdated"
                 ? "This Mac’s changes are waiting on the update."
                 : "Sync still works; the update brings the worker up to what this app expects."}
+              {!manages && " Updating it is for whoever set the domain up — ask an owner."}
             </p>
-            <div className="modal-buttons">
-              <button className="modal-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
-                Update the worker
-              </button>
-            </div>
+            {manages && (
+              <div className="modal-buttons">
+                <button className="modal-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
+                  Update the worker
+                </button>
+              </div>
+            )}
           </div>
         )}
         {ahead && (
@@ -481,21 +474,6 @@ export default function CloudPanel({
             ))}
           </ul>
         )}
-        {/* Two doors into one view: a person and an agent are let in, and
-            shut out, in different ways, and each should be findable by name. */}
-        <div className="cloud-section-label">People and agents</div>
-        <div className="cloud-actions">
-          <button className="modal-btn" data-testid="people-open" onClick={() => setView("people")}>
-            People
-          </button>
-          <span className="cloud-hint">Invite someone by email, or take a Mac’s access away.</span>
-        </div>
-        <div className="cloud-actions">
-          <button className="modal-btn" data-testid="agents-open" onClick={() => setView("agents")}>
-            Agents
-          </button>
-          <span className="cloud-hint">Let a bot work here from another computer, and say what it may do.</span>
-        </div>
 
         <div className="cloud-section-label">Public</div>
         <div className="cloud-actions">
@@ -515,7 +493,7 @@ export default function CloudPanel({
               Version settings
             </button>
           )}
-          {!behind && (
+          {!behind && manages && (
             <button className="modal-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
               Update the worker
             </button>
@@ -542,20 +520,24 @@ export default function CloudPanel({
         </div>
         {error && <div className="modal-error">{error}</div>}
 
-        <div className="cloud-section-label cloud-danger-label">Danger zone</div>
-        <div className="cloud-actions">
-          <button
-            className="modal-btn is-danger-outline"
-            data-testid="wipe-open"
-            onClick={() => {
-              setWipeInput("");
-              setError(null);
-              setView("wipe");
-            }}
-          >
-            Delete everything on {cloud.domain}
-          </button>
-        </div>
+        {manages && (
+          <>
+            <div className="cloud-section-label cloud-danger-label">Danger zone</div>
+            <div className="cloud-actions">
+              <button
+                className="modal-btn is-danger-outline"
+                data-testid="wipe-open"
+                onClick={() => {
+                  setWipeInput("");
+                  setError(null);
+                  setView("wipe");
+                }}
+              >
+                Delete everything on {cloud.domain}
+              </button>
+            </div>
+          </>
+        )}
       </>
     );
   }

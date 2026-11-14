@@ -8,12 +8,17 @@
 //
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
-//     instead of colliding.
+//     instead of colliding. A table whose shape changes is dropped and made
+//     again, and only ever one that holds nothing worth keeping (step 8
+//     does). A table that does hold something gains a column instead, and
+//     only after the runner has looked and found it missing (`columns`).
 //   · A guarded bump. The version only ever moves with
 //     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
-//     the work done. A step that ever moves *data* must lean on that
-//     `changes == 1` rather than on its statements being repeatable.
+//     the work done. A statement that moves *data* cannot lean on being
+//     repeatable, so it carries the guard itself: it names the version it
+//     migrates from in its own WHERE (step 8's does), and moves nothing once
+//     the bump has landed.
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
 //
@@ -32,6 +37,9 @@ type Step = {
   to: number;
   /** The tables it creates — what a wipe empties. */
   tables: readonly string[];
+  /** Columns it adds to tables an earlier step made, each only when the
+   *  table does not have it yet. Added before `sql` runs. */
+  columns?: readonly { table: string; column: string; type: string }[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
 };
@@ -209,6 +217,129 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // A workspace with sections: roles, spaces, and agents that are a
+    // person's.
+    //
+    // Roles as data. Until here `members.role` was a label and a token
+    // always authenticated as a member; from here a token carries the role
+    // on its person's row, so there can be several owners, and two things
+    // that used to be implied need saying.
+    //
+    // `creator` says which person holds the domain's env secret. It used to
+    // be "the one row whose role is owner"; with several owners that no
+    // longer picks anybody out. One row or none — the CHECK is what makes a
+    // second creator impossible to write.
+    //
+    // `removed_tokens` remembers the credentials an owner took away, by the
+    // same sha256 `tokens` held them under. It is what lets the worker tell
+    // a Mac "your access was removed" — the one answer that has that Mac
+    // delete its copy of the workspace — apart from a token it has merely
+    // never heard of (a wiped domain, a rotated secret, a database that
+    // cannot answer), which deletes nothing.
+    //
+    // Spaces: a restricted folder, or one person's Private, is a small
+    // workspace of its own stored under `spaces/<id>/` in the bucket, with
+    // its own people. The shared workspace is not a row here — it is
+    // everything outside that prefix, and everybody's.
+    //
+    // `spaces.etag` is the space's manifest etag, written by the worker
+    // after each write it makes there: it is how one poll says which of a
+    // person's spaces moved without a bucket read for each.
+    //
+    // `addresses` says which space each public address belongs to ('' the
+    // shared workspace). The primary key is what makes an address one
+    // space's, and it is how the renderer finds a page that is not in the
+    // shared workspace's own map.
+    //
+    // Presence and leases are made again with the space each row is in:
+    // a lease is now one document in one space. Both hold only what the
+    // last minute and a half wrote, so dropping them costs a beat.
+    //
+    // An agent belongs to a person, and sees what that person sees.
+    // `agents.member_id` is whose it is. NULL is the creator's — whoever
+    // holds the domain's secret, whether or not they have said who they are
+    // — which is what every agent made before this step is, with nothing to
+    // move: the creator was the only one who could make them.
+    //
+    // The search mirror is kept once per space ('' the shared workspace), so
+    // a search reads only the text its caller's person may read. Both tables
+    // are derived: dropped here, and filled again by the next search.
+    to: 8,
+    tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
+    columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS creator (
+         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
+         member_id TEXT NOT NULL                        -- m-xxxxxxxx: who holds the env secret
+       )`,
+      // One-time move of stored data: before this step exactly one row could
+      // carry the owner role, and it was the creator's. Guarded by the
+      // version it migrates from, so an isolate that runs it after the bump
+      // — when somebody may already have been promoted — moves nothing.
+      `INSERT OR IGNORE INTO creator (id, member_id)
+         SELECT 1, id FROM members
+          WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8
+          ORDER BY created_at, id LIMIT 1`,
+      `CREATE TABLE IF NOT EXISTS removed_tokens (
+         hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
+         removed_at INTEGER NOT NULL
+       )`,
+      `CREATE TABLE IF NOT EXISTS spaces (
+         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
+         kind       TEXT NOT NULL,              -- 'restricted' | 'private'
+         name       TEXT NOT NULL,
+         created_by TEXT NOT NULL,              -- m-xxxxxxxx
+         created_at INTEGER NOT NULL,
+         etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
+       )`,
+      `CREATE TABLE IF NOT EXISTS space_members (
+         member_id TEXT NOT NULL,
+         space_id  TEXT NOT NULL,
+         added_by  TEXT NOT NULL,               -- m-xxxxxxxx
+         added_at  INTEGER NOT NULL,
+         PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
+       )`,
+      `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
+      `CREATE TABLE IF NOT EXISTS addresses (
+         slug     TEXT PRIMARY KEY,
+         space_id TEXT NOT NULL                 -- '' is the shared workspace
+       )`,
+      `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
+      `DROP TABLE IF EXISTS presence`,
+      `CREATE TABLE IF NOT EXISTS presence (
+         device_id   TEXT PRIMARY KEY,          -- x-doklin-device
+         member_id   TEXT,                      -- the person; null for a creator nobody named
+         device_name TEXT NOT NULL,
+         space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
+         path        TEXT,                      -- what they are editing, when anything
+         ts          INTEGER NOT NULL
+       )`,
+      `DROP TABLE IF EXISTS leases`,
+      `CREATE TABLE IF NOT EXISTS leases (
+         space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
+         path        TEXT NOT NULL,             -- relative to its space, lowercased
+         device_id   TEXT NOT NULL,             -- the Mac that holds it
+         member_id   TEXT,                      -- whose Mac; null for a creator nobody named
+         device_name TEXT NOT NULL,
+         until       INTEGER NOT NULL,
+         PRIMARY KEY (space_id, path)
+       )`,
+      `DROP TABLE IF EXISTS search_text`,
+      `CREATE TABLE IF NOT EXISTS search_text (
+         space_id TEXT NOT NULL,                -- '' the shared workspace
+         fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
+         folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
+         PRIMARY KEY (space_id, fid)
+       )`,
+      `DROP TABLE IF EXISTS search_state`,
+      `CREATE TABLE IF NOT EXISTS search_state (
+         space_id TEXT PRIMARY KEY,             -- '' the shared workspace
+         etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
+         held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
@@ -236,6 +367,7 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     let version = await bootstrap(db);
     for (const step of STEPS) {
       if (version >= step.to) continue;
+      for (const c of step.columns ?? []) await ensureColumn(db, c.table, c.column, c.type);
       for (const sql of step.sql) await db.prepare(sql).run();
       const bump = await db
         .prepare("UPDATE meta SET schema_version = ? WHERE key = 'schema' AND schema_version = ?")
@@ -248,6 +380,48 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     }
     migrated = version >= SCHEMA_VERSION;
     return version;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Add a column to a table that holds something worth keeping — when it is
+ * not there. Reading the column is the question: it fails on a table without
+ * it, whatever the table holds. Two isolates that both find it missing both
+ * add it, and the loser's failure is not one: the column is there.
+ */
+async function ensureColumn(db: D1Database, table: string, column: string, type: string): Promise<void> {
+  // The names come from STEPS, never from a request.
+  const there = async (): Promise<boolean> => {
+    try {
+      await db.prepare(`SELECT ${column} FROM ${table} LIMIT 1`).first();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await there()) return;
+  try {
+    await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
+  } catch (e) {
+    if (!(await there())) throw e;
+  }
+}
+
+/**
+ * Run something against the migrated database, or answer null: "this
+ * deployment has no `DB` binding", "the database could not be migrated" and
+ * "the query threw" are one answer, which a route turns into a 503 or into
+ * going without — never a 500, and never a route that throws because
+ * somebody deleted a database out from under a deployed worker.
+ */
+export async function withDb<T>(env: Env, fn: (db: D1Database) => Promise<T>): Promise<T | null> {
+  const db = env.DB;
+  if (!db) return null;
+  try {
+    if ((await ensureSchema(env)) == null) return null;
+    return await fn(db);
   } catch {
     return null;
   }

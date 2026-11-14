@@ -6,6 +6,8 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 
 - Only `retain::sweep` deletes from a local store, by the ladder; besides it, only `stores::forget` (whole store, user-asked, refused while its folder is open), `cloud-cache/` pruning and the one-time `versions/drafts` removal in `untitled.rs`. File deletes, restores, disconnect and wipe never do. Bucket `versions/`: only the cloud sweep and a wipe.
 - Stores live in `<app_data>/versions/`, never in a workspace.
+- In a connected workspace (the folder carries the cloud marker) `Private/` and `Restricted/` are never in the workspace's store (`space::shared_skip`). Each section's folder has a store and a versioner of its own (`cloud::section_roots`), mirrored to that space's own `versions/`. Otherwise a Private's content would reach the store everyone reads.
+- A space's folder that leaves this Mac takes its store with it (`forget_root`).
 - The versioner is independent of the cloud engine: own watcher plus `edits::touched`, own `scan_local`, path-keyed snapshots (no sync file ids); works with no cloud.
 - Write order: blobs → snapshot → index (`write_atomic`). Sweep order: index → snapshots → blobs. A crash leaves orphans, never a row missing bytes.
 - A restore is one Rust command (`versions_restore_file`, `versions_restore_snapshot`): capture `pre-restore`, write through the app's write path, capture `restore` with `restoredFrom`. Never a capture plus `write_file` from the frontend: the cadence can land between them. Undo is another restore (of `preRestoreHash`, or `preRestoreTs` + same paths). History never branches.

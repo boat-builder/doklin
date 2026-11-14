@@ -1,19 +1,22 @@
-// The Agents tab of the Cloud panel's "People and agents" view.
+// The Agents tab of the workspace's "People and agents" view.
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
-// copy of the folder. The owner adds one here, ticks what it may do, and is
-// handed one short prompt to give it (cloudPrompts.ts): what Doklin is, the
-// command that installs `doklin`, and `doklin login <address> <code>`. That
-// is the whole of setting it up, and there is one button for it. Everything
-// the agent can reach is decided by the boxes here, on the domain; nothing
-// on the bot's machine can widen them.
+// copy of the folder. It belongs to the person who adds it here, and sees
+// what they see — the shared workspace, their Private, the restricted folders
+// they are in. They tick what it may do there, and are handed one short
+// prompt to give it (cloudPrompts.ts): what Doklin is, the command that
+// installs `doklin`, and `doklin login <address> <code>`. That is the whole
+// of setting it up, and there is one button for it. Nothing on the bot's
+// machine can widen what the boxes say.
 //
 // The order is the People tab's: the door, its form and the prompt it ends
 // in at the top, the list under them.
 //
-// Owner only: the routes behind this are the owner's, like the people routes
-// beside them, and CloudPeople renders this only on the owner's branch. As
-// everywhere in the panel, no `fetch` here — the engine makes every call.
+// Everybody's own agents are theirs to add, change, log in and remove. An
+// owner is also shown everyone else's, to remove and nothing more: a login
+// code for somebody's agent is a way in as that person. The domain decides
+// both (cloud-worker/src/agentApi.ts); this draws what it would allow. As
+// everywhere in the view, no `fetch` here — the engine makes every call.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -29,6 +32,7 @@ import {
   type AgentScope,
   type CloudAgent,
   type CloudAgentLogin,
+  type CloudMember,
 } from "./cloud";
 import { buildAgentLoginPrompt } from "./cloudPrompts";
 
@@ -41,10 +45,10 @@ const SCOPES: { scope: AgentScope; label: string; what: string }[] = [
   { scope: "read", label: "Read", what: "list, read and search documents, and read their comments" },
   { scope: "comment", label: "Comment", what: "start, answer and remove comment threads" },
   { scope: "edit", label: "Edit", what: "write, move and remove documents and files" },
-  { scope: "publish", label: "Publish", what: "make any document in this workspace public, and stop publishing" },
+  { scope: "publish", label: "Publish", what: "make anything it can open public, and stop publishing" },
 ];
 
-/** What a new agent starts with. Publishing is off until the owner says so:
+/** What a new agent starts with. Publishing is off until its person says so:
  *  a remote agent cannot be asked to confirm, so the box is the whole gate. */
 const DEFAULT_SCOPES: AgentScope[] = ["read", "comment", "edit"];
 
@@ -54,19 +58,31 @@ type Draft = { id: string | null; name: string; scopes: AgentScope[] };
 const INTRO = (
   <p className="cloud-hint" data-testid="agents-intro">
     Agents are bots. Each works with this workspace from another computer through the{" "}
-    <code>doklin</code> command line — reading, writing, commenting and publishing within what
-    you allow — with no copy of the folder.
+    <code>doklin</code> command line, with no copy of the folder. An agent you add is yours: it
+    sees what you see — the shared workspace, your Private, the restricted folders you are in —
+    and reads, writes, comments and publishes there within what you allow.
   </p>
 );
+
+const scopesOf = (a: CloudAgent) =>
+  SCOPES.filter((s) => a.scopes.includes(s.scope))
+    .map((s) => s.label.toLowerCase())
+    .join(" · ");
 
 export default function CloudAgents({
   root,
   domain,
+  people,
+  everyone,
   copy,
   copied,
 }: {
   root: string;
   domain: string;
+  /** Everyone on the workspace: whose somebody else's agent is, by name. */
+  people: CloudMember[];
+  /** An owner: shown everybody's agents, not only their own. */
+  everyone: boolean;
   copy: (key: string, text: string) => void;
   copied: string | null;
 }) {
@@ -167,6 +183,65 @@ export default function CloudAgents({
   const prompt = login
     ? buildAgentLoginPrompt({ domain, line: login.login.line, expiresAt: login.login.expiresAt })
     : "";
+  const mine = agents.filter((a) => a.mine);
+  const others = everyone ? agents.filter((a) => !a.mine) : [];
+  const whose = (a: CloudAgent) => {
+    const person = people.find((m) => m.id === a.memberId);
+    return person ? person.name || person.email : "the workspace's creator";
+  };
+  const machines = (a: CloudAgent) => (
+    <ul className="cloud-macs">
+      {a.machines.map((m) => (
+        <li className="cloud-mac-row" key={m.id} data-testid={`agent-machine-${m.id}`}>
+          <span className="cloud-mac-name">{m.host}</span>
+          <span className="cloud-presence-what">logged in {timeAgo(m.createdAt, now)}</span>
+          {confirm === `machine:${m.id}` ? (
+            <span className="cloud-inline-confirm">
+              <span className="cloud-hint">Its next command is refused.</span>
+              <button
+                className="modal-btn is-danger-solid"
+                data-testid={`agent-logout-yes-${m.id}`}
+                disabled={busy}
+                onClick={() => void act(() => cloudAgentRevokeMachine(root, a.id, m.id))}
+              >
+                Log out
+              </button>
+              <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button className="modal-btn" data-testid={`agent-logout-${m.id}`} onClick={() => setConfirm(`machine:${m.id}`)}>
+              Log out
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+  const remove = (a: CloudAgent) =>
+    confirm === `agent:${a.id}` ? (
+      <span className="cloud-inline-confirm">
+        <span className="cloud-hint">
+          Every machine it is logged in on is refused from its next command. What it wrote stays.
+        </span>
+        <button
+          className="modal-btn is-danger-solid"
+          data-testid={`agent-remove-yes-${a.id}`}
+          disabled={busy}
+          onClick={() => void act(() => cloudAgentRemove(root, a.id))}
+        >
+          Remove
+        </button>
+        <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
+          Cancel
+        </button>
+      </span>
+    ) : (
+      <button className="modal-btn is-danger-outline" data-testid={`agent-remove-${a.id}`} onClick={() => setConfirm(`agent:${a.id}`)}>
+        Remove
+      </button>
+    );
 
   return (
     <>
@@ -206,7 +281,7 @@ export default function CloudAgents({
 
         {draft ? (
           <div className="cloud-card" data-testid="agent-form">
-            <div className="cloud-card-title">{draft.id === null ? `Add an agent to ${domain}` : "Edit this agent"}</div>
+            <div className="cloud-card-title">{draft.id === null ? "Add an agent of your own" : "Edit this agent"}</div>
             <div className="modal-field">
               <div className="modal-field-label">Its name</div>
               <input
@@ -237,9 +312,10 @@ export default function CloudAgents({
               </div>
             </div>
             <p className="cloud-hint">
-              The name is what its comments and changes are signed with. An agent cannot see or change
-              who is on this workspace, its history or its settings, whatever is ticked here — and a
-              change to these boxes reaches it on its next command.
+              The name is what its comments and changes are signed with. It sees what you see and no
+              more, and the boxes are what it may do there: it cannot see or change who is on this
+              workspace, its history or its settings, whatever is ticked. A change to the boxes reaches
+              it on its next command.
             </p>
             <div className="modal-buttons">
               <button
@@ -274,24 +350,20 @@ export default function CloudAgents({
       </div>
 
       <div className="cloud-section-label">
-        {agents.length} {agents.length === 1 ? "agent" : "agents"}
+        Your agents · {mine.length}
       </div>
-      {agents.length === 0 ? (
+      {mine.length === 0 ? (
         <p className="cloud-hint" data-testid="agents-empty">
           None yet.
         </p>
       ) : (
         <ul className="cloud-people" data-testid="agent-list">
-          {agents.map((a) => (
+          {mine.map((a) => (
             <li className="cloud-person" key={a.id} data-testid={`agent-${a.id}`}>
               <div className="cloud-person-head">
                 <span className="cloud-person-name">{a.name}</span>
                 {a.scopes.includes("publish") && <span className="cloud-person-tag">can publish</span>}
-                <span className="cloud-person-email">
-                  {SCOPES.filter((s) => a.scopes.includes(s.scope))
-                    .map((s) => s.label.toLowerCase())
-                    .join(" · ")}
-                </span>
+                <span className="cloud-person-email">{scopesOf(a)}</span>
               </div>
               <div className="cloud-hint">
                 {a.machines.length === 0
@@ -300,40 +372,7 @@ export default function CloudAgents({
                 {a.lastUsedAt != null && ` · last used ${timeAgo(a.lastUsedAt, now)}`}
                 {a.code && a.code.expiresAt > now && ` · a login code is waiting, for ${timeUntil(a.code.expiresAt, now)} more`}
               </div>
-              {a.machines.length > 0 && (
-                <ul className="cloud-macs">
-                  {a.machines.map((m) => (
-                    <li className="cloud-mac-row" key={m.id} data-testid={`agent-machine-${m.id}`}>
-                      <span className="cloud-mac-name">{m.host}</span>
-                      <span className="cloud-presence-what">logged in {timeAgo(m.createdAt, now)}</span>
-                      {confirm === `machine:${m.id}` ? (
-                        <span className="cloud-inline-confirm">
-                          <span className="cloud-hint">Its next command is refused.</span>
-                          <button
-                            className="modal-btn is-danger-solid"
-                            data-testid={`agent-logout-yes-${m.id}`}
-                            disabled={busy}
-                            onClick={() => void act(() => cloudAgentRevokeMachine(root, a.id, m.id))}
-                          >
-                            Log out
-                          </button>
-                          <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
-                            Cancel
-                          </button>
-                        </span>
-                      ) : (
-                        <button
-                          className="modal-btn"
-                          data-testid={`agent-logout-${m.id}`}
-                          onClick={() => setConfirm(`machine:${m.id}`)}
-                        >
-                          Log out
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
+              {a.machines.length > 0 && machines(a)}
               <div className="cloud-actions">
                 <button
                   className="modal-btn"
@@ -354,36 +393,43 @@ export default function CloudAgents({
                 >
                   Edit
                 </button>
-                {confirm === `agent:${a.id}` ? (
-                  <span className="cloud-inline-confirm">
-                    <span className="cloud-hint">
-                      Every machine it is logged in on is refused from its next command. What it wrote stays.
-                    </span>
-                    <button
-                      className="modal-btn is-danger-solid"
-                      data-testid={`agent-remove-yes-${a.id}`}
-                      disabled={busy}
-                      onClick={() => void act(() => cloudAgentRemove(root, a.id))}
-                    >
-                      Remove
-                    </button>
-                    <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
-                      Cancel
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    className="modal-btn is-danger-outline"
-                    data-testid={`agent-remove-${a.id}`}
-                    onClick={() => setConfirm(`agent:${a.id}`)}
-                  >
-                    Remove
-                  </button>
-                )}
+                {remove(a)}
               </div>
             </li>
           ))}
         </ul>
+      )}
+
+      {others.length > 0 && (
+        <>
+          <div className="cloud-section-label">Other people’s agents · {others.length}</div>
+          <p className="cloud-hint">
+            Each sees what its person sees. As an owner you can log one out or remove it; changing it, or logging
+            it in, is its person’s.
+          </p>
+          <ul className="cloud-people" data-testid="agent-others">
+            {others.map((a) => (
+              <li className="cloud-person" key={a.id} data-testid={`agent-${a.id}`}>
+                <div className="cloud-person-head">
+                  <span className="cloud-person-name">{a.name}</span>
+                  <span className="cloud-person-tag" data-testid={`agent-whose-${a.id}`}>
+                    {whose(a)}
+                  </span>
+                  {a.scopes.includes("publish") && <span className="cloud-person-tag">can publish</span>}
+                  <span className="cloud-person-email">{scopesOf(a)}</span>
+                </div>
+                <div className="cloud-hint">
+                  {a.machines.length === 0
+                    ? "Not logged in anywhere"
+                    : `Logged in on ${a.machines.length} machine${a.machines.length === 1 ? "" : "s"}`}
+                  {a.lastUsedAt != null && ` · last used ${timeAgo(a.lastUsedAt, now)}`}
+                </div>
+                {a.machines.length > 0 && machines(a)}
+                <div className="cloud-actions">{remove(a)}</div>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
       {error && <div className="modal-error">{error}</div>}
     </>

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::engine::{FileState, WorkspaceState};
+use super::space::RESERVED_DIRS;
+use super::unit::{FileState, WorkspaceState};
 use super::manifest::{Manifest, ManifestFile, MANIFEST_VERSION};
 use super::remote::{Bound, Remote, RemoteError, WorkspaceRecord};
 use super::scan::{
@@ -59,7 +60,7 @@ pub fn describe(domain: &str, e: FlowError) -> String {
         ),
         FlowError::NotBound => format!("{} holds no workspace yet — connect a folder to it first", domain),
         FlowError::Unauthorized => format!("{} rejected this token", domain),
-        FlowError::Forbidden => "only the domain's owner can do that".into(),
+        FlowError::Forbidden => "only an owner of this workspace can do that".into(),
         FlowError::Offline(m) => format!("couldn't reach {}: {}", domain, m),
         FlowError::Other(m) => m,
     }
@@ -86,7 +87,9 @@ pub async fn seed_upload<R: Remote>(
     events: &Arc<dyn Events>,
     progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
-    let scan = scan_local(root).map_err(FlowError::Other)?;
+    // What is under a reserved name is never the shared workspace's: it is
+    // this person's own, and syncs as their sections do once the engine runs.
+    let scan = scan_local(root, &RESERVED_DIRS).map_err(FlowError::Other)?;
     let total = scan.len();
     let _ = std::fs::create_dir_all(state_dir.join("base"));
 

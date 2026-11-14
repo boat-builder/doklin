@@ -126,7 +126,7 @@ pub fn archive_name(root: &Path, day: &str) -> String {
 /// disk), so the writer below is a loop and nothing else.
 fn manifest(root: &Path, store: &Store) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
-    let tree: BTreeMap<String, _> = scan_local(root)?;
+    let tree: BTreeMap<String, _> = scan_local(root, crate::cloud::space::shared_skip(root))?;
     for (rel, entry) in tree {
         out.push((format!("workspace/{}", rel), entry.abs));
     }

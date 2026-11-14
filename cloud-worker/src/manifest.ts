@@ -17,6 +17,8 @@ import {
   MAX_TOMBSTONES,
   RESERVED_SLUGS,
   SLUG_RE,
+  SPACE_ID_RE,
+  reservedTop,
   validPath,
 } from "./layout";
 import { MANIFEST_VERSION } from "./version";
@@ -34,7 +36,11 @@ export type ManifestFile = {
   by?: string;
 };
 
-export type Tombstone = { path: string; rev?: number; ts?: number; by?: string };
+/** A removed file. `to` is set when it was not deleted but moved to another
+ *  section: the id of the space it went to, `""` for the shared workspace.
+ *  A Mac in that section moves its copy there; any other deletes it outright
+ *  instead of putting it in the Trash. */
+export type Tombstone = { path: string; rev?: number; ts?: number; by?: string; to?: string };
 
 /**
  * The public map, keyed by slug. A file entry references the fileId (so a
@@ -88,7 +94,10 @@ const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFi
 const optionalText = (v: unknown, max: number): boolean =>
   v === undefined || (typeof v === "string" && v.length <= max);
 
-function validateFiles(files: unknown): string | null {
+/** What a shared manifest naming a file under a reserved folder is told. */
+export const RESERVED_SENTENCE = "Private and Restricted are kept for a person's own and restricted folders";
+
+function validateFiles(files: unknown, space: boolean): string | null {
   if (!isObject(files)) return "files must be an object";
   const ids = Object.keys(files);
   if (ids.length > MAX_MANIFEST_FILES) return "too many files";
@@ -98,6 +107,7 @@ function validateFiles(files: unknown): string | null {
     const f = files[id];
     if (!isObject(f)) return `invalid file entry: ${id}`;
     if (!validPath(f.path)) return `invalid path for ${id}`;
+    if (!space && reservedTop(f.path)) return RESERVED_SENTENCE;
     // Case-insensitive: the workspace lives on a case-insensitive disk.
     const pathKey = f.path.toLowerCase();
     if (seenPaths.has(pathKey)) return `duplicate path: ${f.path}`;
@@ -123,6 +133,9 @@ function validateTombstones(tombstones: unknown): string | null {
     if (t.rev !== undefined && !isCount(t.rev)) return `invalid tombstone rev for ${id}`;
     if (t.ts !== undefined && !isTime(t.ts)) return `invalid tombstone ts for ${id}`;
     if (!optionalText(t.by, MAX_NAME_LEN)) return `invalid tombstone by for ${id}`;
+    if (t.to !== undefined && t.to !== "" && !(typeof t.to === "string" && SPACE_ID_RE.test(t.to))) {
+      return `invalid tombstone to for ${id}`;
+    }
   }
   return null;
 }
@@ -132,9 +145,10 @@ function validateTombstones(tombstones: unknown): string | null {
  * references, at most one root. References are checked for shape, not for
  * existence: an entry deliberately outlives its file (the page 404s while
  * the file is gone and comes back when the file does), and a folder entry
- * may cover a folder that is empty now.
+ * may cover a folder that is empty now. The page at `/` is the shared
+ * workspace's to name: a space's map has none.
  */
-function validatePublic(map: unknown): string | null {
+function validatePublic(map: unknown, space: boolean): string | null {
   if (map === undefined) return null;
   if (!isObject(map)) return "public must be an object";
   const slugs = Object.keys(map);
@@ -161,12 +175,15 @@ function validatePublic(map: unknown): string | null {
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
+  if (roots > 0 && space) return "the home page is chosen from the shared workspace";
   if (roots > 1) return "more than one root page";
   return null;
 }
 
-/** Shape-check a manifest without trusting the client. */
-export function validateManifest(data: unknown): ManifestProblem | null {
+/** Shape-check a manifest without trusting the client. `space` is true for
+ *  the manifest of a restricted folder or a Private, false for the shared
+ *  workspace's. */
+export function validateManifest(data: unknown, space: boolean): ManifestProblem | null {
   const bad = (error: string): ManifestProblem => ({ status: 400, error });
   if (!isObject(data)) return bad("manifest must be an object");
   if (!Number.isInteger(data.version)) return bad("manifest version must be an integer");
@@ -185,6 +202,6 @@ export function validateManifest(data: unknown): ManifestProblem | null {
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
-    validateFiles(data.files) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public);
+    validateFiles(data.files, space) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public, space);
   return problem ? bad(problem) : null;
 }

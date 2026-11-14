@@ -10,8 +10,10 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 - An entry outlives its file: 404 while gone, back when the file is; stopping is explicit. `root: true` whose file is gone → `/` serves the landing page.
 - Offline publishing: the engine queues `public_ops` in its state and `fold_public` folds them into the next won CAS (re-point renames, re-bind dead entries, apply ops, re-point folders).
 - Slug grammar `^[a-z0-9][a-z0-9-]{2,63}$` and reserved words live in `layout.ts`, `manifest.rs`, `src/cloud.ts`; the random-slug alphabet (8 of `abcdefghjkmnpqrstuvwxyz23456789`) in `manifest.rs` and `agentPages.ts`. **Change all.** Custom slugs are checked against the manifest locally; two devices racing one slug: the loser gets a suffix.
-- Anyone who may write the manifest may publish: members always, agents with `publish`.
-- `CloudStatus.public` = manifest + unsynced ops; `alive` false when the file is gone or a folder holds no synced file.
+- Anyone who may write the manifest may publish: members always, agents with `publish` — from any section their person can see, into that section's map.
+- `CloudStatus.public` = manifest + unsynced ops, of every section this Mac holds; `alive` false when the file is gone or a folder holds no synced file.
+- Each section has its own map. The page at `/` is chosen from the shared workspace's only; a space's map naming a `root` is refused.
+- An owner can stop any page on the domain (`/api/pages`), but only a person in its section can open or re-publish its file.
 
 ## Addresses
 

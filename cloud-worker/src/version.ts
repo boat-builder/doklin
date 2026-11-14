@@ -87,7 +87,37 @@
 //       by the app's own store modules, and a card's page is a document
 //       `<board>/<card>` whose properties a read leaves out and a write keeps.
 //       D1 gains `board_cards`, a copy of every card's properties block.
-export const WORKER_VERSION = 11;
+//  12 = a workspace with sections.
+//       Roles: a token authenticates with the role on its person's row, so
+//       there can be several owners; every gated route asks one table
+//       (roles.ts) and `/api/meta` answers the caller's row as `you.can`.
+//       The secret's holder is the creator, never removed or demoted. A
+//       credential an owner took away is answered `401 {removed: true}`,
+//       which alone has a Mac delete its copy. A removed person's row is
+//       kept, out of the People list, and a code for somebody who has signed
+//       in before is theirs or the creator's to make.
+//       Spaces: a restricted folder, or a person's Private, is a workspace of
+//       its own under `spaces/<id>/`, served by the sync routes again at
+//       `/api/spaces/<id>/…` to the people in it and a 404 to everyone else.
+//       The poll answers the caller's spaces with each one's manifest etag,
+//       and presence and leases are by space. Manifest v4: the shared
+//       workspace holds nothing under `Private/` or `Restricted/` — on a Mac
+//       those are where a person's Private and their restricted folders are
+//       — and a tombstone may say which section its file moved to (`to`)
+//       rather than that it was deleted.
+//       Pages: a public address is one space's for the whole domain
+//       (`addresses`), and a page is served from whichever holds it. An owner
+//       sees every address, whichever section published the page, and can
+//       take any of them down (`/api/pages`, `pages.manage`).
+//       Agents: an agent belongs to a person and sees what they see — a path
+//       under `Private/` or `Restricted/<folder>/` is answered in that space,
+//       a move between sections writes where it goes first, and search keeps
+//       a mirror per space. Anyone has agents of their own (`agents.own`); an
+//       owner sees everybody's and may remove any.
+//       D1 gains `creator`, `removed_tokens`, `spaces`, `space_members`,
+//       `addresses` and `agents.member_id`; `presence`, `leases` and the
+//       search tables are made again with a space.
+export const WORKER_VERSION = 12;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map
@@ -100,6 +130,8 @@ export const WORKER_FEATURES: readonly string[] = [
   "boards",
   "versions",
   "members",
+  "roles",
+  "spaces",
   "presence",
   "leases",
   "agents",
@@ -111,6 +143,13 @@ export const WORKER_FEATURES: readonly string[] = [
 ];
 // "members" is a promise the app can act on: this worker mints and resolves
 // per-person tokens, so the People panel has something to talk to.
+// "roles" is the promise that `/api/meta` says what the caller may do
+// (`you.can`), that the People list answers anyone here, and that a removed
+// credential is told so. The People view asks for it before it draws: against
+// a worker without the name it has no way to know what to offer, and says the
+// worker needs updating instead.
+// "spaces" is the promise that `/api/spaces` answers, that the poll lists the
+// caller's spaces, and that a beat may name the space its document is in.
 // "presence" is the promise that `POST /api/poll` carries a beat. Every
 // worker has had presence of some kind; before this one it was a route of its
 // own, and an app that beats into a worker without the name would be POSTing
@@ -134,8 +173,10 @@ export const WORKER_FEATURES: readonly string[] = [
 // sentence naming which side is behind: an app newer than this worker pauses
 // in `worker-outdated` until the worker is updated, and an app older than it
 // is told to update itself (refuse politely, never
-// corrupt). Version 3 is where `by` became a member id.
-export const MANIFEST_VERSION = 3;
+// corrupt). Version 3 is where `by` became a member id; version 4 reserves
+// `Private` and `Restricted` at the top of the shared workspace and gives a
+// tombstone its `to`.
+export const MANIFEST_VERSION = 4;
 
 // The Workers runtime compatibility date wrangler.toml pins — the app writes
 // that file verbatim into the setup prompt, so this is its one source.

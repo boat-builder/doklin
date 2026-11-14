@@ -18,6 +18,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::cloud::scan::{read_file_checked, scan_local};
+use crate::cloud::space::shared_skip;
 
 use super::status::SnapshotDelta;
 use super::store::{hash_full, FileEntry, Index, Store};
@@ -84,7 +85,7 @@ pub struct RestoreReport {
 /// whose size and mtime are unchanged is never read again. The error is the
 /// scan's own — a folder past the entry cap has no diff, only a sentence.
 pub fn disk_now(store: &Store, last: &BTreeMap<String, FileEntry>) -> Result<BTreeMap<String, FileEntry>, String> {
-    let scanned = scan_local(&store.root).map_err(|_| too_large())?;
+    let scanned = scan_local(&store.root, shared_skip(&store.root)).map_err(|_| too_large())?;
     let mut out = BTreeMap::new();
     for (rel, entry) in &scanned {
         let cached = last.get(rel).filter(|c| c.s == entry.size && c.m == entry.mtime_ms && !c.h.is_empty());
@@ -107,7 +108,7 @@ pub fn disk_now(store: &Store, last: &BTreeMap<String, FileEntry>) -> Result<BTr
 /// The paths the folder holds right now — the cheap half of `disk_now`,
 /// with nothing hashed. All *Recently deleted* needs.
 pub fn disk_paths(store: &Store) -> Result<BTreeSet<String>, String> {
-    Ok(scan_local(&store.root).map_err(|_| too_large())?.into_keys().collect())
+    Ok(scan_local(&store.root, shared_skip(&store.root)).map_err(|_| too_large())?.into_keys().collect())
 }
 
 fn too_large() -> String {

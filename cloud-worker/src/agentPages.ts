@@ -14,9 +14,16 @@
 // that is free or already its own, the first publisher's name and date kept
 // when a page is republished. A document's page belongs to its markdown file
 // when it has one and to its html when it has not.
+//
+// Each section keeps its own map, and an address is one section's for the
+// whole domain (addresses.ts). So a page is published in the section its
+// document is in, the list is every section's the agent's person can see, and
+// an address is stopped in whichever of those holds it.
 
-import { notBound, refuse, type Call } from "./agentCall";
-import { Refusal, commit, type Tx } from "./commit";
+import { spaceAt, spacesWithPages } from "./addresses";
+import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
+import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
+import { Refusal, type Committed, type Tx } from "./commit";
 import {
   Index,
   docExists,
@@ -32,7 +39,7 @@ import { MAX_DESC_LEN, MAX_TITLE_LEN, RESERVED_SLUGS, SLUG_RE } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
-import { isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
+import { isHtmlPath, isMarkdownPath } from "./workspace";
 
 /** The alphabet a random slug is drawn from — no look-alikes, as the engine's
  *  is (`SLUG_ALPHABET`, src-tauri/src/cloud/manifest.rs). */
@@ -100,11 +107,31 @@ function targetAt(index: Index, raw: string): { target: Target; fids: string[] }
 
 /* ---------- What is public ---------- */
 
-export async function getPages({ env, url }: Call): Promise<Response> {
-  const ws = await openWorkspace(env);
-  if (!ws) return notBound();
-  const names = new Map(((await listDirectory(env)) ?? []).map((p) => [p.id, p.name]));
-  return json({ pages: pagesOf(ws.manifest, url.origin, names) });
+export async function getPages(c: Call): Promise<Response> {
+  const { env, url, places } = c;
+  const unavailable = (): Response => json({ error: "this domain's database is not answering — try again in a moment" }, 503);
+  const [all, holding, directory] = await Promise.all([places.all(), spacesWithPages(env), listDirectory(env)]);
+  if (all === null || holding === null) return unavailable();
+  const names = new Map((directory ?? []).map((p) => [p.id, p.name]));
+  // The shared workspace's map, and that of each section the registry says
+  // holds an address: a section that publishes nothing is not opened.
+  const publishing = all.filter((s) => s.space === "" || holding.has(s.space));
+  const pages: Record<string, unknown>[] = [];
+  const notListed: string[] = [];
+  for (const [i, section] of publishing.entries()) {
+    if (i > MAX_SECTIONS_READ) {
+      notListed.push(section.mount);
+      continue;
+    }
+    const tree = await openTree(inSection(c, section));
+    if (!tree) {
+      if (section.space === "") return notBound();
+      continue;
+    }
+    pages.push(...pagesOf(tree.manifest, url.origin, names));
+  }
+  pages.sort((a, b) => String(a.slug).localeCompare(String(b.slug)));
+  return json({ pages, ...(notListed.length > 0 ? { notListed } : {}) });
 }
 
 function pagesOf(m: Manifest, origin: string, names: ReadonlyMap<string, string>): Record<string, unknown>[] {
@@ -134,7 +161,7 @@ function pagesOf(m: Manifest, origin: string, names: ReadonlyMap<string, string>
 /* ---------- Publishing ---------- */
 
 export async function putPage(c: Call): Promise<Response> {
-  const { request, env, url, who } = c;
+  const { request, url } = c;
   const body = await readJsonObject(request);
   if (!body) return json({ error: "invalid json body" }, 400);
   const path = typeof body.path === "string" ? body.path : "";
@@ -148,9 +175,8 @@ export async function putPage(c: Call): Promise<Response> {
   const title = cleanText(body.title, MAX_TITLE_LEN);
   const desc = cleanText(body.desc, MAX_DESC_LEN);
 
-  const done = await commit(
-    env,
-    who.id,
+  const done = await change(
+    c,
     async (tx) => {
       const index = new Index(tx.files);
       const found = targetAt(index, path);
@@ -167,7 +193,7 @@ export async function putPage(c: Call): Promise<Response> {
       }
       return publish(tx, index, found.target, found.fids, { wanted, title, desc }, url.origin);
     },
-    { dryRun: body.dryRun === true },
+    body.dryRun === true,
   );
   if (done instanceof Refusal) return refuse(done);
   await mirrorAfter(c, done);
@@ -231,26 +257,56 @@ function publish(
 
 /* ---------- Stopping ---------- */
 
+type Stopped = { stopped: { slug: string; url: string }[] };
+
 export async function deletePage(c: Call): Promise<Response> {
-  const { env, url, who } = c;
+  const { url, places } = c;
   const slugParam = (url.searchParams.get("slug") ?? "").trim().toLowerCase();
   const path = url.searchParams.get("path") ?? "";
   if (!slugParam && !path) return json({ error: "say which page — a document, a folder or an address" }, 400);
+  const dryRun = url.searchParams.get("dry") === "1";
 
-  const done = await commit(env, who.id, async (tx) => {
-    const map = tx.m.public ?? {};
-    const slugs = slugParam ? (map[slugParam] ? [slugParam] : []) : slugsFor(tx, path);
-    if (slugs instanceof Refusal) return slugs;
-    if (slugs.length === 0) {
-      return new Refusal(404, slugParam ? `nothing is published at "${slugParam}"` : `"${path}" is not published`);
-    }
-    const stopped = slugs.map((slug) => ({ slug, url: `${url.origin}/${slug}` }));
-    for (const slug of slugs) delete map[slug];
-    tx.touch();
-    return { stopped };
-  }, { dryRun: url.searchParams.get("dry") === "1" });
+  /** The section of this agent's person that holds an address — the shared
+   *  workspace when none does, where it then is not published either. */
+  const holderOf = async (slug: string): Promise<Section | null> => {
+    const [all, space] = [await places.all(), await spaceAt(c.env, slug)];
+    if (all === null) return null;
+    return all.find((s) => s.space === (space ?? "")) ?? all[0];
+  };
+  const stop = async (section: Section, slug: string): Promise<{ at: Call; done: Committed<Stopped> | Refusal }> => {
+    const at = inSection(c, section);
+    const done = await change(
+      at,
+      async (tx) => {
+        const map = tx.m.public ?? {};
+        const slugs = slug ? (map[slug] ? [slug] : []) : slugsFor(tx, path);
+        if (slugs instanceof Refusal) return slugs;
+        if (slugs.length === 0) {
+          return new Refusal(404, slugParam ? `nothing is published at "${slugParam}"` : `"${path}" is not published`);
+        }
+        const stopped = slugs.map((s) => ({ slug: s, url: `${url.origin}/${s}` }));
+        for (const s of slugs) delete map[s];
+        tx.touch();
+        return { stopped };
+      },
+      dryRun,
+    );
+    return { at, done };
+  };
+
+  const section = slugParam ? await holderOf(slugParam) : await places.of(path);
+  if (section === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
+  if (section instanceof Refusal) return refuse(section);
+  let { at, done } = await stop(section, slugParam);
+  // The word may be an address rather than a path, and an address is in
+  // whichever section published it.
+  const word = path.replace(/^\/+|\/+$/g, "").toLowerCase();
+  if (done instanceof Refusal && done.status === 404 && !slugParam && SLUG_RE.test(word)) {
+    const holder = await holderOf(word);
+    if (holder && holder.space !== section.space) ({ at, done } = await stop(holder, word));
+  }
   if (done instanceof Refusal) return refuse(done);
-  await mirrorAfter(c, done);
+  await mirrorAfter(at, done);
   return json({ ...done.value, ...(done.wrote ? {} : { written: false }) });
 }
 

@@ -8,7 +8,9 @@
 //!
 //! ```text
 //! mod.rs        the manager, the commands, init at boot
-//! engine.rs     Engine<R>: the cycle, fold_public, presence, history, status
+//! engine.rs     Engine<R>: the task, the poll, presence, status, the sections
+//! unit.rs       Unit<R>: one section and its manifest — the cycle, fold_public
+//! space.rs      where a workspace's sections are on disk, and their markers
 //! manifest.rs   the wire types (manifest v2, the public map) + their grammar
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
@@ -34,9 +36,12 @@ mod remote;
 // The versioner reuses the local walk, the hashing and the atomic write
 // (scan) and the event sink (status) — see src/versions/.
 pub(crate) mod scan;
+// The versioner asks which folders are sections of their own.
+pub(crate) mod space;
 pub(crate) mod status;
 #[cfg(test)]
 mod tests;
+mod unit;
 pub(crate) mod versions;
 
 use std::collections::HashMap;
@@ -55,13 +60,13 @@ use config::{
     domain_of, ensure_device, normalize_endpoint, read_cloud_file, read_marker, remove_marker, sanitize_folder_name,
     state_dir, write_cloud_file, write_marker, DeviceIdentity, Marker, WorkspaceEntry,
 };
-use engine::{Engine, EngineCmd, EngineConfig, PublishRequest};
+use engine::{Engine, EngineCmd, EngineConfig, Exit, PublishRequest, SpacesChanged};
 use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, Events, Invited, People,
-    Probe, Redeemed, StatusTable,
+    Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -97,6 +102,15 @@ pub(crate) fn device_name(data_dir: &Path) -> String {
         .unwrap_or_else(device_display_name)
 }
 
+/// The folders inside the workspace at `root` that are sections of their
+/// own — this person's Private and the restricted folders they are in — by
+/// what the folders themselves say. Empty for a folder that is not a
+/// connected workspace.
+pub(crate) fn section_roots(root: &Path) -> Vec<PathBuf> {
+    let Some(marker) = read_marker(root) else { return Vec::new() };
+    space::held(root, &marker.ws_id).into_iter().map(|held| held.dir).collect()
+}
+
 /* ---------- The manager ---------- */
 
 struct EngineHandle {
@@ -119,6 +133,11 @@ struct ManagerInner {
     /// so the freshest report wins when two windows share a workspace.
     activity: HashMap<String, (Option<String>, u64)>,
     activity_seq: u64,
+    /// Every workspace taken off this Mac since the app started
+    /// (`access_removed`). An event says so as it happens, but an engine can
+    /// hear it on first contact — before any window is listening — so a
+    /// window also asks for this list once it is up (`cloud_removed`).
+    removed: Vec<Removed>,
 }
 
 #[derive(Default)]
@@ -143,6 +162,7 @@ pub(crate) fn init(app: &AppHandle) {
         statuses: Arc::new(Mutex::new(Default::default())),
         activity: HashMap::new(),
         activity_seq: 0,
+        removed: Vec::new(),
     };
     for ws in &file.workspaces {
         spawn_engine(&mut inner, ws);
@@ -194,17 +214,186 @@ fn spawn_engine(inner: &mut ManagerInner, ws: &WorkspaceEntry) {
             device_id: inner.device.id.clone(),
             device_name: inner.device.name.clone(),
             use_trash: true,
+            creator: ws.creator,
+            on_creator: (!ws.creator).then(|| {
+                let (app, root) = (inner.app.clone(), ws.root.clone());
+                Box::new(move || mark_creator(&app, &root)) as Box<dyn Fn() + Send + Sync>
+            }),
+            on_spaces: Some({
+                let app = inner.app.clone();
+                Box::new(move |changed| spaces_changed(&app, changed))
+            }),
         },
         Arc::new(HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id)),
         Arc::new(AppEvents(inner.app.clone())),
         inner.statuses.clone(),
     );
-    tauri::async_runtime::spawn(engine.run(cmd_rx, fs_rx));
+    // The one way an engine ends by itself: the domain said this Mac's access
+    // was taken away. The engine stops there and touches nothing; taking the
+    // workspace off this Mac is the manager's, because the manager is what
+    // holds everything that has to go with it.
+    let (app, entry) = (inner.app.clone(), ws.clone());
+    tauri::async_runtime::spawn(async move {
+        if engine.run(cmd_rx, fs_rx).await == Exit::Removed {
+            access_removed(app, entry).await;
+        }
+    });
 
     if let Some(bus) = inner.app.try_state::<EditBus>() {
         bus.register(root.clone(), cmd_tx.clone());
     }
     inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, _watcher: watcher });
+}
+
+/// A space's folder appeared on this Mac or left it (`EngineConfig::
+/// on_spaces`): what follows a folder follows. A folder that left takes its
+/// local version history with it — the history holds every file's content —
+/// and the versioners are brought in line with the folders that are here.
+fn spaces_changed(app: &AppHandle, changed: SpacesChanged) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for (root, store_dir) in changed.removed {
+            crate::versions::forget_root(&app, &root, store_dir).await;
+        }
+        crate::versions::reconcile(&app);
+    });
+}
+
+/// Write down that this Mac holds the domain's own token for the workspace at
+/// `root` — what its engine just heard from the domain (`EngineConfig::
+/// on_creator`). From then on that folder is never deleted on a `removed`
+/// answer, whatever answers at that address later.
+fn mark_creator(app: &AppHandle, root: &str) {
+    let _ = with_inner(app, |inner| {
+        let mut file = read_cloud_file(&inner.data_dir);
+        if let Some(entry) = file.workspaces.iter_mut().find(|w| w.root == root) {
+            entry.creator = true;
+        }
+        write_cloud_file(&inner.data_dir, &file)
+    });
+}
+
+/// Take a workspace off this Mac, because an owner took this Mac's access to
+/// it away. What goes: the
+/// folder — outright, not to the Trash — and everything Doklin kept for it
+/// here: the credential, the sync state, the local version history. What is
+/// touched in the cloud: nothing.
+///
+/// Reached only from an engine that heard `RemoteError::Removed`, which the
+/// worker says of a credential it remembers an owner removing and of nothing
+/// else — never of an outage, a wiped domain or a rotated secret.
+async fn access_removed(app: AppHandle, entry: WorkspaceEntry) {
+    // Forget it first, under the lock: no engine, no watcher, no credential.
+    let forgotten = with_inner(&app, |inner| {
+        let mut file = read_cloud_file(&inner.data_dir);
+        // Only if this is still the connection that engine was syncing. A
+        // folder disconnected and connected again since holds a credential
+        // of its own, and that one was not removed. And never the creator's:
+        // the engine does not end this way for one (`heard_removed`), and
+        // this is the same rule, asked of what is written down.
+        if !file.by_root(&entry.root).is_some_and(|held| held.token == entry.token && !held.creator) {
+            return Ok(None);
+        }
+        stop_engine(inner, &entry.root);
+        file.remove_root(&entry.root);
+        write_cloud_file(&inner.data_dir, &file)?;
+        emit_statuses(&AppEvents(inner.app.clone()), &inner.statuses);
+        Ok(Some(inner.data_dir.clone()))
+    });
+    let Ok(Some(data_dir)) = forgotten else { return };
+
+    let root = PathBuf::from(&entry.root);
+    // Found while the folder still exists: a store's key is the folder's
+    // canonical path. Each section inside it has a store of its own.
+    let store_dir = crate::versions::store_for_root(&data_dir, &root).dir;
+    let sections: Vec<(String, PathBuf)> = space::held(&root, &entry.ws_id)
+        .into_iter()
+        .map(|held| {
+            let store = crate::versions::store_for_root(&data_dir, &held.dir).dir;
+            (held.dir.to_string_lossy().to_string(), store)
+        })
+        .collect();
+    let home = app.path().home_dir().ok();
+    let copy = entry.clone();
+    let deleted = tokio::task::spawn_blocking(move || remove_copy(&copy, home.as_deref())).await.unwrap_or(false);
+    crate::versions::forget_root(&app, &entry.root, store_dir).await;
+    for (section, store) in sections {
+        crate::versions::forget_root(&app, &section, store).await;
+    }
+    let _ = std::fs::remove_dir_all(state_dir(&data_dir, &entry.ws_id));
+
+    // Said twice, on purpose: the event reaches the windows that are
+    // listening now, and the list answers one that was not up yet — an
+    // engine hears this on first contact, which can beat the first window.
+    let removed = Removed { root: entry.root, name: entry.name, domain: entry.domain, deleted, at: scan::now_ms() };
+    let _ = with_inner(&app, |inner| {
+        inner.removed.push(removed.clone());
+        Ok(())
+    });
+    AppEvents(app).emit_json(EV_REMOVED, serde_json::to_value(&removed).unwrap_or_default());
+}
+
+/// Delete this Mac's copy of a workspace — the folder and everything in it,
+/// outright. True when no folder is left at that path.
+///
+/// Deleting a tree is the one thing here that cannot be taken back, so the
+/// folder has to say it is that workspace: it must carry the marker
+/// `cloud_join` and `cloud_connect` wrote into it, naming this domain and
+/// this workspace id. A folder that does not — replaced by something else
+/// since, or stripped of its marker — is left alone, and so is any path wide
+/// enough to hold the home folder.
+fn remove_copy(entry: &WorkspaceEntry, home: Option<&Path>) -> bool {
+    let root = Path::new(&entry.root);
+    if !root.exists() {
+        return true;
+    }
+    // The folder itself, wherever the path leads: a root reached through a
+    // symlink is the directory behind it, and removing only the link would
+    // leave every file where it was.
+    let Ok(real) = std::fs::canonicalize(root) else { return false };
+    let is_that_workspace =
+        read_marker(&real).is_some_and(|marker| marker.ws_id == entry.ws_id && marker.domain == entry.domain);
+    // Asked of the path as it was written and as it resolves, against the
+    // home folder both ways: on macOS one of a pair is often spelled through
+    // a symlink (`/var` for `/private/var`) and the other is not.
+    let home_real = home.and_then(|home| std::fs::canonicalize(home).ok());
+    let holds_home = |dir: &Path| {
+        home.is_some_and(|home| home.starts_with(dir)) || home_real.as_deref().is_some_and(|home| home.starts_with(dir))
+    };
+    let too_wide = real.parent().is_none() || holds_home(root) || holds_home(&real);
+    if !is_that_workspace || too_wide {
+        return false;
+    }
+    if std::fs::remove_dir_all(&real).is_err() {
+        return false;
+    }
+    // What is left at the path when it was a link: the link, now dangling.
+    if root.is_symlink() {
+        let _ = std::fs::remove_file(root);
+    }
+    !root.exists() && !root.is_symlink()
+}
+
+/// Where a workspace this Mac joins is kept: `~/Doklin`, one folder per
+/// workspace. Visible, so the files are the
+/// user's to find in Finder; fixed, so joining never stops to ask where.
+fn join_parent(home: &Path) -> PathBuf {
+    home.join("Doklin")
+}
+
+/// The folder a workspace called `name` downloads into under `parent`: its
+/// own name — or, when a folder of that name is already there with something
+/// in it, the name and the first number that is free ("Notes 2").
+fn free_folder(parent: &Path, name: &str) -> PathBuf {
+    let base = sanitize_folder_name(name);
+    let free = |dir: &Path| !dir.exists() || std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(false);
+    let mut dest = parent.join(&base);
+    let mut n = 2u32;
+    while !free(&dest) {
+        dest = parent.join(format!("{} {}", base, n));
+        n += 1;
+    }
+    dest
 }
 
 /// Stop the engine for `root` (its presence beat clears on the way out) and
@@ -285,6 +474,10 @@ fn record_and_spawn(app: &AppHandle, entry: WorkspaceEntry) -> Result<(), String
         file.upsert(entry.clone());
         write_cloud_file(&inner.data_dir, &file)?;
         stop_engine(inner, &entry.root);
+        // A workspace that left this folder earlier in this run is not the
+        // one arriving now: a window that asks what was removed must not be
+        // told to let go of it (`cloud_removed`).
+        inner.removed.retain(|gone| gone.root != entry.root);
         spawn_engine(inner, &entry);
         Ok(())
     })
@@ -449,18 +642,30 @@ pub(crate) async fn cloud_invite(
     Ok(Invited { blob: invite::blob(&call.endpoint, &code), code, invite: record })
 }
 
-/// Who is on this workspace and what they hold — the
-/// whole People view in one answer, so the panel never draws half a roster.
+/// Who is on this workspace, who this Mac is among them and what it may do
+/// about it — the whole People view in one answer, so
+/// the panel never draws half a roster.
 #[tauri::command]
 pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People, String> {
     let call = workspace_call(&app, &root)?;
-    people_of(&call.remote, &call.device.id, &call.domain).await
+    let people = people_of(&call.remote, &call.device.id, &call.domain).await?;
+    // The engine learned what this Mac may do when it last probed, and a role
+    // can have changed since. Whoever opens this view is looking at the
+    // answer; have the engine ask again, so the rest of the panel agrees.
+    let _ = with_inner(&app, |inner| {
+        if let Some(handle) = inner.engines.get(&root) {
+            let _ = handle.tx.send(EngineCmd::Probe);
+        }
+        Ok(())
+    });
+    Ok(people)
 }
 
-/// The owner saying who they are — once, and only here. Identity,
+/// The creator saying who they are — once, and only here. Identity,
 /// never authority: the domain's env secret is what authenticates them either
 /// way, so this row is what puts a name in the People list, and losing it
-/// costs a name rather than access.
+/// costs a name rather than access. Only the Mac that holds that secret is
+/// answered; everybody else already is somebody.
 #[tauri::command]
 pub(crate) async fn cloud_adopt_owner(
     app: AppHandle,
@@ -475,19 +680,44 @@ pub(crate) async fn cloud_adopt_owner(
         .map_err(|e| describe_people(&call.domain, e))
 }
 
+/// The workspaces taken off this Mac since the app started — what a window
+/// asks once it is up, in case one left before it was listening
+/// (`access_removed`). Never drained: every window asks for itself, and each
+/// knows which of these it has already shown.
+#[tauri::command]
+pub(crate) fn cloud_removed(app: AppHandle) -> Result<Vec<Removed>, String> {
+    with_inner(&app, |inner| Ok(inner.removed.clone()))
+}
+
+/// Make someone an owner, or a member again (an owner's to do). Every Mac
+/// they are signed in on carries the new role on its next request. The
+/// domain refuses the caller's own row and the creator's, and its sentence
+/// says which.
+#[tauri::command]
+pub(crate) async fn cloud_set_role(
+    app: AppHandle,
+    root: String,
+    member_id: String,
+    role: String,
+) -> Result<remote::MemberRecord, String> {
+    let call = workspace_call(&app, &root)?;
+    call.remote.set_member_role(&member_id, &role).await.map_err(|e| describe_people(&call.domain, e))
+}
+
 /// Take a person off this workspace: their row, the invite they had and every
-/// Mac they signed in on, in one batch. Each of those Macs stops syncing on
-/// its very next request — the bearer resolves through the table the batch
-/// emptied, so there is no session left to expire.
+/// Mac they signed in on, in one batch. Each of those Macs is refused on its
+/// very next request — the bearer resolves through the table the batch
+/// emptied, so there is no session left to expire — and, told why, deletes
+/// its copy of the workspace (`access_removed`).
 #[tauri::command]
 pub(crate) async fn cloud_revoke_person(app: AppHandle, root: String, member_id: String) -> Result<(), String> {
     let call = workspace_call(&app, &root)?;
     revoked(&call.domain, call.remote.delete_member(&member_id).await)
 }
 
-/// Revoke one Mac, leaving the person and their other Macs alone. What comes
-/// back is not the credential — the domain never had it in the clear — it is
-/// the row that resolves it.
+/// Sign one Mac out, leaving the person and their other Macs alone; that Mac
+/// deletes its copy when it hears. What is named here is not the credential —
+/// the domain never had it in the clear — it is the row that resolves it.
 #[tauri::command]
 pub(crate) async fn cloud_revoke_device(app: AppHandle, root: String, token_id: String) -> Result<(), String> {
     let call = workspace_call(&app, &root)?;
@@ -502,32 +732,44 @@ pub(crate) async fn cloud_withdraw_invite(app: AppHandle, root: String, invite_i
     revoked(&call.domain, call.remote.delete_invite(&invite_id).await)
 }
 
-/// The People view's whole answer, composed from the three identity lists.
+/// The People view's whole answer: who this Mac is, then the lists its role
+/// may read.
 ///
-/// Generic over the remote so the in-memory worker can prove the branch that
-/// carries the design: a `403` from the members route is not a failure, it is
-/// this Mac being told which door it came in by. Nothing on disk records that
-/// — `cloud.json` holds a credential, never a claim about one — so the
-/// question is asked every time the view opens, and answered by the domain.
-/// A member asks for nothing further: the other two lists are the owner's as
-/// well, and asking would only collect two more refusals.
+/// Generic over the remote so the in-memory worker can prove the part that
+/// carries the design: what a Mac may do is asked of the domain every time
+/// the view opens, never remembered. `cloud.json` holds a credential, not a
+/// claim about one — a role is the person's, and an owner can change it while
+/// this Mac is asleep. Each list is asked for only when `you.can` says it
+/// will be answered, so a member's view costs no refusals.
 async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str) -> Result<People, String> {
-    let members = match remote.list_members().await {
-        Ok(members) => members,
-        Err(remote::RemoteError::Forbidden) => {
-            return Ok(People {
-                role: "member".into(),
-                device_id: device_id.to_string(),
-                members: Vec::new(),
-                invites: Vec::new(),
-                devices: Vec::new(),
-            })
-        }
-        Err(e) => return Err(describe_people(domain, e)),
-    };
-    let (invites, devices) = tokio::try_join!(remote.list_invites(), remote.list_tokens())
-        .map_err(|e| describe_people(domain, e))?;
-    Ok(People { role: "owner".into(), device_id: device_id.to_string(), members, invites, devices })
+    let meta = remote.meta().await.map_err(|e| describe_people(domain, e))?;
+    if !meta.features.iter().any(|f| f == "roles") {
+        // Without the role table there is no telling what to offer, and
+        // guessing would draw buttons the domain refuses.
+        return Err(format!(
+            "{} runs a worker too old to say who may do what here — whoever set the domain up needs to update it",
+            domain
+        ));
+    }
+    let you = meta.you.unwrap_or_default();
+    let may = |action: &str| you.can.iter().any(|held| held == action);
+    let (members, invites, devices) = tokio::try_join!(
+        async { if may("people.see") { remote.list_members().await } else { Ok(Vec::new()) } },
+        async { if may("people.invite") { remote.list_invites().await } else { Ok(Vec::new()) } },
+        async { if may("people.remove") { remote.list_tokens().await } else { Ok(Vec::new()) } },
+    )
+    .map_err(|e| describe_people(domain, e))?;
+    Ok(People {
+        role: you.role,
+        creator: you.creator,
+        me: you.member_id,
+        can: you.can,
+        device_id: device_id.to_string(),
+        token_id: you.token_id,
+        members,
+        invites,
+        devices,
+    })
 }
 
 /// A failed people call in words. The arm that earns its place is `NotFound`:
@@ -545,7 +787,7 @@ fn describe_people(domain: &str, e: remote::RemoteError) -> String {
 
 /// A revocation's answer, where `NotFound` is success: the row is gone, which
 /// is what was asked for. It cannot be the old worker `describe_people`
-/// blames for a 404 either — a Revoke button only exists on a list that route
+/// blames for a 404 either — a Remove button only exists on a list that route
 /// answered.
 fn revoked(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
     match r {
@@ -588,16 +830,18 @@ fn clean_scopes(scopes: Vec<String>) -> Vec<String> {
     KNOWN.iter().filter(|k| **k == "read" || scopes.iter().any(|s| s == *k)).map(|k| k.to_string()).collect()
 }
 
-/// Every agent on this workspace (owner only): what each may do, the
-/// machines it is logged in on, and whether a login code is still waiting.
+/// This person's agents — and, for an owner, everybody's: whose each is,
+/// what it may do, the machines it is logged in on, and for one's own
+/// whether a login code is still waiting.
 #[tauri::command]
 pub(crate) async fn cloud_agents(app: AppHandle, root: String) -> Result<Vec<remote::AgentRecord>, String> {
     let call = workspace_call(&app, &root)?;
     call.remote.list_agents().await.map_err(|e| describe_agents(&call.domain, e))
 }
 
-/// Add an agent (owner only) and mint the code its first machine logs in
-/// with. The line comes back once, in the answer, and nothing stores it.
+/// Add an agent of this person's own and mint the code its first machine
+/// logs in with. The line comes back once, in the answer, and nothing stores
+/// it.
 #[tauri::command]
 pub(crate) async fn cloud_agent_add(
     app: AppHandle,
@@ -619,8 +863,8 @@ pub(crate) async fn cloud_agent_add(
     Ok(AgentAdded { agent, login })
 }
 
-/// A new login code for an agent that exists — for another machine, or
-/// because the first one ran out. Whatever code it had stops working.
+/// A new login code for one of this person's agents — for another machine,
+/// or because the first one ran out. Whatever code it had stops working.
 #[tauri::command]
 pub(crate) async fn cloud_agent_code(app: AppHandle, root: String, agent_id: String) -> Result<AgentLogin, String> {
     let call = workspace_call(&app, &root)?;
@@ -632,8 +876,9 @@ pub(crate) async fn cloud_agent_code(app: AppHandle, root: String, agent_id: Str
     Ok(login)
 }
 
-/// Rename an agent, or change what it may do. The agent finds out on its
-/// next request: its permissions are read off its row every time.
+/// Rename one of this person's agents, or change what it may do. The agent
+/// finds out on its next request: its permissions are read off its row
+/// every time.
 #[tauri::command]
 pub(crate) async fn cloud_agent_update(
     app: AppHandle,
@@ -651,8 +896,9 @@ pub(crate) async fn cloud_agent_update(
         .map_err(|e| describe_agents(&call.domain, e))
 }
 
-/// Remove an agent: its row, its pending code and every machine it is
-/// logged in on. Each of them is refused on its very next request.
+/// Remove an agent — one's own, or as an owner anybody's: its row, its
+/// pending code and every machine it is logged in on. Each of them is
+/// refused on its very next request.
 #[tauri::command]
 pub(crate) async fn cloud_agent_remove(app: AppHandle, root: String, agent_id: String) -> Result<(), String> {
     let call = workspace_call(&app, &root)?;
@@ -744,34 +990,33 @@ pub(crate) async fn cloud_connect(
         .map_err(|e| flows::describe(&domain, e))?;
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
 
-    record_and_spawn(&app, WorkspaceEntry { root, domain, endpoint, ws_id: ws_id.clone(), name, token })?;
+    // Whether this Mac is the creator is the domain's to say: the engine's
+    // first probe asks, a moment from now, and writes it down.
+    record_and_spawn(&app, WorkspaceEntry { root, domain, endpoint, ws_id: ws_id.clone(), name, token, creator: false })?;
     Ok(ws_id)
 }
 
-/// Download a domain's workspace into `<dest_parent>/<name>` and start
-/// syncing it — the second Mac's flow. Answers the new folder's path.
+/// Download a domain's workspace into `~/Doklin/<name>` and start syncing it
+/// — how a Mac joins a workspace, whether somebody invited it or it is
+/// another Mac of the creator's. No folder is asked for (`join_parent`).
+/// Answers the new folder's path.
 #[tauri::command]
-pub(crate) async fn cloud_join(
-    app: AppHandle,
-    endpoint: String,
-    token: String,
-    dest_parent: String,
-) -> Result<String, String> {
+pub(crate) async fn cloud_join(app: AppHandle, endpoint: String, token: String) -> Result<String, String> {
     let endpoint = normalize_endpoint(&endpoint)?;
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
     let token = token.trim().to_string();
-    let parent = PathBuf::from(&dest_parent);
-    if !parent.is_dir() {
-        return Err("pick a folder to download into".into());
-    }
+    let home = app.path().home_dir().map_err(|e| format!("couldn't find your home folder: {}", e))?;
+    let parent = join_parent(&home);
     let (data_dir, device) = with_inner(&app, |inner| Ok((inner.data_dir.clone(), inner.device.clone())))?;
 
     let remote = Arc::new(HttpRemote::new(&endpoint, &token, &device.id));
     let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let creator = meta.you.as_ref().is_some_and(|you| you.creator);
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
-    let dest = parent.join(sanitize_folder_name(&workspace.name));
+    std::fs::create_dir_all(&parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
+    let dest = free_folder(&parent, &workspace.name);
     let root = dest.to_string_lossy().to_string();
     with_inner(&app, |inner| {
         check_root_free(inner, &dest)?;
@@ -789,7 +1034,15 @@ pub(crate) async fn cloud_join(
 
     record_and_spawn(
         &app,
-        WorkspaceEntry { root: root.clone(), domain, endpoint, ws_id: workspace.id, name: workspace.name, token },
+        WorkspaceEntry {
+            root: root.clone(),
+            domain,
+            endpoint,
+            ws_id: workspace.id,
+            name: workspace.name,
+            token,
+            creator,
+        },
     )?;
     Ok(root)
 }
@@ -826,6 +1079,7 @@ pub(crate) async fn cloud_resume(
 
     let remote = HttpRemote::new(&endpoint, &token, &device.id);
     let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let creator = meta.you.as_ref().is_some_and(|you| you.creator);
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
@@ -841,7 +1095,7 @@ pub(crate) async fn cloud_resume(
     let _ = std::fs::create_dir_all(sdir.join("base"));
     record_and_spawn(
         &app,
-        WorkspaceEntry { root, domain, endpoint, ws_id: workspace.id.clone(), name: workspace.name, token },
+        WorkspaceEntry { root, domain, endpoint, ws_id: workspace.id.clone(), name: workspace.name, token, creator },
     )?;
     Ok(workspace.id)
 }
@@ -972,6 +1226,95 @@ pub(crate) async fn cloud_set_root(app: AppHandle, root: String, slug: Option<St
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
 }
 
+/* ---------- Restricted folders ---------- */
+
+/// The engine of the workspace at `root`.
+fn engine_of(app: &AppHandle, root: &str) -> Result<mpsc::UnboundedSender<EngineCmd>, String> {
+    with_inner(app, |inner| {
+        inner.engines.get(root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })
+}
+
+/// Make a restricted folder holding whoever is asking and `members` (member
+/// ids — people already in the workspace). With `from`, the absolute path of
+/// a folder in the workspace, that folder becomes it: it leaves the Macs of
+/// everyone not chosen. Answers the folder as the status lists it, so the
+/// caller knows where it is on this Mac.
+#[tauri::command]
+pub(crate) async fn cloud_space_create(
+    app: AppHandle,
+    root: String,
+    name: String,
+    members: Vec<String>,
+    from: Option<String>,
+) -> Result<SpaceStatus, String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::MakeSpace { name, members, from, reply }).await
+}
+
+/// Add a person to a restricted folder (`add`), or take one out. Anyone in a
+/// folder may do either, to anyone in it — themselves included, which is
+/// leaving it: the folder then leaves this Mac. The last person in a folder
+/// cannot be taken out; the domain's sentence says to delete it instead.
+#[tauri::command]
+pub(crate) async fn cloud_space_member(
+    app: AppHandle,
+    root: String,
+    id: String,
+    member_id: String,
+    add: bool,
+) -> Result<(), String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::SpaceMember { id, member: member_id, add, reply }).await
+}
+
+/// Delete a restricted folder for everyone in it: what it stored on the
+/// domain, and its copy on each of their Macs.
+#[tauri::command]
+pub(crate) async fn cloud_space_delete(app: AppHandle, root: String, id: String) -> Result<(), String> {
+    let tx = engine_of(&app, &root)?;
+    ask(tx, |reply| EngineCmd::DeleteSpace { id, reply }).await
+}
+
+/* ---------- Every public address ---------- */
+
+/// A failed call about the domain's pages, in words. As with people, the arm
+/// that earns its place is `NotFound` on the list: a worker that predates the
+/// route has none to miss.
+fn describe_pages(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old to list every page — update it from the Cloud panel", domain)
+        }
+        other => flows::describe(domain, other.into()),
+    }
+}
+
+/// Every public address on the workspace's domain (an owner's to read),
+/// including pages published from a section this Mac's person is not in —
+/// of which it says only what the address itself says to anyone.
+#[tauri::command]
+pub(crate) async fn cloud_pages(app: AppHandle, root: String) -> Result<remote::EveryPages, String> {
+    let call = workspace_call(&app, &root)?;
+    call.remote.list_every_page().await.map_err(|e| describe_pages(&call.domain, e))
+}
+
+/// Take a page down, whoever published it (an owner's to do). Already gone
+/// is done. The section that held it hears as it hears any other change —
+/// this Mac's too, on the pass this asks for.
+#[tauri::command]
+pub(crate) async fn cloud_page_take_down(app: AppHandle, root: String, slug: String) -> Result<(), String> {
+    let call = workspace_call(&app, &root)?;
+    match call.remote.take_down_page(slug.trim()).await {
+        Ok(()) | Err(remote::RemoteError::NotFound) => {}
+        Err(e) => return Err(flows::describe(&call.domain, e.into())),
+    }
+    if let Ok(tx) = engine_of(&app, &root) {
+        let _ = tx.send(EngineCmd::SyncNow);
+    }
+    Ok(())
+}
+
 /// The cloud version store's index for the workspace holding `path` — what
 /// the history rail merges with this Mac's own snapshots. `Ok(None)` when
 /// the workspace is connected to a worker that has no `versions` feature.
@@ -979,22 +1322,21 @@ pub(crate) async fn versions_index_for(
     app: &AppHandle,
     path: &str,
 ) -> Result<Option<crate::cloud::versions::VersionsIndex>, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
-    ask(tx, |reply| EngineCmd::VersionsIndex { reply }).await
+    ask(tx, |reply| EngineCmd::VersionsIndex { rel, reply }).await
 }
 
-/// How far back the bucket keeps for this workspace — a CAS on the cloud
+/// How far back the bucket keeps for the folder at `root` — a workspace, or
+/// one section of one, each with a store of its own. A CAS on the cloud
 /// index, so it is one answer for every device rather than a per-Mac
-/// setting. Errors when the workspace isn't connected: there is no bucket to
+/// setting. Errors when the folder isn't connected: there is no bucket to
 /// set a horizon on.
 pub(crate) async fn set_cloud_horizon(app: &AppHandle, root: &str, days: Option<u32>) -> Result<(), String> {
-    let root = root.to_string();
-    let tx = with_inner(app, |inner| {
-        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "That folder isn't connected.".to_string())
-    })?;
-    ask(tx, |reply| EngineCmd::SetCloudHorizon { days, reply }).await
+    let (tx, rel) =
+        with_inner(app, |inner| route(inner, root).ok_or_else(|| "That folder isn't connected.".to_string()))?;
+    ask(tx, |reply| EngineCmd::SetCloudHorizon { rel, days, reply }).await
 }
 
 /// One mirrored snapshot, downloaded and cached if this Mac hasn't seen it.
@@ -1003,21 +1345,21 @@ pub(crate) async fn version_snapshot(
     path: &str,
     id: &str,
 ) -> Result<crate::versions::store::Snapshot, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
     let id = id.to_string();
-    ask(tx, move |reply| EngineCmd::VersionSnapshot { id, reply }).await
+    ask(tx, move |reply| EngineCmd::VersionSnapshot { rel, id, reply }).await
 }
 
 /// One mirrored version's content, for a document whose blob this Mac's
 /// store no longer holds (or never did).
 pub(crate) async fn version_blob(app: &AppHandle, path: &str, hash: &str) -> Result<Vec<u8>, String> {
-    let (tx, _rel) = with_inner(app, |inner| {
+    let (tx, rel) = with_inner(app, |inner| {
         route(inner, path).ok_or_else(|| "that folder isn't a connected workspace".to_string())
     })?;
     let hash = hash.to_string();
-    ask(tx, move |reply| EngineCmd::VersionBlob { hash, reply }).await
+    ask(tx, move |reply| EngineCmd::VersionBlob { rel, hash, reply }).await
 }
 
 /// Erase everything on the workspace's domain (owner only) — the step that

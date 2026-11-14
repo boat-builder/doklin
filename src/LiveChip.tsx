@@ -188,8 +188,9 @@ export default function LiveChip({
       <>
         <div className="live-pop-head">Publish “{title}”</div>
         <p className="cloud-hint">
-          Notes publish from a folder that is connected to a domain of your own. Connect this one,
-          and any note in it is public with one click — as fresh as the sync, never fresher.
+          Notes publish from a workspace: a folder connected to a domain of your own. Make this
+          folder one, and any note in it is public with one click — as fresh as the sync, never
+          fresher.
         </p>
         <div className="modal-buttons">
           <button
@@ -200,7 +201,7 @@ export default function LiveChip({
               onConnect();
             }}
           >
-            Connect a domain
+            Create a workspace
           </button>
         </div>
       </>

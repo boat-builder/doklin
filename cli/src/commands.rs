@@ -112,7 +112,7 @@ fn normalize_endpoint(raw: &str) -> Result<String, Failure> {
 }
 
 pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
-    let usage = "the whole line the workspace's owner gave you — doklin login <domain> <code>";
+    let usage = "the whole line you were given — doklin login <domain> <code>";
     let endpoint = normalize_endpoint(args.need(0, usage)?)?;
     let code = args.need(1, usage)?;
     args.at_most(2)?;
@@ -148,7 +148,7 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     });
     creds::save(&all)?;
     // The login this one replaces is no use to anybody now: let it go, so
-    // the owner's list shows one machine and not two. Best effort.
+    // its person's list shows one machine and not two. Best effort.
     if let Some(old) = before {
         let _ = Client::new(&endpoint, Some(&old)).send("DELETE", "login", &[], &[], None);
     }
@@ -157,7 +157,7 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let shown = json!({ "workspace": v["workspace"], "agent": v["agent"], "scopes": v["scopes"], "endpoint": endpoint });
     ctx.answer(&shown, || {
         format!(
-            "Logged in to {} ({}) as {}. It may {}.\nRun `doklin help agent` for what to do next.",
+            "Logged in to {} ({}) as {}. It may {}.\nPut new work under Private/ unless you are told where it goes.\nRun `doklin help agent` for what to do next.",
             text(&v["workspace"], "name"),
             domain,
             text(&v["agent"], "name"),
@@ -196,12 +196,25 @@ pub fn whoami(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let s = session(ctx, "agents")?;
     let v = s.client.send("GET", "me", &[], &[], None)?.json()?;
     ctx.answer(&v, || {
+        // Whose it is, and where that lets it work besides what is shared.
+        let whose = match v["person"].get("name").and_then(Value::as_str) {
+            Some(name) if !name.is_empty() => format!(", {}'s agent", name),
+            _ => String::new(),
+        };
+        let sections = strings(&v["sections"]);
+        let places = if sections.is_empty() {
+            "It sees the shared workspace.".to_string()
+        } else {
+            format!("It sees the shared workspace, and {}.", list(&sections.iter().map(|s| format!("{}/", s)).collect::<Vec<_>>()))
+        };
         format!(
-            "{} on {} ({})\nIt may {}.\nWorker version {}.",
+            "{}{} on {} ({})\nIt may {}.\n{}\nWorker version {}.",
             text(&v["agent"], "name"),
+            whose,
             text(&v["workspace"], "name"),
             s.ws.domain(),
             may(&strings(&v["scopes"])),
+            places,
             v["version"]
         )
     });
@@ -255,6 +268,10 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
         for file in v["files"].as_array().into_iter().flatten() {
             lines.push(format!("{}  (file, {}){}", text(file, "path"), size(file["size"].as_u64().unwrap_or(0)), public_of(file)));
+        }
+        let unlisted = strings(&v["notListed"]);
+        if !unlisted.is_empty() {
+            lines.push(format!("Not listed here — list each on its own: {}.", unlisted.join(", ")));
         }
         if lines.is_empty() {
             "Nothing here yet.".to_string()
@@ -549,6 +566,10 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         if let Some(name) = v.get("name").and_then(Value::as_str) {
             out.push_str(&format!(" It is called {} now.", name));
         }
+        let unpublished = strings(&v["unpublished"]);
+        if !unpublished.is_empty() {
+            out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
+        }
         out
     });
     Ok(())
@@ -667,8 +688,14 @@ pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     ctx.answer(&v, || {
         let pages = v["pages"].as_array().cloned().unwrap_or_default();
         if pages.is_empty() {
-            return "Nothing in this workspace is public.".to_string();
+            return "Nothing this agent can see is public.".to_string();
         }
+        let unlisted = strings(&v["notListed"]);
+        let rest = if unlisted.is_empty() {
+            String::new()
+        } else {
+            format!("\nNot listed: what is public from {}.", list(&unlisted))
+        };
         pages
             .iter()
             .map(|p| {
@@ -692,6 +719,7 @@ pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             })
             .collect::<Vec<_>>()
             .join("\n")
+            + &rest
     });
     Ok(())
 }
@@ -884,6 +912,10 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let skipped = strings(&v["notSearched"]);
         if !skipped.is_empty() {
             lines.push(format!("Too large to search: {}.", skipped.join(", ")));
+        }
+        let unsearched = strings(&v["sectionsNotSearched"]);
+        if !unsearched.is_empty() {
+            lines.push(format!("Not searched — search each with --in: {}.", unsearched.join(", ")));
         }
         lines.join("\n")
     });

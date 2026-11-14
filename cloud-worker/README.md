@@ -8,29 +8,36 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ## Headers and auth
 
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
+- A bearer an owner took away (person removed, Mac signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the Mac delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`.
-- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`; `dka_…` → `agent_tokens` → `agent`; else `tokens` → `member`.
-- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. Owner-only route, member bearer → `403 {"error":"owner only"}`.
+- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`, the **creator** (no D1 read); `dka_…` → `agent_tokens` → `agent`; else `tokens` → the role on that person's `members` row (`owner` | `member`), read every request.
+- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see` and `agents.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
+- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
 - No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`.
-- No `DB` / D1 down: `/api/auth/*`, search, board routes → `503`; member/agent bearers → `401`; sync unaffected; `/api/meta` `"d1": null`.
+- No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search, board routes → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
 
 ## Engine routes (`src/api.ts`, `src/versions.ts`)
 
 ```
 GET  /api/meta  {version, features, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
-     you: {role, memberId, email, name}, people: [{id, name}]}  people = members then agents.
+     you: {role, creator, can: [actions], tokenId, memberId, email, name}, people: [{id, name}]}
+     people = members then agents.
      Runs the D1 migration (once per isolate).
 POST /api/workspace  owner; {name, deviceName?, ownerEmail?, ownerName?} → 201 {id, name, createdAt,
      createdBy, manifestEtag, owner?}; 409 {workspace} when bound
 GET  /api/workspace  {id, name, createdAt, createdBy, files, bytes}
-GET  /api/poll  {manifestEtag, presence: {<deviceId>: {memberId, name, path?, ts}},
-     leases: [{path, deviceId, memberId, name, until}]|null}; writes nothing
-POST /api/poll  same answer; body {name, path?, take?} | {leave: true} records the beat (needs
-     x-doklin-device). D1 failure → presence {}, leases null, etag still answered
+GET  /api/poll  {manifestEtag, presence: {<deviceId>: {memberId, name, path?, space?, ts}},
+     leases: [{path, space?, deviceId, memberId, name, until}]|null, spaces: [space]|null};
+     writes nothing. spaces = the caller's. path/space are absent, and a lease unlisted, for a
+     space the caller is not in; no space = the shared workspace
+POST /api/poll  same answer; body {name, path?, space?, take?} | {leave: true} records the beat
+     (needs x-doklin-device); a space the caller is not in = no path. D1 failure → presence {},
+     leases null, spaces null, etag still answered
 GET  /api/manifest[?since=e]  body + x-manifest-etag; 304 unchanged
-PUT  /api/manifest  x-base-etag (428 without) → {etag, seq}; 412 {etag} lost race; 400 invalid;
-     426 other manifest version; 413 > 4 MB
+PUT  /api/manifest  x-base-etag (428 without) → {etag, seq} + x-manifest-etag; 412 {etag} lost
+     race; 400 invalid; 426 other manifest version; 413 > 4 MB; 409 {error, taken: [slug]} when
+     the public map names an address another space holds
 GET    /api/blobs/<fid>         {blobs: [{hash, size, uploaded}]}
 GET    /api/blobs/<fid>/<hash>  bytes, content-type as uploaded
 PUT    /api/blobs/<fid>/<hash>  create-only → {stored, existed, hash, size}; 413 > 25 MB
@@ -44,32 +51,83 @@ POST /api/admin/wipe  owner; {"confirm":"wipe"}; batched, repeat until remaining
      round empties every D1 table but meta. Frees the domain.
 ```
 
+## Spaces (`src/spaces.ts`, `src/api.ts`)
+
+A space is a restricted folder (`s-` + 8 hex) or one person's Private
+(`p-` + their member id's hex). Any person may call these. `space` =
+`{id, kind: restricted|private, name, by, createdAt, etag, members: [memberId]}`;
+`etag` is its manifest's. **Everything under `/api/spaces/<id>` is `404
+{"error":"not found"}` to anyone not in it, owners included** — the same
+body an unknown id gets. Malformed id `400`.
+
+```
+GET    /api/spaces  {spaces} — the caller's
+POST   /api/spaces  {name, members?: [memberId]} → 201 {space}; the caller is always in it;
+       400 {unknown: [id]} for ids that are not people here; name = one folder name (no "/",
+       no leading ".", ≤ 80)
+PUT    /api/spaces/private  {space} — the caller's Private, created on first call
+PATCH  /api/spaces/<id>  {name} → {space}
+DELETE /api/spaces/<id>  → {deleted, purged, remaining}; batched like the wipe, repeat while remaining
+PUT    /api/spaces/<id>/members/<memberId>  → {space}; 404 not a person here
+DELETE /api/spaces/<id>/members/<memberId>  204 (self = leave); 404 not in it; 409 the last one
+*      /api/spaces/<id>/manifest · /blobs/… · /versions/…  the engine routes above, on that space
+```
+
+`409`: PATCH, DELETE or members on a Private; any call by a creator with no
+member row. A space's manifest may not name a `root` page (`400`).
+
+## Every public address (`src/everyPage.ts`; `pages.manage`)
+
+```
+GET    /api/pages  {pages: [{slug, kind, title, by, at, shared}], truncated}
+DELETE /api/pages/<slug>  204; 404 nothing is published there
+```
+
+Every page the domain serves, whichever space published it. Of a page in a
+space it says only what the address tells anyone: `title` (the entry's, else
+the file's or folder's name, else the space's), `by` as a name, `at`. Never
+the space, the path or the file. `shared` = in the shared workspace.
+`truncated`: more spaces hold addresses than one request reads (40). The
+`DELETE` edits that space's public map through `commit`.
+
 ## Auth routes (`src/api.ts`, `src/agentApi.ts`)
 
-Owner-only except join. Deletes → `204`; unknown id `404`; malformed id `400`.
+Owners only, except join, `GET members` and the agent routes. Deletes → `204`; unknown id `404`; malformed id `400`.
+`409`: changing or removing your own row or the creator's; deleting the token the call is made with.
 
 ```
 POST   /api/auth/join  no bearer; {code, deviceId?, deviceName?} → 201 {token, tokenId, member};
        400 not a code; 401 unknown or expired (identical)
 POST   /api/auth/invites  {email, name?, codeHash, expiresAt ≤ 30 d} → 201 {invite}; creates the
-       member if new, replaces their pending invite
+       member if new, re-enables a removed one, replaces their pending invite; 409 when somebody
+       has signed in as that address (lastSeenAt set, or the creator's row) unless the caller is
+       the creator or that person
 GET    /api/auth/invites  pending, unexpired
 DELETE /api/auth/invites/<id>
-GET    /api/auth/members  everyone, with device count and lastSeenAt
-POST   /api/auth/members  {email, name?} — adopt/rename the owner's identity
-DELETE /api/auth/members/<id>  person + invite + tokens + presence + leases
+GET    /api/auth/members  any person; everyone not removed, with role, creator, device count and
+       lastSeenAt (set at first redeem, then by the beat)
+POST   /api/auth/members  creator only; {email, name?} — adopt/rename the creator's identity
+PATCH  /api/auth/members/<id>  {role: owner|member} → {member}; owner → member withdraws every
+       pending invite
+DELETE /api/auth/members/<id>  the row stays with disabled = 1, role member; their invite, tokens,
+       presence, leases, restricted-folder memberships and agents go (their Private stays); token
+       hashes go to removed_tokens; removing an owner withdraws every pending invite
 GET    /api/auth/tokens  [{id, memberId, email, deviceName, createdAt}] — never a hash
-DELETE /api/auth/tokens/<id>
-POST   /api/auth/agents  {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}
-GET    /api/auth/agents  {agents: [{id, name, scopes, createdAt, lastUsedAt,
-       machines: [{id, host, createdAt}], code: {id, createdAt, expiresAt}|null}]}
-POST   /api/auth/agents/<id>  {name?, scopes?} → {updated: true}
-POST   /api/auth/agents/<id>/code  {codeHash, expiresAt} → 201 {code}; replaces a pending one
-DELETE /api/auth/agents/<id>  agent + codes + tokens
-DELETE /api/auth/agents/<id>/tokens/<tid>
+DELETE /api/auth/tokens/<id>  its hash goes to removed_tokens
+POST   /api/auth/agents  anyone; {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}: the caller's
+GET    /api/auth/agents  anyone; the caller's agents, an owner everyone's: {agents: [{id, name, scopes,
+       createdAt, lastUsedAt, memberId|null, mine, machines: [{id, host, createdAt}],
+       code: {id, createdAt, expiresAt}|null}]}; `code` only on the caller's own
+POST   /api/auth/agents/<id>  {name?, scopes?} → {updated: true}; its person only
+POST   /api/auth/agents/<id>/code  {codeHash, expiresAt} → 201 {code}; replaces a pending one; its
+       person only
+DELETE /api/auth/agents/<id>  agent + codes + tokens; its person, or an owner
+DELETE /api/auth/agents/<id>/tokens/<tid>  its person, or an owner
 ```
 
-`scopes`: subset of `read comment edit publish` holding `read`.
+`scopes`: subset of `read comment edit publish` holding `read`. An agent that
+is not the caller's: `404` to a member; to an owner `403` on the two `POST`s.
+`agents.member_id` NULL is the creator's.
 
 ## Document API (`src/agentApi.ts`, `src/agentBoards.ts`; agent bearer only)
 
@@ -77,11 +135,21 @@ Under `/api/agent/`. Missing scope → `403 {error, need, scopes}`. JSON except
 document bytes; refusals `{error, code?, …}`. `dry=1` / `dryRun: true`
 validates without writing (`written: false`). Commit lost 5 times → `503`.
 
+Every path is literal, as on the disk of the agent's person (`src/agentPlace.ts`):
+`Private/…` is their Private, `Restricted/<folder>/…` a restricted folder they
+are in, anything else the shared workspace. A route is answered in the space
+its path names, with that space's manifest mounted at its folder
+(`src/mount.ts`); a folder the person is not in → `404`; `Private/…` for a
+creator with no member row → `409`. `tree`, `search` and `pages` at the top
+cover every section, opening at most 8 spaces a request (`notListed`,
+`sectionsNotSearched`). A restricted folder's name is the Mac's (`candidates`,
+`src-tauri/src/cloud/space.rs`, **change both**), given out in creation order.
+
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
        name}|null, version, features}; 400 not a code; 401 unknown/used/expired (identical); 503
 DELETE login  revoke this token (204)
-GET    me     {agent, scopes, workspace, version, features}
+GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version, features}
 read:
 GET tree?dir=&deep=1  {dir, folders, boards: [{path, cards}], documents: [{path, md?, html?,
     htmlBehind?, public?}], files: [{path, rev, size, changed, by, public?}]}; a version is
@@ -91,8 +159,10 @@ GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind (document|file
     values percent-encoded. clean=1 strips markers; info=1 → JSON row + {kind, comments}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
-    moreLines?, inComments?}], total, truncated?, notSearched?} | 202 {indexing, pending}; limit ≤ 30
-GET pages  {pages: [{slug, url, kind: document|file|folder, path, title?, desc?, home?, by?, byName?, at?, missing?}]}
+    moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
+    {indexing, pending}; limit ≤ 30
+GET pages  {pages: [{slug, url, kind: document|file|folder, path, title?, desc?, home?, by?, byName?,
+    at?, missing?}], notListed?}
 GET board?path=  {board, name, cards, by, fields: [{id, name, type, options?: [{name, color?}]}], conflicts?}
 GET cards?path=&by=&where=  {board, name, cards, shown?, by, fields, columns: [{name, empty?, color?,
     cards: [{title, props, rev, changed, by, byName?, conflict?}]}], conflicts?} | 202 {indexing,
@@ -102,7 +172,10 @@ edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version?,
        file, rev, size, created, unchanged?, htmlBehind?, orphaned?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
-POST   move {from, to, dryRun?}  document/file/folder/board; to ending in / = into → {kind, from, to, files, name?}
+POST   move {from, to, dryRun?}  document/file/folder/board; to ending in / = into → {kind, from, to,
+       files, name?, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
+       file ids) before they are removed with a tombstone `to`; pages re-claimed after, and
+       `unpublished` lists addresses that could not be
 POST   board {path, name?} → 201 {board, name, fields, created}
 POST   card {path, title, set?, first?, page?} → 201 {board, title, path, rev, props, created}
 PATCH  card {path, card, set?, title?, <place>} → {board, title, path, rev, props, renamed?, placed?}
@@ -150,6 +223,8 @@ ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision; a
 /<slug>/raw             html rendition verbatim, CSP sandbox
 /<dirSlug>              folder table of contents
 /<dirSlug>/<rel/path>   nested note (md extension dropped, case-insensitive), …/raw, or image/PDF/html
+                        a slug the shared map lacks is looked up in `addresses` and served from
+                        that space (cache key carries its etag and id); held by nobody → 404, uncached
 /og.png · /<slug>/og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
 /__web/<tag>/mermaid.js  immutable, content-tagged
 /__web/fonts/<file>      bundled Newsreader
@@ -160,12 +235,13 @@ anything else            404 page
 
 ```
 workspace.json   {id, name, createdAt, createdBy: {deviceId, deviceName}}; create-only; bound iff present
-manifest.json    manifest v3; CAS on etag
+manifest.json    manifest v4; CAS on etag
 blobs/<fileId>/<hash>   immutable; hash = sha256 hex prefix, 16–64 chars
 versions/index.json     {version, horizonDays, snapshots: [{id, ts, device, reason, files, bytes,
                         digest, pinned?, label?, restoredFrom?}]}; CAS on etag
 versions/snapshots/<id>.json.gz  id = <ts13>-<deviceId>; immutable
 versions/blobs/<hash>   gzip'd, FULL sha256; immutable
+spaces/<spaceId>/…      one space: manifest.json, blobs/, versions/ again, under its prefix
 ```
 
 Bind puts the empty manifest, then `workspace.json`, both
@@ -174,11 +250,11 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`. Old `presence.json` / `history/` are dead.
 
-## Manifest v3 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
+## Manifest v4 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
 
 ```json
 {
-  "version": 3, "name": "Notes", "seq": 812,
+  "version": 4, "name": "Notes", "seq": 812,
   "files": { "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
                             "mtime": 1757000000000, "by": "m-1a2b3c4d" } },
   "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "m-1a2b3c4d" } },
@@ -191,32 +267,45 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 ```
 
 - `by`: `m-` or `a-` + 8 hex; checked only as a bounded string (v2 device names survive).
+- A tombstone may carry `to`: the file was moved to another section, not
+  deleted — a space id, or `""` for the shared workspace.
+- The shared manifest holds no file under `Private/` or `Restricted/`, in any
+  case (`RESERVED_FOLDERS`, `layout.ts` ⇄ `RESERVED_DIRS`, `space.rs`:
+  **change both**); a space's manifest may. Tombstones are not checked for it.
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
-  reference shape, ≤ 1 `root`. Never existence. Merge semantics are the engine's.
+  reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 7)
+## D1 (`src/schema.ts`, schema 8)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
 members      (id m-…, email UNIQUE normalized, name, role, created_at, last_seen_at, disabled)
 tokens       (hash PK, id t-…, member_id → members CASCADE, device_id, device_name, created_at)
 invites      (hash PK, id i-…, member_id → members CASCADE, created_at, expires_at)
-presence     (device_id PK, member_id?, device_name, path?, ts)
-leases       (path PK lowercased, device_id, member_id?, device_name, until)
-agents       (id a-…, name, scopes, created_at, last_used_at, disabled)
+presence     (device_id PK, member_id?, device_name, space_id '' = shared, path?, ts)
+leases       ((space_id, path) PK, path lowercased, device_id, member_id?, device_name, until)
+agents       (id a-…, name, scopes, created_at, last_used_at, disabled, member_id)   NULL = the creator's
 agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expires_at)
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
-search_text  (fid PK, folded)        md file id, else html; NULL past 1 MB
-search_state (key 'mirror', etag, held)   held = {"<fid>": "<text hash>.<sidecar hash>"}
+search_text  ((space_id, fid) PK, folded)   space_id '' = shared; md file id, else html; NULL past 1 MB
+search_state (space_id PK, etag, held)      held = {"<fid>": "<text hash>.<sidecar hash>"}
 board_cards  (fid PK, hash, head)    a card's frontmatter block as last read
+creator        (id = 1 PK, member_id)   whose row holds OWNER_TOKEN; one row or none
+removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe
+spaces        (id s-…|p-…, kind, name, created_by, created_at, etag)   etag = its manifest's
+space_members ((member_id, space_id) PK, added_by, added_at)
+addresses     (slug PK, space_id)       which space a public address is; '' = shared
 ```
 
-`hash` columns are `sha256(token or code)`. Migrations: ordered `STEPS` run
+`members.disabled = 1` is a removed person: no tokens, not listed, still in
+`/api/meta` `people`. `hash` columns are `sha256(token or code)`. Migrations: ordered `STEPS` run
 on `/api/meta`, idempotent `CREATE … IF NOT EXISTS`, then `UPDATE meta SET
 schema_version = <to> WHERE key = 'schema' AND schema_version = <to-1>` so
-concurrent isolates converge. Updates ship no migrations directory: add a
+concurrent isolates converge. A table that holds data never changes shape by
+`DROP`: a step lists the column under `columns`, and the runner adds it only
+when a read of it fails. Updates ship no migrations directory: add a
 step, never a wrangler migration. Single-primary: no read replicas (a lease
 two Macs both believe they hold is worse than none).
 

@@ -13,16 +13,15 @@
 // the worker writes the marker and the record in one manifest write — so a
 // thread can never be half-made.
 
-import { notBound, refuse, type Call } from "./agentCall";
+import { change, notBound, openTree, refuse, type Call } from "./agentCall";
 import { contentTypeOf, documentAt, versionFlag } from "./agentDocs";
 import { headLines, splitCard } from "./boardCards";
-import { Refusal, commit, newFileId, type Tx } from "./commit";
+import { Refusal, newFileId, type Tx } from "./commit";
 import { Index, askedVersion, type Doc, type Version } from "./documents";
 import { json, readJsonObject } from "./http";
 import { ANCHOR_TEXT_LEN, anchorResolves, elementsOf, elementsStartingWith, normalizeText } from "./htmlText";
 import { blobKey } from "./layout";
 import { mirrorAfter } from "./search";
-import { openWorkspace } from "./workspace";
 import {
   CRITIC_BLOCK_RE,
   newThreadId,
@@ -134,9 +133,10 @@ export function threadsOf(md: string | null, html: string | null, meta: EntityMe
 
 /* ---------- Reading ---------- */
 
-export async function getComments({ env, url }: Call): Promise<Response> {
+export async function getComments(c: Call): Promise<Response> {
+  const { env, url } = c;
   const path = url.searchParams.get("path") ?? "";
-  const ws = await openWorkspace(env);
+  const ws = await openTree(c);
   if (!ws) return notBound();
   const doc = documentAt(new Index(ws.manifest.files), path);
   if (doc instanceof Refusal) return refuse(doc);
@@ -283,7 +283,7 @@ function freshThreadId(md: string | null, meta: EntityMeta): string {
 }
 
 export async function postComment(c: Call): Promise<Response> {
-  const { request, env, who } = c;
+  const { request, who } = c;
   const body = await readJsonObject(request);
   if (!body) return json({ error: "invalid json body" }, 400);
   const path = typeof body.path === "string" ? body.path : "";
@@ -299,7 +299,7 @@ export async function postComment(c: Call): Promise<Response> {
   const asked = thread ? null : askedVersion(path, flag);
   if (asked instanceof Refusal) return refuse(asked);
 
-  const done = await commit(env, who.id, async (tx) => {
+  const done = await change(c, async (tx) => {
     const doc = documentAt(new Index(tx.files), path);
     if (doc instanceof Refusal) return doc;
     const open = await openThreads(tx, doc);
@@ -313,7 +313,7 @@ export async function postComment(c: Call): Promise<Response> {
     if (value instanceof Refusal) return value;
     await saveThreads(tx, doc, value.md, open.meta);
     return value.answer;
-  }, { dryRun: body.dryRun === true });
+  }, body.dryRun === true);
   if (done instanceof Refusal) return refuse(done);
   await mirrorAfter(c, done);
   return json({ ...done.value, ...(done.wrote ? {} : { written: false }) }, thread || !done.wrote ? 200 : 201);
@@ -377,12 +377,12 @@ async function start(
 }
 
 export async function deleteComment(c: Call): Promise<Response> {
-  const { env, url, who } = c;
+  const { url } = c;
   const path = url.searchParams.get("path") ?? "";
   const id = (url.searchParams.get("thread") ?? "").replace(/^#/, "").trim();
   if (!id) return json({ error: "say which thread" }, 400);
 
-  const done = await commit(env, who.id, async (tx) => {
+  const done = await change(c, async (tx) => {
     const doc = documentAt(new Index(tx.files), path);
     if (doc instanceof Refusal) return doc;
     const open = await openThreads(tx, doc);
@@ -407,7 +407,7 @@ export async function deleteComment(c: Call): Promise<Response> {
     }
     await saveThreads(tx, doc, md, meta);
     return { path: doc.stem, thread: id, version };
-  }, { dryRun: url.searchParams.get("dry") === "1" });
+  }, url.searchParams.get("dry") === "1");
   if (done instanceof Refusal) return refuse(done);
   await mirrorAfter(c, done);
   return json({ ...done.value, removed: done.wrote });
