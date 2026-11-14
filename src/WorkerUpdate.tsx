@@ -13,7 +13,8 @@
 // A worker that is NEWER than this app is the other way round — the card
 // says so and points at the Doklin release instead.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import {
   BUNDLED_WORKER_VERSION,
   cloudCheckWorker,
@@ -47,13 +48,8 @@ export default function WorkerUpdate({
   const [copied, setCopied] = useState<"commands" | "prompt" | null>(null);
   const [checking, setChecking] = useState(false);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(onClose, cardRef);
 
   const commands = useMemo(() => updateCommands(cloud.endpoint), [cloud.endpoint]);
   const prompt = useMemo(
@@ -103,13 +99,9 @@ export default function WorkerUpdate({
   }
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="modal-overlay">
       <div
+        ref={cardRef}
         className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"

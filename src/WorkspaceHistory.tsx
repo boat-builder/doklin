@@ -9,7 +9,8 @@
 // A snapshot of now is taken first, so every restore here is itself a
 // version and the toast's *Undo* is another restore.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import { groupByDay, isRecent, timeLabel } from "./HistoryRail";
 import {
   versionsRestoreSnapshot,
@@ -132,16 +133,12 @@ export default function WorkspaceHistory({
     };
   }, [root, selected]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      if (confirming) setConfirming(null);
-      else onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [confirming, onClose]);
+  // Esc takes back a pending restore first; a press outside just closes.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss((how) => {
+    if (how === "escape" && confirming) setConfirming(null);
+    else onClose();
+  }, cardRef);
 
   const groups = useMemo(() => groupByDay(snapshots), [snapshots]);
   const rows = useMemo(() => rowsOf(diff), [diff]);
@@ -193,13 +190,9 @@ export default function WorkspaceHistory({
   const nothingToDo = diff != null && rows.length === 0;
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="modal-overlay">
       <div
+        ref={cardRef}
         className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"

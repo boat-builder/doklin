@@ -140,7 +140,7 @@ export type CloudProbe = {
 export type CloudMarker = { domain: string; wsId: string };
 
 /** What a second Mac needs to download a workspace: shown behind
- *  "Connect another Mac…", never part of a status. */
+ *  "Connect another Mac", never part of a status. */
 export type CloudCredentials = { endpoint: string; token: string };
 
 /** The two halves of an invite found in one paste — either may be missing,

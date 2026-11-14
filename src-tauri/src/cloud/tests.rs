@@ -2000,7 +2000,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
         .unwrap();
 
     // From here the invitee's flow IS the second Mac's flow: the token goes
-    // into the same download the panel's "Connect another Mac…" feeds.
+    // into the same download the panel's "Connect another Mac" feeds.
     let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", &redeemed.token));
     let parent = tempfile::tempdir().unwrap();
     let dest = parent.path().join("Notes");

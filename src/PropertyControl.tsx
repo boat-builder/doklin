@@ -5,7 +5,8 @@
 // so a select looks and behaves the same wherever you meet it. It renders the
 // value and reports a new one; the caller owns the write.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import { propList, type PropValue } from "./store/frontmatter";
 import type { Field, OptionColor, StoreDef } from "./store/storeFile";
 
@@ -160,23 +161,7 @@ function SelectPopover({
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [typed, setTyped] = useState("");
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const id = window.setTimeout(() => {
-      window.addEventListener("pointerdown", onDown);
-      window.addEventListener("keydown", onKey);
-    }, 0);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  useDismiss(onClose, ref);
   const clean = typed.trim();
   const isNew = clean !== "" && !options.some((o) => o.toLowerCase() === clean.toLowerCase());
   const shown = clean === ""

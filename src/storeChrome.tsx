@@ -7,6 +7,7 @@
 // copies of that would drift.
 
 import { useEffect, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import type { Stage } from "./store/board";
 
 export function Popover({
@@ -22,28 +23,10 @@ export function Popover({
   onClose: () => void;
   children: React.ReactNode;
 }) {
-  useEffect(() => {
-    const onDown = () => onClose();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    // Defer: the click that opened the popover is still propagating.
-    const id = window.setTimeout(() => {
-      window.addEventListener("pointerdown", onDown);
-      window.addEventListener("keydown", onKey);
-    }, 0);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(onClose, ref);
   return (
-    <div
-      className={`dk-popover ${className}`}
-      style={{ left: x, top: y }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
+    <div ref={ref} className={`dk-popover ${className}`} style={{ left: x, top: y }}>
       {children}
     </div>
   );

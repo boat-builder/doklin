@@ -154,7 +154,7 @@ pub struct Probe {
 }
 
 /// What a second Mac needs to download a workspace: shown in the Cloud
-/// panel behind "Connect another Mac…", never carried by a status.
+/// panel behind "Connect another Mac", never carried by a status.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {

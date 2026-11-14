@@ -98,6 +98,8 @@ import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
 import StoreView from "./StoreView";
 import CardPeek from "./CardPeek";
+import { useDismiss } from "./dismiss";
+import { CloseIcon } from "./storeChrome";
 import type { StoreEmbedHost, StoreChoice } from "./StoreEmbedFrame";
 import PropertiesHeader from "./PropertiesHeader";
 import {
@@ -6194,6 +6196,9 @@ function SaveAsPrompt({
     inputRef.current?.select(); // pre-filled name: typing replaces it wholesale
   }, []);
 
+  const panelRef = useRef<HTMLDivElement>(null);
+  useDismiss(onCancel, panelRef);
+
   const submit = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -6206,15 +6211,15 @@ function SaveAsPrompt({
   };
 
   return (
-    <div
-      className="saveas-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onCancel();
-      }}
-    >
-      <div className="saveas-panel" role="dialog" aria-label="Save note">
-        <div className="saveas-title">
-          Save to <span className="saveas-dir">{dirLabel}</span>
+    <div className="saveas-backdrop">
+      <div ref={panelRef} className="saveas-panel" role="dialog" aria-label="Save note">
+        <div className="saveas-head">
+          <div className="saveas-title">
+            Save to <span className="saveas-dir">{dirLabel}</span>
+          </div>
+          <button className="saveas-close" onClick={onCancel} aria-label="Cancel" title="Cancel">
+            <CloseIcon size={12} />
+          </button>
         </div>
         <div className="saveas-inputwrap">
           <input
@@ -6234,11 +6239,10 @@ function SaveAsPrompt({
               if (e.key === "Enter") {
                 e.preventDefault();
                 void submit();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                onCancel();
               }
-              e.stopPropagation(); // keep app-level shortcuts out of the prompt
+              // App-level shortcuts stay out of the prompt; Esc goes on to
+              // close it.
+              if (e.key !== "Escape") e.stopPropagation();
             }}
           />
           {!MD_EXT_RE.test(value) && <span className="saveas-ext">.md</span>}
@@ -6277,13 +6281,15 @@ function UnsavedPrompt({
     saveRef.current?.focus();
   }, []);
 
+  // Esc and a press outside are Cancel: the note stays open, nothing lost.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(() => onAnswer("cancel"), cardRef);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") return;
       e.stopPropagation();
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onAnswer("cancel");
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
         onAnswer("discard");
       } else if (e.metaKey || e.ctrlKey) {
@@ -6299,6 +6305,7 @@ function UnsavedPrompt({
   return (
     <div className="modal-overlay">
       <div
+        ref={cardRef}
         className="modal unsaved-prompt"
         role="alertdialog"
         aria-modal="true"
@@ -6453,23 +6460,7 @@ function Settings({
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(() => setOpen(false), wrapRef, open);
 
   const updateAvailable = update.phase === "available";
   const updateBusy =

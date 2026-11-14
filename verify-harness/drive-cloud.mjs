@@ -141,7 +141,7 @@ const pillBefore = await tid("live-chip").textContent();
 await tid("live-chip").click();
 await poll(async () => (await tid("publish-pop").count()) === 1);
 step(
-  "chip (not connected): reads Publish, its popover explains and offers Connect a domain…",
+  "chip (not connected): reads Publish, its popover explains and offers Connect a domain",
   pillBefore === "Publish" &&
     (await tid("live-chip").getAttribute("data-state")) === "publish" &&
     (await tid("publish-connect").count()) === 1 &&
@@ -163,7 +163,7 @@ step(
 await tid("settings-cloud").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 step(
-  "panel (not connected): Connect a domain… enabled, Open a workspace from a domain… offered",
+  "panel (not connected): Connect a domain enabled, Open a workspace from a domain offered",
   (await tid("connect-domain").isEnabled()) && (await tid("open-from-domain").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-01-not-connected.png" });
@@ -466,7 +466,7 @@ await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "projec
 await poll(async () => (await tid("published-row").count()) === 1);
 step(
   "published list: the panel's door counts 2, folders sort first, Use as home page sets the root, Stop asks then removes the folder",
-  doorText === "Published pages (2)…" && rowSlugs.join(",") === "projects,team-notes",
+  doorText === "Published pages (2)" && rowSlugs.join(",") === "projects,team-notes",
   `${doorText} · ${rowSlugs.join(",")}`,
 );
 await page.screenshot({ path: SHOTS + "cloud-11-published-list.png" });
@@ -996,7 +996,7 @@ await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 
 /* 24 — People and agents: one view, a tab each, and a door for each in the
    panel — so that neither has to be found behind the other.
-   People… lands on the People tab, with the invite door above the list */
+   People lands on the People tab, with the invite door above the list */
 await tid("sync-status").click();
 await poll(async () => (await tid("people-open").count()) === 1);
 const doorLabel = await dialog("Cloud").locator(".cloud-section-label", { hasText: "People and agents" }).count();
@@ -1007,9 +1007,9 @@ await poll(async () => (await tid("people-list").count()) === 1);
 const selected = async (tab) => (await tid(`tab-${tab}`).getAttribute("aria-selected")) === "true";
 const above = async (a, b) => (await tid(a).boundingBox()).y < (await tid(b).boundingBox()).y;
 step(
-  "People and agents: the panel has a door for each; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
+  "People and agents: the panel has a door for each; People opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
   doorLabel === 1 &&
-    doors.join("|") === "People…|Agents…" &&
+    doors.join("|") === "People|Agents" &&
     (await tid("tab-people").textContent()).trim() === "People" &&
     (await tid("tab-agents").textContent()).trim() === "Agents" &&
     (await selected("people")) &&
@@ -1233,7 +1233,7 @@ const tooOld = (await tid("agents-unavailable").textContent()).trim();
 const stillSaysWhat = await tid("agents-intro").isVisible();
 await tid("tab-people").click();
 step(
-  "Agents (an older worker): Agents… opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
+  "Agents (an older worker): Agents opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
   landedOnAgents &&
     tooOld === TOO_OLD &&
     stillSaysWhat &&

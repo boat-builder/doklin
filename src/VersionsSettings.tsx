@@ -7,7 +7,8 @@
 // Everything here is a setting or a read; the one long operation is the
 // export, and it reports itself through `versions-progress`.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   onVersionsProgress,
@@ -105,16 +106,12 @@ export default function VersionsSettings({
     void load();
   }, [load]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      if (forgetting) setForgetting(null);
-      else onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [forgetting, onClose]);
+  // Esc takes back a pending "forget" first; a press outside just closes.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss((how) => {
+    if (how === "escape" && forgetting) setForgetting(null);
+    else onClose();
+  }, cardRef);
 
   // Only while an export is running: the event fires per file and there is
   // no reason to hold a listener open for the life of the modal.
@@ -166,13 +163,9 @@ export default function VersionsSettings({
   }, [root, act, load]);
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="modal-overlay">
       <div
+        ref={cardRef}
         className="modal cloud-modal"
         role="dialog"
         aria-modal="true"
@@ -328,7 +321,7 @@ export default function VersionsSettings({
                           setForgetting(store.key);
                         }}
                       >
-                        Forget…
+                        Forget
                       </button>
                     )}
                   </span>

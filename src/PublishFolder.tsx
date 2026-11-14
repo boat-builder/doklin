@@ -6,7 +6,8 @@
 // published folder and stops it.
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useDismiss } from "./dismiss";
 import {
   cloudPublish,
   cloudUnpublish,
@@ -64,13 +65,10 @@ export default function PublishFolder({
   const [error, setError] = useState<string | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useDismiss(() => {
+    if (!busy) onClose();
+  }, cardRef);
 
   // How much becomes public: every note under the folder, however deep.
   useEffect(() => {
@@ -108,13 +106,8 @@ export default function PublishFolder({
   const previewSlug = problem === null ? typed : "…";
 
   return (
-    <div
-      className="modal-overlay"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
-    >
-      <div className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={existing ? "Published folder" : "Publish folder"}>
+    <div className="modal-overlay">
+      <div ref={cardRef} className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={existing ? "Published folder" : "Publish folder"}>
         <div className="modal-header">
           <div className="modal-title">{existing ? "Published folder" : "Publish folder"}</div>
           <button className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>
