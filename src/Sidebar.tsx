@@ -95,6 +95,9 @@ type Props = {
   cloud?: CloudStatus | null;
   currentPath: string | null;
   selection: SidebarSelection[];
+  // A folder to bring into view — asked for from outside the app
+  // (`doklin open <folder>`); a new `seq` asks again.
+  reveal?: { path: string; seq: number } | null;
   // The shared file clipboard (null/empty = nothing to paste).
   clipboard: FileClipboardPayload | null;
   refreshToken: number;
@@ -210,6 +213,7 @@ export default function Sidebar({
   cloud = null,
   currentPath,
   selection,
+  reveal = null,
   clipboard,
   refreshToken,
   onSelect,
@@ -291,6 +295,24 @@ export default function Sidebar({
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
+
+  // Bring the folder an open from outside asked for into view: open the
+  // folders above it (and it), then scroll to its row once the tree has drawn
+  // it. A folder the tree never shows (a hidden one) simply never scrolls.
+  const revealedRef = useRef(0);
+  useEffect(() => {
+    if (!reveal || revealedRef.current === reveal.seq || !tree) return;
+    const target = reveal.path;
+    const holds = (dir: string) => target === dir || target.startsWith(`${dir}/`);
+    if ([...collapsed].some(holds)) {
+      setCollapsed((prev) => new Set([...prev].filter((dir) => !holds(dir))));
+      return; // this runs again once they are open
+    }
+    const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(target)}"]`);
+    if (!row) return;
+    revealedRef.current = reveal.seq;
+    row.scrollIntoView({ block: "nearest" });
+  }, [reveal, tree, collapsed]);
 
   const toggleCollapsed = useCallback((path: string) => {
     setCollapsed((prev) => {

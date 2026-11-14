@@ -92,6 +92,9 @@ A closing paragraph long enough to wrap a few times, so the measure and the lead
         transformCallback: (cb) => cb,
         invoke: (cmd, args) => {
           switch (cmd) {
+            // Nothing opened from outside the app is waiting for this window.
+            case "take_window_shows":
+              return Promise.resolve([]);
             case "take_window_init":
               return Promise.resolve({
                 isMain: true,

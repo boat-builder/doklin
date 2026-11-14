@@ -145,6 +145,13 @@ pub struct CloudManager {
     inner: Mutex<Option<ManagerInner>>,
 }
 
+/// The folders of the workspaces this Mac is connected to, as cloud.json
+/// spells them: what an open from outside the app is placed against.
+pub(crate) fn connected_roots(app: &AppHandle) -> Vec<String> {
+    let Ok(data_dir) = app.path().app_data_dir() else { return Vec::new() };
+    read_cloud_file(&data_dir).workspaces.into_iter().map(|w| w.root).collect()
+}
+
 /// Called once from tauri's setup: load cloud.json, mint a device identity
 /// on first run, spawn an engine per connected workspace.
 pub(crate) fn init(app: &AppHandle) {

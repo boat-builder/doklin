@@ -146,6 +146,10 @@ type WindowInit = {
   restored: boolean;
 };
 
+/** Something an open from outside the app asked this window to show
+ *  (`Show` in src-tauri/src/external_open.rs — change both). */
+type WindowShow = { path: string; kind: "file" | "board" | "folder" };
+
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
 // true and flip it false for spawned windows once init resolves, so a spawned
@@ -2366,6 +2370,41 @@ export default function App() {
     sidebarSelectionRef.current = sels;
     setSidebarSelection(sels);
   }, []);
+
+  // Opens from outside the app (`doklin open`, Finder) that the backend placed
+  // in this window: a file or a board as its tab, a folder of this workspace
+  // shown in the sidebar. Taken once the window is ready and again on every
+  // ping (src-tauri/src/external_open.rs).
+  const [revealRequest, setRevealRequest] = useState<{ path: string; seq: number } | null>(null);
+  const openTabRef = useRef(openTab);
+  useEffect(() => {
+    openTabRef.current = openTab;
+  }, [openTab]);
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    const take = async () => {
+      const shows = await invoke<WindowShow[]>("take_window_shows").catch(() => [] as WindowShow[]);
+      for (const show of shows) {
+        if (!live) return;
+        if (show.kind === "folder") {
+          setSidebarOpen(true);
+          setSidebarMode("files");
+          selectSidebarEntries([{ path: show.path, kind: "dir" }]);
+          setRevealRequest((r) => ({ path: show.path, seq: (r?.seq ?? 0) + 1 }));
+        } else {
+          await openTabRef.current(show.path, show.kind === "board" ? "store" : "file");
+        }
+      }
+    };
+    void take();
+    // SHOWS_EVENT in src-tauri/src/external_open.rs — change both.
+    const un = listen("window-shows", () => void take());
+    return () => {
+      live = false;
+      void un.then((f) => f()).catch(() => {});
+    };
+  }, [ready, selectSidebarEntries]);
 
   const setWorkspace = useCallback((root: string) => {
     sessionWorkspaceRoot = root;
@@ -5992,6 +6031,7 @@ export default function App() {
           cloud={cloudForRoot}
           currentPath={sidebarCurrentPath}
           selection={sidebarSelection}
+          reveal={revealRequest}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}

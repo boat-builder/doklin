@@ -6,8 +6,8 @@
 //! that domain's document API, and the only thing kept here is the token a
 //! `doklin login` left behind.
 //!
-//! On macOS the same word has always opened files in the app
-//! (`doklin notes.md`), so an argument that is not a command is still that.
+//! The one exception is `doklin open`, which hands files on this Mac to the
+//! app. Every other word after `doklin` names a command, on every system.
 
 mod args;
 mod board;
@@ -15,6 +15,7 @@ mod commands;
 mod creds;
 mod help;
 mod http;
+mod open;
 mod text;
 
 use std::io::IsTerminal;
@@ -203,6 +204,13 @@ pub const COMMANDS: &[Command] = &[
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::published,
     },
+    Command {
+        name: "open",
+        usage: "doklin open [<path>…]",
+        about: "Open files or folders from this Mac in the Doklin app; with no path, open the app. A path inside a workspace opens in that workspace's window. Needs no login.",
+        accepts: Accepts { values: &[], switches: &[] },
+        run: open::open,
+    },
 ];
 
 fn main() {
@@ -222,7 +230,7 @@ fn main() {
 
 fn run(raw: &[String], json: bool) -> Result<(), Failure> {
     let Some(first) = raw.first() else {
-        return no_arguments();
+        return help::print(None);
     };
     match first.as_str() {
         "help" | "--help" | "-h" => return help::print(raw.get(1).map(String::as_str)),
@@ -233,7 +241,11 @@ fn run(raw: &[String], json: bool) -> Result<(), Failure> {
         _ => {}
     }
     let Some(command) = COMMANDS.iter().find(|c| c.name == first) else {
-        return not_a_command(raw);
+        return Err(Failure::usage(if first.starts_with('-') {
+            format!("there is no {} option — run `doklin help`", first)
+        } else {
+            format!("\"{}\" is not a doklin command — run `doklin help`", first)
+        }));
     };
     let args = args::parse(&raw[1..], &command.accepts)?;
     if args.has("help") {
@@ -266,48 +278,5 @@ fn report(failure: &Failure, json: bool) {
     }
     for el in detail["candidates"].as_array().into_iter().flatten() {
         eprintln!("  <{}> {}", el["tag"].as_str().unwrap_or(""), el["text"].as_str().unwrap_or(""));
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn no_arguments() -> Result<(), Failure> {
-    open_in_app(&[])
-}
-
-#[cfg(not(target_os = "macos"))]
-fn no_arguments() -> Result<(), Failure> {
-    help::print(None)
-}
-
-#[cfg(target_os = "macos")]
-fn not_a_command(raw: &[String]) -> Result<(), Failure> {
-    if raw[0].starts_with('-') {
-        return Err(Failure::usage(format!("there is no {} option — run `doklin help`", raw[0])));
-    }
-    open_in_app(raw)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn not_a_command(raw: &[String]) -> Result<(), Failure> {
-    Err(Failure::usage(format!("\"{}\" is not a doklin command — run `doklin help`", raw[0])))
-}
-
-/// Open files or a folder in the Doklin app — what `doklin <path>` has
-/// always meant on a Mac. Each path gets a window of its own.
-#[cfg(target_os = "macos")]
-fn open_in_app(paths: &[String]) -> Result<(), Failure> {
-    let mut open = std::process::Command::new("open");
-    if paths.is_empty() {
-        open.args(["-a", "Doklin"]);
-    } else {
-        let here = std::env::current_dir().unwrap_or_default();
-        open.args(["-n", "-a", "Doklin", "--args"]);
-        for path in paths {
-            open.arg(if path.starts_with('/') { std::path::PathBuf::from(path) } else { here.join(path) });
-        }
-    }
-    match open.status() {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(Failure::other("could not open Doklin — is the app installed? For the commands, run `doklin help`")),
     }
 }

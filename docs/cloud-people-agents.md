@@ -101,7 +101,8 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Token only in `~/.config/doklin/credentials.json` (`$XDG_CONFIG_HOME`), 0600 in 0700, one entry per domain; `-w` picks.
 - Exit codes are a contract: `0` ok · `1` other · `2` usage · `3` not found · `4` not permitted · `5` conflict · `6` not logged in/revoked · `7` worker too old (missing feature, or an unknown route's 404/405).
 - JSON when stdout isn't a TTY or with `--json`; `read` puts content on stdout, metadata on stderr. `--dry-run` on every change; re-asks on `202`; board commands read stdin only with `--from -`.
-- On a Mac a non-command argument opens that path in the app. Install: `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`).
+- Every word after `doklin` is a command on every system; an unknown one is exit `2`, `doklin` alone is the overview. `open` is the one command about this Mac: it hands paths on this disk to the app (refused off a Mac, needs no login) and never knows workspaces — the app places them.
+- One `doklin` per Mac. The app carries it at `Doklin.app/Contents/Helpers/doklin` (`bundle.macOS.files`); *Doklin → Install Command Line Tool* (`cli_install.rs`) links `/usr/local/bin/doklin` to it, replacing what is there and naming a `doklin` the terminal finds first. `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`) is for everything else; on a Mac with the app it links to that copy instead of downloading.
 - Concepts: `doklin help agent|sections|documents|comments|publishing|boards`.
 
 ## Limits

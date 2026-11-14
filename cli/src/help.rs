@@ -51,6 +51,9 @@ Boards
   board field add|set|rm …     the board's fields             (doklin help boards)
   board option add|set|rm …    a field's options, which are its columns
 
+This Mac
+  open [path…]                 open files or folders here in the Doklin app; no login
+
 Everywhere
   -w <domain>     which workspace, when this machine is logged in to several
   --json          answer in JSON (already the case when the output is not a terminal)

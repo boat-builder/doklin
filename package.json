@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:cli": "cargo build --release --locked --manifest-path cli/Cargo.toml --target aarch64-apple-darwin",
     "lint": "eslint src",
     "typecheck:worker": "tsc -p cloud-worker/tsconfig.json --noEmit",
     "test:worker": "node cloud-worker/test/run.mjs",
