@@ -1,8 +1,6 @@
 //! `<app_data>/versions/settings.json` — the kill switch and the horizon.
 //! One file for every store, because both settings are the user's answer to
-//! "how much history do I want", not a property of any one folder. Phase 5
-//! puts a surface on this; phase 1 wires it so a test and the harness can
-//! flip it.
+//! "how much history do I want", not a property of any one folder.
 
 use std::path::Path;
 

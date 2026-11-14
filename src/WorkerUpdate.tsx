@@ -1,4 +1,4 @@
-// "Update the worker" — docs/cloud.md §7.2. One card (v1 → v2), two ways to
+// "Update the worker": one card (v1 → v2), two ways to
 // run the same update, and "Check again", which asks the engine to probe the
 // domain; the fresh version arrives through the status this card is rendered
 // from. The app can't push the update itself: by design it holds only the

@@ -141,40 +141,5 @@ Or double-click a `.md` file or folder in Finder.
 
 ## For agents & contributors
 
-Deeper docs live in dedicated files to keep this page focused:
-
-- **[docs/development.md](docs/development.md)** — how to run from source, the
-  architecture (frontend/backend, Tauri commands, file association, the CLI),
-  saving/autosave internals, the macOS-only porting convention, and the full
-  keyboard / UI / theme reference. **Start here for any code change.**
-- **[docs/release-pipeline.md](docs/release-pipeline.md)** — the *producer* side:
-  how a push to `main` becomes a signed, notarized DMG on GitHub Releases —
-  the CI/CD jobs, Apple signing + notarization, the auto-update manifest, the
-  secrets, a failure playbook, and a checklist for reusing the pipeline.
-- **[docs/auto-update.md](docs/auto-update.md)** — the *consumer* side: the
-  one-click in-app update feature — its UI flow and state machine, the
-  signed-manifest architecture and why it's safe, and a **portable checklist
-  for adding the same feature to another Tauri app**.
-- **[docs/tabs-followups.md](docs/tabs-followups.md)** — design notes and
-  deferred follow-ups for the tab system.
-- **[docs/datastores-kanban.md](docs/datastores-kanban.md)** — the design for
-  structured data: *datastores* (a folder of markdown cards with frontmatter
-  plus a `store.jsonl` definition), kanban and table views as a tab and as
-  a ` ```kanban ` / ` ```table ` embed in notes, how it rides sync / history
-  / publishing, and the phased
-  plan. All four phases are built: a board from a folder, a board embedded
-  in a note, the pure snapshot a published page draws from, and the second
-  view with properties on any note.
-- **[docs/cloud.md](docs/cloud.md)** — the cloud as built: one domain per
-  workspace, a single Rust engine as the only writer, publishing as a flag
-  in the workspace manifest with pages rendered from synced files, the
-  agent + wrangler setup, a workspace shared with people (a member keyed by
-  their email, an invite code that is a 100-bit capability, presence and
-  advisory file leases riding the poll, all in a D1 database beside the
-  bucket) and with agents (an identity that is not a person, the document
-  API it works through, search, and the `doklin` command line in `cli/`),
-  the decisions behind each, and what a team of ten still runs into on
-  Cloudflare's free plan.
-- **[cloud-worker/README.md](cloud-worker/README.md)** — the worker's
-  contract: the bucket, the manifest, the sync API, the document API, the
-  public routes, and deploying by hand.
+[CLAUDE.md](CLAUDE.md) has the commands, the house rules and which doc in
+[docs/](docs/) covers which part of the code.

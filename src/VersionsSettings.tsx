@@ -1,5 +1,5 @@
-// The two horizons, where the disk goes, and the export
-// (docs/versioning.md §8, docs/versioning-plan.md §8.2). One modal rather
+// The two horizons, where the disk goes, and the export.
+// One modal rather
 // than a section of the gear popover: five controls, two of them lists, do
 // not belong in a menu — and both the popover and the Cloud panel's *This
 // Mac* need something they can open.

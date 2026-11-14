@@ -1,5 +1,5 @@
-// Every file this folder's history holds and the folder itself does not
-// (docs/versioning-plan.md §7.2, §12.3.4). Apple Notes' shape: always in
+// Every file this folder's history holds and the folder itself does not.
+// Apple Notes' shape: always in
 // sight at the foot of the sidebar — a bin and its count in the footer bar —
 // opening in the sidebar's own column, because deletion is the moment nobody
 // goes looking for a menu.
@@ -22,7 +22,7 @@ const dirname = (p: string) => {
 };
 const stripDocExt = (name: string) => name.replace(/\.(md|markdown|mdown|mkd)$/i, "");
 
-/** Where a restore lands when the old path is occupied: the plan's
+/** Where a restore lands when the old path is occupied:
  *  ` (restored)`, before the extension, numbered if that is taken too. */
 export function restoredName(path: string, n = 1): string {
   const dot = path.lastIndexOf(".");

@@ -18,7 +18,7 @@ name: release
 #      always resolves to the newest build. It also builds the macOS `doklin`
 #      command and attaches all three binaries with their installer, so
 #        curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh
-#      always installs the newest one (docs/cloud.md §8.6).
+#      always installs the newest one.
 #
 # The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
 # workflows from GITHUB_TOKEN pushes — so the bump cannot re-trigger this
@@ -380,7 +380,7 @@ jobs:
           cp scripts/doklin-cloud-update.sh release-assets/doklin-cloud-update.sh
           chmod +x release-assets/doklin-cloud-update.sh
 
-      # The `doklin` command (cli/, docs/cloud.md §8.6): what an agent uses to
+      # The `doklin` command (cli/): what an agent uses to
       # work with a workspace through its domain. Three binaries —
       #   doklin-linux-x64, doklin-linux-arm64   built by `build-cli`
       #   doklin-macos-arm64                     built here

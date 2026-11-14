@@ -1,5 +1,5 @@
 //! The engine: one task per connected workspace, the only code that holds a
-//! token or talks to the worker (docs/cloud.md §6).
+//! token or talks to the worker.
 //!
 //! Bidirectional, state-based sync between a local workspace folder and its
 //! domain. Disk stays the source of truth; the remote side is a manifest
@@ -67,7 +67,7 @@ pub const FS_SETTLE: Duration = Duration::from_millis(5000);
 /// touch — autosave is already debounced 600 ms upstream, so an edit reaches
 /// the cloud about two seconds after the keystroke.
 pub const TOUCH_SETTLE: Duration = Duration::from_millis(1500);
-/// Presence heartbeat cadence. The beat rides the poll (docs/cloud.md §6.4):
+/// Presence heartbeat cadence. The beat rides the poll:
 /// it goes out on the first poll at least this long after the last one landed
 /// — every third, at a 15 s poll — and well inside the worker's 90 s TTL, so
 /// one lost beat is survivable and two are not. It is also what renews a
@@ -75,7 +75,7 @@ pub const TOUCH_SETTLE: Duration = Duration::from_millis(1500);
 pub(crate) const PRESENCE_BEAT: Duration = Duration::from_secs(45);
 /// How long a document counts as being edited here after it was last opened
 /// or typed in: what presence reports as "editing <path>", and how long this
-/// Mac keeps the document's lease (docs/cloud.md §8.2). Long enough to stop
+/// Mac keeps the document's lease. Long enough to stop
 /// and think without the document going to somebody else; short enough that a
 /// Mac left on with a note open lets go of it by the time anyone minds.
 pub(crate) const ACTIVITY_FRESH: Duration = Duration::from_secs(5 * 60);
@@ -182,10 +182,10 @@ pub struct WorkspaceState {
     pub legacy_cleanup: LegacyCleanup,
 }
 
-/// The bookmark of the one-time clean-up that phase 6 leaves behind
-/// (docs/versioning-plan.md §9.1): every file's retired revision blobs. It
+/// The bookmark of the one-time clean-up of the retired manifest history:
+/// every file's retired revision blobs. It
 /// had a first pass over the `history/<fid>.json` archives too, until the
-/// routes it called were deleted (docs/cloud.md §6.6).
+/// routes it called were deleted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LegacyCleanup {
     /// What an older release wrote here when it finished deleting archives.
@@ -209,8 +209,9 @@ pub struct LegacyCleanup {
 impl LegacyCleanup {
     /// Nothing has happened yet, so there is nothing worth writing down —
     /// which is what keeps this out of the state file of a workspace
-    /// connected after phase 6, with no history to retire in the first
-    /// place. Every later state is persisted, the finished one included.
+    /// connected after the manifest history was retired, with none to
+    /// retire in the first place. Every later state is persisted, the
+    /// finished one included.
     fn is_pristine(&self) -> bool {
         !self.archives_done && !self.done && self.cursor.is_none()
     }
@@ -308,8 +309,8 @@ pub struct Engine<R: Remote> {
     /// What `/api/meta` last listed. A worker without `versions` is mirrored
     /// to not at all — and says so in the status.
     worker_features: Vec<String>,
-    /// The member id this Mac signs with here, as `/api/meta` last said it
-    /// (docs/cloud.md §6.6). None on a domain that has not been asked
+    /// The member id this Mac signs with here, as `/api/meta` last said it.
+    /// None on a domain that has not been asked
     /// yet, or one whose owner has never adopted an identity — then work is
     /// signed with the Mac's name, exactly as it was before v3.
     me: Option<String>,
@@ -578,7 +579,7 @@ impl<R: Remote> Engine<R> {
             // before this engine writes anything: `me` is what a manifest it
             // publishes signs with, and `people` is what the `by` in one it
             // reads is shown as. A worker older than v6 answers neither, and
-            // everything falls back to device names (docs/cloud.md §6.6).
+            // everything falls back to device names.
             self.me = meta.you.and_then(|you| you.member_id).filter(|id| !id.is_empty());
             self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
             self.people_at = Some(Instant::now());
@@ -1418,7 +1419,7 @@ impl<R: Remote> Engine<R> {
 
     /// Drop every blob of a pushed file but the one the manifest points at
     /// now, once it is old enough that no racing pusher still needs it.
-    /// Since phase 6 there is nothing else to keep: a file's past is the
+    /// There is nothing else to keep: a file's past is the
     /// version store's, and the sync side needs exactly the current bytes.
     async fn gc_blobs(&mut self) {
         let candidates: Vec<String> = std::mem::take(&mut self.gc_candidates).into_iter().collect();
@@ -1440,7 +1441,7 @@ impl<R: Remote> Engine<R> {
         }
     }
 
-    /* ----- the retired manifest history (docs/versioning-plan.md §9.1) ----- */
+    /* ----- the retired manifest history ----- */
 
     /// Every fileId this workspace can name, sorted — live files and
     /// tombstones both, because a deleted file's blobs are exactly what the
@@ -1459,7 +1460,7 @@ impl<R: Remote> Engine<R> {
     /// persisted, so it survives a restart and is never done twice.
     ///
     /// This used to sweep the `history/<fid>.json` archives first. Those
-    /// routes are gone (docs/cloud.md §6.6), and the archives with them:
+    /// routes are gone, and the archives with them:
     /// a workspace whose first pass never finished keeps a few small objects
     /// nothing reads, and the wipe takes them. The blobs are the part that
     /// was worth the walk — a deep revision of a large file is megabytes —
@@ -1500,7 +1501,7 @@ impl<R: Remote> Engine<R> {
         self.persist_state();
     }
 
-    /* ----- the version store's mirror (docs/versioning-plan.md §6.2) ----- */
+    /* ----- the version store's mirror ----- */
 
     fn worker_has(&self, feature: &str) -> bool {
         self.worker_features.iter().any(|f| f == feature)
@@ -1942,7 +1943,7 @@ impl<R: Remote> Engine<R> {
 
     /// Everybody else here, in words. The worker says whose Mac each one is;
     /// the directory says what they are called — the same resolution every
-    /// `by` gets (docs/cloud.md §6.6). Your own other Mac is named as a
+    /// `by` gets. Your own other Mac is named as a
     /// Mac, and so is one whose person the directory cannot name yet.
     fn presence_of(&self, poll: &PollResponse) -> Vec<PresenceDevice> {
         let mut presence: Vec<PresenceDevice> = poll

@@ -1,4 +1,4 @@
-//! Capture (docs/versioning.md §6.1): the cadence rule that decides *when* a
+//! Capture: the cadence rule that decides *when* a
 //! snapshot is taken, and the scan that takes it.
 //!
 //! The rule is Notion's, and it is the whole reason the history reads like a

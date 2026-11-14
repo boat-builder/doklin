@@ -1,5 +1,4 @@
-// The D1 database beside the bucket: its schema, and the runner that owns it
-// (docs/cloud.md §5.1).
+// The D1 database beside the bucket: its schema, and the runner that owns it.
 //
 // An update ships ONE bundled JS file and no migrations directory, so
 // `wrangler d1 migrations apply` is not available to a domain being updated:
@@ -24,14 +23,14 @@
 // answer an identity route, because those ARE the database (members.ts);
 // the owner's own credential is the env secret and never reads a row, so a
 // database that is gone degrades a workspace to one credential rather than
-// locking anyone out (docs/cloud.md §5.4).
+// locking anyone out.
 
 import type { Env } from "./env";
 
 type Step = {
   /** The schema version this step produces. */
   to: number;
-  /** The tables it creates — what a wipe empties (docs/cloud.md §5.7). */
+  /** The tables it creates — what a wipe empties. */
   tables: readonly string[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
@@ -42,7 +41,7 @@ const BASE_VERSION = 1;
 
 const STEPS: readonly Step[] = [
   {
-    // People and the credentials they hold (docs/cloud.md §8.1). The
+    // People and the credentials they hold. The
     // separation is the whole point: a *member* is permanent and keyed by
     // their email, so a new Mac re-reaches the same person; a *token* is
     // per-device and disposable; an *invite* is a token that has not been
@@ -84,7 +83,7 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // Who is here, a row per device (docs/cloud.md §5.3). It used to be one
+    // Who is here, a row per device. It used to be one
     // shared R2 object read, mutated and written back with no CAS — two beats
     // landing together lost one, and every beat was a Class A write. A row
     // per device, upserted, is atomic by itself.
@@ -106,7 +105,7 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // Who holds which document (docs/cloud.md §8.2). Keyed by the path, so
+    // Who holds which document. Keyed by the path, so
     // one atomic upsert is the whole of acquiring, renewing and refusing: the
     // primary key is the lock, and the upsert's WHERE says whose it may be.
     //
@@ -128,7 +127,7 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // Agents and the credentials they hold (docs/cloud.md §8.3) — the same
+    // Agents and the credentials they hold — the same
     // three lifetimes as people, in tables of their own: an agent is not a
     // member (no email, permissions a member does not have, and a token that
     // is only answered on the document API). Both secrets are stored as their
@@ -167,7 +166,7 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // The search mirror (docs/cloud.md §8.5): one row per document holding
+    // The search mirror: one row per document holding
     // its text, lower-cased, so "which documents contain this" is one scan in
     // the database instead of a blob read per document. Keyed by file id, so
     // a move or a rename costs it nothing.
@@ -194,8 +193,7 @@ const STEPS: readonly Step[] = [
     ],
   },
   {
-    // A copy of every board card's properties block (docs/cloud.md §8.4,
-    // Boards), so showing a board is one query rather than a blob read per
+    // A copy of every board card's properties block, so showing a board is one query rather than a blob read per
     // card. Keyed by file id, with the content hash the block was read from:
     // a row whose hash is not the manifest's is stale, and read again. A
     // card removed on a Mac leaves its row behind until a wipe — a few
@@ -256,7 +254,7 @@ export async function ensureSchema(env: Env): Promise<number | null> {
 }
 
 /**
- * The D1 half of the owner's wipe (docs/cloud.md §5.7): empty every table a step created,
+ * The D1 half of the owner's wipe: empty every table a step created,
  * so a rebound domain inherits no ghost members. The schema is brought up
  * first — a wipe of a database nobody has migrated has nothing to delete
  * from — and `meta` survives, since it holds no one's data.

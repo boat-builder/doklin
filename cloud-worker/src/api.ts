@@ -1,5 +1,5 @@
-// The authenticated API — everything the engine says to the worker
-// (docs/cloud.md §5.3–5.5, §5.7). JSON in, JSON out, a bearer on
+// The authenticated API — everything the engine says to the worker.
+// JSON in, JSON out, a bearer on
 // every request; the engine is the only caller, so there is no CORS and no
 // preflight. Every request also carries `x-doklin-device` (attribution for
 // presence and the binding) and `x-doklin-client` (the app version, for
@@ -7,13 +7,13 @@
 //
 //   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
 //                                    you: who this bearer is, people: [{id, name}] — the directory
-//                                    a manifest's `by` is read with (docs/cloud.md §6.6)}
+//                                    a manifest's `by` is read with}
 //   POST   /api/workspace            owner; bind this domain: body {name, deviceName?,
 //                                    ownerEmail?, ownerName?} → 201 (+ {owner} when named)
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
 //   GET    /api/poll                 {manifestEtag, presence, leases} — the cheap 15 s poll; reads only
-//   POST   /api/poll                 the same poll, carrying this device's beat (docs/cloud.md §5.3):
+//   POST   /api/poll                 the same poll, carrying this device's beat:
 //                                    body {name, path?, take?} — "here, editing path", which claims
 //                                    its lease (take: from whoever holds it) and lets go of any
 //                                    other — or {leave: true}. Presence and leases are best effort:
@@ -38,7 +38,7 @@
 //   POST   /api/admin/wipe           owner; body {"confirm":"wipe"} — erase everything, batched;
 //                                    repeat until remaining:false. Frees the domain.
 //
-//   People (docs/cloud.md §5.3–5.4, §8.1). Everything here is the D1 database beside
+//   People. Everything here is the D1 database beside
 //   the bucket; a deployment without one answers 503 and loses nothing else.
 //
 //   POST   /api/auth/join            NO BEARER — {code, deviceId?, deviceName?} → 201
@@ -58,7 +58,7 @@
 //   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
 //   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
 //
-//   Agents (docs/cloud.md §8.3). An agent's token is answered under /api/agent and nowhere
+//   Agents. An agent's token is answered under /api/agent and nowhere
 //   else — every route above answers one with 403 — and the routes that manage agents sit
 //   beside the people routes, owner-only like them. Both are listed in agentApi.ts.
 //
@@ -166,12 +166,12 @@ export async function handleApi(
     // The probe is also where the database migrates itself: it is the one
     // route every engine calls on start and on every poll, and the only one
     // that reports what it found. `d1` is the schema version, or null on a
-    // deployment whose wrangler.toml has no DB binding (docs/cloud.md §5.1).
+    // deployment whose wrangler.toml has no DB binding.
     //
     // Since v6 it also answers identity: who the caller is, and what every
     // person here is called. Both belong on the route an engine already asks
     // before it writes anything — a manifest it PUTs signs with `you.memberId`
-    // and every `by` it reads resolves through `people` (docs/cloud.md §6.6).
+    // and every `by` it reads resolves through `people`.
     const [workspace, d1, you, people] = await Promise.all([
       readWorkspace(env),
       ensureSchema(env),
@@ -218,7 +218,7 @@ export async function handleApi(
   }
 
   // The version store — its own prefix, its own CAS'd index, nothing to do
-  // with the manifest's per-file history (docs/versioning.md §6.4).
+  // with the manifest's per-file history.
   if (section === "versions" && (parts.length === 3 || parts.length === 4)) {
     return handleVersions(request, env, url, parts);
   }
@@ -252,7 +252,7 @@ export async function handleApi(
 const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
 
 /**
- * Who the bearer is, as the app has to write it down (docs/cloud.md §6.6):
+ * Who the bearer is, as the app has to write it down:
  * the id a manifest this Mac writes will carry in `by`.
  *
  * A member's identity came off their token already — `authenticate` resolved
@@ -362,7 +362,7 @@ async function handleAuth(request: Request, env: Env, parts: string[]): Promise<
  * Invite someone by email, creating the person if this is the first time that
  * address has been seen. The body carries `codeHash`, never a code: the app
  * mints the 100-bit code and hashes it, so a worker log, a D1 backup and this
- * request body are all incapable of letting anyone in (docs/cloud.md §5.4).
+ * request body are all incapable of letting anyone in.
  */
 async function createInvite(request: Request, env: Env): Promise<Response> {
   const body = await readJsonObject(request);
@@ -552,16 +552,14 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
 
 /**
  * The 15-second question every engine asks — "has the manifest moved?" — and,
- * since v7, the carrier of its presence beat; since v8, of its leases too
- * (docs/cloud.md §5.3, §8.2).
+ * since v7, the carrier of its presence beat; since v8, of its leases too.
  *
  * The method says whether anything is written. A `GET` reads; a `POST` says
  * "this device is here" (or is leaving), and the engine sends one only when a
  * beat is due — every 45 s, the moment the edited path changes, or when the
  * document it has open is free to claim — so an idle poll writes nothing and
  * the client decides when a write happens. A worker that wrote on every poll
- * would spend 58% of D1's free daily writes on freshness nobody can see
- * (docs/cloud.md §11.2).
+ * would spend 58% of D1's free daily writes on freshness nobody can see.
  *
  * The etag is the poll's job; presence and leases are not. A database that is
  * missing, broken or mid-outage answers `{}` for presence and `null` for
@@ -611,7 +609,7 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
  * next bind finds no workspace.json. Batched to the per-request subrequest
  * budget; the client repeats the call until `remaining` comes back false.
  *
- * The last round empties D1 as well (docs/cloud.md §5.7) — otherwise a
+ * The last round empties D1 as well — otherwise a
  * rebound domain would inherit the old workspace's people. Nothing has to be
  * saved for last any more: a wipe is owner-only, and the owner's credential
  * is the worker's env secret rather than anything in here, so the call cannot

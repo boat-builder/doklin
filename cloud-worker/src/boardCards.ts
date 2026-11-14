@@ -1,4 +1,4 @@
-// A board's cards as the worker reads them (docs/cloud.md §8.4, Boards).
+// A board's cards as the worker reads them.
 //
 // A card is a note: its frontmatter block holds its properties and the rest
 // is its page (src/store/frontmatter.ts). Two things live here.

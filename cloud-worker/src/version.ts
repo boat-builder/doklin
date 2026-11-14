@@ -1,6 +1,6 @@
 // The worker's API version and feature list, in a file of their own so the
 // app's build can read the integer straight out of the source (a virtual
-// module in vite.config.ts — docs/cloud.md §7.1) without bundling
+// module in vite.config.ts) without bundling
 // the worker. Keep the declaration on one line in exactly this shape: the
 // bundle script and the app parse it with /^export const WORKER_VERSION = (\d+);$/m.
 //
@@ -27,26 +27,26 @@
 //       reference, plus DELETE on a per-file history archive. Where 1's
 //       history is one file's revisions, this is the folder's — what every
 //       device keeps locally, mirrored so it outlives the laptop.
-//   4 = a D1 database beside the bucket (docs/cloud.md §5.1): the binding,
+//   4 = a D1 database beside the bucket: the binding,
 //       the worker's own migration runner, a schema version reported by
 //       /api/meta as `d1`, and a wipe that empties it. Nothing reads or
 //       writes a table yet — the bump exists so the update badge lands the
 //       plumbing before any feature rides on it, and a worker still running 3
 //       has no binding and answers `d1: null`.
-//   5 = people (docs/cloud.md §8.1): members keyed by a normalized email,
+//   5 = people: members keyed by a normalized email,
 //       per-device tokens stored as their own sha256, one-time invites, and
 //       the /api/auth routes that mint, list and revoke them. A member's
 //       bearer now resolves through D1; the owner's is still the env secret
 //       and still reads no row, so a database that is gone costs a workspace
 //       its people and never its owner.
-//   6 = attribution by person (docs/cloud.md §6.6): a manifest's `by` is
+//   6 = attribution by person: a manifest's `by` is
 //       a member id rather than a device name (MANIFEST_VERSION 3), and
 //       /api/meta says who the bearer is and what this workspace's people are
 //       called, so any Mac can put a name to an id without being the owner.
 //       The three deprecated /api/history/<fid> routes go with it: the
 //       manifest has carried no revisions since the version store landed, and
 //       what reads them is a release nobody is running.
-//   7 = presence in D1, folded into the poll (docs/cloud.md §5.3): a row
+//   7 = presence in D1, folded into the poll: a row
 //       per device instead of one shared presence.json, written by
 //       `POST /api/poll` when the engine has a beat to send and never by a
 //       `GET`, which still only reads. Entries carry the member id, so "who
@@ -54,7 +54,7 @@
 //       and with them the separate beat request and nearly every R2 write an
 //       idle workspace made. A revoked device or a removed person leaves
 //       presence at once rather than at the end of the TTL.
-//   8 = leases (docs/cloud.md §8.2): a beat that names a document claims it
+//   8 = leases: a beat that names a document claims it
 //       — one atomic upsert on a `leases` table keyed by the path, which
 //       acquires a free or lapsed lease, renews this Mac's own and refuses
 //       anybody else's — and a beat that names another document, or none,
@@ -70,7 +70,7 @@
 //       tinted columns with their stage glyphs, progress, card excerpts and
 //       dates. No API change: the bump is how the new look reaches a deployed
 //       domain, through the update badge.
-//  10 = agents (docs/cloud.md §8.3–8.5): identities that are not people,
+//  10 = agents: identities that are not people,
 //       added by the owner with a set of permissions, logged in by a one-time
 //       code, and answered on the document API under /api/agent and nowhere
 //       else. There the worker reads and changes the workspace itself — it
@@ -81,7 +81,7 @@
 //       never crosses the wire. `/api/meta`'s directory lists agents too, so
 //       a Mac can name the `a-` id on what an agent changed. D1 gains the
 //       agents' tables and the search mirror.
-//  11 = boards for agents (docs/cloud.md §8.4, Boards): a board is one name
+//  11 = boards for agents: a board is one name
 //       on the document API, never a folder — its cards, fields and options
 //       are read and changed through routes of their own, parsed and written
 //       by the app's own store modules, and a card's page is a document
@@ -120,7 +120,7 @@ export const WORKER_FEATURES: readonly string[] = [
 // always has and shows no lock — which is exactly what an older worker can
 // honestly offer.
 // The five "agent" names are what the `doklin` command line checks before it
-// offers a command (docs/cloud.md §8.6): "agents" is the login and the People
+// offers a command: "agents" is the login and the People
 // view's Agents section; "agent-docs" reading and changing documents;
 // "agent-pages" publishing; "agent-comments" threads; "agent-search" the
 // mirror and the search over it. They landed together, and stay separate
@@ -129,11 +129,11 @@ export const WORKER_FEATURES: readonly string[] = [
 // "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
 // reports it more precisely than a name in this list could.
 
-// The manifest schema this worker understands (docs/cloud.md §6.6).
+// The manifest schema this worker understands.
 // A PUT carrying any other version is a 426 in both directions, with a
 // sentence naming which side is behind: an app newer than this worker pauses
 // in `worker-outdated` until the worker is updated, and an app older than it
-// is told to update itself (docs/cloud.md §5.7 — refuse politely, never
+// is told to update itself (refuse politely, never
 // corrupt). Version 3 is where `by` became a member id.
 export const MANIFEST_VERSION = 3;
 

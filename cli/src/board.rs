@@ -1,4 +1,4 @@
-//! `doklin board` — a board as one thing (docs/cloud.md §8.6).
+//! `doklin board` — a board as one thing.
 //!
 //! On a Mac a board is a folder of notes and a definition file. Here it is
 //! never that: it is named by its path, its cards by their titles, its fields

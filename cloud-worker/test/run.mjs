@@ -641,7 +641,7 @@ await test("meta: the probe says who the bearer is, and what everyone here is ca
   // The directory is everybody's — a manifest names ids, so every Mac in the
   // workspace has to be able to put a name to one — and it is names and
   // nothing else. The People list, with addresses and devices, stays the
-  // owner's (docs/cloud.md §5.4).
+  // owner's.
   assert.ok(mine.people.length >= 2);
   assert.deepEqual(
     [...new Set(mine.people.map((p) => Object.keys(p).sort().join(",")))],
@@ -764,7 +764,7 @@ await test("manifest: either side of a schema skew is 426, and the sentence says
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
   // An app still writing v2 — `by` a device name, `hist` an array — is not
-  // corrupt, it is old, and 426 is the status that says so (docs/cloud.md §5.7).
+  // corrupt, it is old, and 426 is the status that says so.
   const older = await putManifest(manifest(3, {}, { version: 2 }));
   assert.equal(older.status, 426);
   assert.match(older.json.error, /update the app/);
@@ -891,7 +891,7 @@ await test("blobs: content-addressed round-trip, list, delete; a re-put is a no-
 
 await test("history: the three deprecated routes are gone, in every verb", async () => {
   // The manifest has carried no revisions since the version store landed, and
-  // §2's compatibility rule is what let these go rather than linger as dead
+  // the compatibility rule is what let these go rather than linger as dead
   // routes. A 404 is the whole answer: not a method error, not an empty
   // archive — there is no such thing here any more.
   for (const method of ["GET", "PUT", "DELETE"]) {
@@ -900,7 +900,7 @@ await test("history: the three deprecated routes are gone, in every verb", async
   }
 });
 
-/* ---------- The version store (docs/versioning.md §6.4) ---------- */
+/* ---------- The version store ---------- */
 
 const snapId = (ts, device = DEVICE) => `${String(ts).padStart(13, "0")}-${device}`;
 const versionsIndex = (snapshots, horizonDays = null) => ({ version: 1, horizonDays, snapshots });
@@ -1693,7 +1693,7 @@ await test("public: the root page serves at /; renders cache under the manifest'
   assert.equal((await pub("/home")).status, 404, "the page itself is a 404 until the file is back");
 });
 
-/* ---------- Agents (docs/cloud.md §8.3–8.5) ---------- */
+/* ---------- Agents ---------- */
 
 // An agent has no copy of the folder, so everything below is the worker
 // itself reading and changing the workspace. "A Mac" in these tests is what a

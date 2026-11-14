@@ -1,4 +1,4 @@
-// Boards, for an agent (docs/cloud.md §8.4, Boards).
+// Boards, for an agent.
 //
 //   read   GET    /api/agent/board?path=                     its name, fields and options, how many cards
 //          GET    /api/agent/cards?path=&by=&where=…         every card, in columns
@@ -777,7 +777,7 @@ export async function deleteCard(c: Call): Promise<Response> {
       const companion = index.at(`${stem}${suffix}`);
       if (companion) tx.remove(companion.fid);
     }
-    // A page outlives its document on purpose (docs/cloud.md §9, decision 7).
+    // A page outlives its document on purpose.
     return { board: at.path, title: titleOf(entry), path: stem, stillPublic: ownPages(tx.m, url.origin, [entry.fid]) };
   });
 }

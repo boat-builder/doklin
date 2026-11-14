@@ -1,4 +1,4 @@
-// The Cloud panel's "People and agents" view — docs/cloud.md §7.2, §8.1.
+// The Cloud panel's "People and agents" view.
 // Two kinds of access, a tab each, because they are let in differently and
 // nobody should have to scroll past one to find the other:
 //

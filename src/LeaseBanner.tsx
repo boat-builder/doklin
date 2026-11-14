@@ -1,5 +1,5 @@
-// The view-only banner over a document another Mac holds (docs/cloud.md
-// §8.2). The lease is advisory: the editor goes read-only because someone else
+// The view-only banner over a document another Mac holds.
+// The lease is advisory: the editor goes read-only because someone else
 // has the document open, never because a write would be refused — so *Take
 // over* is one click, and what both of you typed in the moment it takes
 // merges as any overlap does.

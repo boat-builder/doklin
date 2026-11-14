@@ -1,4 +1,4 @@
-//! `doklin` — work with a Doklin workspace from anywhere (docs/cloud.md §8.6).
+//! `doklin` — work with a Doklin workspace from anywhere.
 //!
 //! A workspace is a folder of documents on somebody's Mac, synced through a
 //! domain of their own. An agent on another computer has no such folder, and

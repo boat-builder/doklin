@@ -1,5 +1,5 @@
 //! The workspace manifest — the one mutable object in the bucket — as the
-//! engine and the worker both see it (docs/cloud.md §6.6). These
+//! engine and the worker both see it. These
 //! are the wire types the worker shape-checks on every `PUT`
 //! (cloud-worker/src/manifest.ts); the caps and grammars below mirror
 //! cloud-worker/src/layout.ts so the engine never builds a manifest the
@@ -98,8 +98,8 @@ pub struct ManifestFile {
     pub size: u64,
     #[serde(default)]
     pub mtime: u64,
-    /// Who last changed it — a **member id** since v3 (docs/cloud.md
-    /// §6.6), where it used to be the device's name. Empty where there is no
+    /// Who last changed it — a **member id** since v3, where it used to be
+    /// the device's name. Empty where there is no
     /// identity: a workspace whose domain has never said who this Mac is.
     /// A workspace upgraded from v2 keeps the device names already in it,
     /// and the surfaces show whatever does not resolve exactly as it stands.
@@ -172,7 +172,7 @@ pub struct PollResponse {
     pub manifest_etag: String,
     #[serde(default)]
     pub presence: BTreeMap<String, PresenceEntry>,
-    /// Every live lease (worker v8, docs/cloud.md §8.2). `None` from an older
+    /// Every live lease (worker v8). `None` from an older
     /// worker, and from one whose database could not answer — both mean
     /// "nobody is known to hold anything", which is what no lock looks like.
     #[serde(default)]

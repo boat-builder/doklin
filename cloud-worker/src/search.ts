@@ -1,4 +1,4 @@
-// Search (docs/cloud.md §8.5): which documents contain this text, with the
+// Search: which documents contain this text, with the
 // lines — the question the app's own search asks (`search_workspace`,
 // src-tauri/src/lib.rs), answered for a caller that has no copy of the folder.
 //

@@ -3,7 +3,7 @@
 // that a follow never navigates the page out from under the app, that
 // in-document #anchors scroll here instead of reaching the host, and that a
 // read-only document still follows links. Needs the repo-root vite dev server
-// (port 1420) — see .claude/skills/verify/SKILL.md.
+// (port 1420).
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 

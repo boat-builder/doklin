@@ -317,7 +317,7 @@ await poll(async () => (await page.evaluate(() => navigator.clipboard.readText()
 
 // Attribution is by person since manifest v3: the same page, published by
 // somebody else, names them — and one published from another Mac of your own
-// reads as yours, because `me` is a person rather than a Mac (docs/cloud.md §6.6).
+// reads as yours, because `me` is a person rather than a Mac.
 await page.evaluate(() => {
   const s = window.__cloud.statuses[0];
   window.__setStatuses([{ ...s, public: s.public.map((p) => ({ ...p, by: "Bob" })) }]);
@@ -768,7 +768,7 @@ await poll(async () => (await dialog("Cloud").count()) === 0);
 
 /* 18 — history: the one thing only a connected workspace puts on the rail —
    a version another Mac mirrored, read like a local one and restored as the
-   new current state (docs/versioning-plan.md §6.3). Since phase 6 that is
+   new current state. That is
    the whole of it: the sync manifest carries no history to fall back on, and
    nothing here asks it for a revision. drive-versions.mjs walks the rail
    itself; this is the part a folder on its own never has. */
@@ -995,8 +995,8 @@ step(
 await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
 
 /* 24 — People and agents: one view, a tab each, and a door for each in the
-   panel — so that neither has to be found behind the other (docs/cloud.md
-   §7.2). People… lands on the People tab, with the invite door above the list */
+   panel — so that neither has to be found behind the other.
+   People… lands on the People tab, with the invite door above the list */
 await tid("sync-status").click();
 await poll(async () => (await tid("people-open").count()) === 1);
 const doorLabel = await dialog("Cloud").locator(".cloud-section-label", { hasText: "People and agents" }).count();
@@ -1088,7 +1088,7 @@ step(
     (await tid("person-m-owner").count()) === 1,
 );
 
-/* 24c — Agents, on their own tab (docs/cloud.md §8.3): the owner adds a bot,
+/* 24c — Agents, on their own tab: the owner adds a bot,
    ticks what it may do — publishing is off until ticked, reading is not a
    choice — and is handed ONE thing, once: a short prompt that says what
    Doklin is and carries the command that installs `doklin` and the one that

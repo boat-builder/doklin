@@ -2,7 +2,7 @@
 // (src/cloudPrompts.ts): the setup and teardown prompts the app hands to an
 // agent, the update prompt that only asks an agent to run
 // scripts/doklin-cloud-update.sh, and the "no step the agent has to invent"
-// check that docs/cloud.md §7.4 asks for. The script is held to the same
+// check. The script is held to the same
 // naming rule and the same compatibility date as the prompts, by running its
 // `--names` mode and reading the worker's source. The other line the app
 // hands out — the one that installs the `doklin` command — is held to the
@@ -329,7 +329,7 @@ eq(
 /* ---------- the agent login prompt ---------- */
 //
 // What the owner hands an agent — the one thing the Agents tab's login card
-// copies (docs/cloud.md §8.3). Held to being short, and to carrying exactly
+// copies. Held to being short, and to carrying exactly
 // what a bot that has never heard of Doklin needs: what it is, the two
 // commands, and what the address in the second one is.
 {
@@ -362,8 +362,8 @@ eq(
 
 /* ---------- the `doklin` installer ---------- */
 //
-// The agent login card hands out one line that installs the command
-// (docs/cloud.md §8.6). That line, the script it fetches and the release
+// The agent login card hands out one line that installs the command.
+// That line, the script it fetches and the release
 // that attaches the script and its binaries have to agree on every name —
 // and the script has to refuse a download that is not what the release says
 // it is. It is run here against a release made up in a temp folder: a `curl`

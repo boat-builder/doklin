@@ -1,7 +1,7 @@
 # Doklin cloud worker — deployment config template.
 #
 # The app's setup prompt writes the real wrangler.toml for the agent that
-# deploys a domain (docs/cloud.md §7.4); this copy is for doing it
+# deploys a domain; this copy is for doing it
 # by hand. Copy it to wrangler.toml (gitignored — it carries your account id
 # and domain), replace the placeholders, then from this directory:
 #
@@ -13,7 +13,7 @@
 #   npx -y wrangler@4 deploy
 #
 # Every name derives from the domain (dots → dashes, prefixed "doklin-") so
-# two setups can never collide. See README.md.
+# two setups can never collide.
 
 name = "doklin-notes-example-com"
 main = "doklin-cloud-worker.js"
@@ -35,8 +35,8 @@ routes = [{ pattern = "notes.example.com", custom_domain = true }]
 binding = "DATA"                          # the worker reads env.DATA — leave as is
 bucket_name = "doklin-notes-example-com"
 
-# The database beside the bucket: people, presence and file leases
-# (docs/cloud.md §5.1). `wrangler d1 create` prints the id; `wrangler d1 info
+# The database beside the bucket: people, presence and file leases.
+# `wrangler d1 create` prints the id; `wrangler d1 info
 # <name>` prints it again if the create output has scrolled away. The worker
 # migrates its own schema, so there is no migrations directory to apply.
 [[d1_databases]]

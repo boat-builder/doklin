@@ -1,4 +1,4 @@
-// Comments, as threads (docs/cloud.md §8.4, Comments).
+// Comments, as threads.
 //
 //   GET    /api/agent/comments?path=
 //   POST   /api/agent/comments           {path, on, body, v?, dryRun?}   start a thread

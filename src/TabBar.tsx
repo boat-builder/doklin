@@ -36,7 +36,7 @@ type Props = {
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
   // Version history for this tab's file — the tab's right-click menu is one
-  // of the ways in (docs/versioning-plan.md §12.3.6). A board has no
+  // of the ways in. A board has no
   // document to version and an untitled note no history, so neither has the
   // item.
   onHistory?: (path: string) => void;

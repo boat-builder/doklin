@@ -1,5 +1,5 @@
-// A document's version history, as a right rail (docs/versioning-plan.md
-// §5.4, §12.3). Google Docs' shape, for Google Docs' reason: the list is
+// A document's version history, as a right rail.
+// Google Docs' shape, for Google Docs' reason: the list is
 // the retention ladder made visible — every version for today and
 // yesterday, one row per day further back — and the document itself never
 // leaves the screen. Selecting a row previews it in place; VersionPreview
@@ -166,7 +166,7 @@ export default function HistoryRail({
         </button>
       </div>
 
-      {/* The trust line (§12.3.7): the promise is a sentence the user can
+      {/* The trust line: the promise is a sentence the user can
           read, not a feature they have to find. */}
       <div className="history-rail-trust" data-testid="history-trust">
         {oldest != null ? `Every change since ${sinceLabel(oldest)}` : "No versions yet"}

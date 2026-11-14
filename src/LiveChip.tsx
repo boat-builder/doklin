@@ -1,5 +1,5 @@
-// The Live chip in the title row and its popover — docs/cloud.md §7.2,
-// §7.3. Rendered by App only for a file tab inside the open workspace.
+// The Live chip in the title row and its popover.
+// Rendered by App only for a file tab inside the open workspace.
 // Everything it shows derives from the workspace's status (the public map as
 // the engine believes it, this Mac's queued edits included): a note is
 // published exactly when the map holds a file entry for its path.

@@ -1,4 +1,4 @@
-//! Retention (docs/versioning.md §6.2): the thinning ladder, and the sweep
+//! Retention: the thinning ladder, and the sweep
 //! that applies it. The ladder is the only reason a snapshot or a blob is
 //! ever deleted — no other code path in the app removes anything from a
 //! store.

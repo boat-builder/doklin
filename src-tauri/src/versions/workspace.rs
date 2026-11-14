@@ -1,4 +1,4 @@
-//! The workspace-scale derivations (docs/versioning-plan.md §7.1): what a
+//! The workspace-scale derivations: what a
 //! retained snapshot differs from the folder on disk, every file some
 //! snapshot held that is not on disk any more, and the restore that puts a
 //! whole moment back.
@@ -7,10 +7,10 @@
 //! the *workspace*, through the same `write_workspace_file` the rest of the
 //! app uses, and never into a store. Only `retain.rs` deletes from a store.
 //!
-//! A restore at this scale is the file restore's shape (§5.2), one size up:
+//! A restore at this scale is the file restore's shape, one size up:
 //! capture the state it is about to leave, write, trash what was not there
 //! then, capture the state it made. The moments in between stay exactly
-//! where they are — a restore never branches (docs/versioning-plan.md §12.3).
+//! where they are — a restore never branches.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

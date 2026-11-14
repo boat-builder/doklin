@@ -1,5 +1,5 @@
-//! The cloud mirror of the local version store (docs/versioning.md §6.4,
-//! docs/versioning-plan.md §6). The versioner captures; this uploads what it
+//! The cloud mirror of the local version store.
+//! The versioner captures; this uploads what it
 //! captured, thins what is up there on the same ladder, and never writes a
 //! byte into a local store.
 //!

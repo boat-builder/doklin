@@ -1,5 +1,4 @@
-// The Agents tab of the Cloud panel's "People and agents" view —
-// docs/cloud.md §8.3.
+// The Agents tab of the Cloud panel's "People and agents" view.
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
 // copy of the folder. The owner adds one here, ticks what it may do, and is

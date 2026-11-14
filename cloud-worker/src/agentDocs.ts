@@ -1,4 +1,4 @@
-// The document routes of the document API (docs/cloud.md §8.4): what a
+// The document routes of the document API: what a
 // folder holds, a document's content and what is known about it, and the
 // three ways an agent changes the tree — write, remove, move.
 //
@@ -461,8 +461,8 @@ async function writeVersion(
 }
 
 /**
- * What a markdown write may do to comment markers (docs/cloud.md §8.4,
- * Comments). A thread's anchor is a marker in the text — `{==words==}{>>#id<<}`
+ * What a markdown write may do to comment markers. A thread's anchor is a
+ * marker in the text — `{==words==}{>>#id<<}`
  * — and its conversation is in the sidecar. So:
  *
  *   · a marker whose id no thread has is refused: a thread is started with
@@ -536,7 +536,7 @@ function removeDocument(tx: Tx, doc: Doc, origin: string): Record<string, unknow
     kind: "document",
     path: doc.stem,
     versions: [...(doc.md ? ["md"] : []), ...(doc.html ? ["html"] : [])],
-    // A page outlives its document on purpose (docs/cloud.md §9, decision 7).
+    // A page outlives its document on purpose.
     stillPublic: ownPages(tx.m, origin, fids),
   };
 }

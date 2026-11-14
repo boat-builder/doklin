@@ -1,4 +1,4 @@
-// The frontend's half of the cloud contract (docs/cloud.md §6.7):
+// The frontend's half of the cloud contract:
 // the types the engine's status event and commands carry, one typed wrapper
 // per command, and the listeners. No `fetch` anywhere — the Rust engine is
 // the only code that holds a token or talks to a domain; this file only
@@ -62,7 +62,7 @@ export type PresenceDevice = {
   ts: number;
 };
 
-/** A document another Mac holds (docs/cloud.md §8.2) — open there, so it
+/** A document another Mac holds — open there, so it
  *  opens view-only here. Mirrors `LeaseHolder` in status.rs — change both. */
 export type LeaseHolder = {
   /** The lease's key: workspace-relative and lowercased, so match it with
@@ -216,7 +216,7 @@ export type CloudPeople = {
   devices: CloudDevice[];
 };
 
-/** What an agent may do (docs/cloud.md §8.3). `read` is always held. */
+/** What an agent may do. `read` is always held. */
 export type AgentScope = "read" | "comment" | "edit" | "publish";
 
 /** One machine an agent is logged in on, by what the machine calls itself. */
@@ -561,7 +561,7 @@ export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()
 
 /** What the Cloud panel's *Version history* line says: how much of this
  *  folder's history the domain is holding, or that its worker is too old to
- *  hold any (docs/versioning-plan.md §6.2). History is never gated on the
+ *  hold any. History is never gated on the
  *  cloud, so a worker that can't mirror is a note, not a warning. */
 export function versionsLine(s: CloudStatus, now = Date.now()): string {
   if (s.versions == null) {

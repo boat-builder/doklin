@@ -1,4 +1,4 @@
-// People, and the credentials they hold (docs/cloud.md §5.4, §8.1).
+// People, and the credentials they hold.
 //
 // The shape everything here rests on is a separation the old design did not
 // make: an *identity* is not a *credential*.
@@ -11,12 +11,12 @@
 //            revoking one is deleting one row.
 //   invite   a token that has not been claimed yet. Stored only as
 //            sha256(code), one-time, and deleted the moment it is redeemed or
-//            found expired (docs/cloud.md §8.1) — no cron trigger, no reaper.
+//            found expired — no cron trigger, no reaper.
 //
 // The owner is not in here on the authenticating path. `OWNER_TOKEN` stays
 // the worker's env secret, compared with no database read, so a D1 outage
-// degrades a workspace to one credential instead of locking its owner out
-// (docs/cloud.md §5.4). The owner gets a member row all the same — for attribution and for
+// degrades a workspace to one credential instead of locking its owner out.
+// The owner gets a member row all the same — for attribution and for
 // the People list — and `adoptOwner` is what writes it.
 
 import { randomHex, sha256Hex } from "./crypto";
@@ -44,7 +44,7 @@ export type MemberWithDevices = Member & { devices: number };
  * secret. Note what is NOT here: a role. The `members.role` column describes
  * a *person* — it is what the People list shows — and a token is never
  * evidence of it. Owner authority comes from exactly one place, the env
- * secret, so no row anybody can write grants it (docs/cloud.md §5.4). Inviting the owner's
+ * secret, so no row anybody can write grants it. Inviting the owner's
  * own address therefore mints an ordinary member credential, which is what
  * it should be: their second Mac already has the real one.
  */
@@ -133,7 +133,7 @@ export const HASH_RE = /^[a-f0-9]{64}$/;
 
 /** The ids this module mints: `m-` a member, `t-` a token, `i-` an invite.
  *  Short on purpose — a member id is what the manifest, presence and leases
- *  carry, and an email must never enter any of them (docs/cloud.md §8.1). */
+ *  carry, and an email must never enter any of them. */
 export const ENTITY_ID_RE = /^[mti]-[a-f0-9]{8}$/;
 
 /* ---------- The database, or nothing ---------- */
@@ -187,7 +187,7 @@ const memberId = (): string => `m-${randomHex(4)}`;
  *
  * Deliberately NOT written here: `last_seen_at`. A write on every request is
  * 57,600 writes a day for ten Macs; the presence beat carries it instead,
- * at most once an hour per person (presence.ts; docs/cloud.md §8.1).
+ * at most once an hour per person (presence.ts).
  */
 export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | null> {
   return withDb(env, async (db) => {
@@ -222,7 +222,7 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
 
 /**
  * Everyone's id and display name, and nothing else — what a `by` in the
- * manifest is read with (docs/cloud.md §6.6). People first, then agents: an
+ * manifest is read with. People first, then agents: an
  * agent signs what it changes with its own `a-` id (agents.ts), and a Mac has
  * to be able to put a name to that as well.
  *
@@ -343,7 +343,7 @@ export async function deleteMember(env: Env, id: string): Promise<boolean | null
 /* ---------- Tokens ---------- */
 
 /** Every signed-in device. Never the hash: the owner does not get to hold
- *  anyone's credential, only to name it (docs/cloud.md §8.1). */
+ *  anyone's credential, only to name it. */
 export async function listTokens(env: Env): Promise<TokenRow[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
@@ -399,7 +399,7 @@ export async function deleteToken(env: Env, id: string): Promise<boolean | null>
  * new one is made.
  *
  * `codeHash` is sha256 of the canonical code and arrives from the app — the
- * worker never sees the plaintext at this end (docs/cloud.md §8.1).
+ * worker never sees the plaintext at this end.
  */
 export async function putInvite(
   env: Env,

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs `doklin`, the command-line tool an agent uses to work with a Doklin
-# workspace through its domain (docs/cloud.md §8.6). One static binary and
+# workspace through its domain. One static binary and
 # nothing else — no runtime, no background process, no copy of any workspace.
 #
 #   curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh

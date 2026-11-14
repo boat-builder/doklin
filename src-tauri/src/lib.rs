@@ -1,6 +1,6 @@
 //! Doklin backend.
 //!
-//! This app currently targets **macOS only** (see the README). Anywhere we lean
+//! This app currently targets **macOS only**. Anywhere we lean
 //! on a platform-specific API we tag the spot with the literal comment
 //! `macOS-only` so a future cross-platform effort can `grep "macOS-only"` to find
 //! every place that needs a portable fallback.
@@ -15,10 +15,10 @@ use std::time::{Duration, UNIX_EPOCH};
 pub mod pdf_export;
 mod store;
 // The cloud: one engine per connected workspace, the only writer to the
-// workspace's domain — see docs/cloud.md and src/cloud/mod.rs.
+// workspace's domain — see src/cloud/mod.rs.
 mod cloud;
 // Versioning: one local snapshot store per open folder — see
-// docs/versioning.md and src/versions/mod.rs.
+// src/versions/mod.rs.
 mod versions;
 // The one call every write command ends with; it feeds both of the above.
 mod edits;
@@ -162,7 +162,7 @@ const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
 #[cfg(target_os = "macos")]
 const QUIT_FLUSH_TIMEOUT_MS: u64 = 1000;
 /// How long the exit then waits for every versioner to capture what the
-/// windows just flushed (docs/versioning.md §6.1). A capture with nothing
+/// windows just flushed. A capture with nothing
 /// to do answers at once; this only bounds the worst case.
 const VERSIONS_FLUSH_TIMEOUT_MS: u64 = 2000;
 

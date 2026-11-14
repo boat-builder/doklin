@@ -1,5 +1,5 @@
-//! The flows that happen before an engine exists — or instead of one
-//! (docs/cloud.md §6.8): bind a domain and upload a folder
+//! The flows that happen before an engine exists — or instead of one:
+//! bind a domain and upload a folder
 //! (connect), download a workspace into a fresh folder (join), erase a
 //! domain (wipe). Generic over [`Remote`] so the test matrix runs them
 //! against the in-memory worker; mod.rs wraps each in a command that adds
@@ -132,7 +132,7 @@ pub async fn seed_upload<R: Remote>(
                 // People panel, which needs a connected workspace — so at
                 // the moment a folder is uploaded nobody has said who this
                 // is yet. Everything the engine writes afterwards is signed
-                // with the person (docs/cloud.md §6.6).
+                // with the person.
                 by: device_name.to_string(),
             },
         );

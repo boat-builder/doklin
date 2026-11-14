@@ -1,4 +1,4 @@
-// A document, as the document API speaks of one (docs/cloud.md §8.4).
+// A document, as the document API speaks of one.
 //
 // On disk, and in the manifest, a document is up to three files that share a
 // stem: `plan.md`, its optional `plan.html` rendition, and `plan.meta.jsonl`
@@ -11,8 +11,8 @@
 // holds. Nothing here reads a blob or writes anything.
 //
 // A board is a folder too, on disk and in the manifest: a `store.jsonl` and a
-// markdown file per card (src/store/). An agent never sees it as one
-// (docs/cloud.md §8.4, Boards). Here a board is one name; a card's page is a
+// markdown file per card (src/store/). An agent never sees it as one.
+// Here a board is one name; a card's page is a
 // document named `<board>/<card>`; and nothing else inside the folder — the
 // definition file, a subfolder, a picture — can be named at all. The board
 // itself is worked on through the board routes (agentBoards.ts).

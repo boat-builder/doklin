@@ -7,7 +7,7 @@
 //
 // The D1 surface the worker uses: prepare / bind / run / first / all, and
 // batch as one transaction (D1 rolls a batch back if any statement fails,
-// which is what the lease upsert in docs/cloud.md §8.2 rests on).
+// which is what the lease upsert rests on).
 //
 // `queries` records every statement prepared, so a test can assert that an
 // isolate migrates once and then stops asking.

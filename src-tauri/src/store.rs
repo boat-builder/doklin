@@ -2,7 +2,7 @@
 //!
 //! A datastore is a FOLDER: one markdown file per card, plus a definition
 //! file (`store.jsonl`) naming the fields, the select options that are the
-//! board's columns, and the saved views. See `docs/datastores-kanban.md`.
+//! board's columns, and the saved views.
 //!
 //! Everything here is byte-level: locating a card's leading frontmatter
 //! block, splicing a new one in, and watching the folder. The frontmatter

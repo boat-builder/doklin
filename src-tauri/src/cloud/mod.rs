@@ -1,8 +1,8 @@
 //! The cloud: one domain per workspace, one engine per connected workspace,
-//! the engine as the only writer (docs/cloud.md). This file is the
+//! the engine as the only writer. This file is the
 //! manager — the engines, their watchers, the edit-bus routes, `cloud.json`
 //! and the folder marker — and the Tauri commands the frontend calls
-//! (§6.7; mirrored in src/cloud.ts). The engine itself is engine.rs; what it
+//! (mirrored in src/cloud.ts). The engine itself is engine.rs; what it
 //! says to the worker is remote.rs; the flows that run before an engine
 //! exists are flows.rs.
 //!
@@ -333,7 +333,7 @@ pub(crate) fn cloud_parse_invite(text: String) -> invite::Pasted {
     invite::parse_pasted(&text)
 }
 
-/// Trade an invite code for this Mac's own credential (docs/cloud.md §6.8).
+/// Trade an invite code for this Mac's own credential.
 ///
 /// The one command that runs before this Mac holds any credential at all,
 /// which inverts the order every other entrance uses: redeem first, then
@@ -449,7 +449,7 @@ pub(crate) async fn cloud_invite(
     Ok(Invited { blob: invite::blob(&call.endpoint, &code), code, invite: record })
 }
 
-/// Who is on this workspace and what they hold (docs/cloud.md §7.2) — the
+/// Who is on this workspace and what they hold — the
 /// whole People view in one answer, so the panel never draws half a roster.
 #[tauri::command]
 pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People, String> {
@@ -457,7 +457,7 @@ pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People,
     people_of(&call.remote, &call.device.id, &call.domain).await
 }
 
-/// The owner saying who they are — once, and only here (§7.2). Identity,
+/// The owner saying who they are — once, and only here. Identity,
 /// never authority: the domain's env secret is what authenticates them either
 /// way, so this row is what puts a name in the People list, and losing it
 /// costs a name rather than access.
@@ -554,7 +554,7 @@ fn revoked(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
     }
 }
 
-/* ---------- Agents (docs/cloud.md §8.3) ---------- */
+/* ---------- Agents ---------- */
 
 /// A fresh login code and the line that carries it. The code is minted and
 /// hashed here, exactly as an invite's is: only its sha256 goes up, so a
@@ -923,7 +923,7 @@ pub(crate) fn cloud_set_activity(
     })
 }
 
-/// *Take over* on a document another Mac holds (docs/cloud.md §8.2): the
+/// *Take over* on a document another Mac holds: the
 /// engine for `root` claims it on its next beat, from whoever has it. Advisory
 /// like the lease itself — the Mac it is taken from goes view-only on its next
 /// poll, and anything both typed in between merges as any overlap does.
