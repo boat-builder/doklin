@@ -1,0 +1,17 @@
+// doklin.cc, the product page: an assets-only Worker serving public/ as-is.
+// No script, no bindings. The cloud worker's own landing page (the fallback
+// every user's domain shows) is a different thing and lives in cloud-worker/.
+//
+//   cd site && CLOUDFLARE_ACCOUNT_ID=<account id> wrangler deploy
+{
+  "name": "doklin-site",
+  "compatibility_date": "2026-09-17",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "doklin.cc", "custom_domain": true }
+  ]
+}
