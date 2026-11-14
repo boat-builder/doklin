@@ -830,16 +830,18 @@ fn clean_scopes(scopes: Vec<String>) -> Vec<String> {
     KNOWN.iter().filter(|k| **k == "read" || scopes.iter().any(|s| s == *k)).map(|k| k.to_string()).collect()
 }
 
-/// Every agent on this workspace (owner only): what each may do, the
-/// machines it is logged in on, and whether a login code is still waiting.
+/// This person's agents — and, for an owner, everybody's: whose each is,
+/// what it may do, the machines it is logged in on, and for one's own
+/// whether a login code is still waiting.
 #[tauri::command]
 pub(crate) async fn cloud_agents(app: AppHandle, root: String) -> Result<Vec<remote::AgentRecord>, String> {
     let call = workspace_call(&app, &root)?;
     call.remote.list_agents().await.map_err(|e| describe_agents(&call.domain, e))
 }
 
-/// Add an agent (owner only) and mint the code its first machine logs in
-/// with. The line comes back once, in the answer, and nothing stores it.
+/// Add an agent of this person's own and mint the code its first machine
+/// logs in with. The line comes back once, in the answer, and nothing stores
+/// it.
 #[tauri::command]
 pub(crate) async fn cloud_agent_add(
     app: AppHandle,
@@ -861,8 +863,8 @@ pub(crate) async fn cloud_agent_add(
     Ok(AgentAdded { agent, login })
 }
 
-/// A new login code for an agent that exists — for another machine, or
-/// because the first one ran out. Whatever code it had stops working.
+/// A new login code for one of this person's agents — for another machine,
+/// or because the first one ran out. Whatever code it had stops working.
 #[tauri::command]
 pub(crate) async fn cloud_agent_code(app: AppHandle, root: String, agent_id: String) -> Result<AgentLogin, String> {
     let call = workspace_call(&app, &root)?;
@@ -874,8 +876,9 @@ pub(crate) async fn cloud_agent_code(app: AppHandle, root: String, agent_id: Str
     Ok(login)
 }
 
-/// Rename an agent, or change what it may do. The agent finds out on its
-/// next request: its permissions are read off its row every time.
+/// Rename one of this person's agents, or change what it may do. The agent
+/// finds out on its next request: its permissions are read off its row
+/// every time.
 #[tauri::command]
 pub(crate) async fn cloud_agent_update(
     app: AppHandle,
@@ -893,8 +896,9 @@ pub(crate) async fn cloud_agent_update(
         .map_err(|e| describe_agents(&call.domain, e))
 }
 
-/// Remove an agent: its row, its pending code and every machine it is
-/// logged in on. Each of them is refused on its very next request.
+/// Remove an agent — one's own, or as an owner anybody's: its row, its
+/// pending code and every machine it is logged in on. Each of them is
+/// refused on its very next request.
 #[tauri::command]
 pub(crate) async fn cloud_agent_remove(app: AppHandle, root: String, agent_id: String) -> Result<(), String> {
     let call = workspace_call(&app, &root)?;

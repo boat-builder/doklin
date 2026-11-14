@@ -6013,7 +6013,7 @@ export default function App() {
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
           onOpenPeople={cloudForRoot ? () => setAccessTab("people") : undefined}
-          onOpenAgents={mayOn(cloudForRoot, "agents.manage") ? () => setAccessTab("agents") : undefined}
+          onOpenAgents={mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
           onNewRestricted={
             cloudForRoot?.sections
               ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })

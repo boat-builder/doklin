@@ -21,6 +21,10 @@
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
+// A change to a space is made under the names its person uses (`mount`,
+// mount.ts): the transaction sees `Private/notes/plan.md`, and what is
+// checked and stored is the space's own `notes/plan.md`.
+//
 // A lost race is nearly always another device's unrelated write, so the loop
 // re-reads and re-applies rather than failing. That is why a caller's own
 // precondition (`if-rev`) is checked inside `change`, against the manifest it
@@ -31,6 +35,7 @@ import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, blobKey } from "./layout";
 import { validateManifest, type Manifest, type ManifestFile } from "./manifest";
+import { mounted, unmounted } from "./mount";
 import { noteEtag, spaceOf } from "./spaces";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
@@ -137,13 +142,22 @@ export class Tx {
     this.dirty = true;
   }
 
-  /** Delete a file, leaving the tombstone a Mac honours. */
-  remove(fid: string): void {
+  /** Delete a file, leaving the tombstone a Mac honours. With `to` it was
+   *  not deleted but moved to another section — that space's id, "" for the
+   *  shared workspace — which is what a Mac's own move across sections
+   *  writes (`Tombstone::to`, src-tauri/src/cloud/manifest.rs). */
+  remove(fid: string, to?: string): void {
     const file = this.m.files[fid];
     if (!file) return;
     delete this.m.files[fid];
     this.m.tombstones ??= {};
-    this.m.tombstones[fid] = { path: file.path, rev: file.rev + 1, ts: this.now, by: this.by };
+    this.m.tombstones[fid] = {
+      path: file.path,
+      rev: file.rev + 1,
+      ts: this.now,
+      by: this.by,
+      ...(to === undefined ? {} : { to }),
+    };
     this.dirty = true;
   }
 
@@ -161,7 +175,8 @@ export const newFileId = (): string => `f-${randomHex(6)}`;
 
 /** `wrote` is false when the change left the manifest as it was, or was a
  *  dry run: nothing was stored and `etag` is the manifest's own. `manifest`
- *  is the manifest as this call left it — what `etag` names when it wrote. */
+ *  is the manifest as this call left it, in its stored form — what `etag`
+ *  names when it wrote. */
 export type Committed<T> = { value: T; etag: string; manifest: Manifest; wrote: boolean };
 
 /**
@@ -174,14 +189,16 @@ export type Committed<T> = { value: T; etag: string; manifest: Manifest; wrote: 
  * from the `Tx` it is given and nothing from an earlier run.
  *
  * With `dryRun` the change is applied and checked and then thrown away: the
- * value says what would have happened.
+ * value says what would have happened. `mount` is the folder the space is
+ * at, as the caller names paths: the change sees every path under it.
  */
 export async function commit<T>(
   env: Env,
   by: string,
   change: (tx: Tx) => Promise<T | Refusal>,
-  opts: { dryRun?: boolean } = {},
+  opts: { dryRun?: boolean; mount?: string } = {},
 ): Promise<Committed<T> | Refusal> {
+  const mount = opts.mount ?? "";
   /** Blobs this call created, as opposed to found already stored. */
   const created = new Set<string>();
   const stored = new Set<string>();
@@ -209,7 +226,7 @@ export async function commit<T>(
     if (validateManifest(parsed, inSpace) !== null) {
       return new Refusal(409, "this workspace's manifest is not one this worker can change — open it in Doklin first");
     }
-    const tx = new Tx(env, parsed as Manifest, by);
+    const tx = new Tx(env, mounted(parsed as Manifest, mount), by);
     const before = named(tx.m);
     lastSeen = before;
     const addresses = new Set(Object.keys(tx.m.public ?? {}));
@@ -221,10 +238,14 @@ export async function commit<T>(
     }
     if (!tx.changed) {
       await sweep(before);
-      return { value, etag: obj.etag, manifest: tx.m, wrote: false };
+      return { value, etag: obj.etag, manifest: parsed as Manifest, wrote: false };
     }
 
-    const next = tx.m;
+    const next = unmounted(tx.m, mount);
+    if ("outside" in next) {
+      await sweep(before);
+      return new Refusal(400, `"${next.outside}" would not be in ${mount} — name a place inside ${mount}/`);
+    }
     next.seq += 1;
     if (next.tombstones) {
       for (const [fid, t] of Object.entries(next.tombstones)) {

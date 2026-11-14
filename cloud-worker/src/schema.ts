@@ -9,7 +9,9 @@
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
 //     instead of colliding. A table whose shape changes is dropped and made
-//     again, and only ever one that holds nothing worth keeping (step 9's).
+//     again, and only ever one that holds nothing worth keeping (steps 9 and
+//     10). A table that does hold something gains a column instead, and only
+//     after the runner has looked and found it missing (`columns`).
 //   · A guarded bump. The version only ever moves with
 //     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
@@ -35,6 +37,9 @@ type Step = {
   to: number;
   /** The tables it creates — what a wipe empties. */
   tables: readonly string[];
+  /** Columns it adds to tables an earlier step made, each only when the
+   *  table does not have it yet. Added before `sql` runs. */
+  columns?: readonly { table: string; column: string; type: string }[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
 };
@@ -313,6 +318,35 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // An agent belongs to a person, and sees what that person sees.
+    // `agents.member_id` is whose it is. NULL is the creator's — whoever
+    // holds the domain's secret, whether or not they have said who they are
+    // — which is what every agent made before this step is, with nothing to
+    // move: the creator was the only one who could make them.
+    //
+    // The search mirror is kept once per space ('' the shared workspace), so
+    // a search reads only the text its caller's person may read. Both tables
+    // are derived: dropped here, and filled again by the next search.
+    to: 10,
+    tables: [],
+    columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
+    sql: [
+      `DROP TABLE IF EXISTS search_text`,
+      `CREATE TABLE IF NOT EXISTS search_text (
+         space_id TEXT NOT NULL,                -- '' the shared workspace
+         fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
+         folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
+         PRIMARY KEY (space_id, fid)
+       )`,
+      `DROP TABLE IF EXISTS search_state`,
+      `CREATE TABLE IF NOT EXISTS search_state (
+         space_id TEXT PRIMARY KEY,             -- '' the shared workspace
+         etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
+         held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
@@ -340,6 +374,7 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     let version = await bootstrap(db);
     for (const step of STEPS) {
       if (version >= step.to) continue;
+      for (const c of step.columns ?? []) await ensureColumn(db, c.table, c.column, c.type);
       for (const sql of step.sql) await db.prepare(sql).run();
       const bump = await db
         .prepare("UPDATE meta SET schema_version = ? WHERE key = 'schema' AND schema_version = ?")
@@ -354,6 +389,30 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     return version;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Add a column to a table that holds something worth keeping — when it is
+ * not there. Reading the column is the question: it fails on a table without
+ * it, whatever the table holds. Two isolates that both find it missing both
+ * add it, and the loser's failure is not one: the column is there.
+ */
+async function ensureColumn(db: D1Database, table: string, column: string, type: string): Promise<void> {
+  // The names come from STEPS, never from a request.
+  const there = async (): Promise<boolean> => {
+    try {
+      await db.prepare(`SELECT ${column} FROM ${table} LIMIT 1`).first();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await there()) return;
+  try {
+    await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
+  } catch (e) {
+    if (!(await there())) throw e;
   }
 }
 

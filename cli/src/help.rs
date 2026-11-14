@@ -7,14 +7,19 @@ use crate::{Command, Failure, COMMANDS};
 
 const OVERVIEW: &str = r#"doklin — work with a Doklin workspace from anywhere
 
-A workspace is a folder of documents that lives on somebody's Mac and syncs through
+A workspace is a folder of documents that lives on people's Macs and syncs through
 a domain of their own. This program reads and changes it through that domain.
 Nothing is copied to this machine.
 
+You work as one person's agent, and see what they see. A path says where a thing is:
+  Private/…                    only your person sees it
+  Restricted/<folder>/…        only the people in that folder
+  anything else                shared with everyone in the workspace
+
 Getting in
-  login <domain> <code>        log this machine in, with the line the owner gave you
+  login <domain> <code>        log this machine in, with the line you were given
   logout                       log this machine out
-  whoami                       which workspace and agent this is, and what it may do
+  whoami                       which workspace and agent this is, whose, and what it may do
 
 Reading
   ls [folder] [--deep]         what a folder holds
@@ -55,6 +60,7 @@ More
   doklin help documents        one document, two versions: markdown and html
   doklin help comments         how a comment attaches to text
   doklin help publishing       what public means
+  doklin help sections         Private, Restricted and what is shared
   doklin help boards           a board, its cards and their properties
   doklin help agent            a short brief for an AI agent using this
   doklin help <command>
@@ -159,8 +165,36 @@ Look at --dry-run before you do it.
 Removing a document does not unpublish it. Its address answers "not found" until
 the document is back, and then shows it again. Stop publishing with `unpublish`.
 
-This machine can publish only if the workspace's owner allowed it: `doklin whoami`
-says what it may do."#;
+This machine can publish only if its person allowed it: `doklin whoami` says what
+it may do. Publishing does not change who can open the document in the workspace:
+a page from Private/ is public, and its document is still only your person's."#;
+
+const SECTIONS: &str = r#"SECTIONS
+
+A workspace has three kinds of place, and a path says which one a thing is in.
+
+  Private/…                 Your person's own. Nobody else in the workspace sees it.
+  Restricted/<folder>/…     A restricted folder: only the people in it. `doklin ls
+                            Restricted` lists the ones your person is in.
+  anything else             Shared: everyone in the workspace sees and edits it.
+
+You are one person's agent and see exactly what they see. If they are added to a
+folder you can work in it from your next command; if they are taken out, it is gone
+for you too. A folder they are not in does not exist as far as you can tell.
+
+Put new work under Private/ unless your person says where it goes:
+
+  doklin write Private/drafts/summary < summary.md
+
+Moving a thing changes who can see it, so do it only when asked:
+
+  doklin mv Private/drafts/summary Projects/        now everyone sees it
+  doklin mv Projects/summary Restricted/Finance/    now only that folder's people
+
+`doklin ls` and `doklin search` with no folder cover everything you can see;
+`doklin ls Private` or `doklin search "…" --in Restricted/Finance` only that place.
+You cannot make a restricted folder or change who is in one — people do that in the
+Doklin app. `Private` and `Restricted` themselves are not folders to move or rename."#;
 
 const BOARDS: &str = r#"BOARDS
 
@@ -230,9 +264,17 @@ every command asks the domain. What you change shows up in their app within
 seconds, signed with your name.
 
 Start here
-  doklin whoami                what you may do: read, comment, edit, publish
-  doklin ls --deep             everything in the workspace
+  doklin whoami                whose agent you are, and what you may do
+  doklin ls --deep             everything you can see
   doklin search "<words>"      find documents by what they say
+
+Where things go
+  You see what your person sees. Private/ is theirs alone, Restricted/<folder>/ is
+  for the people in that folder, and everything else is shared with the whole
+  workspace (doklin help sections).
+  · Create anything new under Private/, unless your person tells you where it goes.
+  · Do not move a document out of Private/ or a restricted folder unless asked:
+    that shows it to more people.
 
 Read before you write
   doklin read <doc>            prints the text; its revision is on stderr
@@ -280,12 +322,13 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         "documents" | "document" | "versions" => DOCUMENTS,
         "comments" => COMMENTS,
         "publishing" => PUBLISHING,
+        "sections" | "private" | "restricted" => SECTIONS,
         "agent" | "agents" => AGENT,
         "boards" | "cards" => BOARDS,
         name => {
             let Some(found) = COMMANDS.iter().find(|c| c.name == name) else {
                 return Err(Failure::usage(format!(
-                    "there is no help on \"{}\" — try: documents, comments, publishing, boards, agent, or a command's name",
+                    "there is no help on \"{}\" — try: documents, comments, publishing, sections, boards, agent, or a command's name",
                     name
                 )));
             };

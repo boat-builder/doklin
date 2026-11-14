@@ -102,6 +102,7 @@ export type CloudAction =
   | "people.invite"
   | "people.remove"
   | "people.roles"
+  | "agents.own"
   | "agents.manage"
   | "pages.manage"
   | "workspace.manage";
@@ -287,7 +288,14 @@ export type CloudAgent = {
   createdAt: number;
   /** When it last made a request, to the hour. Null until it has. */
   lastUsedAt: number | null;
+  /** Whose it is: one of the workspace's people. Null for a creator who has
+   *  not said who they are. */
+  memberId: string | null;
+  /** Whether that is you. Somebody else's is listed to an owner, who may
+   *  remove it and nothing more. */
+  mine: boolean;
   machines: CloudAgentMachine[];
+  /** A login code nobody has used yet — only ever on an agent of your own. */
   code: { id: string; createdAt: number; expiresAt: number } | null;
 };
 

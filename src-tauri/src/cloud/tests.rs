@@ -4700,10 +4700,20 @@ impl WorkerTx {
 
     /// `Tx.remove`: the entry goes, a tombstone one revision on stays.
     fn remove(&mut self, fid: &str) {
+        self.gone(fid, None);
+    }
+
+    /// `Tx.remove` with `to`: not deleted, but moved to another section —
+    /// that space's id, "" for the shared workspace.
+    fn moved_to(&mut self, fid: &str, to: &str) {
+        self.gone(fid, Some(to.to_string()));
+    }
+
+    fn gone(&mut self, fid: &str, to: Option<String>) {
         let Some(f) = self.m.files.remove(fid) else { return };
         self.m.tombstones.insert(
             fid.to_string(),
-            Tombstone { path: f.path, rev: f.rev + 1, ts: self.now, by: self.by.clone(), to: None },
+            Tombstone { path: f.path, rev: f.rev + 1, ts: self.now, by: self.by.clone(), to },
         );
         self.dirty = true;
     }
@@ -4825,6 +4835,26 @@ fn worker_writes<T>(be: &SharedWorker, change: impl FnOnce(&mut WorkerTx) -> T) 
         let mut b = be.lock().unwrap();
         b.manifest = next;
         b.etag += 1;
+    }
+    value
+}
+
+/// One write by the worker to a restricted folder or a Private — what an
+/// agent's change to a path under `Private/` or `Restricted/<folder>/` is
+/// (cloud-worker/src/agentPlace.ts): that space's manifest, under one new etag.
+fn worker_writes_in<T>(be: &SharedWorker, space: &str, change: impl FnOnce(&mut WorkerTx) -> T) -> T {
+    let mut b = be.lock().unwrap();
+    let section = &mut b.spaces.get_mut(space).unwrap_or_else(|| panic!("no space {space}")).section;
+    let mut tx =
+        WorkerTx { m: section.manifest.clone(), by: AGENT.into(), now: now_ms(), staged: Vec::new(), dirty: false };
+    let value = change(&mut tx);
+    if tx.dirty {
+        for (key, bytes) in tx.staged {
+            section.blobs.entry(key).or_insert((bytes, 0));
+        }
+        tx.m.seq += 1;
+        section.manifest = tx.m;
+        section.etag += 1;
     }
     value
 }
@@ -5765,6 +5795,47 @@ async fn a_file_moved_into_a_folder_stays_in_place_for_the_people_in_it() {
     assert!(paths(&manifest_of(&be)).is_empty(), "the shared workspace got nothing back");
     alice.engine.poll_for_test().await;
     assert_eq!(alice.read("Restricted/Finance/budget.md").as_deref(), Some("line one\nline two\nBob's line\n"));
+}
+
+/// An agent's move between sections is the worker's doing, not a Mac's, and
+/// reads the same on every Mac: a new file where it went, written first, and
+/// a tombstone where it was that says where (`moveAcross`,
+/// cloud-worker/src/agentDocs.ts). In both sections, a Mac moves its copy and
+/// downloads nothing; in only the old one, it deletes its copy outright.
+#[tokio::test]
+async fn a_document_an_agent_moves_to_another_section_moves_on_a_mac_in_both_and_leaves_the_others() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.write("Docs/budget.md", "the numbers\n");
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    alice.sync().await;
+    bob.sync().await;
+    assert_eq!(bob.read("Docs/budget.md").as_deref(), Some("the numbers\n"));
+
+    // Alice's agent: `doklin mv Docs/budget Restricted/Finance/`.
+    worker_writes_in(&be, &finance, |tx| tx.create("budget.md", "the numbers\n"));
+    let was = fid_at(&be, "Docs/budget.md");
+    worker_writes(&be, |tx| tx.moved_to(&was, &finance));
+    assert_eq!(manifest_of(&be).tombstones[&was].to.as_deref(), Some(finance.as_str()));
+
+    let fetched = be.lock().unwrap().blob_gets;
+    alice.engine.poll_for_test().await;
+    assert_eq!(alice.read("Restricted/Finance/budget.md").as_deref(), Some("the numbers\n"));
+    assert!(!alice.abs("Docs").exists(), "her copy moved, and left no empty folder behind");
+    assert_eq!(be.lock().unwrap().blob_gets, fetched, "nothing was downloaded to do it");
+    let there = manifest_in(&be, &finance);
+    let budget = there.files.values().find(|f| f.path == "budget.md").unwrap();
+    assert_eq!((budget.rev, budget.by.as_str()), (1, AGENT), "and her Mac wrote nothing back");
+
+    // Bob is not in Finance: the file was taken out of his reach.
+    bob.engine.poll_for_test().await;
+    assert!(!bob.abs("Docs/budget.md").exists(), "gone from his Mac");
+    assert!(!bob.abs("Restricted").exists());
+    assert!(paths(&manifest_of(&be)).is_empty(), "and neither Mac put it back");
 }
 
 /// Taken out of a restricted folder, a Mac deletes it outright — the folder,

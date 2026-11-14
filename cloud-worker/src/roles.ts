@@ -26,7 +26,10 @@ export type Action =
   | "people.remove"
   /** Make someone an owner, or a member again. */
   | "people.roles"
-  /** Add, change and remove agents. */
+  /** Connect agents of one's own: add them, change them, log them in and
+   *  remove them. */
+  | "agents.own"
+  /** See everybody's agents, and remove any of them. */
   | "agents.manage"
   /** See every public address on the domain, and take any page down. */
   | "pages.manage"
@@ -39,6 +42,7 @@ const TABLE: Readonly<Record<Action, readonly PersonRole[]>> = {
   "people.invite": ["owner"],
   "people.remove": ["owner"],
   "people.roles": ["owner"],
+  "agents.own": ["owner", "member"],
   "agents.manage": ["owner"],
   "pages.manage": ["owner"],
   "workspace.manage": ["owner"],

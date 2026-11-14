@@ -70,7 +70,7 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: OWNER, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 9;
+const D1_SCHEMA = 10;
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -90,6 +90,15 @@ const D1_TABLES = [
   "spaces",
   "tokens",
 ];
+
+/** The agent tables as a database had them from schema 5 to 9 (schema.ts). */
+const AGENT_TABLES_BEFORE_OWNERS = `
+    CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
+                         last_used_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE agent_codes (hash TEXT PRIMARY KEY, id TEXT NOT NULL, agent_id TEXT NOT NULL,
+                              created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE agent_tokens (hash TEXT PRIMARY KEY, id TEXT NOT NULL, agent_id TEXT NOT NULL, host TEXT NOT NULL,
+                               created_at INTEGER NOT NULL);`;
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const blobHash = (content) => sha256(content).slice(0, 16);
@@ -692,14 +701,14 @@ await test("identity: the creator is a person for attribution, and a secret for 
 });
 
 await test("roles: a role is the person's — an owner makes another, and it lands on their very next request", async () => {
-  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"];
+  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"];
   const role = (id, to, token = OWNER) =>
     call(`/api/auth/members/${id}`, { method: "PATCH", token, body: { role: to } });
   const creator = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
 
   // What each role may do is one table, and the probe answers the caller's
   // row of it — the same answer every gated route below is decided by.
-  assert.deepEqual((await call("/api/meta", { token: MEMBER })).json.you.can, ["work", "people.see"]);
+  assert.deepEqual((await call("/api/meta", { token: MEMBER })).json.you.can, ["work", "people.see", "agents.own"]);
   assert.deepEqual((await call("/api/meta", { token: OWNER })).json.you.can, EVERYTHING);
 
   assert.equal((await role(ALICE.id, "owner", MEMBER)).status, 403, "a member cannot make an owner — themselves least of all");
@@ -880,10 +889,16 @@ await test("d1: a database from before roles learns who its creator was — once
                          device_name TEXT, created_at INTEGER NOT NULL);
     CREATE TABLE invites (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL,
                           created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    ${AGENT_TABLES_BEFORE_OWNERS}
+    CREATE TABLE search_text (fid TEXT PRIMARY KEY, folded TEXT);
+    CREATE TABLE search_state (key TEXT PRIMARY KEY, etag TEXT NOT NULL, held TEXT NOT NULL);
+    INSERT INTO search_state VALUES ('mirror', 'e-old', '{}');
     INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
     INSERT INTO members VALUES ('m-0000000b', 'bob@example.com', 'Bob', 'member', 2, NULL, 0);
+    INSERT INTO agents VALUES ('a-0000000a', 'Old bot', 'read edit', 4, NULL, 0);
   `);
   old.run("INSERT INTO tokens VALUES (?, 't-0000000b', 'm-0000000b', 'd-bob', 'Air', 3)", sha256("bobs-token"));
+  old.run("INSERT INTO agent_tokens VALUES (?, 't-0000000a', 'a-0000000a', 'ci', 5)", sha256("dka_an-old-bots-token"));
   const bindings = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: old };
   const fetch = async (isolate, path, token, init = {}) => {
     const res = await isolate.fetch(
@@ -902,6 +917,19 @@ await test("d1: a database from before roles learns who its creator was — once
   assert.equal(old.value("SELECT member_id FROM creator"), "m-0000000a", "the owner row of old was the creator's");
   assert.equal(meta.json.you.memberId, "m-0000000a");
   assert.equal(meta.json.you.creator, true);
+  // An agent made before agents belonged to anybody was the creator's to
+  // make, and is the creator's: its row gains the column and nothing moves.
+  assert.deepEqual(old.rows("SELECT id, member_id FROM agents"), [{ id: "a-0000000a", member_id: null }]);
+  const oldBot = await fetch(first, "/api/agent/me", "dka_an-old-bots-token");
+  assert.equal(oldBot.status, 200, "its token still works");
+  assert.deepEqual(oldBot.json.person, { id: "m-0000000a", name: "Ada" }, "and it is Ada's");
+  assert.deepEqual(oldBot.json.sections, ["Private"], "so it sees her Private");
+  // The search mirror is derived: made again, by space, and empty.
+  assert.deepEqual(old.rows("SELECT * FROM search_state"), []);
+  assert.deepEqual(
+    old.rows("SELECT name FROM pragma_table_info('search_text') ORDER BY cid").map((c) => c.name),
+    ["space_id", "fid", "folded"],
+  );
   // Bob's token used to authenticate as a member whatever his row said; it
   // still does, because his row says member.
   assert.equal((await fetch(first, "/api/meta", "bobs-token")).json.you.role, "member");
@@ -931,8 +959,11 @@ await test("d1: a database from before roles learns who its creator was — once
     INSERT INTO meta (key, schema_version) VALUES ('schema', 6);
     CREATE TABLE members (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
                           created_at INTEGER NOT NULL, last_seen_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
+    ${AGENT_TABLES_BEFORE_OWNERS}
     INSERT INTO members VALUES ('m-0000000c', 'cy@example.com', 'Cy', 'member', 1, NULL, 0);
+    INSERT INTO agents VALUES ('a-0000000c', 'Nobody''s bot', 'read', 2, NULL, 0);
   `);
+  blank.run("INSERT INTO agent_tokens VALUES (?, 't-0000000c', 'a-0000000c', 'ci', 3)", sha256("dka_nobodys-token"));
   const second = await anotherIsolate("upgrade-2");
   const res = await second.fetch(
     new Request("https://blank.example.com/api/meta", { headers: { authorization: `Bearer ${OWNER}` } }),
@@ -942,6 +973,16 @@ await test("d1: a database from before roles learns who its creator was — once
   assert.equal(answered.d1, D1_SCHEMA);
   assert.equal(answered.you.memberId, null, "nobody adopted an identity, so nobody is named");
   assert.equal(blank.value("SELECT COUNT(*) FROM creator"), 0);
+  // The creator's agent is then nobody's in particular: it has the shared
+  // workspace, and no Private until its person says who they are.
+  const orphan = await second.fetch(
+    new Request("https://blank.example.com/api/agent/me", { headers: { authorization: "Bearer dka_nobodys-token" } }),
+    { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: blank },
+  );
+  const nobodys = await orphan.json();
+  assert.equal(nobodys.person, null);
+  assert.deepEqual(nobodys.sections, []);
+  assert.equal(blank.value("SELECT COUNT(*) FROM spaces"), 0, "nothing was made for nobody");
 });
 
 await test("meta: the probe says who the bearer is, and what everyone here is called", async () => {
@@ -2595,9 +2636,14 @@ await test("agents: the owner adds one with its first code; the code is redeemed
   // The token authenticates, and says what it is for.
   const me = await call("/api/agent/me", { token, device: null });
   assert.equal(me.status, 200);
+  const maker = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
   assert.deepEqual(me.json, {
     agent: { id: agent.id, name: "Grok bot" },
+    // Whose it is — the domain's secret made it, so its holder's — and where
+    // it can work besides the shared workspace.
+    person: { id: maker.id, name: maker.name },
     scopes: ["read", "edit"],
+    sections: ["Private"],
     workspace: { id: here.id, name: here.name },
     version: workerVersion,
     features: login.json.features,
@@ -2608,10 +2654,10 @@ await test("agents: the owner adds one with its first code; the code is redeemed
   const used = db.value("SELECT last_used_at FROM agents WHERE id = ?", agent.id);
   assert.ok(used >= before, "the first request said the agent was here");
   db.queries.length = 0;
-  assert.equal((await call("/api/agent/me", { token, device: null })).status, 200);
+  assert.equal((await call("/api/agent/doc?path=Nowhere/at-all", { token, device: null })).status, 404);
   assert.ok(
     db.queries.length === 1 && /^\s*SELECT/i.test(db.queries[0]),
-    `a request within the hour is one read: ${db.queries.join(" | ")}`,
+    `a request in the shared workspace, within the hour, is one read: ${db.queries.join(" | ")}`,
   );
   db.run("UPDATE agents SET last_used_at = ? WHERE id = ?", Date.now() - 2 * HOUR, agent.id);
   await call("/api/agent/me", { token, device: null });
@@ -2695,22 +2741,68 @@ await test("agents: a rename and new permissions apply on the next request; a ma
   assert.equal((await call(`/api/auth/agents/${bot.id}`, { method: "DELETE", token: OWNER })).status, 404);
   assert.equal((await me(other.token)).status, 200, "another agent is not touched");
 
-  // Agents are the owner's to manage, like people.
-  const body = { name: "Mine", scopes: ["edit"], codeHash: sha256("x"), expiresAt: Date.now() + HOUR };
-  for (const [method, path, sent] of [
-    ["GET", "/api/auth/agents"],
-    ["POST", "/api/auth/agents", body],
+  // An agent is its person's. Alice has none, and the owner's do not exist
+  // to her: not in her list, and a 404 by id — what an id nobody minted gets.
+  const mine = (token) => call("/api/auth/agents", { token });
+  assert.deepEqual((await mine(MEMBER)).json.agents, [], "a member's list is her own agents");
+  const theirs = [
     ["POST", `/api/auth/agents/${other.id}`, { scopes: ["publish"] }],
     ["POST", `/api/auth/agents/${other.id}/code`, { codeHash: sha256("x"), expiresAt: Date.now() + HOUR }],
     ["DELETE", `/api/auth/agents/${other.id}`],
     ["DELETE", `/api/auth/agents/${other.id}/tokens/t-00000000`],
-  ]) {
+  ];
+  for (const [method, path, sent] of theirs) {
     const member = await call(path, { method, token: MEMBER, body: sent });
-    assert.equal(member.status, 403, `${method} ${path} is the owner's`);
-    assert.deepEqual(member.json, { error: "only an owner can do that" });
-    assert.equal((await call(path, { method, token: other.token, device: null, body: sent })).status, 403, "and never an agent's own");
+    assert.equal(member.status, 404, `${method} ${path}: the owner's agent is not Alice's to touch`);
+    assert.deepEqual(member.json, { error: "no such agent" });
+  }
+  // And never an agent's own to do, nor anybody's without a credential.
+  const body = { name: "Mine", scopes: ["edit"], codeHash: sha256("x"), expiresAt: Date.now() + HOUR };
+  for (const [method, path, sent] of [["GET", "/api/auth/agents"], ["POST", "/api/auth/agents", body], ...theirs]) {
+    assert.equal((await call(path, { method, token: other.token, device: null, body: sent })).status, 403, "never an agent's own");
     assert.equal((await call(path, { method, body: sent })).status, 401, "auth comes first");
   }
+
+  // Anyone connects agents for themselves.
+  const aliceBody = nextCodeBody();
+  const made = await call("/api/auth/agents", {
+    method: "POST",
+    token: MEMBER,
+    body: { name: "Alice's bot", scopes: ["edit"], codeHash: sha256(aliceBody), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(made.status, 201, made.text);
+  assert.equal(made.json.agent.memberId, ALICE.id);
+  assert.equal(made.json.agent.mine, true);
+  assert.equal(db.value("SELECT member_id FROM agents WHERE id = ?", made.json.agent.id), ALICE.id);
+  const alices = (await loginWith(agentCode(aliceBody), "alices-laptop")).json.token;
+  assert.deepEqual((await me(alices)).json.person, { id: ALICE.id, name: ALICE.name }, "it is hers");
+  assert.deepEqual((await mine(MEMBER)).json.agents.map((a) => [a.id, a.mine]), [[made.json.agent.id, true]]);
+  const asAlice = (path, opts) => call(`/api/auth/agents/${made.json.agent.id}${path}`, { token: MEMBER, ...opts });
+  assert.equal((await asAlice("", { method: "POST", body: { scopes: ["comment"] } })).status, 200, "hers to change");
+  const againBody = nextCodeBody();
+  const again2 = await asAlice("/code", { method: "POST", body: { codeHash: sha256(againBody), expiresAt: Date.now() + HOUR } });
+  assert.equal(again2.status, 201, "and hers to log in on another machine");
+
+  // An owner sees everybody's, and whose each is — and may remove any. That
+  // is all: a new permission is its person's to give, and a login code is a
+  // way in as that person, so neither is an owner's to make.
+  const seen = (await mine(OWNER)).json.agents.find((a) => a.id === made.json.agent.id);
+  assert.equal(seen.memberId, ALICE.id);
+  assert.equal(seen.mine, false);
+  assert.equal(seen.code, null, "whether hers has a code waiting is hers to know");
+  assert.equal(seen.machines.length, 1);
+  assert.equal((await mine(OWNER)).json.agents.find((a) => a.id === other.id).mine, true);
+  const asOwner = (path, opts) => call(`/api/auth/agents/${made.json.agent.id}${path}`, { token: OWNER, ...opts });
+  const meddle = await asOwner("", { method: "POST", body: { scopes: ["publish"] } });
+  assert.equal(meddle.status, 403);
+  assert.ok(/somebody else's/.test(meddle.json.error), meddle.json.error);
+  assert.equal((await asOwner("/code", { method: "POST", body: { codeHash: sha256("y"), expiresAt: Date.now() + HOUR } })).status, 403);
+  assert.deepEqual((await me(alices)).json.scopes, ["read", "comment"], "nothing of hers changed");
+  assert.equal((await loginWith(agentCode(againBody))).status, 201, "and her own code still works");
+  assert.equal((await asOwner(`/tokens/${seen.machines[0].id}`, { method: "DELETE" })).status, 204, "an owner logs one of its machines out");
+  assert.equal((await me(alices)).status, 401);
+  assert.equal((await asOwner("", { method: "DELETE" })).status, 204, "or removes it");
+  assert.deepEqual((await mine(MEMBER)).json.agents, []);
   assert.deepEqual((await me(other.token)).json.scopes, ["read"], "none of that changed anything");
 });
 
@@ -2848,7 +2940,7 @@ await test("agents: each permission — every route and verb is refused without 
         assert.equal(res.status, 403, `${agent.name} may not ${method} ${path}`);
         assert.equal(res.json.need, scope, "the refusal names the permission");
         assert.deepEqual(res.json.scopes, agent.scopes, "…and the ones it holds");
-        assert.ok(/may not .* — the workspace's owner can allow it/.test(res.json.error), "in a sentence that says what to do next");
+        assert.ok(/may not .* — its person can allow it/.test(res.json.error), "in a sentence that says what to do next");
       }
     }
   }
@@ -3235,12 +3327,12 @@ await test("documents: what a Mac would never see is refused; the sidecar never 
     }
   }
   assert.equal(etagNow(), etag, "none of it reached the manifest");
-  // The two folders that are a person's own on a Mac are nobody's to write
-  // into the shared workspace, in any case.
-  for (const p of ["Private/plan", "restricted/Finance/q3"]) {
+  // The two folders that are a person's own on a Mac are never the shared
+  // workspace's, in any case: a path under one is in that section, or nowhere.
+  for (const p of ["restricted/Nobodys/q3", "Restricted/q3", "RESTRICTED"]) {
     const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
-    assert.equal(kept.status, 409, `writing ${p}`);
-    assert.ok(/kept for a person's own and restricted folders/.test(kept.json.error), kept.json.error);
+    assert.ok(kept.status === 404 || kept.status === 400, `writing ${p}: ${kept.text}`);
+    assert.ok(/restricted folder/.test(kept.json.error), kept.json.error);
   }
   assert.equal(etagNow(), etag, "nor did those");
   assert.ok(/does not sync names that begin with a dot/.test((await api(docUrl(".secret/plan"))).json.error));
@@ -3249,9 +3341,10 @@ await test("documents: what a Mac would never see is refused; the sidecar never 
 
   // A listing is folders, documents and plain files — never a sidecar.
   const root = (await api("/api/agent/tree")).json;
-  assert.deepEqual(root, { dir: "", folders: ["Case"], boards: [], documents: [], files: [] });
+  // (`Private` is the agent's person's own section, beside what is shared.)
+  assert.deepEqual(root, { dir: "", folders: ["Case", "Private"], boards: [], documents: [], files: [] });
   const deep = (await api("/api/agent/tree?deep=1")).json;
-  assert.deepEqual(deep.folders, ["Case", "Case/Sub"]);
+  assert.deepEqual(deep.folders, ["Case", "Case/Sub", "Private"]);
   assert.deepEqual(deep.documents.map((d) => d.path), ["Case/Report", "Case/Sub/inner"]);
   assert.deepEqual(deep.files.map((f) => f.path), ["Case/Data.csv"]);
   assert.ok(!JSON.stringify(deep).includes("meta.jsonl"));
@@ -3313,7 +3406,7 @@ await test("documents: what a Mac would never see is refused; the sidecar never 
     assert.equal(res.json.path, landed.replace(/\.(md|html)$/, ""), "and the answer says where");
     made.push(landed);
   }
-  assert.deepEqual((await api("/api/agent/tree?deep=1")).json.folders, ["Case", "Case/Brand New", "Case/Brand New/sub", "Case/Sub", "Elsewhere"], "one folder, one spelling");
+  assert.deepEqual((await api("/api/agent/tree?deep=1")).json.folders, ["Case", "Case/Brand New", "Case/Brand New/sub", "Case/Sub", "Elsewhere", "Private"], "one folder, one spelling");
   const intoTyped = await api("/api/agent/move", { method: "POST", body: { from: "Elsewhere/As Typed", to: "CASE/sub/" } });
   assert.deepEqual(intoTyped.json, { kind: "document", from: "Elsewhere/As Typed", to: "Case/Sub/As Typed", files: 1 });
   const renamedTyped = await api("/api/agent/move", { method: "POST", body: { from: "case/pixel.png", to: "case/SUB/Dot.png" } });
@@ -4216,7 +4309,7 @@ await test("comments: an html thread sits on the element whose text begins with 
 /* ---------- The document API: search ---------- */
 
 const searchUrl = (q, more = "") => `/api/agent/search?q=${encodeURIComponent(q)}${more}`;
-const mirrorEtag = () => db.value("SELECT etag FROM search_state WHERE key = 'mirror'");
+const mirrorEtag = (space = "") => db.value("SELECT etag FROM search_state WHERE space_id = ?", space);
 /** Run something, counting the blobs the worker reads from the bucket meanwhile. */
 const countingBlobReads = async (run) => {
   const realGet = fake.get.bind(fake);
@@ -4530,13 +4623,13 @@ await test("boards: a board is one name — ls lists it as a board with its card
   const tree = async (dir, deep = false) => (await api(`/api/agent/tree?${qs({ dir, ...(deep ? { deep: "1" } : {}) })}`)).json;
 
   const root = await tree("");
-  assert.deepEqual(root.folders, ["Projects"]);
+  assert.deepEqual(root.folders, ["Private", "Projects"]);
   assert.deepEqual(root.boards, [{ path: "Ideas", cards: 2 }], "a board beside a note of the same name is still a board");
   assert.deepEqual(root.documents.map((d) => d.path), ["Ideas"], "and the note is still a note");
   const projects = await tree("Projects");
   assert.deepEqual([projects.folders, projects.boards], [[], [{ path: "Projects/Roadmap", cards: 3 }]], "not a folder: a board, with three cards");
   const deep = await tree("", true);
-  assert.deepEqual(deep.folders, ["Projects"], "--deep does not go inside a board…");
+  assert.deepEqual(deep.folders, ["Private", "Projects"], "--deep does not go inside a board…");
   assert.deepEqual(deep.boards.map((b) => b.path), ["Ideas", "Projects/Roadmap"]);
   assert.deepEqual(deep.documents.map((d) => d.path), ["Ideas", "Projects/plan"], "…so no card is a loose document");
   assert.deepEqual(deep.files, [], "and store.jsonl, its conflict copy and a picture in it are no files");
@@ -5152,6 +5245,395 @@ await test("addresses: an address is one space's for the whole domain — the se
   assert.equal(unheard.status, 200, unheard.text);
   assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'quiet'"), 0);
   assert.equal((await pub("/quiet")).status, 200);
+});
+
+/* ---------- The document API: sections ---------- */
+
+// Pat and Quinn, their agents, and two folders both called Deals.
+let PAT;
+let QUINN;
+let PAT_BOT;
+let QUINN_BOT;
+let ALICE_BOT;
+let DEALS;
+let DEALS_QUINN;
+/** Add an agent as a person does for themselves, and log one machine in. */
+async function addAgentFor(token, name, scopes) {
+  const body = nextCodeBody();
+  const made = await call("/api/auth/agents", {
+    method: "POST",
+    token,
+    body: { name, scopes, codeHash: sha256(body), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(made.status, 201, made.text);
+  const login = await loginWith(agentCode(body), "test-runner");
+  assert.equal(login.status, 201, login.text);
+  return { id: made.json.agent.id, name, token: login.json.token, scopes: login.json.scopes };
+}
+/** A space's manifest, and a file's text in it, read from the bucket itself. */
+const spaceManifest = (id) => JSON.parse(fake.store.get(`spaces/${id}/manifest.json`).bytes.toString("utf8"));
+const spaceText = (id, p) => {
+  const hit = entryAt(spaceManifest(id), p);
+  return hit ? fake.store.get(`spaces/${id}/blobs/${hit[0]}/${hit[1].hash}`)?.bytes.toString("utf8") : undefined;
+};
+const privateOf = (person) => `p-${person.member.id.slice(2)}`;
+const put = (api, p, text, more = "") => api(docUrl(p, "", more), { method: "PUT", body: text });
+
+await test("sections: an agent sees what its person sees — a path under Private/ or Restricted/<folder>/ is that section's, by the names on their disk, and anything else is shared", async () => {
+  await freshWorkspace({ "Shared/plan.md": "# Plan\n\nThe harbour plan.\n" });
+  PAT = await joinAs("pat@example.com", "Pat", "PPPPPPPPPPPPPPPPPPPP", "d-pat");
+  QUINN = await joinAs("quinn@example.com", "Quinn", "QQQQQQQQQQQQQQQQQQQQ", "d-quinn");
+  PAT_BOT = await addAgentFor(PAT.token, "Pat's bot", ["comment", "edit", "publish"]);
+  QUINN_BOT = await addAgentFor(QUINN.token, "Quinn's bot", ["comment", "edit", "publish"]);
+  ALICE_BOT = await addAgentFor(MEMBER, "Alice's helper", ["comment", "edit", "publish"]);
+  const [pat, quinn, alice] = [as(PAT_BOT), as(QUINN_BOT), as(ALICE_BOT)];
+
+  // Two folders of one name: Pat's, with Quinn in it, and Quinn's, with Pat.
+  DEALS = (await call("/api/spaces", { method: "POST", token: PAT.token, device: "d-pat", body: { name: "Deals", members: [QUINN.member.id] } })).json.space;
+  DEALS_QUINN = (await call("/api/spaces", { method: "POST", token: QUINN.token, device: "d-quinn", body: { name: "Deals", members: [PAT.member.id] } })).json.space;
+  // Made a moment later: the first of a name has it plain.
+  db.run("UPDATE spaces SET created_at = created_at + 1000 WHERE id = ?", DEALS_QUINN.id);
+
+  // Who it is, and where it can work: the second Deals is told apart by who
+  // made it, as it is on a Mac.
+  const me = (await pat("/api/agent/me")).json;
+  assert.deepEqual(me.person, { id: PAT.member.id, name: "Pat" });
+  assert.deepEqual(me.sections, ["Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
+  assert.ok(fake.store.has(`spaces/${privateOf(PAT)}/manifest.json`), "asking made Pat's Private: everyone has one");
+
+  // A path is literal. Under Private/ it is Pat's Private and nowhere else.
+  const sharedEtag = etagNow();
+  const wrote = await put(pat, "Private/notes/idea", "# Idea\n\nA quiet cove nobody knows.\n");
+  assert.equal(wrote.status, 201, wrote.text);
+  assert.equal(wrote.json.path, "Private/notes/idea", "said back the way it was typed");
+  assert.deepEqual(pathsOf(spaceManifest(privateOf(PAT))), ["notes/idea.md"], "stored relative to its own section");
+  assert.equal(entryAt(spaceManifest(privateOf(PAT)), "notes/idea.md")[1].by, PAT_BOT.id, "signed with the agent's own name");
+  assert.equal(etagNow(), sharedEtag, "the shared workspace heard nothing of it");
+  assert.equal(db.value("SELECT etag FROM spaces WHERE id = ?", privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag, "and Pat's Macs are told by their next poll");
+  const read = await pat(docUrl("private/NOTES/idea"));
+  assert.equal(read.status, 200);
+  assert.equal(read.text, "# Idea\n\nA quiet cove nobody knows.\n");
+  assert.equal(decodeURIComponent(read.headers.get("x-doklin-path")), "Private/notes/idea", "whatever case it was asked in");
+  assert.equal((await pat(docUrl("Private/notes/idea", "", "&info=1"))).json.path, "Private/notes/idea");
+
+  // A restricted folder by its name — each of the two Deals its own.
+  assert.equal((await put(pat, "Restricted/Deals/q3", "# Q3\n\nThe first deal.\n")).status, 201);
+  assert.equal((await put(pat, "Restricted/Deals (Quinn)/q4", "# Q4\n\nQuinn's deal.\n")).status, 201);
+  assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["q3.md"]);
+  assert.deepEqual(pathsOf(spaceManifest(DEALS_QUINN.id)), ["q4.md"]);
+  assert.deepEqual(pathsOf(storedManifest()), ["Shared/plan.md"], "and neither in the shared workspace");
+
+  // Listing: the workspace itself shows the two folders it keeps; each is
+  // listed like any other; --deep is everything this person can see.
+  const ls = async (api, dir = "", deep = false) => (await api(`/api/agent/tree?dir=${encodeURIComponent(dir)}${deep ? "&deep=1" : ""}`));
+  assert.deepEqual((await ls(pat)).json.folders, ["Private", "Restricted", "Shared"]);
+  assert.deepEqual((await ls(pat, "Restricted")).json.folders, ["Restricted/Deals", "Restricted/Deals (Quinn)"]);
+  assert.deepEqual((await ls(pat, "Private")).json.folders, ["Private/notes"]);
+  assert.deepEqual((await ls(pat, "Private/notes")).json.documents.map((d) => d.path), ["Private/notes/idea"]);
+  assert.deepEqual((await ls(pat, "restricted/deals")).json.documents.map((d) => d.path), ["Restricted/Deals/q3"]);
+  const everything = (await ls(pat, "", true)).json;
+  assert.deepEqual(everything.documents.map((d) => d.path), ["Private/notes/idea", "Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3", "Shared/plan"]);
+  assert.deepEqual(everything.folders, ["Private", "Private/notes", "Restricted", "Restricted/Deals", "Restricted/Deals (Quinn)", "Shared"]);
+  assert.deepEqual((await ls(pat, "Restricted", true)).json.documents.map((d) => d.path), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
+  // A section is there with nothing in it; a folder nobody made is not.
+  const empty = await ls(quinn, "Private");
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.json, { dir: "Private", folders: [], boards: [], documents: [], files: [] });
+  assert.equal((await ls(pat, "Private/nothing")).status, 404);
+  assert.deepEqual((await ls(alice)).json.folders, ["Private", "Shared"], "Alice is in no restricted folder, so she is shown none");
+  assert.deepEqual((await ls(alice, "Restricted")).json.folders, []);
+
+  // To an agent whose person is not in it, a folder is one nobody made — and
+  // a Private is only ever its own person's.
+  for (const api of [alice, as(await addAgent("The owner's bot", ["edit"]))]) {
+    const gone = await api(docUrl("Restricted/Deals/q3"));
+    assert.equal(gone.status, 404);
+    assert.ok(/no restricted folder "Deals"/.test(gone.json.error), gone.json.error);
+    assert.equal((await api(docUrl("Private/notes/idea"))).status, 404, "its own Private holds no such note");
+    assert.equal((await put(api, "Restricted/Deals/intruder", "# No\n")).status, 404);
+  }
+  assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["q3.md"]);
+  // For Quinn the same two folders, named from where she stands.
+  assert.deepEqual((await quinn("/api/agent/me")).json.sections, ["Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
+  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).text, "# Q3\n\nThe first deal.\n");
+
+  // Taken out of a folder, added to one: the agent follows on its next call.
+  const membership = (method) =>
+    call(`/api/spaces/${DEALS.id}/members/${QUINN.member.id}`, { method, token: PAT.token, device: "d-pat" });
+  assert.equal((await membership("DELETE")).status, 204);
+  assert.deepEqual((await quinn("/api/agent/me")).json.sections, ["Private", "Restricted/Deals"], "her own Deals is the only one now, and has the plain name");
+  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).status, 404, "what was Pat's folder is not there for her");
+  assert.equal((await quinn(docUrl("Restricted/Deals/q4"))).status, 200);
+  assert.equal((await membership("PUT")).status, 200);
+  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).status, 200, "and back");
+
+  // The names of the sections themselves are not documents, and Restricted
+  // holds folders and nothing else.
+  const atRoot = await put(pat, "Private", "# x\n");
+  assert.equal(atRoot.status, 400);
+  assert.ok(/inside Private\//.test(atRoot.json.error), atRoot.json.error);
+  const loose = await put(pat, "Restricted", "# x\n");
+  assert.equal(loose.status, 400);
+  assert.ok(/holds restricted folders and nothing else/.test(loose.json.error), loose.json.error);
+  assert.equal((await put(pat, "Restricted/Brand New/x", "# x\n")).status, 404, "an agent does not make a restricted folder: its person does");
+  assert.equal((await put(pat, "Private.md", "# A shared note that is only called Private\n")).status, 201, "a name is reserved as a folder, not as a word");
+  assert.ok(pathsOf(storedManifest()).includes("Private.md"));
+  assert.equal((await pat(docUrl("Private.md"), { method: "DELETE" })).status, 200);
+
+  // Permissions limit what it may do there, never where: a reader reads all
+  // of it and writes none.
+  const reader = as(await addAgentFor(PAT.token, "Pat's reader", []));
+  assert.equal((await reader(docUrl("Private/notes/idea"))).status, 200);
+  assert.equal((await put(reader, "Private/notes/idea", "# Mine\n", "&force=1")).status, 403);
+});
+
+await test("sections: comments, boards and pages work in every section the person can see — a page is published where its document is, and listed and stopped only by those who can see it", async () => {
+  const [pat, alice] = [as(PAT_BOT), as(ALICE_BOT)];
+  const mine = privateOf(PAT);
+
+  // A comment: the marker in the text and the thread in the sidecar, both in
+  // Pat's Private.
+  const said = await pat("/api/agent/comments", { method: "POST", body: { path: "Private/notes/idea", on: "quiet cove", body: "Which one?" } });
+  assert.equal(said.status, 201, said.text);
+  assert.equal(said.json.path, "Private/notes/idea");
+  assert.ok(spaceText(mine, "notes/idea.md").includes("{==quiet cove==}"));
+  assert.deepEqual(pathsOf(spaceManifest(mine)), ["notes/idea.md", "notes/idea.meta.jsonl"]);
+  const threads = (await pat(commentsUrl("Private/notes/idea"))).json.threads;
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].comments[0].author, "Pat's bot");
+
+  // A board, made and worked on where it was put.
+  const b = boardApi(pat);
+  assert.equal((await b.make({ path: "Private/Tasks" })).status, 201);
+  const card = await b.add({ path: "Private/Tasks", title: "Find the cove", set: ["status=Backlog"], page: "Bring a chart.\n" });
+  assert.equal(card.status, 201, card.text);
+  assert.ok(pathsOf(spaceManifest(mine)).includes("Tasks/Find the cove.md"));
+  const shown = await b.show("Private/Tasks");
+  assert.equal(shown.status, 200, shown.text);
+  assert.deepEqual(columnsOf(shown).filter((c) => !c.endsWith(": ")), ["Backlog: Find the cove"]);
+  assert.equal((await pat(docUrl("Private/Tasks/Find the cove"))).text, "Bring a chart.\n");
+  assert.deepEqual((await pat("/api/agent/tree?dir=Private")).json.boards, [{ path: "Private/Tasks", cards: 1 }]);
+  assert.equal((await boardApi(alice).info("Private/Tasks")).status, 404, "Alice's own Private has no such board");
+
+  // Publishing: an entry in the map of the section the document is in, and
+  // an address that is that section's for the whole domain.
+  const page = await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "pats-idea" } });
+  assert.equal(page.status, 201, page.text);
+  assert.equal(page.json.path, "Private/notes/idea");
+  assert.deepEqual(Object.keys(spaceManifest(mine).public), ["pats-idea"]);
+  assert.equal(spaceManifest(mine).public["pats-idea"].path, "notes/idea.md");
+  assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'pats-idea'"), mine);
+  assert.ok(!("pats-idea" in (storedManifest().public ?? {})), "the shared map does not name it");
+  const served = await pub("/pats-idea");
+  assert.equal(served.status, 200);
+  assert.ok(served.text.includes("A quiet") && !served.text.includes("{=="), "the page is the note, without its comment markers");
+  const taken = await alice("/api/agent/pages", { method: "PUT", body: { path: "Shared/plan", slug: "pats-idea" } });
+  assert.equal(taken.status, 409, "the second claim is told it is taken");
+  assert.ok(/already taken on this domain/.test(taken.json.error), taken.json.error);
+  assert.equal((await alice("/api/agent/pages", { method: "PUT", body: { path: "Shared/plan", slug: "the-plan" } })).status, 201);
+
+  // The list is every section its person can see, and no other.
+  const listed = async (api) => (await api("/api/agent/pages")).json.pages.map((x) => [x.slug, x.path]);
+  assert.deepEqual(await listed(pat), [["pats-idea", "Private/notes/idea"], ["the-plan", "Shared/plan"]]);
+  assert.deepEqual(await listed(alice), [["the-plan", "Shared/plan"]]);
+  assert.equal((await pat(docUrl("Private/notes/idea", "", "&info=1"))).json.public[0], `${ORIGIN}/pats-idea`);
+
+  // Stopping: by its document, or by its address — whichever section holds
+  // it — and never one in a section the agent's person is not in.
+  const stopBy = (api, q) => api(`/api/agent/pages?${q}`, { method: "DELETE" });
+  const notHers = await stopBy(alice, "slug=pats-idea");
+  assert.equal(notHers.status, 404);
+  assert.deepEqual(notHers.json, { error: 'nothing is published at "pats-idea"' }, "what an address nobody has answers");
+  assert.equal((await stopBy(alice, "path=pats-idea")).status, 404);
+  assert.equal((await pub("/pats-idea")).status, 200, "it still answers");
+  const byWord = await stopBy(pat, "path=pats-idea&dry=1");
+  assert.equal(byWord.status, 200, "the word alone is an address, found in the section that holds it");
+  assert.deepEqual(byWord.json.stopped, [{ slug: "pats-idea", url: `${ORIGIN}/pats-idea` }]);
+  const bySlug = await stopBy(pat, "slug=pats-idea");
+  assert.equal(bySlug.status, 200, bySlug.text);
+  assert.equal((await pub("/pats-idea")).status, 404);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'pats-idea'"), 0, "and the address is free again");
+  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "pats-idea" } })).status, 201);
+  assert.equal((await stopBy(pat, `path=${encodeURIComponent("Private/notes/idea")}`)).status, 200, "by its document");
+  // A whole section is a folder like another.
+  const whole = await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/", dryRun: true } });
+  assert.equal(whole.status, 200);
+  assert.equal(whole.json.path, "Private");
+  assert.deepEqual(whole.json.documents, ["Private/notes/idea", "Private/Tasks/Find the cove"].sort((a, c) => a.localeCompare(c, undefined, { sensitivity: "base" })));
+});
+
+await test("sections: search keeps a mirror per section — the workspace itself is every section its person can see, a folder only its own, and nobody's text is found by an agent that cannot read it", async () => {
+  const [pat, quinn, alice] = [as(PAT_BOT), as(QUINN_BOT), as(ALICE_BOT)];
+  db.run("DELETE FROM search_text");
+  db.run("DELETE FROM search_state");
+  await put(alice, "Shared/harbour", "# Harbour\n\nThe cove is on the chart.\n");
+  const search = async (api, q, more = "") => {
+    for (let round = 0; round < 6; round += 1) {
+      const res = await api(searchUrl(q, more));
+      if (res.status !== 202) return res;
+    }
+    throw new Error("the search never finished indexing");
+  };
+  const paths = (res) => res.json.results.map((r) => r.path);
+
+  const everywhere = await search(pat, "cove");
+  assert.equal(everywhere.status, 200, everywhere.text);
+  assert.deepEqual(paths(everywhere), ["Private/notes/idea", "Shared/harbour"], "Pat's Private and the shared workspace");
+  assert.deepEqual(everywhere.json.results[0].matches.map((m) => m.text), ["A quiet cove nobody knows."], "the line, without its comment marker");
+  // One mirror a section: the rows of each are its own.
+  const rowsIn = (space) => db.value("SELECT COUNT(*) FROM search_text WHERE space_id = ?", space);
+  assert.equal(rowsIn(""), pathsOf(storedManifest()).filter((x) => x.endsWith(".md")).length);
+  assert.equal(rowsIn(privateOf(PAT)), 2, "the note and the card");
+  assert.equal(rowsIn(DEALS.id), 1);
+  assert.equal(mirrorEtag(privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag);
+  assert.equal(rowsIn(privateOf(QUINN)), 0, "nobody has searched Quinn's");
+
+  // Alice's agent scans the shared mirror and her own Private's — Pat's
+  // words are not in what it reads.
+  db.queries.length = 0;
+  const hers = await search(alice, "cove");
+  assert.deepEqual(paths(hers), ["Shared/harbour"]);
+  const scan = db.queries.find((sql) => /FROM search_text/.test(sql) && /instr/.test(sql));
+  assert.ok(/space_id IN \(\?,\?\)/.test(scan), `two sections, by id: ${scan}`);
+  assert.deepEqual(paths(await search(alice, "first deal")), []);
+
+  // A folder narrows it to the section it is in.
+  assert.deepEqual(paths(await search(pat, "cove", "&dir=Private")), ["Private/notes/idea"]);
+  assert.deepEqual(paths(await search(pat, "cove", "&dir=Shared")), ["Shared/harbour"]);
+  assert.deepEqual(paths(await search(pat, "deal", "&dir=Restricted")), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
+  assert.deepEqual(paths(await search(pat, "deal", `&dir=${encodeURIComponent("restricted/deals")}`)), ["Restricted/Deals/q3"]);
+  assert.deepEqual(paths(await search(quinn, "deal")), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
+  assert.equal((await pat(searchUrl("deal", "&dir=Restricted/Nobodys"))).status, 404);
+  // A card is found as a card of its board, where the board is.
+  const chart = (await search(pat, "chart", "&dir=Private")).json.results;
+  assert.deepEqual(chart.map((r) => [r.path, r.board]), [["Private/Tasks/Find the cove", "Private/Tasks"]]);
+
+  // What an agent writes is mirrored in the request that wrote it — in the
+  // mirror of the section it wrote to.
+  assert.equal((await put(pat, "Private/notes/tide", "# Tide\n\nHigh water at noon.\n")).status, 201);
+  assert.equal(mirrorEtag(privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag);
+  db.queries.length = 0;
+  assert.deepEqual(paths(await pat(searchUrl("high water"))), ["Private/notes/tide"]);
+  assert.ok(!db.queries.some((sql) => /INTO search_text/.test(sql)), "the search had nothing to catch up");
+});
+
+await test("sections: a move between sections writes where it goes first and leaves a tombstone that says where it went — comments and its public address go with it", async () => {
+  const [pat, quinn] = [as(PAT_BOT), as(QUINN_BOT)];
+  const mine = privateOf(PAT);
+  const move = (api, body) => api("/api/agent/move", { method: "POST", body });
+
+  // Inside one section a move is the move it always was.
+  const within = await move(pat, { from: "Private/notes/tide", to: "Private/tides/noon" });
+  assert.equal(within.status, 200, within.text);
+  assert.deepEqual(within.json, { kind: "document", from: "Private/notes/tide", to: "Private/tides/noon", files: 1 });
+  assert.ok(pathsOf(spaceManifest(mine)).includes("tides/noon.md"));
+
+  // Private → shared. Published first, so the address has something to keep.
+  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "the-cove" } })).status, 201);
+  const [oldFid] = entryAt(spaceManifest(mine), "notes/idea.md");
+  const dry = await move(pat, { from: "Private/notes/idea", to: "Shared/", dryRun: true });
+  assert.equal(dry.status, 200, dry.text);
+  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2, moved: false });
+  assert.ok(pathsOf(spaceManifest(mine)).includes("notes/idea.md") && !pathsOf(storedManifest()).includes("Shared/idea.md"), "a dry run moved nothing");
+
+  const out = await move(pat, { from: "Private/notes/idea", to: "Shared/" });
+  assert.equal(out.status, 200, out.text);
+  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2 });
+  const shared = storedManifest();
+  assert.ok(pathsOf(shared).includes("Shared/idea.md") && pathsOf(shared).includes("Shared/idea.meta.jsonl"), "the note and its comments");
+  const [newFid, landed] = entryAt(shared, "Shared/idea.md");
+  assert.notEqual(newFid, oldFid, "a new file where it went, with an id of its own");
+  assert.equal(landed.rev, 1);
+  assert.equal(landed.by, PAT_BOT.id);
+  assert.ok(textAt("Shared/idea.md").includes("{==quiet cove==}"), "the same bytes");
+  assert.equal((await pat(commentsUrl("Shared/idea"))).json.threads.length, 1, "its thread came with it");
+  const left = spaceManifest(mine);
+  assert.ok(!pathsOf(left).includes("notes/idea.md") && !pathsOf(left).includes("notes/idea.meta.jsonl"));
+  assert.equal(left.tombstones[oldFid].to, "", "the tombstone says it went to the shared workspace — a Mac in both moves its copy");
+  assert.equal(left.tombstones[oldFid].path, "notes/idea.md");
+  // The page: out of Private's map, into the shared one, at the same address.
+  assert.deepEqual(Object.keys(left.public), []);
+  assert.deepEqual(shared.public["the-cove"], { ...shared.public["the-cove"], kind: "file", file: newFid, path: "Shared/idea.md" });
+  assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'the-cove'"), "");
+  const page = await pub("/the-cove");
+  assert.equal(page.status, 200, "and it answers from where the note is now");
+  assert.ok(page.text.includes("A quiet"));
+
+  // Shared → a restricted folder: `to` is that folder's id, and the people
+  // in it find the note there.
+  const [planFid] = entryAt(storedManifest(), "Shared/plan.md");
+  const into = await move(pat, { from: "Shared/plan", to: "Restricted/Deals" });
+  assert.equal(into.status, 200, into.text);
+  assert.equal(into.json.to, "Restricted/Deals/plan", "a section's own folder means into it, slash or not");
+  assert.equal(storedManifest().tombstones[planFid].to, DEALS.id);
+  assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["plan.md", "q3.md"]);
+  assert.equal((await quinn(docUrl("Restricted/Deals/plan"))).text, "# Plan\n\nThe harbour plan.\n");
+  // The page Alice's agent gave it went along, into a section she cannot see.
+  assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'the-plan'"), DEALS.id);
+  assert.equal((await pub("/the-plan")).status, 200);
+
+  // One restricted folder to another, renamed on the way.
+  const across = await move(pat, { from: "Restricted/Deals/q3", to: "Restricted/Deals (Quinn)/archive/third" });
+  assert.equal(across.status, 200, across.text);
+  assert.deepEqual(pathsOf(spaceManifest(DEALS_QUINN.id)), ["archive/third.md", "q4.md"]);
+  assert.equal(Object.values(spaceManifest(DEALS.id).tombstones).find((t) => t.path === "q3.md").to, DEALS_QUINN.id);
+
+  // A folder moves whole, each file under the same name.
+  await put(pat, "Private/trip/a", "# A\n");
+  await put(pat, "Private/trip/b", "# B\n");
+  const folder = await move(pat, { from: "Private/trip", to: "Shared/Trips/2026" });
+  assert.equal(folder.status, 200, folder.text);
+  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Shared/Trips/2026", files: 2 });
+  assert.ok(["Shared/Trips/2026/a.md", "Shared/Trips/2026/b.md"].every((x) => pathsOf(storedManifest()).includes(x)));
+  // A board too, with its name following its folder.
+  const board = await move(pat, { from: "Private/Tasks", to: "Shared/Chores" });
+  assert.equal(board.status, 200, board.text);
+  assert.equal(board.json.kind, "board");
+  assert.equal(board.json.name, "Chores");
+  assert.ok(textAt("Shared/Chores/store.jsonl").includes('"name":"Chores"'));
+  assert.ok(pathsOf(storedManifest()).includes("Shared/Chores/Find the cove.md"));
+
+  // What does not move.
+  const refused = async (body, status, pattern) => {
+    const res = await move(pat, body);
+    assert.equal(res.status, status, `${JSON.stringify(body)}: ${res.text}`);
+    assert.ok(pattern.test(res.json.error), res.json.error);
+  };
+  await refused({ from: "Private", to: "Shared/everything" }, 400, /a section of this workspace, not a folder to move/);
+  await refused({ from: "Restricted/Deals/", to: "Shared/Deals" }, 400, /a section of this workspace/);
+  await refused({ from: "Shared/idea", to: "Restricted/" }, 400, /holds restricted folders and nothing else/);
+  await refused({ from: "Shared/idea", to: "Restricted/Nobodys/idea" }, 404, /no restricted folder/);
+  await refused({ from: "Private/nothing", to: "Shared/x" }, 404, /there is nothing at/);
+  await refused({ from: "Shared/idea", to: "Restricted/Deals/plan" }, 409, /"Restricted\/Deals\/plan.md" is already there/);
+  await refused({ from: "Shared/Chores/Find the cove", to: "Private/cove" }, 400, /a card does not move off its board/);
+  for (let i = 0; i < 17; i += 1) await put(pat, `Private/many/n${String(i).padStart(2, "0")}`, `# ${i}\n`);
+  await refused({ from: "Private/many", to: "Shared/many" }, 400, /17 files, and 16 move between sections at a time/);
+  assert.ok(!pathsOf(storedManifest()).some((x) => x.startsWith("Shared/many/")), "and nothing of it was written");
+  // A reader's agent moves nothing anywhere.
+  const reader = as(await addAgentFor(PAT.token, "Pat's second reader", []));
+  assert.equal((await move(reader, { from: "Shared/idea", to: "Private/idea" })).status, 403);
+});
+
+await test("sections: an agent goes with its person — removed from the workspace, every machine of every agent of theirs is refused, and inviting them again brings none back", async () => {
+  const before = db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", QUINN.member.id);
+  assert.ok(before >= 1);
+  const alicesBefore = db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", ALICE.id);
+  assert.equal((await as(QUINN_BOT)("/api/agent/me")).status, 200);
+  assert.equal((await call(`/api/auth/members/${QUINN.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await as(QUINN_BOT)("/api/agent/me")).status, 401, "its very next request");
+  assert.equal(db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", QUINN.member.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM agent_tokens WHERE agent_id = ?", QUINN_BOT.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", ALICE.id), alicesBefore, "nobody else's");
+  assert.equal((await as(PAT_BOT)("/api/agent/me")).status, 200);
+  assert.ok(!(await call("/api/auth/agents", { token: OWNER })).json.agents.some((a) => a.id === QUINN_BOT.id));
+
+  // Invited again she is the same person, with her Private — and no agents:
+  // one is connected again by its person.
+  const back = await joinAs("quinn@example.com", "Quinn", "QQQQQQQQQQQQQQQQQQQ2", "d-quinn");
+  assert.equal(back.member.id, QUINN.member.id);
+  assert.deepEqual((await call("/api/auth/agents", { token: back.token, device: "d-quinn" })).json.agents, []);
+  // Pat is in Quinn's Deals still; Quinn is in neither until somebody adds her.
+  assert.deepEqual((await as(PAT_BOT)("/api/agent/me")).json.sections, ["Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
 });
 
 await test("wipe: owner-only, confirmed, empties the bucket and frees the domain for a new binding", async () => {

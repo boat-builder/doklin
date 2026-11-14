@@ -195,16 +195,16 @@ pub struct TokenRecord {
 
 /* ---------- Agents ---------- */
 
-/// An agent as the owner's routes describe one: an identity that is not a
-/// person, with what it may do, the machines it is logged in on and the
-/// login code nobody has used yet. Never a credential.
+/// An agent as the domain lists one: an identity that is not a person and
+/// belongs to one, with what it may do, the machines it is logged in on and
+/// the login code nobody has used yet. Never a credential.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecord {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    /// `read`, `comment`, `edit`, `publish` — the ones the owner ticked.
+    /// `read`, `comment`, `edit`, `publish` — the ones its person ticked.
     /// `read` is always among them.
     #[serde(default)]
     pub scopes: Vec<String>,
@@ -213,8 +213,17 @@ pub struct AgentRecord {
     /// When it last made a request, to the hour. None until it has.
     #[serde(default)]
     pub last_used_at: Option<u64>,
+    /// Whose it is: the member it belongs to. None for a creator who has not
+    /// said who they are.
+    #[serde(default)]
+    pub member_id: Option<String>,
+    /// Whether that is whoever asked. An agent that is somebody else's is
+    /// listed to an owner, who may remove it and nothing more.
+    #[serde(default)]
+    pub mine: bool,
     #[serde(default)]
     pub machines: Vec<AgentMachine>,
+    /// The login code nobody has used yet — only ever on one's own agent.
     #[serde(default)]
     pub code: Option<AgentCode>,
 }
@@ -614,7 +623,7 @@ impl HttpRemote {
     }
 }
 
-/// The owner's agent routes (`/api/auth/agents…`). Inherent rather than part
+/// A person's agent routes (`/api/auth/agents…`). Inherent rather than part
 /// of [`Remote`]: that trait is what the *engine* needs, so that it can run
 /// against an in-memory worker, and the engine never manages agents — only
 /// the People view's commands do (mod.rs), and they hold an `HttpRemote`.

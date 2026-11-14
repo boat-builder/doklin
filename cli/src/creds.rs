@@ -122,7 +122,7 @@ pub fn pick<'a>(creds: &'a Credentials, wanted: Option<&str>) -> Result<&'a Work
     }
     match all.as_slice() {
         [] => Err(Failure::not_logged_in(
-            "this machine is not logged in — ask the workspace's owner for a login line (Doklin → Cloud → Agents) and run it",
+            "this machine is not logged in — ask the person you work for to add an agent in Doklin (the workspace menu → Agents…) and run the login line it gives them",
         )),
         [one] => Ok(one),
         many => Err(Failure::usage(format!(

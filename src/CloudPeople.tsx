@@ -6,7 +6,8 @@
 //            workspace. Everybody here sees who is in it; an owner also lets
 //            people in, takes access away, and makes other owners.
 //   Agents   bots that work through the `doklin` command line with no copy of
-//            the folder (CloudAgents.tsx) — shown to whoever may manage them.
+//            the folder (CloudAgents.tsx). Everybody has their own; an owner
+//            also sees everyone else's.
 //
 // Both tabs stay mounted while the view is open — a code that is shown once
 // must not be lost to a look at the other tab. In each, what an owner came to
@@ -165,7 +166,7 @@ export default function CloudPeople({
   const canInvite = may(people, "people.invite");
   const canRemove = may(people, "people.remove");
   const canSetRoles = may(people, "people.roles");
-  const canAgents = may(people, "agents.manage");
+  const canAgents = may(people, "agents.own");
   const macsOf = (m: CloudMember) => people.devices.filter((d) => d.memberId === m.id);
   // The holder of the domain's own token who has not yet said who they are:
   // the one person the list cannot name.
@@ -563,7 +564,14 @@ export default function CloudPeople({
 
       {canAgents && (
         <div className="cloud-stack" role="tabpanel" data-testid="pane-agents" hidden={tab !== "agents"}>
-          <CloudAgents root={root} domain={domain} copy={copy} copied={copied} />
+          <CloudAgents
+            root={root}
+            domain={domain}
+            people={members}
+            everyone={may(people, "agents.manage")}
+            copy={copy}
+            copied={copied}
+          />
         </div>
       )}
     </>

@@ -47,7 +47,7 @@ export default function PeopleDialog({
     }
   }, []);
 
-  const title = mayOn(cloud, "agents.manage") ? "People and agents" : "People";
+  const title = mayOn(cloud, "agents.own") ? "People and agents" : "People";
   return (
     <div
       className="modal-overlay"

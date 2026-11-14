@@ -101,11 +101,12 @@
 //
 //   Agents. An agent's token is answered under /api/agent and nowhere
 //   else — every route above answers one with 403 — and the routes that manage agents sit
-//   beside the people routes, an owner's like them. Both are listed in agentApi.ts.
+//   beside the people routes. Both are listed in agentApi.ts.
 //
 //   POST   /api/agent/login          NO BEARER — the second route above the gate
 //   *      /api/agent/…              an agent's token only: the document API
-//   *      /api/auth/agents…         owner; add, list, change and remove agents
+//   *      /api/auth/agents…         anyone; their own agents — an owner sees everyone's and
+//                                    may remove any
 
 import { claimAddresses, releaseAddresses, takenError } from "./addresses";
 import { agentLogin, handleAgent, handleAgentAdmin } from "./agentApi";
@@ -223,7 +224,7 @@ export async function handleApi(
     return handleAgent(request, env, url, ctx, parts, { ...auth, agent: auth.agent });
   }
   if (section === "agent") {
-    return json({ error: "the document API is for agents — add one in Doklin, under Cloud → People → Agents" }, 403);
+    return json({ error: "the document API is for agents — add one in Doklin, under Agents" }, 403);
   }
 
   // The probe: liveness, the credential, the version and "is this domain
@@ -283,8 +284,8 @@ export async function handleApi(
   }
 
   if (section === "auth" && parts[2] === "agents") {
-    if (!can(auth.role, "agents.manage")) return notAllowed();
-    return handleAgentAdmin(request, env, parts);
+    if (!can(auth.role, "agents.own")) return notAllowed();
+    return handleAgentAdmin(request, env, parts, auth);
   }
 
   if (section === "auth" && (parts.length === 3 || parts.length === 4)) {

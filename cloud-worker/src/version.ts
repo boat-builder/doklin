@@ -111,7 +111,13 @@
 //  15 = an owner sees every public address on the domain, whichever section
 //       published the page, and can take any of them down (`/api/pages`,
 //       `pages.manage`).
-export const WORKER_VERSION = 15;
+//  16 = an agent belongs to a person and sees what they see: a path under
+//       `Private/` or `Restricted/<folder>/` is answered in that space, a
+//       move between sections writes where it goes first, and search keeps a
+//       mirror per space. Anyone has agents of their own (`agents.own`); an
+//       owner sees everybody's and may remove any. D1 gains
+//       `agents.member_id`, and the search tables are made again by space.
+export const WORKER_VERSION = 16;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map

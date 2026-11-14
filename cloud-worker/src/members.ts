@@ -424,7 +424,9 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
  * their row stays, marked `disabled` and a member again. Keeping the row is
  * what keeps their name on what they wrote, and what makes inviting the same
  * address later the same person — with the Private they had. The restricted
- * folders they were in they leave: somebody in each adds them again.
+ * folders they were in they leave: somebody in each adds them again. Their
+ * agents go with them, machines and all — an agent is its person's way in,
+ * and comes back only by being connected again.
  * Their presence and their leases go with them, so nobody keeps seeing — or
  * being kept out of a document by — a person who is no longer here.
  *
@@ -467,6 +469,13 @@ export async function removeMember(env: Env, id: string): Promise<true | Refusal
               AND space_id IN (SELECT id FROM spaces WHERE kind = 'restricted')`,
         )
         .bind(id),
+      db
+        .prepare(`DELETE FROM agent_tokens WHERE agent_id IN (SELECT id FROM agents WHERE member_id = ? AND member_id ${here})`)
+        .bind(id),
+      db
+        .prepare(`DELETE FROM agent_codes WHERE agent_id IN (SELECT id FROM agents WHERE member_id = ? AND member_id ${here})`)
+        .bind(id),
+      db.prepare(`DELETE FROM agents WHERE member_id = ? AND member_id ${here}`).bind(id),
       db.prepare(`UPDATE members SET disabled = 1, role = 'member' WHERE id = ? AND id ${here}`).bind(id),
     ]);
     if ((results.at(-1)?.meta.changes ?? 0) > 0) return true as const;

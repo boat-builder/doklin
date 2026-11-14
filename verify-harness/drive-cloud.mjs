@@ -1212,6 +1212,20 @@ const agentsTab =
   (await above("agents-intro", "agent-open")) &&
   (await above("agent-open", "agent-list"));
 const reviewBot = await tid("agent-a-11111111").textContent();
+// The owner's own agent is in the list above; Bob's is under it, named as
+// his, with nothing offered but taking it away.
+const yours = await tid("agent-list").textContent();
+const bobsHelper = await tid("agent-a-22222222").textContent();
+const bobsHelperIsHis =
+  !yours.includes("Bob’s helper") &&
+  (await tid("agent-others").locator('[data-testid="agent-a-22222222"]').count()) === 1 &&
+  (await tid("agent-whose-a-22222222").textContent()).trim() === "Bob" &&
+  bobsHelper.includes("read · edit") &&
+  !bobsHelper.includes("a login code is waiting") &&
+  (await tid("agent-code-a-22222222").count()) === 0 &&
+  (await tid("agent-edit-a-22222222").count()) === 0 &&
+  (await tid("agent-remove-a-22222222").count()) === 1 &&
+  (await tid("agent-logout-t-bob-box").count()) === 1;
 await tid("agent-open").click();
 await poll(async () => (await tid("agent-form").count()) === 1);
 const boxes = async () => ({
@@ -1246,8 +1260,11 @@ await tid("tab-agents").click();
 const promptKept = (await tid("agent-prompt").isVisible()) && (await tid("agent-prompt").textContent()) === prompt;
 const LOGIN_1 = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
 step(
-  "Agents: their own tab, the door above the list; the list names what each may do and where it is logged in; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is — copied by one button, shown once, and kept through a look at the other tab",
+  "Agents: their own tab, the door above the list; the list is your own agents, naming what each may do and where it is logged in, and an owner is shown other people's under it — whose each is, to log out or remove and nothing else; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is, and that new work goes under Private/ — copied by one button, shown once, and kept through a look at the other tab",
   agentsTab &&
+    bobsHelperIsHis &&
+    (await tid("agents-intro").textContent()).includes("it sees what you see") &&
+    prompt.includes("Put anything new under `Private/`") &&
     reviewBot.includes("Review bot") &&
     reviewBot.includes("read · comment") &&
     !reviewBot.includes("can publish") &&
@@ -1356,10 +1373,10 @@ await page.evaluate(() => {
 
 /* 25 — the same workspace on a Mac that joined with an invite: who is here
    is everybody's to see, and nothing that is an owner's to do is offered —
-   not in the menu (no Agents door), not in the panel (no worker update, no
-   danger zone) and not in the view (no tabs, no invite door, no Remove, no
-   role button) */
-const MEMBER_CAN = ["work", "people.see"];
+   not in the panel (no worker update, no danger zone) and not in the view
+   (no invite door, no Remove, no role button). Agents are everybody's own:
+   the menu has the door, and the tab lists this person's and nobody else's */
+const MEMBER_CAN = ["work", "people.see", "agents.own"];
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("People and agents").count()) === 0);
 
@@ -1434,7 +1451,7 @@ await setCloud({ people: peopleBefore });
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("People and agents").count()) === 0);
 await setCloud({ can: MEMBER_CAN });
-await setStatuses((await page.evaluate(() => window.__cloud.statuses)).map((s) => ({ ...s, can: ["work", "people.see"] })));
+await setStatuses((await page.evaluate(() => window.__cloud.statuses)).map((s) => ({ ...s, can: MEMBER_CAN })));
 const people = await page.evaluate(() => window.__cloud.people);
 await setCloud({
   people: { ...people, role: "member", creator: false, me: "m-bob", can: MEMBER_CAN, invites: [], devices: [] },
@@ -1450,13 +1467,13 @@ await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 await page.locator(".sidebar-header-button").click();
 await poll(async () => (await tid("sidebar-menu-people").count()) === 1);
-const memberMenu = (await tid("sidebar-menu-agents").count()) === 0;
+const memberMenu = (await tid("sidebar-menu-agents").count()) === 1;
 await tid("sidebar-menu-people").click();
-await poll(async () => (await dialog("People").count()) === 1);
+await poll(async () => (await dialog("People and agents").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
 const memberIntro = await tid("people-intro").textContent();
 step(
-  "People (a member): the menu offers People… and no Agents…, the panel nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no tabs, no invite door, no Remove and no role button, and no error",
+  "People (a member): the menu offers People… and Agents…, the panel nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no invite door, no Remove and no role button, and no error",
   memberPanel &&
     memberMenu &&
     memberIntro.includes("Everyone in Notes") &&
@@ -1464,26 +1481,58 @@ step(
     (await tid("person-m-owner").textContent()).includes("owner") &&
     (await tid("person-m-bob").textContent()).includes("you") &&
     !(await tid("person-m-owner").textContent()).includes("you") &&
-    (await tid("tab-people").count()) === 0 &&
-    (await tid("tab-agents").count()) === 0 &&
+    (await tid("tab-people").count()) === 1 &&
+    (await tid("tab-agents").count()) === 1 &&
     (await tid("invite-open").count()) === 0 &&
     (await tid("adopt-owner").count()) === 0 &&
     (await page.locator('[data-testid^="remove-person-"]').count()) === 0 &&
     (await page.locator('[data-testid^="set-role-"]').count()) === 0 &&
     (await page.locator('[data-testid^="revoke-mac-"]').count()) === 0 &&
-    (await tid("agent-list").count()) === 0 &&
-    (await tid("agent-open").count()) === 0 &&
-    (await dialog("People").locator(".modal-error").count()) === 0,
+    (await dialog("People and agents").locator(".modal-error").count()) === 0,
   memberIntro.trim(),
 );
 await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
+
+/* 25b — a member's agents: their own, and only their own. Bob's helper is
+   his to change, log in and remove; the creator's Review bot is not shown to
+   him at all; and he adds one for himself, which is his from the start */
+await tid("tab-agents").click();
+await poll(async () => (await tid("agent-list").count()) === 1);
+const bobsOwn = await tid("agent-a-22222222").textContent();
+const bobsList =
+  (await tid("agent-list").locator('[data-testid="agent-a-22222222"]').count()) === 1 &&
+  bobsOwn.includes("a login code is waiting") &&
+  (await tid("agent-code-a-22222222").count()) === 1 &&
+  (await tid("agent-edit-a-22222222").count()) === 1 &&
+  (await tid("agent-remove-a-22222222").count()) === 1 &&
+  (await tid("agent-a-11111111").count()) === 0 &&
+  (await tid("agent-others").count()) === 0;
+await tid("agent-open").click();
+await poll(async () => (await tid("agent-form").count()) === 1);
+const bobsFormTitle = (await tid("agent-form").locator(".cloud-card-title").textContent()).trim();
+await tid("agent-name").fill("Bob’s second");
+await tid("agent-save").click();
+await poll(async () => (await tid("agent-login").count()) === 1);
+const bobsAdd = await lastCall("cloud_agent_add");
+const bobsNew = await page.evaluate(() => window.__cloud.agents.list.at(-1));
+await tid("agent-login-done").click();
+step(
+  "Agents (a member): the tab lists this person's own agents — theirs to log in, edit and remove — and nobody else's; adding one makes it theirs",
+  bobsList &&
+    bobsFormTitle === "Add an agent of your own" &&
+    bobsAdd.args.name === "Bob’s second" &&
+    bobsNew.memberId === "m-bob" &&
+    (await tid("agent-list").locator(`[data-testid="agent-${bobsNew.id}"]`).count()) === 1,
+  bobsOwn.replace(/\s+/g, " ").trim().slice(0, 120),
+);
+await page.screenshot({ path: SHOTS + "cloud-11b-agents-member.png" });
 
 /* 26 — an owner removes this Mac. The engine deletes the copy and says so;
    the window lets go of the workspace — its tabs close, the sidebar goes, the
    panel shuts — and a notice says what happened, in words that do not
    pretend anything was deleted in the cloud */
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People").count()) === 0);
+await poll(async () => (await dialog("People and agents").count()) === 0);
 const removedRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
 await setStatuses([]); // the engine forgets the workspace first, then says why
 await emit("cloud-removed", { root: removedRoot, name: "Notes", domain: "notes.example.com", deleted: true, at: Date.now() });

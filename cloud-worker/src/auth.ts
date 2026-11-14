@@ -21,7 +21,9 @@
 // A bearer that starts `dka_` is an agent's (agents.ts) and resolves through
 // the agents' own table instead: the same one primary-key read, to a role the
 // sync API refuses outright. An agent is only ever answered on the document
-// API (agentApi.ts), within the permissions on its row.
+// API (agentApi.ts), within the permissions on its row, and its `memberId` is
+// the person it belongs to: every question of what it can see is asked as
+// that person.
 //
 // The two routes above this gate are `POST /api/auth/join` and
 // `POST /api/agent/login`, which have to answer without a bearer because
@@ -50,7 +52,8 @@ export type Auth = {
    * knowing which *person* that is. The creator's member row exists (they are
    * in the People list, and attribution names them) but it is identity, never
    * authority: `POST /api/auth/members` is what writes it, and losing it
-   * costs a name, not access.
+   * costs a name, not access. For an agent it is the person the agent
+   * belongs to — null, again, when that is the creator.
    */
   memberId: string | null;
   email: string | null;
@@ -59,7 +62,7 @@ export type Auth = {
   deviceId: string | null;
   /**
    * Set exactly when `role` is "agent": the id it signs what it changes with,
-   * and what the owner ticked for it. Null for people — a person's token is
+   * and what its person ticked for it. Null for people — a person's token is
    * not a limited account, so there is nothing to list.
    */
   agent: { id: string; scopes: readonly Scope[] } | null;
@@ -104,7 +107,7 @@ export async function authenticate(request: Request, env: Env): Promise<Auth | "
       role: "agent",
       creator: false,
       tokenId: agent.tokenId,
-      memberId: null,
+      memberId: agent.memberId,
       email: null,
       name: agent.name,
       deviceId,

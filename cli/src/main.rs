@@ -77,7 +77,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "login",
         usage: "doklin login <domain> <code>",
-        about: "Log this machine in, with the line the workspace's owner gave you. The code works once.",
+        about: "Log this machine in, with the line you were given. The code works once.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::login,
     },
@@ -91,7 +91,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "whoami",
         usage: "doklin whoami",
-        about: "Which workspace and agent this is, and what it may do.",
+        about: "Which workspace and agent this is, whose it is, what it may do and where it can work.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::whoami,
     },
@@ -119,7 +119,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "search",
         usage: "doklin search <text> [--in <folder>] [--limit <n>]",
-        about: "Documents containing the text, whatever its case, with the matching lines.",
+        about: "Documents containing the text, whatever its case, with the matching lines. With no --in, everywhere this agent can see.",
         accepts: Accepts { values: &["in", "limit"], switches: &[] },
         run: commands::search,
     },
@@ -161,7 +161,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "mv",
         usage: "doklin mv <from> <to>",
-        about: "Move or rename a document (both versions and its comments), a plain file or a folder. A destination that is a folder means into it.",
+        about: "Move or rename a document (both versions and its comments), a plain file or a folder. A destination that is a folder means into it. Moving between Private/, a restricted folder and what is shared changes who can see it.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::mv,
     },

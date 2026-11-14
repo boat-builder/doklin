@@ -130,7 +130,7 @@
         joinError: null,
         // What this Mac's credential may do, as the status reports it: every
         // action for an owner. A drive narrows it to a member's.
-        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"],
+        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"],
         token: "ab".repeat(32),
         // Who this Mac is on the scripted domain — what the engine resolved
         // its own signature to.
@@ -158,9 +158,12 @@
         mintedCode: "dkln-9F4TR-2QWXM-7NBKD-5HGVZ",
         // The domain's agents, kept as real state like
         // the people below: adding one adds a row, a new login code replaces
-        // the pending one, logging a machine out takes one away. `error`, when
-        // a string, is what every agent command rejects with — a worker that
-        // predates agents answers that way.
+        // the pending one, logging a machine out takes one away. Each is
+        // somebody's (`memberId`; null is the creator's): the list a command
+        // answers is the asker's own, and everybody's for an owner, each
+        // marked `mine` or not. `error`, when a string, is what every agent
+        // command rejects with — a worker that predates agents answers that
+        // way.
         agents: {
           list: [
             {
@@ -169,8 +172,19 @@
               scopes: ["read", "comment"],
               createdAt: Date.now() - 2 * 86400000,
               lastUsedAt: Date.now() - 2 * 3600000,
+              memberId: null,
               machines: [{ id: "t-box-1", host: "ci-runner-7", createdAt: Date.now() - 86400000 }],
               code: null,
+            },
+            {
+              id: "a-22222222",
+              name: "Bob’s helper",
+              scopes: ["read", "edit"],
+              createdAt: Date.now() - 86400000,
+              lastUsedAt: null,
+              memberId: "m-bob",
+              machines: [{ id: "t-bob-box", host: "bobs-laptop", createdAt: Date.now() - 3600000 }],
+              code: { id: "c-bob-1", createdAt: Date.now() - 60000, expiresAt: Date.now() + 50 * 60000 },
             },
           ],
           // The codes it mints, in the clear, in order.
@@ -190,7 +204,7 @@
           // never asked who was binding it. Adopting an identity is the
           // panel's job, and sets this to the new row's id.
           me: null,
-          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.manage", "pages.manage", "workspace.manage"],
+          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"],
           // This Mac. A Mac only appears in the list below under its own id
           // if it redeemed a code rather than holding the domain's own
           // token — which is exactly when "this Mac" is worth saying.
@@ -649,7 +663,15 @@
               record(cmd, args);
               const a = window.__cloud.agents;
               if (typeof a.error === "string") return Promise.reject(a.error);
-              return Promise.resolve(JSON.parse(JSON.stringify(a.list)));
+              // As the domain answers: the asker's own, everybody's for an
+              // owner, and a waiting code only on one's own.
+              const p = window.__cloud.people;
+              const mine = (x) => (p.creator ? x.memberId === null || x.memberId === p.me : x.memberId === p.me);
+              return Promise.resolve(
+                JSON.parse(JSON.stringify(a.list))
+                  .filter((x) => mine(x) || p.can.includes("agents.manage"))
+                  .map((x) => ({ ...x, mine: mine(x), code: mine(x) ? x.code : null })),
+              );
             }
             case "cloud_agent_add":
             case "cloud_agent_code": {
@@ -667,17 +689,19 @@
                 a.list = a.list.map((x) => (x.id === args.agentId ? { ...x, code: pending } : x));
                 return Promise.resolve(login);
               }
+              const asker = window.__cloud.people;
               const agent = {
                 id: `a-new-${n}`,
                 name: args.name,
                 scopes: args.scopes,
                 createdAt: Date.now(),
                 lastUsedAt: null,
+                memberId: asker.creator ? null : asker.me,
                 machines: [],
                 code: pending,
               };
               a.list = [...a.list, agent];
-              return Promise.resolve({ agent: JSON.parse(JSON.stringify(agent)), login });
+              return Promise.resolve({ agent: { ...JSON.parse(JSON.stringify(agent)), mine: true }, login });
             }
             case "cloud_agent_update": {
               record(cmd, args);

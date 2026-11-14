@@ -8,7 +8,7 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - The secret's holder is the **creator**: always an owner; their member row (bind, or `cloud_adopt_owner`) is the one in `creator` and is never removed or demoted.
 - A token carries its person's `members.role`, read on every request, so a role change bites on the next call. There can be several owners.
 - Who may do what is one table: `can(role, action)` in `roles.ts`. Every gated route asks it; `/api/meta` answers the caller's row as `you.can` and the app hides by it (`may` / `mayOn`, `src/cloud.ts`; an empty `can` on a status means not yet known, so the control shows). Change a permission there, nowhere else.
-- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners only = invite, remove, sign out, roles, agents, bind, wipe.
+- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners only = invite, remove, sign out, roles, other people's agents, bind, wipe.
 - Nobody removes or demotes their own row, or deletes the token the call is made with.
 - Codes are 100 bits (Crockford base32): no throttle, lockout or counter. Revoking a row bites on the next request.
 - `last_seen_at` (beat) and `last_used_at` (agent request) move at most hourly.
@@ -56,12 +56,21 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 
 ## Agents
 
-- An agent (`a-` + 8 hex) is a name + scopes; not a member. The sync cycle has no agent code; the owner's agent calls are `HttpRemote` methods, off the `Remote` trait.
+- An agent (`a-` + 8 hex) is a name, scopes and the person it belongs to (`agents.member_id`; NULL is the creator's); not a member. The sync cycle has no agent code; the app's agent calls are `HttpRemote` methods, off the `Remote` trait.
+- **An agent sees exactly what its person sees**: the shared workspace, their Private, the restricted folders they are in. Its token's `Auth.memberId` is its person, so every "is this person in this space" is the question a Mac's token is asked, on every request: added to a folder, taken out, the agent follows on its next call. Scopes limit what it does there, never where. Nothing else widens or narrows it.
+- Anyone has agents of their own (`agents.own`). Only its person changes one or mints it a login code: a code is a way in as that person, the reason an invite code for somebody who has signed in is theirs to make. An owner (`agents.manage`) is listed everybody's and may remove one or log a machine out, nothing more; to anyone else another person's agent is a `404`.
+- Removing a person deletes their agents. Inviting them again brings none back.
 - `publish` is off unless ticked (a remote agent can't be asked to confirm). Scopes are per route (`ROUTES`, `agentApi.ts`). The home page is set only in the app.
 - The only way in: a `dkla-…` code (`AGENT_PREFIX` ⇄ `normalizeAgentCode`, **change both**), valid 1 h (`AGENT_CODE_MINUTES`; the worker's looser cap absorbs clock skew), shown once in `buildAgentLoginPrompt` (install line + `doklin login <endpoint> <code>`). Login deletes the code and mints the machine's `dka_` token in one statement.
+- New work goes under `Private/` unless the person names a place — by instruction only: the login prompt and `doklin help agent|sections` say so. Never a setting, a flag or a default folder: a path already says where a thing is.
 
 ## Document API
 
+- **Paths are literal** (`agentPlace.ts`), the ones on the person's disk: `Private/…` their Private, `Restricted/<folder>/…` a folder they are in, anything else shared. A call runs in the space its path names, on that space's manifest mounted at its folder (`mount.ts`): every lookup, refusal and answer carries the path as typed, and `commit` takes the change back to the stored form before it is checked. A folder the person is not in answers what a folder nobody made answers.
+- A restricted folder is called what a Mac calls it: `folderNames` ⇄ `candidates` (`space.rs`), `folderName` ⇄ `sanitize_folder_name` (`config.rs`). **Change both.** The worker hands the names out in the order the folders were made, a Mac in the order they reached it, so of two folders with one name a Mac may have the other first; `doklin ls Restricted` is what the agent calls each.
+- An agent makes, renames and deletes no section and changes nobody's membership; `Private` and `Restricted/<folder>` themselves do not move.
+- A move between sections (`moveAcross`) is the one change that is two manifest writes: ≤ 16 files, written where they go first under new file ids, then removed with a tombstone `to` — what a Mac's own cross-section move leaves (`WorkerTx::moved_to`, `tests.rs`). A file that changed in between stays where it is. A page is given up by the write that removes its file and claimed after by the section it went to; one that could not be is answered as `unpublished`.
+- A listing, a search or the page list of the workspace itself covers every section, opening ≤ 8 spaces a request (`MAX_SECTIONS_READ`) and naming the ones it left out.
 - **The worker is a third writer** (`commit.ts`): read manifest + etag → apply (checks `if-rev` against that manifest; a refusal writes nothing) → `validateManifest` → blobs create-only → manifest `onlyIf etagMatches`; a lost race redoes it. The precondition is the file's `rev`, never the etag. An unchanged manifest isn't written.
 - `apply_remote` relies on: new file `f-` + 12 hex, `rev: 1`; edit `rev + 1`, new hash/size/mtime; move new path, `rev + 1`, same hash and mtime; removal a tombstone `{path, rev + 1, ts, by}`; a write over its own tombstone takes the next rev; `seq + 1`; `by` = agent id; a document's files in one write. `WorkerTx` (`tests.rs`) mirrors `Tx`: **change both**. Macs apply it next poll, writing nothing back.
 - A **document** = a stem with up to two versions, markdown (`.md .markdown .mdown .mkd`) and html; its sidecar `<stem>.meta.jsonl` never crosses the API. Reads default to md, else html; writes default to md and never guess on html-only. Anything else is a plain file named in full (`locate`, `documents.ts`).
@@ -84,6 +93,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 ## Search (`search.ts`)
 
 - `search_text`: per document, lower-cased text (markers or tags stripped) + comment bodies; too big → `notSearched`. A search catches up first (≤ 8 inline, else `202` after ≤ 36). API writes catch up via `ctx.waitUntil`; a Mac's PUT never does (no D1 write per save). Query `instr(folded, ?) > 0`.
+- One mirror per space (`space_id`, `''` shared), keyed `(space_id, fid)`: a file that changes section is in both manifests for a moment, and one section's catch-up must not drop the other's row. A search scans `space_id IN (…)` — the sections its person is in — and never another space's rows.
 
 ## CLI (`cli/`)
 
@@ -92,10 +102,10 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Exit codes are a contract: `0` ok · `1` other · `2` usage · `3` not found · `4` not permitted · `5` conflict · `6` not logged in/revoked · `7` worker too old (missing feature, or an unknown route's 404/405).
 - JSON when stdout isn't a TTY or with `--json`; `read` puts content on stdout, metadata on stderr. `--dry-run` on every change; re-asks on `202`; board commands read stdin only with `--from -`.
 - On a Mac a non-command argument opens that path in the app. Install: `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`).
-- Concepts: `doklin help agent|documents|comments|publishing|boards`.
+- Concepts: `doklin help agent|sections|documents|comments|publishing|boards`.
 
 ## Limits
 
-- No Doklin rate limits; the worker counts nothing. The owner removes a runaway agent.
+- No Doklin rate limits; the worker counts nothing. Its person, or an owner, removes a runaway agent.
 - Free-plan caps: 100k Worker requests/day (then errors until 00:00 UTC), 50 subrequests and 10 ms CPU a request, D1 5M rows read / 100k written a day. Hence batches and `202`s.
 - An agent write costs ~`1 + 2 × Macs online` requests. Watch: `scripts/cloud-usage.sh <domain> [days]`. Unmeasured: write CPU at 5,000 files.

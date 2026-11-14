@@ -99,3 +99,12 @@ export async function spaceAt(env: Env, slug: string): Promise<string | null> {
   );
   return id ?? null;
 }
+
+/** Every space — never the shared workspace — that holds an address. Null
+ *  when the database cannot say. */
+export async function spacesWithPages(env: Env): Promise<Set<string> | null> {
+  return withDb(env, async (db) => {
+    const { results } = await db.prepare("SELECT DISTINCT space_id FROM addresses WHERE space_id <> ''").all<{ space_id: string }>();
+    return new Set(results.map((r) => r.space_id));
+  });
+}
