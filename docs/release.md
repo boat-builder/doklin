@@ -9,7 +9,7 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 
 ## Rules
 
-- Every push to `main` cuts a release; runs are serialized (`concurrency: release-main`).
+- Every push to `main` cuts a release, except one touching only `site/` (`paths-ignore`); runs are serialized (`concurrency: release-main`).
 - Never version by hand. `bump` patch-bumps the latest `v*` tag; for minor/major, raise `version` in `src-tauri/tauri.conf.json`. It stamps `package.json`, `tauri.conf.json`, and `Cargo.toml` + `Cargo.lock` of `src-tauri/` (crate `doklin`) and `cli/` (crate `doklin-cli`, names hard-coded). A new file carrying the version must join the stamp, or app and manifest drift and the updater misfires.
 - Keep the build in `bump`'s run: its tag is pushed with `GITHUB_TOKEN`, which triggers no workflow, so an `on: push: tags` workflow never runs.
 - `ci.yml` does not compile the app's Rust; a `src-tauri/` break first fails the release on `main`.

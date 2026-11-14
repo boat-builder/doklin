@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doklin: the open-source knowledge base for teams and their AI agents</title>
+<meta name="description" content="Doklin is a free, open-source markdown editor and team workspace for Mac, and a knowledge base your AI agents connect to for context, on infrastructure you own.">
+<link rel="canonical" href="https://doklin.cc/">
+<meta name="theme-color" content="#ffffff">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Doklin">
+<meta property="og:url" content="https://doklin.cc/">
+<meta property="og:title" content="Doklin: the knowledge base your team writes and your agents read">
+<meta property="og:description" content="A markdown editor and shared workspace for everything your company writes, and the context your AI agents connect to. Free, open source, and on infrastructure you own.">
+<meta property="og:image" content="https://doklin.cc/doklin.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preload" href="/fonts/newsreader-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header id="top" class="band site-header">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="/doklin.png" alt=""><span>Doklin</span></a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#agents">Agents</a>
+      <a href="#documents">Documents</a>
+      <a href="#editor">Editor</a>
+      <a href="#workspace">Workspace</a>
+      <a href="#yours">Open source</a>
+    </nav>
+    <div class="header-actions">
+      <a class="gh" href="https://github.com/boat-builder/doklin">GitHub<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+      <a class="btn btn-sm btn-ghost" href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="band hero">
+  <div class="wrap">
+    <div class="hero-dots" aria-hidden="true"></div>
+    <div class="hero-inner">
+      <p class="eyebrow"><i aria-hidden="true"></i>Open source · Free · For Mac</p>
+      <h1 class="h1">
+        <span>The knowledge base</span>
+        <span><em>your team writes</em></span>
+        <span>and <span class="agent-voice">your agents read</span><span class="cursor" aria-hidden="true"></span></span>
+      </h1>
+      <p class="hero-sub">Doklin is a markdown editor and shared workspace for everything your company writes, and the context your AI agents connect to. Free, open source, and on infrastructure you own.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/></svg>Download for macOS</a>
+        <a class="link-arrow" href="#agents">Connect an agent<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></a>
+        <span class="note">Free · Apple silicon</span>
+      </div>
+      <dl class="specs">
+        <div><dt>Editor</dt><dd>macOS · Apple silicon</dd></div>
+        <div><dt>Agents</dt><dd>Linux and macOS · any shell</dd></div>
+        <div><dt>Cloud</dt><dd>Your own Cloudflare account</dd></div>
+        <div><dt>Price</dt><dd>Free · open source</dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section id="agents" class="dark">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <p class="eyebrow"><b>01</b>For your agents</p>
+        <h2 class="h2">Give your agents your company's context.</h2>
+        <p class="lead">Agents connect with one command, from any machine. They search, read and write the same documents your team is working in, as fresh as the last save. There are no connectors to set up and no copy to keep in sync.</p>
+        <p class="small-print">Works with Claude Code, Codex, or any agent that can run a command. Linux and macOS.</p>
+      </div>
+      <div class="terminal">
+        <div class="panel-bar"><span>agent, on any machine</span><span>doklin</span></div>
+<pre><span class="t-dim">$ </span>doklin <span class="t-cmd">search</span> <span class="t-str">"pricing decision"</span>
+<span class="t-dim">$ </span>doklin <span class="t-cmd">read</span> Strategy/pricing
+<span class="t-dim">$ </span>doklin <span class="t-cmd">comment</span> Strategy/pricing <span class="t-dim">\</span>
+    <span class="t-flag">--on</span> <span class="t-str">"annual plan"</span> <span class="t-flag">-m</span> <span class="t-str">"Numbers updated for Q1"</span>
+<span class="t-dim">$ </span>doklin <span class="t-cmd">publish</span> Strategy/pricing<span class="cursor" aria-hidden="true"></span></pre>
+      </div>
+    </div>
+    <div class="points">
+      <div class="point">
+        <h3>They see what their person sees</h3>
+        <p>An agent belongs to someone on the team and reaches exactly what they can, including their Private section and the restricted folders they're in.</p>
+      </div>
+      <div class="point">
+        <h3>You choose what they may do</h3>
+        <p>Read, comment, edit, publish. Publishing stays off until you turn it on.</p>
+      </div>
+      <div class="point">
+        <h3>Their work comes back like a teammate's</h3>
+        <p>Edits appear in the app, signed with the agent's name, and every version can be restored.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="documents" class="band">
+  <div class="wrap">
+    <p class="eyebrow"><b>02</b>One document, two versions</p>
+    <h2 class="h2 h2-pair">
+      <span class="agent-voice">Markdown for agents.</span>
+      <span><em>A real page for people.</em></span>
+    </h2>
+    <p class="lead lead-wide">Agents work best in markdown, but people shouldn't have to read it raw. A Doklin document can hold both: the markdown your agents read and write, and a designed HTML page made from it for the people who read it. They're one document, with one name and one set of comments, and moving it moves both.</p>
+
+    <div class="pair">
+      <div class="pair-bar"><span>Strategy/pricing</span><span>one document · two versions</span></div>
+      <div class="pane pane-md">
+        <div class="pane-head"><span>pricing.md</span><span>What your agents read</span></div>
+<pre><span class="md-dim">---</span>
+<span class="md-key">status</span>: <span class="md-val">Decided</span>
+<span class="md-key">owner</span>: <span class="md-val">Maya</span>
+<span class="md-dim">---</span>
+
+<span class="md-h"><span class="md-mark"># </span>Pricing</span>
+
+Two plans. Pay monthly, or yearly with two months free.
+
+<span class="md-h"><span class="md-mark">## </span>Annual plan</span>
+
+<span class="md-dim">- </span>Billed once a year
+<span class="md-dim">- </span>Two months free
+<span class="md-dim">- </span>Switch back any time</pre>
+      </div>
+      <div class="pane pane-page">
+        <div class="pane-head"><span>pricing.html</span><span>What your team reads</span></div>
+        <div class="page">
+          <div class="page-meta"><span class="pill">Decided</span><span>Owner · Maya</span></div>
+          <p class="page-title">Pricing</p>
+          <p class="page-intro">Two plans. Pay monthly, or yearly with two months free.</p>
+          <div class="page-box">
+            <p class="page-box-title">Annual plan</p>
+            <ul class="checks">
+              <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2267ee" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Billed once a year</li>
+              <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2267ee" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Two months free</li>
+              <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2267ee" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Switch back any time</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="points">
+      <div class="point">
+        <h3>In the app</h3>
+        <p>Switch between the two versions, or put them side by side. Comment on either.</p>
+      </div>
+      <div class="point">
+        <h3>For your agents</h3>
+        <p>They write the markdown, the page, or both. A page with no markdown behind it is a document too.</p>
+      </div>
+      <div class="point">
+        <h3>When you share it</h3>
+        <p>A published document opens on its page. The page exports to PDF.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="editor" class="band">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <p class="eyebrow"><b>03</b>For your team</p>
+        <h2 class="h2">A markdown editor people actually like.</h2>
+        <p class="lead">Write the way you would in Notion: slash for blocks, checklists, diagrams, tables, comments. Every page is still a plain .md file you can open anywhere.</p>
+        <div class="stack">
+          <div class="point">
+            <h3>Start with what you have</h3>
+            <p>Open a folder of markdown, like a docs repo or an Obsidian vault, and it becomes your workspace.</p>
+          </div>
+          <div class="point">
+            <h3>Boards from notes</h3>
+            <p>Turn a folder into a board or a table. Each card is a note.</p>
+          </div>
+          <div class="point">
+            <h3>Nothing gets lost</h3>
+            <p>Every version of every note, plus the ones you deleted.</p>
+          </div>
+        </div>
+      </div>
+      <div class="illus" role="img" aria-label="A note open in the Doklin editor, with a checklist and the slash menu offering Heading 2, Table, Code, Diagram and Board.">
+        <div class="pair-bar"><span>Team/onboarding.md</span><span>plain markdown</span></div>
+        <div class="sheet">
+          <p class="sheet-title">Onboarding</p>
+          <p class="sheet-p">Everything a new teammate needs in their first week.</p>
+          <div class="tasks">
+            <div class="task task-done"><span class="box box-on"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>Read the handbook</div>
+            <div class="task"><span class="box"></span>Set up your Mac</div>
+          </div>
+          <div class="slash-line">/<span class="caret"></span></div>
+          <div class="menu">
+            <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6v12"/><path d="M12 6v12"/><path d="M4 12h8"/><path d="M16 10.5c0-1.4 1.1-2.5 2.5-2.5S21 9.1 21 10.5c0 2.5-5 3.5-5 7.5h5"/></svg>Heading 2</div>
+            <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/><path d="M10 10v10"/></svg>Table</div>
+            <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>Code</div>
+            <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="6" rx="1.5"/><rect x="14" y="15" width="7" height="6" rx="1.5"/><path d="M6.5 9v3.5a2 2 0 0 0 2 2h9V15"/></svg>Diagram</div>
+            <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="10" rx="1.5"/><rect x="17" y="4" width="4" height="13" rx="1.5"/></svg>Board</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="workspace" class="band">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <p class="eyebrow"><b>04</b>For your company</p>
+        <h2 class="h2">One place for everything your company writes.</h2>
+        <p class="lead">Invite your team with a code. They paste it into Doklin and the workspace is on their Mac. There's no folder to pick and no account to make.</p>
+        <div class="stack">
+          <div class="point">
+            <h3>Shared, Private, Restricted</h3>
+            <p>Everyone gets the shared workspace and a Private section. Anyone can make a folder only its people can see; to everyone else, it doesn't exist.</p>
+          </div>
+          <div class="point">
+            <h3>See who's working</h3>
+            <p>Faces show who's online, and a page someone is editing opens read-only for everyone else until they're done.</p>
+          </div>
+          <div class="point">
+            <h3>Publish to your own domain</h3>
+            <p>A page, a folder or the whole workspace gets an address on your domain, and stopping publishing takes it down.</p>
+          </div>
+        </div>
+      </div>
+      <div class="ws visual-first">
+        <div class="pair-bar"><span>notes.yourcompany.com</span><span>one workspace</span></div>
+        <div class="ws-row">
+          <div class="ws-text">
+            <p class="ws-name">Workspace</p>
+            <p class="ws-desc">Shared with everyone on the team.</p>
+          </div>
+          <div class="faces" aria-hidden="true">
+            <span class="face f1">You</span><span class="face f2">MK</span><span class="face f3">JL</span><span class="face f4">AS</span><span class="face f5">RT</span>
+          </div>
+        </div>
+        <div class="ws-row">
+          <div class="ws-text">
+            <p class="ws-name"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Restricted · Fundraising</p>
+            <p class="ws-desc">Only its people can see it. To everyone else, it doesn't exist.</p>
+          </div>
+          <div class="faces" aria-hidden="true">
+            <span class="face f1">You</span><span class="face f2">MK</span>
+          </div>
+        </div>
+        <div class="ws-row">
+          <div class="ws-text">
+            <p class="ws-name">Private</p>
+            <p class="ws-desc">Yours alone. Your agents can work here too.</p>
+          </div>
+          <div class="faces" aria-hidden="true">
+            <span class="face f1">You</span><span class="agent-chip">your agent</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="yours" class="tint">
+  <div class="wrap">
+    <p class="eyebrow"><b>05</b>Yours</p>
+    <h2 class="h2">Open source, free, and yours.</h2>
+    <div class="points points-4">
+      <div class="point">
+        <h3>Free and open source</h3>
+        <p>Download the app and use it on your own files. No account, no trial.</p>
+      </div>
+      <div class="point">
+        <h3>Your files</h3>
+        <p>Everything is plain markdown on your Macs. Export the whole workspace with its history as one archive that opens without Doklin.</p>
+      </div>
+      <div class="point">
+        <h3>Your cloud</h3>
+        <p>The shared workspace runs on your own Cloudflare account, built for its free plan. There's no Doklin server in the middle, and an agent sets it up from a prompt Doklin writes.</p>
+      </div>
+      <div class="point">
+        <h3>Your agents</h3>
+        <p>Doklin has no AI of its own. Use the agents you already trust.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="dark">
+  <div class="wrap">
+    <p class="eyebrow"><b>06</b>Start where you are</p>
+    <h2 class="h2">
+      <span>Start with a markdown file.</span>
+      <span><em>Grow into a knowledge base.</em></span>
+    </h2>
+    <ol class="points steps">
+      <li class="point step">
+        <span class="step-num">1</span>
+        <h3>An editor</h3>
+        <p>Open the notes on your Mac. Free, no account.</p>
+      </li>
+      <li class="point step step-2">
+        <span class="step-num">2</span>
+        <h3>A workspace</h3>
+        <p>Connect it to your domain and invite your team.</p>
+      </li>
+      <li class="point step step-3">
+        <span class="step-num">3</span>
+        <h3>A knowledge base</h3>
+        <p>Add an agent and hand it one prompt.</p>
+      </li>
+    </ol>
+    <div class="closing-actions">
+      <a class="btn btn-primary" href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/></svg>Download for macOS</a>
+      <a class="btn btn-ghost" href="https://github.com/boat-builder/doklin">Source on GitHub<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a>
+    </div>
+    <p class="note closing-note">Free · Apple silicon · Updates itself</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="dark site-footer">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="/doklin.png" alt=""><span>Doklin</span></a>
+    <span class="note">Free and open source</span>
+    <nav class="footer-links" aria-label="Links">
+      <a href="https://github.com/boat-builder/doklin">GitHub</a>
+      <a href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

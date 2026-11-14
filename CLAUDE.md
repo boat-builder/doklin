@@ -2,7 +2,8 @@
 
 macOS-only (Apple Silicon) Tauri 2 markdown editor. `src/` React + Milkdown
 Crepe frontend, `src-tauri/` Rust backend, `cloud-worker/` Cloudflare Worker,
-`cli/` the `doklin` command.
+`cli/` the `doklin` command, `site/` the doklin.cc product page (static,
+deployed by hand: `cd site && wrangler deploy`).
 
 ## Commands
 
@@ -20,7 +21,7 @@ Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on
 
 ## Rules
 
-- Every push to `main` cuts a release.
+- Every push to `main` cuts a release, unless it only touches `site/`.
 - The frontend never `fetch`es. The cloud engine in Rust is the only code that
   holds a token or talks to a domain.
 - Contracts mirrored in two places say "change both" on both sides — change both.
