@@ -1,6 +1,6 @@
 [package]
 name = "doklin-cli"
-version = "0.1.97"
+version = "0.1.98"
 description = "Work with a Doklin workspace from anywhere, through its own domain"
 edition = "2021"
 publish = false
