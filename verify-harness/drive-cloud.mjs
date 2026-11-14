@@ -632,7 +632,7 @@ await emit("cloud-conflict", {
   root: "/docs",
   path: "notes.md",
   by: "Bob",
-  conflictPath: "/docs/notes (conflict — Bob, Jul 11 14.32).md",
+  conflictPath: "notes (conflict — Bob, Jul 11 14.32).md",
 });
 await poll(async () => (await page.locator(".toast").count()) === 1);
 const conflictToast = await page.locator(".toast").textContent();

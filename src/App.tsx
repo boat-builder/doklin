@@ -5064,7 +5064,7 @@ export default function App() {
       onCloudConflict((e) => {
         pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
-          run: () => void openTab(e.conflictPath, "file"),
+          run: () => void openTab(`${e.root}/${e.conflictPath}`, "file"),
         });
       }),
       onCloudAddressTaken((e) => {

@@ -291,7 +291,8 @@ export type CloudAgentAdded = { agent: CloudAgent; login: CloudAgentLogin };
 
 export type CloudAppliedEvent = { root: string; paths: string[] };
 /** `by` is a name, not an id: the engine resolves it, because the conflict
- *  copy it names is a real file on disk and had to be called something. */
+ *  copy it names is a real file on disk and had to be called something.
+ *  Both paths are workspace-relative. */
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
 /** A page asked for an address another section holds on this domain, and was
