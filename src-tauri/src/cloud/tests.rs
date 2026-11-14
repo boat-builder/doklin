@@ -79,6 +79,8 @@ struct FakeWorker {
     version_snapshots: HashMap<String, Vec<u8>>,
     version_blobs: HashMap<String, (Vec<u8>, u64)>,
     versions_racer: Option<VersionsIndex>,
+    /// Snapshot ids whose download fails, the way a network blip would.
+    unreachable_snapshots: BTreeSet<String>,
     /* People and the credentials they hold. The
        worker keeps only hashes; so does this — a code is looked up by its
        sha256 here exactly as it is there, which is what makes "the app hashes
@@ -463,6 +465,9 @@ impl Remote for FakeRemote {
         async move {
             this.ready()?;
             let b = this.be.lock().unwrap();
+            if b.unreachable_snapshots.contains(&id) {
+                return Err(RemoteError::Offline("fake blip".into()));
+            }
             b.version_snapshots.get(&id).cloned().ok_or(RemoteError::NotFound)
         }
     }
@@ -494,18 +499,24 @@ impl Remote for FakeRemote {
         cursor: Option<&str>,
     ) -> impl std::future::Future<Output = RemoteResult<(Vec<(String, u64)>, Option<String>)>> + Send {
         let this = self.clone();
-        let at: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
+        let after = cursor.map(String::from);
         async move {
             this.ready()?;
             let b = this.be.lock().unwrap();
             // A deliberately tiny page, so the caller's paging is exercised
             // by every sweep rather than by one test with a thousand blobs.
+            // The cursor is the last key returned, as R2's is in effect, so a
+            // sweep deleting as it pages skips nothing.
             const PAGE: usize = 2;
-            let mut hashes: Vec<(String, u64)> =
-                b.version_blobs.iter().map(|(h, (_, up))| (h.clone(), *up)).collect();
+            let mut hashes: Vec<(String, u64)> = b
+                .version_blobs
+                .iter()
+                .filter(|(h, _)| after.as_ref().is_none_or(|a| *h > a))
+                .map(|(h, (_, up))| (h.clone(), *up))
+                .collect();
             hashes.sort();
-            let page: Vec<(String, u64)> = hashes.iter().skip(at).take(PAGE).cloned().collect();
-            let next = (at + PAGE < hashes.len()).then(|| (at + PAGE).to_string());
+            let page: Vec<(String, u64)> = hashes.iter().take(PAGE).cloned().collect();
+            let next = (hashes.len() > PAGE).then(|| page[PAGE - 1].0.clone());
             Ok((page, next))
         }
     }
@@ -3621,6 +3632,142 @@ async fn cloud_sweep_spares_young_blobs() {
     let worker = be.lock().unwrap();
     assert!(!worker.version_blobs.contains_key(&orphan));
     assert!(worker.version_blobs.contains_key(&hash_full(b"one\n")), "what a snapshot names is kept");
+}
+
+/// Every content hash a snapshot the cloud index names refers to that the
+/// bucket does not hold — a version no other Mac could restore.
+fn dangling_cloud_blobs(be: &SharedWorker) -> Vec<String> {
+    let worker = be.lock().unwrap();
+    let mut missing = Vec::new();
+    for entry in &worker.versions_index.clone().unwrap_or_default().snapshots {
+        let gz = worker.version_snapshots.get(&entry.id).expect("an indexed snapshot's object");
+        let snap: Snapshot =
+            serde_json::from_slice(&crate::versions::store::gunzip(gz).unwrap()).expect("a snapshot");
+        for file in snap.files.values() {
+            if !worker.version_blobs.contains_key(&file.h) {
+                missing.push(format!("{} -> {}", entry.id, file.h));
+            }
+        }
+    }
+    missing
+}
+
+/// Another Mac's daily sweep collects a blob this Mac uploaded once no
+/// snapshot the index names references it — this Mac still holds it locally,
+/// so nothing here hears about it. When this Mac's content goes back to those
+/// bytes (a restore), the blob has to go up again.
+#[tokio::test]
+async fn a_blob_another_devices_sweep_collected_goes_up_again() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let mut b = device("Book", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+
+    // Three days ago, inside one UTC day: the Air captured a draft, the Book
+    // the next state an hour later. Past a day the ladder keeps the last of
+    // each UTC day — the Book's.
+    let day = ago(3 * DAY) / DAY * DAY;
+    let (draft_at, next_at) = (day + 6 * HOUR, day + 7 * HOUR);
+    a.captured(draft_at, Reason::Interval, &[("Home.md", "the draft\n")]);
+    a.engine.mirror_versions().await;
+    let draft = hash_full(b"the draft\n");
+    // It went up three days ago, not just now: well past the sweep's grace.
+    be.lock().unwrap().version_blobs.get_mut(&draft).unwrap().1 = now_ms() - CLOUD_GC_GRACE_MS - 1;
+
+    b.captured(next_at, Reason::Interval, &[("Home.md", "the next state\n")]);
+    b.engine.mirror_versions().await;
+    assert!(
+        !cloud_ids(&be).contains(&snapshot_id(draft_at, &a.device_id())),
+        "the Book's sweep thinned the Air's draft out of the index"
+    );
+    assert!(!be.lock().unwrap().version_blobs.contains_key(&draft), "and collected the blob nothing named");
+    assert!(a.store().has_blob(&draft), "which the Air's own store still holds");
+
+    // Today the Air restores the draft: its newest snapshot holds those bytes
+    // again, and it is mirrored.
+    let back_at = ago(MINUTE);
+    a.captured(back_at, Reason::Restore, &[("Home.md", "the draft\n")]);
+    a.engine.mirror_versions().await;
+    assert!(cloud_ids(&be).contains(&snapshot_id(back_at, &a.device_id())));
+    assert_eq!(dangling_cloud_blobs(&be), Vec::<String>::new(), "every mirrored snapshot's content is up there");
+    let restored = super::versions::blob(&FakeRemote::new(&be, &b.device_id()), &draft)
+        .await
+        .expect("the Book can open the Air's restored version");
+    assert_eq!(restored, b"the draft\n");
+}
+
+/// What a sweep racing that restore leaves, and what a build before the fix
+/// above left: a retained snapshot naming a blob the bucket no longer holds.
+/// The next sweep on a Mac that has the bytes puts them back.
+#[tokio::test]
+async fn the_sweep_puts_back_a_blob_a_retained_snapshot_names() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let mut b = device("Book", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+    a.captured(ago(MINUTE), Reason::Restore, &[("Home.md", "the draft\n")]);
+    a.engine.mirror_versions().await;
+    let draft = hash_full(b"the draft\n");
+    be.lock().unwrap().version_blobs.remove(&draft);
+    assert_eq!(dangling_cloud_blobs(&be).len(), 1);
+
+    // The Book never captured those bytes: its sweep sees the gap and has
+    // nothing to fill it with.
+    b.engine.mirror_versions().await;
+    assert_eq!(dangling_cloud_blobs(&be).len(), 1, "only a Mac holding the content can repair it");
+
+    // The Air's next sweep does. Its push alone never would: the snapshot is
+    // already in the index, so there is nothing for it to send.
+    a.engine.state.last_cloud_sweep_ms = None;
+    a.engine.mirror_versions().await;
+    assert_eq!(dangling_cloud_blobs(&be), Vec::<String>::new());
+    let restored = super::versions::blob(&FakeRemote::new(&be, &b.device_id()), &draft)
+        .await
+        .expect("the Book can open it again");
+    assert_eq!(restored, b"the draft\n");
+}
+
+/// A retained snapshot the sweep cannot read might name any blob, so a sweep
+/// that misses one collects nothing that day — and still counts as done.
+#[tokio::test]
+async fn a_sweep_that_cannot_read_a_snapshot_collects_nothing() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    let mut b = device("Book", &be);
+    a.engine.probe_worker().await;
+    b.engine.probe_worker().await;
+    let old_at = ago(3 * DAY);
+    a.captured(old_at, Reason::Interval, &[("Home.md", "three days ago\n")]);
+    a.captured(ago(MINUTE), Reason::Interval, &[("Home.md", "today\n")]);
+    a.engine.mirror_versions().await;
+    let (old, orphan) = (hash_full(b"three days ago\n"), hash_full(b"a version in flight\n"));
+    {
+        let mut worker = be.lock().unwrap();
+        let long_ago = now_ms() - CLOUD_GC_GRACE_MS - 1;
+        worker.version_blobs.get_mut(&old).unwrap().1 = long_ago;
+        worker.version_blobs.insert(orphan.clone(), (vec![1, 2, 3], long_ago));
+        worker.unreachable_snapshots.insert(snapshot_id(old_at, &a.device_id()));
+    }
+
+    // The Book has never read the three-day-old snapshot, and its download
+    // fails.
+    b.engine.mirror_versions().await;
+    {
+        let worker = be.lock().unwrap();
+        assert!(worker.version_blobs.contains_key(&old), "the blob only that snapshot names survives");
+        assert!(worker.version_blobs.contains_key(&orphan), "and so does every other blob, for today");
+    }
+    assert!(b.engine.state.last_cloud_sweep_ms.is_some(), "the sweep still counts as done");
+
+    // The next day's sweep reads it, and collection resumes.
+    be.lock().unwrap().unreachable_snapshots.clear();
+    b.engine.state.last_cloud_sweep_ms = None;
+    b.engine.mirror_versions().await;
+    let worker = be.lock().unwrap();
+    assert!(!worker.version_blobs.contains_key(&orphan));
+    assert!(worker.version_blobs.contains_key(&old));
 }
 
 #[tokio::test]

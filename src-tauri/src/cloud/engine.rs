@@ -167,11 +167,6 @@ pub struct WorkspaceState {
     /// A pending "make this the root page" (`Some(None)` clears the root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_op: Option<Option<String>>,
-    /// Version blobs this device has put in the bucket, so a mirror pass
-    /// costs one index read rather than a PUT per blob. Pruned each pass to
-    /// what the local store still holds.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub versions_uploaded: BTreeSet<String>,
     /// When the cloud version store was last thinned — daily, by whichever
     /// device gets there first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1532,18 +1527,9 @@ impl<R: Remote> Engine<R> {
         }
         let store = crate::versions::store_for_root(&self.cfg.data_dir, &self.cfg.root);
         let remote = self.remote.clone();
-        let mut uploaded = std::mem::take(&mut self.state.versions_uploaded);
         let mut swept = self.state.last_cloud_sweep_ms;
-        let result = version_store::mirror(
-            remote.as_ref(),
-            &store,
-            &self.cfg.device_id,
-            &mut uploaded,
-            &mut swept,
-            now_ms(),
-        )
-        .await;
-        self.state.versions_uploaded = uploaded;
+        let result =
+            version_store::mirror(remote.as_ref(), &store, &self.cfg.device_id, &mut swept, now_ms()).await;
         self.state.last_cloud_sweep_ms = swept;
         self.persist_state();
         match result {
