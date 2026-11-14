@@ -147,6 +147,9 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   // PDF export: idle → running (stage streamed from Rust via
   // pdf-export-progress) → a transient "Saved" flash, or an error card.
   const [pdf, setPdf] = useState<PdfState>({ kind: "idle" });
+  // The page's canvas colour as the bridge reports it, painted over the
+  // frame's white backdrop so the scrollbar gutter matches the page.
+  const [canvas, setCanvas] = useState<string | null>(null);
 
   // Refs for the message handler (installed once).
   const threadsRef = useRef(threads);
@@ -266,6 +269,10 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         onGestureRef.current?.();
       } else if (msg.type === "zoom-key") {
         onZoomKeyRef.current?.(msg.dir);
+      } else if (msg.type === "canvas") {
+        // The frame is untrusted: a single colour value or nothing, so the
+        // string can never smuggle a url() into the app's own styles.
+        if (CSS.supports("color", msg.color)) setCanvas(msg.color);
       }
     };
     window.addEventListener("message", onMessage);
@@ -524,6 +531,9 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         title="HTML version"
         sandbox="allow-scripts allow-popups"
         srcDoc={srcDoc}
+        // A one-colour gradient layers the page's colour over the white
+        // backdrop, compositing a translucent canvas exactly as the page does.
+        style={canvas ? { backgroundImage: `linear-gradient(${canvas}, ${canvas})` } : undefined}
       />
       {commentsEnabled && (
       <div className={`html-comment-layer ${docked ? "is-docked" : ""}`}>

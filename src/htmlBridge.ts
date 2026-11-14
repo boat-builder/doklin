@@ -102,6 +102,12 @@ export type BridgeGestureMsg = { dk: "doklin-comments"; type: "gesture" };
 // 0 = reset. Key events don't cross the frame boundary either, so without
 // this the shortcuts would go dead the moment the reader clicks the page.
 export type BridgeZoomKeyMsg = { dk: "doklin-comments"; type: "zoom-key"; dir: number };
+// The computed colour the rendition paints its canvas with (may be
+// transparent), re-sent whenever it changes. The frame's scrollbar gutter
+// lies outside that canvas and shows the iframe element's own backdrop, so
+// the app paints the backdrop to match — otherwise macOS's always-visible
+// scrollbars run a white strip down a page of any other colour.
+export type BridgeCanvasMsg = { dk: "doklin-comments"; type: "canvas"; color: string };
 export type BridgeOutMsg =
   | BridgeReadyMsg
   | BridgeLayoutMsg
@@ -110,7 +116,8 @@ export type BridgeOutMsg =
   | BridgeOpenMsg
   | BridgeScrollMsg
   | BridgeGestureMsg
-  | BridgeZoomKeyMsg;
+  | BridgeZoomKeyMsg
+  | BridgeCanvasMsg;
 
 export function isBridgeMsg(data: unknown): data is BridgeOutMsg {
   const d = data as { dk?: string; type?: string };
@@ -636,6 +643,35 @@ const BRIDGE_SCRIPT = `
     true
   );
 
+  /* ----- the page's canvas colour, for the frame's backdrop ----- */
+
+  // CSS paints the canvas with the root's background, or with <body>'s when
+  // the root has none. Re-checked whenever the page's look can change: a
+  // theme class or inline style on <html>/<body>, a stylesheet swap, the OS
+  // appearance flipping, or a background transition settling.
+  var canvasSent = null;
+  function reportCanvas() {
+    var root = getComputedStyle(document.documentElement);
+    var src = root;
+    var bg = root.backgroundColor;
+    if ((bg === "transparent" || bg === "rgba(0, 0, 0, 0)") && root.backgroundImage === "none") {
+      src = getComputedStyle(document.body);
+    }
+    var color = src.backgroundColor;
+    if (color === canvasSent) return;
+    canvasSent = color;
+    post({ type: "canvas", color: color });
+  }
+  var paintChanges = new MutationObserver(reportCanvas);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", reportCanvas);
+  document.addEventListener(
+    "transitionend",
+    function (e) {
+      if (e.target === document.documentElement || e.target === document.body) reportCanvas();
+    },
+    true
+  );
+
   /* ----- keep layout fresh ----- */
 
   document.addEventListener("scroll", scheduleLayout, { capture: true, passive: true });
@@ -655,10 +691,14 @@ const BRIDGE_SCRIPT = `
       characterData: true,
       attributes: false
     });
+    paintChanges.observe(document.documentElement, { attributes: true });
+    paintChanges.observe(document.body, { attributes: true });
+    paintChanges.observe(document.head, { childList: true, subtree: true, characterData: true });
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(scheduleLayout);
     }
     post({ type: "ready" });
+    reportCanvas();
     scheduleLayout();
   }
 
