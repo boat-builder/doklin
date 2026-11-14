@@ -837,7 +837,7 @@ await check("write: what the workspace cannot hold is refused — not text, a hi
     "a sidecar": refused(await doklin(editorBox, ["write", "Drive/alpha.meta.jsonl", "--force"], { input: "x" }), 2, /comments commands/),
     "a path that climbs out": refused(await doklin(editorBox, ["write", "../outside"], { input: "x" }), 2, /not a path in a workspace/),
     "a name taken in another case is that document, not a second one": refused(await doklin(editorBox, ["write", "DRIVE/Alpha"], { input: "x" }), 5, /Drive\/alpha already exists/),
-    "a marker no thread has": refused(invented, 2, /#zzzzzz/) && same(invented.problem.unknownMarkers, ["zzzzzz"]),
+    "a marker no thread has": refused(invented, 2, /add a comment marker \(#zzzzzz\) — start a thread with `doklin comment`/) && invented.problem.code === "comments" && same(invented.problem.added, ["zzzzzz"]),
   };
   const alpha = await doklin(editorBox, ["read", "Drive/alpha"]);
   facts["none of it touched the document"] = alpha.out === ALPHA && alpha.meta.rev === 4;
@@ -1031,12 +1031,17 @@ await check("comment --html: a thread on an element of the html version, named b
   };
 });
 
-await check("a write that keeps a marker keeps its thread in place; one that drops the marker keeps the thread as an orphan and says so; comment rm removes a thread and unwraps its words", async () => {
+await check("a write keeps every comment where it was: keeping a marker keeps its thread in place; dropping one or changing its words is refused, --force or not; comment rm removes a thread and unwraps its words", async () => {
   const kept = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "green", "--replace", "teal"]);
   const inPlace = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.find((t) => t.id === thread);
+  const MARKED = `# Alpha\n\nThe boat {==ships in June==}{>>#${thread}<<} if the paint dries.\n\nThe boat was teal.\n`;
   const dropped = await doklin(editorBox, ["edit", "Drive/alpha", "--find", `{==ships in June==}{>>#${thread}<<}`, "--replace", "leaves in July"]);
-  const orphan = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.find((t) => t.id === thread);
-  const removedOrphan = await doklin(editorBox, ["comment", "rm", "Drive/alpha", thread]);
+  const reworded = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
+  const forced = await doklin(editorBox, ["write", "Drive/alpha", "--force"], { input: MARKED.replace(`{==ships in June==}{>>#${thread}<<}`, "leaves in July") });
+  const untouched = await doklin(editorBox, ["read", "Drive/alpha"]);
+  const stillThere = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.find((t) => t.id === thread);
+  const removedFirst = await doklin(editorBox, ["comment", "rm", "Drive/alpha", thread]);
+  const rewritten = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
 
   const second = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "paint dries", "-m", "Will it?"]);
   const marked = await doklin(editorBox, ["read", "Drive/alpha"]);
@@ -1045,10 +1050,12 @@ await check("a write that keeps a marker keeps its thread in place; one that dro
   const plain = await doklin(editorBox, ["read", "Drive/alpha"]);
   const left = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads;
   return {
-    "a write that keeps the marker reports no orphan": kept.code === 0 && kept.json.orphaned === undefined && inPlace.on === "ships in June" && inPlace.orphaned === undefined,
-    "a write that drops it names the thread": dropped.code === 0 && same(dropped.json.orphaned, [thread]),
-    "the thread is kept, with no place": orphan.orphaned === true && orphan.comments.length === 2,
-    "comment rm removes an orphan": removedOrphan.code === 0 && same(removedOrphan.json, { path: "Drive/alpha", thread, version: "md", removed: true }),
+    "a write that keeps the marker keeps the thread in place": kept.code === 0 && inPlace.on === "ships in June" && inPlace.orphaned === undefined,
+    "a write that drops it is refused, and says how to remove the thread": refused(dropped, 2, new RegExp(`remove the marker of comment #${thread} \\(on "ships in June"\\).*\`doklin comment rm Drive/alpha ${thread}\``)) && dropped.problem.code === "comments" && same(dropped.problem.threads, [thread]),
+    "so is one that changes its words": refused(reworded, 2, new RegExp(`change the words of comment #${thread}`)) && same(reworded.problem.threads, [thread]),
+    "--force does not get past it": refused(forced, 2, /remove the marker of comment/),
+    "the text and the thread are as they were": untouched.out === MARKED && stillThere.orphaned === undefined && stillThere.comments.length === 2,
+    "comment rm first, and then the words are the agent's to change": removedFirst.code === 0 && same(removedFirst.json, { path: "Drive/alpha", thread, version: "md", removed: true }) && rewritten.code === 0,
     "a second thread marks its words": marked.out.includes(`the {==paint dries==}{>>#${second.json.thread}<<}.`),
     "comment rm --dry-run removes nothing": dry.code === 0 && dry.json.removed === false,
     "comment rm unwraps the words": removed.code === 0 && removed.json.removed === true && plain.out === "# Alpha\n\nThe boat leaves in July if the paint dries.\n\nThe boat was teal.\n",
@@ -1453,7 +1460,7 @@ if (!canTty) {
     };
   });
 
-  await check("on a terminal: the other sentences — a reply, a thread on html, the same text again, html left behind, an orphaned thread, publishing and stopping, a move, one version removed, a search that waits", async () => {
+  await check("on a terminal: the other sentences — a reply, a thread on html, the same text again, a write that would drop a comment, html left behind, a thread a Mac's edit left without its words, publishing and stopping, a move, one version removed, a search that waits", async () => {
     // A document as a Mac synced it a minute ago: both versions, and a thread.
     const PAIR_HTML = "<h1>Pair</h1><p>The mast is too tall.</p>";
     await macWrites(
@@ -1468,7 +1475,10 @@ if (!canTty) {
     const reply = await t(["reply", "Pair", "m4st01", "-m", "Forty feet."]);
     const onHtml = await t(["comment", "Pair", "--html", "--on", "The mast", "-m", "Shorter?"]);
     const unchanged = await t(["write", "Pair", "--html", "--force", "--from", scratchFile("pair.html", PAIR_HTML)]);
-    const edit = await t(["edit", "Pair", "--find", "{==too tall==}{>>#m4st01<<}", "--replace", "just right"]);
+    const dropping = await t(["edit", "Pair", "--find", "{==too tall==}{>>#m4st01<<}", "--replace", "just right"]);
+    const edit = await t(["edit", "Pair", "--find", "The mast is", "--replace", "The mast was"]);
+    // A person rewrites the sentence on their Mac: the thread loses its words, which is theirs to do.
+    await macWrites({ "Pair.md": "# Pair\n\nThe mast is just right.\n" });
     const behind = await t(["ls"]);
     const info = await t(["info", "Pair"]);
     const read = await t(["read", "Pair"]);
@@ -1492,10 +1502,11 @@ if (!canTty) {
       reply: reply.out.includes("Answered thread #m4st01 in Pair — it has 2 comments now."),
       "a thread on html": /Started thread #\S+ on the <p> that begins "The mast is too tall\." in Pair\./.test(onHtml.out),
       "the same text again": unchanged.out.includes("The html version of Pair already says exactly that — nothing was written."),
-      "an edit that leaves the html behind and a thread without its words": edit.out.includes("Changed 1 place in the markdown version of Pair — revision 2.") && edit.out.includes("Its html version is now behind") && edit.out.includes("Thread #m4st01 lost the words it was on — it is kept, with no place in the text."),
+      "a write that would drop a comment": dropping.code === 2 && dropping.out.includes('doklin: this write would remove the marker of comment #m4st01 (on "too tall")') && dropping.out.includes("`doklin comment rm Pair m4st01`"),
+      "an edit that leaves the html behind": edit.out.includes("Changed 1 place in the markdown version of Pair — revision 2.") && edit.out.includes("Its html version is now behind"),
       "ls, behind": /^Pair  \[md · html, html is behind\]$/m.test(behind.out),
       "info, behind": info.out.includes("(made from an older text than the markdown)") && /comments\s+2 threads/.test(info.out) && /public\s+no/.test(info.out),
-      "read, behind": read.out.includes("The mast is just right.") && read.out.includes("Pair · markdown · revision 2 · its html version is behind this text"),
+      "read, behind": read.out.includes("The mast is just right.") && read.out.includes("Pair · markdown · revision 3 · its html version is behind this text"),
       "comments, with an orphan": comments.out.includes("#m4st01  markdown   (orphaned: the text it was on is gone)") && /#\S+  html, <p> — on "The mast is too tall\."/.test(comments.out) && comments.out.includes("Ada · 2025-09-04 15:33 UTC: How tall?"),
       "a thread removed": rmThread.out.includes("Removed thread #m4st01 from Pair."),
       publish: publish.out.includes(`Published Pair at ${WORKER}/pair-page`),

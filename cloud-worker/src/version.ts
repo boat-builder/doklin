@@ -117,7 +117,12 @@
 //       D1 gains `creator`, `removed_tokens`, `spaces`, `space_members`,
 //       `addresses` and `agents.member_id`; `presence`, `leases` and the
 //       search tables are made again with a space.
-export const WORKER_VERSION = 12;
+//  13 = an agent's write keeps every comment where it was: a markdown write
+//       that drops, changes or adds a comment marker, or an html write that
+//       takes away the element a thread is on, is refused (`400 comments`)
+//       rather than leaving the thread with no place. No route changes: the
+//       bump is how the rule reaches a deployed domain.
+export const WORKER_VERSION = 13;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" (the public map

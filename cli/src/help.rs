@@ -135,17 +135,13 @@ In markdown, a thread's place is marked in the text itself:
 
   The boat {==ships in June==}{>>#c7k2x9<<} if the paint dries.
 
-`read` shows these markers, so that what you write back keeps every comment where
-it was. When you rewrite a document:
+`read` shows these markers. A write must keep each one exactly as it is; it may
+move with its words. A write that removes, changes or adds one is refused: start a
+thread with `doklin comment`, remove one with `doklin comment rm`. In html, a write
+that takes away the element a thread is on is refused the same way.
 
-  · leave each marker as it is, and move it with its words if you move the words;
-  · if you remove one, its thread is kept but has no place any more — the answer
-    to the write names it;
-  · do not write a marker of your own. Start a thread with `doklin comment`.
-
-`read --clean` gives the text without markers. Use it to read, or to make an html
-version from — and do not write it back over the markdown, or every thread loses
-its place."#;
+`read --clean` gives the text without markers, to read or to make an html version
+from. Written back over the markdown, it is refused."#;
 
 const PUBLISHING: &str = r#"PUBLISHING
 
@@ -294,7 +290,7 @@ What matters here
     When you change the markdown and an html version exists, the html is now out
     of date: write it again, or remove it. The answer to your write tells you.
   · Text like {==these words==}{>>#c7k2x9<<} marks a comment. Keep it exactly as
-    it is when you rewrite a document (doklin help comments).
+    it is, or the write is refused (doklin help comments).
   · To say something about a document without changing it, comment on it:
     doklin comment <doc> --on "<words in it>" -m "<what you think>"
   · Publishing makes a document readable by anyone. Do it only when asked, and

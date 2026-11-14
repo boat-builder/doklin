@@ -78,7 +78,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - Refused (would sync to nobody): hidden segments, `IGNORED_NAMES` (⇄ `is_hidden_or_ignored`, `lib.rs`, **change both**), the `.doklin-sync-tmp` suffix, sidecars. A name under an existing folder in another case takes its spelling.
 - No silent overwrite: `if-rev: <n>`, `if-rev: *` or `force=1`. Same bytes: `unchanged`. `htmlBehind`: html mtime > 2 s older than md.
 - A public entry follows its document: its md file, else its html.
-- Comments: reads keep markers (`clean=1` strips) so read-then-write keeps them; a vanished marker orphans its thread, an unknown id is refused. New md threads need words occurring once in plain text. html threads anchor as `{path: "", tag, text}`, resolved by the app's `resolveAnchor` (`htmlBridge.ts`). Stamps are to the second; finer would make every Mac rewrite the sidecar.
+- Comments: reads keep markers (`clean=1` strips) so read-then-write keeps them. **A content write never moves a thread** (`markersKept`, `anchorsKept`): md must carry exactly the old markers, compared as written (moving one with its words is fine); html must leave every thread that resolves resolving. Else `400 comments`, `--force` included — threads change only through the comments routes. New md threads need words occurring once in plain text. html threads anchor as `{path: "", tag, text}`, resolved by the app's `resolveAnchor` (`htmlBridge.ts`). Stamps are to the second; finer would make every Mac rewrite the sidecar.
 - No history, presence, lease or sync in the CLI: undo is the Macs' version store.
 
 ## Boards (`agentBoards.ts`, `boardCards.ts`)
