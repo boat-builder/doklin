@@ -13,11 +13,15 @@ use std::time::{Duration, UNIX_EPOCH};
 
 // pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
 pub mod pdf_export;
+// The sync engine and the version store are a crate of their own (engine/),
+// shared with the iPhone app: engine.rs is this app's side of it, and
+// cloud.rs and versions.rs are the commands the frontend calls.
+mod engine;
 // The cloud: one engine per connected workspace, the only writer to the
-// workspace's domain — see src/cloud/mod.rs.
+// workspace's domain — see engine/src/cloud/mod.rs.
 mod cloud;
 // Versioning: one local snapshot store per open folder — see
-// src/versions/mod.rs.
+// engine/src/versions/mod.rs.
 mod versions;
 // The one call every write command ends with; it feeds both of the above.
 mod edits;
@@ -575,15 +579,9 @@ fn is_html(path: &Path) -> bool {
     }
 }
 
-pub(crate) fn is_hidden_or_ignored(name: &str) -> bool {
-    if name.starts_with('.') {
-        return true;
-    }
-    matches!(
-        name,
-        "node_modules" | "target" | "dist" | "build" | "__pycache__" | ".git"
-    )
-}
+/// The names no tree walk or search looks at: the sync scan's own rule, so
+/// the sidebar and the engine never disagree about what a folder holds.
+pub(crate) use doklin_engine::is_hidden_or_ignored;
 
 /// Recursively walks `dir`, returning a tree of every non-hidden directory and
 /// the markdown/html documents inside. An html file whose stem matches a
@@ -1344,7 +1342,7 @@ fn register_window_content(
     persist_session(&app);
     // Which folders are open is the versioner's cue to start or stop; the
     // registry above is the only place that knows.
-    versions::reconcile(&app);
+    engine::reconcile_versions(&app);
 }
 
 /// Tells a freshly-mounted window what it is and what to open. The label is the
@@ -1605,7 +1603,7 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 /// same name the cloud engine attributes revisions and presence to.
 #[tauri::command]
 fn device_name() -> String {
-    cloud::device_display_name()
+    doklin_engine::cloud::device_display_name()
 }
 
 /// Opens a URL with the system handler: http(s) in the default browser (links
@@ -1701,10 +1699,6 @@ pub fn run() {
         .manage(Quitting::default())
         .manage(pdf_export::PdfExportLock::default())
         .manage(FileClipboard::default())
-        .manage(cloud::CloudManager::default())
-        .manage(cloud::EditBus::default())
-        .manage(versions::VersionsManager::default())
-        .manage(versions::VersionBus::default())
         .invoke_handler(tauri::generate_handler![
             pdf_export::export_pdf,
             read_file,
@@ -1798,7 +1792,7 @@ pub fn run() {
             let handle = app.handle().clone();
             // The cloud engines start with the app: one per connected
             // workspace, from cloud.json.
-            cloud::init(&handle);
+            engine::init(&handle);
             // Before anything looks in app data: the old drafts folder, if a
             // previous build left one, becomes untitled notes.
             if let Ok(data_dir) = handle.path().app_data_dir() {
@@ -1806,7 +1800,7 @@ pub fn run() {
             }
             // The versioners start with it too: one per open folder.
             // `reconcile` starts the rest as windows report in.
-            versions::init(&handle);
+            engine::init_versions(&handle);
             let saved = read_persisted_session(&handle);
             for w in &saved.windows {
                 if w.label == "main" {
@@ -1885,7 +1879,7 @@ pub fn run() {
                 // first of the two exit events, and bounded — a wedged
                 // versioner can delay the quit, never block it.
                 if first {
-                    versions::flush_all_blocking(app, Duration::from_millis(VERSIONS_FLUSH_TIMEOUT_MS));
+                    engine::flush_versions_blocking(app, Duration::from_millis(VERSIONS_FLUSH_TIMEOUT_MS));
                 }
             }
             RunEvent::WindowEvent {
@@ -1912,7 +1906,7 @@ pub fn run() {
                     persist_session(app);
                     // The last window on a folder closing ends its session:
                     // the versioner captures on the way out.
-                    versions::reconcile(app);
+                    engine::reconcile_versions(app);
                 }
             }
             _ => {}

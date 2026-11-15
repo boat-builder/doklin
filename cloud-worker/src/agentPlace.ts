@@ -18,7 +18,7 @@
 // folder they are not in answers what a folder nobody made answers.
 //
 // A restricted folder is called what a Mac calls it (`candidates`,
-// src-tauri/src/cloud/space.rs — change both): its name; its name and who
+// engine/src/cloud/space.rs — change both): its name; its name and who
 // made it when that name is taken; then a number. A Mac gives the names out
 // in the order folders reach it and the worker in the order they were made,
 // so of two folders with one name a Mac may have the other one first —
@@ -51,7 +51,7 @@ export type Section = {
 };
 
 /** A name a folder on a Mac can carry (`sanitize_folder_name`,
- *  src-tauri/src/cloud/config.rs — change both). */
+ *  engine/src/cloud/config.rs — change both). */
 function folderName(name: string): string {
   const cleaned = name
     .replace(/[/:\0\\]/g, "-")

@@ -49,7 +49,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** How long a fresh code is good for. The engine clamps anything longer: a
  *  year of "pending" is not a pending invite, it is a credential nobody is
- *  watching (src-tauri/src/cloud/invite.rs). */
+ *  watching (engine/src/cloud/invite.rs). */
 const EXPIRY_CHOICES: { days: number; label: string }[] = [
   { days: 1, label: "1 day" },
   { days: 7, label: "7 days" },

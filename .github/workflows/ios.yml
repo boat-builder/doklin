@@ -1,0 +1,102 @@
+name: ios
+
+# The iOS app (ios/) is the one part of the repository nothing else compiles:
+# the release builds the Mac app, ci.yml the web and Rust sides, and the app's
+# views need Xcode. So a push that touches it — or the engine it links
+# (engine/, built for iOS nowhere else) — is built here:
+#   - the engine for this Mac, and the core (ios/DoklinKit) linked against it
+#     on the Mac's own toolchain
+#   - the app for the simulator, unsigned: Xcode builds the engine for the
+#     simulator on the way (scripts/ios-engine.sh, the target's first phase)
+#   - and then the app itself is driven in a simulator, against the worker
+#     this branch carries (verify-harness/drive-ios.mjs --app): a journey
+#     through its real screens per test class — reading and editing, people,
+#     comments and publishing, history — each checked against what it left
+#     on the domain. The log of what was on screen at each step, and the
+#     screenshots, are kept with the run
+# Nothing here ships anything. The app is archived and signed from Xcode by
+# hand (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
+# release (release.yml).
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - "engine/**"
+      - "scripts/ios-engine.sh"
+      - "verify-harness/drive-ios.mjs"
+      # The comment cases the core's tests read, beside the Mac's.
+      - "verify-harness/comments-fixture.json"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: iOS app (core tests + simulator build)
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: xcodebuild -version && swift --version && cargo --version
+
+      - name: Rust targets for the simulator and the device
+        run: rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # The device build is not run by anything below: built here so a break
+      # in it shows before somebody archives the app.
+      - name: Build the engine for this Mac and for the device
+        run: scripts/ios-engine.sh host && scripts/ios-engine.sh iphoneos
+
+      # Without a worker to talk to, the live tests skip themselves:
+      # verify-harness/drive-ios.mjs runs those, in ci.yml.
+      - name: Test the core
+        run: swift test --package-path ios/DoklinKit -Xlinker "-L$PWD/ios/Engine/host"
+
+      - name: Build the app for the simulator
+        run: |
+          xcodebuild \
+            -project ios/Doklin.xcodeproj \
+            -scheme Doklin \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # The drive serves the cloud worker from source, through vite.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Drive the app in a simulator
+        run: node verify-harness/drive-ios.mjs --app
+        env:
+          DOKLIN_DRIVE_OUT: ${{ runner.temp }}/ios-drive
+          DOKLIN_DERIVED_DATA: ${{ runner.temp }}/DerivedData
+
+      - name: Keep the log and the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-drive
+          path: |
+            ${{ runner.temp }}/ios-drive/xcodebuild.log
+            ${{ runner.temp }}/ios-drive/screenshots
+          if-no-files-found: ignore
+          retention-days: 7

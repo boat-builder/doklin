@@ -2,7 +2,8 @@
 // the types the engine's status event and commands carry, one typed wrapper
 // per command, and the listeners. No `fetch` anywhere — the Rust engine is
 // the only code that holds a token or talks to a domain; this file only
-// asks it things. Mirrored by src-tauri/src/cloud/status.rs — change both.
+// asks it things. Mirrored by engine/src/cloud/status.rs and the iPhone's
+// Payloads.swift — change all three.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -82,7 +83,7 @@ export type LeaseHolder = {
 };
 
 /** How much of this Mac's version history is in the bucket, and how much is
- *  up there in total. Mirrored by src-tauri/src/cloud/status.rs. */
+ *  up there in total. Mirrored by engine/src/cloud/status.rs. */
 export type VersionsMirror = {
   mirrored: number;
   cloud: number;
@@ -568,7 +569,8 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
 
 /** Who gains sight of something moved from one section to another —
  *  "Everyone in Acme", "All 3 people in “Finance”" — or null when nobody
- *  does, which is every move that keeps the audience or narrows it. */
+ *  does, which is every move that keeps the audience or narrows it. The
+ *  iPhone asks the same (`Sections.wider`, ios/DoklinKit) — change both. */
 export function widerAudience(cloud: CloudStatus, from: Place, to: Place): string | null {
   if (from.kind === "shared" || to.kind === "nowhere" || to.kind === "private") return null;
   if (to.kind === "shared") return `Everyone in ${cloud.name}`;
@@ -590,7 +592,8 @@ export function may(who: { can: string[] }, action: CloudAction): boolean {
  *  lists. Once anybody has signed in as a person, a code for them is theirs to
  *  make, or the superadmin's (`people.recover`) — the domain refuses anyone
  *  else's. Until then they are only invited, and whoever may invite may
- *  replace the code. */
+ *  replace the code. The worker's `createInvite` decides, and the iPhone asks
+ *  the same (`mayInviteAgain`, ios/DoklinKit) — change all three. */
 export function mayInviteAgain(people: CloudPeople, memberId: string): boolean {
   if (!may(people, "people.invite")) return false;
   const person = people.members.find((m) => m.id === memberId);
@@ -639,7 +642,8 @@ export function revealSoon(el: { current: HTMLElement | null }): void {
   requestAnimationFrame(() => el.current?.scrollIntoView({ block: "nearest" }));
 }
 
-/** "just now", "2 min ago", "3 h ago", "12 d ago". */
+/** "just now", "2 min ago", "3 h ago", "12 d ago". The iPhone writes times
+ *  the same (`Clock`, ios/DoklinKit) — change both, with `timeUntil`. */
 export function timeAgo(ms: number, now = Date.now()): string {
   const secs = Math.max(0, Math.round((now - ms) / 1000));
   if (secs < 45) return "just now";
@@ -651,7 +655,8 @@ export function timeAgo(ms: number, now = Date.now()): string {
 }
 
 /** How long something has left: "6 days", "3 h", "12 min", "any moment now".
- *  What a pending invite's expiry is written with. */
+ *  What a pending invite's expiry is written with. The iPhone writes it the
+ *  same (`Clock.left`, ios/DoklinKit) — change both. */
 export function timeUntil(ms: number, now = Date.now()): string {
   const secs = Math.round((ms - now) / 1000);
   if (secs < 60) return "any moment now";
@@ -809,7 +814,8 @@ export const cloudNeedsAttention = (statuses: CloudStatus[]): boolean => statuse
 
 /* ---------- Publishing ---------- */
 
-/** A slug's grammar — the same rule the engine and the worker check. */
+/** A slug's grammar — the same rule the engine, the worker and the iPhone
+ *  (ios/DoklinKit/Sources/DoklinKit/Models/Publishing.swift) check; change all. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 /** Slugs the worker's own routes speak for. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
@@ -823,7 +829,8 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "join",
 ]);
 
-/** Why a typed slug can't be one, or null when it can. The engine says the same things. */
+/** Why a typed slug can't be one, or null when it can. The engine says the same
+ *  things; the iPhone checks with a port (Publishing.swift `slugProblem`) — change both. */
 export function slugProblem(raw: string): string | null {
   const s = raw.trim().toLowerCase();
   if (!SLUG_RE.test(s)) {
@@ -899,7 +906,8 @@ export function livePathsOf(s: CloudStatus | null): Set<string> {
   return out;
 }
 
-/** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows. */
+/** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows.
+ *  The iPhone suggests the same (Publishing.swift `suggestSlug`) — change both. */
 export function suggestSlug(name: string): string {
   const base = name
     .toLowerCase()

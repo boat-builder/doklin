@@ -5,7 +5,7 @@
 // HTML threads live entirely in the entity meta file beside the document,
 // one `hthread` record per thread (metaFile.ts). One record per line is
 // deliberate: cloud sync merges files with a three-way *text* merge
-// (src-tauri/src/cloud/merge.rs), so two people adding or replying to
+// (engine/src/cloud/merge.rs), so two people adding or replying to
 // different threads concurrently merge cleanly line by line.
 //
 // A thread anchors to an ELEMENT of the rendition (markdown comments anchor

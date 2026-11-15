@@ -32,7 +32,7 @@ All three, confirmed with the users:
   learns who its creator was…" (it seeds schema-6 databases to exercise both
   moves).
 
-**The app's key trade** — `src-tauri/src/cloud/`
+**The app's key trade** — `engine/src/cloud/`
 - `engine.rs`: `KEY_SENTENCE`, `KEY_TRADE_GAP`, `EngineConfig::on_key`, the
   `key` and `key_asked` fields, the `meta.key` branch in `probe_worker`, and
   `self.key` in `can_cycle`, `pass` and the run loop's poll branch.
@@ -64,5 +64,5 @@ All three, confirmed with the users:
 - `terminal.rs` `terminal_name`: `Terminal (…)` for a person with no name.
 
 No wire change: no `WORKER_VERSION` bump, no schema step. Run the worker
-tests, `cargo test --lib`, `pnpm build && pnpm lint`, and the
+tests, `cargo test --workspace` in `engine/`, `pnpm build && pnpm lint`, and the
 `drive-cloud` / `drive-cli` drivers after.

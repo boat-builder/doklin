@@ -9,7 +9,7 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
 - A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
-- Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`.
+- Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`; the iPhone's engine sends `ios/<version>`.
 - Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
 - Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`; the superadmin also `people.recover` and `workspace.manage`.
 - Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {error}`, naming who may (`refusal`, `roles.ts`).
@@ -151,7 +151,7 @@ its path names, with that space's manifest mounted at its folder
 (`src/mount.ts`); a folder the person is not in → `404`. `tree`, `search` and `pages` at the top
 cover every section, opening at most 8 spaces a request (`notListed`,
 `sectionsNotSearched`). A restricted folder's name is the Mac's (`candidates`,
-`src-tauri/src/cloud/space.rs`, **change both**), given out in creation order.
+`engine/src/cloud/space.rs`, **change both**), given out in creation order.
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
@@ -236,7 +236,7 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`. Old `presence.json` / `history/` are dead.
 
-## Manifest v4 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
+## Manifest v4 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
 
 ```json
 {

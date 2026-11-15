@@ -6,7 +6,7 @@
 // as immutable blobs, then the manifest is replaced by compare-and-swap on
 // its etag. A Mac cannot tell an agent's write from another Mac's, which is
 // the point: its next poll sees a new etag and its ordinary cycle applies it
-// (src-tauri/src/cloud/engine.rs, `apply_remote`).
+// (engine/src/cloud/engine.rs, `apply_remote`).
 //
 // What every change here keeps, because that cycle reads it:
 //
@@ -45,7 +45,7 @@ const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 const ATTEMPTS = 5;
 
 /** A tombstone older than this ages out with whoever writes next — the
- *  engine's `TOMBSTONE_TTL_MS` (src-tauri/src/cloud/engine.rs). Change both. */
+ *  engine's `TOMBSTONE_TTL_MS` (engine/src/cloud/engine.rs). Change both. */
 const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The answer when a change must not be made. `status` is the HTTP status
@@ -145,7 +145,7 @@ export class Tx {
   /** Delete a file, leaving the tombstone a Mac honours. With `to` it was
    *  not deleted but moved to another section — that space's id, "" for the
    *  shared workspace — which is what a Mac's own move across sections
-   *  writes (`Tombstone::to`, src-tauri/src/cloud/manifest.rs). */
+   *  writes (`Tombstone::to`, engine/src/cloud/manifest.rs). */
   remove(fid: string, to?: string): void {
     const file = this.m.files[fid];
     if (!file) return;

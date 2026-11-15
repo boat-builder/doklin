@@ -10,7 +10,7 @@
 //
 // The file is JSON Lines — a header line, then ONE record per line —
 // because cloud sync merges files with a three-way *text* merge
-// (src-tauri/src/cloud/merge.rs): two people adding threads concurrently
+// (engine/src/cloud/merge.rs): two people adding threads concurrently
 // merge cleanly line-by-line. Records are sorted by (type, id) and
 // serialized with a fixed key order, so two devices writing the same
 // logical state produce the same bytes (a concurrent one-time migration on
@@ -40,6 +40,10 @@
 // extractMarkdown convert at the IO boundary, and expand∘extract is the
 // identity on a migrated file, which is what makes the one-time migration
 // safe to re-run anywhere, any number of times.
+//
+// The iPhone writes the same bytes with a port of this file
+// (ios/DoklinKit/Sources/DoklinKit/Comments/MetaFile.swift), both held to
+// verify-harness/comments-fixture.json — change both.
 
 import {
   CRITIC_BLOCK_RE,

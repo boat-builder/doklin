@@ -126,6 +126,20 @@ step(
     (await page.locator(".version-preview .ProseMirror").first().getAttribute("contenteditable")) === "false" &&
     (await lastVersionCall("versions_read")).args.root === "/docs",
 );
+// Hidden, not merely covered: with the live editor still laid out the
+// preview lands below it, out of sight.
+const liveShown = await page.evaluate(() =>
+  [...document.querySelectorAll(".editor-wrap.is-version-preview > :not(.version-preview)")].some(
+    (el) => el.querySelector(".ProseMirror[contenteditable=true]") && getComputedStyle(el).display !== "none",
+  ),
+);
+const previewTop = await tid("version-preview").evaluate((el) => el.getBoundingClientRect().top);
+const wrapTop = await page.locator(".editor-wrap.is-version-preview").evaluate((el) => el.getBoundingClientRect().top);
+step(
+  "the live editor is hidden while a version shows, and the version is where it was",
+  !liveShown && previewTop - wrapTop < 80,
+  `live editor shown: ${liveShown}, preview ${Math.round(previewTop - wrapTop)}px below the top`,
+);
 await page.screenshot({ path: SHOTS + "versions-02-preview.png" });
 
 /* 7 — Show changes: the same version as a unified diff, additions marked. */

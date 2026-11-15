@@ -79,7 +79,9 @@ function blocksOf(md: string): { index: number; end: number; anchor: string; spa
 /**
  * Every thread on a document, both versions. Pure: the texts in, the threads
  * out. `md` and `html` are null when the document has no such version — a
- * thread recorded for a version that is gone reads as orphaned.
+ * thread recorded for a version that is gone reads as orphaned. The iPhone
+ * lists a document's threads the same way (Threads.swift,
+ * `DocumentComments.threads`) — change both.
  */
 export function threadsOf(md: string | null, html: string | null, meta: EntityMeta): Thread[] {
   const out: Thread[] = [];
@@ -147,10 +149,12 @@ export async function getComments(c: Call): Promise<Response> {
   return json({ path: doc.stem, threads: threadsOf(md, html, meta) });
 }
 
-/* ---------- Where a new markdown thread may sit ---------- */
+/* ---------- Where a new markdown thread may sit ----------
+   The iPhone places a person's comment by the same rule
+   (ios/DoklinKit/Sources/DoklinKit/Comments/Threads.swift, `Placing`) — change both. */
 
 /** Why these words cannot carry a comment, whatever the text — or null. */
-function anchorProblem(on: string): string | null {
+export function anchorProblem(on: string): string | null {
   if (on === "") return "say which words the comment is on";
   if (/[\r\n]/.test(on)) return "a comment sits on words within one paragraph — quote text from a single line";
   // The marker has to land inside one run of plain text: the app reads
@@ -173,7 +177,9 @@ function closedRanges(md: string): { from: number; to: number; why: string }[] {
   };
   const front = /^---\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(md);
   if (front) out.push({ from: 0, to: front[0].length, why: "the frontmatter at the top" });
-  add(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\1[`~]*[ \t]*(?=\n|$)|$)/gm, "a code block");
+  // A fence with no end runs to the end of the text: `(?![\s\S])`, not `$`,
+  // which under the m flag is the end of any line.
+  add(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\1[`~]*[ \t]*(?=\n|$)|(?![\s\S]))/gm, "a code block");
   add(/`[^`\n]+`/g, "code");
   add(/\]\([^)\n]*\)/g, "a link's address");
   add(/<[^>\n]+>/g, "an html tag");
@@ -191,7 +197,7 @@ type Occurrence = { line: number; text: string; inside?: string };
  * address, the frontmatter, another comment. Anything else is refused with
  * every occurrence listed, so the caller can quote more of the sentence.
  */
-function placeForMarker(md: string, on: string, name: string): number | Refusal {
+export function placeForMarker(md: string, on: string, name: string): number | Refusal {
   const closed = closedRanges(md);
   const found: (Occurrence & { index: number })[] = [];
   for (let i = md.indexOf(on); i >= 0; i = md.indexOf(on, i + on.length)) {

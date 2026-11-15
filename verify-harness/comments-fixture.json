@@ -1,0 +1,2079 @@
+{
+  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift. Times are milliseconds since 1970.",
+  "metaFile": [
+    {
+      "path": "/a/notes.md",
+      "meta": "/a/notes.meta.jsonl"
+    },
+    {
+      "path": "/a/notes.html",
+      "meta": "/a/notes.meta.jsonl"
+    },
+    {
+      "path": "/a/n.markdown",
+      "meta": "/a/n.meta.jsonl"
+    },
+    {
+      "path": "a/x.html.md",
+      "meta": "a/x.meta.jsonl"
+    },
+    {
+      "path": "a/X.MD",
+      "meta": "a/X.meta.jsonl"
+    },
+    {
+      "path": "Projects/plan.md",
+      "meta": "Projects/plan.meta.jsonl"
+    },
+    {
+      "path": "page.html",
+      "meta": "page.meta.jsonl"
+    },
+    {
+      "path": "Notes/Ünïcode.mkd",
+      "meta": "Notes/Ünïcode.meta.jsonl"
+    },
+    {
+      "path": "loose.txt",
+      "meta": "loose.txt.meta.jsonl"
+    }
+  ],
+  "parseSpans": [
+    {
+      "spans": "{>>#abcd<<}",
+      "parsed": {
+        "kind": "ref",
+        "id": "abcd"
+      }
+    },
+    {
+      "spans": "{>>#abcd <<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "#abcd"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcd  <<}",
+      "parsed": {
+        "kind": "thread",
+        "id": "abcd",
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": ""
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcd\n<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "#abcd"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abc<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "#abc"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#ABCD x<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "#ABCD x"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcdefghijklmnop x<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": "abcdefghijklmnop",
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "x"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcdefghijklmnopq x<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "#abcdefghijklmnopq x"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcd<<}{>>B · 2026-01-01T00:00:00Z: r<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": "abcd",
+        "comments": [
+          {
+            "author": "B",
+            "at": 1767225600000,
+            "body": "r"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#abcd x<<}{>>y<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": "abcd",
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "x"
+          },
+          {
+            "author": "",
+            "at": 0,
+            "body": "y"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>#c7k2x9 Sherin's Mac · 2026-07-14T09:12:33Z: This reads odd<<}{>>Aisha · 2026-07-14T10:01:05Z: agree<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": "c7k2x9",
+        "comments": [
+          {
+            "author": "Sherin's Mac",
+            "at": 1784020353000,
+            "body": "This reads odd"
+          },
+          {
+            "author": "Aisha",
+            "at": 1784023265000,
+            "body": "agree"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>free text  <<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "free text"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>><<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": ""
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>> · 2026-01-01T00:00Z: no author<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 1767225600000,
+            "body": "no author"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>A · 2026-13-01T00:00:00Z: no such month<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "A",
+            "at": 0,
+            "body": "no such month"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>A · B · 2026-01-01T00:00:00.5Z: a dot in the name<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "A · B",
+            "at": 1767225600500,
+            "body": "a dot in the name"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T00:00:00.05Z: hundredths<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 1767225600050,
+            "body": "hundredths"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T00:00:00.1234Z: four places<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "Al · 2026-01-01T00:00:00.1234Z: four places"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-02-30T10:00:00Z: rolls into March<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 1772445600000,
+            "body": "rolls into March"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T24:00:00Z: the next midnight<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 1767312000000,
+            "body": "the next midnight"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T24:01Z: past midnight<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 0,
+            "body": "past midnight"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T23:59:60Z: a leap second<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 0,
+            "body": "a leap second"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 0000-01-01T00:00Z: year zero<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": -62167219200000,
+            "body": "year zero"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 1969-12-31T23:59:59Z: before 1970<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": -1000,
+            "body": "before 1970"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Al · 2026-01-01T00:00:00Z:  spaces kept <<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Al",
+            "at": 1767225600000,
+            "body": " spaces kept "
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>Zoë · 2026-01-01T00:00:00Z: ünïcode<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "Zoë",
+            "at": 1767225600000,
+            "body": "ünïcode"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · 2026-01-01T00:00:00Z: two hundred<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "at": 1767225600000,
+            "body": "two hundred"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · 2026-01-01T00:00:00Z: one too many<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · 2026-01-01T00:00:00Z: one too many"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 · 2026-01-01T00:00:00Z: two hundred units<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "at": 1767225600000,
+            "body": "two hundred units"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 · 2026-01-01T00:00:00Z: two hundred and two units<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 · 2026-01-01T00:00:00Z: two hundred and two units"
+          }
+        ]
+      }
+    },
+    {
+      "spans": "{>>A·2026-01-01T00:00:00Z: no spaces<<}",
+      "parsed": {
+        "kind": "thread",
+        "id": null,
+        "comments": [
+          {
+            "author": "",
+            "at": 0,
+            "body": "A·2026-01-01T00:00:00Z: no spaces"
+          }
+        ]
+      }
+    }
+  ],
+  "sanitizeBody": [
+    {
+      "in": "  a\n\n b <<} c \n",
+      "out": "a b << } c"
+    },
+    {
+      "in": "line one\r\nline two",
+      "out": "line one line two"
+    },
+    {
+      "in": "tab\there",
+      "out": "tab\there"
+    },
+    {
+      "in": "keep  double  spaces",
+      "out": "keep  double  spaces"
+    },
+    {
+      "in": " nbsp ",
+      "out": "nbsp"
+    },
+    {
+      "in": "a b",
+      "out": "a b"
+    },
+    {
+      "in": "﻿bom\n",
+      "out": "bom"
+    },
+    {
+      "in": "x\u000b\ny",
+      "out": "x y"
+    },
+    {
+      "in": "<<}<<}",
+      "out": "<< }<< }"
+    },
+    {
+      "in": "",
+      "out": ""
+    }
+  ],
+  "sanitizeAuthor": [
+    {
+      "in": " Al\tice  <<} ",
+      "out": "Al ice << }"
+    },
+    {
+      "in": "Sherin's MacBook Pro",
+      "out": "Sherin's MacBook Pro"
+    },
+    {
+      "in": "a b",
+      "out": "a b"
+    },
+    {
+      "in": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "out": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "in": "  ",
+      "out": ""
+    },
+    {
+      "in": "line\nbreak",
+      "out": "line break"
+    },
+    {
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀b",
+      "out": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d"
+    }
+  ],
+  "formatThreadSpans": [
+    {
+      "id": "abc123",
+      "comments": [
+        {
+          "author": "A",
+          "at": 1767225600123,
+          "body": "b"
+        },
+        {
+          "author": "",
+          "at": 0,
+          "body": "legacy"
+        },
+        {
+          "author": "X",
+          "at": 0,
+          "body": "y"
+        }
+      ],
+      "out": "{>>#abc123 A · 2026-01-01T00:00:00Z: b<<}{>>legacy<<}{>>X · 1970-01-01T00:00:00Z: y<<}"
+    },
+    {
+      "id": "q1w2",
+      "comments": [],
+      "out": "{>>#q1w2<<}"
+    },
+    {
+      "id": "neg1",
+      "comments": [
+        {
+          "author": "A",
+          "at": -1000,
+          "body": "before 1970"
+        }
+      ],
+      "out": "{>>#neg1 A · 1969-12-31T23:59:59Z: before 1970<<}"
+    },
+    {
+      "id": "big1",
+      "comments": [
+        {
+          "author": "A",
+          "at": 253402300800000,
+          "body": "year ten thousand"
+        }
+      ],
+      "out": "{>>#big1 A · +010000-01-01T00:00:00Z: year ten thousand<<}"
+    },
+    {
+      "id": "frac",
+      "comments": [
+        {
+          "author": "A",
+          "at": 1.7,
+          "body": "a fraction of a millisecond"
+        }
+      ],
+      "out": "{>>#frac A · 1970-01-01T00:00:00Z: a fraction of a millisecond<<}"
+    },
+    {
+      "id": "nobody",
+      "comments": [
+        {
+          "author": "",
+          "at": 5000,
+          "body": "unsigned but timed"
+        }
+      ],
+      "out": "{>>#nobody  · 1970-01-01T00:00:05Z: unsigned but timed<<}"
+    }
+  ],
+  "stripComments": [
+    {
+      "in": "a {==b==}{>>#x1y2 A · 2026-01-01T00:00:00Z: c<<} d {==e==} {>>f<<}",
+      "out": "a b d e "
+    },
+    {
+      "in": "{====}",
+      "out": ""
+    },
+    {
+      "in": "no markers here",
+      "out": "no markers here"
+    },
+    {
+      "in": "{==a\nb==}{>>#abcd<<}",
+      "out": "a\nb"
+    }
+  ],
+  "deriveId": [
+    {
+      "material": "abc",
+      "index": 0,
+      "id": "lvhqqbqt"
+    },
+    {
+      "material": "é😀",
+      "index": 3,
+      "id": "1xrf8e81"
+    },
+    {
+      "material": "",
+      "index": 0,
+      "id": "4z2hp917"
+    },
+    {
+      "material": "a {>>note one<<}",
+      "index": 1,
+      "id": "1on0x9d4"
+    }
+  ],
+  "meta": [
+    {
+      "about": "tolerant: bad lines, duplicates, ids, widths",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\nnot json at all\n{\"t\":\"hthread\",\"id\":\"h1\",\"anchor\":{\"path\":\"p\",\"tag\":\"h2\",\"text\":\"lead\"},\"comments\":[]}\n{\"t\":\"prop\",\"id\":\"color\",\"value\":\"blue\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"B\",\"at\":2,\"body\":\"dup\"}]}\n{\"t\":\"mthread\",\"comments\":[]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[180,0]}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[220.4,140]}\n{\"t\":\"tcols\",\"id\":\"bad\",\"cols\":[220,-3]}\n{\"t\":\"tcols\",\"id\":\"nan\",\"cols\":[\"220\"]}\n{\"t\":\"tcols\",\"cols\":[220]}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"h1\",\"anchor\":{\"path\":\"p\",\"tag\":\"h2\",\"text\":\"lead\"},\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"prop\",\"id\":\"color\",\"value\":\"blue\"}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[220,140]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[180,0]}\n",
+      "empty": false
+    },
+    {
+      "about": "no header line",
+      "raw": "{\"t\":\"mthread\",\"id\":\"t1\",\"comments\":[{\"author\":\"Alice\",\"at\":1767225600000,\"body\":\"a thread\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"t1\",\"comments\":[{\"author\":\"Alice\",\"at\":1767225600000,\"body\":\"a thread\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "nothing",
+      "raw": "",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "empty": true
+    },
+    {
+      "about": "a seed's widths",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"yh4epk11\",\"cols\":[260,0,140]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"yh4epk11\",\"cols\":[260,0,140]}\n",
+      "empty": false
+    },
+    {
+      "about": "keys out of order, unknown fields, stamps of old sidecars",
+      "raw": "{\"comments\":[{\"body\":\"b\",\"at\":5,\"author\":\"A\",\"extra\":1}],\"id\":\"k1\",\"t\":\"mthread\",\"more\":true}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"text\":\"lead\",\"tag\":\"p\",\"path\":\"main > p:nth-of-type(1)\",\"x\":0},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"w\",\"label\":\"web\",\"codeId\":\"c9\",\"eid\":\"e1\"}]}\n{\"t\":\"mthread\",\"id\":\"k3\",\"comments\":[{\"author\":\"N\",\"at\":8,\"body\":\"n\",\"eid\":null},{\"author\":\"O\",\"at\":9,\"body\":\"o\",\"eid\":5},{\"author\":\"P\",\"at\":10,\"body\":\"p\",\"eid\":{\"b\":1,\"2\":0,\"a\":[true,null]}}]}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"path\":\"main > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"lead\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"w\",\"eid\":\"e1\",\"codeId\":\"c9\",\"label\":\"web\"}]}\n{\"t\":\"mthread\",\"id\":\"k1\",\"comments\":[{\"author\":\"A\",\"at\":5,\"body\":\"b\"}]}\n{\"t\":\"mthread\",\"id\":\"k3\",\"comments\":[{\"author\":\"N\",\"at\":8,\"body\":\"n\",\"eid\":null},{\"author\":\"O\",\"at\":9,\"body\":\"o\",\"eid\":5},{\"author\":\"P\",\"at\":10,\"body\":\"p\",\"eid\":{\"2\":0,\"b\":1,\"a\":[true,null]}}]}\n",
+      "empty": false
+    },
+    {
+      "about": "text JSON must write as JavaScript does",
+      "raw": "{\"t\":\"mthread\",\"id\":\"u1\",\"comments\":[{\"author\":\"Zoë 日本\",\"at\":1,\"body\":\"quote \\\" back \\\\ slash / tab \\t bell \\u0007 del  line   end\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"u1\",\"comments\":[{\"author\":\"Zoë 日本\",\"at\":1,\"body\":\"quote \\\" back \\\\ slash / tab \\t bell \\u0007 del  line   end\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "a key given twice",
+      "raw": "{\"t\":\"mthread\",\"id\":\"a1\",\"id\":\"b2\",\"comments\":[]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"b2\",\"comments\":[]}\n",
+      "empty": false
+    },
+    {
+      "about": "carriage returns",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\r\n{\"t\":\"mthread\",\"id\":\"cr1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\r\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"cr1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "lines that are not records",
+      "raw": "[1,2]\nnull\n\"text\"\n42\n{\"t\":\"\"}\n{\"doklin\":5,\"t\":\"x\",\"id\":\"y\"}\n{\"t\":\"x\",\"id\":7,\"n\":1}\n{\"t\":\"x\",\"n\":2}\n{\"t\":\"mthread\",\"id\":7,\"comments\":[]}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"x\",\"id\":7,\"n\":1}\n{\"doklin\":5,\"t\":\"x\",\"id\":\"y\"}\n",
+      "empty": false
+    },
+    {
+      "about": "rows sort by code unit",
+      "raw": "{\"t\":\"mthread\",\"id\":\"é1\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a1\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"Z1\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a10\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a2\",\"comments\":[]}\n{\"t\":\"a\",\"id\":\"z\"}\n{\"t\":\"zz\",\"id\":\"a\"}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"a\",\"id\":\"z\"}\n{\"t\":\"mthread\",\"id\":\"Z1\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a1\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a10\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"a2\",\"comments\":[]}\n{\"t\":\"mthread\",\"id\":\"é1\",\"comments\":[]}\n{\"t\":\"zz\",\"id\":\"a\"}\n",
+      "empty": false
+    },
+    {
+      "about": "numbers",
+      "raw": "{\"t\":\"mthread\",\"id\":\"n1\",\"comments\":[{\"author\":\"A\",\"at\":1.5,\"body\":\"x\"},{\"author\":\"B\",\"at\":1e+21,\"body\":\"y\"},{\"author\":\"C\",\"at\":0,\"body\":\"z\"},{\"author\":\"D\",\"at\":0.000001,\"body\":\"w\"},{\"author\":\"E\",\"at\":1e-7,\"body\":\"v\"},{\"author\":\"F\",\"at\":9007199254740994,\"body\":\"u\"}]}\n{\"t\":\"tcols\",\"id\":\"r1\",\"cols\":[0.5,2.5,1.49999]}\n{\"t\":\"mthread\",\"id\":\"n2\",\"comments\":[{\"author\":\"G\",\"at\":1E3,\"body\":\"exponent\"},{\"author\":\"H\",\"at\":-12.50,\"body\":\"trailing zero\"}]}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"n1\",\"comments\":[{\"author\":\"A\",\"at\":1.5,\"body\":\"x\"},{\"author\":\"B\",\"at\":1e+21,\"body\":\"y\"},{\"author\":\"C\",\"at\":0,\"body\":\"z\"},{\"author\":\"D\",\"at\":0.000001,\"body\":\"w\"},{\"author\":\"E\",\"at\":1e-7,\"body\":\"v\"},{\"author\":\"F\",\"at\":9007199254740994,\"body\":\"u\"}]}\n{\"t\":\"mthread\",\"id\":\"n2\",\"comments\":[{\"author\":\"G\",\"at\":1000,\"body\":\"exponent\"},{\"author\":\"H\",\"at\":-12.5,\"body\":\"trailing zero\"}]}\n{\"t\":\"tcols\",\"id\":\"r1\",\"cols\":[1,3,1]}\n",
+      "empty": false
+    },
+    {
+      "about": "a foreign line, trimmed and kept",
+      "raw": "   {\"t\":\"prop\" , \"id\":\"x\",  \"v\" : [1, 2]}   \n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"prop\" , \"id\":\"x\",  \"v\" : [1, 2]}\n",
+      "empty": false
+    },
+    {
+      "about": "half a character: kept, and written as JavaScript writes it",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\uD83D\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair \\ud83d\\ude00 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair 😀 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
+      "empty": false
+    }
+  ],
+  "expand": [
+    {
+      "md": "# Doc\n\nSome {==anchor text==}{>>#abc123<<} here.\n",
+      "mthreads": [
+        {
+          "id": "abc123",
+          "comments": [
+            {
+              "author": "Alice",
+              "at": 1784020353000,
+              "body": "first"
+            },
+            {
+              "author": "Bob",
+              "at": 1784023200000,
+              "body": "reply"
+            }
+          ]
+        }
+      ],
+      "out": "# Doc\n\nSome {==anchor text==}{>>#abc123 Alice · 2026-07-14T09:12:33Z: first<<}{>>Bob · 2026-07-14T10:00:00Z: reply<<} here.\n",
+      "orphanIds": []
+    },
+    {
+      "md": "{==part one==}{>>#tt1x<<}\n\n{==part two==}{>>#tt1x<<}\n",
+      "mthreads": [
+        {
+          "id": "tt1x",
+          "comments": [
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "hi"
+            }
+          ]
+        }
+      ],
+      "out": "{==part one==}{>>#tt1x A · 2026-01-01T00:00:00Z: hi<<}\n\n{==part two==}{>>#tt1x<<}\n",
+      "orphanIds": []
+    },
+    {
+      "md": "a {==x==}{>>#nope11<<} b\n",
+      "mthreads": [],
+      "out": "a {==x==}{>>#nope11<<} b\n",
+      "orphanIds": []
+    },
+    {
+      "md": "{==x==}{>>#dd1x Alice · 2026-01-01T00:00:00Z: edited local<<}\n",
+      "mthreads": [
+        {
+          "id": "dd1x",
+          "comments": [
+            {
+              "author": "Alice",
+              "at": 1767225600000,
+              "body": "old body"
+            },
+            {
+              "author": "Carol",
+              "at": 1767312000000,
+              "body": "meta-only reply"
+            }
+          ]
+        }
+      ],
+      "out": "{==x==}{>>#dd1x Alice · 2026-01-01T00:00:00Z: edited local<<}{>>Carol · 2026-01-02T00:00:00Z: meta-only reply<<}\n",
+      "orphanIds": []
+    },
+    {
+      "md": "no markers here\n",
+      "mthreads": [
+        {
+          "id": "gone12",
+          "comments": [
+            {
+              "author": "A",
+              "at": 5,
+              "body": "x"
+            }
+          ]
+        }
+      ],
+      "out": "no markers here\n",
+      "orphanIds": [
+        "gone12"
+      ]
+    },
+    {
+      "md": "{==a==}{>>#in1x A · 2026-01-01T00:00:00Z: inline<<} and {==b==}{>>#hy1x<<}\n",
+      "mthreads": [
+        {
+          "id": "hy1x",
+          "comments": [
+            {
+              "author": "B",
+              "at": 9,
+              "body": "from meta"
+            }
+          ]
+        }
+      ],
+      "out": "{==a==}{>>#in1x A · 2026-01-01T00:00:00Z: inline<<} and {==b==}{>>#hy1x B · 1970-01-01T00:00:00Z: from meta<<}\n",
+      "orphanIds": []
+    },
+    {
+      "md": "{==first==}{>>#rf1x<<} then {==second==}{>>#rf1x Z · 2026-01-01T00:00:00Z: inline, lost<<}\n",
+      "mthreads": [
+        {
+          "id": "rf1x",
+          "comments": [
+            {
+              "author": "M",
+              "at": 1767225600000,
+              "body": "meta"
+            }
+          ]
+        }
+      ],
+      "out": "{==first==}{>>#rf1x M · 2026-01-01T00:00:00Z: meta<<} then {==second==}{>>#rf1x Z · 2026-01-01T00:00:00Z: inline, lost<<}\n",
+      "orphanIds": []
+    },
+    {
+      "md": "{==x==}{>>#em1x<<}\n",
+      "mthreads": [
+        {
+          "id": "em1x",
+          "comments": []
+        }
+      ],
+      "out": "{==x==}{>>#em1x<<}\n",
+      "orphanIds": [
+        "em1x"
+      ]
+    },
+    {
+      "md": "{==x==}{>>#un1x B · 2026-01-02T00:00:00Z: second<<}\n",
+      "mthreads": [
+        {
+          "id": "un1x",
+          "comments": [
+            {
+              "author": "C",
+              "at": 1767484800000,
+              "body": "fourth"
+            },
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "first"
+            },
+            {
+              "author": "B",
+              "at": 1767312000000,
+              "body": "dup of second"
+            }
+          ]
+        }
+      ],
+      "out": "{==x==}{>>#un1x B · 2026-01-02T00:00:00Z: second<<}{>>A · 2026-01-01T00:00:00Z: first<<}{>>C · 2026-01-04T00:00:00Z: fourth<<}\n",
+      "orphanIds": []
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "mthreads": [
+        {
+          "id": "half1",
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        }
+      ],
+      "out": "# T\n\nSome {==words==}{>>#half1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d · 1970-01-01T00:00:01Z: Signed with a long name.<<} here.\n",
+      "orphanIds": []
+    }
+  ],
+  "extract": [
+    {
+      "md": "# Doc\n\nSome {==anchor text==}{>>#abc123 Alice · 2026-07-14T09:12:33Z: first<<}{>>Bob · 2026-07-14T10:00:00Z: reply<<} here.\n",
+      "out": "# Doc\n\nSome {==anchor text==}{>>#abc123<<} here.\n",
+      "mthreads": [
+        {
+          "id": "abc123",
+          "comments": [
+            {
+              "author": "Alice",
+              "at": 1784020353000,
+              "body": "first"
+            },
+            {
+              "author": "Bob",
+              "at": 1784023200000,
+              "body": "reply"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "{==part one==}{>>#tt1x A · 2026-01-01T00:00:00Z: hi<<}\n\n{==part two==}{>>#tt1x A · 2026-01-01T00:00:00Z: hi<<}\n",
+      "out": "{==part one==}{>>#tt1x<<}\n\n{==part two==}{>>#tt1x<<}\n",
+      "mthreads": [
+        {
+          "id": "tt1x",
+          "comments": [
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "hi"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "x {==a==}{>>note one<<} y {==a==}{>>note one<<} z\n",
+      "out": "x {==a==}{>>#3a2wvkig<<} y {==a==}{>>#1on0x9d4<<} z\n",
+      "mthreads": [
+        {
+          "id": "3a2wvkig",
+          "comments": [
+            {
+              "author": "",
+              "at": 0,
+              "body": "note one"
+            }
+          ]
+        },
+        {
+          "id": "1on0x9d4",
+          "comments": [
+            {
+              "author": "",
+              "at": 0,
+              "body": "note one"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "{==a==}{>>#in1x A · 2026-01-01T00:00:00Z: inline<<} and {==b==}{>>#hy1x B · 1970-01-01T00:00:00Z: from meta<<}\n",
+      "out": "{==a==}{>>#in1x<<} and {==b==}{>>#hy1x<<}\n",
+      "mthreads": [
+        {
+          "id": "in1x",
+          "comments": [
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "inline"
+            }
+          ]
+        },
+        {
+          "id": "hy1x",
+          "comments": [
+            {
+              "author": "B",
+              "at": 0,
+              "body": "from meta"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "{==only==}{>>#ro1x<<} a ref with no root\n",
+      "out": "{==only==}{>>#ro1x<<} a ref with no root\n",
+      "mthreads": []
+    },
+    {
+      "md": "{==a==} text {==b==}{>>#cc11 A · 2026-01-01T00:00:00Z: hi<<}\n",
+      "out": "{==a==} text {==b==}{>>#cc11<<}\n",
+      "mthreads": [
+        {
+          "id": "cc11",
+          "comments": [
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "hi"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "{==x==}{>>3a2wvkig<<} {==y==}{>>#3a2wvkig<<}\n",
+      "out": "{==x==}{>>#he4mjd39<<} {==y==}{>>#3a2wvkig<<}\n",
+      "mthreads": [
+        {
+          "id": "he4mjd39",
+          "comments": [
+            {
+              "author": "",
+              "at": 0,
+              "body": "3a2wvkig"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "{==s==}{>>#sp1x<<}{>>#sp1x<<}\n",
+      "out": "{==s==}{>>#sp1x<<}\n",
+      "mthreads": [
+        {
+          "id": "sp1x",
+          "comments": [
+            {
+              "author": "",
+              "at": 0,
+              "body": "#sp1x"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d · 1970-01-01T00:00:01Z: Signed with a long name.<<} here.\n",
+      "out": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "mthreads": [
+        {
+          "id": "half1",
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "migrate": [
+    {
+      "md": "# T\n\n{==old==}{>>#aa1x A · 2026-01-01T00:00:00Z: inline body<<} tail\n",
+      "meta": null,
+      "outMd": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
+      "mdChanged": true,
+      "metaChanged": true,
+      "againChanged": false
+    },
+    {
+      "md": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
+      "outMd": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    },
+    {
+      "md": "plain\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"or1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"kept\"}]}\n",
+      "outMd": "plain\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"or1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"kept\"}]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    },
+    {
+      "md": "just prose\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n",
+      "outMd": "just prose\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    },
+    {
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hh1\",\"anchor\":{\"path\":\"p\",\"tag\":\"p\",\"text\":\"x\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"a note\"}]}\n",
+      "outMd": null,
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hh1\",\"anchor\":{\"path\":\"p\",\"tag\":\"p\",\"text\":\"x\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"a note\"}]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    },
+    {
+      "md": "just prose\n",
+      "meta": null,
+      "outMd": "just prose\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    },
+    {
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>c-1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"c-1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#18n1xsp1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"18n1xsp1\",\"comments\":[{\"author\":\"\",\"at\":0,\"body\":\"c-1\"}]}\n{\"t\":\"mthread\",\"id\":\"c-1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "mdChanged": true,
+      "metaChanged": true,
+      "againChanged": false
+    },
+    {
+      "md": "{==a==}{>>#ms1x A · 2026-01-01T00:00:00.9Z: a stamp finer than the form<<}\n",
+      "meta": null,
+      "outMd": "{==a==}{>>#ms1x<<}\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ms1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600900,\"body\":\"a stamp finer than the form\"}]}\n",
+      "mdChanged": true,
+      "metaChanged": true,
+      "againChanged": true
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n",
+      "outMd": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
+    }
+  ],
+  "threads": [
+    {
+      "about": "the seed's note",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "html": null,
+      "threads": [
+        {
+          "id": "plain1",
+          "version": "md",
+          "on": "a highlighted phrase",
+          "line": 3,
+          "comments": [
+            {
+              "author": "Ada",
+              "at": 1757000000000,
+              "body": "Say it plainer."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "an old inline thread",
+      "md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there.\n",
+      "meta": null,
+      "html": null,
+      "threads": [
+        {
+          "id": "old111",
+          "version": "md",
+          "on": "old words",
+          "line": 1,
+          "comments": [
+            {
+              "author": "Alice",
+              "at": 1767261600000,
+              "body": "an inline thread"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a thread over two paragraphs, one with no entries, an orphan",
+      "md": "---\ntitle: x\n---\n# T\n\n{==part one==}{>>#tt1x<<}\n\n{==part two==}{>>#tt1x<<} and {==bare==}{>>#nobody<<}\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"tt1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"hi\"},{\"author\":\"B\",\"at\":1767225660000,\"body\":\"yes\"}]}\n{\"t\":\"mthread\",\"id\":\"gone12\",\"comments\":[{\"author\":\"C\",\"at\":5000,\"body\":\"lost words\"}]}\n",
+      "html": null,
+      "threads": [
+        {
+          "id": "tt1x",
+          "version": "md",
+          "on": "part one",
+          "line": 6,
+          "comments": [
+            {
+              "author": "A",
+              "at": 1767225600000,
+              "body": "hi"
+            },
+            {
+              "author": "B",
+              "at": 1767225660000,
+              "body": "yes"
+            }
+          ]
+        },
+        {
+          "id": "gone12",
+          "version": "md",
+          "on": "",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "C",
+              "at": 5000,
+              "body": "lost words"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a page's threads: one found, one gone, one with no text",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hp1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"Ship it by June, and tell everyone.\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"When in June?\"}]}\n{\"t\":\"hthread\",\"id\":\"hp2\",\"anchor\":{\"path\":\"\",\"tag\":\"li\",\"text\":\"Second & last\"},\"comments\":[{\"author\":\"W\",\"at\":8000,\"body\":\"found by its start\"}]}\n{\"t\":\"hthread\",\"id\":\"hp3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"not a paragraph\"},\"comments\":[{\"author\":\"W\",\"at\":9000,\"body\":\"inside a script, so gone\"}]}\n{\"t\":\"hthread\",\"id\":\"hp4\",\"anchor\":{\"path\":\"\",\"tag\":\"div\",\"text\":\"\"},\"comments\":[{\"author\":\"W\",\"at\":10000,\"body\":\"nothing to compare\"}]}\n{\"t\":\"mthread\",\"id\":\"mo1\",\"comments\":[{\"author\":\"A\",\"at\":1000,\"body\":\"a markdown thread on a page with no markdown\"}]}\n",
+      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script>var x = \"<p>not a paragraph</p>\";</script></body></html>",
+      "threads": [
+        {
+          "id": "mo1",
+          "version": "md",
+          "on": "",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "A",
+              "at": 1000,
+              "body": "a markdown thread on a page with no markdown"
+            }
+          ]
+        },
+        {
+          "id": "hp1",
+          "version": "html",
+          "on": "Ship it by June, and tell everyone.",
+          "tag": "p",
+          "comments": [
+            {
+              "author": "W",
+              "at": 7000,
+              "body": "When in June?"
+            }
+          ]
+        },
+        {
+          "id": "hp2",
+          "version": "html",
+          "on": "Second & last",
+          "tag": "li",
+          "comments": [
+            {
+              "author": "W",
+              "at": 8000,
+              "body": "found by its start"
+            }
+          ]
+        },
+        {
+          "id": "hp3",
+          "version": "html",
+          "on": "not a paragraph",
+          "tag": "p",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "W",
+              "at": 9000,
+              "body": "inside a script, so gone"
+            }
+          ]
+        },
+        {
+          "id": "hp4",
+          "version": "html",
+          "on": "",
+          "tag": "div",
+          "comments": [
+            {
+              "author": "W",
+              "at": 10000,
+              "body": "nothing to compare"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a note with a page beside it, the page not given",
+      "md": "plain\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hq1\",\"anchor\":{\"path\":\"\",\"tag\":\"h1\",\"text\":\"The plan\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"x\"}]}\n",
+      "html": null,
+      "threads": [
+        {
+          "id": "hq1",
+          "version": "html",
+          "on": "The plan",
+          "tag": "h1",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "W",
+              "at": 7000,
+              "body": "x"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a page whose element changed its start",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hr1\",\"anchor\":{\"path\":\"\",\"tag\":\"h1\",\"text\":\"The plan, now longer\"},\"comments\":[{\"author\":\"W\",\"at\":1000,\"body\":\"prefix the other way\"}]}\n{\"t\":\"hthread\",\"id\":\"hr2\",\"anchor\":{\"path\":\"\",\"tag\":\"h2\",\"text\":\"The plan\"},\"comments\":[{\"author\":\"W\",\"at\":2000,\"body\":\"another tag\"}]}\n",
+      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script>var x = \"<p>not a paragraph</p>\";</script></body></html>",
+      "threads": [
+        {
+          "id": "hr1",
+          "version": "html",
+          "on": "The plan, now longer",
+          "tag": "h1",
+          "comments": [
+            {
+              "author": "W",
+              "at": 1000,
+              "body": "prefix the other way"
+            }
+          ]
+        },
+        {
+          "id": "hr2",
+          "version": "html",
+          "on": "The plan",
+          "tag": "h2",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "W",
+              "at": 2000,
+              "body": "another tag"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "half a character: an author's name and a page thread's words, cut as the Mac cuts them",
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "html": "<!doctype html><html><body><p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀 and the line goes on</p></body></html>",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n",
+      "threads": [
+        {
+          "id": "half1",
+          "version": "md",
+          "on": "words",
+          "line": 3,
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        },
+        {
+          "id": "hs1",
+          "version": "html",
+          "on": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ud83d",
+          "tag": "p",
+          "comments": [
+            {
+              "author": "W",
+              "at": 5000,
+              "body": "On the long line."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "about": "start on the seed's note",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "start": {
+          "on": "more after it",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and {==more after it==}{>>#ph0ne1<<}.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n"
+    },
+    {
+      "about": "start on a note with no meta file yet",
+      "md": "# Plan\n\nShip it by June.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "Ship it",
+          "body": "  When,\n\n exactly? <<} ",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "# Plan\n\n{==Ship it==}{>>#ph0ne1<<} by June.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"When, exactly? << }\"}]}\n"
+    },
+    {
+      "about": "start on a note in the old inline form: it is put in the new layout as well",
+      "md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there. And more here.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "more here",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "Hello {==old words==}{>>#old111<<} there. And {==more here==}{>>#ph0ne1<<}.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"old111\",\"comments\":[{\"author\":\"Alice\",\"at\":1767261600000,\"body\":\"an inline thread\"}]}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n"
+    },
+    {
+      "about": "an author made plain",
+      "md": "Plain words.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "Plain",
+          "body": "x",
+          "author": "  Sherin's\tMac  <<}",
+          "at": 1784020353123,
+          "id": "auth01"
+        }
+      },
+      "outMd": "{==Plain==}{>>#auth01<<} words.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"auth01\",\"comments\":[{\"author\":\"Sherin's Mac << }\",\"at\":1784020353000,\"body\":\"x\"}]}\n"
+    },
+    {
+      "about": "words with surrounding spaces",
+      "md": "Plain words.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "  words ",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "Plain {==words==}{>>#ph0ne1<<}.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n"
+    },
+    {
+      "about": "an underscore inside a word is fine",
+      "md": "a snake_case name\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "snake_case name",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "a {==snake_case name==}{>>#ph0ne1<<}\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n"
+    },
+    {
+      "about": "once in text and once in code",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "Only once here",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "outMd": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. {==Only once here==}{>>#ph0ne1<<}, and `only once here` in code.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n"
+    },
+    {
+      "about": "no words",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "   ",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "noWords"
+      }
+    },
+    {
+      "about": "two lines",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "two\nlines",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "oneLine"
+      }
+    },
+    {
+      "about": "formatting",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "**bold**",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "formatting"
+      }
+    },
+    {
+      "about": "an underscore at a word's edge",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "_edge",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "formatting"
+      }
+    },
+    {
+      "about": "strikethrough",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "a ~~b",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "formatting"
+      }
+    },
+    {
+      "about": "not there",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "missing words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "missing"
+      }
+    },
+    {
+      "about": "only in the frontmatter",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "words in the frontmatter",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "frontmatter"
+      }
+    },
+    {
+      "about": "only in code",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "code words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code"
+      }
+    },
+    {
+      "about": "only in a code block",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "fenced words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code block"
+      }
+    },
+    {
+      "about": "only on the second line of a code block",
+      "md": "# T\n\n```js\nconst a = 1;\nconst hello = world;\nmore code here\n```\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "hello = world",
+          "body": "Rename it.",
+          "author": "Pat",
+          "at": 1757000000000,
+          "id": "cb2nd1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code block"
+      }
+    },
+    {
+      "about": "in a code block that is never closed, to the end of the note",
+      "md": "# T\n\nWords before it.\n\n```\nfirst\nthe words further down\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "the words further down",
+          "body": "In code.",
+          "author": "Pat",
+          "at": 1757000000000,
+          "id": "cbopen"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code block"
+      }
+    },
+    {
+      "about": "only in a link's address",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "link-words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "link"
+      }
+    },
+    {
+      "about": "only in an html tag",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "tag-words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "html tag"
+      }
+    },
+    {
+      "about": "a heading's mark",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "# Heading words",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "mark"
+      }
+    },
+    {
+      "about": "a list's mark",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "- list item",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "mark"
+      }
+    },
+    {
+      "about": "twice",
+      "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "the twice",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "many",
+        "count": 2
+      }
+    },
+    {
+      "about": "words that already have a comment",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "start": {
+          "on": "a highlighted phrase",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "comment"
+      }
+    },
+    {
+      "about": "nothing to say",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "start": {
+          "on": "more after it",
+          "body": " \n ",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "nothingSaid"
+      }
+    },
+    {
+      "about": "a page has no markdown to start on",
+      "md": null,
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "anything",
+          "body": "Agreed.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123,
+          "id": "ph0ne1"
+        }
+      },
+      "refusal": {
+        "kind": "noMarkdown"
+      }
+    },
+    {
+      "about": "reply",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "plain1",
+          "body": "Plainer, then.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Plainer, then.\"}]}\n"
+    },
+    {
+      "about": "reply on a page",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hp1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"Ship it\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"When?\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "hp1",
+          "body": "In June.",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123
+        }
+      },
+      "outMd": null,
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hp1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"Ship it\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"When?\"},{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"In June.\"}]}\n"
+    },
+    {
+      "about": "reply to a thread that is gone",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "zzzz99",
+          "body": "x",
+          "author": "iPhone 17 Pro",
+          "at": 1784020353123
+        }
+      },
+      "refusal": {
+        "kind": "gone"
+      }
+    },
+    {
+      "about": "remove the only thread: the file stays, empty",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "remove": {
+          "id": "plain1"
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with a highlighted phrase and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n"
+    },
+    {
+      "about": "remove a thread over two paragraphs; another stays",
+      "md": "{==part one==}{>>#tt1x<<}\n\n{==part two==}{>>#tt1x<<} and {==other==}{>>#ot1x<<}\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"tt1x\",\"comments\":[{\"author\":\"A\",\"at\":1000,\"body\":\"hi\"}]}\n{\"t\":\"mthread\",\"id\":\"ot1x\",\"comments\":[{\"author\":\"B\",\"at\":2000,\"body\":\"stays\"}]}\n",
+      "do": {
+        "remove": {
+          "id": "tt1x"
+        }
+      },
+      "outMd": "part one\n\npart two and {==other==}{>>#ot1x<<}\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ot1x\",\"comments\":[{\"author\":\"B\",\"at\":2000,\"body\":\"stays\"}]}\n"
+    },
+    {
+      "about": "remove a thread on a page",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hp1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"Ship it\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"When?\"}]}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n",
+      "do": {
+        "remove": {
+          "id": "hp1"
+        }
+      },
+      "outMd": null,
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n"
+    },
+    {
+      "about": "remove a thread that is gone",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "remove": {
+          "id": "zzzz99"
+        }
+      },
+      "refusal": {
+        "kind": "gone"
+      }
+    },
+    {
+      "about": "delete a reply",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"No.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
+          "index": 1
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n"
+    },
+    {
+      "about": "the first entry is the thread, not a reply",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Ada",
+            "at": 1757000000000,
+            "body": "Say it plainer."
+          },
+          "index": 0
+        }
+      },
+      "refusal": {
+        "kind": "gone"
+      }
+    },
+    {
+      "about": "a reply that moved since it was shown is still the one deleted",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"No.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
+          "index": 1
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"}]}\n"
+    },
+    {
+      "about": "a reply already gone is not looked for elsewhere",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
+          "index": 1
+        }
+      },
+      "refusal": {
+        "kind": "gone"
+      }
+    },
+    {
+      "about": "two replies alike: the one shown goes",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"One.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"Two.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "Two."
+          },
+          "index": 2
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"One.\"}]}\n"
+    },
+    {
+      "about": "a reply beside a page thread holding half a character: that line stays as it was",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "plain1",
+          "body": "Plainer, then.",
+          "author": "Ada's iPhone",
+          "at": 1757000123456
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Ada's iPhone\",\"at\":1757000123000,\"body\":\"Plainer, then.\"}]}\n"
+    },
+    {
+      "about": "a reply signed with a name cut through a character",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "plain1",
+          "body": "Long name.",
+          "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀 more",
+          "at": 1757000123456
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1757000123000,\"body\":\"Long name.\"}]}\n"
+    }
+  ]
+}

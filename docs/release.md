@@ -4,15 +4,16 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 
 ## Jobs
 
-- `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build + `verify-harness/drive-cli.mjs`).
+- `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build + `verify-harness/drive-cli.mjs`), `engine` (`cargo test --workspace --locked` in `engine/`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
+- `ios.yml` (push touching `ios/`): on macos-15, the iOS core's tests, a simulator build, and the app driven in a simulator (`verify-harness/drive-ios.mjs --app`). Nothing ships the iOS app: [ios.md](ios.md).
 - `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes).
 
 ## Rules
 
-- Every push to `main` cuts a release, except one touching only `site/` (`paths-ignore`); runs are serialized (`concurrency: release-main`).
+- Every push to `main` cuts a release, except one touching only `site/` and `ios/` (`paths-ignore`); runs are serialized (`concurrency: release-main`).
 - Never version by hand. `bump` patch-bumps the latest `v*` tag; for minor/major, raise `version` in `src-tauri/tauri.conf.json`. It stamps `package.json`, `tauri.conf.json`, and `Cargo.toml` + `Cargo.lock` of `src-tauri/` (crate `doklin`) and `cli/` (crate `doklin-cli`, names hard-coded). A new file carrying the version must join the stamp, or app and manifest drift and the updater misfires.
 - Keep the build in `bump`'s run: its tag is pushed with `GITHUB_TOKEN`, which triggers no workflow, so an `on: push: tags` workflow never runs.
-- `ci.yml` does not compile the app's Rust; a `src-tauri/` break first fails the release on `main`.
+- `ci.yml` does not compile the Mac app's Rust; a `src-tauri/` break first fails the release on `main`. That includes its wrappers over the engine's commands (`src-tauri/src/cloud.rs`, `versions.rs`): after changing a command's signature in `engine/`, run `cd src-tauri && cargo check`.
 - Two signing chains, never conflate them:
   - Apple Developer ID + notarization (`MACOS_*`/`APPLE_*`): Gatekeeper opens the `.app`/`.dmg`.
   - Tauri updater key (`TAURI_SIGNING_*`): installed apps accept the `.app.tar.gz`. It must pair with `plugins.updater.pubkey`; nothing checks, so a mismatch ships green and every install rejects it. Losing it strands every installed copy.

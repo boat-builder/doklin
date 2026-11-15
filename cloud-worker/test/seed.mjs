@@ -82,10 +82,10 @@ A teleporter, or a jetpack.
   "Sizes.meta.jsonl": '{"doklin":"meta","v":1}\n{"t":"tcols","id":"yh4epk11","cols":[260,0,140]}\n',
   "Comments.md": `# Comments
 
-A sentence with {==a highlighted phrase==}{>>c-1<<} and more after it.
+A sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.
 `,
   "Comments.meta.jsonl":
-    '{"doklin":"meta","v":1}\n{"t":"mthread","id":"c-1","comments":[{"author":"Ada","at":1757000000000,"body":"Say it plainer."}]}\n',
+    '{"doklin":"meta","v":1}\n{"t":"mthread","id":"plain1","comments":[{"author":"Ada","at":1757000000000,"body":"Say it plainer."}]}\n',
   "Diagram.md": `# Flow
 
 \`\`\`mermaid

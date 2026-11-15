@@ -14,9 +14,20 @@ name: ci
 #     exit code. Nothing else builds it before a release ships it to machines
 #     that cannot be asked how it went, and its drive is the one automated
 #     check that the command and the worker still agree
-# The app's Rust is deliberately not built here — it would dominate the
-# runtime and the release build covers it. The command line is a small crate
-# of its own and takes a minute.
+#   - the iOS app's core (ios/DoklinKit) with the engine it links, tested and
+#     then driven against the worker this branch carries
+#     (verify-harness/drive-ios.mjs): it joins as a device, holds the
+#     workspace as files and syncs a change up, so the phone's half of the
+#     engine (the C interface, the Keychain hook, paths under an anchor) and
+#     the worker are checked together. The app itself needs Xcode, and is
+#     built by ios.yml when ios/ changes
+#   - the sync engine and the version store (engine/), with the C interface
+#     the iPhone app links: a crate with no Tauri in it, so its tests — the
+#     in-memory worker and the two-device matrix — run on Linux in a few
+#     minutes. Nothing else runs them before a release ships the engine
+# The Mac app's own Rust (src-tauri/) is deliberately not built here — it
+# would dominate the runtime and the release build covers it. The command
+# line is a small crate of its own and takes a minute.
 
 on:
   pull_request:
@@ -51,6 +62,11 @@ jobs:
 
       - name: Cloud worker tests
         run: node cloud-worker/test/run.mjs
+
+      # The iPhone's port of the comment code reads the same cases (the ios
+      # job runs its side): same input, same bytes in the meta file.
+      - name: Comment code against the shared cases
+        run: node verify-harness/comments.test.mjs
 
       - name: Bundle the cloud worker (size check)
         run: node scripts/bundle-worker.mjs
@@ -89,3 +105,45 @@ jobs:
 
       - name: Drive it against the worker
         run: node verify-harness/drive-cli.mjs
+
+  engine:
+    name: Engine (test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # --locked: a Cargo.lock left behind by a dependency change fails here.
+      - name: Test the engine and its C interface
+        run: cargo test --workspace --locked --manifest-path engine/Cargo.toml
+
+  ios:
+    name: iOS core (test + drive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # The drive serves the cloud worker from source, through vite.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Colour sets match tokens.css
+        run: node scripts/ios-colors.mjs --check
+
+      # The runner image carries a Swift toolchain; the core imports nothing Apple-only.
+      - name: Test the core and drive it against the worker
+        run: node verify-harness/drive-ios.mjs

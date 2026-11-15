@@ -1,6 +1,6 @@
 name: release
 
-# Every push to main cuts a release, unless it only touches site/:
+# Every push to main cuts a release, unless it only touches site/ or ios/:
 #   1. `bump` computes the next version — a patch bump of the latest `v*` tag.
 #      To cut a minor/major instead, raise `version` in src-tauri/tauri.conf.json
 #      in your commit; a file version higher than the latest tag is used verbatim.
@@ -42,10 +42,12 @@ name: release
 on:
   push:
     branches: [main]
-    # The doklin.cc page ships with `wrangler deploy`, not with the app: a push
-    # that touches nothing but site/ cuts no release.
+    # The doklin.cc page ships with `wrangler deploy`, not with the app, and
+    # the iOS app is built from Xcode: a push that touches nothing but site/
+    # and ios/ cuts no release.
     paths-ignore:
       - "site/**"
+      - "ios/**"
   workflow_dispatch:
 
 permissions:

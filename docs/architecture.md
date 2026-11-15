@@ -11,9 +11,12 @@
   forwarding, the window session.
 - `src-tauri/src/edits.rs` — every write command ends with `edits::touched`,
   which pokes the cloud engine and the versioner (the edit bus).
+- `engine/` — the sync engine and the version store, a crate with no Tauri
+  in it, shared with the iPhone app. `src-tauri/src/engine.rs` is the Mac
+  app's side of it; `cloud.rs` and `versions.rs` are its Tauri commands.
 - `src-tauri/src/untitled.rs` — untitled-note buffers.
-- `src-tauri/src/cloud/` + `src/cloud.ts` — sync and publishing ([cloud.md](cloud.md)).
-- `src-tauri/src/versions/` + `src/versions.ts` — history ([versioning.md](versioning.md)).
+- `engine/src/cloud/` + `src/cloud.ts` — sync and publishing ([cloud.md](cloud.md)).
+- `engine/src/versions/` + `src/versions.ts` — history ([versioning.md](versioning.md)).
 - `src-tauri/src/pdf_export.rs` — PDF export ([pdf-export.md](pdf-export.md)).
 
 ## Saving

@@ -1,0 +1,45 @@
+[package]
+name = "doklin-engine"
+# Never stamped: the crate is not released by itself. The Mac app
+# (src-tauri/) and the iPhone app (ffi/, linked from ios/) each build it in.
+version = "0.1.0"
+description = "Doklin's sync engine and version store, with no app around them"
+authors = ["Sherin"]
+edition = "2021"
+publish = false
+
+[workspace]
+members = ["ffi"]
+
+[lib]
+name = "doklin_engine"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+futures-util = "0.3.34"
+# HTTPS to the workspace's worker, content hashing, three-way merge for
+# concurrent edits, random ids and tokens, and local-time labels on conflict
+# copies.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
+diffy = "0.4"
+getrandom = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The version store gzips its blobs and its snapshot files; the export writes
+# one tar.gz of the workspace and its store. Both are pure Rust.
+flate2 = "1"
+tar = "0.4"
+
+# The folder watcher. Not on iOS: nothing but the app writes into its own
+# folder there, and every write it makes rings the edit bus.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+notify = "6"
+notify-debouncer-full = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+# Paused virtual time for the engine's settle-timing tests (src/cloud/tests.rs).
+tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }

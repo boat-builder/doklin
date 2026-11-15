@@ -105,7 +105,7 @@ export function validName(raw: unknown, fallback: string): string {
 /** The two names a workspace keeps for itself at its top: where a person's
  *  Private and their restricted folders are on disk. Nothing in the shared
  *  manifest lives under either, whatever its case (`RESERVED_DIRS`,
- *  src-tauri/src/cloud/space.rs: change both). */
+ *  engine/src/cloud/space.rs: change both). */
 export const RESERVED_FOLDERS: ReadonlySet<string> = new Set(["private", "restricted"]);
 
 /** Whether a workspace-relative path is under one of the reserved names. */

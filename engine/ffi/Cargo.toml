@@ -1,0 +1,16 @@
+[package]
+name = "doklin-engine-ffi"
+version = "0.1.0"
+description = "Doklin's engine behind a C interface, for the iPhone app"
+authors = ["Sherin"]
+edition = "2021"
+publish = false
+
+[lib]
+name = "doklin_engine_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+doklin-engine = { path = ".." }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
