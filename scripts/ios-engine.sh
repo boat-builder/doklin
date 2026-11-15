@@ -3,7 +3,8 @@
 # iPhone app links, into ios/Engine/<platform>/libdoklin_engine_ffi.a:
 #
 #   scripts/ios-engine.sh                 the simulator and the device
-#   scripts/ios-engine.sh iphonesimulator just the simulator (Apple Silicon)
+#   scripts/ios-engine.sh iphonesimulator just the simulator (Apple Silicon only:
+#                                         the project excludes x86_64 there)
 #   scripts/ios-engine.sh iphoneos        just the device
 #   scripts/ios-engine.sh host            this machine: what `swift test` links
 #

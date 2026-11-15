@@ -32,6 +32,7 @@
 - The version is `MARKETING_VERSION` in the project, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.
 - Diagrams (` ```mermaid `, ` ```svg `) are shown as their source: there is no renderer on the device.
 - The UI tests find rows and fields by `accessibilityIdentifier` (`entry-<name>`, `address`, `code`, `login`) and buttons by their label: renaming either is a change to `DoklinUITests.swift` too.
+- The engine (`engine/`, linked as a static library by `scripts/ios-engine.sh`) is built for Apple Silicon only. The project excludes `x86_64` from simulator builds (`EXCLUDED_ARCHS`), so the simulator runs on an Apple Silicon Mac and nowhere else.
 - The simulator build must stay signed-to-run-locally for the UI tests: with `CODE_SIGNING_ALLOWED=NO` the app has no Keychain, and a login cannot be kept.
 
 ## Building and checking
