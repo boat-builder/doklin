@@ -5806,9 +5806,9 @@ export default function App() {
             setCloudPanelOpen(false);
             setCloudSetup("connect");
           }}
-          onJoin={() => {
+          onRecover={() => {
             setCloudPanelOpen(false);
-            setCloudSetup("join");
+            setCloudSetup("recover");
           }}
           onRedeem={() => {
             setCloudPanelOpen(false);

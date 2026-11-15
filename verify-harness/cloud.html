@@ -129,9 +129,16 @@
         // download that died after the invite code was already spent.
         joinError: null,
         // What this Mac's credential may do, as the status reports it: every
-        // action for an owner. A drive narrows it to a member's.
-        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
+        // action for the superadmin. A drive narrows it to a member's.
+        can: ["work", "people.see", "people.invite", "people.recover", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
+        // The key cloud_mint_token answers: what the setup and recovery
+        // prompts carry, and what cloud_recover is asked to trade.
         token: "ab".repeat(32),
+        // What cloud_recover answers with: the device sign-in the key buys.
+        // `error`, when a string, is what the next trade rejects with.
+        recovered: { token: "ef".repeat(32), error: null },
+        // The superadmin's name, as the status carries it.
+        superadmin: "Ada",
         // Who this Mac is on the scripted domain — what the engine resolved
         // its own signature to.
         me: "Sherin",
@@ -159,7 +166,7 @@
         // The domain's agents, kept as real state like
         // the people below: adding one adds a row, a new login code replaces
         // the pending one, logging a machine out takes one away. Each is
-        // somebody's (`memberId`; null is the creator's): the list a command
+        // somebody's (`memberId`): the list a command
         // answers is the asker's own, and everybody's for an owner, each
         // marked `mine` or not. `error`, when a string, is what every agent
         // command rejects with — a worker that predates agents answers that
@@ -172,7 +179,7 @@
               scopes: ["read", "comment"],
               createdAt: Date.now() - 2 * 86400000,
               lastUsedAt: Date.now() - 2 * 3600000,
-              memberId: null,
+              memberId: "m-owner",
               machines: [{ id: "t-box-1", host: "ci-runner-7", createdAt: Date.now() - 86400000 }],
               code: null,
             },
@@ -197,29 +204,30 @@
         // revoke takes one away — so a drive watches the list move rather
         // than watching a call be made.
         people: {
-          role: "owner",
-          // This Mac holds the domain's own token: the workspace's creator…
-          creator: true,
-          // …who has not said who they are yet: a domain bound by an app that
-          // never asked who was binding it. Adopting an identity is the
-          // panel's job, and sets this to the new row's id.
-          me: null,
-          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
-          // This Mac. A Mac only appears in the list below under its own id
-          // if it redeemed a code rather than holding the domain's own
-          // token — which is exactly when "this Mac" is worth saying.
+          // This Mac is signed in as the workspace's superadmin, Ada — on a
+          // device row like anybody's.
+          role: "superadmin",
+          me: "m-owner",
+          can: ["work", "people.see", "people.invite", "people.recover", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
           deviceId: "d-this-mac",
-          // The row in `devices` that is this Mac's own credential: none,
-          // for the creator. A drive sets it to show that row is never
+          // The row in `devices` that is this Mac's own credential: never
           // offered for signing out.
-          tokenId: null,
+          tokenId: "t-this-mac",
           members: [
+            {
+              id: "m-owner",
+              email: "ada@example.com",
+              name: "Ada",
+              role: "superadmin",
+              createdAt: Date.now() - 7 * 86400000,
+              lastSeenAt: Date.now() - 60000,
+              devices: 1,
+            },
             {
               id: "m-bob",
               email: "bob@example.com",
               name: "Bob",
               role: "member",
-              creator: false,
               createdAt: Date.now() - 6 * 86400000,
               lastSeenAt: Date.now() - 3600000,
               devices: 1,
@@ -227,6 +235,14 @@
           ],
           invites: [],
           devices: [
+            {
+              id: "t-this-mac",
+              memberId: "m-owner",
+              email: "ada@example.com",
+              deviceId: "d-this-mac",
+              deviceName: "Ada’s MacBook Pro",
+              createdAt: Date.now() - 7 * 86400000,
+            },
             {
               id: "t-bob-1",
               memberId: "m-bob",
@@ -376,6 +392,7 @@
         me: window.__cloud.me,
         meId: window.__cloud.people.me,
         can: window.__cloud.can,
+        superadmin: window.__cloud.superadmin,
         workerVersion: window.__cloud.workerVersion,
         versions: window.__cloud.versionsMirror,
         public: [],
@@ -572,28 +589,25 @@
               }
               return Promise.resolve({ endpoint: inv.endpoint, token: inv.token, ...inv.member });
             }
+            case "cloud_recover": {
+              const r = window.__cloud.recovered;
+              if (typeof r.error === "string") {
+                const error = r.error;
+                r.error = null;
+                return Promise.reject(error);
+              }
+              return Promise.resolve({
+                endpoint: args.endpoint,
+                token: r.token,
+                memberId: "m-owner",
+                email: args.email,
+                name: args.name || args.email,
+              });
+            }
             case "cloud_people":
               record(cmd, args);
               // A copy: the view must not be able to edit the domain's answer.
               return Promise.resolve(JSON.parse(JSON.stringify(window.__cloud.people)));
-            case "cloud_adopt_owner": {
-              record(cmd, args);
-              const p = window.__cloud.people;
-              const owner = {
-                id: "m-owner",
-                email: args.email,
-                name: args.name || args.email,
-                role: "owner",
-                creator: true,
-                createdAt: Date.now(),
-                lastSeenAt: null,
-                devices: 0,
-              };
-              // One row is the creator's; everybody else's role is their own.
-              p.members = [owner, ...p.members.map((m) => ({ ...m, creator: false }))];
-              p.me = owner.id;
-              return Promise.resolve(owner);
-            }
             case "cloud_removed":
               // What left this Mac before the window was listening: none,
               // unless a drive scripts some.
@@ -617,7 +631,6 @@
                   email,
                   name: args.name || email,
                   role: "member",
-                  creator: false,
                   createdAt: Date.now(),
                   lastSeenAt: null,
                   devices: 0,
@@ -669,7 +682,7 @@
               // As the domain answers: the asker's own, everybody's for an
               // owner, and a waiting code only on one's own.
               const p = window.__cloud.people;
-              const mine = (x) => (p.creator ? x.memberId === null || x.memberId === p.me : x.memberId === p.me);
+              const mine = (x) => x.memberId === p.me;
               return Promise.resolve(
                 JSON.parse(JSON.stringify(a.list))
                   .filter((x) => mine(x) || p.can.includes("agents.manage"))
@@ -699,7 +712,7 @@
                 scopes: args.scopes,
                 createdAt: Date.now(),
                 lastUsedAt: null,
-                memberId: asker.creator ? null : asker.me,
+                memberId: asker.me,
                 machines: [],
                 code: pending,
               };
@@ -727,14 +740,6 @@
                 x.id === args.agentId ? { ...x, machines: x.machines.filter((m) => m.id !== args.tokenId) } : x,
               );
               return Promise.resolve(null);
-            }
-            case "cloud_token": {
-              // Only the Mac that holds the domain's own token is answered.
-              if (!window.__cloud.people.creator) {
-                return Promise.reject("this Mac has a sign-in of its own, which is never shown");
-              }
-              const s = window.__cloud.statuses.find((s) => s.root === args.root);
-              return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });
             }
             case "cloud_device_code": {
               // A string here is what the next call rejects with.
@@ -1095,7 +1100,7 @@
         }),
       );
       // `?sections`: the app starts in a connected workspace that is in
-      // sections — this person (an owner who has said who they are) has a
+      // sections — this person (the superadmin) has a
       // Private with a note in it and is in one restricted folder with Bob;
       // Carol is in the workspace and in neither. A note sits straight under
       // Restricted, in no folder, and somebody's Private has published a
@@ -1107,7 +1112,6 @@
           email: `${name.toLowerCase()}@example.com`,
           name,
           role: "member",
-          creator: false,
           createdAt: Date.now() - 6 * 86400000,
           lastSeenAt: Date.now() - 3600000,
           devices: 1,
@@ -1115,7 +1119,7 @@
         });
         window.__cloud.people.me = me;
         window.__cloud.people.members = [
-          member(me, "Sherin", { role: "owner", creator: true, devices: 0 }),
+          member(me, "Sherin", { role: "superadmin" }),
           member("m-bob", "Bob"),
           member("m-carol", "Carol"),
         ];

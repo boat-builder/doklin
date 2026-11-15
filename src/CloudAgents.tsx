@@ -187,7 +187,7 @@ export default function CloudAgents({
   const others = everyone ? agents.filter((a) => !a.mine) : [];
   const whose = (a: CloudAgent) => {
     const person = people.find((m) => m.id === a.memberId);
-    return person ? person.name || person.email : "the workspace's creator";
+    return person ? person.name || person.email : "somebody";
   };
   const machines = (a: CloudAgent) => (
     <ul className="cloud-macs">

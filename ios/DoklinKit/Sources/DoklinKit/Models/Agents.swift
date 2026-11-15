@@ -136,7 +136,7 @@ public final class AgentsModel {
 
     /// Whose an agent is, in words.
     public func whose(_ agent: AgentRecord) -> String {
-        agent.memberId.flatMap { people?.name(of: $0) } ?? "the workspace's creator"
+        people?.name(of: agent.memberId) ?? "somebody"
     }
 
     public func load() async {

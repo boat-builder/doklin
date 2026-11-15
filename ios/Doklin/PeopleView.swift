@@ -105,7 +105,7 @@ struct PeopleView: View {
         VStack(alignment: .leading, spacing: 3) {
             NameLine(
                 name: member.name.isEmpty ? member.email : member.name,
-                tags: (people.isYou(member) ? ["you"] : []) + (member.role == "owner" ? ["owner"] : [])
+                tags: (people.isYou(member) ? ["you"] : []) + (member.role == "member" ? [] : [member.role])
             )
             if !member.name.isEmpty {
                 Text(member.email)
@@ -148,8 +148,9 @@ struct PeopleView: View {
             .padding(.leading, 12)
             Spacer(minLength: 8)
             // Never this iPhone: signing it out would delete the copy being
-            // looked at. Removing the workspace from this iPhone is how.
-            if !people.isThisDevice(device) {
+            // looked at. Removing the workspace from this iPhone is how. Nor
+            // anybody's but the superadmin a device of theirs.
+            if !people.isThisDevice(device), people.signsOut(devicesOf: member) {
                 Button("Sign out") {
                     question = signOutQuestion(device)
                 }
@@ -169,7 +170,7 @@ struct PeopleView: View {
             ) { await model.flipRole(of: member) }
             : Question(
                 "Make \(name) an owner?",
-                "They will be able to invite and remove people, make other owners, and delete the workspace.",
+                "They will be able to invite and remove people, and make other owners.",
                 button: "Make an owner", destructive: false
             ) { await model.flipRole(of: member) }
     }
@@ -269,9 +270,9 @@ private struct InviteSheet: View {
                     }
                 } footer: {
                     Text("Only the code runs out. Once they have joined, their access lasts until an owner removes them. "
-                        + (people?.creator == true
+                        + (people?.may("people.recover") == true
                             ? "Inviting somebody already here gives them a fresh code and stops the one they had. Inviting somebody who was removed brings them back as the same person."
-                            : "A new code for somebody who has already signed in is theirs to make, or the workspace creator’s."))
+                            : "A new code for somebody who has already signed in is theirs to make, or the workspace superadmin’s."))
                 }
                 Section {
                     Button {

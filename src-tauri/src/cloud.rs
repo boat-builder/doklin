@@ -7,7 +7,7 @@ use doklin_engine::cloud::config::Marker;
 use doklin_engine::cloud::invite::Pasted;
 use doklin_engine::cloud::remote::{AgentRecord, EveryPages, MemberRecord};
 use doklin_engine::cloud::status::{
-    AgentAdded, AgentLogin, CloudStatus, Credentials, DeviceCode, Invited, People, Probe, Redeemed, Removed,
+    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, People, Probe, Redeemed, Removed,
     SpaceStatus,
 };
 use tauri::AppHandle;
@@ -45,11 +45,6 @@ pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
 }
 
 #[tauri::command]
-pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, String> {
-    cloud::cloud_token(&core(&app)?, root)
-}
-
-#[tauri::command]
 pub(crate) async fn cloud_device_code(app: AppHandle, root: String) -> Result<DeviceCode, String> {
     cloud::cloud_device_code(&core(&app)?, root).await
 }
@@ -71,13 +66,14 @@ pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People,
 }
 
 #[tauri::command]
-pub(crate) async fn cloud_adopt_owner(
+pub(crate) async fn cloud_recover(
     app: AppHandle,
-    root: String,
+    endpoint: String,
+    key: String,
     email: String,
     name: Option<String>,
-) -> Result<MemberRecord, String> {
-    cloud::cloud_adopt_owner(&core(&app)?, root, email, name).await
+) -> Result<Redeemed, String> {
+    cloud::cloud_recover(&core(&app)?, endpoint, key, email, name).await
 }
 
 #[tauri::command]

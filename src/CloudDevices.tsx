@@ -3,12 +3,8 @@
 // the workspace and keeps it in step. Everybody adds their own, as many as
 // they have, with a code that works once — pasted on the other device, it
 // joins as them on a sign-in of its own, so any one device can be signed out
-// without touching the rest. No token is ever shown or carried between two.
-//
-// The one exception is said out loud here: the Mac a workspace was made on
-// holds the domain's own token, which is no sign-in — it is not in the list
-// and cannot be signed out. Whoever holds it keeps a copy for the day every
-// device is lost, and that is the only thing it is shown for.
+// without touching the rest. No token is ever shown or carried between two,
+// and no device is special: the superadmin's are rows like anybody's.
 //
 // The order is the other tabs': the door and the code it ends in at the top,
 // the list under them. As everywhere in the view, no `fetch` here — the
@@ -18,11 +14,9 @@ import { useCallback, useRef, useState } from "react";
 import {
   cloudDeviceCode,
   cloudRevokeDevice,
-  cloudToken,
   revealSoon,
   timeAgo,
   timeUntil,
-  type CloudCredentials,
   type CloudDeviceCode,
   type CloudPeople,
 } from "./cloud";
@@ -57,8 +51,6 @@ export default function CloudDevices({
   const [minted, setMinted] = useState<CloudDeviceCode | null>(null);
   /** Which row is asking "are you sure". */
   const [confirm, setConfirm] = useState<string | null>(null);
-  /** The domain's own token, once its holder asked to see it. */
-  const [secret, setSecret] = useState<CloudCredentials | null>(null);
   const top = useRef<HTMLDivElement>(null);
 
   const add = useCallback(async () => {
@@ -93,19 +85,8 @@ export default function CloudDevices({
     [root, reload],
   );
 
-  const show = useCallback(async () => {
-    setError(null);
-    try {
-      setSecret(await cloudToken(root));
-    } catch (e) {
-      setError(errText(e));
-    }
-  }, [root]);
-
   const mine = people.devices.filter((d) => d.memberId === people.me);
-  // A device is signed in as a person, so the holder of the domain's token
-  // has to have said who they are before they can add one.
-  const unnamed = people.creator && !people.me;
+  const superadmin = people.members.find((m) => m.role === "superadmin");
 
   return (
     <>
@@ -142,23 +123,13 @@ export default function CloudDevices({
           </div>
         )}
 
-        {unnamed ? (
-          <div className="cloud-card cloud-card--attention" data-testid="device-needs-identity">
-            <div className="cloud-card-title">Say who you are first</div>
-            <p className="cloud-hint">
-              A device is signed in as a person, and {name} doesn’t know who you are yet. Give it your
-              name and email under People, then add a device here.
-            </p>
+        {!minted && (
+          <div className="cloud-actions">
+            <button className="modal-btn is-primary" data-testid="device-add" disabled={busy} onClick={() => void add()}>
+              {busy ? "Making a code…" : "Add a device"}
+            </button>
+            <span className="cloud-hint">Another Mac, or an iPhone. It joins with one line you paste there.</span>
           </div>
-        ) : (
-          !minted && (
-            <div className="cloud-actions">
-              <button className="modal-btn is-primary" data-testid="device-add" disabled={busy} onClick={() => void add()}>
-                {busy ? "Making a code…" : "Add a device"}
-              </button>
-              <span className="cloud-hint">Another Mac, or an iPhone. It joins with one line you paste there.</span>
-            </div>
-          )
         )}
       </div>
 
@@ -166,14 +137,6 @@ export default function CloudDevices({
       {/* A card each, as the People and Agents tabs list theirs: the name
           and its tag, what it is on a line of its own, then its action. */}
       <ul className="cloud-people" data-testid="device-list">
-        {people.creator && (
-          <li className="cloud-person" data-testid="device-secret">
-            <div className="cloud-person-head">
-              <span className="cloud-person-name">This Mac</span>
-            </div>
-            <div className="cloud-hint">It holds the domain’s own token, so it can’t be signed out.</div>
-          </li>
-        )}
         {mine.map((d) => {
           const thisMac = d.id === people.tokenId;
           return (
@@ -216,49 +179,14 @@ export default function CloudDevices({
         })}
       </ul>
 
-      {people.creator && (
-        <>
-          <div className="cloud-section-label">If you lose every device</div>
-          <p className="cloud-hint">
-            The domain’s own token is the way back in: on a new Mac, the gear → Cloud… → Open with the
-            domain’s token. Keep a copy somewhere safe. It is never how a device is added — whoever
-            holds it has all of {domain}, and it cannot be taken back.
-          </p>
-          {secret ? (
-            <div className="cloud-stack" data-testid="domain-secret">
-              <div className="modal-field">
-                <div className="modal-field-label">Endpoint</div>
-                <div className="cloud-copy-row">
-                  <input className="modal-field-input" readOnly value={secret.endpoint} data-testid="creds-endpoint" />
-                  <button className="modal-btn" onClick={() => copy("endpoint", secret.endpoint)}>
-                    {copied === "endpoint" ? "Copied ✓" : "Copy"}
-                  </button>
-                </div>
-              </div>
-              <div className="modal-field">
-                <div className="modal-field-label">Token</div>
-                <div className="cloud-copy-row">
-                  <input className="modal-field-input modal-field-token" readOnly value={secret.token} data-testid="creds-token" />
-                  <button className="modal-btn" onClick={() => copy("token", secret.token)}>
-                    {copied === "token" ? "Copied ✓" : "Copy"}
-                  </button>
-                </div>
-              </div>
-              <div className="cloud-actions">
-                <button className="modal-btn" onClick={() => setSecret(null)}>
-                  Hide
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="cloud-actions">
-              <button className="modal-btn" data-testid="show-domain-secret" onClick={() => void show()}>
-                Show the domain’s token
-              </button>
-            </div>
-          )}
-        </>
-      )}
+      <div className="cloud-section-label">If you lose every device</div>
+      <p className="cloud-hint" data-testid="lose-every-device">
+        {people.role === "superadmin"
+          ? `On a new Mac: the gear → Cloud… → Recover with your Cloudflare account. An agent puts a fresh key on ${domain}’s worker, and that Mac signs in as you.`
+          : superadmin
+            ? `${superadmin.name || superadmin.email}, the superadmin, can make you a new code to join with.`
+            : "The workspace’s superadmin can make you a new code to join with."}
+      </p>
       {error && <div className="modal-error">{error}</div>}
     </>
   );

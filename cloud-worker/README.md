@@ -1,7 +1,7 @@
 # Doklin cloud worker — wire contract
 
 Per domain: a Worker, an R2 bucket (`DATA`), a D1 database (`DB`), the
-secret `OWNER_TOKEN`. Rules and engine: [docs/cloud.md](../docs/cloud.md);
+secret `OWNER_TOKEN` (the domain's key). Rules and engine: [docs/cloud.md](../docs/cloud.md);
 pages: [docs/cloud-publishing.md](../docs/cloud-publishing.md); people,
 agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.md).
 
@@ -10,22 +10,22 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
 - A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`; the iPhone's engine sends `ios/<version>`.
-- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`, the **creator** (no D1 read); `dka_…` → `agent_tokens` → `agent`; else `tokens` → the role on that person's `members` row (`owner` | `member`), read every request.
-- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
-- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
-- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`. A join is how every device but the creator's first Mac gets its bearer: an invite's code, or a device code.
-- No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
+- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
+- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`; the superadmin also `people.recover` and `workspace.manage`.
+- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {error}`, naming who may (`refusal`, `roles.ts`).
+- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`. A join (an invite's code, or a device code) or a trade of the key (`recover`) is how a device gets its bearer.
+- No `DB` / D1 down: every bearer but the key → `503` (never `401`); `/api/meta` with the key still answers, `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
 
 ## Engine routes (`src/api.ts`, `src/versions.ts`)
 
 ```
 GET  /api/meta  {version, features, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
-     you: {role, creator, can: [actions], tokenId, memberId, email, name}, people: [{id, name}]}
-     people = members then agents.
-     Runs the D1 migration (once per isolate).
-POST /api/workspace  owner; {name, deviceName?, ownerEmail?, ownerName?} → 201 {id, name, createdAt,
-     createdBy, manifestEtag, owner?}; 409 {workspace} when bound
+     you: {role, can: [actions], tokenId, memberId, email, name}, superadmin: {id, name}|null,
+     people: [{id, name}]}; people = members then agents. With the key: {version, features,
+     workspace, d1, key: true}. Runs the D1 migration (once per isolate).
+POST /api/workspace  superadmin; {name, deviceName?} → 201 {id, name, createdAt, createdBy,
+     manifestEtag}; 409 {workspace} when bound
 GET  /api/workspace  {id, name, createdAt, createdBy, files, bytes}
 GET  /api/poll  {manifestEtag, presence: {<deviceId>: {memberId, name, path?, space?, ts}},
      leases: [{path, space?, deviceId, memberId, name, until}]|null, spaces: [space]|null};
@@ -47,8 +47,8 @@ PUT  /api/versions/index  x-base-etag (428), "*" creates; 412 {etag}; 400; 413 >
 GET|PUT|DELETE /api/versions/snapshots/<id>  PUT create-only ({existed: true} on re-PUT); 413 > 4 MB
 GET  /api/versions/blobs[?cursor=c]  {blobs: [{hash, size, uploaded}], cursor?} — one page
 GET|PUT|DELETE /api/versions/blobs/<hash>  PUT create-only; 413 > 25 MB
-POST /api/admin/wipe  owner; {"confirm":"wipe"}; batched, repeat until remaining:false; the last
-     round empties every D1 table but meta. Frees the domain.
+POST /api/admin/wipe  superadmin; {"confirm":"wipe"}; batched, repeat until remaining:false; the
+     last round empties every D1 table but meta and spent_keys. Frees the domain.
 ```
 
 ## Spaces (`src/spaces.ts`, `src/api.ts`)
@@ -73,8 +73,8 @@ DELETE /api/spaces/<id>/members/<memberId>  204 (self = leave); 404 not in it; 4
 *      /api/spaces/<id>/manifest · /blobs/… · /versions/…  the engine routes above, on that space
 ```
 
-`409`: PATCH, DELETE or members on a Private; any call by a creator with no
-member row. A space's manifest may not name a `root` page (`400`).
+`409`: PATCH, DELETE or members on a Private. A space's manifest may not name
+a `root` page (`400`).
 
 ## Every public address (`src/everyPage.ts`; `pages.manage`)
 
@@ -92,21 +92,24 @@ the space, the path or the file. `shared` = in the shared workspace.
 
 ## Auth routes (`src/api.ts`, `src/agentApi.ts`)
 
-Owners only, except join, `GET members`, the device routes and the agent routes. Deletes → `204`; unknown id `404`; malformed id `400`.
-`409`: changing or removing your own row or the creator's; signing out the device the call is made with.
+Owners only, except join, recover, `GET members`, the device routes and the agent routes. Deletes → `204`; unknown id `404`; malformed id `400`.
+`409`: changing or removing your own row or the superadmin's; signing out the device the call is made with, or (for anybody but them) one of the superadmin's.
 
 ```
 POST   /api/auth/join  no bearer; {code, deviceId?, deviceName?} → 201 {token, tokenId, member};
        400 not a code; 401 unknown or expired (identical)
+POST   /api/auth/recover  the key; {email?, name?, deviceId?, deviceName?} → 201 {token, tokenId,
+       member}: a device sign-in as the superadmin — email's person (made if new, brought back if
+       removed, an owner), who becomes it; without one the superadmin there is. 409
+       {code: "no_identity"} when there is none; 401 {code: "key_spent"} the second time
 POST   /api/auth/invites  {email, name?, codeHash, expiresAt ≤ 30 d} → 201 {invite}; creates the
        member if new, re-enables a removed one, replaces their pending invite; 409 when somebody
-       has signed in as that address (lastSeenAt set, or the creator's row) unless the caller is
-       the creator or that person
+       has signed in as that address (lastSeenAt set, or the superadmin's row) unless the caller is
+       the superadmin or that person
 GET    /api/auth/invites  pending, unexpired
 DELETE /api/auth/invites/<id>
-GET    /api/auth/members  any person; everyone not removed, with role, creator, device count and
-       lastSeenAt (set at first redeem, then by the beat)
-POST   /api/auth/members  creator only; {email, name?} — adopt/rename the creator's identity
+GET    /api/auth/members  any person; everyone not removed, with role (`superadmin` for theirs), device
+       count and lastSeenAt (set at the first redeem or trade, then by the beat)
 PATCH  /api/auth/members/<id>  {role: owner|member} → {member}; owner → member withdraws every
        pending invite
 DELETE /api/auth/members/<id>  the row stays with disabled = 1, role member; their invite, tokens,
@@ -114,14 +117,13 @@ DELETE /api/auth/members/<id>  the row stays with disabled = 1, role member; the
        hashes go to removed_tokens; removing an owner withdraws every pending invite
 POST   /api/auth/devices/code  anyone; {codeHash, expiresAt ≤ 24 h} → 201 {code: {id, createdAt, expiresAt}}:
        a code for a device of the caller's own, stored as their pending invite (replacing it) and
-       redeemed by join; the domain's secret asks as the creator's person, 409 {code: "no_identity"}
-       when they have not said who they are
+       redeemed by join
 GET    /api/auth/devices  anyone; the caller's devices, an owner everyone's: {devices: [{id, memberId,
        email, deviceId, deviceName, createdAt}]} — never a hash
-DELETE /api/auth/devices/<id>  its person, or an owner; its hash goes to removed_tokens. Somebody
-       else's is `404` to a member
+DELETE /api/auth/devices/<id>  its person, or an owner but not one of the superadmin's (409); its
+       hash goes to removed_tokens. Somebody else's is `404` to a member
 DELETE /api/auth/session  a device ending its own sign-in: its row, presence and lease go, nothing
-       goes to removed_tokens; 409 for the domain's secret
+       goes to removed_tokens
 POST   /api/auth/agents  anyone; {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}: the caller's
 GET    /api/auth/agents  anyone; the caller's agents, an owner everyone's: {agents: [{id, name, scopes,
        createdAt, lastUsedAt, memberId|null, mine, machines: [{id, host, createdAt}],
@@ -135,7 +137,6 @@ DELETE /api/auth/agents/<id>/tokens/<tid>  its person, or an owner
 
 `scopes`: subset of `read comment edit publish` holding `read`. An agent that
 is not the caller's: `404` to a member; to an owner `403` on the two `POST`s.
-`agents.member_id` NULL is the creator's.
 
 ## Document API (`src/agentApi.ts`; agent bearer only)
 
@@ -147,8 +148,7 @@ Every path is literal, as on the disk of the agent's person (`src/agentPlace.ts`
 `Private/…` is their Private, `Restricted/<folder>/…` a restricted folder they
 are in, anything else the shared workspace. A route is answered in the space
 its path names, with that space's manifest mounted at its folder
-(`src/mount.ts`); a folder the person is not in → `404`; `Private/…` for a
-creator with no member row → `409`. `tree`, `search` and `pages` at the top
+(`src/mount.ts`); a folder the person is not in → `404`. `tree`, `search` and `pages` at the top
 cover every section, opening at most 8 spaces a request (`notListed`,
 `sectionsNotSearched`). A restricted folder's name is the Mac's (`candidates`,
 `engine/src/cloud/space.rs`, **change both**), given out in creation order.
@@ -263,7 +263,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 7)
+## D1 (`src/schema.ts`, schema 8)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -272,12 +272,13 @@ tokens       (hash PK, id t-…, member_id → members CASCADE, device_id, devic
 invites      (hash PK, id i-…, member_id → members CASCADE, created_at, expires_at)
 presence     (device_id PK, member_id?, device_name, space_id '' = shared, path?, ts)
 leases       ((space_id, path) PK, path lowercased, device_id, member_id?, device_name, until)
-agents       (id a-…, name, scopes, created_at, last_used_at, disabled, member_id)   NULL = the creator's
+agents       (id a-…, name, scopes, created_at, last_used_at, disabled, member_id)
 agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expires_at)
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
 search_text  ((space_id, fid) PK, folded)   space_id '' = shared; md file id, else html; NULL past 1 MB
 search_state (space_id PK, etag, held)      held = {"<fid>": "<text hash>.<sidecar hash>"}
-creator        (id = 1 PK, member_id)   whose row holds OWNER_TOKEN; one row or none
+superadmin     (id = 1 PK, member_id)   who last traded the key; one row or none
+spent_keys     (hash PK, spent_at)      keys already traded; a wipe keeps it
 removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe
 spaces        (id s-…|p-…, kind, name, created_by, created_at, etag)   etag = its manifest's
 space_members ((member_id, space_id) PK, added_by, added_at)
@@ -304,7 +305,7 @@ npx -y wrangler@4 d1 create doklin-notes-example-com      # prints database_id
 # wrangler.toml from cloud-worker/wrangler.toml.example: account id, database id, names, domain
 npx -y wrangler@4 secret put OWNER_TOKEN
 npx -y wrangler@4 deploy
-curl -fsS -H "Authorization: Bearer $TOKEN" https://notes.example.com/api/meta   # d1 must be a number
+curl -fsS -H "Authorization: Bearer $KEY" https://notes.example.com/api/meta     # d1 must be a number
 sh doklin-cloud-update.sh https://notes.example.com       # update (release asset)
 ```
 

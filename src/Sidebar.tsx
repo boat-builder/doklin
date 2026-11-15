@@ -1271,18 +1271,6 @@ export default function Sidebar({
                   </span>
                 )}
               </div>
-              {/* A creator who never said who they are is nobody a Private
-                  could belong to; anybody else gets theirs on the first sync. */}
-              {!hasPrivate && cloud?.workerVersion != null && cloud.meId == null && (
-                <div className="sidebar-message tree-section-hint" data-testid="private-nobody">
-                  Say who you are and you get a section only you can see.{" "}
-                  {onOpenPeople && (
-                    <button className="tree-section-link" onClick={onOpenPeople}>
-                      People…
-                    </button>
-                  )}
-                </div>
-              )}
               {hasPrivate && layout.private.length === 0 && !showCreateInPrivate && (
                 <div className="sidebar-message tree-section-hint">Only you can see what you put here.</div>
               )}

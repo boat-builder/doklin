@@ -1,7 +1,7 @@
 // Who is in the workspace and how they got in, through the real screens
 // against the harness worker: the people, an invite made, made again from
 // further down and withdrawn, a role given and taken back, this iPhone among
-// Ada's devices and a line for another, an agent added and removed, who else
+// Sherin's devices and a line for another, an agent added and removed, who else
 // is here, and restricted folders: one made with somebody in it, listed,
 // renamed, looked into and deleted here; another deleted on another device
 // while a note in it is open here.
@@ -81,11 +81,11 @@ final class PeopleUITests: UITestCase {
     func testPeopleDevicesAgentsAndARestrictedFolder() throws {
         launchAndJoin()
 
-        // People: Ada made the workspace, and this iPhone is hers.
+        // People: Sherin is the workspace's superadmin, and this iPhone is hers.
         open("People")
-        let ada = expect(marked("person-ada@example.com"), "Ada among the people")
-        XCTAssertTrue(ada.label.contains("Ada (drive)") && ada.label.contains("you") && ada.label.contains("owner"), ada.label)
-        expect(app.staticTexts["this iPhone"], "this iPhone among Ada's devices")
+        let sherin = expect(marked("person-sherin@example.com"), "Sherin among the people")
+        XCTAssertTrue(sherin.label.contains("Sherin") && sherin.label.contains("you") && sherin.label.contains("superadmin"), sherin.label)
+        expect(app.staticTexts["this iPhone"], "this iPhone among Sherin's devices")
         record("people")
 
         // An invite: the line to send, once, then the code waits until it is withdrawn.
@@ -124,10 +124,13 @@ final class PeopleUITests: UITestCase {
         expect(app.buttons["Make an owner"], "Bea, a member again")
         back()
 
-        // Devices: this iPhone, never offered for signing out, and a line for another.
+        // Devices: this iPhone, never offered for signing out — her Mac is —
+        // the way back in, and a line for another.
         open("Devices")
         expect(app.staticTexts["this iPhone"], "this iPhone among your devices")
-        XCTAssertFalse(app.buttons["Sign out"].exists, "this iPhone is offered for signing out")
+        expect(marked("device-Sherin's MacBook Pro"), "her Mac among her devices")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label == %@", "Sign out")).count, 1, "only the Mac is offered for signing out, never this iPhone")
+        expect(text(containing: "Recover with your Cloudflare account"), "the way back in, for the superadmin")
         marked("device-add").tap()
         expect(text(containing: "doklin-invite http://localhost"), "the line for another device")
         expect(text(containing: "It works once, for "), "how long the line lasts")
@@ -154,15 +157,15 @@ final class PeopleUITests: UITestCase {
         back()
 
         // Here now: nobody else has the workspace open — then another device
-        // of Ada's is editing the plan, which opens here view-only until this
+        // of Sherin's is editing the plan, which opens here view-only until this
         // iPhone takes it over.
         open("Here now")
         expect(marked("here-alone"), "only this iPhone here")
         try ask("editing?path=Projects/plan.md")
         expect(text(containing: "editing Projects/plan.md"), "the other device, editing the plan", timeout: 45)
         record("here now")
-        app.staticTexts["Ada's Mac (drive)"].tap()
-        expect(text(containing: "Open on your other device, Ada's Mac (drive) — view only"), "the plan, view only")
+        app.staticTexts["Sherin's Mac (drive)"].tap()
+        expect(text(containing: "Open on your other device, Sherin's Mac (drive) — view only"), "the plan, view only")
         record("the plan, view only")
         marked("edit").tap()
         expect(app.buttons["Take over"], "Take over in the editor").tap()
@@ -198,7 +201,7 @@ final class PeopleUITests: UITestCase {
         expect(marked("entry-Money"), "the folder, renamed").tap()
         expect(marked("access"), "who can open it, once the domain has the new name", timeout: 45).tap()
         expect(app.navigationBars["Who can open “Money”"], "the folder's people, under its new name")
-        expect(words("2 people"), "Ada and Bea in it")
+        expect(words("2 people"), "Sherin and Bea in it")
         expect(marked("space-member-Bea"), "Bea in it")
         record("who can open the folder")
 
@@ -206,7 +209,7 @@ final class PeopleUITests: UITestCase {
         // it closes, back to Restricted, which no longer lists it.
         app.buttons["Remove"].tap()
         confirm("Remove")
-        expect(words("1 person"), "only Ada in it")
+        expect(words("1 person"), "only Sherin in it")
         reveal(marked("space-delete"), "Delete it for everyone").tap()
         confirm("Delete the folder")
         expect(app.navigationBars["Restricted"], "Restricted, once the folder is gone")

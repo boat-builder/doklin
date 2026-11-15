@@ -11,7 +11,7 @@
 // with, and a worker that is behind becomes an "update the worker" state
 // rather than an error. The counter starts at 1: nothing older speaks this
 // API, so no version below 1 can ever show up.
-export const WORKER_VERSION = 16;
+export const WORKER_VERSION = 17;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" is the promise
@@ -32,6 +32,7 @@ export const WORKER_FEATURES: readonly string[] = [
   "agent-comments",
   "agent-search",
   "devices",
+  "superadmin",
 ];
 // "members" is a promise the app can act on: this worker mints and resolves
 // per-person tokens, so the People panel has something to talk to.
@@ -59,7 +60,11 @@ export const WORKER_FEATURES: readonly string[] = [
 // "devices" is the promise that anyone here adds a device of their own with a
 // one-time code (`POST /api/auth/devices/code`), is listed their devices, signs
 // one out, and that a device ends its own sign-in (`DELETE /api/auth/session`).
-// A bare
+// "superadmin" is the promise that the domain's key is no sign-in: it is
+// answered on `GET /api/meta` (with `key: true`) and `POST /api/auth/recover`,
+// which trades it, once, for a device sign-in of the workspace's one
+// superadmin — and on nothing else. A Mac whose stored token is the key hears
+// so from the probe (`key: true`) and trades it for a sign-in of its own.
 // "d1" is still deliberately absent — that is plumbing, and /api/meta's `d1`
 // reports it more precisely than a name in this list could.
 

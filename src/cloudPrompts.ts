@@ -1,6 +1,6 @@
 // The agent prompts and the naming rule they share, as
-// pure functions: the setup wizard, the update card and the panel's teardown
-// step render them, and verify-harness/cloudprompts.test.mjs checks that no
+// pure functions: the setup wizard, the recovery wizard, the update card and
+// the panel's teardown step render them, and verify-harness/cloudprompts.test.mjs checks that no
 // step is left for the agent to invent. Nothing here touches the app — the
 // version and the compatibility date come in as arguments (the app reads
 // them from virtual:cloud-worker-version via src/cloud.ts).
@@ -17,8 +17,9 @@
 // artifact, establish credentials, verify identity before mutating, create
 // the resources the config will name, the config file verbatim, deploy with
 // the failure named, verify and print one line back, and the negative scope
-// at the end. Setup carries the token — its copy point says so; update and
-// teardown carry no secret.
+// at the end. Setup and recovery carry a key — a fresh one each, which the
+// app trades once for this Mac's own sign-in, so a copy left in the agent's
+// chat lets nobody in; update and teardown carry no secret.
 
 export const WORKER_BUNDLE_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js";
@@ -168,15 +169,15 @@ const NEGATIVE_SCOPE =
 
 export type SetupPromptInput = {
   target: CloudTarget;
-  /** The owner token the app minted — the one secret the prompt carries. */
-  token: string;
+  /** The key the app minted — the one secret the prompt carries. */
+  key: string;
   workspaceName: string;
   /** The worker version this app was built for (the download may be newer). */
   workerVersion: number;
   compatibilityDate: string;
 };
 
-/** Setup: a fresh worker and bucket, the token as the secret, the endpoint back. */
+/** Setup: a fresh worker and bucket, the key as the secret, the endpoint back. */
 export function buildSetupPrompt(i: SetupPromptInput): string {
   const name = resourceName(i.target);
   const domain = i.target.kind === "domain" ? i.target.domain : null;
@@ -200,14 +201,43 @@ export function buildSetupPrompt(i: SetupPromptInput): string {
 5. Create the database: \`npx -y wrangler@4 d1 create ${name}\`. It prints a \`database_id\` — a uuid; keep it, the next step needs it verbatim. Confirm with \`npx -y wrangler@4 d1 list\`, which must now list ${name}; if it doesn't, stop and ask me. If the id has scrolled away, \`npx -y wrangler@4 d1 info ${name}\` prints it again — never make one up, and never copy one from another database.
 6. Next to the downloaded file, write wrangler.toml with exactly this. Two fill-ins, both from steps above: the account_id from step 2 and the database_id from step 5.
 ${wranglerToml(name, name, name, domain, i.compatibilityDate)}
-7. Store the app's token as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN\` and give it exactly this value:
-${i.token}
+7. Store the app's key as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN\` and give it exactly this value:
+${i.key}
 8. ${deploy}
-9. Verify: \`curl -fsS -H "Authorization: Bearer ${i.token}" ${endpoint}/api/meta\` must answer 200 with JSON whose "workspace" is null, whose "version" is at least ${i.workerVersion}, and whose "d1" is a number — a null "d1" means the database binding didn't take, so re-check the database_id in wrangler.toml and deploy again. On a custom domain, retry the whole check for up to five minutes while the certificate is being issued before treating it as a failure.
+9. Verify: \`curl -fsS -H "Authorization: Bearer ${i.key}" ${endpoint}/api/meta\` must answer 200 with JSON whose "workspace" is null, whose "version" is at least ${i.workerVersion}, and whose "d1" is a number — a null "d1" means the database binding didn't take, so re-check the database_id in wrangler.toml and deploy again. On a custom domain, retry the whole check for up to five minutes while the certificate is being issued before treating it as a failure.
 10. Then print exactly this line, filled in:
 ENDPOINT: ${endpoint}
 
-The token is already in the app, so the endpoint is the only value I need back. ${NEGATIVE_SCOPE}`;
+The key is already in the app, so the endpoint is the only value I need back. ${NEGATIVE_SCOPE}`;
+}
+
+export type RecoverPromptInput = {
+  endpoint: string;
+  /** The fresh key the app minted — the one secret the prompt carries. */
+  key: string;
+};
+
+/** Recovery: a fresh key on the worker, nothing else. Whoever can set it
+ *  controls the Cloudflare account, which is what makes them the
+ *  workspace's superadmin once the app trades it. */
+export function buildRecoverPrompt(i: RecoverPromptInput): string {
+  const endpoint = endpointArg(i.endpoint);
+  const { worker, certain } = deploymentNames(i.endpoint);
+  const nameNote = certain
+    ? "certain: it is the first label of the workers.dev hostname"
+    : "Doklin's naming convention — verify it before changing anything";
+  return `Put a fresh key on the Doklin cloud worker serving ${endpoint}, so I can get back into my workspace from this Mac. The worker is on my Cloudflare account; this sets one secret on it and changes nothing else.
+
+1. ${LOGIN_STEP}
+2. Confirm the worker. It should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — I can see it in the Cloudflare dashboard under Workers & Pages — and never set a secret on a worker you guessed.
+3. Set the key as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN --name ${worker}\` and give it exactly this value:
+${i.key}
+   That redeploys the worker with the new secret; its bucket, its database and its domain stay as they are.
+4. Verify: \`curl -fsS -H "Authorization: Bearer ${i.key}" ${endpoint}/api/meta\` must answer 200 with JSON whose "key" is true. Retry for up to a minute while the new secret takes effect. If it answers but has no "key" at all, the worker is too old to recover with: stop and tell me — it needs Doklin's update script first.
+5. Then print exactly this line:
+KEY SET: ${endpoint}
+
+The key works once, and the app is what uses it. Do not deploy anything, and do not create or modify any other Cloudflare resource.`;
 }
 
 export type UpdatePromptInput = {
@@ -234,7 +264,7 @@ export function updateCommands(endpoint: string): string {
   ].join("\n");
 }
 
-/** Update: run the script. No secret — the token, the bucket and the domain
+/** Update: run the script. No secret — the key, the bucket and the domain
  *  all survive a same-name redeploy, so nothing here is sensitive. The
  *  prompt's whole job is the context (which domain, which versions) and the
  *  boundary (the script is the job; don't deploy anything by hand). */
@@ -273,8 +303,8 @@ export type AgentLoginPromptInput = {
  *  sees, so "under Private/" is an instruction here and nowhere a setting.
  *  `doklin help agent` is the briefing; this only gets the agent that far.
  *  It carries the login code, which works once — the one prompt here with a
- *  secret in it besides setup's. The iPhone hands out the same words
- *  (`AgentPrompt`, ios/DoklinKit) — change both. */
+ *  secret in it besides setup's and recovery's. The iPhone hands out the same
+ *  words (`AgentPrompt`, ios/DoklinKit) — change both. */
 export function buildAgentLoginPrompt(i: AgentLoginPromptInput): string {
   // UTC and spelled out: the reader is on another machine, in no known zone.
   const expires = `${new Date(i.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;

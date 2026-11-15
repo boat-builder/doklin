@@ -9,9 +9,8 @@
 // — and an open tab following it; sharing a private note; a move that lets
 // more people see a note asking first, and one that narrows asking nothing;
 // who is in a folder — adding, removing, the last person handing it on;
-// a folder taken away elsewhere saying so; deleting one for everyone; a
-// creator nobody can name being told why they have no Private; and an owner
-// taking down a page published from a section they are not in.
+// a folder taken away elsewhere saying so; deleting one for everyone; and an
+// owner taking down a page published from a section they are not in.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 
@@ -405,26 +404,6 @@ step(
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Published pages").count()) === 0);
-
-/* 15 — a creator who never said who they are has no Private, and is told
-       what to do about it where they would look for one. */
-await page.evaluate(() => {
-  const s = window.__cloud.statuses[0];
-  window.__sections.private = null;
-  window.__setStatuses([{ ...s, meId: null, spaces: s.spaces.filter((sp) => sp.kind !== "private") }]);
-  window.__emit("cloud-applied", { root: "/docs", paths: [] });
-});
-await poll(async () => (await tid("private-nobody").count()) === 1);
-const nobody = await tid("private-nobody").innerText();
-const noPlus = (await tid("new-private").count()) === 0;
-await tid("private-nobody").locator(".tree-section-link").click();
-await poll(async () => (await dialog("People, devices and agents").count()) === 1);
-step(
-  "nobody a Private could belong to: the Private list says to say who you are, and its link opens People",
-  nobody.includes("Say who you are") && noPlus,
-  nobody.replace(/\n/g, " "),
-);
-await page.screenshot({ path: SHOTS + "sections-03-nobody.png" });
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;

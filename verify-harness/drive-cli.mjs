@@ -28,7 +28,8 @@
 // credentials file a login leaves is the scratch one and never the real one.
 //
 // Two things are not the real worker, and say so where they are made: the
-// "Mac" (the owner's token on the sync API, as an engine would use it) and
+// "Mac" (the superadmin's device token on the sync API, as an engine would
+// use it) and
 // the worker that is behind (a stand-in that lacks the later features —
 // exit 7 cannot be had from a worker that is current). The terminal steps
 // are skipped, out loud, where there is no script(1).
@@ -53,7 +54,8 @@ if (!existsSync(BIN)) {
 }
 const CLI_VERSION = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(ROOT, "cli/Cargo.toml"), "utf8"))?.[1];
 
-const OWNER = "owner-secret"; // what serve-worker.mjs binds the domain with
+/** The superadmin's device sign-in, which serve-worker.mjs traded its key for and printed. */
+let OWNER;
 const SCRATCH = mkdtempSync(join(tmpdir(), "doklin-drive-cli-"));
 const sha256 = (input) => createHash("sha256").update(input).digest("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -125,6 +127,7 @@ await new Promise((resolve, reject) => {
   let said = "";
   const hear = (chunk) => {
     said += chunk;
+    OWNER ??= /superadmin token: ([0-9a-f]{64})/.exec(said)?.[1];
     if (said.includes("cloud worker on")) resolve();
   };
   child.stdout.on("data", hear);
@@ -642,7 +645,8 @@ await check("ls: folders, documents with their versions and public addresses, pl
   const home = doc(root, "Home");
   const plan = doc(projects, "Projects/plan");
   return {
-    "the root's folders": same(root.folders, ["Projects"]) && root.dir === "",
+    // Sherin's Private is a section of hers, so her agents see it too.
+    "the root's folders": same(root.folders, ["Private", "Projects"]) && root.dir === "",
     "the root's documents": same(root.documents.map((d) => d.path), ["Comments", "Diagram", "Home", "Ideas", "Scratch", "Sizes"]),
     "no plain files at the root": same(root.files, []),
     "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
@@ -1429,7 +1433,11 @@ if (!canTty) {
     const json = await t(["whoami", "--json"]);
     return {
       login: login.code === 0 && login.out.includes(`Logged in to Notes (${DOMAIN}) as Terminal bot. It may read, comment, edit and publish.`) && login.out.includes("doklin help agent") && !login.out.includes("dka_"),
-      whoami: whoami.out.includes(`Terminal bot on Notes (${DOMAIN})`) && whoami.out.includes("It may read, comment, edit and publish.") && /Worker version \d+\./.test(whoami.out),
+      whoami:
+        whoami.out.includes(`Terminal bot, Sherin's agent on Notes (${DOMAIN})`) &&
+        whoami.out.includes("It may read, comment, edit and publish.") &&
+        whoami.out.includes("It sees the shared workspace, and Private/.") &&
+        /Worker version \d+\./.test(whoami.out),
       ls: ls.out.includes("Projects/assets/\n") && /Projects\/plan  \[md · html\]  public: http/.test(ls.out) && ls.out.includes("Projects/status  [md]"),
       info: info.out.includes("Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /public\s+http/.test(info.out),
       read: read.out.includes("The halyard needs splicing.") && /Scratch · markdown · revision \d+/.test(read.out),

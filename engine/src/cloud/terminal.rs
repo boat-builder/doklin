@@ -66,8 +66,8 @@ async fn terminal_code(call: &WorkspaceCall) -> Result<String, String> {
     Ok(login.code)
 }
 
-/// `Sherin's terminal (Sherin's MacBook Pro)` — or, for a creator who has
-/// not said who they are, `Terminal (…)`. Capped as the worker caps it, so
+/// `Sherin's terminal (Sherin's MacBook Pro)` — or, when the domain does not
+/// say whose Mac this is, `Terminal (…)`. Capped as the worker caps it, so
 /// the name looked for is the name it keeps.
 fn terminal_name(person: &str, mac: &str) -> String {
     let person = person.trim();

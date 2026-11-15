@@ -42,6 +42,9 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     /// What this device may do here (`work`, `people.invite`, …). Empty
     /// means not known yet, never "nothing".
     public let can: [String]
+    /// The workspace's superadmin, by name — whom to ask for what only they
+    /// can do. Null until the domain has said.
+    public let superadmin: String?
     public let workerVersion: Int?
     public let `public`: [PublicPage]
     public let presence: [PresenceDevice]
@@ -159,9 +162,8 @@ public struct Redeemed: Decodable, Sendable {
 
 /// `cloud_people`: everything the People and Devices screens show.
 public struct People: Decodable, Equatable, Sendable {
-    /// `owner` or `member`.
+    /// `superadmin`, `owner` or `member`.
     public let role: String
-    public let creator: Bool
     /// Which of `members` is you.
     public let me: String?
     public let can: [String]
@@ -178,8 +180,9 @@ public struct MemberRecord: Decodable, Equatable, Sendable, Identifiable {
     public let id: String
     public let email: String
     public let name: String
+    /// `superadmin`, `owner` or `member`. The one superadmin nobody changes
+    /// or removes.
     public let role: String
-    public let creator: Bool
     public let createdAt: Int
     public let lastSeenAt: Int?
     public let devices: Int
@@ -227,7 +230,8 @@ public struct AgentRecord: Decodable, Equatable, Sendable, Identifiable {
     public let scopes: [String]
     public let createdAt: Int
     public let lastUsedAt: Int?
-    public let memberId: String?
+    /// Whose it is: one of the workspace's people.
+    public let memberId: String
     public let mine: Bool
     public let machines: [AgentMachine]
     public let code: AgentCode?

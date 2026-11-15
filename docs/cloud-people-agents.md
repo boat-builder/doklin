@@ -4,11 +4,12 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 
 ## Credentials
 
-- `auth.ts` matches the owner secret first, with no D1 read, so a D1 outage costs people, never the creator.
-- The secret's holder is the **creator**: always an owner; their member row (bind, or `cloud_adopt_owner`) is the one in `creator` and is never removed or demoted.
-- A token carries its person's `members.role`, read on every request, so a role change bites on the next call. There can be several owners.
+- **Every credential is a row.** No device is matched any other way, so none is special. A database that cannot answer is `503` for every bearer, never `401`: a `401` is what stops a Mac for good.
+- **The key** (`OWNER_TOKEN`) is nobody's sign-in. As a bearer it is answered on `GET /api/meta` (`key: true`, no `you`) and `POST /api/auth/recover`, and `403` on every other route. The recover trades it for a device token as the superadmin and spends it in the same batch, first (`spent_keys`, by sha256; a wipe keeps it), so a copy left in an agent's chat lets nobody in.
+- **The superadmin** is the one person the `superadmin` table names: whoever last traded a key, which only the Cloudflare account can set. A trade naming another email moves the role to them — the only way it moves; nothing in the app hands it over — and the one before keeps `owner` on their row. The role is theirs on every device of theirs. Their row is never removed or demoted, and only they sign out a device of theirs.
+- A token carries its person's role (`superadmin` off that table, else `members.role`), read on every request, so a role change bites on the next call. There can be several owners.
 - Who may do what is one table: `can(role, action)` in `roles.ts`. Every gated route asks it; `/api/meta` answers the caller's row as `you.can` and the app hides by it (`may` / `mayOn`, `src/cloud.ts`; an empty `can` on a status means not yet known, so the control shows). Change a permission there, nowhere else.
-- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners only = invite, remove, sign out, roles, other people's agents, bind, wipe.
+- A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners = invite, remove, sign out, roles, other people's agents, every public address. The superadmin alone = bind, wipe, the update card (`workspace.manage`), and a new code for somebody who has signed in before (`people.recover`).
 - Nobody removes or demotes their own row, or signs out the device the call is made with.
 - Codes are 100 bits (Crockford base32): no throttle, lockout or counter. Revoking a row bites on the next request.
 - `last_seen_at` (beat) and `last_used_at` (agent request) move at most hourly.
@@ -17,7 +18,7 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 
 - A member is keyed by normalized email (`m-` + 8 hex): re-inviting an address reaches the same person. Member ids enter the manifest, emails never.
 - **A removed person's row is never deleted** (`members.disabled`): out of the People list and unable to sign in, still in the directory so what they wrote keeps their name. Inviting the address again is the same person, a member, with their Private; restricted folders they were in are not given back.
-- The address is never verified, so a code is whoever redeems it. Once somebody has signed in as a person (`lastSeenAt` set — the redeem sets it — or the creator's row), a new code for them is only theirs or the creator's to make; before that the row is an invitation any owner may re-issue (`mayInviteAgain`, `src/cloud.ts` ⇄ `mayInviteAgain`, the iPhone's `People.swift` ⇄ `createInvite`, `api.ts`: **change all three**).
+- The address is never verified, so a code is whoever redeems it. Once somebody has signed in as a person (`lastSeenAt` set — a redeem or a trade sets it — or the superadmin's row), a new code for them is only theirs or the superadmin's to make: the superadmin controls the account the workspace is stored on and can read all of it anyway. Before that the row is an invitation any owner may re-issue (`mayInviteAgain`, `src/cloud.ts` ⇄ `mayInviteAgain`, the iPhone's `People.swift` ⇄ `createInvite`, `api.ts`: **change all three**).
 - Invite: the owner's Mac mints `dkln-XXXXX-XXXXX-XXXXX-XXXXX` (`invite.rs`) and sends only its sha256; 7 days default; cap `MAX_DAYS` ⇄ `MAX_INVITE_TTL_MS`, **change both**. Line: `doklin-invite <endpoint> <code>`. `normalize_code` ⇄ `normalizeCode` (`members.ts`) must match exactly: **change both**.
 - Redeem runs first (`/api/meta` is behind the gate): `cloud_redeem`, then probe, `cloud_join`. The code is spent at redeem; later failures retry the probe only.
 - `CloudPeople.tsx` asks (`cloud_people`), never stores: no role is on disk. Everyone reads the list; lists a role may not act on come back empty.
@@ -28,9 +29,8 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 
 - A device (a Mac, an iPhone) is a row in `tokens`: one sign-in, one device. It gets there by `POST /api/auth/join` and no other way — with an invite somebody made for its person, or a **device code** that person made for themselves (`cloud_device_code` → `POST /api/auth/devices/code`).
 - To the domain a device code is that person's pending invite: same table, same grammar, same line (`doklin-invite <endpoint> <code>`), same redeem, one pending code a person. Never give it a prefix, a table or a route of its own to redeem.
-- **No person's token is ever shown or carried between two devices.** `cloud_token` answers only the Mac that holds the domain's secret (`creator` in `cloud.json`), for the creator to keep a copy of: the door that takes it (*Open with the domain's token*) is the way back in when every device is lost, never how one is added.
-- That Mac is not a device row: not listed, not signed out. The secret asks for a device code as the creator's person and is refused (`409 no_identity`) until they have one (`cloud_adopt_owner`). The creator's other devices are rows like anyone's — role `owner`, `creator: false` — and obey a removal.
-- Everyone lists and signs out their own (`devices.own`); an owner anybody's (`people.remove`). Somebody else's is a `404` to a member.
+- **No token or key is ever shown or carried between two devices.** Lost every device: a member asks the superadmin for a new code; the superadmin recovers with the Cloudflare account ([cloud.md](cloud.md) *Flows*).
+- Everyone lists and signs out their own (`devices.own`); an owner anybody's but the superadmin's (`people.remove`; `409` for one of theirs). Somebody else's is a `404` to a member.
 - Signing a device out is a removal (`removed_tokens`: it deletes its copy). A device leaving is not: `DELETE /api/auth/session` forgets the row and says nothing. Disconnect calls it, bounded by `END_SESSION_WAIT` and never waited on to succeed; a wipe does not (it empties the table).
 - `DEVICE_CODE_MINUTES` (`invite.rs`) is the lifetime; the worker's `MAX_DEVICE_CODE_TTL_MS` is looser only to absorb clock skew.
 - A join whose open folder carries that workspace's marker offers *Resume* (`CloudSetup.tsx`): the only way a disconnected Mac's folder syncs again, since nobody can type a token for it.
@@ -40,7 +40,7 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - **Only `401 {removed: true}` deletes** (`RemoteError::Removed`). Never infer it from another refusal: a D1 outage answers a bare `401` to every member at once.
 - The engine exits `Exit::Removed`; `access_removed` then deletes the folder outright (not the Trash), the local version stores (the workspace's and each section's) and the sync state, drops the `cloud.json` entry and emits `cloud-removed`. Nothing in the cloud is deleted.
 - `remove_copy` deletes only a folder whose marker names that domain and `wsId`, resolved through symlinks, and never a path that holds the home directory.
-- The creator's Mac never obeys it (`creator` in `cloud.json`, written on the first probe that says so): that folder is the user's own.
+- Every device obeys it, the superadmin's included.
 - A removal never lapses: an offline Mac deletes when it next reaches the domain. A wipe empties `removed_tokens`, so it deletes nobody's copy.
 - `cloud_removed` returns the removals since launch, for a window that was not listening; a window dedupes by `root` + `at`.
 
@@ -52,7 +52,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - **Outside a space it does not exist**, for owners too: same `404` as an unknown id, no name, no count. Presence shows a person is here without the path; leases in it are not listed.
 - Nothing about a space is in the shared manifest, the shared blobs or the shared version store.
 - Everyone in a restricted folder is equal. The last person cannot leave (`409`); a folder whose last person was removed from the workspace stays stored with nobody in it.
-- A Private's id is its person's (`p-<member hex>`), so it cannot be made twice; it never has a second person. A creator with no member row has none.
+- A Private's id is its person's (`p-<member hex>`), so it cannot be made twice; it never has a second person.
 - `spaces.etag` mirrors the space's manifest etag so one poll covers every space. It is written after each manifest write through the worker (`noteEtag`; `commit.ts` too) and repaired by any manifest read that finds it stale. A writer that bypasses both leaves other Macs blind.
 - An owner (`pages.manage`) is told of every public address and can take any page down, including one in a space they are not in — and of such a page only what its address tells anyone (`everyPage.ts`). Nothing else about a space reaches an owner.
 - A public address is one space's for the whole domain: `addresses.slug` is the primary key, claimed before the manifest is stored and released after (`claimAddresses`, called by `putManifest` and `commit`). The registry may hold a claim its space failed to store, never lack one it stored. The shared workspace's claims are best effort (its sync never waits on D1), so a space's claim is also checked against the shared map.
@@ -67,7 +67,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 
 ## Agents
 
-- An agent (`a-` + 8 hex) is a name, scopes and the person it belongs to (`agents.member_id`; NULL is the creator's); not a member. The sync cycle has no agent code; the app's agent calls are `HttpRemote` methods, off the `Remote` trait.
+- An agent (`a-` + 8 hex) is a name, scopes and the person it belongs to (`agents.member_id`); not a member. The sync cycle has no agent code; the app's agent calls are `HttpRemote` methods, off the `Remote` trait.
 - **An agent sees exactly what its person sees**: the shared workspace, their Private, the restricted folders they are in. Its token's `Auth.memberId` is its person, so every "is this person in this space" is the question a Mac's token is asked, on every request: added to a folder, taken out, the agent follows on its next call. Scopes limit what it does there, never where. Nothing else widens or narrows it.
 - Anyone has agents of their own (`agents.own`). Only its person changes one or mints it a login code: a code is a way in as that person, the reason an invite code for somebody who has signed in is theirs to make. An owner (`agents.manage`) is listed everybody's and may remove one or log a machine out, nothing more; to anyone else another person's agent is a `404`.
 - Removing a person deletes their agents. Inviting them again brings none back.

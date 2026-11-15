@@ -4,11 +4,8 @@ import SwiftUI
 /// This person's devices here: the Macs and iPhones signed in as them, each
 /// on a sign-in of its own, so any one can be signed out without touching
 /// the others — every one but this iPhone, which leaves by being removed
-/// from it. Another is added with a line that works once.
-///
-/// The phone never holds the domain's own token — it joins with a line,
-/// always — so nothing here is about that token: it is shown on the Mac
-/// that holds it.
+/// from it. Another is added with a line that works once. No device is
+/// special: the superadmin's are rows like anybody's.
 struct DevicesView: View {
     @State private var model: PeopleModel
     @State private var question: Question?
@@ -96,8 +93,24 @@ struct DevicesView: View {
                     .accessibilityIdentifier("device-\(device.named ?? device.id)")
                 }
             }
+
+            Section("If you lose every device") {
+                Hint(loseEveryDevice(people))
+                    .accessibilityIdentifier("lose-every-device")
+            }
         }
         .listStyle(.insetGrouped)
         .refreshable { await model.load() }
+    }
+
+    /// The way back in, as the Mac's Devices tab says it (CloudDevices.tsx).
+    private func loseEveryDevice(_ people: People) -> String {
+        if people.role == "superadmin" {
+            return "On a new Mac: the gear → Cloud… → Recover with your Cloudflare account. An agent puts a fresh key on \(workspace.domain)’s worker, and that Mac signs in as you."
+        }
+        if let superadmin = people.superadmin {
+            return "\(superadmin.name.isEmpty ? superadmin.email : superadmin.name), the superadmin, can make you a new code to join with."
+        }
+        return "The workspace’s superadmin can make you a new code to join with."
     }
 }

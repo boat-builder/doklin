@@ -5,16 +5,16 @@
 //
 // Not connected: three doors — join a workspace with a line (an invite
 // somebody sent, or a code from another device of your own), create one from
-// this folder on a domain of your own, or get back into one you made with the
-// domain's own token. Connected: the workspace and its phase, sync now /
+// this folder on a domain of your own, or recover one with its Cloudflare
+// account after every device is gone. Connected: the workspace and its phase, sync now /
 // pause, who else is here, the held mass-deletion waiting for a word, the
 // worker's version against this app's, adding a device, disconnect, and the
 // danger zone: erase everything on the domain (which frees it), then the
 // teardown prompt for the agent. Who is in the workspace, their devices and
 // its agents are the workspace menu's (PeopleDialog.tsx).
 //
-// What only an owner may do — the worker, the danger zone — is hidden from a
-// member by the same table the domain decides with (`mayOn`).
+// What only the superadmin may do — the worker, the danger zone — is hidden
+// from everyone else by the same table the domain decides with (`mayOn`).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -65,7 +65,7 @@ export default function CloudPanel({
   pendingDeletePaths,
   onClose,
   onConnect,
-  onJoin,
+  onRecover,
   onRedeem,
   onAddDevice,
   onUpdateWorker,
@@ -82,7 +82,9 @@ export default function CloudPanel({
   pendingDeletePaths: string[];
   onClose: () => void;
   onConnect: () => void;
-  onJoin: () => void;
+  /** Every device is gone: get back in with the Cloudflare account — the
+   *  wizard's recover mode (CloudSetup.tsx). */
+  onRecover: () => void;
   /** This Mac has a line to join with — an invite, or a code from another
    *  device of its person's: the wizard's third mode (CloudSetup.tsx). */
   onRedeem: () => void;
@@ -214,8 +216,8 @@ export default function CloudPanel({
           <button className="modal-btn" data-testid="connect-domain" disabled={!root} onClick={onConnect}>
             Create a workspace
           </button>
-          <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
-            Open with the domain’s token
+          <button className="modal-btn" data-testid="recover-domain" onClick={onRecover}>
+            Recover with your Cloudflare account
           </button>
         </div>
         {!root && <p className="cloud-hint">Open a folder first to create a workspace from it.</p>}
@@ -223,8 +225,8 @@ export default function CloudPanel({
           Joining takes one line: the invite somebody sent you, or — for a workspace you are
           already in — the line another device of yours makes under Devices → Add a device.
           Creating one turns the open folder into a workspace you can invite people to. The third
-          door is the way back into a workspace you made when every device is gone: it wants the
-          domain’s own token.
+          door is the way back in for whoever controls a workspace’s Cloudflare account, when
+          every device is gone.
         </p>
       </>
     );
@@ -274,8 +276,8 @@ export default function CloudPanel({
     const paused = cloud.phase === "paused";
     const others = cloud.presence;
     const pages = cloud.public.length;
-    // An owner's, hidden from a member — and offered while the domain has not
-    // said, which is every worker from before roles (`mayOn`).
+    // The superadmin's, hidden from everyone else — and offered while the
+    // domain has not said, which is every worker from before roles (`mayOn`).
     const manages = mayOn(cloud, "workspace.manage");
     body = (
       <>
@@ -313,9 +315,8 @@ export default function CloudPanel({
           <p className="cloud-hint cloud-warn">
             {cloud.domain} doesn’t accept this Mac’s sign-in, so nothing syncs. Your files here are
             untouched. Disconnect this Mac, then join again with this folder open: with a line from
-            another device of yours (Devices → Add a device), or an invite from an owner. If this
-            Mac made the workspace and its worker was redeployed with a new token, open it with
-            that token instead.
+            another device of yours (Devices → Add a device), or an invite from an owner. Without
+            either, whoever controls the workspace’s Cloudflare account can recover it with that.
           </p>
         )}
         {cloud.phase === "offline" && (
@@ -363,7 +364,10 @@ export default function CloudPanel({
               {cloud.phase === "worker-outdated"
                 ? "This Mac’s changes are waiting on the update."
                 : "Sync still works; the update brings the worker up to what this app expects."}
-              {!manages && " Updating it is for whoever set the domain up — ask an owner."}
+              {!manages &&
+                (cloud.superadmin
+                  ? ` Updating it is the superadmin’s — ask ${cloud.superadmin}.`
+                  : " Updating it is the superadmin’s — whoever set the domain up.")}
             </p>
             {manages && (
               <div className="modal-buttons">

@@ -64,8 +64,7 @@ pub struct CloudStatus {
     /// know whether somebody *else* did a thing.
     pub me: String,
     /// The same person as the domain's id for them — which of a folder's
-    /// `members` is this Mac. None until the domain has said, and for a
-    /// creator who never said who they are.
+    /// `members` is this Mac. None until the domain has said.
     pub me_id: Option<String>,
     /// What this Mac's credential may do here, in the words of the worker's
     /// role table (`work`, `people.invite`, …) — what every surface hides
@@ -73,6 +72,10 @@ pub struct CloudStatus {
     /// worker that predates the table; a surface reads that as "not known",
     /// never as "nothing" (src/cloud.ts `mayOn`).
     pub can: Vec<String>,
+    /// The workspace's superadmin, by name — whom a surface says to ask for
+    /// what only they can do (an update of the worker). None until the
+    /// domain has said.
+    pub superadmin: Option<String>,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
     /// The version store's mirror — null when this worker has no `versions`
@@ -215,19 +218,10 @@ pub struct Probe {
     pub workspace: Option<WorkspaceRecord>,
 }
 
-/// The domain's own token, as the Mac that made the workspace holds it: the
-/// creator's copy to keep for getting back in when every device is lost.
-/// Never how a device is added (`DeviceCode`), and never carried by a status.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Credentials {
-    pub endpoint: String,
-    pub token: String,
-}
-
-/// `cloud_redeem`: this Mac's own credential, and who the domain says the
-/// person holding it is. The token goes straight into `cloud_join`, or into
-/// `cloud_resume` when the open folder is already that workspace.
+/// `cloud_redeem` and `cloud_recover`: this Mac's own credential, and who the
+/// domain says the person holding it is. The token goes straight into
+/// `cloud_join`, `cloud_connect` (a fresh domain), or `cloud_resume` when the
+/// open folder is already that workspace.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Redeemed {
@@ -273,12 +267,10 @@ pub struct DeviceCode {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct People {
-    /// `owner` or `member`.
+    /// `superadmin`, `owner` or `member`.
     pub role: String,
-    /// This Mac holds the domain's own secret: the workspace's creator.
-    pub creator: bool,
     /// The person this Mac is, by member id — which row in `members` is
-    /// "you". None for a creator who has not yet said who they are.
+    /// "you". None only from a worker too old to say.
     pub me: Option<String>,
     /// What that role may do, in the worker's words (`people.invite`, …).
     pub can: Vec<String>,
@@ -286,15 +278,13 @@ pub struct People {
     pub device_id: String,
     /// The row in `devices` that is the credential this Mac syncs with.
     /// Never offered for signing out: that would delete the copy in hand.
-    /// None for the creator's secret.
     pub token_id: Option<String>,
     /// Everyone, newest last.
     pub members: Vec<MemberRecord>,
     /// The pending, unexpired invites. Empty for whoever may not invite.
     pub invites: Vec<InviteRecord>,
     /// The signed-in devices: this person's own, and for an owner
-    /// everybody's. The Mac that holds the domain's secret is not among them
-    /// — that credential has no row (remote.rs).
+    /// everybody's.
     pub devices: Vec<DeviceRecord>,
 }
 

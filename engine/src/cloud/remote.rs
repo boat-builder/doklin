@@ -2,7 +2,7 @@
 //! engine — merges, conflicts, tombstones, the public map, the flows — runs
 //! in tests against an in-memory fake with the worker's CAS semantics
 //! (tests.rs), and in the app against `HttpRemote`: the sync API of
-//! cloud-worker/README.md, JSON over HTTPS with the owner token as bearer.
+//! cloud-worker/README.md, JSON over HTTPS with this device's token as bearer.
 //! Nothing outside this module holds a token or opens a connection.
 
 use std::time::Duration;
@@ -49,33 +49,35 @@ pub struct Meta {
     pub workspace: Option<WorkspaceRecord>,
     #[serde(default)]
     pub you: Option<Identity>,
+    /// True when the bearer is the domain's key, which is nobody's sign-in:
+    /// the worker answers it the probe and nothing else, and the app trades
+    /// it for a sign-in of its own (`HttpRemote::recover`).
+    #[serde(default)]
+    pub key: bool,
+    /// The workspace's superadmin — whom to ask for what only they can do.
+    /// None until somebody has traded a key, and from a worker before v17.
+    #[serde(default)]
+    pub superadmin: Option<Person>,
     /// The directory: every person's id and display name, and nothing else.
     /// The People list — addresses, devices, roles — is a route of its own.
     #[serde(default)]
     pub people: Vec<Person>,
 }
 
-/// Who the bearer is. `member_id` is the id this Mac's work is signed with;
-/// it is None for a creator who has never adopted an identity, whose access
-/// comes from the env secret and needs no row at all.
+/// Who the bearer is. `member_id` is the id this Mac's work is signed with.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
-    /// `owner` or `member` — the role on this person's row, or `owner` for
-    /// the domain's own secret.
+    /// `superadmin`, `owner` or `member` — the role this person holds.
     #[serde(default)]
     pub role: String,
-    /// True when the bearer is the domain's secret: the workspace's creator.
-    #[serde(default)]
-    pub creator: bool,
     /// What that role may do, as the worker's one table spells it
     /// (cloud-worker/src/roles.ts) — what the app hides the rest by. Empty
     /// from a worker older than v11, which had no such table to answer from.
     #[serde(default)]
     pub can: Vec<String>,
-    /// Which row of the signed-in Macs this credential is (`t-…`); None for
-    /// the domain's own secret, which is no row. What keeps the app from
-    /// offering to sign out the Mac it is running on.
+    /// Which row of the signed-in devices this credential is (`t-…`). What
+    /// keeps the app from offering to sign out the Mac it is running on.
     #[serde(default)]
     pub token_id: Option<String>,
     #[serde(default)]
@@ -116,14 +118,11 @@ pub struct MemberRecord {
     pub email: String,
     #[serde(default)]
     pub name: String,
-    /// `owner` or `member`. It is the person's, and every Mac they are signed
-    /// in on carries it: an owner makes another by changing this.
+    /// `superadmin`, `owner` or `member`. It is the person's, and every
+    /// device they are signed in on carries it: an owner makes another by
+    /// changing this. The one superadmin is nobody's to change or remove.
     #[serde(default)]
     pub role: String,
-    /// The person who holds the domain's secret. Always an owner, and the one
-    /// row nobody can remove or make a member.
-    #[serde(default)]
-    pub creator: bool,
     #[serde(default)]
     pub created_at: u64,
     /// When a Mac of theirs last beat, and before any has, when they first
@@ -172,10 +171,6 @@ pub struct RedeemedToken {
 /// lists it. Never the credential: its person, and an owner, are told who
 /// holds one and may take it away, never what it is — a list of tokens would
 /// be a list of keys.
-///
-/// The Mac that holds the domain's own secret is not in here at all. It is
-/// matched against no row, so there is nothing to list and nothing to revoke
-/// but the secret itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRecord {
@@ -214,10 +209,9 @@ pub struct AgentRecord {
     /// When it last made a request, to the hour. None until it has.
     #[serde(default)]
     pub last_used_at: Option<u64>,
-    /// Whose it is: the member it belongs to. None for a creator who has not
-    /// said who they are.
+    /// Whose it is: the member it belongs to.
     #[serde(default)]
-    pub member_id: Option<String>,
+    pub member_id: String,
     /// Whether that is whoever asked. An agent that is somebody else's is
     /// listed to an owner, who may remove it and nothing more.
     #[serde(default)]
@@ -505,20 +499,10 @@ pub trait Remote: Send + Sync + 'static {
     /// last-seen — the People list, which every person here may read.
     fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send;
 
-    /// `POST /api/auth/members` (the domain's secret only): the creator
-    /// saying who they are. Identity, never authority — the env secret keeps
-    /// authenticating them either way, and losing this row costs a name, not
-    /// access.
-    fn adopt_owner(
-        &self,
-        email: &str,
-        name: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send;
-
     /// `PATCH /api/auth/members/<id>` (owner): make someone an owner, or a
     /// member again. Every Mac they are signed in on carries the new role on
     /// its next request. The worker refuses the caller's own row and the
-    /// creator's, with a sentence that says which.
+    /// superadmin's, with a sentence that says which.
     fn set_member_role(
         &self,
         id: &str,
@@ -528,7 +512,7 @@ pub trait Remote: Send + Sync + 'static {
     /// `DELETE /api/auth/members/<id>` (owner): the person and every
     /// credential they hold, in one batch. Each of their Macs is told so on
     /// its next request, and deletes its copy. Refused, like a role change,
-    /// for the caller's own row and the creator's.
+    /// for the caller's own row and the superadmin's.
     fn delete_member(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
     /// `GET /api/auth/invites` (owner): the pending, unexpired ones.
@@ -552,16 +536,15 @@ pub trait Remote: Send + Sync + 'static {
     /// owner, everybody's.
     fn list_devices(&self) -> impl std::future::Future<Output = RemoteResult<Vec<DeviceRecord>>> + Send;
 
-    /// `DELETE /api/auth/devices/<id>` (its person, or an owner): sign one
-    /// device out. It takes effect on that device's very next request — the
+    /// `DELETE /api/auth/devices/<id>` (its person, or an owner — but a
+    /// superadmin's device is theirs alone): sign one device out. It takes effect on that device's very next request — the
     /// bearer resolves through the table, so there is no session to expire —
     /// and that device deletes its copy when it hears.
     fn sign_out_device(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
     /// `DELETE /api/auth/session`: this device ending its own sign-in. The
     /// domain forgets it and tells it to delete nothing — leaving is not
-    /// being shown the door. Refused for the domain's secret, which is no
-    /// sign-in.
+    /// being shown the door.
     fn end_session(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
@@ -642,6 +625,29 @@ impl HttpRemote {
             let res = expect_status(res).await?;
             read_list(res, kind).await
         }
+    }
+}
+
+/// Trading the domain's key. Inherent rather than part of [`Remote`] for the
+/// reason the agent routes below are: the engine never trades — the
+/// manager's commands do (mod.rs), holding an `HttpRemote` whose bearer is
+/// the key.
+impl HttpRemote {
+    /// `POST /api/auth/recover`: trade the key this remote holds for this
+    /// device's own sign-in, as the superadmin — `email`'s person, who
+    /// becomes it, or with `None` the superadmin there is. The key works once:
+    /// a spent one, like a wrong one, is `Unauthorized`.
+    pub async fn recover(&self, email: Option<&str>, name: Option<&str>, device_name: &str) -> RemoteResult<RedeemedToken> {
+        let body = json!({ "email": email, "name": name, "deviceId": self.device_id, "deviceName": device_name });
+        let res = self
+            .auth(self.client.post(self.url("auth/recover")))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&body).unwrap_or_default())
+            .send()
+            .await
+            .map_err(transport_err)?;
+        let res = expect_status(res).await?;
+        res.json::<RedeemedToken>().await.map_err(transport_err)
     }
 }
 
@@ -1310,27 +1316,6 @@ impl Remote for HttpRemote {
     }
     fn list_members(&self) -> impl std::future::Future<Output = RemoteResult<Vec<MemberRecord>>> + Send {
         self.list_of("members")
-    }
-
-    fn adopt_owner(
-        &self,
-        email: &str,
-        name: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
-        let body = json!({ "email": email, "name": name });
-        async move {
-            let res = self
-                .auth(self.client.post(self.url("auth/members")))
-                .header("content-type", "application/json")
-                .body(serde_json::to_vec(&body).unwrap_or_default())
-                .send()
-                .await
-                .map_err(transport_err)?;
-            let res = expect_status(res).await?;
-            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
-            serde_json::from_value(v.get("member").cloned().unwrap_or_default())
-                .map_err(|e| RemoteError::Other(format!("the domain's answer wasn't a person: {}", e)))
-        }
     }
 
     fn set_member_role(

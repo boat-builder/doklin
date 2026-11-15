@@ -48,7 +48,8 @@ import { join } from "node:path";
 import { SEED_FILES } from "../cloud-worker/test/seed.mjs";
 
 const ROOT = new URL("../", import.meta.url).pathname;
-const OWNER = "owner-secret"; // what serve-worker.mjs binds the domain with
+/** The superadmin's device sign-in, which serve-worker.mjs traded its key for and printed. */
+let OWNER;
 const sha256 = (input) => createHash("sha256").update(input).digest("hex");
 
 let workerPid = null;
@@ -88,6 +89,7 @@ await new Promise((resolve, reject) => {
   let said = "";
   const hear = (chunk) => {
     said += chunk;
+    OWNER ??= /superadmin token: ([0-9a-f]{64})/.exec(said)?.[1];
     if (said.includes("cloud worker on")) resolve();
   };
   child.stdout.on("data", hear);
@@ -107,17 +109,10 @@ const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 const asOwner = { authorization: `Bearer ${OWNER}`, "content-type": "application/json", "x-doklin-device": "d-drive", "x-doklin-client": "0.0.0-drive" };
 
-// A device is added by a person, for themselves, and the domain's secret is
-// nobody until its holder says who they are: say so, as the Mac's People
-// view does, then mint the code a second device of theirs joins with.
-{
-  const res = await fetch(`${WORKER}/api/auth/members`, {
-    method: "POST",
-    headers: asOwner,
-    body: JSON.stringify({ email: "ada@example.com", name: "Ada (drive)" }),
-  });
-  if (!res.ok) throw new Error(`could not say who the creator is: ${res.status} ${await res.text()}`);
-}
+if (!OWNER) throw new Error("the harness worker did not print the superadmin's token");
+
+// A device is added by a person, for themselves: the code another device of
+// Sherin's — the superadmin, whose Mac this script stands for — joins with.
 async function deviceLine() {
   const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
   const res = await fetch(`${WORKER}/api/auth/devices/code`, {
@@ -129,20 +124,20 @@ async function deviceLine() {
   return `doklin-invite ${WORKER} dkln-${canonical.match(/.{5}/g).join("-")}`;
 }
 
-/** Another device of Ada's — the Mac this script stands for — editing
+/** Another device of Sherin's — the Mac this script stands for — editing
  *  `path` now: it is here, and holds the document until it stops beating. */
 async function editingElsewhere(path) {
   const res = await fetch(`${WORKER}/api/poll`, {
     method: "POST",
     headers: asOwner,
-    body: JSON.stringify({ name: "Ada's Mac (drive)", path }),
+    body: JSON.stringify({ name: "Sherin's Mac (drive)", path }),
   });
   if (!res.ok) throw new Error(`could not say another device is editing ${path}: ${res.status} ${await res.text()}`);
   return `editing ${path}`;
 }
 
 /** The restricted folder called `name` deleted for everyone in it, on
- *  another device of Ada's: the domain's secret acts as her, and she is in
+ *  another device of Sherin's: she is in
  *  every folder she made. */
 async function deletedElsewhere(name) {
   const listed = await fetch(`${WORKER}/api/spaces`, { headers: asOwner });

@@ -123,7 +123,7 @@ final class EngineLiveTests: XCTestCase {
 
         // This device is one of its person's, and can add another.
         let people: People = try await Engine.shared.call("cloud_people", ["root": .string(root)])
-        XCTAssertEqual(people.role, "owner")
+        XCTAssertEqual(people.role, "superadmin")
         XCTAssertTrue(people.can.contains("devices.own"))
         XCTAssertTrue(people.devices.contains { $0.deviceName == "iPhone (engine drive)" }, "\(people.devices.map(\.deviceName))")
         let another: DeviceCode = try await Engine.shared.call("cloud_device_code", ["root": .string(root)])
@@ -133,7 +133,7 @@ final class EngineLiveTests: XCTestCase {
         // screens use: each change made, and the list read back.
         let roster = PeopleModel(workspace: workspace)
         await roster.load()
-        XCTAssertTrue(roster.people?.members.contains { $0.email == "ada@example.com" && $0.creator } ?? false, "\(String(describing: roster.people))")
+        XCTAssertTrue(roster.people?.members.contains { $0.email == "sherin@example.com" && $0.isSuperadmin } ?? false, "\(String(describing: roster.people))")
         let invited = await roster.invite(email: "kit@example.com", name: " Kit ", days: 1)
         XCTAssertTrue(invited, roster.problem ?? "")
         XCTAssertTrue(roster.invited?.blob.hasPrefix("doklin-invite ") ?? false)

@@ -18,15 +18,15 @@
 //
 // A person's role is data: `members.role`, read off the row their token
 // resolves to, so there can be several owners and one of them can make
-// another (roles.ts says what each role may do).
+// another (roles.ts says what each role may do). One person is more: the
+// superadmin, whom the one-row `superadmin` table names. Their row is never
+// removed or made a member, and only they sign out a device of theirs.
 //
-// The creator is not in here on the authenticating path. `OWNER_TOKEN` stays
-// the worker's env secret, compared with no database read, so a D1 outage
-// degrades a workspace to one credential instead of locking its creator out
-// altogether. The creator gets a member row all the same — for
-// attribution and for the People list — `adoptCreator` is what writes it, and
-// the one-row `creator` table says which row it is: that row is never removed
-// and never made a member.
+// The superadmin is whoever last traded the domain's key (`claimSuperadmin`):
+// the env secret `OWNER_TOKEN`, which only somebody who controls the
+// Cloudflare account can set. The key is never a sign-in. Trading it makes a
+// device token like any other, on the superadmin's row, and spends it —
+// `spent_keys` remembers it, so the same key never works twice.
 
 import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
@@ -38,9 +38,9 @@ export type Member = {
   id: string;
   email: string;
   name: string;
+  /** `superadmin` for the one row the `superadmin` table names; otherwise
+   *  the role on the row. */
   role: PersonRole;
-  /** The person who holds the domain's env secret. Always an owner. */
-  creator: boolean;
   createdAt: number;
   /** When a Mac of theirs last beat, to the hour — and, before any has, when
    *  they first traded a code in. Null means nobody has ever signed in as
@@ -51,9 +51,12 @@ export type Member = {
 /** A member plus how many devices they are signed in on — the People list. */
 export type MemberWithDevices = Member & { devices: number };
 
+/** What `members.role` itself holds: superadmin is a row of its own table. */
+type StoredRole = Exclude<PersonRole, "superadmin">;
+
 /**
- * What a bearer resolves to when it is a person's token, not the domain's
- * secret: who they are, and the role on their row. The role is read on every
+ * What a bearer resolves to when it is a person's token: who they are, and
+ * the role on their row. The role is read on every
  * request, so making someone an owner — or a member again — takes effect on
  * their very next call, exactly as a revocation does.
  */
@@ -159,27 +162,31 @@ type MemberRow = {
   id: string;
   email: string;
   name: string;
+  /** The role as `MEMBER_COLS` reads it: superadmin first. */
   role: string;
-  /** 1 when the `creator` table names this row. Every read selects it. */
-  creator: number;
   created_at: number;
   last_seen_at: number | null;
   disabled: number;
 };
 
-/** A member's columns, plus whether the `creator` table names the row. */
-const MEMBER_COLS = `m.id AS id, m.email AS email, m.name AS name, m.role AS role,
-                m.created_at AS created_at, m.last_seen_at AS last_seen_at, m.disabled AS disabled,
-                EXISTS (SELECT 1 FROM creator c WHERE c.member_id = m.id) AS creator`;
+/** A person's role in SQL, over a members row aliased `m`: superadmin when
+ *  the `superadmin` table names it, else what the row holds. */
+const ROLE_SQL = `CASE WHEN EXISTS (SELECT 1 FROM superadmin s WHERE s.member_id = m.id) THEN 'superadmin' ELSE m.role END`;
 
-const toRole = (raw: string): PersonRole => (raw === "owner" ? "owner" : "member");
+/** A member's columns, with the role as `ROLE_SQL` reads it. */
+const MEMBER_COLS = `m.id AS id, m.email AS email, m.name AS name, ${ROLE_SQL} AS role,
+                m.created_at AS created_at, m.last_seen_at AS last_seen_at, m.disabled AS disabled`;
+
+/** Rows a statement may change, over a members row's id: not the superadmin's. */
+const NOT_SUPERADMIN = "NOT IN (SELECT member_id FROM superadmin)";
+
+const toRole = (raw: string): PersonRole => (raw === "superadmin" || raw === "owner" ? raw : "member");
 
 const toMember = (r: MemberRow): Member => ({
   id: r.id,
   email: r.email,
   name: r.name,
   role: toRole(r.role),
-  creator: Number(r.creator) !== 0,
   createdAt: Number(r.created_at),
   lastSeenAt: r.last_seen_at == null ? null : Number(r.last_seen_at),
 });
@@ -198,17 +205,19 @@ const memberId = (): string => `m-${randomHex(4)}`;
  * at most once an hour per person (presence.ts), after the redeem that first
  * sets it.
  */
-export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | null> {
+export async function resolveToken(env: Env, bearerHash: string): Promise<TokenIdentity | "nobody" | null> {
+  // Null is a database that could not answer, which is not "nobody": the
+  // caller says the domain is unavailable rather than that the token is bad.
   return withDb(env, async (db) => {
     const row = await db
       .prepare(
-        `SELECT t.id AS token_id, m.id AS member_id, m.email, m.name, m.role
+        `SELECT t.id AS token_id, m.id AS member_id, m.email, m.name, ${ROLE_SQL} AS role
            FROM tokens t JOIN members m ON m.id = t.member_id
           WHERE t.hash = ? AND m.disabled = 0`,
       )
       .bind(bearerHash)
       .first<{ token_id: string; member_id: string; email: string; name: string; role: string }>();
-    if (!row) return null;
+    if (!row) return "nobody" as const;
     return {
       tokenId: row.token_id,
       memberId: row.member_id,
@@ -216,7 +225,7 @@ export async function resolveToken(env: Env, bearerHash: string): Promise<TokenI
       name: row.name,
       role: toRole(row.role),
     };
-  }).then((v) => v ?? null); // a database that cannot answer has authenticated nobody
+  });
 }
 
 /**
@@ -240,8 +249,7 @@ export async function isRemovedToken(env: Env, bearerHash: string): Promise<bool
 /* ---------- Members ---------- */
 
 /** Everyone here, with how many devices they hold — a removed person is not
- *  among them. Newest last, so the creator — who is written at bind — leads
- *  the list. */
+ *  among them. Newest last, so whoever set the workspace up leads the list. */
 export async function listMembers(env: Env): Promise<MemberWithDevices[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
@@ -281,23 +289,15 @@ export async function listDirectory(env: Env): Promise<{ id: string; name: strin
   });
 }
 
-/** The creator's own row — `"none"` when they have not said who they are,
- *  null when the database cannot say. Identity, never authority: the env
- *  secret is what authenticates them. */
-export async function creatorRow(env: Env): Promise<Member | "none" | null> {
-  return withDb(env, async (db) => {
-    const row = await db
-      .prepare(`SELECT ${MEMBER_COLS} FROM members m JOIN creator c ON c.member_id = m.id LIMIT 1`)
-      .first<MemberRow>();
-    return row ? toMember(row) : ("none" as const);
-  });
-}
-
-/** The creator's own row, if they have said who they are — how
- *  `GET /api/meta` can tell them what they are called. */
-export async function findCreator(env: Env): Promise<Member | null> {
-  const row = await creatorRow(env);
-  return row === "none" ? null : row;
+/** Who the superadmin is, by id and name — what `GET /api/meta` tells
+ *  everyone, so the app can say whom to ask. Null when there is none yet, or
+ *  the database cannot say. */
+export async function findSuperadmin(env: Env): Promise<{ id: string; name: string } | null> {
+  return withDb(env, (db) =>
+    db
+      .prepare("SELECT m.id AS id, m.name AS name FROM members m JOIN superadmin s ON s.member_id = m.id")
+      .first<{ id: string; name: string }>(),
+  ).then((v) => v ?? null);
 }
 
 /**
@@ -311,7 +311,7 @@ export async function upsertMember(
   env: Env,
   email: string,
   name: string | null,
-  role: PersonRole,
+  role: StoredRole,
 ): Promise<Member | null> {
   // A name that was actually supplied, or null. The distinction matters on
   // the conflict branch: re-inviting Ada without typing her name again must
@@ -356,58 +356,86 @@ export async function findMemberByEmail(env: Env, email: string): Promise<Member
   return found === null ? undefined : found.member;
 }
 
+/** What trading the domain's key can come to besides a sign-in: the key
+ *  was traded before, or nobody was named and there is no superadmin to be. */
+export type ClaimRefusal = "spent" | "no_identity";
+
 /**
- * Write (or rename) the creator's own member row. The creator authenticates
- * off the env secret, so this is identity, never authority — but it is what
- * makes the creator a *person* in the People list and in attribution.
+ * Trade the domain's key for a device sign-in as the superadmin — how a
+ * workspace gets its first device, and the way back in for whoever controls
+ * the Cloudflare account after every device is lost.
  *
- * One row is the creator's. Adopting a new address moves the mark to it and
- * makes the old row a plain member rather than deleting it: that row may
- * already be named in a manifest, and an address somebody stopped using
- * should not go on holding an owner's authority.
+ * `email` names who is at the keyboard; null means the superadmin there is
+ * now, coming back. Naming somebody else makes THEM the superadmin: setting
+ * the key proved they control the account the workspace is stored on, and
+ * that is what the role is. The person they replace keeps the owner role on
+ * their row. A person removed before is here again, an owner.
+ *
+ * The key is spent in the same batch, first: of two trades racing with one
+ * key, the second's batch fails on the primary key and writes nothing.
  */
-export async function adoptCreator(env: Env, email: string, name: string | null): Promise<Member | null> {
+export async function claimSuperadmin(
+  env: Env,
+  keyHash: string,
+  email: string | null,
+  name: string | null,
+  deviceId: string | null,
+  deviceName: string | null,
+  now = Date.now(),
+): Promise<Redeemed | ClaimRefusal | null> {
   const given = typeof name === "string" && name.trim() ? name.trim().slice(0, MAX_NAME_LEN) : null;
   return withDb(env, async (db) => {
-    // One batch, keyed by the address throughout: the row, the mark and the
-    // role move together or not at all, so a removal that lands in between
-    // cannot leave the mark on a row that is gone.
+    if (await db.prepare("SELECT 1 AS spent FROM spent_keys WHERE hash = ?").bind(keyHash).first()) {
+      return "spent" as const;
+    }
+    const who =
+      email ??
+      (await db
+        .prepare("SELECT m.email AS email FROM members m JOIN superadmin s ON s.member_id = m.id")
+        .first<string>("email"));
+    if (!who) return "no_identity" as const;
+
+    const token = randomHex(32);
+    const tokenId = `t-${randomHex(4)}`;
     await db.batch([
+      db.prepare("INSERT INTO spent_keys (hash, spent_at) VALUES (?, ?)").bind(keyHash, now),
       db
         .prepare(
           `INSERT INTO members (id, email, name, role, created_at, last_seen_at, disabled)
-           VALUES (?, ?, ?, 'owner', ?, NULL, 0)
-           ON CONFLICT(email) DO UPDATE SET name = COALESCE(?, members.name), disabled = 0`,
+           VALUES (?1, ?2, ?3, 'owner', ?4, ?4, 0)
+           ON CONFLICT(email) DO UPDATE SET name = COALESCE(?5, members.name), role = 'owner', disabled = 0,
+                                            last_seen_at = COALESCE(members.last_seen_at, ?4)`,
         )
-        .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), Date.now(), given),
-      db
-        .prepare("UPDATE members SET role = 'member' WHERE id IN (SELECT member_id FROM creator) AND email != ?")
-        .bind(email),
-      // The insert only sets the role on a *new* row; a person invited as a
-      // member first has to be made an owner.
-      db.prepare("UPDATE members SET role = 'owner' WHERE email = ?").bind(email),
+        .bind(memberId(), who, given ?? validName(null, who.split("@")[0] || "Member"), now, given),
       db
         .prepare(
-          `INSERT INTO creator (id, member_id) SELECT 1, id FROM members WHERE email = ?
+          `INSERT INTO superadmin (id, member_id) SELECT 1, id FROM members WHERE email = ?
            ON CONFLICT(id) DO UPDATE SET member_id = excluded.member_id`,
         )
-        .bind(email),
+        .bind(who),
+      db
+        .prepare(
+          `INSERT INTO tokens (hash, id, member_id, device_id, device_name, created_at)
+           SELECT ?, ?, id, ?, ?, ? FROM members WHERE email = ?`,
+        )
+        .bind(await sha256Hex(token), tokenId, deviceId, validName(deviceName, "A device"), now, who),
     ]);
-    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(email).first<MemberRow>();
-    return row ? toMember(row) : null;
+    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(who).first<MemberRow>();
+    if (!row) throw new Error("the superadmin's row did not land");
+    return { token, tokenId, member: toMember(row) };
   });
 }
 
 /** What changing a role, or removing a person, can come to besides done:
- *  nobody has that id, or the row is the creator's and stays as it is. */
-export type Refusal = "missing" | "creator";
+ *  nobody has that id, or the row is the superadmin's and stays as it is. */
+export type Refusal = "missing" | "superadmin";
 
 /**
  * Make someone an owner, or a member again. Their tokens carry the new role
- * on their next request — it is read off this row every time. The creator's
- * row is refused: it is an owner's for as long as the domain has a secret.
+ * on their next request — it is read off this row every time. The
+ * superadmin's row is refused: the role moves only by trading the key.
  */
-export async function setMemberRole(env: Env, id: string, role: PersonRole): Promise<Member | Refusal | null> {
+export async function setMemberRole(env: Env, id: string, role: StoredRole): Promise<Member | Refusal | null> {
   return withDb(env, async (db) => {
     const results = await db.batch([
       // An owner who stops being one may have made codes for anybody, and
@@ -418,18 +446,18 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
           `DELETE FROM invites
             WHERE ?1 = 'member'
               AND EXISTS (SELECT 1 FROM members WHERE id = ?2 AND role = 'owner' AND disabled = 0
-                             AND id NOT IN (SELECT member_id FROM creator))`,
+                             AND id ${NOT_SUPERADMIN})`,
         )
         .bind(role, id),
       db
         .prepare(
-          "UPDATE members SET role = ?1 WHERE id = ?2 AND disabled = 0 AND id NOT IN (SELECT member_id FROM creator)",
+          `UPDATE members SET role = ?1 WHERE id = ?2 AND disabled = 0 AND id ${NOT_SUPERADMIN}`,
         )
         .bind(role, id),
     ]);
     const member = await readHere(db, id);
     if (!member) return "missing" as Refusal;
-    return (results.at(-1)?.meta.changes ?? 0) > 0 ? member : ("creator" as Refusal);
+    return (results.at(-1)?.meta.changes ?? 0) > 0 ? member : ("superadmin" as Refusal);
   });
 }
 
@@ -446,8 +474,9 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
  *
  * Every token they held is written down in `removed_tokens` on the way out:
  * that is what tells each of their Macs, on its next request, that access was
- * taken away rather than merely lost (`isRemovedToken`). The creator's row is
- * refused — whoever holds the domain's secret cannot be removed from it.
+ * taken away rather than merely lost (`isRemovedToken`). The superadmin's row
+ * is refused — whoever controls the account the workspace is stored on
+ * cannot be removed from it.
  *
  * Removing an OWNER also withdraws every code nobody has used yet, whoever it
  * was for. An owner makes codes for other people's rows; one they made and
@@ -458,10 +487,10 @@ export async function setMemberRole(env: Env, id: string, role: PersonRole): Pro
 export async function removeMember(env: Env, id: string): Promise<true | Refusal | null> {
   return withDb(env, async (db) => {
     // Every statement carries the same guard, so the batch is all or nothing
-    // on the two facts that matter: the row is not the creator's, and the
+    // on the two facts that matter: the row is not the superadmin's, and the
     // person is still here. The role is read by the statements above the one
     // that resets it.
-    const here = "IN (SELECT id FROM members WHERE disabled = 0 AND id NOT IN (SELECT member_id FROM creator))";
+    const here = `IN (SELECT id FROM members WHERE disabled = 0 AND id ${NOT_SUPERADMIN})`;
     const results = await db.batch([
       db
         .prepare(
@@ -493,7 +522,7 @@ export async function removeMember(env: Env, id: string): Promise<true | Refusal
       db.prepare(`UPDATE members SET disabled = 1, role = 'member' WHERE id = ? AND id ${here}`).bind(id),
     ]);
     if ((results.at(-1)?.meta.changes ?? 0) > 0) return true as const;
-    return (await readHere(db, id)) ? ("creator" as Refusal) : ("missing" as Refusal);
+    return (await readHere(db, id)) ? ("superadmin" as Refusal) : ("missing" as Refusal);
   });
 }
 
@@ -531,7 +560,9 @@ export async function listDevices(env: Env, of: string | null): Promise<Device[]
   });
 }
 
-/** Sign one device out — one of `of`'s own, or anybody's (`null`, an owner).
+/** Sign one device out: one of `caller`'s own or, with `everyone` (an
+ *  owner), anybody's but the superadmin's, which only they sign out. Answers
+ *  "superadmin" when that is why nothing went.
  *  Takes effect on that device's very next request: the bearer resolves
  *  through this table, so there is no session to expire. Its presence row and
  *  its lease go in the same batch — a device that has just been shown the
@@ -539,18 +570,30 @@ export async function listDevices(env: Env, of: string | null): Promise<Device[]
  *  else, for the TTL's minute and a half. The token is written down in
  *  `removed_tokens` first, so that device is told its access was taken away
  *  and deletes its copy (`isRemovedToken`). */
-export async function signOutDevice(env: Env, id: string, of: string | null): Promise<boolean | null> {
-  const mine = "id = ?1 AND (?2 IS NULL OR member_id = ?2)";
+export async function signOutDevice(
+  env: Env,
+  id: string,
+  caller: string,
+  everyone: boolean,
+): Promise<boolean | "superadmin" | null> {
+  const mine = `id = ?1 AND (member_id = ?2 OR (?3 = 1 AND member_id ${NOT_SUPERADMIN}))`;
+  const flag = everyone ? 1 : 0;
   return withDb(env, async (db) => {
     const results = await db.batch([
       db
-        .prepare(`INSERT OR IGNORE INTO removed_tokens (hash, removed_at) SELECT hash, ?3 FROM tokens WHERE ${mine}`)
-        .bind(id, of, Date.now()),
-      db.prepare(`DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, of),
-      db.prepare(`DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, of),
-      db.prepare(`DELETE FROM tokens WHERE ${mine}`).bind(id, of),
+        .prepare(`INSERT OR IGNORE INTO removed_tokens (hash, removed_at) SELECT hash, ?4 FROM tokens WHERE ${mine}`)
+        .bind(id, caller, flag, Date.now()),
+      db.prepare(`DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, caller, flag),
+      db.prepare(`DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, caller, flag),
+      db.prepare(`DELETE FROM tokens WHERE ${mine}`).bind(id, caller, flag),
     ]);
-    return (results.at(-1)?.meta.changes ?? 0) > 0;
+    if ((results.at(-1)?.meta.changes ?? 0) > 0) return true;
+    if (!everyone) return false;
+    const theirs = await db
+      .prepare("SELECT 1 AS theirs FROM tokens WHERE id = ? AND member_id IN (SELECT member_id FROM superadmin)")
+      .bind(id)
+      .first();
+    return theirs ? ("superadmin" as const) : false;
   });
 }
 
@@ -650,9 +693,8 @@ export type RedeemResult = Redeemed | "expired" | "unknown";
  * somebody tried to use.
  *
  * The token is minted here, 256 bits, and returned exactly once; the database
- * keeps only its sha256. That is the same strength as the domain's own
- * secret, which matters because a person's token is not a limited account —
- * and, on an owner's row, it is an owner's.
+ * keeps only its sha256. That matters because a person's token is not a
+ * limited account — and, on an owner's row, it is an owner's.
  */
 export async function redeemInvite(
   env: Env,

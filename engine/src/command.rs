@@ -45,17 +45,16 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         "cloud_mint_token" => json(cloud::cloud_mint_token()),
         "cloud_parse_invite" => json(cloud::cloud_parse_invite(a.get("text")?)),
         "cloud_redeem" => json(cloud::cloud_redeem(core, a.get("endpoint")?, a.get("code")?).await?),
+        "cloud_recover" => json(
+            cloud::cloud_recover(core, a.get("endpoint")?, a.get("key")?, a.get("email")?, a.get("name")?).await?,
+        ),
         "cloud_probe" => json(cloud::cloud_probe(core, a.get("endpoint")?, a.get("token")?).await?),
         "cloud_marker" => json(cloud::cloud_marker(a.get("root")?)),
-        "cloud_token" => json(cloud::cloud_token(core, a.get("root")?)?),
         "cloud_device_code" => json(cloud::cloud_device_code(core, a.get("root")?).await?),
         "cloud_invite" => {
             json(cloud::cloud_invite(core, a.get("root")?, a.get("email")?, a.get("name")?, a.get("days")?).await?)
         }
         "cloud_people" => json(cloud::cloud_people(core, a.get("root")?).await?),
-        "cloud_adopt_owner" => {
-            json(cloud::cloud_adopt_owner(core, a.get("root")?, a.get("email")?, a.get("name")?).await?)
-        }
         "cloud_removed" => json(cloud::cloud_removed(core)?),
         "cloud_set_role" => {
             json(cloud::cloud_set_role(core, a.get("root")?, a.get("memberId")?, a.get("role")?).await?)

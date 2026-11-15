@@ -13,16 +13,19 @@ final class PeopleTests: XCTestCase {
     private let hour = 3_600_000
     private let day = 86_400_000
 
-    /// Ada made the workspace and is an owner; this iPhone is one of her
-    /// devices. Bea is invited and has never signed in; Cy has, on one device.
-    private func people(creator: Bool = false, can: [String] = ["work", "people.see", "people.invite", "people.remove", "people.roles", "devices.own", "agents.own"]) throws -> People {
+    private static let owner = ["work", "people.see", "people.invite", "people.remove", "people.roles", "devices.own", "agents.own"]
+
+    /// Ada is the workspace's superadmin; this iPhone is one of her devices,
+    /// unless `me` says it is somebody else's. Bea is invited and has never
+    /// signed in; Cy has, on one device.
+    private func people(me: String = "m-ada", can: [String] = PeopleTests.owner) throws -> People {
         let can = can.map { "\"\($0)\"" }.joined(separator: ",")
         return try decode(People.self, """
-        {"role":"owner","creator":\(creator),"me":"m-ada","can":[\(can)],"deviceId":"d-phone","tokenId":"t-phone",
+        {"role":"owner","me":"\(me)","can":[\(can)],"deviceId":"d-phone","tokenId":"t-phone",
          "members":[
-          {"id":"m-ada","email":"ada@example.com","name":"Ada","role":"owner","creator":true,"createdAt":0,"lastSeenAt":null,"devices":1},
-          {"id":"m-bea","email":"bea@example.com","name":"","role":"member","creator":false,"createdAt":0,"lastSeenAt":null,"devices":0},
-          {"id":"m-cy","email":"cy@example.com","name":"Cy","role":"member","creator":false,"createdAt":0,"lastSeenAt":\(Int(1_000_000 - 3 * hour)),"devices":1}],
+          {"id":"m-ada","email":"ada@example.com","name":"Ada","role":"superadmin","createdAt":0,"lastSeenAt":null,"devices":1},
+          {"id":"m-bea","email":"bea@example.com","name":"","role":"member","createdAt":0,"lastSeenAt":null,"devices":0},
+          {"id":"m-cy","email":"cy@example.com","name":"Cy","role":"member","createdAt":0,"lastSeenAt":\(Int(1_000_000 - 3 * hour)),"devices":1}],
          "invites":[{"id":"i-1","memberId":"m-bea","email":"bea@example.com","name":"","createdAt":0,"expiresAt":\(1_000_000 + 7 * day)}],
          "devices":[
           {"id":"t-phone","memberId":"m-ada","email":"ada@example.com","deviceId":"d-phone","deviceName":"iPhone","createdAt":0},
@@ -52,7 +55,8 @@ final class PeopleTests: XCTestCase {
         let people = try people()
         let now = 1_000_000
         let (ada, bea, cy) = (people.members[0], people.members[1], people.members[2])
-        XCTAssertEqual(people.summary(of: ada, now: now), "Made this workspace, on a Mac that holds the domain’s own token and isn’t counted here. 1 other device.")
+        XCTAssertEqual(people.summary(of: ada, now: now), "1 device")
+        XCTAssertEqual(people.superadmin?.id, "m-ada")
         XCTAssertEqual(people.summary(of: bea, now: now), "Invited — no device has traded the code in yet.")
         XCTAssertEqual(people.summary(of: cy, now: now), "1 device · seen 3 h ago")
         XCTAssertTrue(people.isYou(ada))
@@ -77,20 +81,33 @@ final class PeopleTests: XCTestCase {
         XCTAssertEqual(blank.label, "A device")
     }
 
-    func testNobodyChangesTheirOwnRowOrTheCreators() throws {
+    func testNobodyChangesTheirOwnRowOrTheSuperadmins() throws {
         let people = try people()
-        XCTAssertFalse(people.changeable(people.members[0]), "your own row, which is the creator's too")
+        XCTAssertFalse(people.changeable(people.members[0]), "your own row")
         XCTAssertTrue(people.changeable(people.members[1]))
+        let cy = try self.people(me: "m-cy")
+        XCTAssertFalse(cy.changeable(cy.members[0]), "the superadmin's row, to another owner")
+        XCTAssertTrue(cy.changeable(cy.members[1]))
         let member = try self.people(can: ["work", "people.see", "devices.own", "agents.own"])
         XCTAssertFalse(member.changeable(member.members[1]), "a member changes nobody")
     }
 
-    func testANewCodeForSomebodySignedInIsTheirsOrTheCreators() throws {
+    func testOnlyTheSuperadminSignsOutADeviceOfTheirs() throws {
+        let ada = try people()
+        XCTAssertTrue(ada.signsOut(devicesOf: ada.members[0]), "her own")
+        XCTAssertTrue(ada.signsOut(devicesOf: ada.members[2]))
+        let cy = try people(me: "m-cy")
+        XCTAssertFalse(cy.signsOut(devicesOf: cy.members[0]), "the superadmin's, to another owner")
+        XCTAssertTrue(cy.signsOut(devicesOf: cy.members[2]), "his own")
+    }
+
+    func testANewCodeForSomebodySignedInIsTheirsOrTheSuperadmins() throws {
         let owner = try people()
         XCTAssertTrue(owner.mayInviteAgain("m-bea"), "nobody has signed in as Bea")
         XCTAssertFalse(owner.mayInviteAgain("m-cy"), "Cy has signed in")
         XCTAssertTrue(owner.mayInviteAgain("m-ada"), "a code for yourself")
-        XCTAssertTrue(try people(creator: true).mayInviteAgain("m-cy"), "the creator may")
+        XCTAssertFalse(try people(me: "m-cy").mayInviteAgain("m-ada"), "the superadmin has signed in, by being it")
+        XCTAssertTrue(try people(can: PeopleTests.owner + ["people.recover"]).mayInviteAgain("m-cy"), "the superadmin may")
         XCTAssertFalse(try people(can: ["work"]).mayInviteAgain("m-bea"), "whoever may not invite may not")
     }
 

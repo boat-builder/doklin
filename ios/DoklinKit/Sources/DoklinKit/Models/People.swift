@@ -69,22 +69,33 @@ extension People {
     public func isThisDevice(_ device: DeviceRecord) -> Bool { device.id == tokenId }
 
     /// Whether a person's role or presence here can be changed from this
-    /// device: nobody changes their own row, and nobody the creator's.
+    /// device: nobody changes their own row, and nobody the superadmin's.
     public func changeable(_ member: MemberRecord) -> Bool {
-        !isYou(member) && !member.creator && (may("people.roles") || may("people.remove"))
+        !isYou(member) && !member.isSuperadmin && (may("people.roles") || may("people.remove"))
+    }
+
+    /// Whether this person may sign out a device of `member`'s: their own,
+    /// or anybody's but the superadmin's, whose devices are theirs alone. The
+    /// domain refuses the rest (CloudPeople.tsx asks the same).
+    public func signsOut(devicesOf member: MemberRecord) -> Bool {
+        isYou(member) || !member.isSuperadmin
     }
 
     /// Whether a new code may be made for a person already listed. Once
     /// anybody has signed in as them, a code is theirs to make or the
-    /// creator's; until then whoever may invite may replace it. The worker's
-    /// `createInvite` (cloud-worker/src/api.ts) decides, and `mayInviteAgain`
-    /// (src/cloud.ts) asks the same — change all three.
+    /// superadmin's (`people.recover`); until then whoever may invite may
+    /// replace it. The worker's `createInvite` (cloud-worker/src/api.ts)
+    /// decides, and `mayInviteAgain` (src/cloud.ts) asks the same — change
+    /// all three.
     public func mayInviteAgain(_ memberId: String) -> Bool {
         guard may("people.invite") else { return false }
         let person = members.first { $0.id == memberId }
-        let signedIn = person.map { $0.creator || $0.lastSeenAt != nil } ?? false
-        return !signedIn || creator || me == memberId
+        let signedIn = person.map { $0.isSuperadmin || $0.lastSeenAt != nil } ?? false
+        return !signedIn || may("people.recover") || me == memberId
     }
+
+    /// The workspace's superadmin, when the list names one.
+    public var superadmin: MemberRecord? { members.first { $0.isSuperadmin } }
 
     /// What a person's row says under their name: how they are here, and
     /// when they were last seen.
@@ -92,10 +103,7 @@ extension People {
         let count = member.devices
         let devices = "\(count) device\(count == 1 ? "" : "s")"
         var words: String
-        if member.creator {
-            words = "Made this workspace, on a Mac that holds the domain’s own token and isn’t counted here."
-            if count > 0 { words += " \(count) other device\(count == 1 ? "" : "s")." }
-        } else if count == 0 {
+        if count == 0 {
             words = invites.contains { $0.memberId == member.id }
                 ? "Invited — no device has traded the code in yet."
                 : "No device signed in."
@@ -223,4 +231,9 @@ public final class PeopleModel {
             invited = nil
         }
     }
+}
+
+extension MemberRecord {
+    /// The one person nobody changes, removes or signs out but themselves.
+    public var isSuperadmin: Bool { role == "superadmin" }
 }

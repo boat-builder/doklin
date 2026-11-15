@@ -345,8 +345,8 @@ npx -y "$WRANGLER" deploy || die "the deploy failed — see wrangler's output ab
 
 # ---------- 5. is it up? ----------
 #
-# /api/meta wants the owner token, which this script deliberately does not
-# have, so 401 is the answer that means "the new worker is serving". A custom
+# /api/meta wants a bearer, which this script deliberately does not have,
+# so 401 is the answer that means "the new worker is serving". A custom
 # domain can take a moment to come back, so give it one.
 #
 # ${ENDPOINT} is braced because the next character is not ASCII: macOS's
