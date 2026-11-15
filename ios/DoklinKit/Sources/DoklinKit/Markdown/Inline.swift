@@ -269,7 +269,7 @@ public enum InlineParser {
                 flush()
                 let children = InlineParser.parse(words)
                 if spans > 0 {
-                    pieces.append(.node(.highlight(thread: InlineParser.threadID(first ?? ""), children: children)))
+                    pieces.append(.node(.highlight(thread: CriticMarkup.threadID(ofSpan: first ?? ""), children: children)))
                 } else {
                     for child in children { pieces.append(.node(child)) }
                 }
@@ -493,16 +493,6 @@ public enum InlineParser {
             pieces.append(.delimiter(char: c, count: n, canOpen: canOpen, canClose: canClose))
             i += n
         }
-    }
-
-    /// `#id` at the start of a thread's first span (criticMarkup.ts, `ID_RE`).
-    static func threadID(_ span: String) -> String? {
-        guard span.hasPrefix("#") else { return nil }
-        let id = span.dropFirst().prefix { $0.isASCII && ($0.isLowercase || $0.isNumber) }
-        guard (4...16).contains(id.count) else { return nil }
-        let rest = span.dropFirst(1 + id.count)
-        guard rest.isEmpty || rest.first == " " || rest.first == "\t" || rest.first == "\n" else { return nil }
-        return String(id)
     }
 
     /// Pair the delimiter runs up into emphasis, the way CommonMark does:

@@ -53,15 +53,16 @@ public enum MarkdownEditing {
         return changed
     }
 
-    /// Characters a comment's words may not hold: the worker writes a marker
-    /// around them, and a marker cannot cross formatting (agentComments.ts,
-    /// `anchorProblem`). Stricter than the worker on purpose — it refuses what
-    /// this lets through, never the other way about.
+    /// Characters that split a line into the stretches words are offered
+    /// from: a marker cannot cross formatting. Stricter than where a comment
+    /// may go (`Placing`) on purpose — this offers less than that takes,
+    /// never more.
     private static let formatting: Set<Character> = ["*", "`", "[", "]", "<", ">", "|", "\\", "{", "}", "~", "_", "(", ")", "#", "!"]
 
     /// Words on `line` (0-based) of `source` that a comment can be started
-    /// on: plain text that occurs exactly once in the whole note. Nil when
-    /// the line offers none — then the person quotes the words themselves.
+    /// on: plain text that is in the note once outside code, links and the
+    /// comments already there. Nil when the line offers none — then the
+    /// person quotes the words themselves.
     public static func commentAnchor(in source: String, line: Int) -> String? {
         let lines = MarkdownLines.split(source)
         guard line >= 0, line < lines.count else { return nil }
@@ -96,23 +97,14 @@ public enum MarkdownEditing {
             var count = min(words.count, 5)
             while count <= min(words.count, 14) {
                 let candidate = words.prefix(count).joined(separator: " ")
-                if candidate.count >= 3, occurrences(of: candidate, in: source) == 1 { return candidate }
+                if candidate.count >= 3, Placing.problem(candidate) == nil, (try? Placing.place(candidate, in: source)) != nil {
+                    return candidate
+                }
                 if count == words.count { break }
                 count += 1
             }
         }
         return nil
-    }
-
-    static func occurrences(of needle: String, in haystack: String) -> Int {
-        guard !needle.isEmpty else { return 0 }
-        var count = 0
-        var from = haystack.startIndex
-        while let range = haystack.range(of: needle, range: from..<haystack.endIndex) {
-            count += 1
-            from = range.upperBound
-        }
-        return count
     }
 
     /// What a new note starts as: its name as a heading, the way the Mac app
@@ -173,13 +165,12 @@ public enum DocLinks {
         return name
     }
 
-    /// The file beside a document that holds its comment threads: its stem
-    /// and `.meta.jsonl`, the Mac's rule (src/metaFile.ts, `meta_file_of` in
-    /// src-tauri/src/lib.rs).
+    /// The file beside a document that holds its comment threads: its path
+    /// without the markdown extension, then without `.html`, and
+    /// `.meta.jsonl` — the rule the Mac writes it by (src/metaFile.ts,
+    /// `metaFileOf`).
     public static func metaFile(of path: String) -> String {
-        let folder = directory(of: path)
-        let file = stem(of: name(of: path)) + ".meta.jsonl"
-        return folder.isEmpty ? file : "\(folder)/\(file)"
+        MetaFile.stem(of: path) + ".meta.jsonl"
     }
 
     /// Resolve `href`, written in the file at `file` (`Projects/plan.md`).
