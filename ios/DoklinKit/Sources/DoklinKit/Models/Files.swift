@@ -152,7 +152,7 @@ public struct WorkspaceFiles: Sendable {
             throw DoklinError("This folder could not be opened — it may have been moved or removed.")
         }
         var folders: [String] = []
-        var markdown: [String: String] = [:]
+        var markdown: [String] = []
         var html: [String: String] = [:]
         var others: [String] = []
         for name in names where !isHiddenOrIgnored(name) && !name.lowercased().hasSuffix(".meta.jsonl") {
@@ -162,7 +162,7 @@ public struct WorkspaceFiles: Sendable {
                 folders.append(path)
             } else if kind == .typeRegular {
                 switch FileKind.of(name) {
-                case .markdown: markdown[DocLinks.stem(of: name)] = path
+                case .markdown: markdown.append(path)
                 case .html: html[DocLinks.stem(of: name)] = path
                 default: others.append(path)
                 }
@@ -171,10 +171,20 @@ public struct WorkspaceFiles: Sendable {
         let byName = { (a: String, b: String) in
             DocLinks.name(of: a).localizedStandardCompare(DocLinks.name(of: b)) == .orderedAscending
         }
-        var documents: [DocumentRow] = markdown.map { stem, path in
-            DocumentRow(path: path, html: html[stem], modified: modified(path))
+        // Every markdown file is a row. A page pairs with the one note of its
+        // stem — `.md` first, as the Mac pairs them — and is a row of its own
+        // when no note has its stem.
+        let stemOf = { (path: String) in DocLinks.stem(of: DocLinks.name(of: path)) }
+        let notes = markdown.sorted { a, b in
+            let (aMd, bMd) = (a.lowercased().hasSuffix(".md"), b.lowercased().hasSuffix(".md"))
+            return aMd != bMd ? aMd : byName(a, b)
         }
-        documents += html.filter { markdown[$0.key] == nil }.map { DocumentRow(path: $0.value, html: nil, modified: modified($0.value)) }
+        var paired = Set<String>()
+        var documents: [DocumentRow] = notes.map { path in
+            let rendition = paired.insert(stemOf(path)).inserted ? html[stemOf(path)] : nil
+            return DocumentRow(path: path, html: rendition, modified: modified(path))
+        }
+        documents += html.filter { !paired.contains($0.key) }.map { DocumentRow(path: $0.value, html: nil, modified: modified($0.value)) }
         documents.sort { byName($0.path, $1.path) }
         return folders.sorted(by: byName).map(FolderEntry.folder)
             + documents.map(FolderEntry.document)
@@ -205,12 +215,15 @@ public struct WorkspaceFiles: Sendable {
 
     /* ---------- Writing ---------- */
 
-    /// Put a file down whole. Answers the paths that changed, for
-    /// `Workspace.wrote`.
+    /// Put a file down whole, in a folder that is there: a folder sync took
+    /// away is never made again by a save. Answers the paths that changed,
+    /// for `Workspace.wrote`.
     @discardableResult
     public func write(_ path: String, _ data: Data) throws -> [String] {
+        guard exists(DocLinks.directory(of: path)) else {
+            throw DoklinError("\(DocLinks.name(of: path)) was not saved: its folder is no longer on this iPhone.")
+        }
         do {
-            try FileManager.default.createDirectory(at: url(path).deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: url(path), options: .atomic)
         } catch {
             throw DoklinError("\(DocLinks.name(of: path)) could not be saved: \(error.localizedDescription)")

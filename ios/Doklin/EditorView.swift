@@ -48,7 +48,7 @@ struct EditorView: View {
                         Button("Keep mine") { keepMine() }
                     }
                 }
-                SourceEditor(text: $text, controller: controller, editable: lease == nil)
+                SourceEditor(text: $text, controller: controller, editable: lease == nil && !changedElsewhere)
                     .accessibilityIdentifier("editor")
             }
             .background(Theme.sheet)
@@ -96,7 +96,7 @@ struct EditorView: View {
     /// Save once the typing pauses.
     private func schedule() {
         pending?.cancel()
-        guard text != saved, !changedElsewhere, lease == nil else { return }
+        guard text != saved, !changedElsewhere else { return }
         pending = Task {
             try? await Task.sleep(nanoseconds: 700_000_000)
             guard !Task.isCancelled else { return }
@@ -104,25 +104,44 @@ struct EditorView: View {
         }
     }
 
-    private func save() async {
+    /// Write what was typed. True when the file now holds it.
+    @discardableResult
+    private func save() async -> Bool {
         let typed = text
-        guard typed != saved, !changedElsewhere, lease == nil else { return }
+        if typed == saved { return true }
+        guard !changedElsewhere else { return false }
         writing = typed
         defer { writing = nil }
         do {
-            try await model.save(typed)
+            try await model.save(typed, over: saved)
             saved = typed
+            return true
+        } catch is DocumentModel.ChangedElsewhere {
+            pending?.cancel()
+            changedElsewhere = true
         } catch {
             failure = (error as? DoklinError)?.message ?? error.localizedDescription
         }
+        return false
     }
 
     /// Files of the workspace changed: when this note is one of them and
     /// not by this editor's hand, take the new text — or, with unsaved
     /// typing here, ask.
     private func heardChange() {
-        guard model.isAffected(by: model.workspace.lastChanged),
-              let disk = try? model.workspace.files.text(model.path),
+        guard model.isAffected(by: model.workspace.lastChanged) else { return }
+        if !model.exists {
+            // Moved or removed on another device, or its folder left this
+            // iPhone: there is nothing here to save into.
+            pending?.cancel()
+            saved = text
+            Task {
+                await model.editing(false)
+                dismiss()
+            }
+            return
+        }
+        guard let disk = try? model.workspace.files.text(model.path),
               disk != saved, disk != writing
         else { return }
         if text == saved {
@@ -153,10 +172,12 @@ struct EditorView: View {
         Task { await model.takeOver() }
     }
 
+    /// Close once what was typed is in the file — never over typing that
+    /// is not: the banner or the alert says why, and the editor stays.
     private func close() {
         pending?.cancel()
         Task {
-            await save()
+            guard await save() else { return }
             await model.editing(false)
             model.load()
             dismiss()

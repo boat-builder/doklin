@@ -4323,16 +4323,29 @@ fn cloud_file_and_marker_round_trip() {
 
 use crate::Secrets;
 
-/// A keeper of sign-ins in memory, as the iPhone's Keychain is one.
+/// A keeper of sign-ins in memory, as the iPhone's Keychain is one — and,
+/// like it, one that can fail to answer for a moment.
 #[derive(Default)]
-struct KeptSecrets(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+struct KeptSecrets {
+    kept: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    unreadable: std::sync::Mutex<Option<String>>,
+}
+
+impl KeptSecrets {
+    fn get(&self, ws_id: &str) -> Option<String> {
+        self.kept.lock().unwrap().get(ws_id).cloned()
+    }
+}
 
 impl Secrets for KeptSecrets {
-    fn secret(&self, ws_id: &str) -> Option<String> {
-        self.0.lock().unwrap().get(ws_id).cloned()
+    fn secret(&self, ws_id: &str) -> Result<Option<String>, String> {
+        if self.unreadable.lock().unwrap().as_deref() == Some(ws_id) {
+            return Err("could not be read".into());
+        }
+        Ok(self.kept.lock().unwrap().get(ws_id).cloned())
     }
     fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String> {
-        let mut kept = self.0.lock().unwrap();
+        let mut kept = self.kept.lock().unwrap();
         match token {
             Some(token) => kept.insert(ws_id.to_string(), token.to_string()),
             None => kept.remove(ws_id),
@@ -4362,7 +4375,7 @@ fn a_sign_in_the_app_keeps_is_never_in_cloud_json() {
     // The file names both workspaces and holds neither sign-in.
     let on_disk = std::fs::read_to_string(dir.path().join("cloud.json")).unwrap();
     assert!(!on_disk.contains("secret-"), "{}", on_disk);
-    assert_eq!(kept.secret("w-1").as_deref(), Some("secret-one"));
+    assert_eq!(kept.get("w-1").as_deref(), Some("secret-one"));
 
     // Read back through the keeper, each entry has its sign-in again.
     let back = read_cloud_file(dir.path(), Some(&kept));
@@ -4376,9 +4389,23 @@ fn a_sign_in_the_app_keeps_is_never_in_cloud_json() {
     let mut file = back;
     file.remove_root("/phone/Documents/Notes");
     write_cloud_file(dir.path(), &file, Some(&kept)).unwrap();
-    assert_eq!(kept.secret("w-1"), None);
-    assert_eq!(kept.secret("w-2").as_deref(), Some("secret-two"));
+    assert_eq!(kept.get("w-1"), None);
+    assert_eq!(kept.get("w-2").as_deref(), Some("secret-two"));
     assert_eq!(read_cloud_file(dir.path(), Some(&kept)).workspaces.len(), 1);
+
+    // A keeper that cannot be read just now: that workspace is not connected
+    // meanwhile, but a write in between — another workspace joined — keeps
+    // its entry and its sign-in, and it is back once the keeper answers.
+    *kept.unreadable.lock().unwrap() = Some("w-2".into());
+    let mut file = read_cloud_file(dir.path(), Some(&kept));
+    assert!(file.workspaces.is_empty());
+    file.upsert(entry("/phone/Documents/Notes", "notes.example.com", "w-3", "secret-three"));
+    write_cloud_file(dir.path(), &file, Some(&kept)).unwrap();
+    assert_eq!(kept.get("w-2").as_deref(), Some("secret-two"));
+    *kept.unreadable.lock().unwrap() = None;
+    let back = read_cloud_file(dir.path(), Some(&kept));
+    assert_eq!(back.workspaces.len(), 2);
+    assert_eq!(back.by_root("/phone/Documents/Team").unwrap().token, "secret-two");
 }
 
 #[test]

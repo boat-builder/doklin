@@ -187,10 +187,16 @@ private func engineAnswered(_ context: UnsafeMutableRawPointer?, _ ok: Bool, _ a
 }
 
 /// The sign-in kept for a workspace, handed over as the engine asks: a copy
-/// from `malloc`, which the engine frees.
-private func engineSecret(_ wsId: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
-    guard let wsId, let token = Engine.shared.secrets?.secret(for: String(cString: wsId)) else { return nil }
-    return strdup(token)
+/// from `malloc`, which the engine frees, or none. False when the store
+/// could not be read, which the engine never takes for "none".
+private func engineSecret(_ wsId: UnsafePointer<CChar>?, _ out: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Bool {
+    guard let wsId, let out, let secrets = Engine.shared.secrets else { return false }
+    do {
+        out.pointee = try secrets.secret(for: String(cString: wsId)).flatMap { strdup($0) }
+        return true
+    } catch {
+        return false
+    }
 }
 
 /// Keep a workspace's sign-in, or forget it when `token` is null.

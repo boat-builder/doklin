@@ -10,6 +10,9 @@ struct WorkspaceView: View {
     @State private var path: [Route] = []
     @State private var joining = false
     @State private var confirmingLeave = false
+    /// What has not synced would go with the copy: asked once more.
+    @State private var confirmingUnsynced = false
+    @State private var leaving = false
     @State private var failure: String?
 
     var body: some View {
@@ -41,9 +44,25 @@ struct WorkspaceView: View {
             isPresented: $confirmingLeave,
             titleVisibility: .visible
         ) {
-            Button("Remove from this iPhone", role: .destructive) { leave() }
+            Button("Remove from this iPhone", role: .destructive) { leave(checked: false) }
         } message: {
             Text("This iPhone is signed out of \(workspace.name) and its copy here is deleted. Nothing changes for anybody else, and nothing is deleted in the cloud.")
+        }
+        .confirmationDialog(
+            "Some changes have not synced",
+            isPresented: $confirmingUnsynced,
+            titleVisibility: .visible
+        ) {
+            Button("Remove anyway", role: .destructive) { leave(checked: true) }
+        } message: {
+            Text("Changes made on this iPhone that have not reached \(workspace.domain) yet are deleted with its copy. To keep them, connect to the internet and let it sync first.")
+        }
+        .overlay {
+            if leaving {
+                ProgressView("Syncing before removing…")
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
         }
         .alert("That did not work", isPresented: failureShown) {
             Button("OK", role: .cancel) { failure = nil }
@@ -125,10 +144,24 @@ struct WorkspaceView: View {
         }
     }
 
-    private func leave() {
+    /// Remove the workspace — once what was written here has synced, or
+    /// after the person said to go ahead without it.
+    private func leave(checked: Bool) {
+        let (root, name) = (workspace.root, workspace.name)
         Task {
+            if !checked {
+                leaving = true
+                let synced = await device.synced(root)
+                leaving = false
+                guard synced else {
+                    confirmingUnsynced = true
+                    return
+                }
+            }
             do {
-                try await device.leave(workspace.root)
+                if try await !device.leave(root) {
+                    failure = "This iPhone is signed out of \(name), but its copy here could not be deleted. Nothing was deleted in the cloud."
+                }
             } catch {
                 failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }

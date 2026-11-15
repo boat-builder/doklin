@@ -70,6 +70,9 @@ public final class FolderModel {
     }
 
     public func remove(_ entry: FolderEntry) async throws {
+        // No Trash here: history is the only copy, so what is pending goes
+        // into it first.
+        try? await Engine.shared.run("versions_flush", ["ms": 2000])
         let gone = try workspace.files.remove(entry)
         await workspace.wrote(gone)
         load()

@@ -20,7 +20,9 @@ public struct DoklinError: Error, LocalizedError, Equatable, Sendable {
 
 /// Where sign-ins are kept. The app uses the Keychain; tests use memory.
 public protocol SecretStore: Sendable {
-    func secret(for key: String) -> String?
+    /// What is kept under `key`, nil when nothing is — and an error when the
+    /// store could not be read just now, which is never "nothing".
+    func secret(for key: String) throws -> String?
     /// Keep `value`, or remove what is kept when it is nil.
     func setSecret(_ value: String?, for key: String) throws
 }
@@ -71,22 +73,35 @@ public struct KeychainSecretStore: SecretStore {
         ]
     }
 
-    public func secret(for key: String) -> String? {
+    public func secret(for key: String) throws -> String? {
         var search = query(key)
         search[kSecReturnData as String] = true
         search[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
-        guard SecItemCopyMatching(search as CFDictionary, &found) == errSecSuccess, let data = found as? Data else { return nil }
+        let status = SecItemCopyMatching(search as CFDictionary, &found)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = found as? Data else {
+            throw DoklinError("This iPhone's Keychain could not be read (error \(status)).")
+        }
         return String(data: data, encoding: .utf8)
     }
 
+    /// Replace what is kept in place, so a failure leaves the old one there.
     public func setSecret(_ value: String?, for key: String) throws {
-        _ = SecItemDelete(query(key) as CFDictionary)
-        guard let value else { return }
-        var item = query(key)
-        item[kSecValueData as String] = Data(value.utf8)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(item as CFDictionary, nil)
+        guard let value else {
+            let status = SecItemDelete(query(key) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw DoklinError("This iPhone's Keychain would not let go of the sign-in (error \(status)).")
+            }
+            return
+        }
+        var status = SecItemUpdate(query(key) as CFDictionary, [kSecValueData as String: Data(value.utf8)] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query(key)
+            item[kSecValueData as String] = Data(value.utf8)
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
         guard status == errSecSuccess else {
             throw DoklinError("This iPhone's Keychain would not keep the sign-in (error \(status)).")
         }

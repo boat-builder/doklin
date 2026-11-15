@@ -20,9 +20,11 @@ typedef void (*doklin_event_callback)(const char *event, const char *payload);
 // sentence saying why not. Called once, from a thread of the engine's.
 typedef void (*doklin_done_callback)(void *context, bool ok, const char *answer);
 
-// (workspace id) -> the sign-in kept for it, allocated with malloc (the
-// engine frees it), or NULL when there is none. From any thread.
-typedef char *(*doklin_secret_get_callback)(const char *ws_id);
+// (workspace id, out): true when the keeper answered — *token then the
+// sign-in kept for it, allocated with malloc (the engine frees it), or NULL
+// when there is none; false when it could not be read just now. From any
+// thread.
+typedef bool (*doklin_secret_get_callback)(const char *ws_id, char **token);
 
 // (workspace id, token): keep `token` for the workspace, or forget what is
 // kept when it is NULL. Answers true once done. From any thread.

@@ -19,6 +19,7 @@ final class FilesTests: XCTestCase {
     }
 
     private func put(_ path: String, _ text: String = "x") throws {
+        try FileManager.default.createDirectory(at: files.url(DocLinks.directory(of: path)), withIntermediateDirectories: true)
         try files.write(path, Data(text.utf8))
     }
 
@@ -46,6 +47,28 @@ final class FilesTests: XCTestCase {
         guard case .document(let page) = entries[3] else { return XCTFail("\(entries)") }
         XCTAssertTrue(page.isHTML)
         XCTAssertNil(page.html)
+    }
+
+    func testNotesOfOneStemAreRowsOfTheirOwnAndThePagePairsWithOne() throws {
+        try put("notes.md")
+        try put("notes.markdown")
+        try put("notes.html")
+        let rows = try files.list("")
+        XCTAssertEqual(rows.count, 2, "\(rows)")
+        guard case .document(let md) = rows.first(where: { $0.path == "notes.md" }),
+              case .document(let other) = rows.first(where: { $0.path == "notes.markdown" })
+        else { return XCTFail("\(rows)") }
+        XCTAssertEqual(md.html, "notes.html")
+        XCTAssertNil(other.html)
+    }
+
+    func testASaveNeverMakesAGoneFolderAgain() throws {
+        try put("Gone/a.md")
+        try FileManager.default.removeItem(at: files.url("Gone"))
+        XCTAssertThrowsError(try files.write("Gone/a.md", Data("x".utf8))) { error in
+            XCTAssertEqual((error as? DoklinError)?.message, "a.md was not saved: its folder is no longer on this iPhone.")
+        }
+        XCTAssertFalse(files.exists("Gone"))
     }
 
     func testANewNoteNeverTakesANameInUse() throws {
@@ -156,5 +179,38 @@ final class AudienceTests: XCTestCase {
     func testAStatusFromBeforeTheDomainAnsweredMayEverything() throws {
         let s = try status(sections: false, spaces: "[]")
         XCTAssertTrue(s.may("people.invite"))
+    }
+}
+
+/// A note saved only over what it was opened with.
+@MainActor
+final class DocumentTests: XCTestCase {
+    func testASaveOverAChangeSyncWroteWritesNothing() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-doc-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)
+        let workspace = device.workspace(root.path)
+        try workspace.files.write("note.md", Data("# Note\n\n- [ ] milk\n".utf8))
+        let note = DocumentModel(workspace: workspace, path: "note.md")
+        note.load()
+
+        // Another device's change lands while this one is being typed.
+        try workspace.files.write("note.md", Data("# Note\n\nFrom the Mac.\n\n- [ ] milk\n".utf8))
+        do {
+            try await note.save("# Note\n\n- [ ] milk\n- [ ] eggs\n", over: "# Note\n\n- [ ] milk\n")
+            XCTFail("a save over a change sync wrote went through")
+        } catch is DocumentModel.ChangedElsewhere {}
+        XCTAssertEqual(try workspace.files.text("note.md"), "# Note\n\nFrom the Mac.\n\n- [ ] milk\n")
+
+        // A box ticked on the old text reads the note again and ticks nothing.
+        await note.toggleTask(line: 2)
+        XCTAssertEqual(try workspace.files.text("note.md"), "# Note\n\nFrom the Mac.\n\n- [ ] milk\n")
+        XCTAssertEqual(note.text, "# Note\n\nFrom the Mac.\n\n- [ ] milk\n")
+        XCTAssertNotNil(note.problem)
+
+        // On what it holds now, both go through.
+        await note.toggleTask(line: 4)
+        XCTAssertEqual(try workspace.files.text("note.md"), "# Note\n\nFrom the Mac.\n\n- [x] milk\n")
     }
 }

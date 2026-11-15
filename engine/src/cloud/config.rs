@@ -60,18 +60,25 @@ pub struct CloudFile {
     pub version: u32,
     pub device: Option<DeviceIdentity>,
     pub workspaces: Vec<WorkspaceEntry>,
+    /// Entries whose sign-in the app's keeper could not read just now: not
+    /// connected for as long as that lasts, and written back as they were —
+    /// a passing failure to read is never taken to mean the sign-in is gone.
+    #[serde(skip)]
+    pub unread: Vec<WorkspaceEntry>,
 }
 
 impl CloudFile {
     /// Add (or replace) an entry — one per root, one per domain.
     pub fn upsert(&mut self, entry: WorkspaceEntry) {
         self.workspaces.retain(|w| w.root != entry.root && w.domain != entry.domain);
+        self.unread.retain(|w| w.root != entry.root && w.domain != entry.domain);
         self.workspaces.push(entry);
         self.version = CLOUD_FILE_VERSION;
     }
 
     pub fn remove_root(&mut self, root: &str) {
         self.workspaces.retain(|w| w.root != root);
+        self.unread.retain(|w| w.root != root);
     }
 
     pub fn by_root(&self, root: &str) -> Option<&WorkspaceEntry> {
@@ -91,9 +98,19 @@ pub fn read_cloud_file(data_dir: &Path, secrets: Option<&dyn Secrets>) -> CloudF
     // platform can move the app's folder.
     for w in &mut file.workspaces {
         w.root = crate::paths::resolved(&w.root);
-        if let Some(secrets) = secrets {
-            w.token = secrets.secret(&w.ws_id).unwrap_or_default();
+    }
+    if let Some(secrets) = secrets {
+        let mut read = Vec::new();
+        for mut w in std::mem::take(&mut file.workspaces) {
+            match secrets.secret(&w.ws_id) {
+                Ok(token) => {
+                    w.token = token.unwrap_or_default();
+                    read.push(w);
+                }
+                Err(_) => file.unread.push(w),
+            }
         }
+        file.workspaces = read;
     }
     // Tolerate a hand-edited file: entries missing what an engine needs are
     // nothing to sync.
@@ -110,20 +127,27 @@ pub fn read_cloud_file(data_dir: &Path, secrets: Option<&dyn Secrets>) -> CloudF
 
 /// Write cloud.json. With `secrets`, each token goes to the keeper first and
 /// the file holds none; a workspace the file no longer names has its sign-in
-/// forgotten once the file is down, so nothing outlives its entry.
+/// forgotten once the file is down, so nothing outlives its entry. Entries
+/// whose sign-in could not be read go back as they were, theirs untouched.
 pub fn write_cloud_file(data_dir: &Path, file: &CloudFile, secrets: Option<&dyn Secrets>) -> Result<(), String> {
     let path = cloud_file_path(data_dir);
     let mut written = file.clone();
     let mut gone = Vec::new();
     if let Some(secrets) = secrets {
         for w in &mut written.workspaces {
-            if secrets.secret(&w.ws_id).as_deref() != Some(w.token.as_str()) {
+            if secrets.secret(&w.ws_id)?.as_deref() != Some(w.token.as_str()) {
                 secrets.set_secret(&w.ws_id, Some(&w.token))?;
             }
             w.token = String::new();
         }
+        written.workspaces.extend(file.unread.iter().cloned());
         let before: CloudFile = read_json(&path).unwrap_or_default();
-        gone = before.workspaces.into_iter().map(|w| w.ws_id).filter(|id| !file.workspaces.iter().any(|w| &w.ws_id == id)).collect();
+        gone = before
+            .workspaces
+            .into_iter()
+            .map(|w| w.ws_id)
+            .filter(|id| !written.workspaces.iter().any(|w| &w.ws_id == id))
+            .collect();
     }
     for w in &mut written.workspaces {
         w.root = crate::paths::stored(&w.root);

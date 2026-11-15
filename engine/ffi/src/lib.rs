@@ -24,9 +24,11 @@ pub type EventCallback = extern "C" fn(event: *const c_char, payload: *const c_c
 /// `(context, ok, answer)`: the command's answer as JSON when `ok`, else a
 /// sentence saying why not.
 pub type DoneCallback = extern "C" fn(context: *mut c_void, ok: bool, answer: *const c_char);
-/// `(workspace id)` → the sign-in kept for it, as a string the app allocated
-/// with `malloc` (the engine frees it), or null when there is none.
-pub type SecretGetCallback = extern "C" fn(ws_id: *const c_char) -> *mut c_char;
+/// `(workspace id, out)`: true when the keeper answered — `*out` then the
+/// sign-in kept for it, as a string the app allocated with `malloc` (the
+/// engine frees it), or null when there is none; false when it could not be
+/// read just now.
+pub type SecretGetCallback = extern "C" fn(ws_id: *const c_char, token: *mut *mut c_char) -> bool;
 /// `(workspace id, token)`: keep `token` for the workspace, or forget what is
 /// kept when it is null. True once done.
 pub type SecretSetCallback = extern "C" fn(ws_id: *const c_char, token: *const c_char) -> bool;
@@ -85,17 +87,21 @@ impl Host for AppHost {
 }
 
 impl Secrets for AppHost {
-    fn secret(&self, ws_id: &str) -> Option<String> {
-        let key = CString::new(ws_id).ok()?;
-        let kept = (self.get_secret)(key.as_ptr());
+    fn secret(&self, ws_id: &str) -> Result<Option<String>, String> {
+        let unreadable = || "This iPhone's Keychain could not be read just now.".to_string();
+        let key = CString::new(ws_id).map_err(|_| unreadable())?;
+        let mut kept: *mut c_char = std::ptr::null_mut();
+        if !(self.get_secret)(key.as_ptr(), &mut kept) {
+            return Err(unreadable());
+        }
         if kept.is_null() {
-            return None;
+            return Ok(None);
         }
         // Safety: the app handed over a NUL-terminated string from malloc,
         // read here once and freed.
         let token = unsafe { CStr::from_ptr(kept).to_string_lossy().into_owned() };
         unsafe { free(kept.cast()) };
-        Some(token).filter(|t| !t.is_empty())
+        Ok(Some(token).filter(|t| !t.is_empty()))
     }
 
     fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String> {

@@ -109,7 +109,7 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(made, "From the phone.md")
         let note = DocumentModel(workspace: workspace, path: made)
         note.load()
-        try await note.save("# From the phone\n\nWritten on a device.\n\n- [ ] a box to tick\n")
+        try await note.save("# From the phone\n\nWritten on a device.\n\n- [ ] a box to tick\n", over: "# From the phone\n\n")
         await note.toggleTask(line: 4)
         XCTAssertEqual(note.text, "# From the phone\n\nWritten on a device.\n\n- [x] a box to tick\n")
         await device.syncNow(root)

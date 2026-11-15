@@ -7,9 +7,9 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
-use crate::cloud::status::Events;
+use crate::cloud::status::{Events, EV_APPLIED};
 use crate::cloud::EditBus;
 use crate::versions::VersionBus;
 
@@ -45,8 +45,10 @@ pub trait Host: Send + Sync + 'static {
 /// A keeper of sign-ins, by workspace id. What it holds is read whenever
 /// cloud.json is, and the entry there carries no token (cloud/config.rs).
 pub trait Secrets: Send + Sync {
-    /// The sign-in kept for the workspace, if there is one.
-    fn secret(&self, ws_id: &str) -> Option<String>;
+    /// The sign-in kept for the workspace: `Ok(None)` when none is kept, an
+    /// error when the keeper could not be read just now — which is never
+    /// taken to mean "none".
+    fn secret(&self, ws_id: &str) -> Result<Option<String>, String>;
     /// Keep `token` for the workspace, or forget what is kept when it is None.
     fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String>;
 }
@@ -129,6 +131,36 @@ impl Core {
 
     pub(crate) fn events(&self) -> Arc<dyn Events> {
         Arc::new(HostEvents(self.host.clone()))
+    }
+
+    /// The event sink of a workspace's sync engine. Where nothing watches
+    /// the folder (`Setup::watch` false: the iPhone), the files sync writes
+    /// reach the versioner through here, as a watcher's events reach it on a
+    /// Mac — or the version store never hears of them.
+    pub(crate) fn sync_events(self: &Arc<Self>) -> Arc<dyn Events> {
+        if self.watch {
+            self.events()
+        } else {
+            Arc::new(AppliedToVersions(Arc::downgrade(self)))
+        }
+    }
+}
+
+/// The host as a sync engine's event sink, ringing the version bus for every
+/// path an `EV_APPLIED` names.
+struct AppliedToVersions(Weak<Core>);
+
+impl Events for AppliedToVersions {
+    fn emit_json(&self, event: &str, payload: serde_json::Value) {
+        let Some(core) = self.0.upgrade() else { return };
+        if event == EV_APPLIED {
+            if let (Some(root), Some(paths)) = (payload["root"].as_str(), payload["paths"].as_array()) {
+                for path in paths.iter().filter_map(|p| p.as_str()) {
+                    core.version_bus.touch(&Path::new(root).join(path));
+                }
+            }
+        }
+        core.host.emit(event, payload);
     }
 }
 

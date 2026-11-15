@@ -259,7 +259,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
             }),
         },
         Arc::new(HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id, &core.client)),
-        core.events(),
+        core.sync_events(),
         inner.statuses.clone(),
     );
     // The one way an engine ends by itself: the domain said this Mac's access

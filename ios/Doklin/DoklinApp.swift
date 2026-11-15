@@ -43,11 +43,18 @@ extension EngineSetup {
     /// Where this iPhone keeps things: the engine's own files in Application
     /// Support, each workspace in Documents, sign-ins in the Keychain.
     /// Everything written down is relative to the app's folder, which iOS
-    /// moves on an update.
+    /// moves on an update. None of it goes into a backup: it is all in the
+    /// cloud, and a phone restored from one joins again as a new device —
+    /// with a device id of its own, and no copy that nothing signs in to.
     @MainActor static var onThisPhone: EngineSetup {
         let files = FileManager.default
-        let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Doklin")
-        let documents = files.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Doklin")
+        var documents = files.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var notBackedUp = URLResourceValues()
+        notBackedUp.isExcludedFromBackup = true
+        try? files.createDirectory(at: support, withIntermediateDirectories: true)
+        try? support.setResourceValues(notBackedUp)
+        try? documents.setResourceValues(notBackedUp)
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return EngineSetup(
             secrets: KeychainSecretStore(service: Bundle.main.bundleIdentifier ?? "doklin"),

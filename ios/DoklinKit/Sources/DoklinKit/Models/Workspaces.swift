@@ -40,6 +40,10 @@ public final class Workspaces {
     @ObservationIgnored private let remembered: UserDefaults
     /// A workspace just joined, whose status the engine has not sent yet.
     @ObservationIgnored private var arriving: String?
+    /// A sign-in a line bought whose download has not finished: the line's
+    /// code works once, so trying again downloads with this rather than
+    /// asking for a new line. Held in memory only.
+    @ObservationIgnored private var bought: (endpoint: String, code: String, redeemed: Redeemed)?
     @ObservationIgnored private var starting = false
 
     public init(remembered: UserDefaults = .standard) {
@@ -138,12 +142,24 @@ public final class Workspaces {
                     : "That line is cut short — it needs both the address and the code. Copy the whole line again."
             )
         }
-        let redeemed: Redeemed = try await Engine.shared.call("cloud_redeem", ["endpoint": .string(endpoint), "code": .string(code)])
+        let redeemed: Redeemed
+        if let held = bought, held.endpoint == endpoint, held.code == code {
+            redeemed = held.redeemed
+        } else {
+            redeemed = try await Engine.shared.call("cloud_redeem", ["endpoint": .string(endpoint), "code": .string(code)])
+            bought = (endpoint, code, redeemed)
+        }
         joining = CloudProgress(root: "", kind: "download", done: 0, total: 0)
         defer { joining = nil }
-        let root: String = try await Engine.shared.call(
-            "cloud_join", ["endpoint": .string(redeemed.endpoint), "token": .string(redeemed.token)]
-        )
+        let root: String
+        do {
+            root = try await Engine.shared.call(
+                "cloud_join", ["endpoint": .string(redeemed.endpoint), "token": .string(redeemed.token)]
+            )
+        } catch let error as DoklinError {
+            throw DoklinError("\(error.message) The line is still good on this iPhone: choose Join again to retry.")
+        }
+        bought = nil
         arriving = root
         select(root)
         try? await Engine.shared.run("versions_reconcile")
@@ -151,14 +167,34 @@ public final class Workspaces {
         return root
     }
 
-    /// Sign this iPhone out of a workspace and delete its copy here. Nothing
-    /// changes for anybody else, and nothing is deleted in the cloud.
-    public func leave(_ root: String) async throws {
-        _ = try await Engine.shared.call("cloud_leave", ["root": .string(root)], as: Bool.self)
+    /// Whether everything written on this iPhone in a workspace has reached
+    /// its domain: sync now, and wait a little for the pass to finish.
+    public func synced(_ root: String, within seconds: Double = 10) async -> Bool {
+        let started = Int(Date().timeIntervalSince1970 * 1000)
+        await syncNow(root)
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            await refresh()
+            guard let status = status(root) else { return false }
+            if status.phase == .idle, (status.lastSyncMs ?? 0) >= started { return true }
+            if status.phase != .syncing, status.phase != .idle { return false }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return false
+    }
+
+    /// Sign this iPhone out of a workspace and delete its copy here — with
+    /// whatever of it had not synced yet. Nothing changes for anybody else,
+    /// and nothing is deleted in the cloud. False when the copy could not be
+    /// deleted, though the sign-in is gone either way.
+    @discardableResult
+    public func leave(_ root: String) async throws -> Bool {
+        let deleted = try await Engine.shared.call("cloud_leave", ["root": .string(root)], as: Bool.self)
         open[root] = nil
         if selected == root { selected = nil }
         try? await Engine.shared.run("versions_reconcile")
         await refresh()
+        return deleted
     }
 
     /* ---------- Sync ---------- */
@@ -209,10 +245,6 @@ public final class Workspaces {
         case "cloud-conflict":
             if let conflict = event.decode(CloudConflict.self) {
                 say(conflict.root, "\(conflict.by) and this iPhone both changed \(DocLinks.name(of: conflict.path)) — both versions are kept, the other one beside it.", path: conflict.conflictPath)
-            }
-        case "cloud-pending-deletes":
-            if let held = event.decode(CloudPendingDeletes.self) {
-                say(held.root, "\(held.count) files disappeared from \(status(held.root)?.name ?? "this workspace") — sync is holding the deletion until you say so.", path: nil)
             }
         case "cloud-space-left":
             if let left = event.decode(CloudSpaceLeft.self) {

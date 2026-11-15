@@ -9,6 +9,10 @@ import Observation
 @MainActor
 @Observable
 public final class DocumentModel {
+    /// A save that found the note changed under it — by sync, from another
+    /// device — and wrote nothing.
+    public struct ChangedElsewhere: Error {}
+
     public let workspace: Workspace
     /// The file it opened as: a note's markdown, a page's html, or any file.
     public let path: String
@@ -47,11 +51,16 @@ public final class DocumentModel {
     /// The other device that has it open for editing.
     public var lease: LeaseHolder? { workspace.lease(of: path) }
 
-    /// Whether a change of the workspace's files is this document's.
+    /// Whether a change of the workspace's files is this document's: one of
+    /// its files, or a folder it is in.
     public func isAffected(by changed: Set<String>) -> Bool {
         let mine = [path, htmlPath, DocLinks.metaFile(of: path)].compactMap { $0?.lowercased() }
-        return mine.contains { changed.contains($0) } || changed.contains(path.lowercased())
+        let lower = path.lowercased()
+        return mine.contains { changed.contains($0) } || changed.contains { lower.hasPrefix($0 + "/") }
     }
+
+    /// Whether the note is still on this iPhone.
+    public var exists: Bool { workspace.files.exists(path) }
 
     /// Read it off the disk.
     public func load() {
@@ -77,9 +86,14 @@ public final class DocumentModel {
 
     /* ---------- Writing ---------- */
 
-    /// Put new markdown down, as the person typed it.
-    public func save(_ source: String) async throws {
+    /// Put new markdown down, as the person typed it over `expected` — what
+    /// the file held when they started. When the file holds something else
+    /// now, sync wrote it from another device: `ChangedElsewhere`, and
+    /// nothing is written over it.
+    public func save(_ source: String, over expected: String) async throws {
         guard isNote else { throw DoklinError("Only a note's markdown can be edited here.") }
+        let now = try workspace.files.text(path)
+        guard now == expected || now == source else { throw ChangedElsewhere() }
         try workspace.files.write(path, Data(source.utf8))
         text = source
         document = MarkdownDocument.parse(source)
@@ -95,7 +109,10 @@ public final class DocumentModel {
             return
         }
         do {
-            try await save(ticked)
+            try await save(ticked, over: source)
+        } catch is ChangedElsewhere {
+            load()
+            problem = "This note changed on another device, so it was read again. Tick the box once more."
         } catch {
             problem = (error as? DoklinError)?.message ?? error.localizedDescription
         }
