@@ -5,7 +5,7 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 ## Jobs
 
 - `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build + `verify-harness/drive-cli.mjs`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
-- `ios.yml` (push touching `ios/`): the iOS core's tests and an unsigned simulator build on macos-15. Nothing ships the iOS app: [ios.md](ios.md).
+- `ios.yml` (push touching `ios/`): on macos-15, the iOS core's tests, a simulator build, and the app driven in a simulator (`verify-harness/drive-ios.mjs --app`). Nothing ships the iOS app: [ios.md](ios.md).
 - `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes).
 
 ## Rules

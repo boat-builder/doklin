@@ -10,8 +10,19 @@
 		D0C0000000000000000000A1 /* DoklinKit in Frameworks */ = {isa = PBXBuildFile; productRef = D0C000000000000000000141 /* DoklinKit */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		D0C000000000000000000151 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D0C000000000000000000101 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D0C0000000000000000000F1;
+			remoteInfo = Doklin;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		D0C0000000000000000000B1 /* Doklin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Doklin.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0C0000000000000000000B3 /* DoklinUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DoklinUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0C0000000000000000000B2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -19,6 +30,11 @@
 		D0C0000000000000000000C1 /* Doklin */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Doklin;
+			sourceTree = "<group>";
+		};
+		D0C0000000000000000000C2 /* DoklinUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = DoklinUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,6 +48,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0C0000000000000000000D5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -39,6 +62,7 @@
 			isa = PBXGroup;
 			children = (
 				D0C0000000000000000000C1 /* Doklin */,
+				D0C0000000000000000000C2 /* DoklinUITests */,
 				D0C0000000000000000000B2 /* Info.plist */,
 				D0C0000000000000000000E2 /* Products */,
 			);
@@ -48,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				D0C0000000000000000000B1 /* Doklin.app */,
+				D0C0000000000000000000B3 /* DoklinUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -78,6 +103,29 @@
 			productReference = D0C0000000000000000000B1 /* Doklin.app */;
 			productType = "com.apple.product-type.application";
 		};
+		D0C0000000000000000000F2 /* DoklinUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0C000000000000000000123 /* Build configuration list for PBXNativeTarget "DoklinUITests" */;
+			buildPhases = (
+				D0C0000000000000000000D4 /* Sources */,
+				D0C0000000000000000000D5 /* Frameworks */,
+				D0C0000000000000000000D6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D0C000000000000000000161 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D0C0000000000000000000C2 /* DoklinUITests */,
+			);
+			name = DoklinUITests;
+			packageProductDependencies = (
+			);
+			productName = DoklinUITests;
+			productReference = D0C0000000000000000000B3 /* DoklinUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -90,6 +138,10 @@
 				TargetAttributes = {
 					D0C0000000000000000000F1 = {
 						CreatedOnToolsVersion = 16.0;
+					};
+					D0C0000000000000000000F2 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = D0C0000000000000000000F1;
 					};
 				};
 			};
@@ -111,12 +163,20 @@
 			projectRoot = "";
 			targets = (
 				D0C0000000000000000000F1 /* Doklin */,
+				D0C0000000000000000000F2 /* DoklinUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		D0C0000000000000000000D3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0C0000000000000000000D6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -133,7 +193,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0C0000000000000000000D4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D0C000000000000000000161 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D0C0000000000000000000F1 /* Doklin */;
+			targetProxy = D0C000000000000000000151 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		D0C000000000000000000111 /* Debug */ = {
@@ -249,6 +324,40 @@
 			};
 			name = Release;
 		};
+		D0C000000000000000000115 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sherin.doklin.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Doklin;
+			};
+			name = Debug;
+		};
+		D0C000000000000000000116 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sherin.doklin.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Doklin;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -266,6 +375,15 @@
 			buildConfigurations = (
 				D0C000000000000000000113 /* Debug */,
 				D0C000000000000000000114 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D0C000000000000000000123 /* Build configuration list for PBXNativeTarget "DoklinUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0C000000000000000000115 /* Debug */,
+				D0C000000000000000000116 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

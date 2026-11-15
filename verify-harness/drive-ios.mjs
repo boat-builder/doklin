@@ -19,9 +19,22 @@
 //
 // Without this, `swift test` in ios/DoklinKit runs everything that needs no
 // worker and skips the rest.
-import { spawn } from "node:child_process";
+//
+// And the app itself, on a Mac with Xcode:
+//
+//   node verify-harness/drive-ios.mjs --app
+//
+// builds it, starts an iPhone simulator and runs ios/DoklinUITests — one
+// journey through the real screens against this worker: log in, browse, read,
+// edit, tick a box, search, relaunch, log out. What was on screen at each
+// step is printed (the lines that begin `UI>`), and the whole xcodebuild log
+// and the screenshots are left in $DOKLIN_DRIVE_OUT (a temporary folder when
+// unset; the path is printed).
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer as createTcpServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -103,20 +116,97 @@ const AGENTS = {
   searcher: ["read"],
   leaving: ALL,
   twice: ALL,
+  app: ALL,
 };
 const codes = {};
 for (const [name, scopes] of Object.entries(AGENTS)) codes[name] = await addAgent(`${name} (iOS drive)`, scopes);
 
-const split = process.argv.indexOf("--");
-const command = split >= 0 ? process.argv.slice(split + 1) : ["swift", "test", "--package-path", join(ROOT, "ios/DoklinKit")];
-console.log(`running: ${command.join(" ")}`);
-const status = await new Promise((resolve, reject) => {
-  const child = spawn(command[0], command.slice(1), {
-    env: { ...process.env, DOKLIN_TEST_ENDPOINT: WORKER, DOKLIN_TEST_CODES: JSON.stringify(codes) },
-    stdio: "inherit",
+/* ---------- The core: `swift test`, or the command after `--` ---------- */
+
+async function driveCore() {
+  const split = process.argv.indexOf("--");
+  const command = split >= 0 ? process.argv.slice(split + 1) : ["swift", "test", "--package-path", join(ROOT, "ios/DoklinKit")];
+  console.log(`running: ${command.join(" ")}`);
+  return new Promise((resolve, reject) => {
+    const child = spawn(command[0], command.slice(1), {
+      env: { ...process.env, DOKLIN_TEST_ENDPOINT: WORKER, DOKLIN_TEST_CODES: JSON.stringify(codes) },
+      stdio: "inherit",
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
   });
-  child.on("error", reject);
-  child.on("exit", (code) => resolve(code ?? 1));
-});
+}
+
+/* ---------- The app: its UI tests in a simulator ---------- */
+
+/** An iPhone simulator this Xcode can run: the newest runtime its SDK covers. */
+function pickSimulator() {
+  const xcrun = (...args) => execFileSync("xcrun", args, { encoding: "utf8" });
+  const sdk = xcrun("--sdk", "iphonesimulator", "--show-sdk-version").trim().split(".").map(Number);
+  const newerThanSdk = ([major, minor]) => major > sdk[0] || (major === sdk[0] && minor > (sdk[1] ?? 0));
+  const runtimes = Object.entries(JSON.parse(xcrun("simctl", "list", "devices", "available", "-j")).devices)
+    .map(([runtime, devices]) => ({ version: /iOS-(\d+)-(\d+)/.exec(runtime)?.slice(1).map(Number), devices }))
+    .filter((r) => r.version && !newerThanSdk(r.version))
+    .sort((a, b) => b.version[0] - a.version[0] || b.version[1] - a.version[1]);
+  for (const { version, devices } of runtimes) {
+    const phones = devices.filter((d) => d.name.startsWith("iPhone"));
+    const phone = phones.find((d) => !d.name.includes("SE")) ?? phones[0];
+    if (phone) return { udid: phone.udid, name: `${phone.name}, iOS ${version.join(".")}` };
+  }
+  throw new Error("There is no iPhone simulator this Xcode can run — add one under Xcode → Settings → Components.");
+}
+
+async function driveApp() {
+  const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
+  mkdirSync(out, { recursive: true });
+  const result = join(out, "DoklinUITests.xcresult");
+  rmSync(result, { recursive: true, force: true });
+  const simulator = pickSimulator();
+  console.log(`driving the app on ${simulator.name}; the full log and the screenshots go to ${out}`);
+
+  const log = createWriteStream(join(out, "xcodebuild.log"));
+  // What a reader of the run wants: the screens, the tests, and anything that went wrong.
+  const worthSaying = /^UI> |^Test (Case|Suite) |^\s*Executed |^\*\* |error:|: error |Testing failed|Testing started/;
+  const status = await new Promise((resolve, reject) => {
+    const child = spawn(
+      "xcodebuild",
+      [
+        "test",
+        "-project", join(ROOT, "ios/Doklin.xcodeproj"),
+        "-scheme", "Doklin",
+        "-destination", `id=${simulator.udid}`,
+        "-resultBundlePath", result,
+        ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
+      ],
+      {
+        // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
+        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_ENDPOINT: WORKER, TEST_RUNNER_DOKLIN_TEST_CODES: JSON.stringify(codes) },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let rest = "";
+    const hear = (chunk) => {
+      log.write(chunk);
+      const lines = (rest + chunk).split("\n");
+      rest = lines.pop();
+      for (const line of lines) if (worthSaying.test(line)) console.log(line);
+    };
+    child.stdout.on("data", hear);
+    child.stderr.on("data", hear);
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+  await new Promise((resolve) => log.end(resolve));
+
+  // The screenshots out of the result bundle, as files anybody can open. Best effort.
+  try {
+    execFileSync("xcrun", ["xcresulttool", "export", "attachments", "--path", result, "--output-path", join(out, "screenshots")], { stdio: "ignore" });
+  } catch {
+    console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
+  }
+  return status;
+}
+
+const status = await (process.argv.includes("--app") ? driveApp() : driveCore());
 cleanup();
 process.exit(status);

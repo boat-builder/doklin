@@ -6,6 +6,10 @@ name: ios
 #   - the core (ios/DoklinKit) on the Mac's own toolchain — the Keychain code
 #     in it exists only on Apple platforms, so ci.yml's Linux run never sees it
 #   - the app for the simulator, unsigned
+#   - and then the app itself is driven in a simulator, against the worker
+#     this branch carries (verify-harness/drive-ios.mjs --app): one journey
+#     through its real screens. The log of what was on screen at each step,
+#     and the screenshots, are kept with the run
 # Nothing here ships anything. The app is archived and signed from Xcode by
 # hand (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
 # release (release.yml).
@@ -14,6 +18,7 @@ on:
   push:
     paths:
       - "ios/**"
+      - "verify-harness/drive-ios.mjs"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 
@@ -25,7 +30,7 @@ jobs:
   app:
     name: iOS app (core tests + simulator build)
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
 
@@ -47,3 +52,32 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # The drive serves the cloud worker from source, through vite.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Drive the app in a simulator
+        run: node verify-harness/drive-ios.mjs --app
+        env:
+          DOKLIN_DRIVE_OUT: ${{ runner.temp }}/ios-drive
+          DOKLIN_DERIVED_DATA: ${{ runner.temp }}/DerivedData
+
+      - name: Keep the log and the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-drive
+          path: |
+            ${{ runner.temp }}/ios-drive/xcodebuild.log
+            ${{ runner.temp }}/ios-drive/screenshots
+          if-no-files-found: ignore
+          retention-days: 7

@@ -43,16 +43,18 @@ struct SignInView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
-                    .onChange(of: address) { _, typed in
+                    .accessibilityIdentifier("address")
+                    .onChange(of: address) { before, typed in
                         // The whole line pasted into the first field is the line all the same.
-                        if let line = LoginLine.find(in: typed) { fill(line) }
+                        if pasted(before, typed), let line = LoginLine.find(in: typed) { fill(line) }
                     }
                 TextField("Login code", text: $code)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
                     .font(.system(.body, design: .monospaced))
-                    .onChange(of: code) { _, typed in
-                        if let line = LoginLine.find(in: typed) { fill(line) }
+                    .accessibilityIdentifier("code")
+                    .onChange(of: code) { before, typed in
+                        if pasted(before, typed), let line = LoginLine.find(in: typed) { fill(line) }
                     }
             } header: {
                 Text("Address and login code")
@@ -77,6 +79,7 @@ struct SignInView: View {
                     }
                 }
                 .disabled(working || address.trimmingCharacters(in: .whitespaces).isEmpty || code.trimmingCharacters(in: .whitespaces).isEmpty)
+                .accessibilityIdentifier("login")
             }
         }
         .navigationTitle("Doklin")
@@ -88,6 +91,12 @@ struct SignInView: View {
                 }
             }
         }
+    }
+
+    /// Whether a field's text arrived all at once. A line being typed is
+    /// left alone: its code is not whole until the last character.
+    private func pasted(_ before: String, _ after: String) -> Bool {
+        after.count - before.count > 8
     }
 
     private func fill(_ line: LoginLine) {

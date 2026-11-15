@@ -18,7 +18,8 @@
 | --- | --- |
 | `ios/DoklinKit/` | Swift package: `Client.swift` + `API.swift` (the document API), `Markdown/` (the reader's parser, task ticking, comment anchors, links), `Models/` (accounts, session, the `@Observable` model behind each screen, the caches) |
 | `ios/Doklin/` | SwiftUI views. UIKit only in `SourceEditor.swift` and `PlatformViews.swift` |
-| `ios/Doklin.xcodeproj` | One target. `ios/Doklin/` is a synchronized folder: a file added there is in the build, with no project edit |
+| `ios/DoklinUITests/` | One journey through the real screens, run by `drive-ios.mjs --app`; skipped without a worker |
+| `ios/Doklin.xcodeproj` | The app and its UI tests. Both folders are synchronized: a file added there is in the build, with no project edit |
 | `ios/Info.plist` | Only what build settings cannot say (plain http to a worker on this machine). The rest is `INFOPLIST_KEY_*` |
 
 ## Traps
@@ -30,6 +31,8 @@
 - `x-doklin-client` is `ios/<version>`; `host` at login is the device's name, which is what the Mac's Agents panel lists.
 - The version is `MARKETING_VERSION` in the project, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.
 - Diagrams (` ```mermaid `, ` ```svg `) are shown as their source: there is no renderer on the device.
+- The UI tests find rows and fields by `accessibilityIdentifier` (`entry-<name>`, `address`, `code`, `login`) and buttons by their label: renaming either is a change to `DoklinUITests.swift` too.
+- The simulator build must stay signed-to-run-locally for the UI tests: with `CODE_SIGNING_ALLOWED=NO` the app has no Keychain, and a login cannot be kept.
 
 ## Building and checking
 
@@ -37,6 +40,7 @@
 open ios/Doklin.xcodeproj                 # set a team under Signing, then run
 swift test --package-path ios/DoklinKit   # the core; live tests skip without a worker
 node verify-harness/drive-ios.mjs         # the core against the harness worker
+node verify-harness/drive-ios.mjs --app   # the app in a simulator against it (a Mac with Xcode)
 node scripts/ios-colors.mjs [--check]     # colour sets from tokens.css
 ```
 

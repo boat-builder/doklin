@@ -32,6 +32,7 @@ struct FolderView: View {
                 NavigationLink(value: route(for: entry)) {
                     EntryRow(entry: entry, audience: session.audience(of: entry.path))
                 }
+                .accessibilityIdentifier("entry-\(entry.name)")
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if session.may(.edit), movable(entry) {
                         if !isFolder(entry) {
