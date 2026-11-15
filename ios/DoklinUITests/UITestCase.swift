@@ -86,7 +86,7 @@ class UITestCase: XCTestCase {
     /// with this class's line. Ends on the workspace's top folder.
     func launchAndJoin() {
         app.launch()
-        while marked("workspace-menu").waitForExistence(timeout: 8) {
+        for _ in 0..<3 where marked("workspace-menu").waitForExistence(timeout: 8) {
             removeFromThisPhone()
             _ = marked("line").waitForExistence(timeout: 10)
         }
@@ -113,6 +113,10 @@ class UITestCase: XCTestCase {
         } else {
             app.buttons.matching(identifier: "Remove from this iPhone").firstMatch.tap()
         }
+        // A workspace that could not sync first — its worker gone, as one a
+        // stopped run left behind — is asked about once more.
+        let anyway = app.buttons["Remove anyway"]
+        if anyway.waitForExistence(timeout: 15) { anyway.tap() }
     }
 }
 

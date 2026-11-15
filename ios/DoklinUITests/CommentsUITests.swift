@@ -158,10 +158,10 @@ final class CommentsUITests: UITestCase {
         expect(app.buttons["Unset as home page"], "the plan as the home page").tap()
         marked("page-menu-home").tap()
         expect(app.buttons["Use as home page"], "Home no longer the home page").tap()
-        marked("page-menu-home").tap()
-        expect(app.buttons["Unset as home page"], "Home the home page again")
+        // Read off the list, not a menu left open over the screen.
+        expect(marked("page-home").staticTexts["Home page"], "Home the home page again")
+        XCTAssertFalse(marked("page-plan").staticTexts["Home page"].exists, "the plan still the home page")
         record("the home page, moved and back")
-        app.navigationBars["Published pages"].tap()
         back()
 
         removeFromThisPhone()
