@@ -813,7 +813,7 @@ fn diff_is_unified_and_capped() {
     // compared against now.
     f.write("a.md", "three and three\n");
     let path = f.root.path().join("a.md");
-    let against_now = history::diff_texts(&text(&new), &history::read_disk(&path).unwrap()).unwrap();
+    let against_now = history::diff_texts(&text(&new), &history::read_disk(&path, "Mac").unwrap()).unwrap();
     assert!(against_now.contains("+three and three"), "{}", against_now);
 
     let big = String::from_utf8(vec![b'a'; MAX_DIFF_BYTES + 1]).unwrap();

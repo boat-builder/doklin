@@ -301,9 +301,9 @@ pub fn read_version(store: &Store, hash: &str) -> Result<String, String> {
 }
 
 /// The file on disk, as text — the side a diff compares the newest version
-/// against.
-pub fn read_disk(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|_| "that file isn't on this Mac any more".to_string())?;
+/// against. `device_kind` is what the refusal calls this device.
+pub fn read_disk(path: &Path, device_kind: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|_| format!("that file isn't on this {} any more", device_kind))?;
     text_of(bytes)
 }
 

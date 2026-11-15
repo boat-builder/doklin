@@ -1183,7 +1183,8 @@ pub async fn versions_diff(
             Some(hash) => version_text(core, &root, &hash).await,
             None => {
                 let on_disk = path.clone().ok_or_else(|| "there's no file to compare with".to_string())?;
-                tokio::task::spawn_blocking(move || history::read_disk(Path::new(&on_disk)))
+                let kind = core.device_kind.clone();
+                tokio::task::spawn_blocking(move || history::read_disk(Path::new(&on_disk), &kind))
                     .await
                     .map_err(|_| "that comparison didn't finish".to_string())?
             }

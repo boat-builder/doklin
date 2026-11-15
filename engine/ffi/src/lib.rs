@@ -125,6 +125,7 @@ struct Config {
     anchor: Option<String>,
     client: String,
     device_name: String,
+    device_kind: String,
 }
 
 impl Config {
@@ -140,6 +141,7 @@ impl Config {
             anchor: text_of("anchor").filter(|s| !s.is_empty()),
             client: needed("client")?,
             device_name: needed("deviceName")?,
+            device_kind: needed("deviceKind")?,
         })
     }
 }
@@ -171,6 +173,7 @@ fn start(
         anchor,
         client: config.client,
         device_name: config.device_name,
+        device_kind: config.device_kind,
         watch: false,
         runtime: runtime.handle().clone(),
         host: Arc::new(AppHost { on_event, get_secret, set_secret, data_dir }),
@@ -202,8 +205,8 @@ unsafe fn text_of(text: *const c_char) -> String {
 
 /// Start the engine. `config` is JSON: `dataDir` (where the engine keeps its
 /// own files), `joinDir` (where a workspace is downloaded), `anchor` (the
-/// folder the platform can move, if it can), `client` (`x-doklin-client`) and
-/// `deviceName`. A workspace's sign-in is kept through `get_secret` and
+/// folder the platform can move, if it can), `client` (`x-doklin-client`),
+/// `deviceName` and `deviceKind` (`iPhone`, `iPad`). A workspace's sign-in is kept through `get_secret` and
 /// `set_secret`, by workspace id, and never written into the engine's files.
 /// Answers null, or a sentence saying why it did not start — the caller's to
 /// free. A second call changes nothing and answers null.
@@ -282,7 +285,7 @@ mod tests {
     #[test]
     fn a_setup_names_where_things_are_kept() {
         let config = Config::parse(
-            r#"{"dataDir":"/d","joinDir":"/j","anchor":"/a","client":"ios/1.0","deviceName":"Ada's iPhone"}"#,
+            r#"{"dataDir":"/d","joinDir":"/j","anchor":"/a","client":"ios/1.0","deviceName":"Ada's iPhone","deviceKind":"iPhone"}"#,
         )
         .unwrap();
         assert_eq!(config.data_dir, "/d");
@@ -290,6 +293,7 @@ mod tests {
         assert_eq!(config.anchor.as_deref(), Some("/a"));
         assert_eq!(config.client, "ios/1.0");
         assert_eq!(config.device_name, "Ada's iPhone");
+        assert_eq!(config.device_kind, "iPhone");
     }
 
     #[test]

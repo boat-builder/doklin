@@ -31,7 +31,7 @@ typedef bool (*doklin_secret_get_callback)(const char *ws_id, char **token);
 typedef bool (*doklin_secret_set_callback)(const char *ws_id, const char *token);
 
 // Start the engine. `config` is JSON: dataDir, joinDir, anchor (optional),
-// client, deviceName. Sign-ins are kept through get_secret and set_secret,
+// client, deviceName, deviceKind (iPhone, iPad). Sign-ins are kept through get_secret and set_secret,
 // never in the engine's files. Answers NULL, or a sentence saying why it did
 // not start, to hand back to doklin_engine_free. A second call changes nothing.
 char *doklin_engine_start(const char *config, doklin_event_callback on_event,

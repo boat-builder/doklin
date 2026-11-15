@@ -62,7 +62,8 @@ extension EngineSetup {
             workspacesDirectory: documents,
             anchor: URL(fileURLWithPath: NSHomeDirectory()),
             client: "ios/\(version)",
-            deviceName: UIDevice.current.name
+            deviceName: UIDevice.current.name,
+            deviceKind: UIDevice.current.model
         )
     }
 }

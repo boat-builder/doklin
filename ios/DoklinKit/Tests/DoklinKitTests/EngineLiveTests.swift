@@ -46,7 +46,8 @@ final class EngineLiveTests: XCTestCase {
             workspacesDirectory: container.appendingPathComponent("Documents"),
             anchor: container,
             client: "ios/drive",
-            deviceName: "iPhone (engine drive)"
+            deviceName: "iPhone (engine drive)",
+            deviceKind: "iPhone"
         ))
         await device.refresh()
         XCTAssertNil(device.failure)

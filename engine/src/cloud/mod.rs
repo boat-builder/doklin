@@ -244,6 +244,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
             data_dir: inner.data_dir.clone(),
             device_id: inner.device.id.clone(),
             device_name: inner.device.name.clone(),
+            device_kind: core.device_kind.clone(),
             trash: Some({
                 let host = core.host.clone();
                 Arc::new(move |path: &Path| host.trash(path).is_ok()) as Trash
@@ -491,7 +492,7 @@ fn check_domain_free(core: &Core, inner: &ManagerInner, domain: &str, root: &Pat
     let file = read_cloud_file(&inner.data_dir, core.secrets());
     if let Some(w) = file.workspaces.iter().find(|w| w.domain == domain) {
         if Path::new(&w.root) != root {
-            return Err(format!("{} is already connected to \"{}\" on this Mac", domain, w.root));
+            return Err(format!("{} is already connected to \"{}\" on this {}", domain, w.root, core.device_kind));
         }
     }
     Ok(())
@@ -637,7 +638,10 @@ pub fn cloud_token(core: &Arc<Core>, root: String) -> Result<Credentials, String
         let file = read_cloud_file(&inner.data_dir, core.secrets());
         let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
         if !entry.creator {
-            return Err("this Mac has a sign-in of its own, which is never shown — to add a device, use Add a device".into());
+            return Err(format!(
+                "this {} has a sign-in of its own, which is never shown — to add a device, use Add a device",
+                core.device_kind
+            ));
         }
         Ok(Credentials { endpoint: entry.endpoint.clone(), token: entry.token.clone() })
     })

@@ -69,6 +69,9 @@ pub struct Setup {
     pub client: String,
     /// This device's own name, as its person knows it.
     pub device_name: String,
+    /// What a person calls this kind of device — `Mac`, `iPhone`, `iPad` —
+    /// for the sentences the engine says about it ("this Mac's token").
+    pub device_kind: String,
     /// Watch connected folders for changes made outside the app.
     pub watch: bool,
     /// The runtime every engine task runs on.
@@ -86,6 +89,7 @@ pub struct Core {
     pub(crate) join_dir: Option<PathBuf>,
     pub(crate) client: String,
     pub(crate) device_name: String,
+    pub(crate) device_kind: String,
     pub(crate) watch: bool,
     pub(crate) cloud: Mutex<Option<crate::cloud::ManagerInner>>,
     pub(crate) versions: Mutex<Option<crate::versions::ManagerInner>>,
@@ -106,6 +110,7 @@ impl Core {
             join_dir: setup.join_dir,
             client: setup.client,
             device_name: setup.device_name,
+            device_kind: setup.device_kind,
             watch: setup.watch,
             cloud: Mutex::new(None),
             versions: Mutex::new(None),

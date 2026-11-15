@@ -91,6 +91,7 @@ pub(crate) fn init(app: &AppHandle) {
         anchor: None,
         client: env!("CARGO_PKG_VERSION").to_string(),
         device_name: doklin_engine::cloud::device_display_name(),
+        device_kind: "Mac".to_string(),
         watch: true,
         runtime: tauri::async_runtime::handle().inner().clone(),
         host: Arc::new(MacHost(app.clone())),

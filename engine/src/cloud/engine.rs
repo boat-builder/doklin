@@ -204,6 +204,8 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub device_id: String,
     pub device_name: String,
+    /// `Mac`, `iPhone`, `iPad`: what the sentences about this device call it.
+    pub device_kind: String,
     /// Where a real deletion goes: the platform's trash (`Host::trash`).
     /// None — the tests, and a platform with no trash — removes outright.
     pub trash: Option<Trash>,
@@ -746,7 +748,7 @@ impl<R: Remote> Engine<R> {
             Some(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
             Some(RemoteError::Unauthorized) => self.set_status(
                 Phase::Revoked,
-                Some("the domain no longer accepts this Mac's token".into()),
+                Some(format!("the domain no longer accepts this {}'s token", self.cfg.device_kind)),
             ),
             // Obeyed, it has no status of its own: the task loop ends the
             // engine, and the workspace leaves this Mac — row and all — a
@@ -754,14 +756,14 @@ impl<R: Remote> Engine<R> {
             // domain would not take, and reads as one.
             Some(RemoteError::Removed) => {
                 if !self.heard_removed() {
-                    self.set_status(Phase::Revoked, Some("the domain no longer accepts this Mac's token".into()));
+                    self.set_status(Phase::Revoked, Some(format!("the domain no longer accepts this {}'s token", self.cfg.device_kind)));
                 }
             }
             Some(RemoteError::Outdated(m)) => {
                 self.outdated = Some(self.worker_version.unwrap_or(0));
                 self.set_status(
                     Phase::WorkerOutdated,
-                    Some(format!("this Mac's changes are waiting on a worker update ({})", m)),
+                    Some(format!("this {}'s changes are waiting on a worker update ({})", self.cfg.device_kind, m)),
                 );
             }
             Some(RemoteError::NotFound) => self.set_status(
@@ -1173,7 +1175,7 @@ impl<R: Remote> Engine<R> {
         // The list of this person's spaces is what decides which folders
         // stay on this Mac: a folder is only added to one the domain gave.
         if self.spaces.is_none() || !self.shared().reserved_clear() {
-            return Err("This Mac has not caught up with the workspace yet — try again in a moment.".to_string());
+            return Err(format!("This {} has not caught up with the workspace yet — try again in a moment.", self.cfg.device_kind));
         }
         let name = name.trim();
         if !space::valid_folder_name(name) {
@@ -1210,7 +1212,7 @@ impl<R: Remote> Engine<R> {
         if let Err(e) = placed {
             // The domain has the folder; the next poll gives it a folder
             // here. What was to go into it is where it was.
-            return Err(format!("The folder was made, but this Mac could not put it in place: {}.", e));
+            return Err(format!("The folder was made, but this {} could not put it in place: {}.", self.cfg.device_kind, e));
         }
         let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
         let rel = space::spelled(&root, &dir);

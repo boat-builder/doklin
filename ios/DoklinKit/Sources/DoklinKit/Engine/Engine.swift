@@ -68,8 +68,15 @@ public struct EngineSetup: Sendable {
     /// `x-doklin-client`: `ios/<version>`.
     public var client: String
     public var deviceName: String
+    /// What a person calls this kind of device — `iPhone`, `iPad` — in the
+    /// engine's sentences about it.
+    public var deviceKind: String
 
-    public init(secrets: SecretStore, dataDirectory: URL, workspacesDirectory: URL, anchor: URL?, client: String, deviceName: String) {
+    public init(
+        secrets: SecretStore, dataDirectory: URL, workspacesDirectory: URL, anchor: URL?, client: String, deviceName: String,
+        deviceKind: String
+    ) {
+        self.deviceKind = deviceKind
         self.secrets = secrets
         self.dataDirectory = dataDirectory
         self.workspacesDirectory = workspacesDirectory
@@ -100,6 +107,7 @@ public final class Engine: @unchecked Sendable {
             "joinDir": setup.workspacesDirectory.path,
             "client": setup.client,
             "deviceName": setup.deviceName,
+            "deviceKind": setup.deviceKind,
         ]
         if let anchor = setup.anchor { config["anchor"] = anchor.path }
         let text = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
