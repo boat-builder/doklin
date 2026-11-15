@@ -10,8 +10,9 @@ every installation has moved, all of it goes, and so does this file.
 
 All three, confirmed with the users:
 
-1. Every domain runs worker v17 or newer (`/api/meta` answers `version ≥ 17`
-   and `d1: 9`).
+1. Every domain runs worker v18 or newer (`/api/meta` answers `version ≥ 18`
+   and `d1: 9`). v17 alone is not enough: it skipped the superadmin step on a
+   database boards had numbered to 8.
 2. Every Mac that was connected before v17 has updated the app and synced
    since: none shows "this Mac still signs in with the domain's key…", and
    every domain has a superadmin (`/api/meta` `superadmin` is not null).
