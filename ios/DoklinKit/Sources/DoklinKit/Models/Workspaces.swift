@@ -41,6 +41,9 @@ public final class Workspaces {
     /// A workspace just joined, whose status the engine has not sent yet.
     @ObservationIgnored private var arriving: String?
     @ObservationIgnored private var starting = false
+    /// Restricted folders this person is giving up here, as `<root>/<path>`
+    /// lowercased: when one goes, that is no news to them.
+    @ObservationIgnored private var givenUp: Set<String> = []
 
     public init(remembered: UserDefaults = .standard) {
         self.remembered = remembered
@@ -217,7 +220,9 @@ public final class Workspaces {
         case "cloud-space-left":
             if let left = event.decode(CloudSpaceLeft.self) {
                 open[left.root]?.changed([left.path])
-                say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
+                if givenUp.remove("\(left.root)/\(left.path)".lowercased()) == nil {
+                    say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
+                }
             }
         case "cloud-address-taken":
             if let taken = event.decode(CloudAddressTaken.self) {
@@ -235,6 +240,13 @@ public final class Workspaces {
 
     private func say(_ root: String, _ text: String, path: String?) {
         notices.append(Notice(root: root, text: text, path: path))
+    }
+
+    /// This person is giving up the restricted folder at `path` (or, with
+    /// `false`, is not after all).
+    func givingUp(_ root: String, _ path: String, _ giving: Bool) {
+        let key = "\(root)/\(path)".lowercased()
+        if giving { givenUp.insert(key) } else { givenUp.remove(key) }
     }
 
     public func dismiss(_ notice: Notice) {
@@ -286,6 +298,11 @@ public final class Workspace: Identifiable {
     /// Sync now rather than at the next poll.
     public func syncNow() async {
         try? await Engine.shared.run("cloud_sync_now", ["root": .string(root)])
+    }
+
+    /// This person is leaving or deleting the restricted folder at `path`.
+    func givingUp(_ path: String, _ giving: Bool = true) {
+        device?.givingUp(root, path, giving)
     }
 
     func changed(_ paths: [String]) {

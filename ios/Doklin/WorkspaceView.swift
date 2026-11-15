@@ -26,6 +26,16 @@ struct WorkspaceView: View {
                         DocumentView(workspace: workspace, path: file, route: $path)
                     case .search:
                         SearchView(workspace: workspace)
+                    case .people:
+                        PeopleView(workspace: workspace)
+                    case .devices:
+                        DevicesView(workspace: workspace)
+                    case .agents:
+                        AgentsView(workspace: workspace)
+                    case .hereNow:
+                        HereNowView(workspace: workspace)
+                    case .access(let id):
+                        SpaceAccessView(workspace: workspace, id: id, route: $path)
                     }
                 }
         }
@@ -74,6 +84,32 @@ struct WorkspaceView: View {
                     joining = true
                 } label: {
                     Label("Join another workspace", systemImage: "plus")
+                }
+            }
+            Section {
+                Button {
+                    path.append(.people)
+                } label: {
+                    Label("People", systemImage: "person.2")
+                }
+                if workspace.may("devices.own") {
+                    Button {
+                        path.append(.devices)
+                    } label: {
+                        Label("Devices", systemImage: "laptopcomputer.and.iphone")
+                    }
+                }
+                if workspace.may("agents.own") {
+                    Button {
+                        path.append(.agents)
+                    } label: {
+                        Label("Agents", systemImage: "terminal")
+                    }
+                }
+                Button {
+                    path.append(.hereNow)
+                } label: {
+                    Label("Here now", systemImage: "dot.radiowaves.left.and.right")
                 }
             }
             Section {

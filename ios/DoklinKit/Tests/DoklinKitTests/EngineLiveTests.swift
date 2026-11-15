@@ -128,6 +128,41 @@ final class EngineLiveTests: XCTestCase {
         let another: DeviceCode = try await Engine.shared.call("cloud_device_code", ["root": .string(root)])
         XCTAssertTrue(another.blob.hasPrefix("doklin-invite "), another.blob)
 
+        // People, agents and a restricted folder, through the models their
+        // screens use: each change made, and the list read back.
+        let roster = PeopleModel(workspace: workspace)
+        await roster.load()
+        XCTAssertTrue(roster.people?.members.contains { $0.email == "ada@example.com" && $0.creator } ?? false, "\(String(describing: roster.people))")
+        let invited = await roster.invite(email: "kit@example.com", name: " Kit ", days: 1)
+        XCTAssertTrue(invited, roster.problem ?? "")
+        XCTAssertTrue(roster.invited?.blob.hasPrefix("doklin-invite ") ?? false)
+        let waiting = try XCTUnwrap(roster.people?.invites.first { $0.email == "kit@example.com" })
+        XCTAssertEqual(waiting.name, "Kit")
+        await roster.withdraw(waiting)
+        XCTAssertNil(roster.problem)
+        XCTAssertNil(roster.invited)
+        XCTAssertFalse(roster.people?.invites.contains { $0.id == waiting.id } ?? true)
+
+        let agents = AgentsModel(workspace: workspace)
+        let added = await agents.add(name: "Kit bot", scopes: AgentScope.usual)
+        XCTAssertTrue(added, agents.problem ?? "")
+        XCTAssertTrue(agents.login?.login.line.hasPrefix("doklin login ") ?? false)
+        let bot = try XCTUnwrap(agents.mine.first { $0.name == "Kit bot" })
+        XCTAssertEqual(bot.scopes, ["read", "comment", "edit"])
+        await agents.remove(bot)
+        XCTAssertFalse(agents.mine.contains { $0.id == bot.id })
+
+        let making = RestrictedFolderModel(workspace: workspace, source: .new)
+        let restricted = await making.create(name: "Kit", members: [])
+        let folderPath = try XCTUnwrap(restricted, making.problem ?? "")
+        XCTAssertTrue(workspace.files.exists(folderPath), folderPath)
+        await device.refresh()
+        let space = try XCTUnwrap(workspace.restrictedFolder(at: folderPath))
+        let access = SpaceAccessModel(workspace: workspace, id: space.id)
+        await access.delete()
+        XCTAssertNil(access.problem)
+        XCTAssertFalse(workspace.files.exists(folderPath))
+
         // The folder has a history of its own.
         XCTAssertTrue(device.versions.contains { $0.root == root && $0.snapshots >= 1 }, "\(device.versions.map(\.root))")
 

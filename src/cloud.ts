@@ -574,7 +574,8 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
 
 /** Who gains sight of something moved from one section to another —
  *  "Everyone in Acme", "All 3 people in “Finance”" — or null when nobody
- *  does, which is every move that keeps the audience or narrows it. */
+ *  does, which is every move that keeps the audience or narrows it. The
+ *  iPhone asks the same (`Sections.wider`, ios/DoklinKit) — change both. */
 export function widerAudience(cloud: CloudStatus, from: Place, to: Place): string | null {
   if (from.kind === "shared" || to.kind === "nowhere" || to.kind === "private") return null;
   if (to.kind === "shared") return `Everyone in ${cloud.name}`;
@@ -595,7 +596,9 @@ export function may(who: { can: string[] }, action: CloudAction): boolean {
 /** Whether this Mac may make a new code for somebody the workspace already
  *  lists. Once anybody has signed in as a person, a code for them is theirs to
  *  make, or the creator's — the domain refuses anyone else's. Until then they
- *  are only invited, and whoever may invite may replace the code. */
+ *  are only invited, and whoever may invite may replace the code. The worker's
+ *  `createInvite` decides, and the iPhone asks the same (`mayInviteAgain`,
+ *  ios/DoklinKit) — change all three. */
 export function mayInviteAgain(people: CloudPeople, memberId: string): boolean {
   if (!may(people, "people.invite")) return false;
   const person = people.members.find((m) => m.id === memberId);
@@ -644,7 +647,8 @@ export function revealSoon(el: { current: HTMLElement | null }): void {
   requestAnimationFrame(() => el.current?.scrollIntoView({ block: "nearest" }));
 }
 
-/** "just now", "2 min ago", "3 h ago", "12 d ago". */
+/** "just now", "2 min ago", "3 h ago", "12 d ago". The iPhone writes times
+ *  the same (`Clock`, ios/DoklinKit) — change both, with `timeUntil`. */
 export function timeAgo(ms: number, now = Date.now()): string {
   const secs = Math.max(0, Math.round((now - ms) / 1000));
   if (secs < 45) return "just now";

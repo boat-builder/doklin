@@ -61,4 +61,10 @@ enum Route: Hashable {
     case folder(String)
     case document(String)
     case search
+    case people
+    case devices
+    case agents
+    case hereNow
+    /// Who can open a restricted folder, by its id.
+    case access(String)
 }
