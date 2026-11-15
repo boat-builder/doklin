@@ -131,6 +131,47 @@ final class EngineLiveTests: XCTestCase {
         // The folder has a history of its own.
         XCTAssertTrue(device.versions.contains { $0.root == root && $0.snapshots >= 1 }, "\(device.versions.map(\.root))")
 
+        // A note's history keeps what was typed here once it is opened; an
+        // older version reads, compares and goes back, and the restore undoes.
+        let history = NoteHistory(workspace: workspace, path: made)
+        await history.load()
+        let kept = history.versions.count
+        XCTAssertGreaterThanOrEqual(kept, 1, "\(history.versions)")
+        try await note.save("# From the phone\n\nA second thought.\n")
+        await history.load()
+        XCTAssertEqual(history.versions.count, kept + 1, "\(history.versions)")
+        XCTAssertTrue(history.versions[0].current)
+        let older = try XCTUnwrap(history.open(history.versions[1]))
+        let reader = VersionReader(workspace: workspace, opened: older)
+        await reader.load()
+        XCTAssertEqual(reader.text, "# From the phone\n\nWritten on a device.\n\n- [x] a box to tick\n")
+        await reader.compare()
+        XCTAssertTrue(reader.changes?.contains { $0.kind == .added && $0.text == "A second thought." } ?? false, "\(String(describing: reader.changes))")
+        let outcome = try await reader.restore()
+        XCTAssertEqual(try workspace.files.text(made), reader.text)
+        try await VersionReader.undo(outcome, of: older, in: workspace)
+        XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
+
+        // The workspace's moments start where this device joined; restoring
+        // that one would take away the note made since.
+        let timeline = WorkspaceTimeline(workspace: workspace, store: root)
+        await timeline.load()
+        let joined = try XCTUnwrap(timeline.moments.last)
+        XCTAssertEqual(joined.reason, "seed")
+        let restoring = MomentPlan(workspace: workspace, store: root, moment: joined)
+        await restoring.load()
+        XCTAssertTrue(restoring.rows.contains(PlanRow(path: made, kind: .isRemoved)), "\(restoring.rows)")
+
+        // A note removed here is under Recently deleted, and comes back where it was.
+        let ideas = try XCTUnwrap(try workspace.files.list("").first { $0.path == "Ideas.md" })
+        try await folder.remove(ideas)
+        let deleted = RecentlyDeleted(workspace: workspace)
+        await deleted.load(stores: device.stores(of: workspace))
+        let gone = try XCTUnwrap(deleted.documents.first { $0.primary.path == "Ideas.md" }, "\(deleted.documents)")
+        let back = try await gone.bringBack(in: workspace)
+        XCTAssertEqual(back, "Ideas.md")
+        XCTAssertTrue(try workspace.files.text("Ideas.md").hasPrefix("# Ideas"))
+
         // Leaving ends the sign-in and takes the copy, and the keeper's
         // sign-in, with it.
         try await device.leave(root)
