@@ -11,7 +11,7 @@
 // with, and a worker that is behind becomes an "update the worker" state
 // rather than an error. The counter starts at 1: nothing older speaks this
 // API, so no version below 1 can ever show up.
-export const WORKER_VERSION = 16;
+export const WORKER_VERSION = 17;
 
 // What this build can do, for the app's feature checks. A name here is a
 // promise about behaviour, not a version number: "publish" is the promise
