@@ -219,7 +219,7 @@ public final class Workspaces {
             }
         case "cloud-space-left":
             if let left = event.decode(CloudSpaceLeft.self) {
-                open[left.root]?.changed([left.path])
+                open[left.root]?.lost(left.path)
                 if givenUp.remove("\(left.root)/\(left.path)".lowercased()) == nil {
                     say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
                 }
@@ -279,6 +279,11 @@ public final class Workspace: Identifiable {
     public private(set) var changes = 0
     /// The workspace-relative paths of the last change.
     public private(set) var lastChanged: Set<String> = []
+    /// The last restricted folder to leave this iPhone: the screens inside
+    /// it close when it moves.
+    public private(set) var left: FolderLeft?
+    /// Every restricted folder that left while the app ran.
+    @ObservationIgnored private var departed: [String] = []
 
     public nonisolated var id: String { root }
 
@@ -308,6 +313,21 @@ public final class Workspace: Identifiable {
     func changed(_ paths: [String]) {
         lastChanged = Set(paths.map { $0.lowercased() })
         changes += 1
+    }
+
+    /// The restricted folder at `folder` left this iPhone, its copy already
+    /// deleted by the engine.
+    func lost(_ folder: String) {
+        departed.append(folder)
+        left = FolderLeft(path: folder, count: (left?.count ?? 0) + 1)
+        changed([folder])
+    }
+
+    /// Whether `path` was in a restricted folder that left this iPhone and
+    /// has not come back. Nothing is written there: that would make the
+    /// folder again, as one that syncs to nobody.
+    public func isGone(_ path: String) -> Bool {
+        departed.contains { Sections.holds($0, path) && !files.exists($0) }
     }
 
     /// A change made from this device: the engine hears of it, and so does
@@ -358,12 +378,11 @@ public enum Audience: Equatable, Sendable {
 
     public static func of(_ path: String, in status: CloudStatus?) -> Audience {
         guard let status, status.sections else { return .everyone }
-        let lower = path.lowercased()
-        let under = { (folder: String) in lower == folder || lower.hasPrefix(folder + "/") }
-        for space in status.spaces where under(space.path.lowercased()) {
+        let under = { (folder: String) in Sections.holds(folder, path) }
+        for space in status.spaces where under(space.path) {
             return space.kind == .private ? .onlyYou : .folder(space.name)
         }
-        if lower == "restricted" { return .folders }
+        if path.lowercased() == "restricted" { return .folders }
         if under("restricted") || under("private") { return .nowhere }
         return .everyone
     }

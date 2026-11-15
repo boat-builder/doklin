@@ -35,12 +35,21 @@ struct WorkspaceView: View {
                     case .hereNow:
                         HereNowView(workspace: workspace)
                     case .access(let id):
-                        SpaceAccessView(workspace: workspace, id: id, route: $path)
+                        SpaceAccessView(workspace: workspace, id: id)
                     }
                 }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { notice }
-        .safeAreaInset(edge: .bottom, spacing: 0) { SyncLine(workspace: workspace) }
+        .onChange(of: workspace.left) { _, left in
+            if let left { close(left) }
+        }
+        // What sync said sits over the sync line, as a Mac's notes sit at the
+        // bottom: at the top it would cover the screen's navigation bar.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                notice
+                SyncLine(workspace: workspace)
+            }
+        }
         .sheet(isPresented: $joining) {
             NavigationStack {
                 SignInView(canCancel: true)
@@ -64,6 +73,22 @@ struct WorkspaceView: View {
 
     private var failureShown: Binding<Bool> {
         Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
+    }
+
+    /// A restricted folder left this iPhone: every screen inside it closes,
+    /// and its access screen, as a Mac closes its tabs. The rest stay.
+    private func close(_ left: FolderLeft) {
+        path.removeAll { route in
+            switch route {
+            case .folder(let dir), .document(let dir):
+                return left.holds(dir)
+            case .access(let id):
+                // Still listed when the engine says it left, or listed no more.
+                return workspace.space(id: id).map { left.holds($0.path) } ?? true
+            default:
+                return false
+            }
+        }
     }
 
     private var menu: some View {

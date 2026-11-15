@@ -1,8 +1,10 @@
 // Who is in the workspace and how they got in, through the real screens
-// against the harness worker: the people, an invite made and withdrawn, a
-// role given and taken back, this iPhone among Ada's devices and a line for
-// another, an agent added and removed, who else is here, and a restricted
-// folder made with somebody in it, looked into and deleted.
+// against the harness worker: the people, an invite made, made again from
+// further down and withdrawn, a role given and taken back, this iPhone among
+// Ada's devices and a line for another, an agent added and removed, who else
+// is here, and restricted folders: one made with somebody in it, listed,
+// renamed, looked into and deleted here; another deleted on another device
+// while a note in it is open here.
 
 import XCTest
 
@@ -40,13 +42,20 @@ final class PeopleUITests: UITestCase {
         }
     }
 
-    /// Scroll a list until something further down it is on screen.
+    /// Scroll a list until something further down it is on screen, clear
+    /// of the sync line drawn over the list's bottom edge.
     @discardableResult
     private func reveal(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-        for _ in 0..<8 where !(element.exists && element.isHittable) {
+        for _ in 0..<8 where !reachable(element) {
             app.swipeUp()
         }
         return expect(element, what, timeout: 5, file: file, line: line)
+    }
+
+    private func reachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let bar = marked("sync-status")
+        return !bar.exists || element.frame.maxY < bar.frame.minY - 8
     }
 
     /// Tick a switch in a form: its knob, not its words.
@@ -58,6 +67,15 @@ final class PeopleUITests: UITestCase {
     private func type(_ text: String, into field: XCUIElement) {
         field.tap()
         field.typeText(text)
+    }
+
+    /// Wait for something to be on screen, where a finger can reach it.
+    private func inView(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
+        if XCTWaiter().wait(for: [shown], timeout: 10) != .completed {
+            record("out of view — \(what)")
+            XCTFail("\(what) is not in view", file: file, line: line)
+        }
     }
 
     func testPeopleDevicesAgentsAndARestrictedFolder() throws {
@@ -81,6 +99,15 @@ final class PeopleUITests: UITestCase {
         record("an invite's line")
         reveal(marked("once-done"), "Done under the code").tap()
         reveal(words("the code runs out in"), "Bea's code among the codes nobody has used")
+
+        // A new code, asked for from the bottom of the list: it is shown at
+        // the top, and the list goes there.
+        reveal(app.buttons["New code"], "New code on Bea's code").tap()
+        expect(marked("invite-send"), "the invite, filled in again").tap()
+        inView(marked("once-shown"), "the new code")
+        expect(words("A code for bea@example.com"), "whom the new code is for")
+        record("a new code, scrolled into view")
+        reveal(marked("once-done"), "Done under the new code").tap()
         reveal(marked("withdraw-bea@example.com"), "Withdraw on Bea's code").tap()
         confirm("Withdraw")
         gone(words("the code runs out in"), "Bea's code, withdrawn")
@@ -148,7 +175,7 @@ final class PeopleUITests: UITestCase {
         back()
         back()
 
-        // A restricted folder, with Bea in it.
+        // A restricted folder, with Bea in it, listed under Restricted.
         marked("new").tap()
         expect(app.buttons["New restricted folder"], "New restricted folder in the menu").tap()
         type("Finance", into: expect(marked("restricted-name"), "the folder's name field"))
@@ -156,25 +183,65 @@ final class PeopleUITests: UITestCase {
         record("a restricted folder, being made")
         marked("restricted-create").tap()
         expect(app.navigationBars["Finance"], "the new folder, open")
-        marked("access").tap()
+        back()
+        expect(marked("entry-Restricted"), "Restricted, at the top").tap()
+        expect(marked("entry-Finance"), "the new folder, listed under Restricted")
+        record("restricted, with the new folder")
+
+        // Renamed here, for everyone in it.
+        marked("entry-Finance").press(forDuration: 1.0)
+        expect(app.buttons["Rename"], "Rename on the restricted folder").tap()
+        let name = expect(app.alerts.textFields.firstMatch, "the new name's field")
+        name.tap()
+        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money")
+        app.alerts.buttons["Rename"].tap()
+        expect(marked("entry-Money"), "the folder, renamed").tap()
+        expect(marked("access"), "who can open it, once the domain has the new name", timeout: 45).tap()
+        expect(app.navigationBars["Who can open “Money”"], "the folder's people, under its new name")
         expect(words("2 people"), "Ada and Bea in it")
         expect(marked("space-member-Bea"), "Bea in it")
         record("who can open the folder")
 
-        // Bea taken out; then the folder deleted, and everything open in it closes.
+        // Bea taken out; then the folder deleted here, and everything open in
+        // it closes, back to Restricted, which no longer lists it.
         app.buttons["Remove"].tap()
         confirm("Remove")
         expect(words("1 person"), "only Ada in it")
         reveal(marked("space-delete"), "Delete it for everyone").tap()
         confirm("Delete the folder")
-        expect(marked("entry-Projects"), "the top of the workspace, once the folder is gone")
-        if marked("entry-Restricted").exists {
-            marked("entry-Restricted").tap()
-            XCTAssertFalse(marked("entry-Finance").waitForExistence(timeout: 3), "the folder is still listed")
-            record("restricted, after the delete")
-            back()
-        }
+        expect(app.navigationBars["Restricted"], "Restricted, once the folder is gone")
+        gone(marked("entry-Money"), "the deleted folder, from the list")
+        expect(text(containing: "Folders only the people you choose can open."), "Restricted, empty")
         XCTAssertFalse(text(containing: "is no longer on this iPhone").exists, "a folder given up here was told as news")
+        record("restricted, after the delete")
+
+        // Another folder, with a note in it open for editing — deleted on
+        // another device. The editor closes with what was typed, nothing
+        // puts the folder back, and the iPhone says why it went.
+        marked("new-restricted").tap()
+        type("Plans", into: expect(marked("restricted-name"), "the second folder's name field"))
+        marked("restricted-create").tap()
+        expect(app.navigationBars["Plans"], "the second folder, open")
+        marked("new").tap()
+        expect(app.buttons["New note"], "New note in the menu").tap()
+        type("Draft", into: expect(app.alerts.textFields.firstMatch, "the note's name field"))
+        app.alerts.buttons["Create"].tap()
+        expect(app.staticTexts["Draft"], "the new note's heading")
+        marked("edit").tap()
+        let editor = expect(app.textViews.firstMatch, "the editor")
+        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+        editor.typeText("\n\nNumbers nobody else may see.")
+        record("a note in Plans, being edited")
+        try ask("deleted?name=Plans")
+        expect(text(containing: "“Plans” is no longer on this iPhone"), "why the folder went", timeout: 60)
+        gone(app.textViews.firstMatch, "the editor, in a folder that is gone")
+        expect(app.navigationBars["Restricted"], "Restricted, once the folder is gone")
+        record("a folder deleted elsewhere")
+        // Long enough for a save the editor had waiting.
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertFalse(marked("entry-Plans").exists, "the folder came back on this iPhone")
+        app.buttons["Dismiss"].tap()
+        back()
 
         // Bea removed from the workspace.
         open("People")

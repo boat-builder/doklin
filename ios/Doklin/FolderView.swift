@@ -48,13 +48,15 @@ struct FolderView: View {
                     }
                 }
                 .contextMenu {
-                    if mayChange, !model.isManaged(entry) {
+                    if mayChange, model.renamable(entry) {
                         Button {
                             newName = entry.name
                             renaming = entry
                         } label: {
                             Label("Rename", systemImage: "pencil")
                         }
+                    }
+                    if mayChange, !model.isManaged(entry) {
                         Button {
                             moving = entry
                         } label: {
@@ -160,6 +162,10 @@ struct FolderView: View {
             TextField("Name", text: $newName)
             Button("Cancel", role: .cancel) { renaming = nil }
             Button("Rename") { rename() }
+        } message: {
+            if let renaming, workspace.restrictedFolder(at: renaming.path) != nil {
+                Text("It is renamed for everyone in it.")
+            }
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "")?",
@@ -397,7 +403,7 @@ private struct MoveSheet: View {
             }
             .onAppear { folders = model.workspace.files.everyFolder() }
             .confirmationDialog(
-                "Move “\(entry.name)” to \(widening.map { $0.folder.isEmpty ? "the workspace" : "“\(DocLinks.name(of: $0.folder))”" } ?? "")?",
+                widening.map { model.wideningTitle(entry, into: $0.folder) } ?? "",
                 isPresented: wideningShown,
                 titleVisibility: .visible
             ) {

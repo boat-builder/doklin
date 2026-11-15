@@ -36,11 +36,26 @@ extension Workspace {
 }
 
 public enum Sections {
+    /// Whether `path` is `folder` or something in it, compared as the disk
+    /// compares names.
+    public static func holds(_ folder: String, _ path: String) -> Bool {
+        let folder = folder.lowercased(), path = path.lowercased()
+        return path == folder || path.hasPrefix(folder + "/")
+    }
+
     /// The section `path` is in, when it is in one.
     public static func space(holding path: String, in status: CloudStatus?) -> SpaceStatus? {
         guard let status, status.sections else { return nil }
-        let lower = path.lowercased()
-        return status.spaces.first { lower == $0.path.lowercased() || lower.hasPrefix($0.path.lowercased() + "/") }
+        return status.spaces.first { holds($0.path, path) }
+    }
+
+    /// What a move that lets more people see something asks — "Move “plan”
+    /// to the workspace?", "Move “plan” to “Finance”?" — named for who will
+    /// see it there, not for the folder it lands in.
+    public static func moveTitle(_ name: String, to folder: String, in status: CloudStatus?) -> String {
+        let to: String
+        if case .folder(let space) = Audience.of(folder, in: status) { to = "“\(space)”" } else { to = "the workspace" }
+        return "Move “\(name)” to \(to)?"
     }
 
     /// Who gains sight of something moved from `from` to `to` — "Everyone in
@@ -66,6 +81,19 @@ public enum Sections {
             return nil
         }
     }
+}
+
+/// A restricted folder that left this iPhone: this person was taken out of
+/// it, or it was deleted — here or on another device. The engine has
+/// already deleted its copy, so every screen inside it closes.
+public struct FolderLeft: Equatable, Sendable {
+    /// Its folder, workspace-relative, as it was here.
+    public let path: String
+    /// Moves with each folder that leaves, so one leaving twice is heard twice.
+    public let count: Int
+
+    /// Whether `path` was the folder or in it.
+    public func holds(_ path: String) -> Bool { Sections.holds(self.path, path) }
 }
 
 /// What a restricted folder is made from: nothing, a folder that is there
@@ -216,9 +244,6 @@ public final class RestrictedFolderModel {
 public final class SpaceAccessModel {
     public let workspace: Workspace
     public let id: String
-    /// Its folder, workspace-relative, as it was when this opened — still
-    /// known once the folder has gone.
-    public let folder: String
     /// Everyone on the workspace, for names and for who can be added.
     public private(set) var everyone: [MemberRecord]?
     public private(set) var busy = false
@@ -228,7 +253,6 @@ public final class SpaceAccessModel {
     public init(workspace: Workspace, id: String) {
         self.workspace = workspace
         self.id = id
-        self.folder = workspace.space(id: id)?.path ?? ""
         self.meId = workspace.status?.meId
     }
 
@@ -339,6 +363,19 @@ extension FolderModel {
         guard case .folder(let path) = entry, workspace.mayRestrict, !isManaged(entry) else { return false }
         let audience = workspace.audience(of: path)
         return audience == .everyone || audience == .onlyYou
+    }
+
+    /// What can be renamed: anything that is not a section's own folder —
+    /// and a restricted folder, which is then renamed for everyone in it.
+    /// It is never moved or removed like the rows beside it: it is left, or
+    /// deleted for everyone, from its access screen.
+    public func renamable(_ entry: FolderEntry) -> Bool {
+        !isManaged(entry) || workspace.restrictedFolder(at: entry.path) != nil
+    }
+
+    /// The question a move that lets more people see `entry` asks.
+    public func wideningTitle(_ entry: FolderEntry, into folder: String) -> String {
+        Sections.moveTitle(entry.name, to: folder, in: workspace.status)
     }
 
     /// A note of this person's Private, which is shared by moving it into a

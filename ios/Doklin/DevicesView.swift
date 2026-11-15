@@ -76,14 +76,14 @@ struct DevicesView: View {
                 ForEach(people.mine) { device in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            NameLine(name: device.deviceName ?? "A device", tags: people.isThisDevice(device) ? ["this iPhone"] : [])
+                            NameLine(name: device.label, tags: people.isThisDevice(device) ? ["this iPhone"] : [])
                             Hint("Joined \(Clock.ago(device.createdAt, now: now))")
                         }
                         Spacer(minLength: 8)
                         if !people.isThisDevice(device) {
                             Button("Sign out") {
                                 question = Question(
-                                    "Sign out \(device.deviceName ?? "this device")?",
+                                    device.signOutTitle,
                                     "It stops syncing, and deletes its copy of \(workspace.name) the next time Doklin runs there.",
                                     button: "Sign out"
                                 ) { await model.signOut(device) }
@@ -93,7 +93,7 @@ struct DevicesView: View {
                         }
                     }
                     .padding(.vertical, 2)
-                    .accessibilityIdentifier("device-\(device.deviceName ?? device.id)")
+                    .accessibilityIdentifier("device-\(device.named ?? device.id)")
                 }
             }
         }

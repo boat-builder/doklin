@@ -3,13 +3,17 @@ import SwiftUI
 
 /// Making a restricted folder: its name, and who is in it besides this
 /// person. Made from nothing, from a folder that is there, or around a
-/// private note being shared. Once made, `made` is told its folder.
+/// private note being shared. Once made, `made` is told its folder — at
+/// once, or, when the note could not be moved into it, once the person has
+/// read why and asks to open it.
 struct RestrictedFolderSheet: View {
     let made: (String) -> Void
 
     @State private var model: RestrictedFolderModel
     @State private var name: String
     @State private var picked: Set<String> = []
+    /// The folder, made, with something about it the person must read first.
+    @State private var madeFolder: String?
     @Environment(\.dismiss) private var dismiss
 
     init(workspace: Workspace, source: RestrictedSource, made: @escaping (String) -> Void) {
@@ -19,7 +23,7 @@ struct RestrictedFolderSheet: View {
     }
 
     private var source: RestrictedSource { model.source }
-    private var ready: Bool { source.ready(name: name, picked: picked.count) && !model.busy }
+    private var ready: Bool { source.ready(name: name, picked: picked.count) && !model.busy && madeFolder == nil }
 
     var body: some View {
         NavigationStack {
@@ -33,7 +37,7 @@ struct RestrictedFolderSheet: View {
                         .autocorrectionDisabled()
                         .submitLabel(.done)
                         .onSubmit { create() }
-                        .disabled(model.busy)
+                        .disabled(model.busy || madeFolder != nil)
                         .accessibilityIdentifier("restricted-name")
                 }
                 Section {
@@ -46,19 +50,23 @@ struct RestrictedFolderSheet: View {
                     }
                 }
                 Section {
-                    Button {
-                        create()
-                    } label: {
-                        HStack {
-                            Text(model.busy ? "Working…" : source.button)
-                            if model.busy {
-                                Spacer()
-                                ProgressView()
+                    if let madeFolder {
+                        Button("Open “\(DocLinks.name(of: madeFolder))”") { open(madeFolder) }
+                    } else {
+                        Button {
+                            create()
+                        } label: {
+                            HStack {
+                                Text(model.busy ? "Working…" : source.button)
+                                if model.busy {
+                                    Spacer()
+                                    ProgressView()
+                                }
                             }
                         }
+                        .disabled(!ready)
+                        .accessibilityIdentifier("restricted-create")
                     }
-                    .disabled(!ready)
-                    .accessibilityIdentifier("restricted-create")
                 } footer: {
                     if let problem = model.problem { Text(problem).foregroundStyle(Theme.errorInk) }
                 }
@@ -92,7 +100,7 @@ struct RestrictedFolderSheet: View {
                             if !member.name.isEmpty { Hint(member.email) }
                         }
                     }
-                    .disabled(model.busy)
+                    .disabled(model.busy || madeFolder != nil)
                     .accessibilityIdentifier("restricted-pick-\(member.email)")
                 }
             }
@@ -108,26 +116,28 @@ struct RestrictedFolderSheet: View {
     private func create() {
         guard ready else { return }
         Task {
-            if let folder = await model.create(name: name, members: Array(picked)) {
-                dismiss()
-                made(folder)
-            }
+            guard let folder = await model.create(name: name, members: Array(picked)) else { return }
+            // Made, but the note is not in it: say so here, where it is read.
+            if model.problem == nil { open(folder) } else { madeFolder = folder }
         }
+    }
+
+    private func open(_ folder: String) {
+        dismiss()
+        made(folder)
     }
 }
 
 /// Who can open one restricted folder, and what anyone in it may do about
 /// that: add people, take them out, leave, delete it for everyone. The
 /// folder is read from the workspace's status, so a change shows as soon as
-/// the engine has it; once the folder has left this iPhone, the screen —
-/// and whatever was open in the folder — goes.
+/// the engine has it; once the folder has left this iPhone, the workspace
+/// closes this screen with everything open inside the folder.
 struct SpaceAccessView: View {
-    @Binding var route: [Route]
     @State private var model: SpaceAccessModel
     @State private var question: Question?
 
-    init(workspace: Workspace, id: String, route: Binding<[Route]>) {
-        _route = route
+    init(workspace: Workspace, id: String) {
         _model = State(initialValue: SpaceAccessModel(workspace: workspace, id: id))
     }
 
@@ -144,9 +154,6 @@ struct SpaceAccessView: View {
         .navigationTitle(model.space.map { "Who can open “\($0.name)”" } ?? "Who can open it")
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
-        .onChange(of: model.space == nil) { _, gone in
-            if gone { close() }
-        }
         .asking($question)
         .refusal($model.problem)
     }
@@ -250,19 +257,5 @@ struct SpaceAccessView: View {
             "Everything in it is erased from the cloud, and from the devices of each person in it. This cannot be undone.",
             button: "Delete the folder"
         ) { await model.delete() }
-    }
-
-    /// The folder is gone: so are this screen and anything open inside it.
-    private func close() {
-        let lower = model.folder.lowercased()
-        let inside = { (path: String) in !lower.isEmpty && (path.lowercased() == lower || path.lowercased().hasPrefix(lower + "/")) }
-        let first = route.firstIndex { step in
-            switch step {
-            case .access(let id): return id == model.id
-            case .folder(let path), .document(let path): return inside(path)
-            default: return false
-            }
-        }
-        if let first { route.removeSubrange(first...) }
     }
 }

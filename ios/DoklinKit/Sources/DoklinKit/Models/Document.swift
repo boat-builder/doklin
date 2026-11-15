@@ -80,6 +80,9 @@ public final class DocumentModel {
     /// Put new markdown down, as the person typed it.
     public func save(_ source: String) async throws {
         guard isNote else { throw DoklinError("Only a note's markdown can be edited here.") }
+        guard !workspace.isGone(path) else {
+            throw DoklinError("The folder this note was in is no longer on this iPhone, so it was not saved.")
+        }
         try workspace.files.write(path, Data(source.utf8))
         text = source
         document = MarkdownDocument.parse(source)

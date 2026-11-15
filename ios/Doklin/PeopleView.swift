@@ -37,6 +37,13 @@ struct PeopleView: View {
     }
 
     private func list(_ people: People) -> some View {
+        ScrollViewReader { proxy in
+            rows(people)
+                .revealing(model.invited?.code, in: proxy)
+        }
+    }
+
+    private func rows(_ people: People) -> some View {
         List {
             Section {
             } header: {
@@ -134,7 +141,7 @@ struct PeopleView: View {
     private func deviceRow(_ device: DeviceRecord, of member: MemberRecord, in people: People) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                NameLine(name: device.deviceName ?? "A device", tags: people.isThisDevice(device) ? ["this iPhone"] : [])
+                NameLine(name: device.label, tags: people.isThisDevice(device) ? ["this iPhone"] : [])
                     .font(.subheadline)
                 Hint("joined \(Clock.ago(device.createdAt, now: now))")
             }
@@ -176,7 +183,7 @@ struct PeopleView: View {
 
     private func signOutQuestion(_ device: DeviceRecord) -> Question {
         Question(
-            "Sign out \(device.deviceName ?? "this device")?",
+            device.signOutTitle,
             "It stops syncing, and deletes its copy of \(workspace.name) the next time Doklin runs there.",
             button: "Sign out"
         ) { await model.signOut(device) }

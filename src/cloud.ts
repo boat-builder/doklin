@@ -660,7 +660,8 @@ export function timeAgo(ms: number, now = Date.now()): string {
 }
 
 /** How long something has left: "6 days", "3 h", "12 min", "any moment now".
- *  What a pending invite's expiry is written with. */
+ *  What a pending invite's expiry is written with. The iPhone writes it the
+ *  same (`Clock.left`, ios/DoklinKit) — change both. */
 export function timeUntil(ms: number, now = Date.now()): string {
   const secs = Math.round((ms - now) / 1000);
   if (secs < 60) return "any moment now";

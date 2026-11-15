@@ -28,9 +28,9 @@
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
 // remove from this iPhone; PeopleUITests: people, devices, agents, who is
-// here, a restricted folder). A journey asks this script, at an address it
-// serves, for what only the domain's side can do: its line, and another
-// device editing a document. What was on screen at each step is printed (the
+// here, restricted folders). A journey asks this script, at an address it
+// serves, for what only the domain's side can do: its line, another device
+// editing a document, and a restricted folder deleted elsewhere. What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
 // are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
 // printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
@@ -137,6 +137,21 @@ async function editingElsewhere(path) {
   return `editing ${path}`;
 }
 
+/** The restricted folder called `name` deleted for everyone in it, on
+ *  another device of Ada's: the domain's secret acts as her, and she is in
+ *  every folder she made. */
+async function deletedElsewhere(name) {
+  const listed = await fetch(`${WORKER}/api/spaces`, { headers: asOwner });
+  if (!listed.ok) throw new Error(`could not list the restricted folders: ${listed.status} ${await listed.text()}`);
+  const space = (await listed.json()).spaces.find((s) => s.kind === "restricted" && s.name === name);
+  if (!space) throw new Error(`no restricted folder called ${name}`);
+  for (;;) {
+    const res = await fetch(`${WORKER}/api/spaces/${space.id}`, { method: "DELETE", headers: asOwner });
+    if (!res.ok) throw new Error(`could not delete ${name}: ${res.status} ${await res.text()}`);
+    if (!(await res.json()).remaining) return `deleted ${name}`;
+  }
+}
+
 /** Whether the shared workspace's manifest lists a file at `path`. */
 async function onTheDomain(path) {
   const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
@@ -201,9 +216,15 @@ async function driveApp() {
   //                         rather than every line being minted up front, when
   //                         only the last would still work.
   //   /editing?path=<rel>   another device editing a document of the workspace.
+  //   /deleted?name=<name>  a restricted folder deleted on another device.
   const drive = createHttpServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
-    const asked = url.pathname === "/line" ? deviceLine() : url.pathname === "/editing" ? editingElsewhere(url.searchParams.get("path") ?? "") : Promise.reject(new Error(`nothing at ${url.pathname}`));
+    const asks = {
+      "/line": () => deviceLine(),
+      "/editing": () => editingElsewhere(url.searchParams.get("path") ?? ""),
+      "/deleted": () => deletedElsewhere(url.searchParams.get("name") ?? ""),
+    };
+    const asked = asks[url.pathname]?.() ?? Promise.reject(new Error(`nothing at ${url.pathname}`));
     asked.then(
       (said) => res.writeHead(200, { "content-type": "text/plain" }).end(said),
       (e) => res.writeHead(500, { "content-type": "text/plain" }).end(String(e)),

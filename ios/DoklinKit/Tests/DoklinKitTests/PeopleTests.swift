@@ -63,6 +63,20 @@ final class PeopleTests: XCTestCase {
         XCTAssertEqual(people.name(of: "m-cy"), "Cy")
     }
 
+    func testADeviceWithNoNameIsCalledSo() throws {
+        let people = try people()
+        let (phone, cy) = (people.devices[0], people.devices[1])
+        XCTAssertEqual(phone.label, "iPhone")
+        XCTAssertEqual(phone.signOutTitle, "Sign out iPhone?")
+        XCTAssertEqual(cy.label, "A device")
+        XCTAssertEqual(cy.signOutTitle, "Sign out that device?", "never “this device”: this iPhone is not offered")
+        let blank = try decode(DeviceRecord.self, """
+        {"id":"t-x","memberId":"m-cy","email":"cy@example.com","deviceId":null,"deviceName":"","createdAt":0}
+        """)
+        XCTAssertNil(blank.named)
+        XCTAssertEqual(blank.label, "A device")
+    }
+
     func testNobodyChangesTheirOwnRowOrTheCreators() throws {
         let people = try people()
         XCTAssertFalse(people.changeable(people.members[0]), "your own row, which is the creator's too")
@@ -131,6 +145,56 @@ final class PeopleTests: XCTestCase {
         XCTAssertNil(Sections.wider(in: try self.status(sections: false), from: "Private/a.md", to: ""), "no sections, no audiences")
         XCTAssertEqual(Sections.space(holding: "restricted/finance/x.md", in: status)?.id, "s-fin")
         XCTAssertNil(Sections.space(holding: "Restricted", in: status))
+        XCTAssertNil(Sections.space(holding: "Restricted/Financed/x.md", in: status))
+    }
+
+    func testAMovesQuestionNamesWhoWillSeeIt() throws {
+        let status = try status()
+        XCTAssertEqual(Sections.moveTitle("plan", to: "", in: status), "Move “plan” to the workspace?")
+        XCTAssertEqual(Sections.moveTitle("plan", to: "Projects/Q1", in: status), "Move “plan” to the workspace?", "a folder everyone has is the workspace")
+        XCTAssertEqual(Sections.moveTitle("plan", to: "Restricted/Finance/Q1", in: status), "Move “plan” to “Finance”?", "the folder whose people gain it")
+    }
+
+    /// The engine deleted a restricted folder's copy here and said so: what
+    /// was open in it is never written again — until the folder is back.
+    @MainActor
+    func testANoteInAFolderThatLeftIsNotWrittenAgain() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("doklin-left-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Restricted/Finance")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("# Q3\n".utf8).write(to: folder.appendingPathComponent("Q3.md"))
+        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)
+        let workspace = device.workspace(root.path)
+        let note = DocumentModel(workspace: workspace, path: "Restricted/Finance/Q3.md")
+        note.load()
+        XCTAssertNil(workspace.left)
+        XCTAssertFalse(workspace.isGone(note.path))
+
+        try fm.removeItem(at: folder)
+        workspace.lost("Restricted/Finance")
+        let left = try XCTUnwrap(workspace.left)
+        XCTAssertEqual(left.count, 1)
+        XCTAssertTrue(left.holds("restricted/finance/Q3.md"))
+        XCTAssertTrue(left.holds("Restricted/Finance"))
+        XCTAssertFalse(left.holds("Restricted/Financed/a.md"))
+        XCTAssertTrue(workspace.isGone(note.path))
+        XCTAssertFalse(workspace.isGone("Projects/plan.md"))
+        do {
+            try await note.save("# Q3\n\nTyped as it went.\n")
+            XCTFail("a note was saved into a folder that left")
+        } catch let error as DoklinError {
+            XCTAssertEqual(error.message, "The folder this note was in is no longer on this iPhone, so it was not saved.")
+        }
+        XCTAssertFalse(fm.fileExists(atPath: folder.path), "saving made the folder again")
+
+        // Back in it: the engine makes the folder again, and it is written to.
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        XCTAssertFalse(workspace.isGone(note.path))
+        try fm.removeItem(at: folder)
+        workspace.lost("Restricted/Finance")
+        XCTAssertEqual(workspace.left?.count, 2, "the same folder leaving again is heard again")
     }
 
     func testARestrictedFolderIsMadeFromNothingAFolderOrANote() {

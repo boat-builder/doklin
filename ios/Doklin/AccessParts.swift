@@ -90,7 +90,12 @@ struct OnceCard: View {
 
     var body: some View {
         Section {
+            // The title is in the card, not over it, so the card scrolled to
+            // the top of the list shows what it is.
             VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(Theme.text1)
                 if let lead { Hint(lead) }
                 Text(shown)
                     .font(.system(long ? .caption : .footnote, design: .monospaced))
@@ -116,10 +121,12 @@ struct OnceCard: View {
             .padding(.vertical, 4)
             Button("Done", action: done)
                 .accessibilityIdentifier("once-done")
-        } header: {
-            Text(title)
         }
+        .id(Self.anchor)
     }
+
+    /// Where a list scrolls to bring the card into view.
+    static let anchor = "once-card"
 
     private func copy(_ text: String, as label: String) {
         UIPasteboard.general.string = text
@@ -196,6 +203,19 @@ extension View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 now.wrappedValue = Clock.now
+            }
+        }
+    }
+
+    /// Bring the card shown once into view as `shown` — the code it shows —
+    /// appears: the row that asked for it may be a screen further down, and
+    /// a code scrolled out of sight is a code lost.
+    func revealing(_ shown: String?, in proxy: ScrollViewProxy) -> some View {
+        onChange(of: shown) { _, now in
+            guard now != nil else { return }
+            // Once the list has the card's rows.
+            DispatchQueue.main.async {
+                withAnimation { proxy.scrollTo(OnceCard.anchor, anchor: .top) }
             }
         }
     }

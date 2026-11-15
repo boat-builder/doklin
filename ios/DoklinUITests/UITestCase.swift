@@ -26,10 +26,25 @@ class UITestCase: XCTestCase {
 
     /// Ask the drive for something only the domain's side can do: `line`, or
     /// `editing?path=<workspace-relative>` — another device editing it now.
+    /// What the drive could not do fails the journey there, in its words,
+    /// rather than later as something else.
     @discardableResult
     func ask(_ what: String) throws -> String {
         let url = try XCTUnwrap(URL(string: what, relativeTo: drive), "the drive cannot be asked for \(what)")
-        return try String(contentsOf: url, encoding: .utf8)
+        let answer = DriveAnswer()
+        let answered = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            answer.body = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            answer.status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            answer.error = error
+            answered.signal()
+        }.resume()
+        guard answered.wait(timeout: .now() + 120) == .success else {
+            throw DriveRefused(what: what, why: "it did not answer within two minutes")
+        }
+        if let error = answer.error { throw DriveRefused(what: what, why: error.localizedDescription) }
+        guard answer.status == 200 else { throw DriveRefused(what: what, why: "\(answer.status) \(answer.body)") }
+        return answer.body
     }
 
     /* ---------- Finding things ---------- */
@@ -93,4 +108,19 @@ class UITestCase: XCTestCase {
             app.buttons.matching(identifier: "Remove from this iPhone").firstMatch.tap()
         }
     }
+}
+
+/// The drive's answer to one question, filled in on URLSession's queue and
+/// read once the semaphore says it is there.
+private final class DriveAnswer: @unchecked Sendable {
+    var body = ""
+    var status = 0
+    var error: Error?
+}
+
+private struct DriveRefused: LocalizedError {
+    let what: String
+    let why: String
+
+    var errorDescription: String? { "the drive could not answer \(what): \(why)" }
 }

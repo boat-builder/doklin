@@ -62,6 +62,9 @@ struct EditorView: View {
             }
             .onChange(of: text) { schedule() }
             .onChange(of: model.workspace.changes) { heardChange() }
+            .onChange(of: model.workspace.left) { _, left in
+                if let left, left.holds(model.path) { abandon() }
+            }
             .onChange(of: lease) { takingOver = false }
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active { Task { await save() } }
@@ -106,7 +109,7 @@ struct EditorView: View {
 
     private func save() async {
         let typed = text
-        guard typed != saved, !changedElsewhere, lease == nil else { return }
+        guard typed != saved, !changedElsewhere, lease == nil, !model.workspace.isGone(model.path) else { return }
         writing = typed
         defer { writing = nil }
         do {
@@ -151,6 +154,15 @@ struct EditorView: View {
     private func takeOver() {
         takingOver = true
         Task { await model.takeOver() }
+    }
+
+    /// The restricted folder this note was in left this iPhone, and the
+    /// engine deleted its copy: what was typed goes with it, as on a Mac,
+    /// rather than make the folder again as one nobody else has.
+    private func abandon() {
+        pending?.cancel()
+        Task { await model.editing(false) }
+        dismiss()
     }
 
     private func close() {

@@ -37,6 +37,13 @@ struct AgentsView: View {
     }
 
     private var list: some View {
+        ScrollViewReader { proxy in
+            rows
+                .revealing(model.login?.id, in: proxy)
+        }
+    }
+
+    private var rows: some View {
         List {
             Section {
             } header: {

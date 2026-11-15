@@ -112,6 +112,18 @@ extension People {
     }
 }
 
+extension DeviceRecord {
+    /// What the device called itself, when it said anything.
+    public var named: String? { deviceName?.isEmpty == false ? deviceName : nil }
+
+    /// Its name on a row, as on a Mac.
+    public var label: String { named ?? "A device" }
+
+    /// What signing it out asks. It is never this iPhone, which is not
+    /// offered, so one with no name is "that device".
+    public var signOutTitle: String { "Sign out \(named ?? "that device")?" }
+}
+
 /// The People and Devices screens: one `cloud_people` answer, the changes
 /// made to it, and the code a change minted, while it is on screen.
 @MainActor
