@@ -49,6 +49,131 @@ type Step = {
 /** Where a database starts once `meta` exists: Doklin's, and empty. */
 const BASE_VERSION = 1;
 
+// Step 7 has a name because step 8 runs it again.
+const SPACES_STEP: Step = {
+  // A workspace with sections: roles, spaces, and agents that are a
+  // person's.
+  //
+  // Roles as data. Until here `members.role` was a label and a token
+  // always authenticated as a member; from here a token carries the role
+  // on its person's row, so there can be several owners, and two things
+  // that used to be implied need saying.
+  //
+  // `creator` says which person holds the domain's env secret. It used to
+  // be "the one row whose role is owner"; with several owners that no
+  // longer picks anybody out. One row or none — the CHECK is what makes a
+  // second creator impossible to write.
+  //
+  // `removed_tokens` remembers the credentials an owner took away, by the
+  // same sha256 `tokens` held them under. It is what lets the worker tell
+  // a Mac "your access was removed" — the one answer that has that Mac
+  // delete its copy of the workspace — apart from a token it has merely
+  // never heard of (a wiped domain, a rotated secret, a database that
+  // cannot answer), which deletes nothing.
+  //
+  // Spaces: a restricted folder, or one person's Private, is a small
+  // workspace of its own stored under `spaces/<id>/` in the bucket, with
+  // its own people. The shared workspace is not a row here — it is
+  // everything outside that prefix, and everybody's.
+  //
+  // `spaces.etag` is the space's manifest etag, written by the worker
+  // after each write it makes there: it is how one poll says which of a
+  // person's spaces moved without a bucket read for each.
+  //
+  // `addresses` says which space each public address belongs to ('' the
+  // shared workspace). The primary key is what makes an address one
+  // space's, and it is how the renderer finds a page that is not in the
+  // shared workspace's own map.
+  //
+  // Presence and leases are made again with the space each row is in:
+  // a lease is now one document in one space. Both hold only what the
+  // last minute and a half wrote, so dropping them costs a beat.
+  //
+  // An agent belongs to a person, and sees what that person sees.
+  // `agents.member_id` is whose it is. NULL is the creator's — whoever
+  // holds the domain's secret, whether or not they have said who they are
+  // — which is what every agent made before this step is, with nothing to
+  // move: the creator was the only one who could make them.
+  //
+  // The search mirror is kept once per space ('' the shared workspace), so
+  // a search reads only the text its caller's person may read. Both tables
+  // are derived: dropped here, and filled again by the next search.
+  to: 7,
+  tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
+  columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
+  sql: [
+    `CREATE TABLE IF NOT EXISTS creator (
+       id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
+       member_id TEXT NOT NULL                        -- m-xxxxxxxx: who holds the env secret
+     )`,
+    // One-time move of stored data: before this step exactly one row could
+    // carry the owner role, and it was the creator's. Guarded by the
+    // version it migrates from, so an isolate that runs it after the bump
+    // — when somebody may already have been promoted — moves nothing.
+    `INSERT OR IGNORE INTO creator (id, member_id)
+       SELECT 1, id FROM members
+        WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 7
+        ORDER BY created_at, id LIMIT 1`,
+    `CREATE TABLE IF NOT EXISTS removed_tokens (
+       hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
+       removed_at INTEGER NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS spaces (
+       id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
+       kind       TEXT NOT NULL,              -- 'restricted' | 'private'
+       name       TEXT NOT NULL,
+       created_by TEXT NOT NULL,              -- m-xxxxxxxx
+       created_at INTEGER NOT NULL,
+       etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
+     )`,
+    `CREATE TABLE IF NOT EXISTS space_members (
+       member_id TEXT NOT NULL,
+       space_id  TEXT NOT NULL,
+       added_by  TEXT NOT NULL,               -- m-xxxxxxxx
+       added_at  INTEGER NOT NULL,
+       PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
+     )`,
+    `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
+    `CREATE TABLE IF NOT EXISTS addresses (
+       slug     TEXT PRIMARY KEY,
+       space_id TEXT NOT NULL                 -- '' is the shared workspace
+     )`,
+    `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
+    `DROP TABLE IF EXISTS presence`,
+    `CREATE TABLE IF NOT EXISTS presence (
+       device_id   TEXT PRIMARY KEY,          -- x-doklin-device
+       member_id   TEXT,                      -- the person; null for a creator nobody named
+       device_name TEXT NOT NULL,
+       space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
+       path        TEXT,                      -- what they are editing, when anything
+       ts          INTEGER NOT NULL
+     )`,
+    `DROP TABLE IF EXISTS leases`,
+    `CREATE TABLE IF NOT EXISTS leases (
+       space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
+       path        TEXT NOT NULL,             -- relative to its space, lowercased
+       device_id   TEXT NOT NULL,             -- the Mac that holds it
+       member_id   TEXT,                      -- whose Mac; null for a creator nobody named
+       device_name TEXT NOT NULL,
+       until       INTEGER NOT NULL,
+       PRIMARY KEY (space_id, path)
+     )`,
+    `DROP TABLE IF EXISTS search_text`,
+    `CREATE TABLE IF NOT EXISTS search_text (
+       space_id TEXT NOT NULL,                -- '' the shared workspace
+       fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
+       folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
+       PRIMARY KEY (space_id, fid)
+     )`,
+    `DROP TABLE IF EXISTS search_state`,
+    `CREATE TABLE IF NOT EXISTS search_state (
+       space_id TEXT PRIMARY KEY,             -- '' the shared workspace
+       etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
+       held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
+     )`,
+  ],
+};
+
 const STEPS: readonly Step[] = [
   {
     // People and the credentials they hold. The
@@ -202,128 +327,19 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  SPACES_STEP,
   {
-    // A workspace with sections: roles, spaces, and agents that are a
-    // person's.
-    //
-    // Roles as data. Until here `members.role` was a label and a token
-    // always authenticated as a member; from here a token carries the role
-    // on its person's row, so there can be several owners, and two things
-    // that used to be implied need saying.
-    //
-    // `creator` says which person holds the domain's env secret. It used to
-    // be "the one row whose role is owner"; with several owners that no
-    // longer picks anybody out. One row or none — the CHECK is what makes a
-    // second creator impossible to write.
-    //
-    // `removed_tokens` remembers the credentials an owner took away, by the
-    // same sha256 `tokens` held them under. It is what lets the worker tell
-    // a Mac "your access was removed" — the one answer that has that Mac
-    // delete its copy of the workspace — apart from a token it has merely
-    // never heard of (a wiped domain, a rotated secret, a database that
-    // cannot answer), which deletes nothing.
-    //
-    // Spaces: a restricted folder, or one person's Private, is a small
-    // workspace of its own stored under `spaces/<id>/` in the bucket, with
-    // its own people. The shared workspace is not a row here — it is
-    // everything outside that prefix, and everybody's.
-    //
-    // `spaces.etag` is the space's manifest etag, written by the worker
-    // after each write it makes there: it is how one poll says which of a
-    // person's spaces moved without a bucket read for each.
-    //
-    // `addresses` says which space each public address belongs to ('' the
-    // shared workspace). The primary key is what makes an address one
-    // space's, and it is how the renderer finds a page that is not in the
-    // shared workspace's own map.
-    //
-    // Presence and leases are made again with the space each row is in:
-    // a lease is now one document in one space. Both hold only what the
-    // last minute and a half wrote, so dropping them costs a beat.
-    //
-    // An agent belongs to a person, and sees what that person sees.
-    // `agents.member_id` is whose it is. NULL is the creator's — whoever
-    // holds the domain's secret, whether or not they have said who they are
-    // — which is what every agent made before this step is, with nothing to
-    // move: the creator was the only one who could make them.
-    //
-    // The search mirror is kept once per space ('' the shared workspace), so
-    // a search reads only the text its caller's person may read. Both tables
-    // are derived: dropped here, and filled again by the next search.
-    to: 7,
-    tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
-    columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
-    sql: [
-      `CREATE TABLE IF NOT EXISTS creator (
-         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
-         member_id TEXT NOT NULL                        -- m-xxxxxxxx: who holds the env secret
-       )`,
-      // One-time move of stored data: before this step exactly one row could
-      // carry the owner role, and it was the creator's. Guarded by the
-      // version it migrates from, so an isolate that runs it after the bump
-      // — when somebody may already have been promoted — moves nothing.
-      `INSERT OR IGNORE INTO creator (id, member_id)
-         SELECT 1, id FROM members
-          WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 7
-          ORDER BY created_at, id LIMIT 1`,
-      `CREATE TABLE IF NOT EXISTS removed_tokens (
-         hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
-         removed_at INTEGER NOT NULL
-       )`,
-      `CREATE TABLE IF NOT EXISTS spaces (
-         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
-         kind       TEXT NOT NULL,              -- 'restricted' | 'private'
-         name       TEXT NOT NULL,
-         created_by TEXT NOT NULL,              -- m-xxxxxxxx
-         created_at INTEGER NOT NULL,
-         etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
-       )`,
-      `CREATE TABLE IF NOT EXISTS space_members (
-         member_id TEXT NOT NULL,
-         space_id  TEXT NOT NULL,
-         added_by  TEXT NOT NULL,               -- m-xxxxxxxx
-         added_at  INTEGER NOT NULL,
-         PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
-       )`,
-      `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
-      `CREATE TABLE IF NOT EXISTS addresses (
-         slug     TEXT PRIMARY KEY,
-         space_id TEXT NOT NULL                 -- '' is the shared workspace
-       )`,
-      `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
-      `DROP TABLE IF EXISTS presence`,
-      `CREATE TABLE IF NOT EXISTS presence (
-         device_id   TEXT PRIMARY KEY,          -- x-doklin-device
-         member_id   TEXT,                      -- the person; null for a creator nobody named
-         device_name TEXT NOT NULL,
-         space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
-         path        TEXT,                      -- what they are editing, when anything
-         ts          INTEGER NOT NULL
-       )`,
-      `DROP TABLE IF EXISTS leases`,
-      `CREATE TABLE IF NOT EXISTS leases (
-         space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
-         path        TEXT NOT NULL,             -- relative to its space, lowercased
-         device_id   TEXT NOT NULL,             -- the Mac that holds it
-         member_id   TEXT,                      -- whose Mac; null for a creator nobody named
-         device_name TEXT NOT NULL,
-         until       INTEGER NOT NULL,
-         PRIMARY KEY (space_id, path)
-       )`,
-      `DROP TABLE IF EXISTS search_text`,
-      `CREATE TABLE IF NOT EXISTS search_text (
-         space_id TEXT NOT NULL,                -- '' the shared workspace
-         fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
-         folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
-         PRIMARY KEY (space_id, fid)
-       )`,
-      `DROP TABLE IF EXISTS search_state`,
-      `CREATE TABLE IF NOT EXISTS search_state (
-         space_id TEXT PRIMARY KEY,             -- '' the shared workspace
-         etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
-         held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
-       )`,
-    ],
+    // Step 7 again, because removing boards renumbered steps that had
+    // already shipped. Worker v11 made `board_cards` as step 7; v12 and v13
+    // made it as step 7 and what is now step 7 as step 8. So a database at 7
+    // may hold none of step 7 (worker v11 left it there), and one at 8 holds
+    // all of it whichever numbering it came by. Every statement of step 7 is
+    // safe to run twice, so running it again here lands both histories on
+    // the same database before step 9. `board_cards` itself goes in step 9,
+    // which both reach.
+    ...SPACES_STEP,
+    to: 8,
+    tables: [],
   },
   {
     // No credential is matched without a row any more: the domain's key
@@ -350,7 +366,10 @@ const STEPS: readonly Step[] = [
     // each goes to the superadmin, who is that creator; one with nobody to go
     // to — a creator who never said who they were — goes, with its codes and
     // machines, and the app logs its terminal in again on the way back in.
-    to: 8,
+    //
+    // `board_cards` is what boards kept, on a database that ran worker
+    // v11–v13. Boards are gone, and so is their table.
+    to: 9,
     tables: ["superadmin"],
     retires: ["creator"],
     sql: [
@@ -363,9 +382,9 @@ const STEPS: readonly Step[] = [
          member_id TEXT NOT NULL
        )`,
       `INSERT OR IGNORE INTO superadmin (id, member_id)
-         SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 8`,
+         SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 9`,
       `UPDATE agents SET member_id = (SELECT member_id FROM superadmin)
-        WHERE member_id IS NULL AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8`,
+        WHERE member_id IS NULL AND (SELECT schema_version FROM meta WHERE key = 'schema') < 9`,
       `DELETE FROM agent_tokens WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
       `DELETE FROM agent_codes WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
       `DELETE FROM agents WHERE member_id IS NULL`,
@@ -374,6 +393,7 @@ const STEPS: readonly Step[] = [
          hash     TEXT PRIMARY KEY,             -- sha256(key), as it was traded
          spent_at INTEGER NOT NULL
        )`,
+      `DROP TABLE IF EXISTS board_cards`,
     ],
   },
 ];

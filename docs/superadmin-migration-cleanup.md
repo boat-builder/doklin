@@ -1,17 +1,18 @@
 # Throwaway: remove the key-migration support
 
-Temporary. The superadmin change (worker v17, D1 schema 8) carries code that
-only moves existing installations over: a domain's old `creator` row, and a
-Mac whose `cloud.json` still holds the domain's key from when it was a
-sign-in. Once every installation has moved, all of it goes, and so does this
-file.
+Temporary. The superadmin change (worker v17, D1 schema 9) carries code that
+only moves existing installations over: a domain's old `creator` row, a
+database whose step numbers predate removing boards, and a Mac whose
+`cloud.json` still holds the domain's key from when it was a sign-in. Once
+every installation has moved, all of it goes, and so does this file.
 
 ## When
 
 All three, confirmed with the users:
 
-1. Every domain runs worker v17 or newer (`/api/meta` answers `version ≥ 17`
-   and `d1: 8`).
+1. Every domain runs worker v18 or newer (`/api/meta` answers `version ≥ 18`
+   and `d1: 9`). v17 alone is not enough: it skipped the superadmin step on a
+   database boards had numbered to 8.
 2. Every Mac that was connected before v17 has updated the app and synced
    since: none shows "this Mac still signs in with the domain's key…", and
    every domain has a superadmin (`/api/meta` `superadmin` is not null).
@@ -20,17 +21,22 @@ All three, confirmed with the users:
 ## What goes
 
 **The worker's data move** — `cloud-worker/src/schema.ts`
-- Step 8: every statement but the two `CREATE TABLE … superadmin` /
+- Step 9: every statement but the two `CREATE TABLE … superadmin` /
   `spent_keys` — the `CREATE … creator`, the copy into `superadmin`, the
-  agents `UPDATE`, the three orphan `DELETE`s, the `DROP TABLE creator` —
-  and `retires: ["creator"]`.
+  agents `UPDATE`, the three orphan `DELETE`s, the `DROP TABLE creator`, the
+  `DROP TABLE board_cards` — and `retires: ["creator"]`.
+- Step 8 (step 7 again, for databases numbered before boards were removed):
+  it keeps its number, which has shipped, but becomes `{ to: 8, tables: [],
+  sql: [] }` with a one-line comment, and `SPACES_STEP` goes back inline as
+  step 7.
 - Step 7: the `creator` table, its `INSERT OR IGNORE INTO creator` move, and
   `"creator"` in its `tables`; the comment lines about `creator` and
   `member_id` NULL.
 - The `retires` field on `Step` and `RETIRED` (nothing else uses them).
-- `cloud-worker/test/run.mjs`: the test "d1: a database from before roles
+- `cloud-worker/test/run.mjs`: the tests "d1: a database from before roles
   learns who its creator was…" (it seeds schema-6 databases to exercise both
-  moves).
+  moves), "d1: a database boards left at schema 8…" and "d1: a database
+  worker v11 left at schema 7…", and their `rewound` helper.
 
 **The app's key trade** — `engine/src/cloud/`
 - `engine.rs`: `KEY_SENTENCE`, `KEY_TRADE_GAP`, `EngineConfig::on_key`, the
