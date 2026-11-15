@@ -4,153 +4,77 @@ Throwaway working file. Not for `main`: it lives only on the iOS branch, and is 
 
 ## Status
 
-- **PR 1 is open: #120**, on `claude/devices`. Worker tests (79), engine tests (193) and the two UI drives pass. The Mac app itself has not been run.
-- Next: you try it and merge; then the rebase and PR 2.
+- **PR 1 (devices) is merged: #120.**
+- **The iOS branch is rebased on `main`** (after #120 and #121).
+- **PR 2, step 1 (the engine as its own crate): done.** `engine/` holds the sync engine and the version store, with no Tauri. The Mac app keeps one wrapper per command (`src-tauri/src/cloud.rs`, `versions.rs`) and its `Setup`/`Host` (`src-tauri/src/engine.rs`). Engine tests 181, Mac app tests 18, `pnpm build`, `pnpm lint`: pass on Linux. `ci.yml` has a new `engine` job.
+- **Step 2 (bridge and build): mostly done.** `engine/ffi` (C interface, header in `engine/ffi/include`), `engine/src/command.rs` (every command by name), Swift `Engine` (`ios/DoklinKit/Sources/DoklinKit/Engine/Engine.swift`), `scripts/ios-engine.sh`, an Xcode build phase, `ios.yml`. Left: the Swift payload types (below).
+- **Step 0 (proof): mostly done.**
+  - Linux: `EngineLiveTests` (Swift linked to the engine) joins the harness worker with a device code, downloads the workspace, syncs a new note up (`drive-ios.mjs` checks it reached the domain), mints another device code, leaves and deletes the copy. Passes.
+  - Mac CI runner (run 5): the engine built for `aarch64-apple-ios`; `swift test` linked to it passed. The simulator app build failed only on a missing Intel slice. Fixed by excluding `x86_64` for the simulator (Apple Silicon only, as decided). **Run 6 checks it; not yet seen.**
+- **Not checked by anything yet: the Mac app itself after the engine move.** Its macOS-only lines (Trash via `trash_path_impl`, `cli_install::after_connect`) compile only on a Mac, and `ci.yml` does not build `src-tauri/`. See "On your Mac", first item.
 
 ## Decided
 
 - The phone is a **device** of its person, like a Mac: it holds the whole workspace locally and syncs in the background. It stops being an agent.
-- **"Add a device" is the only way to add a Mac or an iPhone.** Any person can add any number of their own devices, as they can agents. A person can have a Mac alone, an iPhone alone, or both.
+- **"Add a device" is the only way to add a Mac or an iPhone.** Any person can add any number of their own devices.
 - The phone's screens are Swift. The sync engine is the Mac's Rust engine, shared, not rewritten.
 - Not on the phone: creating a workspace, updating the worker, deleting a workspace, the raw-token door, the command line tool, PDF export.
 - Diagrams (mermaid, svg) on the phone come later.
-- **No backward compatibility.** There is one user today. What is replaced is deleted, not kept beside the new thing: the copied-token way of adding a Mac, the old routes, the agent-based phone. Moving over is a one-time migration, written out as a guide when each PR is done (outline at the end).
-
-## Two pull requests
-
-| | Branch | Holds | Touches |
-|---|---|---|---|
-| PR 1 | `claude/devices`, new, from `main` | Devices | worker, Mac engine, Mac UI, docs. Nothing under `ios/`. |
-| PR 2 | `claude/ecstatic-euler-m1iu2p`, rebased on `main` after PR 1 merges | iPhone app as a device | engine crate, bridge, `ios/`, docs |
+- **No backward compatibility.** What is replaced is deleted, not kept beside the new thing.
+- **Apple Silicon only** for the simulator; the engine is not built for Intel.
 
 ---
 
-## PR 1 — Devices
+## How the pieces fit (for whoever picks this up)
 
-### What changes for a person
-
-- **Add a device** makes a one-time line to paste on the other Mac or iPhone. It works once and runs out after an hour. No token is ever shown.
-- Everyone sees **their own devices** and can sign one out. An owner still sees and signs out anybody's.
-- A signed-out device deletes its copy the next time it reaches the domain (as today).
-- The door that takes a raw token stays on the Mac for **recovery only**: a creator who has lost every device has nobody to issue them a code.
-
-### Worker (`cloud-worker/`)
-
-A wire change: `WORKER_VERSION` 15 → 16, new feature name `devices`.
-
-| Route | Who | Does |
-|---|---|---|
-| `POST /api/auth/devices/code` (new) | any person | `{codeHash, expiresAt ≤ 24 h}` → a code for the caller's own person. Replaces their pending one. |
-| `POST /api/auth/join` (unchanged) | no bearer | Redeems it, exactly as it redeems an invite. |
-| `GET /api/auth/devices` | any person | The caller's own devices; an owner everyone's. The same shape as the agents list. |
-| `DELETE /api/auth/devices/<id>` | its person, or an owner | Signs that device out. Never the calling one. |
-| `DELETE /api/auth/session` (new) | the device itself | Ends its own sign-in. Not added to `removed_tokens`: nothing is deleted because of it. |
-
-- `/api/auth/tokens` is renamed `/api/auth/devices`, so the wire says what the app says. The old routes are deleted, not kept.
-- A device code is stored as an invite row for a person who is already here. So there is **one code grammar, one pasted line (`doklin-invite <endpoint> <code>`) and one redeem route**, and no new contract to mirror. No table changes shape.
-- The domain's own secret asking for a code gets one for the creator's person; `409` when the creator has not yet said who they are.
-- A sign-in belongs to one device: no person's token is ever shown, so none can be copied to a second one.
-- `roles.ts`: one new action, `devices.own`, for owner and member.
-- An owner sees a pending device code among pending invites and can withdraw it. Removing or demoting a person withdraws theirs, as it does invites.
-- Wording: "A Mac" → "A device" in defaults and refusals.
-
-### Mac engine (`src-tauri/src/cloud/`)
-
-- `cloud_device_code(root)`: mints the code here, sends only its hash, answers the line once. `DEVICE_CODE_MINUTES` = 60, beside `AGENT_CODE_MINUTES`.
-- `cloud_people`: a member's answer now carries their own devices.
-- `cloud_token` no longer answers a member. It stays only for the creator's recovery copy of the domain's token (open point 1).
-- `cloud_revoke_device`: allowed on one's own.
-- `cloud_disconnect`: also ends this Mac's own sign-in, best effort.
-- A worker older than this answers Add a device with the usual "update the worker" sentence. Nothing else is kept for old workers.
-- Payload types in `status.rs` ⇄ `src/cloud.ts`: change both.
-
-### Mac UI (`src/`)
-
-- `CloudPanel`: "Connect another Mac" becomes **Add a device**: the line, Copy, "works once, for an hour". The token view goes.
-- Not connected: *Join a workspace* takes an invite or a device line (the same door). The third door is relabelled as recovery with the domain's own token.
-- `CloudPeople` / `PeopleDialog`: "Macs" → "devices"; a **Devices** tab beside People and Agents with your devices, Sign out and Add a device.
-- Worker behind: Add a device shows the usual update card, or "ask an owner".
-
-### Docs
-
-`cloud-worker/README.md` (routes), `docs/cloud-people-agents.md` (devices, credentials), `docs/cloud.md` (flows).
-
-### Checks
-
-- `pnpm typecheck:worker && pnpm test:worker`, then again on the bundle. New cases:
-  - a member makes a code, a second device joins, both are listed;
-  - a member sees no one else's devices;
-  - signing out another of one's devices answers it `401 removed`;
-  - ending one's own sign-in answers a bare `401` after;
-  - a creator with no identity is refused;
-  - an owner withdraws a pending code; removal withdraws it.
-- `pnpm build && pnpm lint`; `cd src-tauri && cargo test --lib`; `verify-harness/drive-cloud.mjs` updated for the panel.
-- **Not checkable from here:** the Mac app itself. To try by hand: add a second Mac with a code, sign it out from the first, disconnect.
-
-### Compatibility
-
-None is built. The Mac app and the worker move together: after the merge the Mac app updates itself, the worker is updated from it, and the Macs are moved over once (Migration, at the end). Merging cuts a Mac release.
-
-The creator's first Mac keeps the domain's secret. Their later devices are ordinary sign-ins with the owner role; saying who the creator is stays on the first Mac.
-
-### Not in PR 1
-
-Anything under `ios/`, the engine crate, QR codes.
+- `engine/src/host.rs`: `Core` (one running engine), `Setup` (said once at boot), `Host` (what the engine asks of the app: emit, open folders, write a file, trash, connected).
+- `engine/src/command.rs`: `call(core, name, args)`. Same names and camelCase args as the Mac frontend's `invoke`. A test fails if a `cloud_*`/`versions_*` command has no arm. Extra names for an app without Tauri: `touched`, `device_name`, `bundled_worker_version`, `versions_reconcile`, `versions_flush`.
+- `engine/src/paths.rs`: with `Setup::anchor` set (the iOS container), every path written down (`cloud.json` roots, version index roots, store keys) is relative to it.
+- `engine/ffi/src/lib.rs`: `doklin_engine_start(configJSON, onEvent)`, `doklin_engine_call(name, argsJSON, ctx, done)`, `doklin_engine_free`. The phone's `Host`: every connected workspace is "open"; no trash; no watcher.
+- New engine command `cloud_leave(root)`: ends the sign-in and deletes the copy (Remove from this iPhone).
+- Swift: `Engine.shared.start(EngineSetup(...))`, `call(name, args, as:)`, `run`, `events()`.
 
 ---
 
-## Between the two
+## What is left in PR 2
 
-After PR 1 merges, rebase the three iOS commits (`515c8f5`, `5da6661`, `74cbbf3`) onto `main` and force-push the branch. Expected conflicts are a few doc lines (`README.md`, `CLAUDE.md`, `cloud-worker/README.md`, `docs/cloud-people-agents.md`) and `ci.yml`. The app is still agent-based at that point and still passes its tests.
+### Step 2, the rest
 
----
+- `ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift`: Swift `Decodable` types for `CloudStatus`, `People`, `DeviceRecord`, `AgentRecord`, `Redeemed`, `DeviceCode`, `SpaceStatus`, `VersionsStatus`, `FileHistory`, … mirroring `engine/src/cloud/status.rs` and `versions/status.rs`. `docs/cloud.md` and `status.rs` already name this file: **status.rs ⇄ src/cloud.ts ⇄ Payloads.swift, change all three.** Replace the ad-hoc structs in `EngineLiveTests.swift` with these.
 
-## PR 2 — The iPhone app as a device
+### Step 3: the app on local files (the biggest piece)
 
-### Step 0 — Proof, before anything else
+- Start the engine at launch: data in `Library/Application Support/Doklin`, workspaces in `Documents/`, anchor = the container (`NSHomeDirectory()`), client `ios/<MARKETING_VERSION>`, device name = `UIDevice.current.name`.
+- Sign-in: paste a line (invite or device) → `cloud_parse_invite` → `cloud_redeem` → `cloud_join` (progress from `cloud-progress`).
+- Folder list, reader, editor and search read local files. Every write: write the file, then `touched` with its path.
+- Sync while open; on leaving, `versions_flush` and `cloud_sync_now` inside a `beginBackgroundTask` (about 30 s). Status line from `cloud-status`; Sync now; re-read open files on `cloud-applied`; show `cloud-conflict`.
+- Remove from this iPhone: `cloud_leave`. Signed out from elsewhere: `cloud-removed` → say so, back to sign-in.
+- Delete: the agent client (`Client.swift`, `API.swift`, `Models/Wire.swift`), login, the save-conflict dialog, drafts, the offline cache, `KeychainSecretStore` (the token now lives in the engine's `cloud.json`, inside the app's sandbox: decide whether that is acceptable or whether `cloud.json` should go to a file-protection class), `ClientTests`, `LiveTests`, the agent part of `drive-ios.mjs`. Keep the markdown parser (`Markdown/`) and its tests.
+- `DoklinUITests`: join with a device line from `drive-ios.mjs`, browse, read, edit, tick a box, search, relaunch (still joined), Remove from this iPhone.
 
-The engine has never been built for iOS. Prove on the Mac CI runner that it builds for the simulator, and that the app can join the test worker with a device code and sync a folder. **If this turns out unworkable, the fallback is a Swift engine; steps 3 to 6 are the same either way.**
+### Step 4: people, devices, agents, sections
 
-### Step 1 — The engine as its own crate
+- People: list; invite, remove and roles for an owner (`cloud_people`, `cloud_invite`, `cloud_revoke_person`, `cloud_set_role`, `cloud_withdraw_invite`).
+- Devices: yours, Sign out, Add a device (`cloud_device_code`, `cloud_revoke_device`).
+- Agents: add, permissions, login line, remove, log a machine out (`cloud_agent_*`).
+- Who is here now; "someone is editing this" (view only, take over: `cloud_set_activity`, `cloud_take_over`, leases in `CloudStatus`).
+- Private and restricted folders (`cloud_space_*`; confirm a move that lets more people see something).
 
-- Move the sync engine and the version store out of `src-tauri` into a crate with no Tauri in it. `src-tauri` keeps its commands as thin wrappers. **Mac behaviour does not change.**
-- The engine's tests move with it and can then run on Linux in CI. Today no workflow runs them.
-- What the phone needs from it: folder paths kept relative to the app's folder (iOS can move it between updates), plain delete instead of the Trash (the switch exists), no file watcher.
+### Step 5: comments and publishing
 
-### Step 2 — The bridge and the build
+- Comments: a Swift port of `src/criticMarkup.ts`, `src/metaFile.ts`, `src/htmlComments.ts`, pinned by test cases both languages read (a JSON fixture file both test suites load). Change both.
+- Publishing, published pages, taking a page down: `cloud_publish`, `cloud_unpublish`, `cloud_set_root`, `cloud_pages`, `cloud_page_take_down`.
 
-- Two entry points: a command (name and JSON in, JSON out) and an event callback. The same command names and payloads the Mac frontend uses.
-- Swift types mirror the payloads: `status.rs` ⇄ `src/cloud.ts` ⇄ Swift, change all three.
-- A script builds the engine for device and simulator; Xcode links it; `ios.yml` runs it.
+### Step 6: history
 
-### Step 3 — The app on local files
+Per-note versions and restore, workspace history, recently deleted: `versions_history`, `versions_read`, `versions_diff`, `versions_restore_file`, `versions_snapshots`, `versions_snapshot_diff`, `versions_restore_snapshot`, `versions_deleted`.
 
-- The workspace lives in the app's own folder. Folder list, reader, editor and search read local files; an edit is written to disk and the engine told.
-- Sign-in: paste a line (invite or device) → join → download with progress.
-- Sync runs while open, on opening, and when leaving (iOS allows about half a minute). Status line and Sync now.
-- Remove from this iPhone: ends the sign-in and deletes the copy. Signed out from elsewhere: the copy is deleted and the app says so.
-- Goes: the agent client and login, the save-conflict dialog, drafts, the offline cache, the tests against the agent API. No agent mode is kept on the phone. `drive-ios.mjs` mints device codes instead of agents.
+### Docs and wrap-up
 
-### Step 4 — People, devices, agents, sections
-
-- People: list; invite, remove and roles for an owner.
-- Devices: yours, Sign out, Add a device.
-- Agents: add, permissions, login line, remove, log a machine out.
-- Who is here now; "someone is editing this" (view only, take over).
-- Private and restricted folders: create, manage access, leave, delete; confirm a move that lets more people see something.
-
-### Step 5 — Comments and publishing on local files
-
-- Comments: a Swift port of `criticMarkup.ts`, `metaFile.ts` and `htmlComments.ts`, pinned by test cases both languages read. Change both.
-- Publishing, published pages, taking a page down: through the engine's commands.
-
-### Step 6 — History
-
-Per-note versions and restore, workspace history, recently deleted: through the engine's version store.
-
-### Docs
-
-`docs/ios.md` rewritten (a device, not an agent); the "iOS app is an agent" line leaves `docs/cloud-people-agents.md`; `CLAUDE.md` commands; `docs/release.md`.
+- `docs/ios.md` rewritten (a device, not an agent; the engine library; the build phase).
+- `docs/cloud-people-agents.md`: drop "the iOS app is an agent".
+- `CLAUDE.md` commands (`swift test` now needs `scripts/ios-engine.sh host` and `-Xlinker -L…`; `drive-ios.mjs` does both).
+- Delete this file. Open PR 2. Write the phone's migration steps.
 
 ### Later, not in PR 2
 
@@ -158,27 +82,29 @@ Diagrams, QR scanning for codes, iOS background transfers for a large first down
 
 ---
 
+## On your Mac (Apple Silicon)
+
+1. **The Mac app after the engine move.** `cd src-tauri && cargo check && cargo test --lib`, then `pnpm tauri dev`: open a connected workspace, edit, see it sync; delete a file synced from elsewhere (goes to the Trash); open a note's history and restore a version; Cloud → Add a device. The Rust engine tests: `(cd engine && cargo test --workspace)`.
+2. **The phone's toolchain.** Xcode 16+, `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`.
+3. **The core against the worker:** `pnpm install`, then `node verify-harness/drive-ios.mjs` (builds the engine for the Mac, runs `swift test` linked to it, checks the note reached the domain).
+4. **The app in a simulator:** `node verify-harness/drive-ios.mjs --app`, or open `ios/Doklin.xcodeproj` and run (Xcode builds the engine first; the first build takes a few minutes).
+
+## Open, with what I will do unless told otherwise
+
+1. **Engine crate in its own PR.** Recommended: open a PR with commit `354b62d` (the engine move, Mac app only) now, so that Mac release is tried before the phone depends on it. Otherwise it stays the first commits of PR 2.
+2. **Where the phone keeps its token.** Today the engine writes it into `cloud.json` in the app's sandbox (as the Mac does in app data). The old agent app kept it in the Keychain. Either is defensible; the Keychain needs a `Host` hook for secrets.
+
 ## Migration — yours, once
 
-An outline. The exact steps are checked and written out as a guide when each PR is done.
-
-After PR 1:
+After PR 1 (done, if you followed it):
 
 1. Let the Mac app update itself on every Mac.
 2. On the Mac that created the workspace, update the worker (Cloud → Update the worker).
-3. On that Mac, open People and make sure the creator has a name and an email. Adding a device needs it.
-4. On every other Mac, with its workspace folder open: Cloud → Disconnect this Mac. On the first Mac: workspace menu → Devices… → Add a device, and copy the line. Back on the other Mac, with the same folder still open: Cloud → Join a workspace, paste, Join, then **Resume syncing this folder**. Nothing is downloaded again.
-5. On the first Mac: Devices… → Show the domain's token, and keep a copy somewhere safe. It is the only way back in if every device is lost.
+3. On that Mac, open People and make sure the creator has a name and an email.
+4. On every other Mac, with its workspace folder open: Cloud → Disconnect this Mac. On the first Mac: Devices… → Add a device, copy the line. Back on the other Mac, same folder open: Cloud → Join a workspace, paste, Join, then **Resume syncing this folder**.
+5. On the first Mac: Devices… → Show the domain's token, keep a copy somewhere safe.
 
 After PR 2:
 
 6. On a Mac, remove the agent that was made for the phone (Agents).
 7. Install the new build on the phone. On a Mac choose Add a device, and paste the line on the phone.
-
----
-
-## Open, with what I will do unless told otherwise
-
-1. **Engine crate.** First commits of PR 2. It can be split into its own PR if you want that Mac release watched before the phone depends on it.
-
-Settled in PR 1: the domain's own token is shown only to the creator, in the Devices tab, as the way back in; a device code lasts one hour.
