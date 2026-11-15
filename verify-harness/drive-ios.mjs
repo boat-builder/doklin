@@ -27,7 +27,8 @@
 // builds it, starts an iPhone simulator and runs ios/DoklinUITests — one
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
-// remove from this iPhone). What was on screen at each step is printed (the
+// remove from this iPhone; CommentsUITests: a thread read, started,
+// answered and removed, a note published and stopped, published pages). What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
 // are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
 // printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
@@ -38,6 +39,7 @@ import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, rmSync } from "
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SEED_FILES } from "../cloud-worker/test/seed.mjs";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const OWNER = "owner-secret"; // what serve-worker.mjs binds the domain with
@@ -129,6 +131,32 @@ async function onTheDomain(path) {
   return Object.values(manifest.files ?? {}).some((file) => file.path === path && !file.deleted);
 }
 
+/** The text of a file in the shared workspace, as the domain holds it; null when it holds none. */
+async function textOnTheDomain(path) {
+  const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
+  if (!res.ok) throw new Error(`could not read the manifest: ${res.status}`);
+  const found = Object.entries((await res.json()).files ?? {}).find(([, file]) => file.path === path && !file.deleted);
+  if (!found) return null;
+  const blob = await fetch(`${WORKER}/api/blobs/${found[0]}/${found[1].hash}`, { headers: asOwner });
+  return blob.ok ? blob.text() : null;
+}
+
+/** What CommentsUITests left on the domain: the note as the seed has it (the
+ *  thread it started and removed, unwrapped again), and the seed's thread
+ *  with the reply that stayed — in the bytes a Mac writes, stamped to the second. */
+async function commentsOnTheDomain() {
+  const md = await textOnTheDomain("Comments.md");
+  const meta = await textOnTheDomain("Comments.meta.jsonl");
+  const want =
+    /^\{"doklin":"meta","v":1\}\n\{"t":"mthread","id":"plain1","comments":\[\{"author":"Ada","at":1757000000000,"body":"Say it plainer\."\},\{"author":"[^"]+","at":\d+000,"body":"Plainer, then\."\}\]\}\n$/;
+  if (md !== SEED_FILES["Comments.md"] || !want.test(meta ?? "")) {
+    console.error(`the comments the app wrote are not on the domain as a Mac would write them:\n${md}\n${meta}`);
+    return false;
+  }
+  console.log("the comments the app wrote are on the domain");
+  return true;
+}
+
 /* ---------- The core: `swift test`, or the command after `--` ---------- */
 
 async function driveCore() {
@@ -180,8 +208,11 @@ function pickSimulator() {
 async function driveApp() {
   // A line works once: one for each test class, by its file's name
   // (ios/DoklinUITests/UITestCase.swift reads its own).
+  // The domain keeps one pending code per person, so a line minted later
+  // undoes one minted earlier: with DOKLIN_ONLY, only that class's.
   const lines = {};
-  for (const file of readdirSync(join(ROOT, "ios/DoklinUITests")).filter((f) => f.endsWith("UITests.swift"))) {
+  const only = process.env.DOKLIN_ONLY;
+  for (const file of readdirSync(join(ROOT, "ios/DoklinUITests")).filter((f) => f.endsWith("UITests.swift") && (!only || f === `${only}.swift`))) {
     lines[file.replace(/\.swift$/, "")] = await deviceLine();
   }
   const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
@@ -234,7 +265,9 @@ async function driveApp() {
   } catch {
     console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
   }
-  if (status !== 0 || (process.env.DOKLIN_ONLY && process.env.DOKLIN_ONLY !== "DoklinUITests")) return status;
+  if (status !== 0) return status;
+  if ((!only || only === "CommentsUITests") && !(await commentsOnTheDomain())) return 1;
+  if (only && only !== "DoklinUITests") return status;
   // What the app said it wrote, asked of the domain itself.
   if (!(await onTheDomain("Phone list.md"))) {
     console.error("the note made in the app never reached the domain");

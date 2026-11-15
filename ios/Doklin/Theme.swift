@@ -61,4 +61,5 @@ enum Route: Hashable {
     case folder(String)
     case document(String)
     case search
+    case publishedPages
 }

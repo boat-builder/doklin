@@ -12,6 +12,7 @@ struct FolderView: View {
     @State private var renaming: FolderEntry?
     @State private var moving: FolderEntry?
     @State private var removing: FolderEntry?
+    @State private var publishing: PublishTarget?
     @State private var failure: String?
 
     enum NewThing { case note, folder }
@@ -63,6 +64,14 @@ struct FolderView: View {
                             removing = entry
                         } label: {
                             Label("Remove", systemImage: "trash")
+                        }
+                    }
+                    if case .folder(let dir) = entry, workspace.mayPublish, workspace.status != nil {
+                        Button {
+                            publishing = PublishTarget(path: dir, kind: .dir)
+                        } label: {
+                            let published = workspace.pages(of: dir).contains { $0.kind == .dir }
+                            Label(published ? "Edit publishing…" : "Publish folder…", systemImage: "globe")
                         }
                     }
                 }
@@ -128,6 +137,9 @@ struct FolderView: View {
         }
         .sheet(item: $moving) { entry in
             MoveSheet(model: model, entry: entry) { message in failure = message }
+        }
+        .sheet(item: $publishing) { target in
+            PublishView(workspace: workspace, path: target.path, kind: target.kind) { path.append(.publishedPages) }
         }
         .alert("That did not work", isPresented: failureShown) {
             Button("OK", role: .cancel) { failure = nil }

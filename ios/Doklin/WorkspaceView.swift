@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     @State private var path: [Route] = []
     @State private var joining = false
     @State private var confirmingLeave = false
+    @State private var publishingWorkspace = false
     @State private var failure: String?
 
     var body: some View {
@@ -26,6 +27,8 @@ struct WorkspaceView: View {
                         DocumentView(workspace: workspace, path: file, route: $path)
                     case .search:
                         SearchView(workspace: workspace)
+                    case .publishedPages:
+                        PublishedPagesView(workspace: workspace, route: $path)
                     }
                 }
         }
@@ -35,6 +38,9 @@ struct WorkspaceView: View {
             NavigationStack {
                 SignInView(canCancel: true)
             }
+        }
+        .sheet(isPresented: $publishingWorkspace) {
+            PublishView(workspace: workspace, path: "", kind: .dir) { path.append(.publishedPages) }
         }
         .confirmationDialog(
             "Remove \(workspace.name) from this iPhone?",
@@ -74,6 +80,20 @@ struct WorkspaceView: View {
                     joining = true
                 } label: {
                     Label("Join another workspace", systemImage: "plus")
+                }
+            }
+            Section {
+                Button {
+                    path.append(.publishedPages)
+                } label: {
+                    Label("Published pages (\(workspace.status?.public.count ?? 0))", systemImage: "globe")
+                }
+                if workspace.mayPublish {
+                    Button {
+                        publishingWorkspace = true
+                    } label: {
+                        Label(workspace.pages(of: "").contains { $0.kind == .dir } ? "Edit the workspace’s page…" : "Publish the whole workspace…", systemImage: "network")
+                    }
                 }
             }
             Section {
