@@ -9,12 +9,13 @@ Throwaway working file. Not for `main`: it lives only on the iOS branch, and is 
 - The phone's screens are Swift. The sync engine is the Mac's Rust engine, shared, not rewritten.
 - Not on the phone: creating a workspace, updating the worker, deleting a workspace, the raw-token door, the command line tool, PDF export.
 - Diagrams (mermaid, svg) on the phone come later.
+- **No backward compatibility.** There is one user today. What is replaced is deleted, not kept beside the new thing: the copied-token way of adding a Mac, the old routes, the agent-based phone. Moving over is a one-time migration, written out as a guide when each PR is done (outline at the end).
 
 ## Two pull requests
 
 | | Branch | Holds | Touches |
 |---|---|---|---|
-| PR 1 | new, from `main` (name below) | Devices | worker, Mac engine, Mac UI, docs. Nothing under `ios/`. |
+| PR 1 | `claude/devices`, new, from `main` | Devices | worker, Mac engine, Mac UI, docs. Nothing under `ios/`. |
 | PR 2 | `claude/ecstatic-euler-m1iu2p`, rebased on `main` after PR 1 merges | iPhone app as a device | engine crate, bridge, `ios/`, docs |
 
 ---
@@ -36,13 +37,14 @@ A wire change: `WORKER_VERSION` 15 → 16, new feature name `devices`.
 |---|---|---|
 | `POST /api/auth/devices/code` (new) | any person | `{codeHash, expiresAt ≤ 24 h}` → a code for the caller's own person. Replaces their pending one. |
 | `POST /api/auth/join` (unchanged) | no bearer | Redeems it, exactly as it redeems an invite. |
-| `GET /api/auth/tokens` (widened) | any person | The caller's own devices; an owner everyone's. The same shape as the agents list. |
-| `DELETE /api/auth/tokens/<id>` (widened) | its person, or an owner | Signs that device out. Still never the calling one. |
+| `GET /api/auth/devices` | any person | The caller's own devices; an owner everyone's. The same shape as the agents list. |
+| `DELETE /api/auth/devices/<id>` | its person, or an owner | Signs that device out. Never the calling one. |
 | `DELETE /api/auth/session` (new) | the device itself | Ends its own sign-in. Not added to `removed_tokens`: nothing is deleted because of it. |
 
+- `/api/auth/tokens` is renamed `/api/auth/devices`, so the wire says what the app says. The old routes are deleted, not kept.
 - A device code is stored as an invite row for a person who is already here. So there is **one code grammar, one pasted line (`doklin-invite <endpoint> <code>`) and one redeem route**, and no new contract to mirror. No table changes shape.
 - The domain's own secret asking for a code gets one for the creator's person; `409` when the creator has not yet said who they are.
-- A device ends only a sign-in it redeemed itself (`device_id` on the row is the caller's). A Mac holding a copied token must not sign out the Mac it was copied from.
+- A sign-in belongs to one device: no person's token is ever shown, so none can be copied to a second one.
 - `roles.ts`: one new action, `devices.own`, for owner and member.
 - An owner sees a pending device code among pending invites and can withdraw it. Removing or demoting a person withdraws theirs, as it does invites.
 - Wording: "A Mac" → "A device" in defaults and refusals.
@@ -51,9 +53,10 @@ A wire change: `WORKER_VERSION` 15 → 16, new feature name `devices`.
 
 - `cloud_device_code(root)`: mints the code here, sends only its hash, answers the line once. `DEVICE_CODE_MINUTES` = 60, beside `AGENT_CODE_MINUTES`.
 - `cloud_people`: a member's answer now carries their own devices.
+- `cloud_token` no longer answers a member. It stays only for the creator's recovery copy of the domain's token (open point 1).
 - `cloud_revoke_device`: allowed on one's own.
 - `cloud_disconnect`: also ends this Mac's own sign-in, best effort.
-- Gated on the `devices` feature, re-probed like the others.
+- A worker older than this answers Add a device with the usual "update the worker" sentence. Nothing else is kept for old workers.
 - Payload types in `status.rs` ⇄ `src/cloud.ts`: change both.
 
 ### Mac UI (`src/`)
@@ -74,7 +77,6 @@ A wire change: `WORKER_VERSION` 15 → 16, new feature name `devices`.
   - a member sees no one else's devices;
   - signing out another of one's devices answers it `401 removed`;
   - ending one's own sign-in answers a bare `401` after;
-  - a copied token cannot end the sign-in;
   - a creator with no identity is refused;
   - an owner withdraws a pending code; removal withdraws it.
 - `pnpm build && pnpm lint`; `cd src-tauri && cargo test --lib`; `verify-harness/drive-cloud.mjs` updated for the panel.
@@ -82,11 +84,9 @@ A wire change: `WORKER_VERSION` 15 → 16, new feature name `devices`.
 
 ### Compatibility
 
-- Old Mac app with the new worker: works; routes are only added or widened.
-- New Mac app with an old worker: Add a device waits for the worker update. Until then only the recovery door adds a Mac.
-- Macs that already share one copied token keep working. Signing that sign-in out signs out all of them. To separate two, disconnect one and add it back with a code.
-- The creator's first Mac keeps the domain's secret. Their later devices are ordinary sign-ins with the owner role; saying who the creator is stays on the first Mac.
-- Merging cuts a Mac release, and every domain needs the worker update.
+None is built. The Mac app and the worker move together: after the merge the Mac app updates itself, the worker is updated from it, and the Macs are moved over once (Migration, at the end). Merging cuts a Mac release.
+
+The creator's first Mac keeps the domain's secret. Their later devices are ordinary sign-ins with the owner role; saying who the creator is stays on the first Mac.
 
 ### Not in PR 1
 
@@ -124,7 +124,7 @@ The engine has never been built for iOS. Prove on the Mac CI runner that it buil
 - Sign-in: paste a line (invite or device) → join → download with progress.
 - Sync runs while open, on opening, and when leaving (iOS allows about half a minute). Status line and Sync now.
 - Remove from this iPhone: ends the sign-in and deletes the copy. Signed out from elsewhere: the copy is deleted and the app says so.
-- Goes: the agent client and login, the save-conflict dialog, drafts, the offline cache, the tests against the agent API. `drive-ios.mjs` mints device codes instead of agents.
+- Goes: the agent client and login, the save-conflict dialog, drafts, the offline cache, the tests against the agent API. No agent mode is kept on the phone. `drive-ios.mjs` mints device codes instead of agents.
 
 ### Step 4 — People, devices, agents, sections
 
@@ -153,9 +153,26 @@ Diagrams, QR scanning for codes, iOS background transfers for a large first down
 
 ---
 
+## Migration — yours, once
+
+An outline. The exact steps are checked and written out as a guide when each PR is done.
+
+After PR 1:
+
+1. Let the Mac app update itself on every Mac.
+2. On the Mac that created the workspace, update the worker (Cloud → Update the worker).
+3. On that Mac, open People and make sure the creator has a name and an email. Adding a device needs it.
+4. On every other Mac: disconnect, and move its workspace folder aside. On the first Mac choose Add a device; on the other Mac choose Join a workspace and paste the line. Check the new copy, then delete the folder you moved aside.
+
+After PR 2:
+
+5. On a Mac, remove the agent that was made for the phone (Agents).
+6. Install the new build on the phone. On a Mac choose Add a device, and paste the line on the phone.
+
+---
+
 ## Open, with what I will do unless told otherwise
 
-1. **Branch for PR 1.** This session may only push to the iOS branch. I need your OK to push a second one; I would call it `claude/devices`.
-2. **The domain's own token.** Keep a "show the domain's token" for the creator only, as a backup for recovery; never as a way to add a device. Members never see a token.
-3. **Device code lifetime.** One hour.
-4. **Engine crate.** First commits of PR 2. It can be split into its own PR if you want that Mac release watched before the phone depends on it.
+1. **The domain's own token.** Keep a "show the domain's token" for the creator only, as a backup for recovery; never as a way to add a device. Members never see a token.
+2. **Device code lifetime.** One hour.
+3. **Engine crate.** First commits of PR 2. It can be split into its own PR if you want that Mac release watched before the phone depends on it.
