@@ -93,6 +93,9 @@ export type VersionsMirror = {
   horizonDays: number | null;
 };
 
+/** The role a person holds (cloud-worker/src/roles.ts). */
+export type CloudRole = "superadmin" | "owner" | "member";
+
 /** What a role may do on a workspace, in the words of the worker's one table
  *  (cloud-worker/src/roles.ts) — the domain says which of these this Mac
  *  holds, and every surface hides the rest by it. */
@@ -100,6 +103,7 @@ export type CloudAction =
   | "work"
   | "people.see"
   | "people.invite"
+  | "people.recover"
   | "people.remove"
   | "people.roles"
   | "agents.own"
@@ -123,13 +127,15 @@ export type CloudStatus = {
    *  compared against to know whether somebody *else* did a thing. */
   me: string;
   /** The same person as the domain's id for them — which of a folder's
-   *  `members` is you. Null until the domain has said, and for a creator who
-   *  never said who they are. */
+   *  `members` is you. Null until the domain has said. */
   meId: string | null;
   /** What this Mac's credential may do here, as the domain last said. Empty
    *  until it has answered, and from a worker that predates roles. Ask it
    *  with `mayOn`, which reads "not known yet" as it should be read. */
   can: string[];
+  /** The workspace's superadmin, by name — whom to ask for what only they
+   *  can do. Null until the domain has said. */
+  superadmin: string | null;
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
   /** The version store's mirror; null when the worker predates it — which
@@ -182,11 +188,6 @@ export type CloudProbe = {
 /** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
 export type CloudMarker = { domain: string; wsId: string };
 
-/** The domain's own token, on the Mac that made the workspace: the creator's
- *  copy to keep for getting back in when every device is lost. Never how a
- *  device is added, and never part of a status. */
-export type CloudCredentials = { endpoint: string; token: string };
-
 /** A fresh code for another device of this person's own, and the line that
  *  carries it — the line an invite is. Shown once. */
 export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
@@ -195,9 +196,9 @@ export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
  *  and the redeem screen fills what it finds. */
 export type CloudPastedInvite = { endpoint: string | null; code: string | null };
 
-/** What a redeemed code answers with: this Mac's own credential, and who the
- *  domain says the person holding it is. The token goes straight into
- *  `cloudJoin` — an invitee's flow is the second Mac's flow from there on. */
+/** What a redeemed code or a traded key answers with: this Mac's own
+ *  credential, and who the domain says the person holding it is. The token
+ *  goes straight into `cloudJoin`, `cloudConnect` or `cloudResume`. */
 export type CloudRedeemed = {
   endpoint: string;
   token: string;
@@ -228,12 +229,11 @@ export type CloudMember = {
   id: string;
   email: string;
   name: string;
-  /** The person's role, carried by every Mac they are signed in on. An owner
-   *  makes another by changing it. */
-  role: "owner" | "member";
-  /** The person who made the workspace and holds its domain's own token.
-   *  Always an owner; nobody can remove them or make them a member. */
-  creator: boolean;
+  /** The person's role, carried by every device they are signed in on. An
+   *  owner makes another by changing it. The one superadmin — whoever last
+   *  recovered the workspace with its Cloudflare account — nobody changes or
+   *  removes. */
+  role: CloudRole;
   createdAt: number;
   /** When a Mac of theirs last beat, to the hour — and, before any has, when
    *  they first traded a code in. Null means nobody has ever signed in as
@@ -243,9 +243,7 @@ export type CloudMember = {
   devices: number;
 };
 
-/** One signed-in device: a Mac, an iPhone. The Mac that made the workspace is
- *  not among them: its credential is the domain's env secret, which has no
- *  row to list and none to revoke. */
+/** One signed-in device: a Mac, an iPhone. */
 export type CloudDevice = {
   id: string;
   memberId: string;
@@ -259,17 +257,15 @@ export type CloudDevice = {
  *  what it may do is asked of the domain each time the view opens, never
  *  remembered — a role is the person's, and an owner can change it. */
 export type CloudPeople = {
-  role: "owner" | "member";
-  /** This Mac holds the domain's own token: the workspace's creator. */
-  creator: boolean;
-  /** Which of `members` is you; null for a creator who has not said yet. */
+  role: CloudRole;
+  /** Which of `members` is you; null only from a worker too old to say. */
   me: string | null;
   /** What that role may do — the buttons this view offers. */
   can: string[];
   /** This Mac's own device id, so the list can mark which Mac is this one. */
   deviceId: string;
   /** Which of `devices` is the credential this Mac syncs with. Never offered
-   *  for signing out. Null for the creator's token. */
+   *  for signing out. */
   tokenId: string | null;
   /** Everyone on the workspace. */
   members: CloudMember[];
@@ -294,9 +290,8 @@ export type CloudAgent = {
   createdAt: number;
   /** When it last made a request, to the hour. Null until it has. */
   lastUsedAt: number | null;
-  /** Whose it is: one of the workspace's people. Null for a creator who has
-   *  not said who they are. */
-  memberId: string | null;
+  /** Whose it is: one of the workspace's people. */
+  memberId: string;
   /** Whether that is you. Somebody else's is listed to an owner, who may
    *  remove it and nothing more. */
   mine: boolean;
@@ -339,7 +334,9 @@ export async function cloudStatus(): Promise<CloudStatus[]> {
   return Array.isArray(r) ? (r as CloudStatus[]) : [];
 }
 
-/** 32 random bytes, hex — the owner token the setup wizard hands the agent. */
+/** 32 random bytes, hex — a fresh key for the domain, which the setup and
+ *  recovery prompts have an agent put on the worker. Traded once, by
+ *  `cloudRecover`, for this Mac's own sign-in. */
 export const cloudMintToken = () => invoke<string>("cloud_mint_token");
 
 export const cloudProbe = (endpoint: string, token: string) =>
@@ -347,10 +344,6 @@ export const cloudProbe = (endpoint: string, token: string) =>
 
 /** The marker a folder carries, or null — the wizard's "resume" outcome. */
 export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_marker", { root });
-
-/** The endpoint and the domain's own token — answered only on the Mac that
- *  holds it. */
-export const cloudToken = (root: string) => invoke<CloudCredentials>("cloud_token", { root });
 
 /** A one-time code for another device of this person's own. Whoever pastes
  *  its line joins as them, on a sign-in of its own. */
@@ -366,6 +359,12 @@ export const cloudParseInvite = (text: string) =>
 export const cloudRedeem = (endpoint: string, code: string) =>
   invoke<CloudRedeemed>("cloud_redeem", { endpoint, code });
 
+/** Trade the key an agent just put on the worker for this Mac's own sign-in,
+ *  as the superadmin: `email`'s person, who becomes it. The key works once,
+ *  so a step after this that fails is retried with the token, never the key. */
+export const cloudRecover = (endpoint: string, key: string, email: string, name: string | null) =>
+  invoke<CloudRedeemed>("cloud_recover", { endpoint, key, email, name });
+
 /** Invite someone to a connected workspace by email (an owner's to do). The
  *  code is minted and hashed on this Mac; only its sha256 goes up. */
 export const cloudInvite = (root: string, email: string, name: string | null, days: number | null) =>
@@ -374,11 +373,6 @@ export const cloudInvite = (root: string, email: string, name: string | null, da
 /** Who is on this workspace and what each of them holds — the People view's
  *  whole answer, this Mac's own role included. */
 export const cloudPeople = (root: string) => invoke<CloudPeople>("cloud_people", { root });
-
-/** The creator saying who they are. Identity, never authority: the domain's
- *  token authenticates them either way. */
-export const cloudAdoptOwner = (root: string, email: string, name: string | null) =>
-  invoke<CloudMember>("cloud_adopt_owner", { root, email, name });
 
 /** Every workspace taken off this Mac since the app started. The event says
  *  so as it happens; this answers a window that was not listening yet — an
@@ -594,13 +588,14 @@ export function may(who: { can: string[] }, action: CloudAction): boolean {
 
 /** Whether this Mac may make a new code for somebody the workspace already
  *  lists. Once anybody has signed in as a person, a code for them is theirs to
- *  make, or the creator's — the domain refuses anyone else's. Until then they
- *  are only invited, and whoever may invite may replace the code. */
+ *  make, or the superadmin's (`people.recover`) — the domain refuses anyone
+ *  else's. Until then they are only invited, and whoever may invite may
+ *  replace the code. */
 export function mayInviteAgain(people: CloudPeople, memberId: string): boolean {
   if (!may(people, "people.invite")) return false;
   const person = people.members.find((m) => m.id === memberId);
-  const signedIn = !!person && (person.creator || person.lastSeenAt != null);
-  return !signedIn || people.creator || people.me === memberId;
+  const signedIn = !!person && (person.role === "superadmin" || person.lastSeenAt != null);
+  return !signedIn || may(people, "people.recover") || people.me === memberId;
 }
 
 /** The same question of a workspace's status, whose `can` is empty until the

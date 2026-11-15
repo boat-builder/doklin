@@ -1,17 +1,24 @@
 // The setup wizard. Three entrances:
 //
 //   connect  create a workspace: the open folder goes to a fresh domain —
-//            name it, choose where it lives (a domain of your own or a free
-//            workers.dev address), copy the prompt (it carries the token this
-//            app just minted), paste the endpoint the agent printed, probe,
-//            connect & upload;
+//            name it, say who you are, choose where it lives (a domain of
+//            your own or a free workers.dev address), copy the prompt (it
+//            carries a key this app just minted), paste the endpoint the agent
+//            printed, probe, connect & upload;
+//   recover  the way back in for whoever controls the workspace's Cloudflare
+//            account and has lost every device: the address and who you are,
+//            a prompt that has an agent put a fresh key on the worker, probe,
+//            download it here or resume this folder. Never how a device is
+//            added while one is still in hand;
 //   redeem   join a workspace with a line — the invite somebody sent, or the
 //            one another device of your own made (Devices → Add a device):
 //            paste it and click Join. The code is traded for a credential of
-//            this Mac's own, the workspace downloads, and it opens;
-//   join     the way back in for whoever made the workspace and has lost
-//            every device: the endpoint and the domain's own token, probe,
-//            download it here. Never how a Mac is added.
+//            this Mac's own, the workspace downloads, and it opens.
+//
+// Connect and recover end the same way: the key is traded, once, for this
+// Mac's own sign-in as the workspace's superadmin (`cloudRecover`) — the
+// person named here, who becomes it. Nothing keeps the key and nobody types
+// it: the app mints it, the agent sets it, the app spends it.
 //
 // A workspace this Mac joins is never asked where it should go: it lands in
 // ~/Doklin/<its name>, a folder of its own (the engine picks it —
@@ -19,17 +26,18 @@
 //
 // Redeem runs the entrance backwards, and has to: /api/meta is inside the
 // worker's auth gate, so a joining Mac cannot ask the domain anything until
-// the redeem has minted it a token. A code works once, so a download that
-// fails after it has been spent keeps the credential and offers the download
-// again — never another redeem. And a Mac whose open folder already is that
-// workspace (it disconnected, and is back) is offered the resume below
-// instead of a second copy.
+// the redeem has minted it a token. A code, like a key, works once, so a step
+// that fails after it has been spent keeps the credential and offers the step
+// again — never another trade (`joined`). And a Mac whose open folder already
+// is that workspace (it disconnected, and is back) is offered the resume
+// below instead of a second copy.
 //
-// For the other two the probe decides what the domain is, and the wizard says
-// so in words: fresh → "Connect & upload"; already holding a workspace →
-// "Download it", plus "Resume syncing this folder" when the open folder
-// carries that workspace's marker (a reinstall, a restore from a backup).
-// There is no "bind anyway": a domain holds one workspace.
+// For the other two the probe — made with the key, which the worker answers
+// on that route alone — decides what the domain is, and the wizard says so in
+// words: fresh → "Connect & upload"; already holding a workspace → "Download
+// it", plus "Resume syncing this folder" when the open folder carries that
+// workspace's marker (a reinstall, a restore from a backup). There is no
+// "bind anyway": a domain holds one workspace.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { useDismiss } from "./dismiss";
@@ -42,6 +50,7 @@ import {
   cloudMintToken,
   cloudParseInvite,
   cloudProbe,
+  cloudRecover,
   cloudRedeem,
   cloudResume,
   onCloudProgress,
@@ -51,6 +60,7 @@ import {
   type CloudProgressEvent,
 } from "./cloud";
 import {
+  buildRecoverPrompt,
   buildSetupPrompt,
   cleanDomain,
   cleanWorkersName,
@@ -60,9 +70,9 @@ import {
   type CloudTarget,
 } from "./cloudPrompts";
 
-export type CloudSetupMode = "connect" | "join" | "redeem";
-/** A redeem ends in a download, so it ends as a join: what the outcome names
- *  is what happened to the folder, not which door was used. */
+export type CloudSetupMode = "connect" | "recover" | "redeem";
+/** A redeem or a recovery ends in a download or a resume: what the outcome
+ *  names is what happened to the folder, not which door was used. */
 export type CloudSetupOutcome = "connect" | "join" | "resume";
 
 function CloseIcon() {
@@ -76,6 +86,8 @@ function CloseIcon() {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
+/** The shape a mailbox has — the worker's own check (members.ts `normalizeEmail`). */
+const looksLikeEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 type Probed = {
   endpoint: string;
@@ -85,6 +97,9 @@ type Probed = {
 };
 
 type Work = { how: CloudSetupOutcome; progress: CloudProgressEvent | null };
+
+/** This Mac's own sign-in, once a code or the key has been traded for it. */
+type Joined = { endpoint: string; token: string; name: string };
 
 export default function CloudSetup({
   mode,
@@ -99,13 +114,17 @@ export default function CloudSetup({
   /** The workspace is syncing at `root` — the folder that was open, or the one a download created. */
   onConnected: (root: string, how: CloudSetupOutcome) => void;
 }) {
+  const withKey = mode !== "redeem";
   const [name, setName] = useState(root ? basename(root) : "Notes");
   const [targetKind, setTargetKind] = useState<CloudTarget["kind"]>("domain");
   const [domainInput, setDomainInput] = useState("");
   const [nameInput, setNameInput] = useState("");
-  // Minted here for a connect; typed for a join.
-  const [token, setToken] = useState("");
-  const [tokenError, setTokenError] = useState<string | null>(null);
+  // Who is at the keyboard: whoever trades the key is the superadmin.
+  const [personName, setPersonName] = useState("");
+  const [personEmail, setPersonEmail] = useState("");
+  // Minted here for a connect or a recovery, and never typed.
+  const [key, setKey] = useState("");
+  const [keyError, setKeyError] = useState<string | null>(null);
   const [endpointInput, setEndpointInput] = useState("");
   const [endpointTouched, setEndpointTouched] = useState(false);
   const [probing, setProbing] = useState(false);
@@ -115,13 +134,13 @@ export default function CloudSetup({
   // A connect or a resume ends on a card that says so; a download just opens.
   const [done, setDone] = useState<{ root: string; how: CloudSetupOutcome } | null>(null);
   const [copied, setCopied] = useState(false);
-  // Redeem only: the code as typed or pasted, and what trading it in came to.
-  // `joined` set is what says this Mac already holds a credential — the code
-  // cannot be traded twice, so nothing after that point may offer to trade it
-  // again, only to download with what it bought.
+  // Redeem only: the code as typed or pasted, and whether it is being traded.
   const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
-  const [joined, setJoined] = useState<{ endpoint: string; token: string; name: string } | null>(null);
+  // Set is what says this Mac already holds a credential — a code or a key
+  // cannot be traded twice, so nothing after that point may offer to trade
+  // it again, only to go on with what it bought.
+  const [joined, setJoined] = useState<Joined | null>(null);
 
   // Nothing closes while a step is running.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -130,20 +149,20 @@ export default function CloudSetup({
   }, cardRef);
 
   useEffect(() => {
-    if (mode !== "connect") return;
+    if (!withKey) return;
     let live = true;
     void cloudMintToken()
       .then((t) => {
-        if (live && typeof t === "string" && t) setToken(t);
-        else if (live) setTokenError("Couldn't mint a token.");
+        if (live && typeof t === "string" && t) setKey(t);
+        else if (live) setKeyError("Couldn't make a key.");
       })
       .catch((e) => {
-        if (live) setTokenError(`Couldn't mint a token: ${errText(e)}`);
+        if (live) setKeyError(`Couldn't make a key: ${errText(e)}`);
       });
     return () => {
       live = false;
     };
-  }, [mode]);
+  }, [withKey]);
 
   // Upload / download progress while a flow runs.
   useEffect(() => {
@@ -166,21 +185,30 @@ export default function CloudSetup({
   const targetTyped = targetKind === "domain" ? domainInput.trim() !== "" : nameInput.trim() !== "";
   const targetError = target ? targetProblem(target) : targetTyped ? "That doesn't look right yet." : null;
   const cleanName = name.trim() || (root ? basename(root) : "Notes");
-
-  const prompt = useMemo(() => {
-    if (mode !== "connect" || !target || targetError || !token) return null;
-    return buildSetupPrompt({
-      target,
-      token,
-      workspaceName: cleanName,
-      workerVersion: BUNDLED_WORKER_VERSION,
-      compatibilityDate: WORKER_COMPATIBILITY_DATE,
-    });
-  }, [mode, target, targetError, token, cleanName]);
+  const identityOk = looksLikeEmail(personEmail);
 
   // A domain of your own answers at https://<domain>; a workers.dev address
-  // is only known once wrangler prints it, so that one is pasted.
+  // is only known once wrangler prints it, so that one is pasted. A recovery
+  // starts from the address.
   const endpoint = endpointTouched || mode !== "connect" ? endpointInput : (target && endpointOf(target)) ?? "";
+
+  const prompt = useMemo(() => {
+    if (!key || !identityOk) return null;
+    if (mode === "connect") {
+      if (!target || targetError) return null;
+      return buildSetupPrompt({
+        target,
+        key,
+        workspaceName: cleanName,
+        workerVersion: BUNDLED_WORKER_VERSION,
+        compatibilityDate: WORKER_COMPATIBILITY_DATE,
+      });
+    }
+    if (mode === "recover") {
+      return cleanDomain(endpoint) ? buildRecoverPrompt({ endpoint, key }) : null;
+    }
+    return null;
+  }, [mode, target, targetError, key, identityOk, cleanName, endpoint]);
 
   const copyPrompt = useCallback(async () => {
     if (!prompt) return;
@@ -212,10 +240,27 @@ export default function CloudSetup({
     },
     [root],
   );
-  const probe = useCallback(() => probeWith(endpoint, token), [probeWith, endpoint, token]);
+  const probe = useCallback(() => probeWith(endpoint, key), [probeWith, endpoint, key]);
+
+  /**
+   * This Mac's own sign-in: the one a code or the key already bought, or —
+   * the first time — the key traded for it, as the person named here. The
+   * key is spent by the trade, so whatever fails after it is retried with
+   * what it bought.
+   */
+  const signIn = useCallback(
+    async (at: string): Promise<Joined> => {
+      if (joined) return joined;
+      const r = await cloudRecover(at, key, personEmail.trim(), personName.trim() || null);
+      const got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
+      setJoined(got);
+      return got;
+    },
+    [joined, key, personEmail, personName],
+  );
 
   /** Download the workspace at `at` into its own folder under ~/Doklin and
-   *  open it. Shared by both doors that end in a download. */
+   *  open it. Shared by every door that ends in a download. */
   const download = useCallback(
     async (at: string, bearer: string) => {
       setError(null);
@@ -231,6 +276,19 @@ export default function CloudSetup({
     [onConnected],
   );
 
+  const downloadHere = useCallback(async () => {
+    if (!probed) return;
+    setError(null);
+    let got: Joined;
+    try {
+      got = await signIn(probed.endpoint);
+    } catch (e) {
+      setError(errText(e));
+      return;
+    }
+    await download(got.endpoint, got.token);
+  }, [probed, signIn, download]);
+
   /**
    * Join: trade the code for this Mac's own credential, then download with it.
    *
@@ -241,7 +299,7 @@ export default function CloudSetup({
   const redeem = useCallback(async () => {
     setError(null);
     setRedeeming(true);
-    let got: { endpoint: string; token: string; name: string };
+    let got: Joined;
     try {
       const r = await cloudRedeem(endpoint, code);
       got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
@@ -262,7 +320,6 @@ export default function CloudSetup({
       try {
         const [result, marker] = await Promise.all([cloudProbe(got.endpoint, got.token), cloudMarker(root)]);
         if (marker && result.workspace && marker.wsId === result.workspace.id) {
-          setToken(got.token);
           setProbed({ endpoint: got.endpoint, result, marker });
           return;
         }
@@ -318,14 +375,16 @@ export default function CloudSetup({
   const connect = () => {
     if (!root || !probed) return;
     void run("connect", async () => {
-      await cloudConnect(root, probed.endpoint, token, cleanName);
+      const got = await signIn(probed.endpoint);
+      await cloudConnect(root, got.endpoint, got.token, cleanName);
       return root;
     });
   };
   const resume = () => {
     if (!root || !probed) return;
     void run("resume", async () => {
-      await cloudResume(root, probed.endpoint, token);
+      const got = await signIn(probed.endpoint);
+      await cloudResume(root, got.endpoint, got.token);
       return root;
     });
   };
@@ -337,7 +396,9 @@ export default function CloudSetup({
     if (!probed) return null;
     const { workerVersion, bundledVersion } = probed.result;
     if (workerVersion < bundledVersion) {
-      return `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — connect, then update it from the Cloud panel.`;
+      return withKey
+        ? `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — if this stops, run the update script on it first, then try again.`
+        : `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — connect, then update it from the Cloud panel.`;
     }
     if (workerVersion > bundledVersion) {
       return `The worker is newer than this app (v${workerVersion}) — update Doklin soon.`;
@@ -352,17 +413,26 @@ export default function CloudSetup({
     return `${verb} ${work.progress.done} of ${work.progress.total}…`;
   })();
 
+  // Once the key is spent, what it bought is what every retry goes on with.
+  const spentNote = withKey && joined && error && (
+    <p className="cloud-hint" data-testid="signed-in-as">
+      You’re signed in as {joined.name} — the key is spent, and this Mac has a sign-in of its own.
+      Try again here; closing now would mean running the prompt again with a fresh key.
+    </p>
+  );
+
   const outcome = probed && !done && (
     <div className="cloud-card" data-testid="probe-outcome">
       {workspace ? (
         <>
           <div className="cloud-card-title">
-            {probed.result.workspace && probeDomain(probed.endpoint)} already holds “{workspace.name}”
+            {probeDomain(probed.endpoint)} already holds “{workspace.name}”
           </div>
           <p className="cloud-hint">
             Created on {workspace.createdBy.deviceName}
             {createdAgo(workspace.createdAt)}. A domain holds one workspace — download that one
             to this Mac{markerMatches ? ", or resume syncing this folder, which is that workspace" : ""}.
+            {withKey && ` Either signs you in as ${personEmail.trim()}, its superadmin.`}
           </p>
         </>
       ) : (
@@ -373,8 +443,10 @@ export default function CloudSetup({
           <p className="cloud-hint">
             Worker v{probed.result.workerVersion}.{" "}
             {mode === "connect" && root
-              ? `Connecting uploads everything in “${basename(root)}” — every note and file under it — and keeps it in step from then on.`
-              : "Connect a folder to it from the Mac that has the notes."}
+              ? `Connecting uploads everything in “${basename(root)}” — every note and file under it — and keeps it in step from then on. You’re its superadmin.`
+              : mode === "recover"
+                ? "There is nothing to recover here — create a workspace instead."
+                : "Connect a folder to it from the Mac that has the notes."}
           </p>
         </>
       )}
@@ -396,11 +468,7 @@ export default function CloudSetup({
             </button>
           )}
           {workspace && (
-            <button
-              className="modal-btn is-primary"
-              onClick={() => void download(probed.endpoint, token)}
-              data-testid="download-here"
-            >
+            <button className="modal-btn is-primary" onClick={() => void downloadHere()} data-testid="download-here">
               Download it
             </button>
           )}
@@ -411,6 +479,7 @@ export default function CloudSetup({
           )}
         </div>
       )}
+      {spentNote}
     </div>
   );
 
@@ -430,51 +499,41 @@ export default function CloudSetup({
     </div>
   );
 
-  const endpointStep = (
+  const endpointField = (
+    <div className="modal-field">
+      <div className="modal-field-label">{mode === "recover" ? "Address" : "Endpoint"}</div>
+      <input
+        className="modal-field-input"
+        data-testid="endpoint-input"
+        value={endpoint}
+        placeholder={
+          mode === "recover" || (targetKind === "domain" && mode === "connect")
+            ? "https://notes.example.com"
+            : "https://doklin-notes.example.workers.dev"
+        }
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        disabled={!!joined}
+        onChange={(e) => {
+          setEndpointInput(e.target.value);
+          setEndpointTouched(true);
+          setProbed(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && mode === "connect" && endpoint && key && !probing) void probe();
+        }}
+      />
+    </div>
+  );
+
+  const checkStep = (
     <>
-      <div className="modal-field">
-        <div className="modal-field-label">Endpoint</div>
-        <input
-          className="modal-field-input"
-          data-testid="endpoint-input"
-          value={endpoint}
-          placeholder={targetKind === "domain" && mode === "connect" ? "https://notes.example.com" : "https://doklin-notes.example.workers.dev"}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          onChange={(e) => {
-            setEndpointInput(e.target.value);
-            setEndpointTouched(true);
-            setProbed(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && endpoint && token && !probing) void probe();
-          }}
-        />
-      </div>
-      {mode === "join" && (
-        <div className="modal-field">
-          <div className="modal-field-label">Token</div>
-          <input
-            className="modal-field-input modal-field-token"
-            data-testid="token-input"
-            value={token}
-            placeholder="64 hex characters"
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            onChange={(e) => {
-              setToken(e.target.value.trim());
-              setProbed(null);
-            }}
-          />
-        </div>
-      )}
       <div className="modal-buttons">
         <button
           className={`modal-btn ${probed ? "" : "is-primary"}`}
           data-testid="probe-button"
-          disabled={!endpoint || !token || probing || !!work}
+          disabled={!endpoint || !key || probing || !!work}
           onClick={() => void probe()}
         >
           {probing ? "Checking…" : "Check"}
@@ -482,6 +541,59 @@ export default function CloudSetup({
       </div>
       {error && <div className="modal-error" data-testid="setup-error">{error}</div>}
     </>
+  );
+
+  const identityFields = (
+    <>
+      <div className="modal-field">
+        <div className="modal-field-label">Your name</div>
+        <input
+          className="modal-field-input"
+          data-testid="person-name-input"
+          value={personName}
+          maxLength={80}
+          disabled={!!joined}
+          onChange={(e) => setPersonName(e.target.value)}
+        />
+      </div>
+      <div className="modal-field">
+        <div className="modal-field-label">Your email</div>
+        <input
+          className="modal-field-input"
+          data-testid="person-email-input"
+          value={personEmail}
+          placeholder="you@example.com"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          disabled={!!joined}
+          onChange={(e) => setPersonEmail(e.target.value)}
+        />
+      </div>
+    </>
+  );
+
+  const promptStep = (what: string) => (
+    <li className={`cloud-step ${prompt ? "" : "is-waiting"}`}>
+      <div className="cloud-step-title">Copy the prompt for your agent</div>
+      <div className="cloud-step-note">
+        Run it in Claude Code, or any agent with a terminal. {what} It carries a key this app
+        just made, which this Mac trades once for a sign-in of its own — so paste it only into an
+        agent you run yourself.
+      </div>
+      {prompt && (
+        <>
+          <pre className="cloud-prompt" data-testid="setup-prompt">
+            {prompt}
+          </pre>
+          <div className="modal-buttons">
+            <button className="modal-btn is-primary" onClick={() => void copyPrompt()}>
+              {copied ? "Copied ✓" : "Copy prompt"}
+            </button>
+          </div>
+        </>
+      )}
+    </li>
   );
 
   const redeemStep = (
@@ -591,11 +703,14 @@ export default function CloudSetup({
           {mode === "connect" ? (
             <ol className="cloud-steps">
               <li className="cloud-step">
-                <div className="cloud-step-title">Name it, and say where it will live</div>
+                <div className="cloud-step-title">Name it, say who you are, and where it will live</div>
                 <div className="cloud-step-note">
-                  The name is what everyone you invite sees, and the landing page. A workspace
-                  lives at a domain — a subdomain of one you already use with Cloudflare, or a free
-                  address Cloudflare hands out — and this folder becomes what is in it.
+                  The name is what everyone you invite sees, and the landing page. You are its
+                  superadmin: the one person who updates its worker, erases it, and lets somebody
+                  who lost every device back in — whoever controls the Cloudflare account it is
+                  on. A workspace lives at a domain — a subdomain of one you already use with
+                  Cloudflare, or a free address Cloudflare hands out — and this folder becomes
+                  what is in it.
                 </div>
                 <div className="modal-field">
                   <div className="modal-field-label">Workspace name</div>
@@ -607,6 +722,7 @@ export default function CloudSetup({
                     onChange={(e) => setName(e.target.value)}
                   />
                 </div>
+                {identityFields}
                 <div className="cloud-choices" role="radiogroup" aria-label="Where the cloud lives">
                   <button
                     role="radio"
@@ -668,31 +784,12 @@ export default function CloudSetup({
                   </div>
                 )}
                 {targetError && <div className="modal-error">{targetError}</div>}
-                {tokenError && <div className="modal-error">{tokenError}</div>}
+                {keyError && <div className="modal-error">{keyError}</div>}
               </li>
 
-              <li className={`cloud-step ${prompt ? "" : "is-waiting"}`}>
-                <div className="cloud-step-title">Copy the prompt for your agent</div>
-                <div className="cloud-step-note">
-                  Run it in Claude Code, or any agent with a terminal. It signs into Cloudflare,
-                  deploys the worker with its bucket and database under names derived from the
-                  domain, stores the token as the worker’s secret, and prints the endpoint. It carries the token
-                  this app just minted — the domain’s owner credential — so paste it only into an
-                  agent you run yourself.
-                </div>
-                {prompt && (
-                  <>
-                    <pre className="cloud-prompt" data-testid="setup-prompt">
-                      {prompt}
-                    </pre>
-                    <div className="modal-buttons">
-                      <button className="modal-btn is-primary" onClick={() => void copyPrompt()}>
-                        {copied ? "Copied ✓" : "Copy prompt"}
-                      </button>
-                    </div>
-                  </>
-                )}
-              </li>
+              {promptStep(
+                "It signs into Cloudflare, deploys the worker with its bucket and database under names derived from the domain, stores the key as the worker’s secret, and prints the endpoint.",
+              )}
 
               <li className={`cloud-step ${prompt ? "" : "is-waiting"}`}>
                 <div className="cloud-step-title">Paste the endpoint it printed</div>
@@ -700,7 +797,12 @@ export default function CloudSetup({
                   The line that starts with <code>ENDPOINT:</code>. For a domain of your own it is
                   the domain itself; a workers.dev address includes your account’s subdomain.
                 </div>
-                {prompt && endpointStep}
+                {prompt && (
+                  <>
+                    {endpointField}
+                    {checkStep}
+                  </>
+                )}
                 {outcome}
                 {doneBlock}
               </li>
@@ -724,22 +826,29 @@ export default function CloudSetup({
           ) : (
             <ol className="cloud-steps">
               <li className="cloud-step">
-                <div className="cloud-step-title">The domain, and its own token</div>
+                <div className="cloud-step-title">The workspace’s address, and who you are</div>
                 <div className="cloud-step-note">
-                  This is the way back in for whoever made the workspace and has lost every
-                  device: the token is the domain’s own secret, the one its worker was set up
-                  with. To add a Mac while you still have a device, use Add a device there
-                  instead — that Mac then has a sign-in of its own, which can be taken back.
+                  For whoever controls the workspace’s Cloudflare account and has lost every
+                  device. An agent puts a fresh key on its worker, and this Mac trades it for a
+                  sign-in of its own as the superadmin. An email that isn’t the superadmin’s now
+                  makes you the superadmin in their place. To add a device while you still have
+                  one, use Add a device there instead.
                 </div>
-                {endpointStep}
+                {endpointField}
+                {identityFields}
+                {keyError && <div className="modal-error">{keyError}</div>}
               </li>
-              <li className={`cloud-step ${probed ? "" : "is-waiting"}`}>
-                <div className="cloud-step-title">Download it</div>
+
+              {promptStep("It signs into Cloudflare and sets the key as the worker’s secret — nothing else.")}
+
+              <li className={`cloud-step ${prompt ? "" : "is-waiting"}`}>
+                <div className="cloud-step-title">When it prints KEY SET, get back in</div>
                 <div className="cloud-step-note">
                   The workspace lands in a folder of its own in <code>~/Doklin</code>, named after
                   it, opens, and stays in step from then on.
                   {root ? " A folder that already is that workspace can be resumed in place instead." : ""}
                 </div>
+                {prompt && checkStep}
                 {outcome}
                 {doneBlock}
               </li>
@@ -754,7 +863,7 @@ export default function CloudSetup({
 /** What the dialog calls itself, which is the door that was used. */
 function modalTitle(mode: CloudSetupMode): string {
   if (mode === "connect") return "Create a workspace";
-  return mode === "redeem" ? "Join a workspace" : "Open with the domain’s token";
+  return mode === "redeem" ? "Join a workspace" : "Recover a workspace";
 }
 
 /** The host of an endpoint, for prose. */

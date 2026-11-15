@@ -68,7 +68,7 @@ use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, DeviceCode, Events, Invited,
+    emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, DeviceCode, Events, Invited,
     People,
     Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
@@ -225,10 +225,9 @@ fn spawn_engine(inner: &mut ManagerInner, ws: &WorkspaceEntry) {
             device_id: inner.device.id.clone(),
             device_name: inner.device.name.clone(),
             use_trash: true,
-            creator: ws.creator,
-            on_creator: (!ws.creator).then(|| {
+            on_key: Some({
                 let (app, root) = (inner.app.clone(), ws.root.clone());
-                Box::new(move || mark_creator(&app, &root)) as Box<dyn Fn() + Send + Sync>
+                Box::new(move || trade_key(&app, &root))
             }),
             on_spaces: Some({
                 let app = inner.app.clone();
@@ -270,17 +269,32 @@ fn spaces_changed(app: &AppHandle, changed: SpacesChanged) {
     });
 }
 
-/// Write down that this Mac holds the domain's own token for the workspace at
-/// `root` — what its engine just heard from the domain (`EngineConfig::
-/// on_creator`). From then on that folder is never deleted on a `removed`
-/// answer, whatever answers at that address later.
-fn mark_creator(app: &AppHandle, root: &str) {
-    let _ = with_inner(app, |inner| {
-        let mut file = read_cloud_file(&inner.data_dir);
-        if let Some(entry) = file.workspaces.iter_mut().find(|w| w.root == root) {
-            entry.creator = true;
+/// The domain said the token the workspace at `root` syncs with is its key
+/// (`EngineConfig::on_key`): a connection made while the key was a sign-in.
+/// One-time move of stored data — the key is traded for a sign-in of this
+/// Mac's own, as the superadmin there is, and the engine starts again on it.
+/// A trade that cannot be made leaves the engine saying what to do
+/// (`engine::KEY_SENTENCE`); the next probe tries again.
+fn trade_key(app: &AppHandle, root: &str) {
+    let (app, root) = (app.clone(), root.to_string());
+    tauri::async_runtime::spawn(async move {
+        let Ok((entry, device)) = with_inner(&app, |inner| {
+            let entry = read_cloud_file(&inner.data_dir).by_root(&root).cloned();
+            Ok(entry.map(|e| (e, inner.device.clone())))
+        })
+        .and_then(|held| held.ok_or_else(String::new)) else {
+            return;
+        };
+        let remote = HttpRemote::new(&entry.endpoint, &entry.token, &device.id);
+        let Ok(traded) = remote.recover(None, None, &device.name).await else { return };
+        // Only onto the connection that heard it: a folder disconnected and
+        // connected again since holds a credential of its own.
+        let still = with_inner(&app, |inner| {
+            Ok(read_cloud_file(&inner.data_dir).by_root(&root).is_some_and(|w| w.token == entry.token))
+        });
+        if still == Ok(true) {
+            let _ = record_and_spawn(&app, WorkspaceEntry { token: traded.token, ..entry });
         }
-        write_cloud_file(&inner.data_dir, &file)
     });
 }
 
@@ -299,10 +313,8 @@ async fn access_removed(app: AppHandle, entry: WorkspaceEntry) {
         let mut file = read_cloud_file(&inner.data_dir);
         // Only if this is still the connection that engine was syncing. A
         // folder disconnected and connected again since holds a credential
-        // of its own, and that one was not removed. And never the creator's:
-        // the engine does not end this way for one (`heard_removed`), and
-        // this is the same rule, asked of what is written down.
-        if !file.by_root(&entry.root).is_some_and(|held| held.token == entry.token && !held.creator) {
+        // of its own, and that one was not removed.
+        if !file.by_root(&entry.root).is_some_and(|held| held.token == entry.token) {
             return Ok(None);
         }
         stop_engine(inner, &entry.root);
@@ -526,7 +538,8 @@ pub(crate) fn cloud_status(app: AppHandle) -> Result<Vec<CloudStatus>, String> {
     with_inner(&app, |inner| Ok(snapshot(&inner.statuses)))
 }
 
-/// 32 random bytes, hex: the owner token the setup wizard hands the agent.
+/// 32 random bytes, hex: a fresh key for the domain, which the setup and
+/// recovery prompts hand the agent and `cloud_recover` then trades.
 #[tauri::command]
 pub(crate) fn cloud_mint_token() -> String {
     scan::random_token()
@@ -591,6 +604,55 @@ fn describe_redeem(domain: &str, e: remote::RemoteError) -> String {
     }
 }
 
+/// Trade the domain's key — the one an agent has just set on the worker with
+/// the Cloudflare account — for this Mac's own sign-in as the superadmin:
+/// `email`'s person, who becomes it. How a workspace gets its first device,
+/// and the way back in after every device is lost. The key is spent here, so
+/// the token comes back for `cloud_connect` (a fresh domain), `cloud_join` or
+/// `cloud_resume` to use, and a step after this that fails is retried with
+/// it — never with the key again.
+#[tauri::command]
+pub(crate) async fn cloud_recover(
+    app: AppHandle,
+    endpoint: String,
+    key: String,
+    email: String,
+    name: Option<String>,
+) -> Result<Redeemed, String> {
+    let endpoint = normalize_endpoint(&endpoint)?;
+    let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
+    let device = with_inner(&app, |inner| Ok(inner.device.clone()))?;
+    let remote = HttpRemote::new(&endpoint, key.trim(), &device.id);
+    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let traded = remote
+        .recover(Some(email.trim()), name, &device.name)
+        .await
+        .map_err(|e| describe_recover(&domain, e))?;
+    Ok(Redeemed {
+        endpoint,
+        token: traded.token,
+        member_id: traded.member.id,
+        email: traded.member.email,
+        name: traded.member.name,
+    })
+}
+
+/// A failed trade in words. A key works once, and a wrong one is refused the
+/// same way, so `Unauthorized` covers both without guessing between them.
+fn describe_recover(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::Unauthorized => format!(
+            "{} didn't take that key — a key works once, so it may have been used already, or the agent's step didn't finish. Make a fresh one and run the prompt again.",
+            domain
+        ),
+        remote::RemoteError::NotFound | remote::RemoteError::Forbidden => format!(
+            "{} runs a worker too old to recover — update it first with the update script, then try again",
+            domain
+        ),
+        other => flows::describe(domain, other.into()),
+    }
+}
+
 /// Ask a domain what it is before touching anything: the worker's version
 /// and whether it already holds a workspace.
 #[tauri::command]
@@ -614,22 +676,6 @@ pub(crate) async fn cloud_probe(app: AppHandle, endpoint: String, token: String)
 #[tauri::command]
 pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
     read_marker(Path::new(&root))
-}
-
-/// The endpoint and the domain's own token, on the Mac that holds it — the
-/// creator's copy to keep for the day every device is lost. A person's own
-/// sign-in is never shown: a device is added with a code (`cloud_device_code`)
-/// and gets a credential of its own, so no token is ever carried between two.
-#[tauri::command]
-pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, String> {
-    with_inner(&app, |inner| {
-        let file = read_cloud_file(&inner.data_dir);
-        let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
-        if !entry.creator {
-            return Err("this Mac has a sign-in of its own, which is never shown — to add a device, use Add a device".into());
-        }
-        Ok(Credentials { endpoint: entry.endpoint.clone(), token: entry.token.clone() })
-    })
 }
 
 /// A one-time code for another device of this person's own — a second Mac,
@@ -713,25 +759,6 @@ pub(crate) async fn cloud_people(app: AppHandle, root: String) -> Result<People,
     Ok(people)
 }
 
-/// The creator saying who they are — once, and only here. Identity,
-/// never authority: the domain's env secret is what authenticates them either
-/// way, so this row is what puts a name in the People list, and losing it
-/// costs a name rather than access. Only the Mac that holds that secret is
-/// answered; everybody else already is somebody.
-#[tauri::command]
-pub(crate) async fn cloud_adopt_owner(
-    app: AppHandle,
-    root: String,
-    email: String,
-    name: Option<String>,
-) -> Result<remote::MemberRecord, String> {
-    let call = workspace_call(&app, &root)?;
-    call.remote
-        .adopt_owner(email.trim(), name.as_deref().map(str::trim).filter(|n| !n.is_empty()))
-        .await
-        .map_err(|e| describe_people(&call.domain, e))
-}
-
 /// The workspaces taken off this Mac since the app started — what a window
 /// asks once it is up, in case one left before it was listening
 /// (`access_removed`). Never drained: every window asks for itself, and each
@@ -743,7 +770,7 @@ pub(crate) fn cloud_removed(app: AppHandle) -> Result<Vec<Removed>, String> {
 
 /// Make someone an owner, or a member again (an owner's to do). Every Mac
 /// they are signed in on carries the new role on its next request. The
-/// domain refuses the caller's own row and the creator's, and its sentence
+/// domain refuses the caller's own row and the superadmin's, and its sentence
 /// says which.
 #[tauri::command]
 pub(crate) async fn cloud_set_role(
@@ -814,7 +841,6 @@ async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str)
     .map_err(|e| describe_people(domain, e))?;
     Ok(People {
         role: you.role,
-        creator: you.creator,
         me: you.member_id,
         can: you.can,
         device_id: device_id.to_string(),
@@ -1043,15 +1069,14 @@ pub(crate) async fn cloud_connect(
         .map_err(|e| flows::describe(&domain, e))?;
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
 
-    // Whether this Mac is the creator is the domain's to say: the engine's
-    // first probe asks, a moment from now, and writes it down.
-    record_and_spawn(&app, WorkspaceEntry { root, domain, endpoint, ws_id: ws_id.clone(), name, token, creator: false })?;
+    record_and_spawn(&app, WorkspaceEntry { root, domain, endpoint, ws_id: ws_id.clone(), name, token })?;
     Ok(ws_id)
 }
 
 /// Download a domain's workspace into `~/Doklin/<name>` and start syncing it
-/// — how a Mac joins a workspace, whether somebody invited it or it is
-/// another Mac of the creator's. No folder is asked for (`join_parent`).
+/// — how a Mac joins a workspace, whether somebody invited it, it is another
+/// device of the person's, or the superadmin is recovering it. No folder is
+/// asked for (`join_parent`).
 /// Answers the new folder's path.
 #[tauri::command]
 pub(crate) async fn cloud_join(app: AppHandle, endpoint: String, token: String) -> Result<String, String> {
@@ -1064,7 +1089,6 @@ pub(crate) async fn cloud_join(app: AppHandle, endpoint: String, token: String) 
 
     let remote = Arc::new(HttpRemote::new(&endpoint, &token, &device.id));
     let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
-    let creator = meta.you.as_ref().is_some_and(|you| you.creator);
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
@@ -1094,7 +1118,6 @@ pub(crate) async fn cloud_join(app: AppHandle, endpoint: String, token: String) 
             ws_id: workspace.id,
             name: workspace.name,
             token,
-            creator,
         },
     )?;
     Ok(root)
@@ -1132,7 +1155,6 @@ pub(crate) async fn cloud_resume(
 
     let remote = HttpRemote::new(&endpoint, &token, &device.id);
     let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
-    let creator = meta.you.as_ref().is_some_and(|you| you.creator);
     let Some(workspace) = meta.workspace else {
         return Err(flows::describe(&domain, flows::FlowError::NotBound));
     };
@@ -1148,7 +1170,7 @@ pub(crate) async fn cloud_resume(
     let _ = std::fs::create_dir_all(sdir.join("base"));
     record_and_spawn(
         &app,
-        WorkspaceEntry { root, domain, endpoint, ws_id: workspace.id.clone(), name: workspace.name, token, creator },
+        WorkspaceEntry { root, domain, endpoint, ws_id: workspace.id.clone(), name: workspace.name, token },
     )?;
     Ok(workspace.id)
 }
@@ -1162,14 +1184,14 @@ pub(crate) async fn cloud_disconnect(app: AppHandle, root: String) -> Result<(),
     let held = with_inner(&app, |inner| {
         stop_engine(inner, &root);
         let file = read_cloud_file(&inner.data_dir);
-        Ok(file.by_root(&root).map(|w| (w.endpoint.clone(), w.token.clone(), w.creator, inner.device.id.clone())))
+        Ok(file.by_root(&root).map(|w| (w.endpoint.clone(), w.token.clone(), inner.device.id.clone())))
     })?;
     // This Mac's sign-in ends with it: the token is about to be forgotten,
     // and a row nobody holds would sit among its person's devices for good.
     // Best effort and bounded — a Mac that cannot reach the domain
     // disconnects all the same, and the row is then theirs to sign out from
-    // another device. The domain's secret is no sign-in: nothing to end.
-    if let Some((endpoint, token, false, device_id)) = held {
+    // another device.
+    if let Some((endpoint, token, device_id)) = held {
         let remote = HttpRemote::new(&endpoint, &token, &device_id);
         let _ = tokio::time::timeout(END_SESSION_WAIT, remote.end_session()).await;
     }

@@ -17,12 +17,13 @@ manifest, rendered by the worker from the synced files.
 - **Section** — a part of a workspace with its own people: the shared workspace (everyone), a person's Private, a restricted folder. The last two are *spaces* on the domain.
 - **Engine** — the Rust task syncing a workspace. **Unit** — its sync of one section.
 - **Manifest** — a section's one mutable object: every file's path, rev, hash, plus the public map.
-- **Owner token** — worker secret `OWNER_TOKEN`, minted by the app at setup; whoever holds it is the workspace's creator.
+- **Key** — worker secret `OWNER_TOKEN`, minted by the app for setup and for each recovery and set on the worker by an agent. Never a sign-in: traded once for a device sign-in as the superadmin. No device keeps it.
+- **Superadmin** — the one person who last traded a key, i.e. whoever controls the Cloudflare account. Theirs on every device; no device is special ([cloud-people-agents.md](cloud-people-agents.md) *Credentials*).
 
 ## Rules
 
-1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only an owner's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
-2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS.
+1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only the superadmin's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
+2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a key only to put it in a prompt (`cloud_mint_token`), and a token only to hand it from one command to the next. The worker writes the manifest only for agents (no engine), by the same CAS.
 3. **The manifest is the only truth about what is public.** The frontend's view is `CloudStatus.public`; no `localStorage` registry.
 4. **A public page is a rendering of synced files.** The worker stores no page content.
 5. **Disk is the source of truth for content.** Merge, never clobber; overlaps become a conflict copy beside the file; deletions go to the macOS Trash.
@@ -71,7 +72,7 @@ manifest, rendered by the worker from the synced files.
 - `spaces: null` in a poll changes nothing. Gated on the `spaces` feature.
 - A space's routes answering `404` stop that unit until the next poll says whether its person is still in it.
 - No space has a folder while the shared manifest holds a file under a reserved name (`reserved_clear`): that folder is renamed `Private (shared)` once, after the remote is applied and before the scan (`rescue_reserved`), so the files move rather than vanish.
-- A file directly under `Restricted/` is in no section and syncs nowhere. Nor does `Private/` for a creator who never adopted an identity: there is no member row to hang a Private on.
+- A file directly under `Restricted/` is in no section and syncs nowhere.
 - The reserved names are reserved in any case (`space::top`); a section's paths are spelled as the disk spells its folder (`space::spelled`).
 - A folder's name on a Mac must be one `names_space` accepts for the space's name, or the next reconcile reads it as a rename and `PATCH`es the space. So only the engine names a new restricted folder (`free_restricted_dir`): the app asks it to (`make_space`), and never makes one under `Restricted/` itself.
 - `make_space` with a folder renames that folder into `Restricted/`: its files then leave their section as moves. It refuses while `spaces` is `None`: adding to a list the domain has not given would make every folder missing from it look left.
@@ -110,17 +111,19 @@ manifest, rendered by the worker from the synced files.
 
 ## Flows (`flows.rs`, `mod.rs`)
 
-- **Connect**: mint token → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` → `cloud_connect` binds, uploads, writes `cloud.json` + marker, spawns the engine.
+- **Connect**: name + email asked first → mint key → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` (with the key) → `cloud_recover` trades it for this Mac's sign-in → `cloud_connect` binds with that, uploads, writes `cloud.json` + marker, spawns the engine.
+- **Recover** (every device lost): address + name + email → mint key → recovery prompt (`secret put OWNER_TOKEN --name <worker>`, nothing else) → probe → `cloud_recover` → `cloud_join` or `cloud_resume`. Whoever recovers is the superadmin from then on.
+- **A key works once** (`spent_keys`): a step after the trade that fails is retried with the token it bought, never the key. A lost key costs nothing — the next recovery mints another, and no device syncs on one.
 - **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
 - **Resume**: empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
-- **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`. *Open with the domain's token* is the same from `cloud_probe` on, for the creator's recovery only: [cloud-people-agents.md](cloud-people-agents.md) *Devices*.
+- **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`.
 - **Disconnect**: stop the engine, end this Mac's sign-in, drop the `cloud.json` entry and state; folder, marker and cloud stay.
-- **Wipe** (`cloud_wipe`, owner): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
-- Token rotation is not built.
+- **Wipe** (`cloud_wipe`, superadmin): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
+- **A Mac whose `cloud.json` still holds the key** (connected while it was a sign-in): its probe answers `key: true`, the engine syncs nothing and asks the manager to trade it (`trade_key`, a one-time move). A domain with no superadmin to come back as cannot be traded silently; the engine's status says to recover instead.
 
 ## Local files
 
-- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token, creator}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected); the only place a token lives.
+- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected); the only place a token lives.
 - `<root>/.doklin/cloud.json`: the marker `{domain, wsId}`. Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
 - `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops; merge bases. Each space's are under `spaces/<spaceId>/` in it.
 - `<folder>/.doklin/space.json`: a space's marker (*Sections*). No secret.

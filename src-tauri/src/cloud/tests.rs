@@ -79,7 +79,15 @@ struct FakeWorker {
        worker keeps only hashes; so does this — a code is looked up by its
        sha256 here exactly as it is there, which is what makes "the app hashes
        the canonical form" a thing a test can get wrong. */
-    owner_token: String,
+    /// The superadmin's first device — the sign-in the domain's key was
+    /// traded for when the workspace was set up, which is what most tests'
+    /// Macs hold. Its person is `superadmin`. The fake keeps it out of
+    /// `tokens`, so it is in no list of devices — its one shortcut. A wipe
+    /// forgets it, as it forgets every row.
+    superadmin_token: Option<String>,
+    /// The domain's key, when a test puts one here: answered `key: true` on
+    /// the probe and refused everywhere else, as it is by the worker.
+    key: Option<String>,
     /// By normalized email — a person is found by their address, so
     /// re-inviting one reaches the same row.
     members: BTreeMap<String, MemberRecord>,
@@ -93,9 +101,11 @@ struct FakeWorker {
     /// is answered `Removed`, which is the one refusal a Mac deletes its copy
     /// on; a bearer found nowhere is merely `Unauthorized`.
     removed: BTreeSet<String>,
-    /// The member id of whoever holds the secret — the `creator` table's one
-    /// row. None on a domain whose creator never said who they are.
-    creator: Option<String>,
+    /// The superadmin's member id — the `superadmin` table's one row. None
+    /// until a test names them (`name_superadmin`): until then the fake does
+    /// not say whose the first device is, as a worker too old to answer
+    /// identity would not, and the engine signs with its Mac's name.
+    superadmin: Option<String>,
     /// Not a worker at all: whatever answers at this address now tells every
     /// caller its access was removed — an address that changed hands.
     says_removed_to_all: bool,
@@ -167,15 +177,14 @@ impl std::ops::DerefMut for FakeWorker {
     }
 }
 
-/// The domain's env secret, as the fake holds it: matched with no row read,
-/// so it keeps working whatever happens to the people above.
-const OWNER_TOKEN: &str = "owner-secret-token";
+/// The superadmin's first device's token (`FakeWorker::superadmin_token`).
+const OWNER_TOKEN: &str = "superadmins-first-device";
 
-/// Who a bearer is, the way the worker decides it: the
-/// secret is the creator's, and a token carries the role on its person's row.
+/// Who a bearer is, the way the worker decides it: a token carries the role
+/// its person holds — the superadmin's on every device of theirs.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Caller {
-    Creator,
+    Superadmin,
     Owner,
     Member,
 }
@@ -183,7 +192,8 @@ enum Caller {
 impl Caller {
     fn role(self) -> &'static str {
         match self {
-            Caller::Creator | Caller::Owner => "owner",
+            Caller::Superadmin => "superadmin",
+            Caller::Owner => "owner",
             Caller::Member => "member",
         }
     }
@@ -198,9 +208,14 @@ impl Caller {
             "people.remove",
             "people.roles",
             "agents.manage",
+            "people.recover",
             "workspace.manage",
         ];
-        let held = if self == Caller::Member { &all[..3] } else { &all[..] };
+        let held = match self {
+            Caller::Member => &all[..3],
+            Caller::Owner => &all[..7],
+            Caller::Superadmin => &all[..],
+        };
         held.iter().map(|action| action.to_string()).collect()
     }
 }
@@ -233,17 +248,37 @@ fn fake_worker() -> SharedWorker {
             "leases".into(),
             "spaces".into(),
         ],
-        owner_token: OWNER_TOKEN.into(),
+        superadmin_token: Some(OWNER_TOKEN.into()),
         ..Default::default()
     }))
+}
+
+/// Who the superadmin is, as trading a key with their address says it: the
+/// person — made if new — an owner, and the one the `superadmin` row names.
+fn name_superadmin(be: &SharedWorker, email: &str, name: &str) -> MemberRecord {
+    let mut b = be.lock().unwrap();
+    let email = email.trim().to_lowercase();
+    let id = FakeRemote::mint_id(&mut b, "m");
+    let member = b.members.entry(email.clone()).or_insert(MemberRecord {
+        id,
+        email,
+        created_at: now_ms(),
+        last_seen_at: Some(now_ms()),
+        ..Default::default()
+    });
+    member.name = name.to_string();
+    member.role = "owner".into();
+    let named = member.clone();
+    b.superadmin = Some(named.id.clone());
+    MemberRecord { role: "superadmin".into(), ..named }
 }
 
 #[derive(Clone)]
 struct FakeRemote {
     be: SharedWorker,
     device_id: String,
-    /// The bearer this device speaks with — the owner secret unless a test
-    /// says otherwise, which is what most of them are.
+    /// The bearer this device speaks with — the superadmin's first device
+    /// unless a test says otherwise, which is what most of them are.
     token: String,
     /// The space the sync calls are aimed at (`Remote::space`); None for the
     /// shared workspace.
@@ -255,7 +290,7 @@ impl FakeRemote {
         Self::with_token(be, device_id, OWNER_TOKEN)
     }
 
-    /// A device holding a token somebody redeemed, rather than the secret.
+    /// A device holding a token somebody redeemed.
     fn with_token(be: &SharedWorker, device_id: &str, token: &str) -> Self {
         FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string(), space: None }
     }
@@ -292,20 +327,26 @@ impl FakeRemote {
     }
 
     /// Offline, then the bearer. Every gated route goes through here, so a
-    /// token nobody minted is refused everywhere at once — and the secret is
-    /// matched first, with no row read, exactly as the worker matches it. A
-    /// token's role is read off its person's row each time, so a change of
-    /// role lands on that Mac's very next call.
+    /// token nobody minted is refused everywhere at once, and so is the
+    /// domain's key, which is nobody's sign-in. A token's role is read off
+    /// its person's row each time, so a change of role lands on that Mac's
+    /// very next call.
     fn ready(&self) -> RemoteResult<Caller> {
         self.check_offline()?;
         let be = self.be.lock().unwrap();
         if be.says_removed_to_all {
             return Err(RemoteError::Removed);
         }
-        if self.token == be.owner_token {
-            return Ok(Caller::Creator);
+        if be.key.as_deref() == Some(self.token.as_str()) {
+            return Err(RemoteError::Forbidden);
+        }
+        if be.superadmin_token.as_deref() == Some(self.token.as_str()) {
+            return Ok(Caller::Superadmin);
         }
         if let Some(held) = be.tokens.get(&self.token) {
+            if be.superadmin.as_deref() == Some(held.member_id.as_str()) {
+                return Ok(Caller::Superadmin);
+            }
             let owner = be.members.get(&held.email).is_some_and(|m| m.role == "owner");
             return Ok(if owner { Caller::Owner } else { Caller::Member });
         }
@@ -315,7 +356,7 @@ impl FakeRemote {
         Err(RemoteError::Unauthorized)
     }
 
-    /// The routes an owner's role holds: bind, wipe, invites, removals, roles.
+    /// The routes an owner's role holds: invites, removals, roles.
     fn owner_only(&self) -> RemoteResult<Caller> {
         match self.ready()? {
             Caller::Member => Err(RemoteError::Forbidden),
@@ -323,13 +364,21 @@ impl FakeRemote {
         }
     }
 
-    /// The member id behind this bearer: off the token for a person, off the
-    /// `creator` row for the secret.
-    fn member_id(&self, be: &FakeWorker, caller: Caller) -> Option<String> {
-        match caller {
-            Caller::Creator => be.creator.clone(),
-            _ => be.tokens.get(&self.token).map(|t| t.member_id.clone()),
+    /// The routes only the superadmin holds: bind and wipe.
+    fn superadmin_only(&self) -> RemoteResult<Caller> {
+        match self.ready()? {
+            Caller::Superadmin => Ok(Caller::Superadmin),
+            _ => Err(RemoteError::Forbidden),
         }
+    }
+
+    /// The member id behind this bearer, off its token — or, for the
+    /// superadmin's first device, the person the `superadmin` row names.
+    fn member_id(&self, be: &FakeWorker, _caller: Caller) -> Option<String> {
+        if be.superadmin_token.as_deref() == Some(self.token.as_str()) {
+            return be.superadmin.clone();
+        }
+        be.tokens.get(&self.token).map(|t| t.member_id.clone())
     }
 
     /// The next `<prefix>-<n>` id this fake hands out.
@@ -343,24 +392,40 @@ impl Remote for FakeRemote {
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         let this = self.clone();
         async move {
+            {
+                let mut b = this.be.lock().unwrap();
+                if b.key.as_deref() == Some(this.token.as_str()) {
+                    // The key is nobody: the probe, and no `you`.
+                    b.meta_calls += 1;
+                    return Ok(Meta {
+                        version: b.worker_version,
+                        features: b.features.clone(),
+                        workspace: b.bound.clone(),
+                        key: true,
+                        ..Default::default()
+                    });
+                }
+            }
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.meta_calls += 1;
-            // Identity, the way the worker answers it: a person's comes off
-            // the row their token resolved to, and the creator's off the row
-            // the `creator` table names — none, on a domain where nobody
-            // adopted one.
+            // Identity, the way the worker answers it: off the row the token
+            // resolved to.
             let id = this.member_id(&b, caller);
             let me = b.members.values().find(|m| Some(&m.id) == id.as_ref()).cloned();
             let you = Some(Identity {
                 role: caller.role().into(),
-                creator: caller == Caller::Creator,
                 can: caller.can(),
                 token_id: b.tokens.get(&this.token).map(|t| t.id.clone()),
                 member_id: me.as_ref().map(|m| m.id.clone()),
                 email: me.as_ref().map(|m| m.email.clone()),
-                name: me.map(|m| m.name).unwrap_or_else(|| "Owner".into()),
+                name: me.map(|m| m.name).unwrap_or_default(),
             });
+            let superadmin = b
+                .members
+                .values()
+                .find(|m| b.superadmin.as_deref() == Some(m.id.as_str()))
+                .map(|m| Person { id: m.id.clone(), name: m.name.clone() });
             // People, then agents — `listDirectory` (cloud-worker/src/members.ts).
             let people = b
                 .members
@@ -373,6 +438,8 @@ impl Remote for FakeRemote {
                 features: b.features.clone(),
                 workspace: b.bound.clone(),
                 you,
+                key: false,
+                superadmin,
                 people,
             })
         }
@@ -383,7 +450,7 @@ impl Remote for FakeRemote {
         let name = name.to_string();
         let device_name = device_name.to_string();
         async move {
-            this.owner_only()?;
+            this.superadmin_only()?;
             let mut b = this.be.lock().unwrap();
             if let Some(w) = &b.bound {
                 return Err(RemoteError::AlreadyBound(w.clone()));
@@ -423,8 +490,7 @@ impl Remote for FakeRemote {
             let leasing = b.features.iter().any(|f| f == "leases");
             let now = now_ms();
             let me = this.device_id.clone();
-            // Whose Mac it is, the way the worker decides: off the token for
-            // a person, off the adopted row for the creator.
+            // Whose Mac it is, the way the worker decides: off the token.
             let member_id = this.member_id(&b, caller);
             // The spaces this person is in: what they may see a path in.
             let mine: BTreeSet<String> = b
@@ -933,7 +999,7 @@ impl Remote for FakeRemote {
     fn wipe(&self) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
         let this = self.clone();
         async move {
-            this.owner_only()?;
+            this.superadmin_only()?;
             let mut b = this.be.lock().unwrap();
             let purged = (b.bound.is_some() as u64) + 1 + b.blobs.len() as u64;
             b.bound = None;
@@ -953,7 +1019,8 @@ impl Remote for FakeRemote {
             // …and what it remembered taking away: a wiped domain refuses
             // every token and has removed nobody.
             b.removed.clear();
-            b.creator = None;
+            b.superadmin = None;
+            b.superadmin_token = None;
             Ok(WipeRound { purged, remaining: false })
         }
     }
@@ -973,13 +1040,13 @@ impl Remote for FakeRemote {
             let caller = this.owner_only()?;
             let mut b = this.be.lock().unwrap();
             // A code for an owner's address is theirs to make, or the
-            // creator's — never another owner's, who could keep it.
+            // superadmin's — never another owner's, who could keep it.
             let me = this.member_id(&b, caller);
             if b.members.get(&email).is_some_and(|m| m.role == "owner" && Some(&m.id) != me.as_ref())
-                && caller != Caller::Creator
+                && caller != Caller::Superadmin
             {
                 return Err(RemoteError::Other(
-                    "a code for an owner is theirs to make, or the workspace's creator's".into(),
+                    "a code for an owner is theirs to make, or the workspace's superadmin's".into(),
                 ));
             }
             let id = FakeRemote::mint_id(&mut b, "m");
@@ -1066,52 +1133,10 @@ impl Remote for FakeRemote {
                     // Counted, not stored: a device count that could disagree
                     // with the tokens beside it would be a second truth.
                     devices: b.tokens.values().filter(|t| t.member_id == m.id).count() as u32,
-                    creator: b.creator.as_deref() == Some(m.id.as_str()),
+                    role: if b.superadmin.as_deref() == Some(m.id.as_str()) { "superadmin".into() } else { m.role.clone() },
                     ..m.clone()
                 })
                 .collect())
-        }
-    }
-
-    fn adopt_owner(
-        &self,
-        email: &str,
-        name: Option<&str>,
-    ) -> impl std::future::Future<Output = RemoteResult<MemberRecord>> + Send {
-        let this = self.clone();
-        let email = email.trim().to_lowercase();
-        let name = name.map(str::to_string);
-        async move {
-            // The secret's alone: everybody else already is somebody.
-            if this.ready()? != Caller::Creator {
-                return Err(RemoteError::Forbidden);
-            }
-            let mut b = this.be.lock().unwrap();
-            let id = FakeRemote::mint_id(&mut b, "m");
-            let member = b.members.entry(email.clone()).or_insert(MemberRecord {
-                id,
-                email: email.clone(),
-                name: String::new(),
-                role: "member".into(),
-                created_at: now_ms(),
-                ..Default::default()
-            });
-            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
-                member.name = n.to_string();
-            }
-            member.role = "owner".into();
-            member.creator = true;
-            let adopted = member.clone();
-            // One row is the creator's: adopting a new address moves the mark
-            // and makes the old row a plain member rather than deleting it,
-            // because that row may already be named in a manifest.
-            if let Some(old) = b.creator.replace(adopted.id.clone()).filter(|old| *old != adopted.id) {
-                if let Some(row) = b.members.values_mut().find(|m| m.id == old) {
-                    row.role = "member".into();
-                    row.creator = false;
-                }
-            }
-            Ok(adopted)
         }
     }
 
@@ -1125,11 +1150,11 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.owner_only()?;
             let mut b = this.be.lock().unwrap();
-            if this.member_id(&b, caller).as_deref() == Some(id.as_str()) && caller != Caller::Creator {
+            if this.member_id(&b, caller).as_deref() == Some(id.as_str()) {
                 return Err(RemoteError::Other("that is your own row — another owner has to change it".into()));
             }
-            if b.creator.as_deref() == Some(id.as_str()) {
-                return Err(RemoteError::Other("the workspace's creator is always an owner".into()));
+            if b.superadmin.as_deref() == Some(id.as_str()) {
+                return Err(RemoteError::Other("the workspace's superadmin is always an owner".into()));
             }
             let Some(row) = b.members.values_mut().find(|m| m.id == id) else {
                 return Err(RemoteError::NotFound);
@@ -1152,11 +1177,11 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.owner_only()?;
             let mut b = this.be.lock().unwrap();
-            if this.member_id(&b, caller).as_deref() == Some(id.as_str()) && caller != Caller::Creator {
+            if this.member_id(&b, caller).as_deref() == Some(id.as_str()) {
                 return Err(RemoteError::Other("that is your own row — another owner has to change it".into()));
             }
-            if b.creator.as_deref() == Some(id.as_str()) {
-                return Err(RemoteError::Other("the workspace's creator cannot be removed".into()));
+            if b.superadmin.as_deref() == Some(id.as_str()) {
+                return Err(RemoteError::Other("the workspace's superadmin cannot be removed".into()));
             }
             let Some((email, was_owner)) =
                 b.members.values().find(|m| m.id == id).map(|m| (m.email.clone(), m.role == "owner"))
@@ -1213,14 +1238,11 @@ impl Remote for FakeRemote {
         let this = self.clone();
         let code_hash = code_hash.to_string();
         async move {
-            // Anyone's to ask, and only ever for themselves: the secret asks
-            // as the person who holds it, and has to have said who that is.
+            // Anyone's to ask, and only ever for themselves.
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             let Some(me) = this.member_id(&b, caller) else {
-                return Err(RemoteError::Other(
-                    "say who you are first — your name and email, under People — then add a device".into(),
-                ));
+                return Err(RemoteError::Forbidden);
             };
             let Some(member) = b.members.values().find(|m| m.id == me).cloned() else {
                 return Err(RemoteError::Forbidden);
@@ -1268,14 +1290,20 @@ impl Remote for FakeRemote {
             let mut b = this.be.lock().unwrap();
             let me = this.member_id(&b, caller);
             // Somebody else's device is, to a member, what an unknown id is.
-            let Some(token) = b
+            let Some((token, whose)) = b
                 .tokens
                 .iter()
                 .find(|(_, t)| t.id == id && (caller != Caller::Member || Some(&t.member_id) == me.as_ref()))
-                .map(|(k, _)| k.clone())
+                .map(|(k, t)| (k.clone(), t.member_id.clone()))
             else {
                 return Err(RemoteError::NotFound);
             };
+            // The superadmin's devices are theirs alone to sign out.
+            if b.superadmin.as_deref() == Some(whose.as_str()) && me.as_deref() != Some(whose.as_str()) {
+                return Err(RemoteError::Other(
+                    "that is one of the superadmin's devices — only they sign theirs out".into(),
+                ));
+            }
             if token == this.token {
                 return Err(RemoteError::Other(
                     "that is the device you are on — disconnect it instead of signing it out".into(),
@@ -1290,11 +1318,7 @@ impl Remote for FakeRemote {
     fn end_session(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let this = self.clone();
         async move {
-            if this.ready()? == Caller::Creator {
-                return Err(RemoteError::Other(
-                    "the domain's own token is not a sign-in, so there is none to end".into(),
-                ));
-            }
+            this.ready()?;
             // Forgotten, and not written down as taken away: a device that
             // leaves is told to delete nothing.
             this.be.lock().unwrap().tokens.remove(&this.token);
@@ -1367,8 +1391,7 @@ fn device_as(
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
             use_trash: false,
-            creator: false,
-            on_creator: None,
+            on_key: None,
             on_spaces: None,
         },
         Arc::new(FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)),
@@ -2257,11 +2280,15 @@ async fn bind_refused_when_bound() {
     assert!(msg.contains("already holds \"Notes\""));
     assert!(msg.contains("Alice's Mac"));
 
-    // Wipe frees it.
+    // Wipe frees it — and forgets everybody, the superadmin's devices too:
+    // binding it again starts from a fresh key traded on the account.
     let purged = wipe_all(&alice).await.unwrap();
     assert!(purged >= 1);
     assert!(be.lock().unwrap().bound.is_none());
-    assert!(bind_domain(&bob, "Other", "Bob's Mac").await.is_ok());
+    assert!(bind_domain(&bob, "Other", "Bob's Mac").await.is_err());
+    be.lock().unwrap().superadmin_token = Some("traded-for-a-fresh-key".into());
+    let fresh = Arc::new(FakeRemote::with_token(&be, "d-bob", "traded-for-a-fresh-key"));
+    assert!(bind_domain(&fresh, "Other", "Bob's Mac").await.is_ok());
 }
 
 #[tokio::test]
@@ -2602,8 +2629,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
 #[tokio::test]
 async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
     let be = fake_worker();
-    let owner = FakeRemote::new(&be, "d-alice");
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
 
     let mut a = device("Alice", &be);
     // The probe is where identity arrives, and the probe is what happens
@@ -2638,7 +2664,7 @@ async fn work_is_signed_with_a_person_once_the_domain_says_who_this_mac_is() {
 async fn a_conflict_copy_is_named_after_the_person_not_the_id() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
-    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
 
     let mut a = device("Alice", &be);
@@ -2676,7 +2702,6 @@ async fn a_conflict_copy_is_named_after_the_person_not_the_id() {
 #[tokio::test(start_paused = true)]
 async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
     let be = fake_worker();
-    let owner = FakeRemote::new(&be, "d-alice");
     let mut a = device("Alice", &be);
     a.write("mine.md", "mine\n");
     a.cycle().await;
@@ -2684,7 +2709,7 @@ async fn a_manifest_naming_a_stranger_asks_the_domain_once_who_they_are() {
 
     // Somebody joined and wrote something. Their id means nothing here yet,
     // and a name that only arrives on the next launch is not a name.
-    let bob = owner.adopt_owner("bob@example.com", Some("Bob")).await.unwrap();
+    let bob = name_superadmin(&be, "bob@example.com", "Bob");
     let sign_as = |be: &SharedWorker, by: &str| {
         let mut b = be.lock().unwrap();
         let f = b.manifest.files.values_mut().next().unwrap();
@@ -2787,12 +2812,11 @@ async fn the_owner_sees_everyone_and_what_each_of_them_holds() {
 async fn people_is_everybodys_to_see_and_an_owners_to_change() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
 
     let seen = super::people_of(&owner, "d-alice", "notes.example.com").await.unwrap();
-    assert_eq!(seen.role, "owner");
-    assert!(seen.creator, "this Mac holds the domain's own secret");
+    assert_eq!(seen.role, "superadmin");
     assert_eq!(seen.me.as_deref(), Some(ada.id.as_str()));
     assert_eq!(seen.device_id, "d-alice");
     assert_eq!(seen.members.len(), 2);
@@ -2806,11 +2830,10 @@ async fn people_is_everybodys_to_see_and_an_owners_to_change() {
     let bob = FakeRemote::with_token(&be, "d-bob", &token);
     let mine = super::people_of(&bob, "d-bob", "notes.example.com").await.unwrap();
     assert_eq!(mine.role, "member");
-    assert!(!mine.creator);
     assert_eq!(mine.device_id, "d-bob");
     assert_eq!(mine.members.len(), 2, "the People list answers a member");
     assert_eq!(mine.me, mine.members.iter().find(|m| m.email == "bob@example.com").map(|m| m.id.clone()));
-    assert!(mine.members.iter().any(|m| m.creator && m.role == "owner"));
+    assert!(mine.members.iter().any(|m| m.id == ada.id && m.role == "superadmin"));
     assert!(mine.invites.is_empty());
     assert_eq!(mine.devices.len(), 1, "their own Mac, and nobody else's");
     assert_eq!(mine.devices[0].device_id.as_deref(), Some("d-bob"));
@@ -2843,7 +2866,7 @@ async fn people_is_everybodys_to_see_and_an_owners_to_change() {
 async fn a_role_is_the_persons_and_lands_on_their_next_call() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
     let bob = FakeRemote::with_token(&be, "d-bob", &token);
     let bob_id = super::people_of(&bob, "d-bob", "d").await.unwrap().me.unwrap();
@@ -2854,21 +2877,19 @@ async fn a_role_is_the_persons_and_lands_on_their_next_call() {
     // The same token, untouched: an owner's routes answer it now.
     let mine = super::people_of(&bob, "d-bob", "d").await.unwrap();
     assert_eq!(mine.role, "owner");
-    assert!(!mine.creator, "an owner, and still not the holder of the secret");
     assert_eq!(mine.devices.len(), 1);
     assert!(bob.list_invites().await.is_ok());
 
     // An owner cannot change their own row, and nobody can change the
-    // creator's — the domain's secret lets them in whatever a row says.
+    // superadmin's — the role moves only when somebody trades a key.
     assert!(bob.set_member_role(&bob_id, "member").await.is_err());
     assert!(bob.delete_member(&bob_id).await.is_err());
     assert!(bob.set_member_role(&ada.id, "member").await.is_err());
     assert!(bob.delete_member(&ada.id).await.is_err());
     assert!(owner.delete_member(&ada.id).await.is_err());
-    assert!(matches!(bob.adopt_owner("bob@example.com", None).await, Err(RemoteError::Forbidden)));
     let people = owner.list_members().await.unwrap();
-    assert_eq!(people.iter().filter(|m| m.role == "owner").count(), 2, "several owners");
-    assert_eq!(people.iter().filter(|m| m.creator).count(), 1, "one creator");
+    assert_eq!(people.iter().filter(|m| m.role != "member").count(), 2, "several owners");
+    assert_eq!(people.iter().filter(|m| m.role == "superadmin").count(), 1, "one superadmin");
 
     // And a member again, on the next call.
     owner.set_member_role(&bob_id, "member").await.unwrap();
@@ -2938,23 +2959,23 @@ async fn a_token_the_domain_merely_does_not_know_removes_nothing() {
     assert_eq!(bob.phase(), Phase::Revoked);
     assert!(!bob.engine.was_removed());
 
-    // So is a secret that was rotated under a Mac that held the old one.
-    be.lock().unwrap().owner_token = "a-new-secret".into();
+    // The superadmin's own Mac the same: a wiped domain knows nobody.
     assert!(matches!(alice.engine.cycle().await, Err(RemoteError::Unauthorized)));
     assert_eq!(alice.phase(), Phase::Revoked);
-    assert!(!alice.engine.was_removed(), "the creator's Mac is never told to delete anything");
+    assert!(!alice.engine.was_removed());
 }
 
 #[tokio::test]
-async fn the_creators_mac_never_deletes_on_anybodys_word() {
+async fn a_mac_still_holding_the_key_syncs_nothing_and_asks_the_manager_to_trade_it() {
     let be = fake_worker();
-    // The Mac that made the workspace, as an engine built from a `cloud.json`
-    // entry older than the `creator` field: it has to learn it from the domain.
-    let learned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    be.lock().unwrap().key = Some("the-domains-key".into());
+    // A connection made while the key was a sign-in: its `cloud.json` entry
+    // holds the key itself.
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (root, state, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::create_dir_all(state.path().join("base")).unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
-    let heard = learned.clone();
+    let heard = asked.clone();
     let mut engine = Engine::new(
         EngineConfig {
             ws_id: "w-test".into(),
@@ -2967,41 +2988,46 @@ async fn the_creators_mac_never_deletes_on_anybodys_word() {
             device_id: "d-alice".into(),
             device_name: "Alice".into(),
             use_trash: false,
-            creator: false,
-            on_creator: Some(Box::new(move || heard.store(true, std::sync::atomic::Ordering::SeqCst))),
+            on_key: Some(Box::new(move || {
+                heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
             on_spaces: None,
         },
-        Arc::new(FakeRemote::new(&be, "d-alice")),
+        Arc::new(FakeRemote::with_token(&be, "d-alice", "the-domains-key")),
         Arc::new(Collected::default()),
         statuses.clone(),
     );
     std::fs::write(root.path().join("mine.md"), "my own notes\n").unwrap();
     engine.probe_worker().await;
-    assert!(learned.load(std::sync::atomic::Ordering::SeqCst), "the domain said so, and the manager is told to write it down");
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "the domain said so, and the manager is asked to trade");
     engine.cycle().await.unwrap();
-
-    // The address changes hands, and whatever answers there now says
-    // `removed` to everyone. The creator's credential is no row — nothing an
-    // owner does can take it away — so this is not obeyed: sync stops, as for
-    // any token the domain will not take, and the folder is the user's still.
-    be.lock().unwrap().says_removed_to_all = true;
-    assert!(matches!(engine.cycle().await, Err(RemoteError::Removed)));
-    assert!(!engine.was_removed());
+    assert_eq!(be.lock().unwrap().put_manifest_calls, 0, "nothing syncs on the key");
     let key = root.path().to_string_lossy().to_string();
-    assert_eq!(statuses.lock().unwrap()[&key].phase, Phase::Revoked);
-    engine.probe_worker().await;
-    engine.poll_for_test().await;
-    assert!(!engine.was_removed(), "not on the probe, and not on the poll");
+    let status = statuses.lock().unwrap()[&key].clone();
+    assert_eq!(status.phase, Phase::Error);
+    assert!(status.error.as_deref().unwrap_or("").contains("Recover with your Cloudflare account"), "{:?}", status.error);
+    assert!(!engine.was_removed());
     assert!(root.path().join("mine.md").exists());
+    // A probe soon after does not ask again: a trade that cannot be made is
+    // retried every `KEY_TRADE_GAP`, not on every poll.
+    engine.probe_worker().await;
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
 
-    // An invited Mac told the same thing does obey — it cannot know better,
-    // and its folder is a copy.
-    be.lock().unwrap().says_removed_to_all = false;
+#[tokio::test]
+async fn every_mac_obeys_a_removal_the_superadmins_own_included() {
+    let be = fake_worker();
+    let mut alice = device("Alice", &be);
+    alice.write("mine.md", "my own notes\n");
+    alice.cycle().await;
     let owner = FakeRemote::new(&be, "d-alice");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
     let mut bob = device_as("Bob", &be, tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), &token);
     bob.cycle().await;
+    // No device is special: told its access was removed, each one obeys.
     be.lock().unwrap().says_removed_to_all = true;
+    let _ = alice.engine.cycle().await;
+    assert!(alice.engine.was_removed(), "the superadmin's Mac too");
     let _ = bob.engine.cycle().await;
     assert!(bob.engine.was_removed());
 }
@@ -3022,17 +3048,14 @@ async fn a_device_is_added_with_a_code_by_anyone_for_themselves() {
         async move { FakeRemote::with_token(&be, device, "").redeem(&code, name).await }
     };
 
-    // The secret asks as the person who holds it — so it has to have said
-    // who that is. Until then the Mac that made the workspace is the only one.
-    assert!(code_for(&owner).await.is_err());
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    // The superadmin adds one like anybody, and it is the superadmin too.
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
     let mini = join(code_for(&owner).await.unwrap(), "d-ada-mini", "Ada's mini").await.unwrap();
     assert_eq!(mini.member.id, ada.id);
     let mini = FakeRemote::with_token(&be, "d-ada-mini", &mini.token);
     let as_mini = super::people_of(&mini, "d-ada-mini", "d").await.unwrap();
-    assert_eq!(as_mini.role, "owner");
-    assert!(!as_mini.creator, "the secret alone is the creator's credential");
-    assert!(as_mini.token_id.is_some(), "…and this one is a row, which can be signed out");
+    assert_eq!(as_mini.role, "superadmin");
+    assert!(as_mini.token_id.is_some(), "…on a row of its own, which can be signed out");
 
     // A member, with nobody's leave: a phone of their own, signed in as them
     // on a credential of its own.
@@ -3052,19 +3075,25 @@ async fn a_device_is_added_with_a_code_by_anyone_for_themselves() {
     assert!(mine.devices.iter().all(|d| Some(&d.member_id) == mine.me.as_ref()));
     assert_eq!(super::people_of(&owner, "d-alice", "d").await.unwrap().devices.len(), 3);
 
-    // Somebody else's is, to a member, not there; their own they sign out —
-    // and that device is told so, which is what has it delete its copy.
+    // Somebody else's is, to a member, not there — and the superadmin's, to
+    // an owner, is theirs alone; their own they sign out — and that device is
+    // told so, which is what has it delete its copy.
     let minis_row = as_mini.token_id.clone().unwrap();
     assert!(matches!(bob.sign_out_device(&minis_row).await, Err(RemoteError::NotFound)));
+    let carol = invite_and_redeem(&be, &owner, "carol@example.com", "Carol", "d-carol").await;
+    let carol_id = super::people_of(&FakeRemote::with_token(&be, "d-carol", &carol), "d-carol", "d").await.unwrap().me.unwrap();
+    owner.set_member_role(&carol_id, "owner").await.unwrap();
+    let refused = FakeRemote::with_token(&be, "d-carol", &carol).sign_out_device(&minis_row).await.unwrap_err();
+    assert!(refused.to_string().contains("only they"), "{refused}");
     assert!(mini.meta().await.is_ok());
+    owner.delete_member(&carol_id).await.unwrap();
     bob.sign_out_device(&phone.token_id).await.unwrap();
     assert!(matches!(phone_remote.meta().await, Err(RemoteError::Removed)));
 
     // A device that leaves ends its own sign-in: forgotten, and told to
-    // delete nothing. The secret is no sign-in, so it has none to end.
+    // delete nothing.
     mini.end_session().await.unwrap();
     assert!(matches!(mini.meta().await, Err(RemoteError::Unauthorized)));
-    assert!(owner.end_session().await.is_err());
     assert_eq!(super::people_of(&owner, "d-alice", "d").await.unwrap().devices.len(), 1);
 }
 
@@ -3072,7 +3101,7 @@ async fn a_device_is_added_with_a_code_by_anyone_for_themselves() {
 async fn nobody_signs_out_the_mac_in_hand_and_no_owners_code_outlives_them() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
     invite_and_redeem(&be, &owner, "carol@example.com", "Carol", "d-carol").await;
     let bob = FakeRemote::with_token(&be, "d-bob", &token);
@@ -3086,10 +3115,9 @@ async fn nobody_signs_out_the_mac_in_hand_and_no_owners_code_outlives_them() {
     let my_row = mine.token_id.clone().expect("a person's token is a row");
     assert!(mine.devices.iter().any(|d| d.id == my_row));
     assert!(bob.sign_out_device(&my_row).await.is_err());
-    assert!(super::people_of(&owner, "d-alice", "d").await.unwrap().token_id.is_none(), "the secret is no row");
 
     // A code is a way in as the person it is for. One for another owner's
-    // address — the creator's above all, whose row nobody can remove — is not
+    // address — the superadmin's above all, whose row nobody can remove — is not
     // an owner's to make…
     let hash = |code: &str| invite::code_hash(code);
     let soon = invite::expires_at(now_ms(), None);
@@ -3104,7 +3132,7 @@ async fn nobody_signs_out_the_mac_in_hand_and_no_owners_code_outlives_them() {
         FakeRemote::with_token(&be, "d-bob", "").redeem(&kept, "Bob again").await,
         Err(RemoteError::Unauthorized)
     ));
-    assert!(owner.list_members().await.unwrap().iter().any(|m| m.id == ada.id && m.creator));
+    assert!(owner.list_members().await.unwrap().iter().any(|m| m.id == ada.id && m.role == "superadmin"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3219,46 +3247,35 @@ async fn an_invite_can_be_withdrawn_before_anybody_trades_it_in() {
 }
 
 #[tokio::test]
-async fn the_creator_adopts_an_identity_and_only_one_row_is_theirs() {
+async fn the_superadmin_is_one_person_on_every_device_of_theirs() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
-    // Before it: a domain bound by an app that never asked who was binding it.
-    assert!(owner.list_members().await.unwrap().iter().all(|m| !m.creator));
+    let ada = name_superadmin(&be, "ada@example.com", "Ada");
+    assert_eq!(ada.role, "superadmin");
 
-    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
-    assert_eq!(ada.role, "owner");
-    assert!(ada.creator);
-    assert_eq!(ada.name, "Ada");
-    // Saying it again renames rather than duplicating: the address is the key.
-    let renamed = owner.adopt_owner("  Ada@Example.com ", Some("Ada Lovelace")).await.unwrap();
-    assert_eq!(renamed.id, ada.id);
-    assert_eq!(renamed.name, "Ada Lovelace");
-    assert_eq!(owner.list_members().await.unwrap().len(), 1);
-
-    // Inviting the creator's own address must not demote them — and the
-    // credential it mints is an owner's, because a role is the person's. It
-    // is their other Mac, signed in the ordinary way; what it is not is the
-    // secret, so it has a row an owner can sign out.
+    // Inviting the superadmin's own address changes nothing about them, and
+    // the credential it mints is the superadmin's, because the role is the
+    // person's: their other Mac, signed in the ordinary way, on a row of its own.
     let code = invite::random_code();
     owner
         .create_invite("ada@example.com", None, &invite::code_hash(&code), invite::expires_at(now_ms(), None))
         .await
         .unwrap();
     let redeemed = FakeRemote::with_token(&be, "d-ada-2", "").redeem(&code, "Ada's other Mac").await.unwrap();
-    assert_eq!(redeemed.member.role, "owner", "the row is unchanged");
     let mine = super::people_of(&FakeRemote::with_token(&be, "d-ada-2", &redeemed.token), "d-ada-2", "d").await.unwrap();
-    assert_eq!(mine.role, "owner");
-    assert!(!mine.creator);
-    assert_eq!(mine.devices.len(), 1, "…and it is in the list of Macs, where the secret's are not");
+    assert_eq!(mine.role, "superadmin");
+    assert!(mine.can.iter().any(|c| c == "workspace.manage"));
+    assert_eq!(mine.devices.len(), 1, "…and it is in the list of devices");
 
-    // A new address takes the mark and the old row keeps its place as a plain
-    // member: it may already be named in a manifest.
-    let grace = owner.adopt_owner("grace@example.com", Some("Grace")).await.unwrap();
+    // Whoever trades the next key is the superadmin, and the one before stays
+    // an owner: the role follows whoever controls the account.
+    let grace = name_superadmin(&be, "grace@example.com", "Grace");
     let all = owner.list_members().await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all.iter().filter(|m| m.creator).count(), 1);
-    assert_eq!(all.iter().find(|m| m.creator).unwrap().id, grace.id);
-    assert_eq!(all.iter().find(|m| m.id == ada.id).unwrap().role, "member");
+    assert_eq!(all.iter().filter(|m| m.role == "superadmin").count(), 1);
+    assert_eq!(all.iter().find(|m| m.role == "superadmin").unwrap().id, grace.id);
+    assert_eq!(all.iter().find(|m| m.id == ada.id).unwrap().role, "owner");
+    let again = super::people_of(&FakeRemote::with_token(&be, "d-ada-2", &redeemed.token), "d-ada-2", "d").await.unwrap();
+    assert_eq!(again.role, "owner", "on her very next call");
 }
 
 /* ---------- Taking a workspace off this Mac (mod.rs) ---------- */
@@ -3271,7 +3288,6 @@ fn entry_at(root: &Path) -> WorkspaceEntry {
         ws_id: "w-test".into(),
         name: "Test".into(),
         token: "t".into(),
-        creator: false,
     }
 }
 
@@ -3726,7 +3742,7 @@ async fn a_worker_without_presence_is_polled_and_never_beaten_at_until_it_is_upd
 async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-studio");
-    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
 
     let mut studio = device("Studio", &be);
@@ -3765,7 +3781,7 @@ async fn presence_names_the_person_and_your_own_other_mac_by_its_name() {
 async fn a_stranger_here_is_shown_as_their_mac_and_asked_about_once() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-studio");
-    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    name_superadmin(&be, "ada@example.com", "Ada");
     let mut studio = device("Studio", &be);
     studio.engine.probe_worker().await;
     studio.cycle().await;
@@ -4031,7 +4047,7 @@ async fn a_worker_without_leases_or_a_database_shows_no_lock_and_is_not_claimed_
 async fn a_lease_names_the_person_and_your_own_other_mac() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-studio");
-    owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    name_superadmin(&be, "ada@example.com", "Ada");
     let token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob Mbeki", "d-bob").await;
     let mut studio = device("Studio", &be);
     let mut air = device("Air", &be);
@@ -4282,7 +4298,6 @@ fn cloud_file_and_marker_round_trip() {
         ws_id: "w-1".into(),
         name: "Notes".into(),
         token: "t".into(),
-        creator: false,
     });
     // One entry per root, one per domain.
     file.upsert(WorkspaceEntry {
@@ -4292,7 +4307,6 @@ fn cloud_file_and_marker_round_trip() {
         ws_id: "w-2".into(),
         name: "Notes".into(),
         token: "t2".into(),
-        creator: false,
     });
     assert_eq!(file.workspaces.len(), 1);
     assert_eq!(file.workspaces[0].ws_id, "w-2");
@@ -5931,10 +5945,10 @@ async fn everyone_has_a_private_that_only_their_own_macs_receive() {
     assert_eq!(alice.files(), ["shared.md"], "the shared walk never goes in there");
 }
 
-/// A creator who never said who they are has no row to hang a Private on:
-/// none is asked for, and nothing appears.
+/// A domain that has not said who this Mac is has no row to hang a Private
+/// on: none is asked for, and nothing appears.
 #[tokio::test]
-async fn a_creator_with_no_identity_has_no_private_and_is_not_asked_for_one() {
+async fn a_mac_the_domain_has_not_named_has_no_private_and_is_not_asked_for_one() {
     let be = fake_worker();
     let mut owner = device("Owner", &be);
     owner.engine.probe_worker().await;
@@ -6322,8 +6336,8 @@ async fn people_are_added_to_a_folder_taken_out_of_it_and_the_last_one_deletes_i
     assert!(bob.abs("Private").is_dir(), "and nothing else went with it");
 }
 
-/// A creator who never said who they are is nobody a folder could belong
-/// to, and a worker without spaces has no sections at all.
+/// A Mac the domain has not named is nobody a folder could belong to, and a
+/// worker without spaces has no sections at all.
 #[tokio::test]
 async fn a_folder_needs_somebody_to_belong_to_and_a_worker_that_has_them() {
     let be = fake_worker();
@@ -6332,7 +6346,7 @@ async fn a_folder_needs_somebody_to_belong_to_and_a_worker_that_has_them() {
     nobody.sync().await;
     assert_eq!(nobody.status().me_id, None);
     let refused = nobody.engine.make_space("Finance", &[], None).await.unwrap_err();
-    assert!(refused.contains("Say who you are"), "{refused}");
+    assert!(refused.contains("not caught up"), "{refused}");
     assert!(be.lock().unwrap().spaces.is_empty());
 
     let old = fake_worker();

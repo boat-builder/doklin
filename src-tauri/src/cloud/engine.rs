@@ -78,6 +78,11 @@ const ASKED_AGAIN_FOR: [&str; 4] = ["versions", "presence", "leases", "spaces"];
 /// but an id belonging to somebody since removed never resolves, and that
 /// must cost one request every so often rather than one per cycle.
 pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
+/// The least time between two asks to trade the domain's key (`on_key`): a
+/// Mac still holding it probes every poll, and a trade that cannot be made
+/// (a workspace with no superadmin to come back as) must cost one request
+/// every so often rather than four a minute.
+pub(crate) const KEY_TRADE_GAP: Duration = Duration::from_secs(300);
 
 /* ---------- Commands ---------- */
 
@@ -187,6 +192,11 @@ pub struct SpacesChanged {
 
 /* ---------- The engine ---------- */
 
+/// What a Mac still holding the domain's key says while the manager trades
+/// it for a sign-in of its own — and goes on saying if the trade cannot be
+/// made (a workspace nobody ever named a superadmin for).
+const KEY_SENTENCE: &str = "this Mac still signs in with the domain's key, which is no longer a sign-in — Doklin is trading it for one of its own. If this stays, disconnect this Mac, then choose Recover with your Cloudflare account with this folder open";
+
 pub struct EngineConfig {
     pub ws_id: String,
     pub name: String,
@@ -203,12 +213,11 @@ pub struct EngineConfig {
     pub device_name: String,
     /// Real deletions go to the macOS Trash; tests flip this off.
     pub use_trash: bool,
-    /// This Mac holds the domain's own token, as `cloud.json` last knew
-    /// (`WorkspaceEntry::creator`). Such an engine never acts on `Removed`.
-    pub creator: bool,
-    /// Called the first time the domain says this Mac is the creator and
-    /// `creator` was false, so the manager can write it down.
-    pub on_creator: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called whenever a probe says this Mac's token is the domain's key —
+    /// a connection made when the key was a sign-in — so the manager can
+    /// trade it for a sign-in of this Mac's own and start a new engine on
+    /// that. Until it does, this engine syncs nothing.
+    pub on_key: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called when a space's folder appears on this Mac or leaves it, so the
     /// manager can start and stop what follows a folder — its versioner.
     pub on_spaces: Option<Box<dyn Fn(SpacesChanged) + Send + Sync>>,
@@ -276,9 +285,13 @@ pub struct Engine<R: Remote> {
     /// Set wherever a request can hear it (`heard_removed`), read by the task
     /// loop — which stops the engine and hands the rest to the manager.
     removed: bool,
-    /// This Mac holds the domain's own token: from `cloud.json`, or the
-    /// moment a probe says so.
-    creator: bool,
+    /// The domain said this Mac's token is its key, which is no sign-in:
+    /// nothing syncs until the manager has traded it (`on_key`).
+    key: bool,
+    /// When the manager was last asked to trade it (`KEY_TRADE_GAP`).
+    key_asked: Option<Instant>,
+    /// The superadmin's name, as the probe last said — whom to ask.
+    superadmin: Option<String>,
     /// id → display name for everyone on this workspace, from the same
     /// answer. What a `by` is read with; a miss is shown as it stands.
     people: BTreeMap<String, String>,
@@ -304,7 +317,6 @@ pub struct Engine<R: Remote> {
 
 impl<R: Remote> Engine<R> {
     pub fn new(cfg: EngineConfig, remote: Arc<R>, events: Arc<dyn Events>, statuses: StatusTable) -> Self {
-        let creator = cfg.creator;
         let mut units = BTreeMap::new();
         let shared = UnitConfig {
             id: SHARED.to_string(),
@@ -344,7 +356,9 @@ impl<R: Remote> Engine<R> {
             me: None,
             can: Vec::new(),
             removed: false,
-            creator,
+            key: false,
+            key_asked: None,
+            superadmin: None,
             people: BTreeMap::new(),
             people_at: None,
             last_hourly: None,
@@ -385,7 +399,7 @@ impl<R: Remote> Engine<R> {
     }
 
     fn can_cycle(&self) -> bool {
-        !self.paused && self.outdated.is_none()
+        !self.paused && self.outdated.is_none() && !self.key
     }
 
     /// The shared workspace's unit.
@@ -473,6 +487,7 @@ impl<R: Remote> Engine<R> {
             me: self.name_of(&self.signature()),
             me_id: self.me.clone(),
             can: self.can.clone(),
+            superadmin: self.superadmin.clone(),
             worker_version: self.worker_version,
             versions: self.worker_has("versions").then(|| VersionsMirror {
                 mirrored: mirror.map(|m| m.mirrored).unwrap_or(0),
@@ -510,10 +525,14 @@ impl<R: Remote> Engine<R> {
                 let you = meta.you.unwrap_or_default();
                 self.me = you.member_id.filter(|id| !id.is_empty());
                 self.can = you.can;
-                if you.creator && !self.creator {
-                    self.creator = true;
-                    if let Some(write_down) = &self.cfg.on_creator {
-                        write_down();
+                self.superadmin = meta.superadmin.map(|p| p.name);
+                self.key = meta.key;
+                if self.key {
+                    self.set_status(Phase::Error, Some(KEY_SENTENCE.into()));
+                    let due = self.key_asked.is_none_or(|at| at.elapsed() >= KEY_TRADE_GAP);
+                    if let (true, Some(trade)) = (due, &self.cfg.on_key) {
+                        self.key_asked = Some(Instant::now());
+                        trade();
                     }
                 }
                 self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
@@ -531,19 +550,10 @@ impl<R: Remote> Engine<R> {
         }
     }
 
-    /// The domain said this Mac's access was removed. Obeyed — the task ends
-    /// and the copy leaves this Mac — unless this Mac holds the domain's own
-    /// token. That credential is no row, so nothing an owner does can take it
-    /// away, and a domain that says so of it is not the worker this Mac
-    /// connected to (an address that changed hands, say). The folder it would
-    /// cost is the user's own, connected in place: it is never deleted on
-    /// anybody's word. True when obeyed.
-    fn heard_removed(&mut self) -> bool {
-        if self.creator {
-            return false;
-        }
+    /// The domain said this Mac's access was removed: the task ends and the
+    /// copy leaves this Mac. Every device obeys it alike — none is special.
+    fn heard_removed(&mut self) {
         self.removed = true;
-        true
     }
 
     /// Whether the domain has said this Mac's access was taken away.
@@ -605,8 +615,8 @@ impl<R: Remote> Engine<R> {
     /// a cycle, in an order that writes a moved file's new section before it
     /// leaves the old one, and the workspace's one status says how it went.
     pub(crate) async fn pass(&mut self, which: Which) -> RemoteResult<()> {
-        if self.outdated.is_some() {
-            return Ok(()); // waiting for the worker update; nothing to do
+        if self.outdated.is_some() || self.key {
+            return Ok(()); // waiting for the worker update, or the key's trade
         }
         if !self.cfg.root.is_dir() {
             // Root missing (unmounted disk, renamed folder…): touch nothing.
@@ -744,15 +754,9 @@ impl<R: Remote> Engine<R> {
                 Phase::Revoked,
                 Some("the domain no longer accepts this Mac's token".into()),
             ),
-            // Obeyed, it has no status of its own: the task loop ends the
-            // engine, and the workspace leaves this Mac — row and all — a
-            // moment later. Not obeyed (the creator's Mac), it is a token the
-            // domain would not take, and reads as one.
-            Some(RemoteError::Removed) => {
-                if !self.heard_removed() {
-                    self.set_status(Phase::Revoked, Some("the domain no longer accepts this Mac's token".into()));
-                }
-            }
+            // It has no status of its own: the task loop ends the engine, and
+            // the workspace leaves this Mac — row and all — a moment later.
+            Some(RemoteError::Removed) => self.heard_removed(),
             Some(RemoteError::Outdated(m)) => {
                 self.outdated = Some(self.worker_version.unwrap_or(0));
                 self.set_status(
@@ -986,8 +990,7 @@ impl<R: Remote> Engine<R> {
         let ws_id = self.cfg.ws_id.clone();
         let mut changed: Option<SpacesChanged> = None;
 
-        // Everyone has a Private. A creator who never said who they are has
-        // no row to hang one on, and is not asked for.
+        // Everyone has a Private — once the domain has said who this Mac is.
         if !list.iter().any(|s| s.kind == SpaceKind::Private) && self.me.is_some() && self.private_refusals < 3 {
             match self.remote.ensure_private().await {
                 Ok(mine) => list.push(mine),
@@ -1163,12 +1166,10 @@ impl<R: Remote> Engine<R> {
                 self.cfg.domain
             ));
         }
-        if self.me.is_none() {
-            return Err("Say who you are first — your name and email, under People — so there is somebody for the folder to belong to.".to_string());
-        }
-        // The list of this person's spaces is what decides which folders
-        // stay on this Mac: a folder is only added to one the domain gave.
-        if self.spaces.is_none() || !self.shared().reserved_clear() {
+        // Who this Mac is, and the list of this person's spaces, are what
+        // decide which folders stay on this Mac: a folder is only added to
+        // one the domain gave, for somebody it named.
+        if self.me.is_none() || self.spaces.is_none() || !self.shared().reserved_clear() {
             return Err("This Mac has not caught up with the workspace yet — try again in a moment.".to_string());
         }
         let name = name.trim();
@@ -1875,11 +1876,11 @@ impl<R: Remote> Engine<R> {
                 }
                 next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
-                if self.outdated.is_some() {
-                    // Waiting on a worker update: ask, and resume the moment
-                    // it has happened.
+                if self.outdated.is_some() || self.key {
+                    // Waiting on a worker update, or on the key's trade: ask,
+                    // and resume the moment it has happened.
                     self.probe_worker().await;
-                    if self.outdated.is_none() {
+                    if self.can_cycle() {
                         let _ = self.cycle().await;
                     } else {
                         self.refresh_status();
