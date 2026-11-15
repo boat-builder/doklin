@@ -23,20 +23,22 @@
 //     costs one extra pass over idempotent statements, never a wrong answer.
 //
 // A worker whose `DB` binding is missing or broken — every domain deployed
-// before the binding existed — still serves the whole sync API unchanged and
-// reports `d1: null`. What it cannot do is resolve a member's token or
-// answer an identity route, because those ARE the database (members.ts);
-// the owner's own credential is the env secret and never reads a row, so a
-// database that is gone degrades a workspace to one credential rather than
-// locking anyone out.
+// before the binding existed — still answers the probe and reports
+// `d1: null`. Nobody can sign in to it: every credential is a row here
+// (members.ts), the superadmin's devices' included, so a database that is
+// gone is a workspace that is down for everyone until it answers again.
 
 import type { Env } from "./env";
 
 type Step = {
   /** The schema version this step produces. */
   to: number;
-  /** The tables it creates — what a wipe empties. */
+  /** The tables it creates — what a wipe empties. One a wipe leaves, as it
+   *  leaves `meta`, is made by `sql` and not listed. */
   tables: readonly string[];
+  /** Tables an earlier step made that this one moves out of and drops — no
+   *  longer anything a wipe empties. */
+  retires?: readonly string[];
   /** Columns it adds to tables an earlier step made, each only when the
    *  table does not have it yet. Added before `sql` runs. */
   columns?: readonly { table: string; column: string; type: string }[];
@@ -323,14 +325,67 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // No credential is matched without a row any more: the domain's key
+    // (`OWNER_TOKEN`) stopped being a sign-in, and is traded once for a
+    // device sign-in of the workspace's superadmin (`claimSuperadmin`,
+    // members.ts). That takes two tables and a move.
+    //
+    // `superadmin` says who the one superadmin is: the person who last proved
+    // they control the Cloudflare account, by trading a key. It is what
+    // `creator` said — whose row held the env secret — under the name of
+    // what it now confers, so its row moves across and `creator` goes. The
+    // CHECK is what makes a second superadmin impossible to write. Every
+    // statement is self-contained so two isolates converge: the
+    // `CREATE … creator` is what lets one that runs behind another, which
+    // already dropped it, read an empty table rather than fail.
+    //
+    // `spent_keys` remembers each key already traded, by its sha256, so a
+    // key works once: a copy left in an agent's chat after setup or a
+    // recovery lets nobody in. A wipe leaves it, as it leaves `meta` —
+    // otherwise the key a freed domain was set up with would bind it again.
+    //
+    // Agents: `member_id` NULL was the creator's — whoever held the secret,
+    // named or not. One-time move, guarded by the version it migrates from:
+    // each goes to the superadmin, who is that creator; one with nobody to go
+    // to — a creator who never said who they were — goes, with its codes and
+    // machines, and the app logs its terminal in again on the way back in.
+    to: 8,
+    tables: ["superadmin"],
+    retires: ["creator"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS superadmin (
+         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
+         member_id TEXT NOT NULL                        -- m-xxxxxxxx
+       )`,
+      `CREATE TABLE IF NOT EXISTS creator (
+         id        INTEGER PRIMARY KEY CHECK (id = 1),
+         member_id TEXT NOT NULL
+       )`,
+      `INSERT OR IGNORE INTO superadmin (id, member_id)
+         SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 8`,
+      `UPDATE agents SET member_id = (SELECT member_id FROM superadmin)
+        WHERE member_id IS NULL AND (SELECT schema_version FROM meta WHERE key = 'schema') < 8`,
+      `DELETE FROM agent_tokens WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
+      `DELETE FROM agent_codes WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
+      `DELETE FROM agents WHERE member_id IS NULL`,
+      `DROP TABLE IF EXISTS creator`,
+      `CREATE TABLE IF NOT EXISTS spent_keys (
+         hash     TEXT PRIMARY KEY,             -- sha256(key), as it was traded
+         spent_at INTEGER NOT NULL
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
 export const SCHEMA_VERSION = STEPS.at(-1)?.to ?? BASE_VERSION;
 
-/** Every table the steps create. The wipe empties these and leaves `meta`,
- *  which is the runner's own bookkeeping rather than anyone's data. */
-export const DATA_TABLES: readonly string[] = STEPS.flatMap((s) => s.tables);
+/** Every table the steps list and have not retired. The
+ *  wipe empties these and leaves `meta`, which is the runner's own
+ *  bookkeeping, and `spent_keys`, which is the domain's rather than anyone's. */
+const RETIRED = new Set(STEPS.flatMap((s) => s.retires ?? []));
+export const DATA_TABLES: readonly string[] = STEPS.flatMap((s) => s.tables).filter((t) => !RETIRED.has(t));
 
 // Per isolate, not per request: the check costs one round trip the first time
 // an isolate needs the database and nothing after that.

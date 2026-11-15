@@ -29,7 +29,7 @@ import { Refusal } from "./commit";
 import type { Env } from "./env";
 import { MAX_NAME_LEN } from "./layout";
 import { withDb } from "./schema";
-import { CALLER_SQL, ensurePrivate, sharedEnv, spaceEnv } from "./spaces";
+import { ensurePrivate, sharedEnv, spaceEnv } from "./spaces";
 
 export const PRIVATE_FOLDER = "Private";
 export const RESTRICTED_FOLDER = "Restricted";
@@ -77,11 +77,6 @@ export function folderNames(spaces: readonly { id: string; name: string; maker: 
   return names;
 }
 
-const nobody = (): Refusal =>
-  new Refusal(
-    409,
-    "this agent's person has not said who they are in this workspace, so there is no Private for it — they do that in Doklin, under People",
-  );
 const noDatabase = (): Refusal => new Refusal(503, "this domain's database is not answering — try again in a moment");
 
 /** Every section one agent's person can see, read at most once a request. */
@@ -113,7 +108,7 @@ export class Places {
           `SELECT s.id, s.kind, s.name, COALESCE(m.name, '') AS maker
              FROM space_members mine JOIN spaces s ON s.id = mine.space_id
              LEFT JOIN members m ON m.id = s.created_by
-            WHERE mine.member_id = ${CALLER_SQL}
+            WHERE mine.member_id = ?1
             ORDER BY s.created_at, s.id`,
         )
         .bind(this.person.memberId)
@@ -128,9 +123,9 @@ export class Places {
     if (mine === undefined) {
       const made = await ensurePrivate(env, this.person);
       if (made === null) return null;
-      if (made !== "nobody") mine = made.id;
+      mine = made.id;
     }
-    if (mine !== undefined) out.push({ space: mine, kind: "private", mount: PRIVATE_FOLDER, env: spaceEnv(env, mine) });
+    out.push({ space: mine, kind: "private", mount: PRIVATE_FOLDER, env: spaceEnv(env, mine) });
 
     const restricted = rows.filter((r) => r.kind !== "private");
     const names = folderNames(restricted);
@@ -158,7 +153,6 @@ export class Places {
       const env = this.shared.env;
       const mine = await ensurePrivate(env, this.person);
       if (mine === null) return noDatabase();
-      if (mine === "nobody") return nobody();
       return { space: mine.id, kind: "private", mount: PRIVATE_FOLDER, env: spaceEnv(env, mine.id) };
     }
     if (top !== RESTRICTED_FOLDER.toLowerCase()) return this.shared;
@@ -184,12 +178,12 @@ export class Places {
       : at;
   }
 
-  /** The agent's person, as the directory names them — null for a creator
-   *  who never said who they are, or when the database cannot say. */
+  /** The agent's person, as the directory names them — null when the
+   *  database cannot say. */
   async who(): Promise<{ id: string; name: string } | null> {
     return withDb(this.shared.env, (db) =>
       db
-        .prepare(`SELECT id, name FROM members WHERE id = ${CALLER_SQL}`)
+        .prepare("SELECT id, name FROM members WHERE id = ?1")
         .bind(this.person.memberId)
         .first<{ id: string; name: string }>(),
     );

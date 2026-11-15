@@ -163,7 +163,8 @@ export function seedManifestFiles(files = SEED_FILES) {
 /**
  * Load the seed through the worker's API, as the engine would: bind the
  * domain if it is free, upload every blob, then compare-and-swap the manifest
- * on top of whatever it holds. Answers the manifest etag.
+ * on top of whatever it holds. `token` is a superadmin's device sign-in — a
+ * bind is theirs. Answers the manifest etag.
  */
 export async function seedThroughApi(worker, env, { token, files = SEED_FILES, publicMap = SEED_PUBLIC, name = "Notes" } = {}) {
   const base = "https://notes.example.com";

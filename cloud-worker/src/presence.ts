@@ -40,7 +40,7 @@ import type { Auth } from "./auth";
 import type { Env } from "./env";
 import { PRESENCE_TTL_MS } from "./layout";
 import { withDb } from "./schema";
-import { CALLER_SQL, spacesStatement, toSpace, type Space, type SpaceRow } from "./spaces";
+import { spacesStatement, toSpace, type Space, type SpaceRow } from "./spaces";
 
 /** One device, as the poll reports it. `name` is the Mac's; `memberId` is
  *  whose it is, and the app puts a person's name to it. `path` is what they
@@ -105,7 +105,7 @@ type LeaseRow = {
 };
 
 /** The spaces the caller (?1) is in — what they may be told about. */
-const MINE = `(SELECT space_id FROM space_members WHERE member_id = ${CALLER_SQL})`;
+const MINE = "(SELECT space_id FROM space_members WHERE member_id = ?1)";
 const SEEN = `space_id = '' OR space_id IN ${MINE}`;
 
 // Both bind the caller's member id as ?1 and the clock as ?2.
@@ -172,10 +172,6 @@ export async function readHere(env: Env, auth: Auth, now = Date.now()): Promise<
  *
  * A beat that names a space the caller is not in is a beat with no path: the
  * presence row is written without one, so nothing is claimed.
- *
- * The creator's request carries no member id — the env secret reads no row
- * (auth.ts) — so their row takes the id the `creator` table names, in the
- * same statement. A creator who never said who they are is here as their Mac.
  */
 export async function recordBeat(
   env: Env,
@@ -224,7 +220,7 @@ export async function recordBeat(
             db
               .prepare(
                 `INSERT INTO presence (device_id, member_id, device_name, space_id, path, ts)
-                 SELECT ?2, ${CALLER_SQL}, ?3,
+                 SELECT ?2, ?1, ?3,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?4 ELSE '' END,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?5 END,
                         ?6

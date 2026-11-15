@@ -227,7 +227,8 @@ pub fn random_id(prefix: &str) -> String {
     format!("{}-{}", prefix, hex)
 }
 
-/// 32 random bytes as hex — the owner token the app mints at setup.
+/// 32 random bytes as hex — a fresh key for the domain, minted for setup and
+/// for each recovery.
 pub fn random_token() -> String {
     let mut buf = [0u8; 32];
     let _ = getrandom::getrandom(&mut buf);

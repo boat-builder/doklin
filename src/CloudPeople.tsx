@@ -4,7 +4,8 @@
 //
 //   People   work in the Doklin app, on devices that hold a copy of the
 //            workspace. Everybody here sees who is in it; an owner also lets
-//            people in, takes access away, and makes other owners.
+//            people in, takes access away, and makes other owners. The one
+//            superadmin nobody changes, removes or signs out but themselves.
 //   Devices  a person's own Macs and iPhones (CloudDevices.tsx). Everybody
 //            adds and signs out their own; an owner signs out anybody's, from
 //            the People tab.
@@ -26,7 +27,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  cloudAdoptOwner,
   cloudInvite,
   cloudPeople,
   cloudRevokeDevice,
@@ -96,7 +96,6 @@ export default function CloudPeople({
   const [minted, setMinted] = useState<CloudInvited | null>(null);
   /** Which row is asking "are you sure": `person:<id>`, `role:<id>`, `mac:<id>`, `code:<id>`. */
   const [confirm, setConfirm] = useState<string | null>(null);
-  const [adopt, setAdopt] = useState({ email: "", name: "" });
   const [now, setNow] = useState(() => Date.now());
   /** The invite door, its form and the code it mints. */
   const top = useRef<HTMLDivElement>(null);
@@ -179,9 +178,6 @@ export default function CloudPeople({
   const tabbed = tabs.length > 1;
   const showing: AccessTab = tabs.some((t) => t.tab === tab) ? tab : "people";
   const macsOf = (m: CloudMember) => people.devices.filter((d) => d.memberId === m.id);
-  // The holder of the domain's own token who has not yet said who they are:
-  // the one person the list cannot name.
-  const unnamed = people.creator && !people.me;
 
   return (
     <>
@@ -208,46 +204,6 @@ export default function CloudPeople({
         data-testid="pane-people"
         hidden={showing !== "people"}
       >
-        {unnamed && (
-          <div className="cloud-card cloud-card--attention" data-testid="adopt-owner">
-            <div className="cloud-card-title">{name} doesn’t know who you are</div>
-            <p className="cloud-hint">
-              Your address is how this workspace names you — in the list below, and on what you write
-              once history says <em>who</em> rather than <em>which Mac</em> — and how another device of
-              yours is signed in as you. It is stored on your own
-              domain and told to nobody else. Your access doesn’t depend on it: the domain’s token is
-              what lets this Mac in, with or without a name.
-            </p>
-            <div className="cloud-copy-row">
-              <input
-                className="modal-field-input"
-                data-testid="adopt-email"
-                placeholder="you@example.com"
-                value={adopt.email}
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                onChange={(e) => setAdopt({ ...adopt, email: e.target.value })}
-              />
-              <input
-                className="modal-field-input"
-                data-testid="adopt-name"
-                placeholder="Your name (optional)"
-                value={adopt.name}
-                onChange={(e) => setAdopt({ ...adopt, name: e.target.value })}
-              />
-              <button
-                className="modal-btn is-primary"
-                data-testid="adopt-save"
-                disabled={busy || !adopt.email.trim()}
-                onClick={() => void act(() => cloudAdoptOwner(root, adopt.email.trim(), adopt.name.trim() || null))}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        )}
-
         <p className="cloud-hint" data-testid="people-intro">
           {canInvite
             ? `Everyone in ${name}. Each has a copy of it on a device of their own, kept in step with yours. You let someone in with an invite code, and they stay until an owner removes them.`
@@ -328,9 +284,9 @@ export default function CloudPeople({
                 <p className="cloud-hint">
                   Only the code runs out. Once they have joined, their access lasts until an owner
                   removes them.{" "}
-                  {people.creator
+                  {may(people, "people.recover")
                     ? "Inviting somebody already here gives them a fresh code and stops the one they had. Inviting somebody who was removed brings them back as the same person."
-                    : "A new code for somebody who has already signed in is theirs to make, or the workspace creator’s."}
+                    : "A new code for somebody who has already signed in is theirs to make, or the workspace superadmin’s."}
                 </p>
                 <div className="modal-buttons">
                   <button
@@ -378,25 +334,25 @@ export default function CloudPeople({
               const macs = macsOf(m);
               const waiting = invites.some((i) => i.memberId === m.id);
               const you = m.id === people.me;
-              // Nobody changes their own row, and nobody the creator's: the
-              // domain refuses both, so neither is offered.
-              const changeable = !you && !m.creator;
+              // Nobody changes their own row, and nobody the superadmin's: the
+              // domain refuses both, so neither is offered. Nor does anybody
+              // but the superadmin sign out a device of theirs.
+              const changeable = !you && m.role !== "superadmin";
+              const signsOut = you || m.role !== "superadmin";
               return (
                 <li className="cloud-person" key={m.id} data-testid={`person-${m.id}`}>
                   <div className="cloud-person-head">
                     <span className="cloud-person-name">{m.name || m.email}</span>
                     {you && <span className="cloud-person-tag">you</span>}
-                    {m.role === "owner" && <span className="cloud-person-tag">owner</span>}
+                    {m.role !== "member" && <span className="cloud-person-tag">{m.role}</span>}
                     <span className="cloud-person-email">{m.email}</span>
                   </div>
                   <div className="cloud-hint">
-                    {m.creator
-                      ? `Made this workspace, on a Mac that holds the domain’s own token and isn’t counted here.${m.devices > 0 ? ` ${m.devices} other device${m.devices === 1 ? "" : "s"}.` : ""}`
-                      : m.devices === 0
-                        ? waiting
-                          ? "Invited — no device has traded the code in yet."
-                          : "No device signed in."
-                        : `${m.devices} device${m.devices === 1 ? "" : "s"}`}
+                    {m.devices === 0
+                      ? waiting
+                        ? "Invited — no device has traded the code in yet."
+                        : "No device signed in."
+                      : `${m.devices} device${m.devices === 1 ? "" : "s"}`}
                     {m.lastSeenAt != null && ` · seen ${timeAgo(m.lastSeenAt, now)}`}
                   </div>
                   {macs.length > 0 && (
@@ -412,7 +368,7 @@ export default function CloudPeople({
                             {/* Never this Mac: signing it out would delete the
                                 copy being looked at. Disconnect is the way to
                                 stop syncing here. */}
-                            {thisMac ? null : confirm === `mac:${d.id}` ? (
+                            {thisMac || !signsOut ? null : confirm === `mac:${d.id}` ? (
                               <span className="cloud-inline-confirm">
                                 <span className="cloud-hint">
                                   It stops syncing, and deletes its copy of {name} the next time Doklin
@@ -452,7 +408,7 @@ export default function CloudPeople({
                             <span className="cloud-hint">
                               {m.role === "owner"
                                 ? "They keep working here, and stop being able to invite or remove people. Codes nobody has used yet are withdrawn."
-                                : "They will be able to invite and remove people, make other owners, and delete the workspace."}
+                                : "They will be able to invite and remove people, and make other owners."}
                             </span>
                             <button
                               className="modal-btn is-primary"

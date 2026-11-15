@@ -38,6 +38,7 @@ const {
   WORKER_BUNDLE_URL,
   WORKER_UPDATE_SCRIPT_URL,
   buildAgentLoginPrompt,
+  buildRecoverPrompt,
   buildSetupPrompt,
   buildTeardownPrompt,
   buildUpdatePrompt,
@@ -60,7 +61,7 @@ const eq = (a, b, msg) => {
   assert.equal(a, b, msg);
 };
 
-const TOKEN = "ab".repeat(32);
+const KEY = "ab".repeat(32);
 const DATE = "2025-05-05";
 
 /* ---------- the naming rule ---------- */
@@ -123,7 +124,7 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
   ok(/ask me/.test(prompt), "asks rather than invents");
   ok(/print exactly/.test(prompt), "one line back");
   ok(/Do not (commit|touch|deploy)/.test(prompt.split("\n").at(-1)), "closes with the negative scope");
-  eq(prompt.includes(TOKEN), secret, secret ? "setup carries the token" : "no secret in this one");
+  eq(prompt.includes(KEY), secret, secret ? "setup and recovery carry the key" : "no secret in this one");
   ok(!/<[a-z -]*guess[a-z -]*>/i.test(prompt), "no placeholder the agent must guess");
 }
 
@@ -131,7 +132,7 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
 {
   const p = buildSetupPrompt({
     target: { kind: "domain", domain: "notes.example.com" },
-    token: TOKEN,
+    key: KEY,
     workspaceName: "Notes",
     workerVersion: 1,
     compatibilityDate: DATE,
@@ -163,7 +164,7 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
   ok(p.includes("d1 info doklin-notes-example-com"), "how to read the id back if it scrolled away");
   ok(/never make one up/.test(p), "…and that inventing one is not a fallback");
   ok(p.includes("secret put OWNER_TOKEN"), "the secret's name");
-  ok(p.includes(`\n${TOKEN}\n`), "the token on its own line");
+  ok(p.includes(`\n${KEY}\n`), "the key on its own line");
   ok(p.includes("npx -y wrangler@4 deploy"), "deploys");
   ok(/zone/.test(p), "names the custom-domain failure");
   ok(p.includes("https://notes.example.com/api/meta"), "verifies from the endpoint");
@@ -177,7 +178,7 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
 {
   const p = buildSetupPrompt({
     target: { kind: "workers-dev", name: "sherin-notes" },
-    token: TOKEN,
+    key: KEY,
     workspaceName: "Notes",
     workerVersion: 1,
     compatibilityDate: DATE,
@@ -324,6 +325,27 @@ eq(
   ok(/isn't empty, STOP/.test(p), "a non-empty bucket stops the agent");
   ok(p.includes("TORN DOWN: https://notes.example.com"));
   ok(!p.includes("curl -fsSL"), "nothing to download for a teardown");
+}
+
+/* ---------- recovery: a fresh key on the worker, and nothing else ---------- */
+{
+  const p = buildRecoverPrompt({ endpoint: "https://notes.example.com/", key: KEY });
+  skeleton(p, { steps: 5, secret: true });
+  ok(p.includes("deployments list --name doklin-notes-example-com"), "confirms the worker before touching it");
+  ok(p.includes("secret put OWNER_TOKEN --name doklin-notes-example-com"), "sets the one secret, by the worker's name — no wrangler.toml needed");
+  ok(p.includes(`\n${KEY}\n`), "the key on its own line");
+  ok(p.includes(`-H "Authorization: Bearer ${KEY}" https://notes.example.com/api/meta`), "verifies the key took");
+  ok(p.includes('"key" is true'), "…by what the worker answers a key");
+  ok(/update script first/.test(p), "a worker too old to recover with stops the agent");
+  ok(p.includes("KEY SET: https://notes.example.com"));
+  ok(!p.includes("npx -y wrangler@4 deploy`"), "deploys nothing");
+  ok(!p.includes("r2 bucket create") && !p.includes("d1 create"), "…and creates nothing");
+  ok(!p.includes("curl -fsSL"), "nothing to download");
+}
+{
+  const p = buildRecoverPrompt({ endpoint: "https://doklin-sherin-notes.sherin.workers.dev", key: KEY });
+  ok(p.includes("secret put OWNER_TOKEN --name doklin-sherin-notes"), "a workers.dev worker is named by its hostname");
+  ok(/certain: it is the first label/.test(p));
 }
 
 /* ---------- the agent login prompt ---------- */

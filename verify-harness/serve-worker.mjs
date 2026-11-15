@@ -5,7 +5,12 @@
 // unless --no-mermaid; the bucket, the database and the cache are the
 // in-memory fakes the worker tests use; state resets on restart.
 //
-//   node verify-harness/serve-worker.mjs [--no-mermaid]   # http://localhost:8787, owner token "owner-secret"
+//   node verify-harness/serve-worker.mjs [--no-mermaid]   # http://localhost:8787
+//
+// The domain's key is "owner-secret", and it is spent at start: traded, as an
+// app would at setup, for the superadmin's device sign-in, which the seed is
+// written with and which is printed — `superadmin token: <hex>` — for a
+// driver that needs to act as them.
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -15,7 +20,7 @@ import { seedThroughApi } from "../cloud-worker/test/seed.mjs";
 import { bundleWorker } from "../scripts/bundle-worker.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
-const OWNER = "owner-secret";
+const KEY = "owner-secret";
 const withMermaid = !process.argv.includes("--no-mermaid");
 
 console.log(`bundling the worker${withMermaid ? " with the mermaid module (about a minute)" : ""}…`);
@@ -26,11 +31,22 @@ const out = new URL("serve-worker.js", distDir);
 writeFileSync(out, code);
 const { default: worker } = await import(`${pathToFileURL(out.pathname).href}?t=${Date.now()}`);
 
-const env = { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: new FakeD1() };
+const env = { OWNER_TOKEN: KEY, DATA: new FakeR2(), DB: new FakeD1() };
 // The runtime's cache, so the harness exercises the same path a deploy does.
 globalThis.caches = { default: new FakeCache() };
-const etag = await seedThroughApi(worker, env, { token: OWNER });
+const traded = await worker.fetch(
+  new Request(`http://localhost:${PORT}/api/auth/recover`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json", "x-doklin-device": "d-seed" },
+    body: JSON.stringify({ email: "sherin@example.com", name: "Sherin", deviceId: "d-seed", deviceName: "Sherin's MacBook Pro" }),
+  }),
+  env,
+);
+if (traded.status !== 201) throw new Error(`trading the key failed: ${traded.status} ${await traded.text()}`);
+const { token } = await traded.json();
+const etag = await seedThroughApi(worker, env, { token });
 console.log(`seeded the workspace (manifest ${etag})`);
+console.log(`superadmin token: ${token}`);
 
 const ctx = {
   waitUntil(p) {

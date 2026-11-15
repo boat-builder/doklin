@@ -21,7 +21,6 @@
 // So an agent is one person's, and a login code for it is a way in as that
 // person: only they add it, change it or make it a code. An owner may remove
 // anybody's, and that is all an owner may do to one that is not theirs.
-// `member_id` NULL is the creator's — whoever holds the domain's secret.
 //
 // An agent is not a member on purpose. A member is a person keyed by an
 // email and may use the whole sync API; an agent has no address, holds
@@ -34,7 +33,6 @@ import type { Env } from "./env";
 import { validName } from "./layout";
 import { canonicalCode } from "./members";
 import { withDb } from "./schema";
-import { CALLER_SQL } from "./spaces";
 
 /** What an agent may do. `read` is not optional — an agent that cannot read
  *  cannot do anything else usefully — so every agent holds it. */
@@ -55,11 +53,10 @@ export type AgentMachine = { id: string; host: string; createdAt: number };
 /** A login code nobody has traded in yet. Never the code. */
 export type AgentCode = { id: string; createdAt: number; expiresAt: number };
 
-/** An agent as the Agents view lists it. `memberId` is whose it is — null
- *  when that is a creator who never said who they are — and `mine` whether
- *  that is the caller. */
+/** An agent as the Agents view lists it. `memberId` is whose it is, and
+ *  `mine` whether that is the caller. */
 export type AgentListed = Agent & {
-  memberId: string | null;
+  memberId: string;
   mine: boolean;
   machines: AgentMachine[];
   code: AgentCode | null;
@@ -72,17 +69,12 @@ export type AgentIdentity = {
   name: string;
   scopes: Scope[];
   lastUsedAt: number | null;
-  /** The person it belongs to, as their own token names them: null is the
-   *  creator, exactly as it is for the domain's secret (auth.ts). */
-  memberId: string | null;
+  /** The person it belongs to, as their own token names them. */
+  memberId: string;
 };
 
-/** Whose an agent is, in SQL: the id on its row, or the creator's. */
-const OWNER_SQL = "COALESCE(a.member_id, (SELECT member_id FROM creator))";
-/** Whether agent `a` is the caller's (their member id bound as ?1, null for
- *  the domain's secret). `IS`, so a creator who never said who they are still
- *  owns what the secret made. */
-const MINE_SQL = `${OWNER_SQL} IS ${CALLER_SQL}`;
+/** Whether agent `a` is the caller's (their member id bound as ?1). */
+const MINE_SQL = "a.member_id = ?1";
 
 /** `a-` an agent, `c-` a login code, `t-` one machine's token. */
 export const AGENT_ID_RE = /^a-[a-f0-9]{8}$/;
@@ -152,7 +144,7 @@ const toAgent = (r: AgentRow): Agent => ({
  * Nothing is written here — `touchAgent` moves `last_used_at`, at most once
  * an hour, so a request costs a read and no write.
  */
-export async function resolveAgentToken(env: Env, bearerHash: string): Promise<AgentIdentity | null> {
+export async function resolveAgentToken(env: Env, bearerHash: string): Promise<AgentIdentity | "nobody" | null> {
   return withDb(env, async (db) => {
     const row = await db
       .prepare(
@@ -168,16 +160,16 @@ export async function resolveAgentToken(env: Env, bearerHash: string): Promise<A
         name: string;
         scopes: string;
         last_used_at: number | null;
-        member_id: string | null;
+        member_id: string;
       }>();
-    if (!row) return null;
+    if (!row) return "nobody" as const;
     return {
       tokenId: row.token_id,
       agentId: row.id,
       name: row.name,
       scopes: readScopes(row.scopes),
       lastUsedAt: row.last_used_at == null ? null : Number(row.last_used_at),
-      memberId: row.member_id ?? null,
+      memberId: row.member_id,
     };
   });
 }
@@ -197,11 +189,11 @@ export async function touchAgent(env: Env, identity: AgentIdentity, now = Date.n
 
 /* ---------- Its person's side ---------- */
 
-/** Add an agent that belongs to `owner` — a member id, or null for the
- *  domain's secret — with the first login code already on it. */
+/** Add an agent that belongs to `owner` (a member id), with the first login
+ *  code already on it. */
 export async function createAgent(
   env: Env,
-  owner: string | null,
+  owner: string,
   name: string,
   scopes: Scope[],
   codeHash: string,
@@ -221,8 +213,7 @@ export async function createAgent(
         .prepare("INSERT OR REPLACE INTO agent_codes (hash, id, agent_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
         .bind(codeHash, code.id, agent.id, now, expiresAt),
     ]);
-    const person = await db.prepare(`SELECT ${CALLER_SQL} AS id`).bind(owner).first<string>("id");
-    return { ...agent, memberId: person ?? null, mine: true, machines: [], code };
+    return { ...agent, memberId: owner, mine: true, machines: [], code };
   });
 }
 
@@ -232,7 +223,7 @@ export async function createAgent(
  */
 export async function listAgents(
   env: Env,
-  caller: string | null,
+  caller: string,
   everyone: boolean,
   now = Date.now(),
 ): Promise<AgentListed[] | null> {
@@ -240,18 +231,18 @@ export async function listAgents(
     const [agents, tokens, codes] = await db.batch<Record<string, unknown>>([
       db
         .prepare(
-          `SELECT a.id, a.name, a.scopes, a.created_at, a.last_used_at, ${OWNER_SQL} AS owner, ${MINE_SQL} AS mine
+          `SELECT a.id, a.name, a.scopes, a.created_at, a.last_used_at, a.member_id AS owner, ${MINE_SQL} AS mine
              FROM agents a WHERE ?2 = 1 OR ${MINE_SQL} ORDER BY a.created_at, a.id`,
         )
         .bind(caller, everyone ? 1 : 0),
       db.prepare("SELECT id, agent_id, host, created_at FROM agent_tokens ORDER BY created_at, id"),
       db.prepare("SELECT id, agent_id, created_at, expires_at FROM agent_codes WHERE expires_at > ? ORDER BY created_at, id").bind(now),
     ]);
-    return (agents.results as (AgentRow & { owner: string | null; mine: number })[]).map((row) => {
+    return (agents.results as (AgentRow & { owner: string; mine: number })[]).map((row) => {
       const mine = Number(row.mine) !== 0;
       return {
         ...toAgent(row),
-        memberId: row.owner ?? null,
+        memberId: row.owner,
         mine,
         machines: tokens.results
           .filter((t) => t.agent_id === row.id)
@@ -270,7 +261,7 @@ export async function listAgents(
 
 /** Whose agent this is, to the caller: "mine", "theirs", or "none" when
  *  there is no such agent. */
-export async function agentOwner(env: Env, caller: string | null, id: string): Promise<"mine" | "theirs" | "none" | null> {
+export async function agentOwner(env: Env, caller: string, id: string): Promise<"mine" | "theirs" | "none" | null> {
   return withDb(env, async (db) => {
     const row = await db.prepare(`SELECT ${MINE_SQL} AS mine FROM agents a WHERE a.id = ?2`).bind(caller, id).first<{ mine: number }>();
     if (!row) return "none" as const;
