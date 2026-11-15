@@ -32,7 +32,7 @@ struct SearchView: View {
                                 .foregroundStyle(Theme.text3)
                         }
                         ForEach(Array(result.matches.prefix(3).enumerated()), id: \.offset) { _, match in
-                            Text(match.text)
+                            Text(result.shown(match))
                                 .font(.footnote)
                                 .foregroundStyle(Theme.text2)
                                 .lineLimit(2)

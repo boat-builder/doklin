@@ -223,8 +223,11 @@ private struct ListView: View {
                 actions.toggleTask?(item.line)
             } label: {
                 Image(systemName: done ? "checkmark.square.fill" : "square")
-                    .font(.body)
+                    .font(.title3)
                     .foregroundStyle(done ? Theme.accent : Theme.text3)
+                    // A box is small; what a thumb has to hit is not.
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(actions.toggleTask == nil)

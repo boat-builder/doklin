@@ -203,6 +203,15 @@ public struct SearchResult: Codable, Hashable, Identifiable, Sendable {
     public let inComments: Bool?
 
     public var id: String { "\(path)#\(version.rawValue)" }
+
+    /// A matching line as a reader would see it. The worker answers with the
+    /// line of the source, so a markdown one is read the way the note is:
+    /// its marks dropped, its links as their words.
+    public func shown(_ match: SearchMatch) -> String {
+        guard version == .md else { return match.text }
+        let words = MarkdownDocument.parse(match.text).blocks.map(\.plainText).joined(separator: " ")
+        return words.trimmingCharacters(in: .whitespaces).isEmpty ? match.text : words
+    }
 }
 
 /// `GET search`.

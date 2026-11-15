@@ -107,6 +107,8 @@ struct SourceEditor: UIViewRepresentable {
         view.smartInsertDeleteType = .no
         view.autocapitalizationType = .sentences
         view.text = text
+        // Typing that starts before any tap goes on at the end of the note, not in front of its title.
+        view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
         controller.view = view
         let binding = $text
         controller.changed = { binding.wrappedValue = $0 }

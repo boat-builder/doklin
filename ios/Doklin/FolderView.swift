@@ -266,6 +266,7 @@ private struct EntryRow: View {
                 .font(.title3)
                 .foregroundStyle(tint)
                 .frame(width: 28)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.name)
                     .foregroundStyle(Theme.text1)

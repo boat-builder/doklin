@@ -134,6 +134,15 @@ final class PureTests: XCTestCase {
         XCTAssertEqual(DoklinClient.decode("Projects%2F%C3%9Cber%20plan"), "Projects/Über plan")
     }
 
+    func testASearchMatchIsShownAsTheNoteReads() throws {
+        let json = ##"{"path":"Projects/plan","version":"md","matches":[{"line":3,"text":"Ship it by **June**. See the [status](./status.md)."},{"line":1,"text":"# The plan"},{"line":9,"text":"- [ ] call `Aisha`"},{"line":4,"text":"---"}]}"##
+        let result = try JSONDecoder().decode(SearchResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.matches.map(result.shown), ["Ship it by June. See the status.", "The plan", "- [ ] call Aisha", "---"])
+        // A page's line is already words.
+        let page = try JSONDecoder().decode(SearchResult.self, from: Data(#"{"path":"a","version":"html","matches":[{"text":"2 * 3 * 4 [x]"}]}"#.utf8))
+        XCTAssertEqual(page.shown(page.matches[0]), "2 * 3 * 4 [x]")
+    }
+
     func testARefusalReadsAsASentence() {
         XCTAssertEqual(DoklinClient.sentence("there is no folder \"x\""), "There is no folder \"x\".")
         XCTAssertEqual(DoklinClient.sentence("Already one."), "Already one.")

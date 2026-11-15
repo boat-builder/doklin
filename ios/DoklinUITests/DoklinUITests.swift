@@ -57,6 +57,11 @@ final class DoklinUITests: XCTestCase {
         return element
     }
 
+    /// Put the caret where a person adding to a note puts it: after the last line.
+    private func tapBelowTheText(of editor: XCUIElement) {
+        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+    }
+
     private func back() {
         app.navigationBars.buttons.element(boundBy: 0).tap()
     }
@@ -96,11 +101,14 @@ final class DoklinUITests: XCTestCase {
         expect(app.staticTexts["Scratch"], "Scratch's heading")
         app.buttons["Edit"].tap()
         let editor = expect(app.textViews.firstMatch, "the editor")
-        editor.tap()
+        tapBelowTheText(of: editor)
         editor.typeText("\n\nTyped in the simulator.")
         record("the editor")
         app.buttons["Save"].tap()
-        expect(text(containing: "Typed in the simulator."), "the saved text in the note")
+        // A paragraph of its own under what was there, and the title still the title.
+        expect(app.staticTexts["Typed in the simulator."], "the saved text, as its own paragraph")
+        expect(app.staticTexts["Scratch"], "Scratch's heading after the edit")
+        expect(app.staticTexts["Not public."], "what the note said before")
         record("a note, edited")
         back()
 
@@ -113,11 +121,13 @@ final class DoklinUITests: XCTestCase {
         expect(app.staticTexts["Phone list"], "the new note's heading")
         app.buttons["Edit"].tap()
         let fresh = expect(app.textViews.firstMatch, "the editor for the new note")
-        fresh.tap()
+        tapBelowTheText(of: fresh)
         fresh.typeText("- [ ] milk")
         app.buttons["Save"].tap()
         expect(app.buttons["Not done"], "the unticked box").tap()
         expect(app.buttons["Done"], "the ticked box")
+        expect(app.staticTexts["milk"], "the task's words")
+        expect(app.staticTexts["Phone list"], "the new note's heading after the edit")
         record("a box, ticked")
         back()
         expect(marked("entry-Phone list"), "the new note in the list")
@@ -128,13 +138,15 @@ final class DoklinUITests: XCTestCase {
         search.tap()
         search.typeText("ship it by june")
         expect(app.staticTexts["plan"], "the plan among the results")
+        // The matching line reads as the note does, not as its source.
+        expect(app.staticTexts["Ship it by June. See the status and the ideas."], "the matching line, read")
         record("search")
 
         // Quit and come back: still logged in, and the edit is still there.
         app.terminate()
         app.launch()
         expect(marked("entry-Scratch"), "the workspace after a relaunch").tap()
-        expect(text(containing: "Typed in the simulator."), "the edit after a relaunch")
+        expect(app.staticTexts["Typed in the simulator."], "the edit after a relaunch")
         back()
 
         // Logging out goes back to the first screen.
