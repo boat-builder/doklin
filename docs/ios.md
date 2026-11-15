@@ -14,6 +14,10 @@
 - **What a folder holds is the Mac sidebar's rule**: a document is a stem (markdown, html, or both), `<stem>.meta.jsonl` goes wherever its document goes and is never a row, hidden names are `isHiddenOrIgnored` (⇄ `is_hidden_or_ignored` in `engine/src/lib.rs` ⇄ the worker's `IGNORED_NAMES`, **change all three**).
 - **Leases are honoured**: a note another device holds opens view-only, with *Take over*; the editor says what it is editing (`cloud_set_activity`), never the reader.
 - **What a person may do is the worker's role table** (`CloudStatus.can`, `Workspace.may`); empty means not known yet, and the engine refuses in words.
+- **Comments are written as the Mac writes them**: bare markers in the markdown, bodies in `<stem>.meta.jsonl`, byte for byte — sync merges that file line by line with a Mac's. `Comments/` ports `src/criticMarkup.ts`, `src/metaFile.ts` and the worker's placement and html-anchor rules, held to `verify-harness/comments-fixture.json` with the TS (**change both**). Entries are stamped to the second; an emptied meta file is emptied, never deleted. The author is the engine's `device_name`.
+- **Rules the Mac's frontend states are ported, not re-invented**, and both sides say so: `timeAgo`/`timeUntil` (`Clock`), `widerAudience` (`Sections.wider`), `mayInviteAgain`, `buildAgentLoginPrompt` (`AgentPrompt`). An address (slug) is checked as the Mac checks it; the engine has the last word.
+- **History has no Trash either**: a moment's restore removes what the Mac would move to the Trash, so the moment kept before it is pinned (never thinned) and what went stays under Recently deleted. Recently deleted, the timeline and a note's versions read this iPhone's own stores, since it joined.
+- **The engine's sentences say what this device is** (`Setup::device_kind`, `UIDevice.current.model`: iPhone, iPad).
 - **Colours are generated, never typed**: `node scripts/ios-colors.mjs` writes every colour set in `Assets.xcassets` from `src/styles/tokens.css`, for the names `Theme.swift` asks for. `--check` runs in CI.
 - **`DoklinKit` imports nothing Apple-only** outside `#if canImport(…)`, so its tests run on Linux. Views go in `ios/Doklin/`; logic a view needs goes in the kit.
 - User-facing errors are sentences, here too: the engine's refusals already are, and are shown as they stand.
@@ -24,9 +28,9 @@
 | --- | --- |
 | `engine/ffi/` | The engine behind three C functions (`include/doklin_engine.h`, **change both** with `src/lib.rs`): start (setup JSON, events, the Keychain callbacks), call a command by name, free |
 | `scripts/ios-engine.sh` | Builds `ios/Engine/<platform>/libdoklin_engine_ffi.a` (ignored): `host` for `swift test`, `iphonesimulator`, `iphoneos`. Xcode runs it as the app target's first build phase |
-| `ios/DoklinKit/` | Swift package: `Engine/` (`Engine.swift`, `Payloads.swift`), `Models/` (`Workspaces`: the engine's model, join, leave, settle; `Workspace`; `WorkspaceFiles`; the screens' models), `Markdown/` (the reader's parser, task ticking, links) |
+| `ios/DoklinKit/` | Swift package: `Engine/` (`Engine.swift`, `Payloads.swift`), `Models/` (`Workspaces`: the engine's model, join, leave, settle; `Workspace`; `WorkspaceFiles`; the screens' models: folder, document, search, people, agents, sections, comments, publishing, history), `Comments/` (the comment format's port), `Markdown/` (the reader's parser, task ticking, links) |
 | `ios/Doklin/` | SwiftUI views. UIKit only in `SourceEditor.swift` and `PlatformViews.swift` |
-| `ios/DoklinUITests/` | One class per journey through the real screens, each joining with a line of its own (`UITestCase.swift`); run by `drive-ios.mjs --app`, skipped without it |
+| `ios/DoklinUITests/` | One class per journey through the real screens (`*UITests.swift`), each joining with a line of its own; run by `drive-ios.mjs --app`, skipped without it. `UITestCase.swift` asks the drive, at the address in `DOKLIN_TEST_DRIVE`, for what only the domain's side can do: `/line` (a device line, minted as the class starts: a person has one code waiting at a time), `/editing?path=` (another device editing), `/deleted?name=` (a restricted folder deleted elsewhere) |
 | `ios/Doklin.xcodeproj` | The app and its UI tests. Both folders are synchronized: a file added there is in the build, with no project edit |
 | `ios/Info.plist` | Only what build settings cannot say (plain http to a worker on this machine). The rest is `INFOPLIST_KEY_*` |
 
@@ -35,7 +39,8 @@
 - iOS moves the app's folder on an update: `Setup::anchor` is the container, and everything the engine writes down is relative to it (`engine/src/paths.rs`). The selected workspace is remembered by `wsId`, never by path.
 - `cloud_join` answers the folder before the engine has sent that workspace's status: `Workspaces` keeps a just-joined root selected until it does.
 - The app gets about thirty seconds when it leaves the screen: `settle` flushes versions and syncs every workspace inside a background task. Nothing syncs while iOS has it suspended.
-- `UIDevice.current.name` is the generic model name ("iPhone") without Apple's user-assigned-name entitlement: that is what Devices lists.
+- `UIDevice.current.name` is the generic model name ("iPhone") without Apple's user-assigned-name entitlement: that is what Devices, presence and comment authors show.
+- The sync line, the notices and the toast sit in one bottom inset of the `NavigationStack`; a pushed screen's own bottom bar would sit under it, so screens put their actions at the top.
 - `Info.plist` must stay outside `ios/Doklin/`: inside the synchronized folder it is copied as a resource too, and the build fails on two commands producing one file.
 - `"\r\n"` is one `Character` in Swift. Lines are split by `MarkdownLines.split`, and a ticked box changes one character in place, so a note's line endings survive.
 - A block's `line` is a line of the file, frontmatter included: `togglingTask` takes that number as it is.

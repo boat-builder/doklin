@@ -91,6 +91,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - A public entry follows its document: its md file, else its html.
 - Comments: reads keep markers (`clean=1` strips) so read-then-write keeps them. **A content write never moves a thread** (`markersKept`, `anchorsKept`): md must carry exactly the old markers, compared as written (moving one with its words is fine); html must leave every thread that resolves resolving. Else `400 comments`, `--force` included — threads change only through the comments routes. New md threads need words occurring once in plain text. html threads anchor as `{path: "", tag, text}`, resolved by the app's `resolveAnchor` (`htmlBridge.ts`). Stamps are to the second; finer would make every Mac rewrite the sidecar.
 - No history, presence, lease or sync in the CLI: undo is the Macs' version store.
+- The iPhone writes comments into its own copy by the same rules (`placeForMarker`, `anchorProblem`, `threadsOf` here; `src/criticMarkup.ts`, `src/metaFile.ts` on the Mac): its port (`ios/DoklinKit/Sources/DoklinKit/Comments/`) and the TS are held to one set of cases, `verify-harness/comments-fixture.json` (`comments.test.mjs` for the TS, `CommentsTests` for Swift). **Change all of them together.**
 
 ## Search (`search.ts`)
 

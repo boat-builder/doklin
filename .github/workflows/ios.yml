@@ -9,9 +9,11 @@ name: ios
 #   - the app for the simulator, unsigned: Xcode builds the engine for the
 #     simulator on the way (scripts/ios-engine.sh, the target's first phase)
 #   - and then the app itself is driven in a simulator, against the worker
-#     this branch carries (verify-harness/drive-ios.mjs --app): one journey
-#     through its real screens. The log of what was on screen at each step,
-#     and the screenshots, are kept with the run
+#     this branch carries (verify-harness/drive-ios.mjs --app): a journey
+#     through its real screens per test class — reading and editing, people,
+#     comments and publishing, history — each checked against what it left
+#     on the domain. The log of what was on screen at each step, and the
+#     screenshots, are kept with the run
 # Nothing here ships anything. The app is archived and signed from Xcode by
 # hand (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
 # release (release.yml).
@@ -36,7 +38,7 @@ jobs:
   app:
     name: iOS app (core tests + simulator build)
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
 
