@@ -4866,7 +4866,9 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-y: auto;
 }
 
-.editor-wrap.is-version-preview > .milkdown,
+/* The live editor is the div @milkdown/react's <Milkdown /> puts down
+   (`data-milkdown-root`); Crepe's `.milkdown` is inside it, not a child. */
+.editor-wrap.is-version-preview > [data-milkdown-root],
 .editor-wrap.is-version-preview > .comments-rail,
 .editor-wrap.is-version-preview > .doc-frontmatter,
 .editor-wrap.is-version-preview > .html-view {
