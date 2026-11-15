@@ -28,14 +28,17 @@
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
 // remove from this iPhone; CommentsUITests: a thread read, started,
-// answered and removed, a note published and stopped, published pages). What was on screen at each step is printed (the
-// lines that begin `UI>`), and the whole xcodebuild log and the screenshots
-// are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
-// printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
-// picks the simulator rather than the newest iPhone.
+// answered and removed, a note published and stopped, published pages),
+// one class after another, each with a device line of its own and then a
+// look at what it left on the domain. What was on screen at each step is
+// printed (the lines that begin `UI>`), and the whole xcodebuild log and the
+// screenshots (screenshots/, manifest.json naming each) are left in
+// $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is printed).
+// DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid> picks the
+// simulator rather than the newest iPhone.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -205,20 +208,36 @@ function pickSimulator() {
   throw new Error("There is no iPhone simulator this Xcode can run — add one under Xcode → Settings → Components.");
 }
 
+/** What each journey left on the domain, asked of the domain itself. */
+const ON_THE_DOMAIN = {
+  DoklinUITests: async () => {
+    if (!(await onTheDomain("Phone list.md"))) {
+      console.error("the note made in the app never reached the domain");
+      return false;
+    }
+    console.log("the note made in the app is on the domain");
+    return true;
+  },
+  CommentsUITests: commentsOnTheDomain,
+};
+
 async function driveApp() {
-  // A line works once: one for each test class, by its file's name
-  // (ios/DoklinUITests/UITestCase.swift reads its own).
-  // The domain keeps one pending code per person, so a line minted later
-  // undoes one minted earlier: with DOKLIN_ONLY, only that class's.
-  const lines = {};
+  // One journey per test class, by its file's name. A device line works
+  // once, and the domain keeps one pending code per person — a code minted
+  // later undoes one minted earlier — so each class's line is minted just
+  // before that class runs (ios/DoklinUITests/UITestCase.swift reads its own).
   const only = process.env.DOKLIN_ONLY;
-  for (const file of readdirSync(join(ROOT, "ios/DoklinUITests")).filter((f) => f.endsWith("UITests.swift") && (!only || f === `${only}.swift`))) {
-    lines[file.replace(/\.swift$/, "")] = await deviceLine();
-  }
+  const classes = readdirSync(join(ROOT, "ios/DoklinUITests"))
+    .filter((f) => f.endsWith("UITests.swift"))
+    .map((f) => f.replace(/\.swift$/, ""))
+    .filter((name) => !only || name === only)
+    .sort();
+  if (classes.length === 0) throw new Error(`There is no test class ${only} in ios/DoklinUITests.`);
   const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
   mkdirSync(out, { recursive: true });
-  const result = join(out, "DoklinUITests.xcresult");
-  rmSync(result, { recursive: true, force: true });
+  const shots = join(out, "screenshots");
+  rmSync(shots, { recursive: true, force: true });
+  mkdirSync(shots);
   const simulator = process.env.DOKLIN_SIMULATOR
     ? { udid: process.env.DOKLIN_SIMULATOR, name: `the simulator ${process.env.DOKLIN_SIMULATOR}` }
     : pickSimulator();
@@ -227,53 +246,72 @@ async function driveApp() {
   const log = createWriteStream(join(out, "xcodebuild.log"));
   // What a reader of the run wants: the screens, the tests, and anything that went wrong.
   const worthSaying = /^UI> |^Test (Case|Suite) |^\s*Executed |^\*\* |error:|: error |Testing failed|Testing started/;
-  const status = await new Promise((resolve, reject) => {
-    const child = spawn(
-      "xcodebuild",
-      [
-        "test",
-        "-project", join(ROOT, "ios/Doklin.xcodeproj"),
-        "-scheme", "Doklin",
-        "-destination", `id=${simulator.udid}`,
-        "-resultBundlePath", result,
-        ...(process.env.DOKLIN_ONLY ? [`-only-testing:DoklinUITests/${process.env.DOKLIN_ONLY}`] : []),
-        ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
-      ],
-      {
-        // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
-        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DEVICE_LINES: JSON.stringify(lines) },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let rest = "";
-    const hear = (chunk) => {
-      log.write(chunk);
-      const lines = (rest + chunk).split("\n");
-      rest = lines.pop();
-      for (const line of lines) if (worthSaying.test(line)) console.log(line);
-    };
-    child.stdout.on("data", hear);
-    child.stderr.on("data", hear);
-    child.on("error", reject);
-    child.on("exit", (code) => resolve(code ?? 1));
-  });
-  await new Promise((resolve) => log.end(resolve));
+  const xcodebuild = (args, env = {}) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(
+        "xcodebuild",
+        [
+          ...args,
+          "-project", join(ROOT, "ios/Doklin.xcodeproj"),
+          "-scheme", "Doklin",
+          "-destination", `id=${simulator.udid}`,
+          ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
+        ],
+        { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let rest = "";
+      const hear = (chunk) => {
+        log.write(chunk);
+        const lines = (rest + chunk).split("\n");
+        rest = lines.pop();
+        for (const line of lines) if (worthSaying.test(line)) console.log(line);
+      };
+      child.stdout.on("data", hear);
+      child.stderr.on("data", hear);
+      child.on("error", reject);
+      child.on("exit", (code) => resolve(code ?? 1));
+    });
 
-  // The screenshots out of the result bundle, as files anybody can open. Best effort.
-  try {
-    execFileSync("xcrun", ["xcresulttool", "export", "attachments", "--path", result, "--output-path", join(out, "screenshots")], { stdio: "ignore" });
-  } catch {
-    console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
+  // The screenshots out of a result bundle, as files anybody can open, all
+  // in one folder under one manifest. Best effort.
+  const manifest = [];
+  const keepScreenshots = (result) => {
+    const from = mkdtempSync(join(out, "attachments-"));
+    try {
+      execFileSync("xcrun", ["xcresulttool", "export", "attachments", "--path", result, "--output-path", from], { stdio: "ignore" });
+      for (const file of readdirSync(from)) if (file !== "manifest.json") renameSync(join(from, file), join(shots, file));
+      manifest.push(...JSON.parse(readFileSync(join(from, "manifest.json"), "utf8")));
+      writeFileSync(join(shots, "manifest.json"), JSON.stringify(manifest, null, 2));
+    } catch {
+      console.log(`the screenshots stay inside ${result} — this Xcode's xcresulttool does not export them`);
+    } finally {
+      rmSync(from, { recursive: true, force: true });
+    }
+  };
+
+  const built = await xcodebuild(["build-for-testing"]);
+  if (built !== 0) {
+    await new Promise((resolve) => log.end(resolve));
+    return built;
   }
-  if (status !== 0) return status;
-  if ((!only || only === "CommentsUITests") && !(await commentsOnTheDomain())) return 1;
-  if (only && only !== "DoklinUITests") return status;
-  // What the app said it wrote, asked of the domain itself.
-  if (!(await onTheDomain("Phone list.md"))) {
-    console.error("the note made in the app never reached the domain");
+  const failed = [];
+  for (const name of classes) {
+    const result = join(out, `${name}.xcresult`);
+    rmSync(result, { recursive: true, force: true });
+    const status = await xcodebuild(
+      ["test-without-building", `-only-testing:DoklinUITests/${name}`, "-resultBundlePath", result],
+      // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
+      { TEST_RUNNER_DOKLIN_TEST_DEVICE_LINES: JSON.stringify({ [name]: await deviceLine() }) },
+    );
+    keepScreenshots(result);
+    const check = ON_THE_DOMAIN[name];
+    if (status !== 0 || (check && !(await check()))) failed.push(name);
+  }
+  await new Promise((resolve) => log.end(resolve));
+  if (failed.length > 0) {
+    console.error(`these journeys failed: ${failed.join(", ")}`);
     return 1;
   }
-  console.log("the note made in the app is on the domain");
   return 0;
 }
 
