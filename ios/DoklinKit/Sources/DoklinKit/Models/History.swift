@@ -230,11 +230,17 @@ public final class WorkspaceTimeline {
     }
 
     public func load() async {
+        let asked = store
         if moments.isEmpty { phase = .loading }
         do {
-            moments = try await Engine.shared.call("versions_snapshots", ["root": .string(store)])
+            let read: [SnapshotMeta] = try await Engine.shared.call("versions_snapshots", ["root": .string(asked)])
+            // Another folder was picked while this one was read: its own
+            // load answers for it.
+            guard asked == store else { return }
+            moments = read
             phase = .loaded
         } catch {
+            guard asked == store else { return }
             moments = []
             phase = .failed(words(error))
         }
@@ -307,27 +313,42 @@ public final class MomentPlan {
     }
 
     /// Restore every file, or the ticked ones. Answers what it did and the
-    /// paths it took, which an undo takes again. "Every file" names none:
-    /// the moment is the intent, and the folder may have moved on since.
-    public func restore(all: Bool) async throws -> (report: RestoreReport, paths: [String]?) {
-        let paths = all ? nil : scope(all: false).map(\.path)
+    /// paths it was asked about. "Every file" names none to the engine: the
+    /// moment is the intent, and the folder may have moved on since.
+    public func restore(all: Bool) async throws -> (report: RestoreReport, paths: [String]) {
+        let paths = scope(all: all).map(\.path)
         let report: RestoreReport = try await Engine.shared.call("versions_restore_snapshot", [
             "root": .string(store),
             "ts": .int(moment.ts),
-            "paths": paths.map(JSONValue.strings) ?? .null,
+            "paths": all ? .null : .strings(paths),
         ])
+        await Self.keep(report, store: store)
         await load()
         return (report, paths)
     }
 
-    /// Take a restore back: restore the moment it kept first, with the same paths.
-    public static func undo(_ report: RestoreReport, paths: [String]?, store: String) async throws {
-        guard let before = report.preRestoreTs else { return }
-        try await Engine.shared.run("versions_restore_snapshot", [
+    /// Take a restore back: restore the moment it kept first, for the paths
+    /// it was asked about and no others — an undo tapped later must not
+    /// remove what reached the folder since, another person's note say.
+    public static func undo(_ report: RestoreReport, paths: [String], store: String) async throws {
+        guard let before = report.preRestoreTs, !paths.isEmpty else { return }
+        let undone: RestoreReport = try await Engine.shared.call("versions_restore_snapshot", [
             "root": .string(store),
             "ts": .int(before),
-            "paths": paths.map(JSONValue.strings) ?? .null,
+            "paths": .strings(paths),
         ])
+        await keep(undone, store: store)
+    }
+
+    /// A restore that removed files keeps the moment before it for good. A
+    /// Mac's restore moves them to the Trash; this iPhone's removes them,
+    /// and that moment is then their only copy — which the thinning would
+    /// drop for the restore's own once the hour is out.
+    private static func keep(_ report: RestoreReport, store: String) async {
+        guard report.trashed > 0, let before = report.preRestoreTs else { return }
+        // The restore has landed either way: a moment that could not be
+        // pinned is still kept as long as the thinning keeps it.
+        try? await Engine.shared.run("versions_set_pinned", ["root": .string(store), "ts": .int(before), "pinned": true])
     }
 }
 

@@ -201,9 +201,10 @@ public enum HistoryWords {
     }
 
     /// Why something failed, as a sentence: the engine says what went wrong
-    /// in words of its own, which start small and stop short.
+    /// in words of its own, which start small and stop short — and name the
+    /// Mac it was first written for, where this is this iPhone.
     public static func sentence(_ words: String) -> String {
-        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "this Mac", with: "this iPhone")
         guard let first = trimmed.first else { return "" }
         let capital = first.uppercased() + trimmed.dropFirst()
         return ".?!".contains(capital.last ?? ".") ? capital : capital + "."

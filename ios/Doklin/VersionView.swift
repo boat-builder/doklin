@@ -13,7 +13,9 @@ struct VersionView: View {
     @State private var restoring = false
     @State private var copying = false
     @State private var failure: String?
+    @State private var scrollTarget: Int?
     @Environment(Toaster.self) private var toaster
+    @Environment(\.openURL) private var openInSystem
 
     init(workspace: Workspace, opened: OpenVersion, route: Binding<[Route]>) {
         _route = route
@@ -110,13 +112,25 @@ struct VersionView: View {
 
     @ViewBuilder private var version: some View {
         if let document = reader.document {
-            ScrollView {
-                MarkdownView(document: document, file: opened.path, workspace: workspace)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .frame(maxWidth: 700)
-                    .frame(maxWidth: .infinity)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    MarkdownView(document: document, file: opened.path, workspace: workspace)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 16)
+                        .frame(maxWidth: 700)
+                        .frame(maxWidth: .infinity)
+                }
+                .onChange(of: scrollTarget) { _, target in
+                    guard let target else { return }
+                    withAnimation { proxy.scrollTo(target, anchor: .top) }
+                    scrollTarget = nil
+                }
             }
+            .environment(\.openURL, OpenURLAction { url in
+                guard let tap = NoteLink.tap(url) else { return .systemAction }
+                if case .href(let href) = tap { follow(href) }
+                return .handled
+            })
         } else if reader.kind == .html {
             HTMLView(html: reader.text ?? "")
         } else {
@@ -138,6 +152,31 @@ struct VersionView: View {
             DiffView(lines: lines, changed: reader.changed, against: opened.newer)
         } else {
             ProgressView("Comparing…")
+        }
+    }
+
+    /// Follow a link written in the version as the note follows one:
+    /// another document opens as it is now, a heading of this version
+    /// scrolls into view, the web opens in the system. A tap on words under
+    /// a comment does nothing here — the threads are the note's, not the
+    /// version's.
+    private func follow(_ href: String) {
+        switch DocLinks.target(of: href, from: opened.path) {
+        case .document(let path):
+            if workspace.files.exists(path) {
+                route.append(.document(path))
+            } else {
+                failure = "\(DocLinks.name(of: path)) is not in this workspace."
+            }
+        case .heading(let fragment):
+            let wanted = DocLinks.slug(fragment)
+            if let heading = reader.document?.headings.first(where: { DocLinks.slug($0.title) == wanted }) {
+                scrollTarget = heading.id
+            }
+        case .external(let address):
+            if let url = URL(string: address) { openInSystem(url) }
+        case .nowhere:
+            failure = "That link leads outside this workspace."
         }
     }
 

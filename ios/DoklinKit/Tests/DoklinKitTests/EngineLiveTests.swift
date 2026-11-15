@@ -162,6 +162,26 @@ final class EngineLiveTests: XCTestCase {
         await restoring.load()
         XCTAssertTrue(restoring.rows.contains(PlanRow(path: made, kind: .isRemoved)), "\(restoring.rows)")
 
+        // Restoring that row alone removes the note outright — this device
+        // has no Trash — and keeps the moment before it for good, so the note
+        // stays under Recently deleted; the undo brings it back as it was.
+        for row in restoring.rows where row.path != made { restoring.toggle(row.path) }
+        XCTAssertEqual(restoring.scope(all: false), [PlanRow(path: made, kind: .isRemoved)])
+        XCTAssertEqual(restoring.question(all: false), "Remove 1?")
+        let (report, paths) = try await restoring.restore(all: false)
+        XCTAssertEqual(report.trashed, 1)
+        XCTAssertEqual(report.written, 0)
+        XCTAssertEqual(paths, [made])
+        XCTAssertFalse(workspace.files.exists(made))
+        let preRestore = try XCTUnwrap(report.preRestoreTs)
+        await timeline.load()
+        XCTAssertTrue(timeline.moments.contains { $0.ts == preRestore && $0.pinned }, "\(timeline.moments)")
+        let removed = RecentlyDeleted(workspace: workspace)
+        await removed.load(stores: device.stores(of: workspace))
+        XCTAssertTrue(removed.documents.contains { $0.primary.path == made }, "\(removed.documents)")
+        try await MomentPlan.undo(report, paths: paths, store: root)
+        XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
+
         // A note removed here is under Recently deleted, and comes back where it was.
         let ideas = try XCTUnwrap(try workspace.files.list("").first { $0.path == "Ideas.md" })
         try await folder.remove(ideas)

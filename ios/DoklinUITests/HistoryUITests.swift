@@ -1,7 +1,7 @@
 // The history screens, driven in a simulator against the harness worker
 // (`node verify-harness/drive-ios.mjs --app`): a note's versions — read one,
-// compare it, restore it, undo — the workspace's moments, and a note removed
-// and brought back from Recently deleted.
+// compare it, restore it, undo — the workspace's moments — restore one, undo
+// — and a note removed and brought back from Recently deleted.
 
 import XCTest
 
@@ -107,7 +107,20 @@ final class HistoryUITests: UITestCase {
         expect(text(containing: "Write 1 file"), "the restore's question, in counts")
         record("restoring a moment, asked")
         answer("Cancel")
+
+        // Restored, Scratch is as it was when this iPhone joined; the
+        // toast's Undo puts the line back.
+        marked("restore-all").tap()
+        expect(text(containing: "Write 1 file"), "the restore's question, asked again")
+        answer("Restore")
+        expect(text(containing: "Restored — 1 file written."), "the moment restore's toast")
+        record("a moment restored")
+        app.buttons["Undo"].tap()
+        expectGone(text(containing: "Restored — 1 file written."), "the moment restore's toast, after Undo")
         back()
+        back()
+        expect(marked("entry-Scratch"), "the Scratch note, after the moment's undo").tap()
+        expect(app.staticTexts["A line for history."], "the line, back after the moment's Undo")
         back()
 
         // A note removed here is under Recently deleted, as one row with its

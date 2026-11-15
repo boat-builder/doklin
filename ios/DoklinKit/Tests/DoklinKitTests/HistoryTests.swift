@@ -108,6 +108,15 @@ final class HistoryTests: XCTestCase {
         )
     }
 
+    func testAnEngineRefusalSaysThisIPhoneWhereTheMacSaysThisMac() {
+        XCTAssertEqual(HistoryWords.sentence("that file isn't on this Mac any more"), "That file isn't on this iPhone any more.")
+        XCTAssertEqual(
+            HistoryWords.failed("Couldn't compare", DoklinError("versions are turned off on this Mac — turn them back on to restore")),
+            "Couldn't compare: versions are turned off on this iPhone — turn them back on to restore."
+        )
+        XCTAssertEqual(HistoryWords.sentence("this Mac can't reach the cloud"), "This iPhone can't reach the cloud.")
+    }
+
     func testAComparisonReadsLineByLine() {
         // What versions_diff answers: diffy's unified patch, whose empty
         // context lines carry no space.
