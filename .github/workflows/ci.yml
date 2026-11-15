@@ -14,6 +14,11 @@ name: ci
 #     exit code. Nothing else builds it before a release ships it to machines
 #     that cannot be asked how it went, and its drive is the one automated
 #     check that the command and the worker still agree
+#   - the iOS app's core (ios/DoklinKit), tested and then driven against the
+#     worker this branch carries (verify-harness/drive-ios.mjs), for the
+#     reason the command is: it is another client of the document API, and
+#     nothing else checks that it and the worker still agree. The app itself
+#     needs Xcode, and is built by ios.yml when ios/ changes
 # The app's Rust is deliberately not built here — it would dominate the
 # runtime and the release build covers it. The command line is a small crate
 # of its own and takes a minute.
@@ -89,3 +94,29 @@ jobs:
 
       - name: Drive it against the worker
         run: node verify-harness/drive-cli.mjs
+
+  ios:
+    name: iOS core (test + drive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # The drive serves the cloud worker from source, through vite.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Colour sets match tokens.css
+        run: node scripts/ios-colors.mjs --check
+
+      # The runner image carries a Swift toolchain; the core imports nothing Apple-only.
+      - name: Test the core and drive it against the worker
+        run: node verify-harness/drive-ios.mjs

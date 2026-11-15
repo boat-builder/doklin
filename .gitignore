@@ -50,3 +50,11 @@ cloud-worker/wrangler.toml
 
 # wrangler's local state
 .wrangler
+
+# iOS: build output and per-user Xcode state
+ios/DoklinKit/.build
+ios/DoklinKit/.swiftpm
+ios/build
+DerivedData
+xcuserdata
+*.xcuserstate

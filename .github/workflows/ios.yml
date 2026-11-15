@@ -1,0 +1,49 @@
+name: ios
+
+# The iOS app (ios/) is the one part of the repository nothing else compiles:
+# the release builds the Mac app, ci.yml the web and Rust sides, and the app's
+# views need Xcode. So a push that touches it is built here:
+#   - the core (ios/DoklinKit) on the Mac's own toolchain — the Keychain code
+#     in it exists only on Apple platforms, so ci.yml's Linux run never sees it
+#   - the app for the simulator, unsigned
+# Nothing here ships anything. The app is archived and signed from Xcode by
+# hand (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
+# release (release.yml).
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: iOS app (core tests + simulator build)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
+
+      # Without a worker to talk to, the live tests skip themselves:
+      # verify-harness/drive-ios.mjs runs those, in ci.yml.
+      - name: Test the core
+        run: swift test --package-path ios/DoklinKit
+
+      - name: Build the app for the simulator
+        run: |
+          xcodebuild \
+            -project ios/Doklin.xcodeproj \
+            -scheme Doklin \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
