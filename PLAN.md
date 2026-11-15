@@ -49,7 +49,8 @@ Throwaway working file. Not for `main`: it lives only on the iOS branch, and is 
 - Folder list, reader, editor and search read local files. Every write: write the file, then `touched` with its path.
 - Sync while open; on leaving, `versions_flush` and `cloud_sync_now` inside a `beginBackgroundTask` (about 30 s). Status line from `cloud-status`; Sync now; re-read open files on `cloud-applied`; show `cloud-conflict`.
 - Remove from this iPhone: `cloud_leave`. Signed out from elsewhere: `cloud-removed` → say so, back to sign-in.
-- Delete: the agent client (`Client.swift`, `API.swift`, `Models/Wire.swift`), login, the save-conflict dialog, drafts, the offline cache, `KeychainSecretStore` (the token now lives in the engine's `cloud.json`, inside the app's sandbox: decide whether that is acceptable or whether `cloud.json` should go to a file-protection class), `ClientTests`, `LiveTests`, the agent part of `drive-ios.mjs`. Keep the markdown parser (`Markdown/`) and its tests.
+- **The phone's sign-in lives in the Keychain, not in `cloud.json`** (decided). The engine asks the app for it through `Host` (a get/set/delete secret hook, keyed by workspace id); the Mac's `Host` keeps today's behaviour (the token in `cloud.json`), the phone's leaves `token` empty there and calls back into Swift over the C interface. Keychain item: `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, so sync can read it while the phone is locked, and so it is never in a backup: a phone restored from a backup has no sign-in and joins again as a new device, which is what "a sign-in belongs to one device" asks. `read_cloud_file` already drops an entry with no token; on the phone that check asks the Keychain. Testable on Linux with an in-memory store; the Keychain itself only on a Mac.
+- Delete: the agent client (`Client.swift`, `API.swift`, `Models/Wire.swift`), login, the save-conflict dialog, drafts, the offline cache, `ClientTests`, `LiveTests`, the agent part of `drive-ios.mjs`. Keep the markdown parser (`Markdown/`) and its tests, and `KeychainSecretStore` (reused for the sign-in).
 - `DoklinUITests`: join with a device line from `drive-ios.mjs`, browse, read, edit, tick a box, search, relaunch (still joined), Remove from this iPhone.
 
 ### Step 4: people, devices, agents, sections
@@ -89,10 +90,10 @@ Diagrams, QR scanning for codes, iOS background transfers for a large first down
 3. **The core against the worker:** `pnpm install`, then `node verify-harness/drive-ios.mjs` (builds the engine for the Mac, runs `swift test` linked to it, checks the note reached the domain).
 4. **The app in a simulator:** `node verify-harness/drive-ios.mjs --app`, or open `ios/Doklin.xcodeproj` and run (Xcode builds the engine first; the first build takes a few minutes).
 
-## Open, with what I will do unless told otherwise
+## Settled
 
-1. **Engine crate in its own PR.** Recommended: open a PR with commit `354b62d` (the engine move, Mac app only) now, so that Mac release is tried before the phone depends on it. Otherwise it stays the first commits of PR 2.
-2. **Where the phone keeps its token.** Today the engine writes it into `cloud.json` in the app's sandbox (as the Mac does in app data). The old agent app kept it in the Keychain. Either is defensible; the Keychain needs a `Host` hook for secrets.
+- **One PR** for everything in PR 2, the engine move included. So the Mac app after the move is checked by hand on a Mac before merging ("On your Mac", 1), since merging cuts a Mac release.
+- **The phone's sign-in is in the Keychain** (step 3).
 
 ## Migration — yours, once
 
