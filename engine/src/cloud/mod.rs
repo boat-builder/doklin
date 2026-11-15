@@ -101,7 +101,7 @@ pub(crate) const fn parse_u32(s: &str) -> u32 {
 /// else the device's display name. The versions store's `by` comes from here
 /// too — a snapshot is attributed the same way a revision is.
 pub fn device_name(core: &Core) -> String {
-    read_cloud_file(&core.data_dir)
+    read_cloud_file(&core.data_dir, core.secrets())
         .device
         .map(|d| d.name)
         .filter(|n| !n.is_empty())
@@ -152,12 +152,13 @@ pub(crate) struct ManagerInner {
 }
 
 /// The folders of the workspaces this device is connected to, as the
-/// cloud.json in `data_dir` spells them: what an open from outside the app is
-/// placed against. Read from disk, not from a running engine: a Mac asks
-/// before its engine exists — a file opened from Finder on a cold launch
-/// arrives ahead of the app's setup.
-pub fn connected_roots(data_dir: &Path) -> Vec<String> {
-    read_cloud_file(data_dir).workspaces.into_iter().map(|w| w.root).collect()
+/// cloud.json in `data_dir` spells them (and `secrets` keeps their sign-ins,
+/// where the app keeps them): what an open from outside the app is placed
+/// against. Read from disk, not from a running engine: a Mac asks before its
+/// engine exists — a file opened from Finder on a cold launch arrives ahead
+/// of the app's setup.
+pub fn connected_roots(data_dir: &Path, secrets: Option<&dyn crate::Secrets>) -> Vec<String> {
+    read_cloud_file(data_dir, secrets).workspaces.into_iter().map(|w| w.root).collect()
 }
 
 /// Called once as the app boots: load cloud.json, mint a device identity
@@ -166,8 +167,8 @@ pub fn init(core: &Arc<Core>) {
     let data_dir = core.data_dir.clone();
     let _ = std::fs::create_dir_all(&data_dir);
 
-    let mut file = read_cloud_file(&data_dir);
-    let device = ensure_device(&data_dir, &mut file, &core.device_name);
+    let mut file = read_cloud_file(&data_dir, core.secrets());
+    let device = ensure_device(&data_dir, &mut file, &core.device_name, core.secrets());
 
     let mut inner = ManagerInner {
         data_dir,
@@ -296,11 +297,11 @@ fn spaces_changed(core: &Arc<Core>, changed: SpacesChanged) {
 /// answer, whatever answers at that address later.
 fn mark_creator(core: &Core, root: &str) {
     let _ = with_inner(core, |inner| {
-        let mut file = read_cloud_file(&inner.data_dir);
+        let mut file = read_cloud_file(&inner.data_dir, core.secrets());
         if let Some(entry) = file.workspaces.iter_mut().find(|w| w.root == root) {
             entry.creator = true;
         }
-        write_cloud_file(&inner.data_dir, &file)
+        write_cloud_file(&inner.data_dir, &file, core.secrets())
     });
 }
 
@@ -317,7 +318,7 @@ async fn access_removed(core: Arc<Core>, entry: WorkspaceEntry) {
     let core = &core;
     // Forget it first, under the lock: no engine, no watcher, no credential.
     let forgotten = with_inner(core, |inner| {
-        let mut file = read_cloud_file(&inner.data_dir);
+        let mut file = read_cloud_file(&inner.data_dir, core.secrets());
         // Only if this is still the connection that engine was syncing. A
         // folder disconnected and connected again since holds a credential
         // of its own, and that one was not removed. And never the creator's:
@@ -328,7 +329,7 @@ async fn access_removed(core: Arc<Core>, entry: WorkspaceEntry) {
         }
         stop_engine(core, inner, &entry.root);
         file.remove_root(&entry.root);
-        write_cloud_file(&inner.data_dir, &file)?;
+        write_cloud_file(&inner.data_dir, &file, core.secrets())?;
         emit_statuses(core.events().as_ref(), &inner.statuses);
         Ok(true)
     });
@@ -473,21 +474,21 @@ async fn ask<T>(
 }
 
 /// Refuse a root that is (or contains, or lies inside) a connected one.
-fn check_root_free(inner: &ManagerInner, root: &Path) -> Result<(), String> {
+fn check_root_free(core: &Core, inner: &ManagerInner, root: &Path) -> Result<(), String> {
     for h in inner.engines.values() {
         if h.root == root || root.starts_with(&h.root) || h.root.starts_with(root) {
             return Err("this folder (or one containing it) is already connected".into());
         }
     }
-    let file = read_cloud_file(&inner.data_dir);
+    let file = read_cloud_file(&inner.data_dir, core.secrets());
     if file.by_root(&root.to_string_lossy()).is_some() {
         return Err("this folder is already connected".into());
     }
     Ok(())
 }
 
-fn check_domain_free(inner: &ManagerInner, domain: &str, root: &Path) -> Result<(), String> {
-    let file = read_cloud_file(&inner.data_dir);
+fn check_domain_free(core: &Core, inner: &ManagerInner, domain: &str, root: &Path) -> Result<(), String> {
+    let file = read_cloud_file(&inner.data_dir, core.secrets());
     if let Some(w) = file.workspaces.iter().find(|w| w.domain == domain) {
         if Path::new(&w.root) != root {
             return Err(format!("{} is already connected to \"{}\" on this Mac", domain, w.root));
@@ -498,10 +499,10 @@ fn check_domain_free(inner: &ManagerInner, domain: &str, root: &Path) -> Result<
 
 fn record_and_spawn(core: &Arc<Core>, entry: WorkspaceEntry) -> Result<(), String> {
     with_inner(core, |inner| {
-        let mut file = read_cloud_file(&inner.data_dir);
-        ensure_device(&inner.data_dir, &mut file, &core.device_name);
+        let mut file = read_cloud_file(&inner.data_dir, core.secrets());
+        ensure_device(&inner.data_dir, &mut file, &core.device_name, core.secrets());
         file.upsert(entry.clone());
-        write_cloud_file(&inner.data_dir, &file)?;
+        write_cloud_file(&inner.data_dir, &file, core.secrets())?;
         stop_engine(core, inner, &entry.root);
         // A workspace that left this folder earlier in this run is not the
         // one arriving now: a window that asks what was removed must not be
@@ -527,7 +528,7 @@ pub(crate) struct WorkspaceCall {
 
 fn workspace_call(core: &Core, root: &str) -> Result<WorkspaceCall, String> {
     let (endpoint, token, domain, device) = with_inner(core, |inner| {
-        let file = read_cloud_file(&inner.data_dir);
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
         let entry = file.by_root(root).ok_or_else(|| "that workspace isn't connected".to_string())?;
         Ok((entry.endpoint.clone(), entry.token.clone(), entry.domain.clone(), inner.device.clone()))
     })?;
@@ -633,7 +634,7 @@ pub fn cloud_marker(root: String) -> Option<Marker> {
 /// and gets a credential of its own, so no token is ever carried between two.
 pub fn cloud_token(core: &Arc<Core>, root: String) -> Result<Credentials, String> {
     with_inner(core, |inner| {
-        let file = read_cloud_file(&inner.data_dir);
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
         let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
         if !entry.creator {
             return Err("this Mac has a sign-in of its own, which is never shown — to add a device, use Add a device".into());
@@ -1003,8 +1004,8 @@ pub async fn cloud_connect(
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
     let token = token.trim().to_string();
     let (data_dir, device) = with_inner(core, |inner| {
-        check_root_free(inner, &root_path)?;
-        check_domain_free(inner, &domain, &root_path)?;
+        check_root_free(core, inner, &root_path)?;
+        check_domain_free(core, inner, &domain, &root_path)?;
         Ok((inner.data_dir.clone(), inner.device.clone()))
     })?;
     if let Some(marker) = read_marker(&root_path) {
@@ -1063,8 +1064,8 @@ pub async fn cloud_join(core: &Arc<Core>, endpoint: String, token: String) -> Re
     let dest = free_folder(&parent, &workspace.name);
     let root = dest.to_string_lossy().to_string();
     with_inner(core, |inner| {
-        check_root_free(inner, &dest)?;
-        check_domain_free(inner, &domain, &dest)
+        check_root_free(core, inner, &dest)?;
+        check_domain_free(core, inner, &domain, &dest)
     })?;
 
     let sdir = state_dir(&data_dir, &workspace.id);
@@ -1109,8 +1110,8 @@ pub async fn cloud_resume(
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
     let token = token.trim().to_string();
     let (data_dir, device) = with_inner(core, |inner| {
-        check_root_free(inner, &root_path)?;
-        check_domain_free(inner, &domain, &root_path)?;
+        check_root_free(core, inner, &root_path)?;
+        check_domain_free(core, inner, &domain, &root_path)?;
         Ok((inner.data_dir.clone(), inner.device.clone()))
     })?;
     let Some(marker) = read_marker(&root_path) else {
@@ -1150,7 +1151,7 @@ pub async fn cloud_disconnect(core: &Arc<Core>, root: String) -> Result<(), Stri
     // about to stop resolving.
     let held = with_inner(core, |inner| {
         stop_engine(core, inner, &root);
-        let file = read_cloud_file(&inner.data_dir);
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
         Ok(file.by_root(&root).map(|w| (w.endpoint.clone(), w.token.clone(), w.creator, inner.device.id.clone())))
     })?;
     // This Mac's sign-in ends with it: the token is about to be forgotten,
@@ -1172,7 +1173,7 @@ pub async fn cloud_disconnect(core: &Arc<Core>, root: String) -> Result<(), Stri
 /// clear. Whatever had not reached the domain yet goes with it. True when no
 /// folder is left.
 pub async fn cloud_leave(core: &Arc<Core>, root: String) -> Result<bool, String> {
-    let entry = with_inner(core, |inner| Ok(read_cloud_file(&inner.data_dir).by_root(&root).cloned()))?
+    let entry = with_inner(core, |inner| Ok(read_cloud_file(&inner.data_dir, core.secrets()).by_root(&root).cloned()))?
         .ok_or_else(|| "that workspace isn't connected".to_string())?;
     cloud_disconnect(core, root).await?;
     Ok(delete_copy(core, &entry).await)
@@ -1187,10 +1188,10 @@ const END_SESSION_WAIT: Duration = Duration::from_secs(5);
 fn forget_workspace(core: &Arc<Core>, root: &str) -> Result<(), String> {
     with_inner(core, |inner| {
         stop_engine(core, inner, root);
-        let mut file = read_cloud_file(&inner.data_dir);
+        let mut file = read_cloud_file(&inner.data_dir, core.secrets());
         let ws_id = file.by_root(root).map(|w| w.ws_id.clone());
         file.remove_root(root);
-        write_cloud_file(&inner.data_dir, &file)?;
+        write_cloud_file(&inner.data_dir, &file, core.secrets())?;
         if let Some(ws_id) = ws_id {
             let _ = std::fs::remove_dir_all(state_dir(&inner.data_dir, &ws_id));
         }
@@ -1432,7 +1433,7 @@ pub(crate) async fn version_blob(core: &Arc<Core>, path: &str, hash: &str) -> Re
 /// user just emptied. Answers how many objects were purged.
 pub async fn cloud_wipe(core: &Arc<Core>, root: String) -> Result<u64, String> {
     let (entry, device) = with_inner(core, |inner| {
-        let file = read_cloud_file(&inner.data_dir);
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
         let entry = file.by_root(&root).cloned().ok_or_else(|| "that workspace isn't connected".to_string())?;
         stop_engine(core, inner, &root);
         Ok((entry, inner.device.clone()))

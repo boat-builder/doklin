@@ -50,7 +50,7 @@ fn run(app: &AppHandle) -> Result<(), String> {
     if matches!(found, Found::Nothing) {
         installed.push_str(&format!(" Your terminal's PATH leaves out {} — add it to use doklin.", LINK_DIR));
     }
-    let roots = app.path().app_data_dir().map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir)).unwrap_or_default();
+    let roots = app.path().app_data_dir().map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir, None)).unwrap_or_default();
     let logins: Vec<String> = if roots.is_empty() {
         vec!["Connect a workspace and doklin is logged in to it too.".into()]
     } else {

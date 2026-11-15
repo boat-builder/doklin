@@ -20,10 +20,12 @@ mod host;
 pub mod paths;
 pub mod versions;
 
-pub use host::{Core, Host, Setup};
+pub use host::{Core, Host, Secrets, Setup};
 
 /// A name no tree walk, search or sync scan ever looks at: hidden files, and
-/// the folders build tools fill.
+/// the folders build tools fill. Mirrored by the worker (`IGNORED_NAMES`,
+/// cloud-worker/src/documents.ts) and the iPhone app (`isHiddenOrIgnored`,
+/// ios/DoklinKit/Sources/DoklinKit/Models/Files.swift) — change all three.
 pub fn is_hidden_or_ignored(name: &str) -> bool {
     if name.starts_with('.') {
         return true;

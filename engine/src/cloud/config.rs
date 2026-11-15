@@ -4,7 +4,10 @@
 //! connected workspace, the folder, the domain, the endpoint, the workspace
 //! id and the token. One entry per root, one per domain. Parsed by shape: a
 //! malformed file reads as "nothing connected". The token lives here and
-//! nowhere else.
+//! nowhere else — unless the app keeps sign-ins itself (`Host::secrets`, the
+//! iPhone's Keychain): then the token is there, by workspace id, and the
+//! entry here has none. Both functions below are the one way in and out, so
+//! nothing else knows which.
 //!
 //! `<root>/.doklin/cloud.json` — the marker, no secrets: `{domain, wsId}`.
 //! Hidden, so the tree walk, search and the sync scan already ignore it. It
@@ -18,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::manifest::{clean_name, MAX_NAME_LEN};
+use crate::Secrets;
 use super::scan::{random_id, read_json, write_json};
 
 pub const CLOUD_FILE_VERSION: u32 = 1;
@@ -79,12 +83,17 @@ pub fn cloud_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("cloud.json")
 }
 
-pub fn read_cloud_file(data_dir: &Path) -> CloudFile {
+/// cloud.json as the engine works with it: roots resolved, and each token
+/// where `secrets` keeps it when it keeps them.
+pub fn read_cloud_file(data_dir: &Path, secrets: Option<&dyn Secrets>) -> CloudFile {
     let mut file: CloudFile = read_json(&cloud_file_path(data_dir)).unwrap_or_default();
     // A root is written the way `paths` writes one: relative, where the
     // platform can move the app's folder.
     for w in &mut file.workspaces {
         w.root = crate::paths::resolved(&w.root);
+        if let Some(secrets) = secrets {
+            w.token = secrets.secret(&w.ws_id).unwrap_or_default();
+        }
     }
     // Tolerate a hand-edited file: entries missing what an engine needs are
     // nothing to sync.
@@ -99,12 +108,33 @@ pub fn read_cloud_file(data_dir: &Path) -> CloudFile {
     file
 }
 
-pub fn write_cloud_file(data_dir: &Path, file: &CloudFile) -> Result<(), String> {
+/// Write cloud.json. With `secrets`, each token goes to the keeper first and
+/// the file holds none; a workspace the file no longer names has its sign-in
+/// forgotten once the file is down, so nothing outlives its entry.
+pub fn write_cloud_file(data_dir: &Path, file: &CloudFile, secrets: Option<&dyn Secrets>) -> Result<(), String> {
+    let path = cloud_file_path(data_dir);
     let mut written = file.clone();
+    let mut gone = Vec::new();
+    if let Some(secrets) = secrets {
+        for w in &mut written.workspaces {
+            if secrets.secret(&w.ws_id).as_deref() != Some(w.token.as_str()) {
+                secrets.set_secret(&w.ws_id, Some(&w.token))?;
+            }
+            w.token = String::new();
+        }
+        let before: CloudFile = read_json(&path).unwrap_or_default();
+        gone = before.workspaces.into_iter().map(|w| w.ws_id).filter(|id| !file.workspaces.iter().any(|w| &w.ws_id == id)).collect();
+    }
     for w in &mut written.workspaces {
         w.root = crate::paths::stored(&w.root);
     }
-    write_json(&cloud_file_path(data_dir), &written).map_err(|e| format!("write cloud.json: {}", e))
+    write_json(&path, &written).map_err(|e| format!("write cloud.json: {}", e))?;
+    if let Some(secrets) = secrets {
+        for ws_id in gone {
+            secrets.set_secret(&ws_id, None)?;
+        }
+    }
+    Ok(())
 }
 
 /// The engine's state for one workspace: `state.json` + `base/`.
@@ -114,7 +144,12 @@ pub fn state_dir(data_dir: &Path, ws_id: &str) -> PathBuf {
 
 /// The device identity, minted on first use: a random id and the device's
 /// user-facing name (`Setup::device_name`), capped to what the worker keeps.
-pub fn ensure_device(data_dir: &Path, file: &mut CloudFile, display_name: &str) -> DeviceIdentity {
+pub fn ensure_device(
+    data_dir: &Path,
+    file: &mut CloudFile,
+    display_name: &str,
+    secrets: Option<&dyn Secrets>,
+) -> DeviceIdentity {
     if let Some(d) = file.device.clone() {
         if !d.id.is_empty() {
             return d;
@@ -123,7 +158,7 @@ pub fn ensure_device(data_dir: &Path, file: &mut CloudFile, display_name: &str) 
     let d = DeviceIdentity { id: random_id("d"), name: clean_name(display_name, "This device") };
     file.device = Some(d.clone());
     file.version = CLOUD_FILE_VERSION;
-    let _ = write_cloud_file(data_dir, file);
+    let _ = write_cloud_file(data_dir, file, secrets);
     d
 }
 

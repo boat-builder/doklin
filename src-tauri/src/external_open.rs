@@ -76,7 +76,8 @@ pub(crate) fn handle_external_open(app: &AppHandle, opened: Vec<PathBuf>) {
     let roots: Vec<(String, PathBuf)> = app
         .path()
         .app_data_dir()
-        .map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir))
+        // None: this Mac keeps each sign-in in cloud.json itself.
+        .map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir, None))
         .unwrap_or_default()
         .into_iter()
         .map(|root| {

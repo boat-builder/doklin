@@ -163,6 +163,25 @@ public enum DocLinks {
         return String(path[path.index(after: slash)...])
     }
 
+    /// A name without a document's extension: `plan.md` → `plan`. Any other
+    /// name is left as it is.
+    public static func stem(of name: String) -> String {
+        let lower = name.lowercased()
+        for ext in [".markdown", ".mdown", ".mkd", ".md", ".html"] where lower.hasSuffix(ext) && lower.count > ext.count {
+            return String(name.dropLast(ext.count))
+        }
+        return name
+    }
+
+    /// The file beside a document that holds its comment threads: its stem
+    /// and `.meta.jsonl`, the Mac's rule (src/metaFile.ts, `meta_file_of` in
+    /// src-tauri/src/lib.rs).
+    public static func metaFile(of path: String) -> String {
+        let folder = directory(of: path)
+        let file = stem(of: name(of: path)) + ".meta.jsonl"
+        return folder.isEmpty ? file : "\(folder)/\(file)"
+    }
+
     /// Resolve `href`, written in the file at `file` (`Projects/plan.md`).
     public static func target(of href: String, from file: String) -> LinkTarget {
         var raw = href.trimmingCharacters(in: .whitespaces)

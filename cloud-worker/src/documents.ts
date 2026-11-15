@@ -25,8 +25,9 @@ export type Entry = { fid: string; file: ManifestFile };
 /** The extensions the app opens as a note, in the order it prefers them. */
 const MD_EXTENSIONS = ["md", "markdown", "mdown", "mkd"] as const;
 
-/** Folder names a Mac's scan never descends into (`is_hidden_or_ignored`,
- *  src-tauri/src/lib.rs). A file put under one would sync to nobody. Change both. */
+/** Folder names a device's scan never descends into (`is_hidden_or_ignored`,
+ *  engine/src/lib.rs; `isHiddenOrIgnored` in the iPhone app's Files.swift).
+ *  A file put under one would sync to nobody. Change all three. */
 const IGNORED_NAMES: ReadonlySet<string> = new Set(["node_modules", "target", "dist", "build", "__pycache__"]);
 /** The engine's own in-flight writes (`TMP_SUFFIX`, engine/src/cloud/scan.rs). */
 const TMP_SUFFIX = ".doklin-sync-tmp";

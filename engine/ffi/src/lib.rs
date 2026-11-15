@@ -2,7 +2,8 @@
 //! (ios/, through `DoklinKit`'s `Engine`). Three functions, declared for C in
 //! include/doklin_engine.h — change both:
 //!
-//! - `doklin_engine_start` once, with where things are kept and where events go;
+//! - `doklin_engine_start` once, with where things are kept, where events go
+//!   and how this device's sign-ins are kept (the app's Keychain);
 //! - `doklin_engine_call` for every command, by name (the engine's
 //!   command.rs), answered on a callback;
 //! - `doklin_engine_free` for a string this side handed over.
@@ -15,7 +16,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use doklin_engine::{Core, Host, Setup};
+use doklin_engine::{Core, Host, Secrets, Setup};
 use serde_json::Value;
 
 /// `(event name, payload as JSON)`.
@@ -23,6 +24,17 @@ pub type EventCallback = extern "C" fn(event: *const c_char, payload: *const c_c
 /// `(context, ok, answer)`: the command's answer as JSON when `ok`, else a
 /// sentence saying why not.
 pub type DoneCallback = extern "C" fn(context: *mut c_void, ok: bool, answer: *const c_char);
+/// `(workspace id)` → the sign-in kept for it, as a string the app allocated
+/// with `malloc` (the engine frees it), or null when there is none.
+pub type SecretGetCallback = extern "C" fn(ws_id: *const c_char) -> *mut c_char;
+/// `(workspace id, token)`: keep `token` for the workspace, or forget what is
+/// kept when it is null. True once done.
+pub type SecretSetCallback = extern "C" fn(ws_id: *const c_char, token: *const c_char) -> bool;
+
+extern "C" {
+    /// The C library's: what frees a string the app allocated with `malloc`.
+    fn free(ptr: *mut c_void);
+}
 
 struct Running {
     core: Arc<Core>,
@@ -32,10 +44,12 @@ struct Running {
 
 static RUNNING: OnceLock<Running> = OnceLock::new();
 
-/// The app, as the engine sees it: screens that listen on one callback, and
-/// a folder nothing but the app writes into.
+/// The app, as the engine sees it: screens that listen on one callback, a
+/// folder nothing but the app writes into, and sign-ins kept in its Keychain.
 struct AppHost {
     on_event: EventCallback,
+    get_secret: SecretGetCallback,
+    set_secret: SecretSetCallback,
     /// Where cloud.json is: which workspaces are connected.
     data_dir: PathBuf,
 }
@@ -48,7 +62,7 @@ impl Host for AppHost {
 
     /// Every connected workspace is open for as long as the app runs.
     fn open_folders(&self) -> BTreeSet<String> {
-        doklin_engine::cloud::connected_roots(&self.data_dir).into_iter().collect()
+        doklin_engine::cloud::connected_roots(&self.data_dir, Some(self)).into_iter().collect()
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -63,6 +77,37 @@ impl Host for AppHost {
     /// deleted is in the folder's version history.
     fn trash(&self, path: &Path) -> Result<(), String> {
         Err(format!("there is no trash to move {} to", path.display()))
+    }
+
+    fn secrets(&self) -> Option<&dyn Secrets> {
+        Some(self)
+    }
+}
+
+impl Secrets for AppHost {
+    fn secret(&self, ws_id: &str) -> Option<String> {
+        let key = CString::new(ws_id).ok()?;
+        let kept = (self.get_secret)(key.as_ptr());
+        if kept.is_null() {
+            return None;
+        }
+        // Safety: the app handed over a NUL-terminated string from malloc,
+        // read here once and freed.
+        let token = unsafe { CStr::from_ptr(kept).to_string_lossy().into_owned() };
+        unsafe { free(kept.cast()) };
+        Some(token).filter(|t| !t.is_empty())
+    }
+
+    fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String> {
+        let refused = || "This iPhone's Keychain would not keep the sign-in.".to_string();
+        let key = CString::new(ws_id).map_err(|_| refused())?;
+        let token = token.map(CString::new).transpose().map_err(|_| refused())?;
+        let kept = (self.set_secret)(key.as_ptr(), token.as_ref().map_or(std::ptr::null(), |t| t.as_ptr()));
+        if kept {
+            Ok(())
+        } else {
+            Err(refused())
+        }
     }
 }
 
@@ -93,7 +138,12 @@ impl Config {
     }
 }
 
-fn start(config: &str, on_event: EventCallback) -> Result<(), String> {
+fn start(
+    config: &str,
+    on_event: EventCallback,
+    get_secret: SecretGetCallback,
+    set_secret: SecretSetCallback,
+) -> Result<(), String> {
     if RUNNING.get().is_some() {
         return Ok(());
     }
@@ -117,7 +167,7 @@ fn start(config: &str, on_event: EventCallback) -> Result<(), String> {
         device_name: config.device_name,
         watch: false,
         runtime: runtime.handle().clone(),
-        host: Arc::new(AppHost { on_event, data_dir }),
+        host: Arc::new(AppHost { on_event, get_secret, set_secret, data_dir }),
     });
     if RUNNING.set(Running { core, runtime }).is_err() {
         return Ok(());
@@ -147,15 +197,22 @@ unsafe fn text_of(text: *const c_char) -> String {
 /// Start the engine. `config` is JSON: `dataDir` (where the engine keeps its
 /// own files), `joinDir` (where a workspace is downloaded), `anchor` (the
 /// folder the platform can move, if it can), `client` (`x-doklin-client`) and
-/// `deviceName`. Answers null, or a sentence saying why it did not start —
-/// the caller's to free. A second call changes nothing and answers null.
+/// `deviceName`. A workspace's sign-in is kept through `get_secret` and
+/// `set_secret`, by workspace id, and never written into the engine's files.
+/// Answers null, or a sentence saying why it did not start — the caller's to
+/// free. A second call changes nothing and answers null.
 ///
 /// # Safety
-/// `config` is a NUL-terminated string; `on_event` stays callable for the
-/// life of the process, from any thread.
+/// `config` is a NUL-terminated string; the three callbacks stay callable
+/// for the life of the process, from any thread.
 #[no_mangle]
-pub unsafe extern "C" fn doklin_engine_start(config: *const c_char, on_event: EventCallback) -> *mut c_char {
-    match start(&text_of(config), on_event) {
+pub unsafe extern "C" fn doklin_engine_start(
+    config: *const c_char,
+    on_event: EventCallback,
+    get_secret: SecretGetCallback,
+    set_secret: SecretSetCallback,
+) -> *mut c_char {
+    match start(&text_of(config), on_event, get_secret, set_secret) {
         Ok(()) => std::ptr::null_mut(),
         Err(why) => handed_over(why),
     }

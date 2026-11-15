@@ -4272,7 +4272,7 @@ fn manifest_wire_shape_matches_the_worker() {
 #[test]
 fn cloud_file_and_marker_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(read_cloud_file(dir.path()).workspaces.is_empty());
+    assert!(read_cloud_file(dir.path(), None).workspaces.is_empty());
     let mut file = CloudFile::default();
     file.upsert(WorkspaceEntry {
         root: "/Users/me/Notes".into(),
@@ -4295,20 +4295,20 @@ fn cloud_file_and_marker_round_trip() {
     });
     assert_eq!(file.workspaces.len(), 1);
     assert_eq!(file.workspaces[0].ws_id, "w-2");
-    write_cloud_file(dir.path(), &file).unwrap();
-    let back = read_cloud_file(dir.path());
+    write_cloud_file(dir.path(), &file, None).unwrap();
+    let back = read_cloud_file(dir.path(), None);
     assert_eq!(back.version, 1);
     assert_eq!(back.by_root("/Users/me/Notes").unwrap().token, "t2");
 
     // Garbage reads as nothing connected; a half entry is dropped.
     std::fs::write(dir.path().join("cloud.json"), "{not json").unwrap();
-    assert!(read_cloud_file(dir.path()).workspaces.is_empty());
+    assert!(read_cloud_file(dir.path(), None).workspaces.is_empty());
     std::fs::write(
         dir.path().join("cloud.json"),
         r#"{"version":1,"workspaces":[{"root":"/x","domain":"d","endpoint":"https://d","wsId":"w","name":"n","token":""}]}"#,
     )
     .unwrap();
-    assert!(read_cloud_file(dir.path()).workspaces.is_empty());
+    assert!(read_cloud_file(dir.path(), None).workspaces.is_empty());
 
     let root = tempfile::tempdir().unwrap();
     assert!(read_marker(root.path()).is_none());
@@ -4319,6 +4319,66 @@ fn cloud_file_and_marker_round_trip() {
     assert!(scan_local(root.path(), &[]).unwrap().is_empty(), "the marker is invisible to the scan");
     super::config::remove_marker(root.path());
     assert!(read_marker(root.path()).is_none());
+}
+
+use crate::Secrets;
+
+/// A keeper of sign-ins in memory, as the iPhone's Keychain is one.
+#[derive(Default)]
+struct KeptSecrets(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+
+impl Secrets for KeptSecrets {
+    fn secret(&self, ws_id: &str) -> Option<String> {
+        self.0.lock().unwrap().get(ws_id).cloned()
+    }
+    fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String> {
+        let mut kept = self.0.lock().unwrap();
+        match token {
+            Some(token) => kept.insert(ws_id.to_string(), token.to_string()),
+            None => kept.remove(ws_id),
+        };
+        Ok(())
+    }
+}
+
+#[test]
+fn a_sign_in_the_app_keeps_is_never_in_cloud_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let kept = KeptSecrets::default();
+    let entry = |root: &str, domain: &str, ws_id: &str, token: &str| WorkspaceEntry {
+        root: root.into(),
+        domain: domain.into(),
+        endpoint: format!("https://{}", domain),
+        ws_id: ws_id.into(),
+        name: "Notes".into(),
+        token: token.into(),
+        creator: false,
+    };
+    let mut file = CloudFile::default();
+    file.upsert(entry("/phone/Documents/Notes", "notes.example.com", "w-1", "secret-one"));
+    file.upsert(entry("/phone/Documents/Team", "team.example.com", "w-2", "secret-two"));
+    write_cloud_file(dir.path(), &file, Some(&kept)).unwrap();
+
+    // The file names both workspaces and holds neither sign-in.
+    let on_disk = std::fs::read_to_string(dir.path().join("cloud.json")).unwrap();
+    assert!(!on_disk.contains("secret-"), "{}", on_disk);
+    assert_eq!(kept.secret("w-1").as_deref(), Some("secret-one"));
+
+    // Read back through the keeper, each entry has its sign-in again.
+    let back = read_cloud_file(dir.path(), Some(&kept));
+    assert_eq!(back.by_root("/phone/Documents/Team").unwrap().token, "secret-two");
+
+    // Without the keeper — a phone restored from a backup, whose Keychain
+    // item stayed behind — nothing is connected.
+    assert!(read_cloud_file(dir.path(), Some(&KeptSecrets::default())).workspaces.is_empty());
+
+    // A workspace that leaves the file takes its sign-in with it.
+    let mut file = back;
+    file.remove_root("/phone/Documents/Notes");
+    write_cloud_file(dir.path(), &file, Some(&kept)).unwrap();
+    assert_eq!(kept.secret("w-1"), None);
+    assert_eq!(kept.secret("w-2").as_deref(), Some("secret-two"));
+    assert_eq!(read_cloud_file(dir.path(), Some(&kept)).workspaces.len(), 1);
 }
 
 #[test]

@@ -33,6 +33,22 @@ pub trait Host: Send + Sync + 'static {
 
     /// A workspace was just connected on this device.
     fn connected(&self, _root: &str) {}
+
+    /// Where this device's sign-ins are kept, when the app keeps them itself
+    /// (the iPhone: its Keychain). None — the Mac — keeps each one in
+    /// cloud.json, with the rest of its workspace's entry.
+    fn secrets(&self) -> Option<&dyn Secrets> {
+        None
+    }
+}
+
+/// A keeper of sign-ins, by workspace id. What it holds is read whenever
+/// cloud.json is, and the entry there carries no token (cloud/config.rs).
+pub trait Secrets: Send + Sync {
+    /// The sign-in kept for the workspace, if there is one.
+    fn secret(&self, ws_id: &str) -> Option<String>;
+    /// Keep `token` for the workspace, or forget what is kept when it is None.
+    fn set_secret(&self, ws_id: &str, token: Option<&str>) -> Result<(), String>;
 }
 
 /// What an app says once, at boot.
@@ -104,6 +120,11 @@ impl Core {
     pub fn touched(&self, path: &str) {
         self.edit_bus.touch(Path::new(path));
         self.version_bus.touch(Path::new(path));
+    }
+
+    /// Where sign-ins are kept: the app's keeper, or cloud.json itself.
+    pub(crate) fn secrets(&self) -> Option<&dyn Secrets> {
+        self.host.secrets()
     }
 
     pub(crate) fn events(&self) -> Arc<dyn Events> {
