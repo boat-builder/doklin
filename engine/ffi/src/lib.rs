@@ -36,6 +36,8 @@ static RUNNING: OnceLock<Running> = OnceLock::new();
 /// a folder nothing but the app writes into.
 struct AppHost {
     on_event: EventCallback,
+    /// Where cloud.json is: which workspaces are connected.
+    data_dir: PathBuf,
 }
 
 impl Host for AppHost {
@@ -46,10 +48,7 @@ impl Host for AppHost {
 
     /// Every connected workspace is open for as long as the app runs.
     fn open_folders(&self) -> BTreeSet<String> {
-        RUNNING
-            .get()
-            .map(|running| doklin_engine::cloud::connected_roots(&running.core).into_iter().collect())
-            .unwrap_or_default()
+        doklin_engine::cloud::connected_roots(&self.data_dir).into_iter().collect()
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -106,8 +105,9 @@ fn start(config: &str, on_event: EventCallback) -> Result<(), String> {
         .build()
         .map_err(|e| format!("the engine couldn't start: {}", e))?;
     let anchor = config.anchor.map(PathBuf::from);
+    let data_dir = PathBuf::from(config.data_dir);
     let core = Core::new(Setup {
-        data_dir: PathBuf::from(config.data_dir),
+        data_dir: data_dir.clone(),
         // The folder the platform can move is the widest one the engine may
         // never delete, which is what `home` is for.
         home: anchor.clone(),
@@ -117,7 +117,7 @@ fn start(config: &str, on_event: EventCallback) -> Result<(), String> {
         device_name: config.device_name,
         watch: false,
         runtime: runtime.handle().clone(),
-        host: Arc::new(AppHost { on_event }),
+        host: Arc::new(AppHost { on_event, data_dir }),
     });
     if RUNNING.set(Running { core, runtime }).is_err() {
         return Ok(());

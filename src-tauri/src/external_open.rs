@@ -73,8 +73,10 @@ pub(crate) fn handle_external_open(app: &AppHandle, opened: Vec<PathBuf>) {
     if opened.is_empty() {
         return;
     }
-    let roots: Vec<(String, PathBuf)> = crate::engine::try_core(app)
-        .map(|core| doklin_engine::cloud::connected_roots(&core))
+    let roots: Vec<(String, PathBuf)> = app
+        .path()
+        .app_data_dir()
+        .map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir))
         .unwrap_or_default()
         .into_iter()
         .map(|root| {

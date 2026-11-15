@@ -151,10 +151,13 @@ pub(crate) struct ManagerInner {
     removed: Vec<Removed>,
 }
 
-/// The folders of the workspaces this device is connected to, as cloud.json
-/// spells them: what an open from outside the app is placed against.
-pub fn connected_roots(core: &Core) -> Vec<String> {
-    read_cloud_file(&core.data_dir).workspaces.into_iter().map(|w| w.root).collect()
+/// The folders of the workspaces this device is connected to, as the
+/// cloud.json in `data_dir` spells them: what an open from outside the app is
+/// placed against. Read from disk, not from a running engine: a Mac asks
+/// before its engine exists — a file opened from Finder on a cold launch
+/// arrives ahead of the app's setup.
+pub fn connected_roots(data_dir: &Path) -> Vec<String> {
+    read_cloud_file(data_dir).workspaces.into_iter().map(|w| w.root).collect()
 }
 
 /// Called once as the app boots: load cloud.json, mint a device identity

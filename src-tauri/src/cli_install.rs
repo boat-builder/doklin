@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 pub(crate) const MENU_ID: &str = "install-cli";
@@ -50,7 +50,7 @@ fn run(app: &AppHandle) -> Result<(), String> {
     if matches!(found, Found::Nothing) {
         installed.push_str(&format!(" Your terminal's PATH leaves out {} — add it to use doklin.", LINK_DIR));
     }
-    let roots = crate::engine::try_core(app).map(|core| doklin_engine::cloud::connected_roots(&core)).unwrap_or_default();
+    let roots = app.path().app_data_dir().map(|data_dir| doklin_engine::cloud::connected_roots(&data_dir)).unwrap_or_default();
     let logins: Vec<String> = if roots.is_empty() {
         vec!["Connect a workspace and doklin is logged in to it too.".into()]
     } else {
