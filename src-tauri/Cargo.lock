@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "doklin"
-version = "0.1.109"
+version = "0.1.110"
 dependencies = [
  "base64 0.23.1",
  "doklin-engine",
