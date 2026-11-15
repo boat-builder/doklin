@@ -22,6 +22,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/ios/Engine"
 PROFILE="${DOKLIN_ENGINE_PROFILE:-release}"
 
+# The oldest iOS the app runs on, read from the project: what the engine's C
+# and assembly (ring, under rustls) is compiled for too. Left to itself, cc
+# takes the SDK's own version, and the app links code marked for a newer iOS.
+IOS_MIN="$(sed -n 's/.*IPHONEOS_DEPLOYMENT_TARGET = \([0-9.]*\);/\1/p' "$ROOT/ios/Doklin.xcodeproj/project.pbxproj" | sort -u)"
+case "$IOS_MIN" in
+  "" | *[!0-9.]*)
+    echo "error: ios/Doklin.xcodeproj does not name one IPHONEOS_DEPLOYMENT_TARGET" >&2
+    exit 1
+    ;;
+esac
+
 # Xcode's PATH leaves out where rustup puts cargo.
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
@@ -45,9 +56,9 @@ build() {
   fi
   [ "$PROFILE" = release ] && set -- "$@" --release
   echo "building the engine for $platform ($PROFILE)…"
-  # Xcode's own build settings (SDKROOT, deployment targets for the app) would
-  # misdirect the compiler cargo starts for build scripts, which run on the Mac.
-  env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u MACOSX_DEPLOYMENT_TARGET \
+  # Xcode's SDKROOT and macOS deployment target would misdirect the compiler
+  # cargo starts for build scripts, which run on the Mac.
+  env -u SDKROOT -u MACOSX_DEPLOYMENT_TARGET IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN" \
     cargo build --locked --manifest-path "$ROOT/engine/Cargo.toml" -p doklin-engine-ffi "$@"
   mkdir -p "$OUT/$platform"
   cp "$built/libdoklin_engine_ffi.a" "$OUT/$platform/libdoklin_engine_ffi.a"
