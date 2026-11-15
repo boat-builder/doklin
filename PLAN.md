@@ -2,6 +2,11 @@
 
 Throwaway working file. Not for `main`: it lives only on the iOS branch, and is deleted before that branch merges.
 
+## Status
+
+- **PR 1 is open: #120**, on `claude/devices`. Worker tests (79), engine tests (193) and the two UI drives pass. The Mac app itself has not been run.
+- Next: you try it and merge; then the rebase and PR 2.
+
 ## Decided
 
 - The phone is a **device** of its person, like a Mac: it holds the whole workspace locally and syncs in the background. It stops being an agent.
@@ -162,17 +167,18 @@ After PR 1:
 1. Let the Mac app update itself on every Mac.
 2. On the Mac that created the workspace, update the worker (Cloud → Update the worker).
 3. On that Mac, open People and make sure the creator has a name and an email. Adding a device needs it.
-4. On every other Mac: disconnect, and move its workspace folder aside. On the first Mac choose Add a device; on the other Mac choose Join a workspace and paste the line. Check the new copy, then delete the folder you moved aside.
+4. On every other Mac, with its workspace folder open: Cloud → Disconnect this Mac. On the first Mac: workspace menu → Devices… → Add a device, and copy the line. Back on the other Mac, with the same folder still open: Cloud → Join a workspace, paste, Join, then **Resume syncing this folder**. Nothing is downloaded again.
+5. On the first Mac: Devices… → Show the domain's token, and keep a copy somewhere safe. It is the only way back in if every device is lost.
 
 After PR 2:
 
-5. On a Mac, remove the agent that was made for the phone (Agents).
-6. Install the new build on the phone. On a Mac choose Add a device, and paste the line on the phone.
+6. On a Mac, remove the agent that was made for the phone (Agents).
+7. Install the new build on the phone. On a Mac choose Add a device, and paste the line on the phone.
 
 ---
 
 ## Open, with what I will do unless told otherwise
 
-1. **The domain's own token.** Keep a "show the domain's token" for the creator only, as a backup for recovery; never as a way to add a device. Members never see a token.
-2. **Device code lifetime.** One hour.
-3. **Engine crate.** First commits of PR 2. It can be split into its own PR if you want that Mac release watched before the phone depends on it.
+1. **Engine crate.** First commits of PR 2. It can be split into its own PR if you want that Mac release watched before the phone depends on it.
+
+Settled in PR 1: the domain's own token is shown only to the creator, in the Devices tab, as the way back in; a device code lasts one hour.
