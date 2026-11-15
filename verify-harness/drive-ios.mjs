@@ -27,14 +27,18 @@
 // builds it, starts an iPhone simulator and runs ios/DoklinUITests — one
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
-// remove from this iPhone). What was on screen at each step is printed (the
+// remove from this iPhone; PeopleUITests: people, devices, agents, who is
+// here, a restricted folder). A journey asks this script, at an address it
+// serves, for what only the domain's side can do: its line, and another
+// device editing a document. What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
 // are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
 // printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
 // picks the simulator rather than the newest iPhone.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,6 +125,18 @@ async function deviceLine() {
   return `doklin-invite ${WORKER} dkln-${canonical.match(/.{5}/g).join("-")}`;
 }
 
+/** Another device of Ada's — the Mac this script stands for — editing
+ *  `path` now: it is here, and holds the document until it stops beating. */
+async function editingElsewhere(path) {
+  const res = await fetch(`${WORKER}/api/poll`, {
+    method: "POST",
+    headers: asOwner,
+    body: JSON.stringify({ name: "Ada's Mac (drive)", path }),
+  });
+  if (!res.ok) throw new Error(`could not say another device is editing ${path}: ${res.status} ${await res.text()}`);
+  return `editing ${path}`;
+}
+
 /** Whether the shared workspace's manifest lists a file at `path`. */
 async function onTheDomain(path) {
   const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
@@ -178,12 +194,23 @@ function pickSimulator() {
 }
 
 async function driveApp() {
-  // A line works once: one for each test class, by its file's name
-  // (ios/DoklinUITests/UITestCase.swift reads its own).
-  const lines = {};
-  for (const file of readdirSync(join(ROOT, "ios/DoklinUITests")).filter((f) => f.endsWith("UITests.swift"))) {
-    lines[file.replace(/\.swift$/, "")] = await deviceLine();
-  }
+  // What a journey asks of the domain's side (ios/DoklinUITests/UITestCase.swift):
+  //   /line                 a device line. A line works once, and a person has
+  //                         one code waiting at a time — a new one stops the
+  //                         last — so each class asks for its own as it starts,
+  //                         rather than every line being minted up front, when
+  //                         only the last would still work.
+  //   /editing?path=<rel>   another device editing a document of the workspace.
+  const drive = createHttpServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const asked = url.pathname === "/line" ? deviceLine() : url.pathname === "/editing" ? editingElsewhere(url.searchParams.get("path") ?? "") : Promise.reject(new Error(`nothing at ${url.pathname}`));
+    asked.then(
+      (said) => res.writeHead(200, { "content-type": "text/plain" }).end(said),
+      (e) => res.writeHead(500, { "content-type": "text/plain" }).end(String(e)),
+    );
+  });
+  await new Promise((resolve) => drive.listen(0, "localhost", resolve));
+  const driveAt = `http://localhost:${drive.address().port}`;
   const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
   mkdirSync(out, { recursive: true });
   const result = join(out, "DoklinUITests.xcresult");
@@ -210,7 +237,7 @@ async function driveApp() {
       ],
       {
         // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
-        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DEVICE_LINES: JSON.stringify(lines) },
+        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DRIVE: driveAt },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -227,6 +254,7 @@ async function driveApp() {
     child.on("exit", (code) => resolve(code ?? 1));
   });
   await new Promise((resolve) => log.end(resolve));
+  drive.close();
 
   // The screenshots out of the result bundle, as files anybody can open. Best effort.
   try {

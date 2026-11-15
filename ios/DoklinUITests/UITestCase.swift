@@ -1,9 +1,10 @@
 // What every journey through the app's screens shares: the device line it
 // joins with, finding things, and keeping what was on screen.
 //
-// `node verify-harness/drive-ios.mjs --app` mints one line per test class —
-// one for each `*UITests.swift` here, by its name — since a line works
-// once. A class run without the drive skips itself.
+// `node verify-harness/drive-ios.mjs --app` serves what only the domain's
+// side can do, at an address in the environment: each test class asks it for
+// a line of its own as it starts — a line works once, and a new one stops the
+// one before. A class run without the drive skips itself.
 
 import XCTest
 
@@ -11,15 +12,24 @@ class UITestCase: XCTestCase {
     let app = XCUIApplication()
     /// `doklin-invite <address> <code>`, for this class alone.
     var line = ""
+    /// Where the drive answers.
+    private var drive: URL!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        let name = String(describing: type(of: self))
-        guard let raw = ProcessInfo.processInfo.environment["DOKLIN_TEST_DEVICE_LINES"],
-              let lines = try? JSONDecoder().decode([String: String].self, from: Data(raw.utf8)),
-              let line = lines[name]
-        else { throw XCTSkip("no worker to talk to — run: node verify-harness/drive-ios.mjs --app") }
-        self.line = line
+        guard let raw = ProcessInfo.processInfo.environment["DOKLIN_TEST_DRIVE"], let drive = URL(string: raw) else {
+            throw XCTSkip("no worker to talk to — run: node verify-harness/drive-ios.mjs --app")
+        }
+        self.drive = drive
+        line = try ask("line")
+    }
+
+    /// Ask the drive for something only the domain's side can do: `line`, or
+    /// `editing?path=<workspace-relative>` — another device editing it now.
+    @discardableResult
+    func ask(_ what: String) throws -> String {
+        let url = try XCTUnwrap(URL(string: what, relativeTo: drive), "the drive cannot be asked for \(what)")
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     /* ---------- Finding things ---------- */
