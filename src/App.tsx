@@ -5753,6 +5753,7 @@ export default function App() {
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
           onOpenPeople={cloudForRoot ? () => setAccessTab("people") : undefined}
+          onOpenDevices={mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
           onOpenAgents={mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
           onNewRestricted={
             cloudForRoot?.sections
@@ -5896,6 +5897,10 @@ export default function App() {
           onRedeem={() => {
             setCloudPanelOpen(false);
             setCloudSetup("redeem");
+          }}
+          onAddDevice={() => {
+            setCloudPanelOpen(false);
+            setAccessTab("devices");
           }}
           onUpdateWorker={() => {
             setCloudPanelOpen(false);

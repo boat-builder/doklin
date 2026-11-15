@@ -104,6 +104,7 @@ export type CloudAction =
   | "people.roles"
   | "agents.own"
   | "agents.manage"
+  | "devices.own"
   | "pages.manage"
   | "workspace.manage";
 
@@ -181,9 +182,14 @@ export type CloudProbe = {
 /** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
 export type CloudMarker = { domain: string; wsId: string };
 
-/** What a second Mac needs to download a workspace: shown behind
- *  "Connect another Mac", never part of a status. */
+/** The domain's own token, on the Mac that made the workspace: the creator's
+ *  copy to keep for getting back in when every device is lost. Never how a
+ *  device is added, and never part of a status. */
 export type CloudCredentials = { endpoint: string; token: string };
+
+/** A fresh code for another device of this person's own, and the line that
+ *  carries it — the line an invite is. Shown once. */
+export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
 
 /** The two halves of an invite found in one paste — either may be missing,
  *  and the redeem screen fills what it finds. */
@@ -233,12 +239,13 @@ export type CloudMember = {
    *  they first traded a code in. Null means nobody has ever signed in as
    *  them: they are invited, and that is all. */
   lastSeenAt: number | null;
-  /** How many Macs this person is signed in on. */
+  /** How many devices this person is signed in on. */
   devices: number;
 };
 
-/** One signed-in Mac. The creator's own are not among them: their credential
- *  is the domain's env secret, which has no row to list and none to revoke. */
+/** One signed-in device: a Mac, an iPhone. The Mac that made the workspace is
+ *  not among them: its credential is the domain's env secret, which has no
+ *  row to list and none to revoke. */
 export type CloudDevice = {
   id: string;
   memberId: string;
@@ -261,15 +268,14 @@ export type CloudPeople = {
   can: string[];
   /** This Mac's own device id, so the list can mark which Mac is this one. */
   deviceId: string;
-  /** Which of `devices` is the credential this Mac syncs with — it can carry
-   *  another Mac's device id, when the token came through *Connect another
-   *  Mac…*. Never offered for signing out. Null for the creator's token. */
+  /** Which of `devices` is the credential this Mac syncs with. Never offered
+   *  for signing out. Null for the creator's token. */
   tokenId: string | null;
   /** Everyone on the workspace. */
   members: CloudMember[];
   /** Codes nobody has used yet. Empty for whoever may not invite. */
   invites: CloudInvite[];
-  /** Signed-in Macs. Empty for whoever may not sign one out. */
+  /** The signed-in devices: this person's own, and for an owner everybody's. */
   devices: CloudDevice[];
 };
 
@@ -342,8 +348,13 @@ export const cloudProbe = (endpoint: string, token: string) =>
 /** The marker a folder carries, or null — the wizard's "resume" outcome. */
 export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_marker", { root });
 
-/** The endpoint and owner token of a connected workspace. */
+/** The endpoint and the domain's own token — answered only on the Mac that
+ *  holds it. */
 export const cloudToken = (root: string) => invoke<CloudCredentials>("cloud_token", { root });
+
+/** A one-time code for another device of this person's own. Whoever pastes
+ *  its line joins as them, on a sign-in of its own. */
+export const cloudDeviceCode = (root: string) => invoke<CloudDeviceCode>("cloud_device_code", { root });
 
 /** Split one paste into the address and the code. Pure — no domain is touched. */
 export const cloudParseInvite = (text: string) =>
@@ -383,12 +394,13 @@ export const cloudSetRole = (root: string, memberId: string, role: "owner" | "me
   invoke<CloudMember>("cloud_set_role", { root, memberId, role });
 
 /** Take a person off the workspace: their row, their pending invite and every
- *  Mac they signed in on. Each of those Macs deletes its copy when it hears. */
+ *  device they signed in on. Each of those deletes its copy when it hears. */
 export const cloudRevokePerson = (root: string, memberId: string) =>
   invoke<void>("cloud_revoke_person", { root, memberId });
 
-/** Sign one Mac out, leaving the person and their other Macs alone. It takes
- *  effect on that Mac's very next request, and that Mac deletes its copy. */
+/** Sign one device out — one's own, or as an owner anybody's — leaving the
+ *  person and their other devices alone. It takes effect on that device's
+ *  very next request, and that device deletes its copy. */
 export const cloudRevokeDevice = (root: string, tokenId: string) =>
   invoke<void>("cloud_revoke_device", { root, tokenId });
 

@@ -5,21 +5,25 @@
 //            workers.dev address), copy the prompt (it carries the token this
 //            app just minted), paste the endpoint the agent printed, probe,
 //            connect & upload;
-//   redeem   join a workspace somebody invited you to: paste the line they
-//            sent and click Join. The code is traded for a credential of this
-//            Mac's own, the workspace downloads, and it opens;
-//   join     another Mac of the creator's: the endpoint and the domain's own
-//            token from that Mac's Cloud panel, probe, download it here.
+//   redeem   join a workspace with a line — the invite somebody sent, or the
+//            one another device of your own made (Devices → Add a device):
+//            paste it and click Join. The code is traded for a credential of
+//            this Mac's own, the workspace downloads, and it opens;
+//   join     the way back in for whoever made the workspace and has lost
+//            every device: the endpoint and the domain's own token, probe,
+//            download it here. Never how a Mac is added.
 //
 // A workspace this Mac joins is never asked where it should go: it lands in
 // ~/Doklin/<its name>, a folder of its own (the engine picks it —
 // `cloud_join`), and opens as soon as it is down.
 //
 // Redeem runs the entrance backwards, and has to: /api/meta is inside the
-// worker's auth gate, so an invitee cannot ask the domain anything until the
-// redeem has minted them a token. A code works once, so a download that fails
-// after it has been spent keeps the credential and offers the download again
-// — never another redeem.
+// worker's auth gate, so a joining Mac cannot ask the domain anything until
+// the redeem has minted it a token. A code works once, so a download that
+// fails after it has been spent keeps the credential and offers the download
+// again — never another redeem. And a Mac whose open folder already is that
+// workspace (it disconnected, and is back) is offered the resume below
+// instead of a second copy.
 //
 // For the other two the probe decides what the domain is, and the wizard says
 // so in words: fresh → "Connect & upload"; already holding a workspace →
@@ -250,8 +254,24 @@ export default function CloudSetup({
     } finally {
       setRedeeming(false);
     }
+    // The open folder may already be that workspace — this Mac disconnected
+    // and is coming back, or the folder was restored. Then it is resumed in
+    // place or downloaded afresh, and that is the person's to say: the
+    // outcome card offers both, with the credential the code just bought.
+    if (root) {
+      try {
+        const [result, marker] = await Promise.all([cloudProbe(got.endpoint, got.token), cloudMarker(root)]);
+        if (marker && result.workspace && marker.wsId === result.workspace.id) {
+          setToken(got.token);
+          setProbed({ endpoint: got.endpoint, result, marker });
+          return;
+        }
+      } catch {
+        /* nothing to resume that we can tell of — download, as for any join */
+      }
+    }
     await download(got.endpoint, got.token);
-  }, [endpoint, code, download]);
+  }, [endpoint, code, download, root]);
 
   /** One paste fills both boxes: the line as it was sent, the whole message
    *  around it, or one half on its own — whatever the engine can find in it. */
@@ -439,7 +459,7 @@ export default function CloudSetup({
             className="modal-field-input modal-field-token"
             data-testid="token-input"
             value={token}
-            placeholder="64 hex characters, from the other Mac"
+            placeholder="64 hex characters"
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
@@ -485,7 +505,7 @@ export default function CloudSetup({
         />
       </div>
       <div className="modal-field">
-        <div className="modal-field-label">Invite code</div>
+        <div className="modal-field-label">Code</div>
         <input
           className="modal-field-input modal-field-token"
           data-testid="code-input"
@@ -513,12 +533,18 @@ export default function CloudSetup({
             </div>
           )}
         </div>
+      ) : joined && probed ? (
+        <p className="cloud-hint" data-testid="redeemed-as">
+          You’re in as {joined.name} — the code is spent, and this Mac has a credential of its own.
+          The folder that is open already is this workspace, so choose below. A code works once,
+          so closing now would mean asking for a fresh one.
+        </p>
       ) : joined ? (
         <>
           <p className="cloud-hint" data-testid="redeemed-as">
             You’re in as {joined.name} — the code is spent, and this Mac has a credential of its
             own. The download didn’t finish; try it again here. A code works once, so closing now
-            would mean asking for a fresh invite.
+            would mean asking for a fresh one.
           </p>
           <div className="modal-buttons">
             <button
@@ -682,24 +708,28 @@ export default function CloudSetup({
           ) : mode === "redeem" ? (
             <ol className="cloud-steps">
               <li className="cloud-step">
-                <div className="cloud-step-title">Paste the invite</div>
+                <div className="cloud-step-title">Paste the line</div>
                 <div className="cloud-step-note">
-                  One line from whoever invited you — the address and the code together. Paste it
-                  into either box and both fill in. The workspace downloads to a folder of its own
-                  in <code>~/Doklin</code> and opens; from then on it stays in step with everyone
-                  else’s.
+                  One line — the address and the code together — from whoever invited you, or
+                  from another device of your own: there, the workspace menu → Devices… → Add a
+                  device. Paste it into either box and both fill in. The workspace downloads to a
+                  folder of its own in <code>~/Doklin</code> and opens; from then on it stays in
+                  step with every other copy.
                 </div>
                 {redeemStep}
+                {outcome}
+                {doneBlock}
               </li>
             </ol>
           ) : (
             <ol className="cloud-steps">
               <li className="cloud-step">
-                <div className="cloud-step-title">Where is it?</div>
+                <div className="cloud-step-title">The domain, and its own token</div>
                 <div className="cloud-step-note">
-                  On the Mac that has the workspace: the gear → Cloud… → Connect another Mac
-                  shows both. The token is that Mac’s own credential for the domain — keep it to
-                  Macs you own.
+                  This is the way back in for whoever made the workspace and has lost every
+                  device: the token is the domain’s own secret, the one its worker was set up
+                  with. To add a Mac while you still have a device, use Add a device there
+                  instead — that Mac then has a sign-in of its own, which can be taken back.
                 </div>
                 {endpointStep}
               </li>
@@ -724,7 +754,7 @@ export default function CloudSetup({
 /** What the dialog calls itself, which is the door that was used. */
 function modalTitle(mode: CloudSetupMode): string {
   if (mode === "connect") return "Create a workspace";
-  return mode === "redeem" ? "Join a workspace" : "Open a workspace from a domain";
+  return mode === "redeem" ? "Join a workspace" : "Open with the domain’s token";
 }
 
 /** The host of an endpoint, for prose. */

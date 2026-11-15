@@ -1,18 +1,21 @@
-// The workspace's "People and agents" view (PeopleDialog.tsx draws its frame).
-// Two kinds of access, a tab each, because they are let in differently and
-// nobody should have to scroll past one to find the other:
+// The workspace's "People, devices and agents" view (PeopleDialog.tsx draws
+// its frame). Three kinds of access, a tab each, because they are let in
+// differently and nobody should have to scroll past one to find another:
 //
-//   People   work in the Doklin app, on Macs that hold a copy of the
+//   People   work in the Doklin app, on devices that hold a copy of the
 //            workspace. Everybody here sees who is in it; an owner also lets
 //            people in, takes access away, and makes other owners.
+//   Devices  a person's own Macs and iPhones (CloudDevices.tsx). Everybody
+//            adds and signs out their own; an owner signs out anybody's, from
+//            the People tab.
 //   Agents   bots that work through the `doklin` command line with no copy of
 //            the folder (CloudAgents.tsx). Everybody has their own; an owner
 //            also sees everyone else's.
 //
-// Both tabs stay mounted while the view is open — a code that is shown once
-// must not be lost to a look at the other tab. In each, what an owner came to
-// do is at the top: the door ("Invite someone", "Add an agent"), its form,
-// and the one-time code it ends in; the lists follow.
+// Every tab stays mounted while the view is open — a code that is shown once
+// must not be lost to a look at another tab. In each, what its person came to
+// do is at the top: the door ("Invite someone", "Add a device", "Add an
+// agent"), its form, and the one-time code it ends in; the lists follow.
 //
 // Everything comes from `cloud_people` in one answer — including who this Mac
 // is here and what it may do, which the domain is asked every time the view
@@ -40,6 +43,7 @@ import {
   type CloudPeople as People,
 } from "./cloud";
 import CloudAgents from "./CloudAgents";
+import CloudDevices from "./CloudDevices";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -54,12 +58,13 @@ const EXPIRY_CHOICES: { days: number; label: string }[] = [
 
 type Draft = { email: string; name: string; days: number };
 
-/** The view's two tabs. The app owns which one is showing: each has a door
- *  of its own in the workspace menu. */
-export type AccessTab = "people" | "agents";
+/** The view's tabs. The app owns which one is showing: each has a door of
+ *  its own in the workspace menu. */
+export type AccessTab = "people" | "devices" | "agents";
 
 const TABS: { tab: AccessTab; label: string }[] = [
   { tab: "people", label: "People" },
+  { tab: "devices", label: "Devices" },
   { tab: "agents", label: "Agents" },
 ];
 
@@ -167,6 +172,12 @@ export default function CloudPeople({
   const canRemove = may(people, "people.remove");
   const canSetRoles = may(people, "people.roles");
   const canAgents = may(people, "agents.own");
+  const canDevices = may(people, "devices.own");
+  // The tabs this person has, and the one showing: a tab the domain does not
+  // offer them — a worker from before devices — falls back to People.
+  const tabs = TABS.filter((t) => t.tab === "people" || (t.tab === "devices" ? canDevices : canAgents));
+  const tabbed = tabs.length > 1;
+  const showing: AccessTab = tabs.some((t) => t.tab === tab) ? tab : "people";
   const macsOf = (m: CloudMember) => people.devices.filter((d) => d.memberId === m.id);
   // The holder of the domain's own token who has not yet said who they are:
   // the one person the list cannot name.
@@ -174,14 +185,14 @@ export default function CloudPeople({
 
   return (
     <>
-      {canAgents && (
-        <div className="cloud-tabs" role="tablist" aria-label="People and agents">
-          {TABS.map((t) => (
+      {tabbed && (
+        <div className="cloud-tabs" role="tablist" aria-label="People, devices and agents">
+          {tabs.map((t) => (
             <button
               key={t.tab}
               role="tab"
-              aria-selected={tab === t.tab}
-              className={`cloud-tab ${tab === t.tab ? "is-active" : ""}`}
+              aria-selected={showing === t.tab}
+              className={`cloud-tab ${showing === t.tab ? "is-active" : ""}`}
               data-testid={`tab-${t.tab}`}
               onClick={() => onTab(t.tab)}
             >
@@ -193,16 +204,17 @@ export default function CloudPeople({
 
       <div
         className="cloud-stack"
-        role={canAgents ? "tabpanel" : undefined}
+        role={tabbed ? "tabpanel" : undefined}
         data-testid="pane-people"
-        hidden={canAgents && tab !== "people"}
+        hidden={showing !== "people"}
       >
         {unnamed && (
           <div className="cloud-card cloud-card--attention" data-testid="adopt-owner">
             <div className="cloud-card-title">{name} doesn’t know who you are</div>
             <p className="cloud-hint">
               Your address is how this workspace names you — in the list below, and on what you write
-              once history says <em>who</em> rather than <em>which Mac</em>. It is stored on your own
+              once history says <em>who</em> rather than <em>which Mac</em> — and how another device of
+              yours is signed in as you. It is stored on your own
               domain and told to nobody else. Your access doesn’t depend on it: the domain’s token is
               what lets this Mac in, with or without a name.
             </p>
@@ -238,8 +250,8 @@ export default function CloudPeople({
 
         <p className="cloud-hint" data-testid="people-intro">
           {canInvite
-            ? `Everyone in ${name}. Each has a copy of it on a Mac of their own, kept in step with yours. You let someone in with an invite code, and they stay until an owner removes them.`
-            : `Everyone in ${name}. Each has a copy of it on a Mac of their own, kept in step with yours. An owner invites people and removes them.`}
+            ? `Everyone in ${name}. Each has a copy of it on a device of their own, kept in step with yours. You let someone in with an invite code, and they stay until an owner removes them.`
+            : `Everyone in ${name}. Each has a copy of it on a device of their own, kept in step with yours. An owner invites people and removes them.`}
         </p>
 
         {canInvite && (
@@ -317,7 +329,7 @@ export default function CloudPeople({
                   Only the code runs out. Once they have joined, their access lasts until an owner
                   removes them.{" "}
                   {people.creator
-                    ? "Inviting somebody already here gives them a fresh code — for another Mac, say — and stops the one they had. Inviting somebody who was removed brings them back as the same person."
+                    ? "Inviting somebody already here gives them a fresh code and stops the one they had. Inviting somebody who was removed brings them back as the same person."
                     : "A new code for somebody who has already signed in is theirs to make, or the workspace creator’s."}
                 </p>
                 <div className="modal-buttons">
@@ -379,23 +391,22 @@ export default function CloudPeople({
                   </div>
                   <div className="cloud-hint">
                     {m.creator
-                      ? `Made this workspace. ${you ? "Your Macs" : "Their Macs"} hold the domain’s own token, so they aren’t counted here.`
+                      ? `Made this workspace, on a Mac that holds the domain’s own token and isn’t counted here.${m.devices > 0 ? ` ${m.devices} other device${m.devices === 1 ? "" : "s"}.` : ""}`
                       : m.devices === 0
                         ? waiting
-                          ? "Invited — no Mac has traded the code in yet."
-                          : "No Mac signed in."
-                        : `${m.devices} Mac${m.devices === 1 ? "" : "s"}`}
+                          ? "Invited — no device has traded the code in yet."
+                          : "No device signed in."
+                        : `${m.devices} device${m.devices === 1 ? "" : "s"}`}
                     {m.lastSeenAt != null && ` · seen ${timeAgo(m.lastSeenAt, now)}`}
                   </div>
                   {macs.length > 0 && (
                     <ul className="cloud-macs">
                       {macs.map((d) => {
-                        // This Mac's own sign-in: the row it redeemed, or the
-                        // row whose token it was handed by another Mac.
-                        const thisMac = d.id === people.tokenId || (!!d.deviceId && d.deviceId === people.deviceId);
+                        // This Mac's own sign-in: the row it redeemed.
+                        const thisMac = d.id === people.tokenId;
                         return (
                           <li className="cloud-mac-row" key={d.id} data-testid={`mac-${d.id}`}>
-                            <span className="cloud-mac-name">{d.deviceName || "A Mac"}</span>
+                            <span className="cloud-mac-name">{d.deviceName || "A device"}</span>
                             {thisMac && <span className="cloud-person-tag">this Mac</span>}
                             <span className="cloud-presence-what">joined {timeAgo(d.createdAt, now)}</span>
                             {/* Never this Mac: signing it out would delete the
@@ -470,7 +481,7 @@ export default function CloudPeople({
                         (confirm === `person:${m.id}` ? (
                           <span className="cloud-inline-confirm">
                             <span className="cloud-hint">
-                              Their code stops working, and every Mac they signed in on stops syncing and
+                              Their code stops working, and every device they signed in on stops syncing and
                               deletes its copy of {name} the next time Doklin runs there. Nothing in the
                               cloud is deleted, and their name stays on what they wrote.
                               {m.role === "owner" && " Codes nobody has used yet are withdrawn with them."}
@@ -562,8 +573,23 @@ export default function CloudPeople({
         {error && <div className="modal-error">{error}</div>}
       </div>
 
+      {canDevices && (
+        <div className="cloud-stack" role="tabpanel" data-testid="pane-devices" hidden={showing !== "devices"}>
+          <CloudDevices
+            root={root}
+            name={name}
+            domain={domain}
+            people={people}
+            reload={load}
+            now={now}
+            copy={copy}
+            copied={copied}
+          />
+        </div>
+      )}
+
       {canAgents && (
-        <div className="cloud-stack" role="tabpanel" data-testid="pane-agents" hidden={tab !== "agents"}>
+        <div className="cloud-stack" role="tabpanel" data-testid="pane-agents" hidden={showing !== "agents"}>
           <CloudAgents
             root={root}
             domain={domain}

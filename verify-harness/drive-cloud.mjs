@@ -7,8 +7,8 @@
 // `cloud-applied` refreshing the tree, presence chips, a document another
 // Mac holds opening view-only under its banner and Take over, the worker update
 // card and its badge, the version rail reading a cloud-only revision
-// through the manifest and restoring it, "Connect
-// another Mac", disconnect, the wipe → teardown prompt, the join flow
+// through the manifest and restoring it, Add a
+// device, disconnect, the wipe → teardown prompt, the join flow
 // opening the downloaded folder, the invite door: one paste filling both
 // boxes, a refused code spending nothing, a download on the member's own
 // credential, the People view: adopting an identity, inviting somebody, the
@@ -165,8 +165,8 @@ await tid("settings-cloud").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const doorNames = (await page.locator(".cloud-doors button").allTextContents()).map((t) => t.trim());
 step(
-  "panel (not connected): Join a workspace, Create a workspace (enabled: a folder is open), Open a workspace from a domain",
-  doorNames.join("|") === "Join a workspace|Create a workspace|Open a workspace from a domain" &&
+  "panel (not connected): Join a workspace, Create a workspace (enabled: a folder is open), Open with the domain’s token",
+  doorNames.join("|") === "Join a workspace|Create a workspace|Open with the domain’s token" &&
     (await tid("connect-domain").isEnabled()) &&
     (await tid("open-from-domain").count()) === 1,
   doorNames.join(" · "),
@@ -767,20 +767,36 @@ await setStatuses([status()]);
 await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 
-/* 17 — Connect another Mac: endpoint + token shown */
-await tid("another-mac").click();
+/* 17 — Add a device: the panel's door is the Devices tab. On the Mac that
+   made the workspace, before its holder has said who they are, there is
+   nobody to sign a second device in as — the tab says so and offers no code —
+   and the domain's own token is there to keep a copy of, never to add a
+   device with */
+await tid("add-device").click();
+await poll(async () => (await dialog("People, devices and agents").count()) === 1);
+await poll(async () => (await tid("device-list").count()) === 1);
+const devicesTabOpen =
+  (await dialog("Cloud").count()) === 0 &&
+  (await tid("tab-devices").getAttribute("aria-selected")) === "true" &&
+  (await tid("pane-devices").isVisible()) &&
+  !(await tid("pane-people").isVisible());
+const secretRow = await tid("device-secret").textContent();
+await tid("show-domain-secret").click();
 await poll(async () => (await tid("creds-token").inputValue()) === TOKEN);
-const credsWarning = await dialog("Connect another Mac").textContent();
+const devicesPane = await tid("pane-devices").textContent();
 step(
-  "Connect another Mac: the endpoint and this Mac's token, warned about and pointed away from for anyone else",
-  (await tid("creds-endpoint").inputValue()) === "https://notes.example.com" &&
-    credsWarning.includes("Share it only with Macs you own") &&
-    credsWarning.includes("invite them under People"),
+  "Add a device (the creator, not yet named): the panel opens the Devices tab; no code until they say who they are; this Mac is listed as holding the domain's token, which is shown only as the way back in",
+  devicesTabOpen &&
+    (await tid("device-needs-identity").count()) === 1 &&
+    (await tid("device-add").count()) === 0 &&
+    secretRow.includes("holds the domain’s own token") &&
+    (await tid("creds-endpoint").inputValue()) === "https://notes.example.com" &&
+    devicesPane.includes("If you lose every device") &&
+    devicesPane.includes("never how a device is added") &&
+    (await calls("cloud_device_code")).length === 0,
 );
-await page.keyboard.press("Escape"); // back to main
-await poll(async () => (await dialog("Cloud").count()) === 1);
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("Cloud").count()) === 0);
+await poll(async () => (await dialog("People, devices and agents").count()) === 0);
 
 /* 18 — history: the one thing only a connected workspace puts on the rail —
    a version another Mac mirrored, read like a local one and restored as the
@@ -948,7 +964,7 @@ await poll(async () => (await dialog("Cloud").count()) === 0);
 await setCloud({ marker: null });
 await openPanelFromGear();
 await tid("open-from-domain").click();
-await poll(async () => (await dialog("Open a workspace from a domain").count()) === 1);
+await poll(async () => (await dialog("Open with the domain’s token").count()) === 1);
 await tid("endpoint-input").fill("https://notes.example.com");
 await tid("token-input").fill(TOKEN);
 await tid("probe-button").click();
@@ -958,7 +974,7 @@ const joinOutcome =
 const pickerOpens = () => page.evaluate(() => window.__cloud.pickerOpens ?? 0);
 const pickersBefore = await pickerOpens();
 await tid("download-here").click();
-await poll(async () => (await dialog("Open a workspace from a domain").count()) === 0);
+await poll(async () => (await dialog("Open with the domain’s token").count()) === 0);
 await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Notes");
 const joinCall = await lastCall("cloud_join");
 step(
@@ -972,6 +988,47 @@ step(
     (await tid("sync-status").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-08-joined.png" });
+
+/* 22b — a Mac that disconnected comes back with a code. The folder that is
+   open already is that workspace, so the join does not download a second copy
+   beside it: it offers to resume the folder in place, with the credential the
+   code just bought — the only way back for a Mac that never held a token
+   anybody could type */
+await setStatuses([]);
+const boundTo = await page.evaluate(() => window.__cloud.probe.workspace.id);
+await setCloud({ marker: { domain: "notes.example.com", wsId: boundTo }, invite: INVITE });
+const joinsBefore = (await calls("cloud_join")).length;
+await openPanelFromGear();
+await tid("join-with-invite").click();
+await poll(async () => (await dialog("Join a workspace").count()) === 1);
+await paste("code-input", INVITE.blob);
+await poll(async () => (await tid("endpoint-input").inputValue()) === INVITE.endpoint);
+await tid("redeem-button").click();
+await poll(async () => (await tid("resume-folder").count()) === 1);
+const backAs = (await tid("redeemed-as").textContent()).replace(/\s+/g, " ");
+const backOffered =
+  (await tid("download-here").count()) === 1 &&
+  (await tid("download-again").count()) === 0 &&
+  (await tid("redeem-button").count()) === 0 &&
+  (await calls("cloud_join")).length === joinsBefore;
+const openFolder = await page.evaluate(() => window.__cloud.calls.filter((c) => c.cmd === "cloud_marker").at(-1).args.root);
+await tid("resume-folder").click();
+await poll(async () => (await tid("setup-done").count()) === 1);
+const resumedWith = await lastCall("cloud_resume");
+step(
+  "join with a code, the open folder already that workspace: nothing is downloaded — Resume and Download are offered, and Resume adopts the folder with the credential the code bought",
+  backOffered &&
+    backAs.includes("You’re in as Bob") &&
+    backAs.includes("already is this workspace") &&
+    resumedWith.args.root === openFolder &&
+    resumedWith.args.endpoint === INVITE.endpoint &&
+    resumedWith.args.token === INVITE.token &&
+    (await calls("cloud_join")).length === joinsBefore,
+  backAs.trim().slice(0, 90),
+);
+await page.screenshot({ path: SHOTS + "cloud-08b-back-with-a-code.png" });
+await page.locator(".modal-btn", { hasText: "Done" }).click();
+await poll(async () => (await tid("sync-status").count()) === 1);
 
 /* 23 — joining with an invite: one paste fills both boxes, a bad code costs
    nothing, and Join is the whole of it — the code is traded for this Mac's
@@ -1058,7 +1115,7 @@ await tid("sidebar-menu-workspace").filter({ hasText: "Notes" }).click();
 await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Notes");
 await setStatuses((await page.evaluate(() => window.__cloud.statuses)).filter((s) => s.root !== "/docs"));
 
-/* 24 — People and agents: one window, a tab each, and a door for each in the
+/* 24 — People, devices and agents: one window, a tab each, and a door for each in the
    workspace menu — who is here is the workspace's business, not sync's, and
    neither has to be found behind the other. The Cloud panel has no door to
    either. People… lands on the People tab, with the invite door above the list */
@@ -1074,21 +1131,25 @@ await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 await page.locator(".sidebar-header-button").click();
 await poll(async () => (await tid("sidebar-menu-people").count()) === 1);
-const doors = [(await tid("sidebar-menu-people").textContent()).trim(), (await tid("sidebar-menu-agents").textContent()).trim()];
+const doors = [];
+for (const door of ["people", "devices", "agents"]) doors.push((await tid(`sidebar-menu-${door}`).textContent()).trim());
 await tid("sidebar-menu-people").click();
-await poll(async () => (await dialog("People and agents").count()) === 1);
+await poll(async () => (await dialog("People, devices and agents").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
 const selected = async (tab) => (await tid(`tab-${tab}`).getAttribute("aria-selected")) === "true";
 const above = async (a, b) => (await tid(a).boundingBox()).y < (await tid(b).boundingBox()).y;
 step(
-  "People and agents: the workspace menu has a door for each and the Cloud panel none; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
+  "People, devices and agents: the workspace menu has a door for each and the Cloud panel none; People… opens the view on its People tab — what a person is, the invite door above the list — with the agents a tab away",
   panelDoors === 0 &&
-    doors.join("|") === "People…|Agents…" &&
+    doors.join("|") === "People…|Devices…|Agents…" &&
     (await tid("tab-people").textContent()).trim() === "People" &&
+    (await tid("tab-devices").textContent()).trim() === "Devices" &&
     (await tid("tab-agents").textContent()).trim() === "Agents" &&
     (await selected("people")) &&
+    !(await selected("devices")) &&
     !(await selected("agents")) &&
     (await tid("pane-people").isVisible()) &&
+    !(await tid("pane-devices").isVisible()) &&
     !(await tid("pane-agents").isVisible()) &&
     (await tid("people-intro").textContent()).includes("Everyone in Notes") &&
     (await tid("people-intro").textContent()).includes("until an owner removes them") &&
@@ -1142,8 +1203,44 @@ step(
   shownCode,
 );
 
-/* 24b — and each way of taking access away takes exactly one thing */
+/* 24a — Add a device, now that the creator is somebody: one click makes a
+   code, the line is shown once and copied whole, and nothing in it is a
+   token */
 await tid("minted-done").click();
+await tid("tab-devices").click();
+await poll(async () => (await tid("device-add").count()) === 1);
+const namedNow = (await tid("device-needs-identity").count()) === 0;
+await tid("device-add").click();
+await poll(async () => (await tid("minted-device").count()) === 1);
+const deviceLine = (await tid("device-line").textContent()).trim();
+const deviceTerms = (await tid("device-terms").textContent()).replace(/\s+/g, " ").trim();
+await tid("copy-device-line").click();
+const copiedDeviceLine = await poll(async () => {
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  return text.startsWith("doklin-invite ") && text.includes("D3V1C") ? text : null;
+});
+const deviceCodeCall = await lastCall("cloud_device_code");
+const openRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
+step(
+  "Devices: Add a device makes a one-time code and shows its line once — the line an invite is, good for an hour, pasted under Join a workspace on the other Mac or iPhone — and the door is gone while it is on screen",
+  namedNow &&
+    deviceCodeCall.args.root === openRoot &&
+    deviceLine === "doklin-invite https://notes.example.com dkln-D3V1C-2QWXM-7NBKD-5HGVZ" &&
+    copiedDeviceLine === deviceLine &&
+    !deviceLine.includes(TOKEN) &&
+    deviceTerms.includes("choose Join a workspace and paste this line") &&
+    deviceTerms.includes("It works once, for 1 h.") &&
+    deviceTerms.includes("signed in as you") &&
+    (await tid("device-add").count()) === 0,
+  deviceLine,
+);
+await page.screenshot({ path: SHOTS + "cloud-10a-add-device.png" });
+await tid("minted-device-done").click();
+await poll(async () => (await tid("device-add").count()) === 1);
+await tid("tab-people").click();
+await poll(async () => (await tid("people-list").isVisible()));
+
+/* 24b — and each way of taking access away takes exactly one thing */
 await tid("revoke-mac-t-bob-1").click();
 const signOutSays = await tid("mac-t-bob-1").locator(".cloud-inline-confirm").textContent();
 await tid("revoke-mac-yes-t-bob-1").click();
@@ -1161,13 +1258,13 @@ const removeSays = await tid("person-m-new-1").locator(".cloud-inline-confirm").
 await tid("remove-person-yes-m-new-1").click();
 await poll(async () => (await tid("person-m-new-1").count()) === 0);
 step(
-  "People: signing a Mac out leaves the person, withdrawing a code leaves them too, and removing a person takes their row away — each confirm saying that Mac's copy is deleted and nothing in the cloud is",
+  "People: signing a device out leaves the person, withdrawing a code leaves them too, and removing a person takes their row away — each confirm saying that device's copy is deleted and nothing in the cloud is",
   bobKept &&
     signOutSays.includes("deletes its copy of Notes") &&
     removeSays.includes("deletes its copy of Notes") &&
     removeSays.includes("Nothing in the cloud is deleted") &&
     bobRevoked.args.tokenId === "t-bob-1" &&
-    (await tid("person-m-bob").textContent()).includes("No Mac signed in") &&
+    (await tid("person-m-bob").textContent()).includes("No device signed in") &&
     carolKept &&
     (await lastCall("cloud_withdraw_invite")).args.inviteId === "i-new-1" &&
     (await lastCall("cloud_revoke_person")).args.memberId === "m-new-1" &&
@@ -1345,7 +1442,7 @@ step(
    the tab says so in a line under what an agent is, and the People tab is
    still there to manage */
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People and agents").count()) === 0);
+await poll(async () => (await dialog("People, devices and agents").count()) === 0);
 const TOO_OLD = "notes.example.com runs a worker too old for agents \u2014 update it from the Cloud panel";
 await page.evaluate((error) => {
   window.__cloud.agents.error = error;
@@ -1371,19 +1468,19 @@ await page.evaluate(() => {
   window.__cloud.agents.error = null;
 });
 
-/* 25 — the same workspace on a Mac that joined with an invite: who is here
+/* 25 — the same workspace on a Mac that joined with a code: who is here
    is everybody's to see, and nothing that is an owner's to do is offered —
    not in the panel (no worker update, no danger zone) and not in the view
-   (no invite door, no Remove, no role button). Agents are everybody's own:
-   the menu has the door, and the tab lists this person's and nobody else's */
-const MEMBER_CAN = ["work", "people.see", "agents.own"];
+   (no invite door, no Remove, no role button). Devices and agents are
+   everybody's own: the menu has a door for each, and each tab lists this
+   person's and nobody else's */
+const MEMBER_CAN = ["work", "people.see", "agents.own", "devices.own"];
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People and agents").count()) === 0);
+await poll(async () => (await dialog("People, devices and agents").count()) === 0);
 
-/* 24f — an owner who is not the creator, on a Mac that syncs with a token
-   another of their Macs handed it (Connect another Mac): the row is this
-   Mac's own sign-in whatever device id it carries, so it is tagged and never
-   offered for signing out — that would delete the copy in hand. And of the
+/* 24f — an owner who is not the creator, on a Mac with a sign-in of its
+   own: its row is tagged and never offered for signing out — that would
+   delete the copy in hand. And of the
    codes nobody has used, they may replace their own and one for somebody who
    has never signed in; one for a person who has is that person's, or the
    creator's, so no New code is offered for it */
@@ -1437,7 +1534,7 @@ await setCloud({
 await openAccess("people");
 await poll(async () => (await tid("mac-t-bob-9").count()) === 1);
 step(
-  "People (this Mac's own sign-in): the row whose token this Mac syncs with is tagged this Mac and has no Sign out, though another Mac redeemed it; an owner who is not the creator is offered a new code for themselves and for somebody who never signed in, not for a person who has",
+  "People (this Mac's own sign-in): the row whose token this Mac syncs with is tagged this Mac and has no Sign out; an owner who is not the creator is offered a new code for themselves and for somebody who never signed in, not for a person who has",
   (await tid("mac-t-bob-9").textContent()).includes("this Mac") &&
     (await tid("revoke-mac-t-bob-9").count()) === 0 &&
     (await tid("set-role-m-bob").count()) === 0 &&
@@ -1449,31 +1546,50 @@ step(
 );
 await setCloud({ people: peopleBefore });
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People and agents").count()) === 0);
+await poll(async () => (await dialog("People, devices and agents").count()) === 0);
 await setCloud({ can: MEMBER_CAN });
 await setStatuses((await page.evaluate(() => window.__cloud.statuses)).map((s) => ({ ...s, can: MEMBER_CAN })));
 const people = await page.evaluate(() => window.__cloud.people);
+const bobsDevice = (id, deviceId, deviceName) => ({
+  id,
+  memberId: "m-bob",
+  email: "bob@example.com",
+  deviceId,
+  deviceName,
+  createdAt: Date.now() - 86400000,
+});
 await setCloud({
-  people: { ...people, role: "member", creator: false, me: "m-bob", can: MEMBER_CAN, invites: [], devices: [] },
+  people: {
+    ...people,
+    role: "member",
+    creator: false,
+    me: "m-bob",
+    can: MEMBER_CAN,
+    tokenId: "t-bob-9",
+    members: people.members.map((m) => (m.id === "m-bob" ? { ...m, devices: 2 } : m)),
+    invites: [],
+    // A member is told of their own devices, and nobody else's.
+    devices: [bobsDevice("t-bob-9", "d-this-mac", "Bob\u2019s MacBook"), bobsDevice("t-bob-phone", "d-bob-phone", "Bob\u2019s iPhone")],
+  },
 });
 await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 await poll(async () => (await tid("wipe-open").count()) === 0);
 const memberPanel =
   (await tid("update-worker-quiet").count()) === 0 &&
-  (await tid("another-mac").count()) === 1 &&
+  (await tid("add-device").count()) === 1 &&
   (await tid("disconnect").count()) === 1;
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 await page.locator(".sidebar-header-button").click();
 await poll(async () => (await tid("sidebar-menu-people").count()) === 1);
-const memberMenu = (await tid("sidebar-menu-agents").count()) === 1;
+const memberMenu = (await tid("sidebar-menu-agents").count()) === 1 && (await tid("sidebar-menu-devices").count()) === 1;
 await tid("sidebar-menu-people").click();
-await poll(async () => (await dialog("People and agents").count()) === 1);
+await poll(async () => (await dialog("People, devices and agents").count()) === 1);
 await poll(async () => (await tid("people-list").count()) === 1);
 const memberIntro = await tid("people-intro").textContent();
 step(
-  "People (a member): the menu offers People… and Agents…, the panel nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no invite door, no Remove and no role button, and no error",
+  "People (a member): the menu offers People…, Devices… and Agents…, the panel nothing that is an owner's; the view lists everyone — the creator tagged owner, this person tagged you — with no invite door, no Remove and no role button, and no error",
   memberPanel &&
     memberMenu &&
     memberIntro.includes("Everyone in Notes") &&
@@ -1482,16 +1598,47 @@ step(
     (await tid("person-m-bob").textContent()).includes("you") &&
     !(await tid("person-m-owner").textContent()).includes("you") &&
     (await tid("tab-people").count()) === 1 &&
+    (await tid("tab-devices").count()) === 1 &&
     (await tid("tab-agents").count()) === 1 &&
     (await tid("invite-open").count()) === 0 &&
     (await tid("adopt-owner").count()) === 0 &&
     (await page.locator('[data-testid^="remove-person-"]').count()) === 0 &&
     (await page.locator('[data-testid^="set-role-"]').count()) === 0 &&
-    (await page.locator('[data-testid^="revoke-mac-"]').count()) === 0 &&
-    (await dialog("People and agents").locator(".modal-error").count()) === 0,
+    // Their own other device is theirs to sign out; this Mac never is.
+    (await tid("revoke-mac-t-bob-9").count()) === 0 &&
+    (await page.locator('[data-testid^="revoke-mac-"]').count()) === 1 &&
+    (await dialog("People, devices and agents").locator(".modal-error").count()) === 0,
   memberIntro.trim(),
 );
 await page.screenshot({ path: SHOTS + "cloud-11-people-member.png" });
+
+/* 25a — a member's devices: their own, and theirs to add to and sign out.
+   This Mac is tagged and has no Sign out; the phone has, and signing it out
+   names that one row. No token is shown to a member, anywhere */
+await tid("tab-devices").click();
+await poll(async () => (await tid("device-list").isVisible()));
+const memberDevices =
+  (await tid("device-secret").count()) === 0 &&
+  (await tid("show-domain-secret").count()) === 0 &&
+  (await tid("device-add").count()) === 1 &&
+  (await tid("device-t-bob-9").textContent()).includes("this Mac") &&
+  (await tid("device-sign-out-t-bob-9").count()) === 0 &&
+  (await tid("device-t-bob-phone").textContent()).includes("Bob\u2019s iPhone");
+const tokenAsks = (await calls("cloud_token")).length;
+await tid("device-sign-out-t-bob-phone").click();
+const phoneSays = await tid("device-t-bob-phone").locator(".cloud-inline-confirm").textContent();
+await tid("device-sign-out-yes-t-bob-phone").click();
+await poll(async () => (await tid("device-t-bob-phone").count()) === 0);
+const phoneRevoked = await lastCall("cloud_revoke_device");
+step(
+  "Devices (a member): their own devices and nobody's token — Add a device is theirs, this Mac has no Sign out, and signing the phone out names that one sign-in and says its copy goes",
+  memberDevices &&
+    phoneRevoked.args.tokenId === "t-bob-phone" &&
+    phoneSays.includes("deletes its copy of Notes") &&
+    (await tid("device-t-bob-9").count()) === 1 &&
+    (await calls("cloud_token")).length === tokenAsks,
+);
+await page.screenshot({ path: SHOTS + "cloud-11a-devices-member.png" });
 
 /* 25b — a member's agents: their own, and only their own. Bob's helper is
    his to change, log in and remove; the creator's Review bot is not shown to
@@ -1532,7 +1679,7 @@ await page.screenshot({ path: SHOTS + "cloud-11b-agents-member.png" });
    panel shuts — and a notice says what happened, in words that do not
    pretend anything was deleted in the cloud */
 await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People and agents").count()) === 0);
+await poll(async () => (await dialog("People, devices and agents").count()) === 0);
 const removedRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
 await setStatuses([]); // the engine forgets the workspace first, then says why
 await emit("cloud-removed", { root: removedRoot, name: "Notes", domain: "notes.example.com", deleted: true, at: Date.now() });

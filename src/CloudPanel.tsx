@@ -3,14 +3,15 @@
 // array the engine emits is the whole model, and the panel derives
 // everything from the entry for the open workspace.
 //
-// Not connected: three doors — join a workspace somebody invited you to with
-// the line they sent, create one from this folder on a domain of your own, or
-// open one another Mac of yours created. Connected: the workspace and its
-// phase, sync now / pause, who else is here, the held mass-deletion waiting
-// for a word, the worker's version against this app's, the credentials a
-// second Mac needs, disconnect, and the danger zone: erase everything on the
-// domain (which frees it), then the teardown prompt for the agent. Who is in
-// the workspace, and its agents, are the workspace menu's (PeopleDialog.tsx).
+// Not connected: three doors — join a workspace with a line (an invite
+// somebody sent, or a code from another device of your own), create one from
+// this folder on a domain of your own, or get back into one you made with the
+// domain's own token. Connected: the workspace and its phase, sync now /
+// pause, who else is here, the held mass-deletion waiting for a word, the
+// worker's version against this app's, adding a device, disconnect, and the
+// danger zone: erase everything on the domain (which frees it), then the
+// teardown prompt for the agent. Who is in the workspace, their devices and
+// its agents are the workspace menu's (PeopleDialog.tsx).
 //
 // What only an owner may do — the worker, the danger zone — is hidden from a
 // member by the same table the domain decides with (`mayOn`).
@@ -22,7 +23,6 @@ import {
   cloudDisconnect,
   cloudPause,
   cloudSyncNow,
-  cloudToken,
   cloudWipe,
   mayOn,
   phaseLine,
@@ -30,7 +30,6 @@ import {
   timeAgo,
   workerAhead,
   workerBehind,
-  type CloudCredentials,
   type CloudStatus,
 } from "./cloud";
 import { useDismiss } from "./dismiss";
@@ -58,7 +57,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
-type View = "main" | "another" | "wipe" | "teardown";
+type View = "main" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
@@ -68,6 +67,7 @@ export default function CloudPanel({
   onConnect,
   onJoin,
   onRedeem,
+  onAddDevice,
   onUpdateWorker,
   onOpenPublished,
   onOpenExternal,
@@ -83,8 +83,11 @@ export default function CloudPanel({
   onClose: () => void;
   onConnect: () => void;
   onJoin: () => void;
-  /** Somebody invited this Mac: the wizard's third mode (CloudSetup.tsx). */
+  /** This Mac has a line to join with — an invite, or a code from another
+   *  device of its person's: the wizard's third mode (CloudSetup.tsx). */
   onRedeem: () => void;
+  /** The Devices tab, where a code for another device is made (CloudDevices.tsx). */
+  onAddDevice: () => void;
   onUpdateWorker: () => void;
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
@@ -98,7 +101,6 @@ export default function CloudPanel({
 }) {
   const [view, setView] = useState<View>("main");
   const [error, setError] = useState<string | null>(null);
-  const [creds, setCreds] = useState<CloudCredentials | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [wipeInput, setWipeInput] = useState("");
@@ -121,22 +123,6 @@ export default function CloudPanel({
     const h = window.setInterval(() => setNow(Date.now()), 15000);
     return () => window.clearInterval(h);
   }, []);
-
-  useEffect(() => {
-    if (view !== "another" || !root) return;
-    let live = true;
-    setCreds(null);
-    void cloudToken(root)
-      .then((c) => {
-        if (live) setCreds(c);
-      })
-      .catch((e) => {
-        if (live) setError(errText(e));
-      });
-    return () => {
-      live = false;
-    };
-  }, [view, root]);
 
   const copy = useCallback(async (key: string, text: string) => {
     try {
@@ -174,13 +160,11 @@ export default function CloudPanel({
   }, [cloud]);
 
   const title =
-    view === "another"
-      ? "Connect another Mac"
-      : view === "wipe"
-        ? `Delete everything on ${cloud?.domain ?? "the domain"}`
-        : view === "teardown"
-          ? "Tear down"
-          : "Cloud";
+    view === "wipe"
+      ? `Delete everything on ${cloud?.domain ?? "the domain"}`
+      : view === "teardown"
+        ? "Tear down"
+        : "Cloud";
 
   let body: React.ReactNode;
   if (view === "teardown" && tornDown) {
@@ -231,57 +215,17 @@ export default function CloudPanel({
             Create a workspace
           </button>
           <button className="modal-btn" data-testid="open-from-domain" onClick={onJoin}>
-            Open a workspace from a domain
+            Open with the domain’s token
           </button>
         </div>
         {!root && <p className="cloud-hint">Open a folder first to create a workspace from it.</p>}
         <p className="cloud-hint">
-          Joining is for a workspace somebody invited you to: paste the line they sent. Creating
-          one turns the open folder into a workspace you can invite people to. The third door is
-          for another Mac of your own — it wants the token from the Mac that created the
-          workspace.
+          Joining takes one line: the invite somebody sent you, or — for a workspace you are
+          already in — the line another device of yours makes under Devices → Add a device.
+          Creating one turns the open folder into a workspace you can invite people to. The third
+          door is the way back into a workspace you made when every device is gone: it wants the
+          domain’s own token.
         </p>
-      </>
-    );
-  } else if (view === "another") {
-    body = (
-      <>
-        <p className="cloud-hint">
-          On the other Mac: the gear → Cloud… → Open a workspace from a domain, then paste these
-          two. It downloads “{cloud.name}” into its own folder in <code>~/Doklin</code> and stays
-          in step.
-        </p>
-        <div className="modal-field">
-          <div className="modal-field-label">Endpoint</div>
-          <div className="cloud-copy-row">
-            <input className="modal-field-input" readOnly value={creds?.endpoint ?? cloud.endpoint} data-testid="creds-endpoint" />
-            <button className="modal-btn" onClick={() => void copy("endpoint", creds?.endpoint ?? cloud.endpoint)}>
-              {copied === "endpoint" ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-        </div>
-        <div className="modal-field">
-          <div className="modal-field-label">Token</div>
-          <div className="cloud-copy-row">
-            <input
-              className="modal-field-input modal-field-token"
-              readOnly
-              value={creds?.token ?? ""}
-              placeholder="…"
-              data-testid="creds-token"
-            />
-            <button className="modal-btn" disabled={!creds} onClick={() => creds && void copy("token", creds.token)}>
-              {copied === "token" ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-        </div>
-        <p className="cloud-hint cloud-warn">
-          This is the credential this Mac syncs with: whoever holds it can read and write everything
-          on {cloud.domain}. Share it only with Macs you own — to let somebody <em>else</em> in,
-          invite them under People, in the workspace menu, and they get a credential of their own,
-          which you can take back.
-        </p>
-        {error && <div className="modal-error">{error}</div>}
       </>
     );
   } else if (view === "wipe") {
@@ -367,9 +311,11 @@ export default function CloudPanel({
         {cloud.phase === "error" && cloud.error && <div className="modal-error">{cloud.error}</div>}
         {cloud.phase === "revoked" && (
           <p className="cloud-hint cloud-warn">
-            {cloud.domain} doesn’t accept this Mac’s token, so nothing syncs. Your files here are
-            untouched. If the worker was redeployed with a new token, disconnect and connect this
-            folder again with it; if you joined with an invite, ask an owner for a fresh one.
+            {cloud.domain} doesn’t accept this Mac’s sign-in, so nothing syncs. Your files here are
+            untouched. Disconnect this Mac, then join again with this folder open: with a line from
+            another device of yours (Devices → Add a device), or an invite from an owner. If this
+            Mac made the workspace and its worker was redeployed with a new token, open it with
+            that token instead.
           </p>
         )}
         {cloud.phase === "offline" && (
@@ -485,9 +431,11 @@ export default function CloudPanel({
 
         <div className="cloud-section-label">This Mac</div>
         <div className="cloud-actions">
-          <button className="modal-btn" data-testid="another-mac" onClick={() => setView("another")}>
-            Connect another Mac
-          </button>
+          {mayOn(cloud, "devices.own") && (
+            <button className="modal-btn" data-testid="add-device" onClick={onAddDevice}>
+              Add a device
+            </button>
+          )}
           {onOpenVersions && (
             <button className="modal-btn" data-testid="cloud-versions-settings" onClick={onOpenVersions}>
               Version settings
@@ -500,7 +448,10 @@ export default function CloudPanel({
           )}
           {confirmDisconnect ? (
             <span className="cloud-inline-confirm" data-testid="disconnect-confirm">
-              <span className="cloud-hint">Stop syncing on this Mac? The folder and the cloud stay.</span>
+              <span className="cloud-hint">
+                Stop syncing on this Mac? The folder and the cloud stay, and this Mac’s sign-in ends:
+                to sync here again it joins with a new line.
+              </span>
               <button
                 className="modal-btn is-primary"
                 data-testid="disconnect-yes"

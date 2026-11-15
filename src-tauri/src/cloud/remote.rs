@@ -168,23 +168,24 @@ pub struct RedeemedToken {
     pub member: MemberRecord,
 }
 
-/// One signed-in Mac, as `GET /api/auth/tokens` lists it. Never the
-/// credential: an owner is told who holds one and may take it away, never
-/// what it is — a list of tokens would be a list of keys.
+/// One signed-in device — a Mac, an iPhone — as `GET /api/auth/devices`
+/// lists it. Never the credential: its person, and an owner, are told who
+/// holds one and may take it away, never what it is — a list of tokens would
+/// be a list of keys.
 ///
-/// The Macs that hold the domain's own secret are not in here at all. It is
+/// The Mac that holds the domain's own secret is not in here at all. It is
 /// matched against no row, so there is nothing to list and nothing to revoke
 /// but the secret itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenRecord {
+pub struct DeviceRecord {
     pub id: String,
     #[serde(default)]
     pub member_id: String,
     #[serde(default)]
     pub email: String,
-    /// The `x-doklin-device` id that redeemed it — how a Mac recognizes its
-    /// own row in the list. Null on a token minted before the app sent one.
+    /// The `x-doklin-device` id that redeemed it — how a device recognizes
+    /// its own row in the list.
     #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
@@ -537,14 +538,31 @@ pub trait Remote: Send + Sync + 'static {
     /// anybody trades it in.
     fn delete_invite(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// `GET /api/auth/tokens` (owner): every signed-in Mac.
-    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send;
+    /// `POST /api/auth/devices/code`: a one-time code for another device of
+    /// this person's own, replacing the pending code they had. Only
+    /// `sha256(code)` goes up. `POST /api/auth/join` redeems it, as it does
+    /// an invite — to the domain it is one, for somebody already here.
+    fn device_code(
+        &self,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// `DELETE /api/auth/tokens/<id>` (owner): sign one Mac out. It takes
-    /// effect on that Mac's very next request — the bearer resolves through
-    /// the table, so there is no session to expire — and that Mac deletes its
-    /// copy when it hears.
-    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+    /// `GET /api/auth/devices`: this person's signed-in devices — for an
+    /// owner, everybody's.
+    fn list_devices(&self) -> impl std::future::Future<Output = RemoteResult<Vec<DeviceRecord>>> + Send;
+
+    /// `DELETE /api/auth/devices/<id>` (its person, or an owner): sign one
+    /// device out. It takes effect on that device's very next request — the
+    /// bearer resolves through the table, so there is no session to expire —
+    /// and that device deletes its copy when it hears.
+    fn sign_out_device(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
+
+    /// `DELETE /api/auth/session`: this device ending its own sign-in. The
+    /// domain forgets it and tells it to delete nothing — leaving is not
+    /// being shown the door. Refused for the domain's secret, which is no
+    /// sign-in.
+    fn end_session(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 }
 
 /* ---------- HTTP remote (the real worker) ---------- */
@@ -1345,11 +1363,37 @@ impl Remote for HttpRemote {
         self.revoke("invites", id)
     }
 
-    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
-        self.list_of("tokens")
+    fn device_code(
+        &self,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let body = json!({ "codeHash": code_hash, "expiresAt": expires_at });
+        async move {
+            let res = self
+                .auth(self.client.post(self.url("auth/devices/code")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&body).unwrap_or_default())
+                .send()
+                .await
+                .map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
     }
 
-    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        self.revoke("tokens", id)
+    fn list_devices(&self) -> impl std::future::Future<Output = RemoteResult<Vec<DeviceRecord>>> + Send {
+        self.list_of("devices")
+    }
+
+    fn sign_out_device(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        self.revoke("devices", id)
+    }
+
+    fn end_session(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let url = self.url("auth/session");
+        async move {
+            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
+            expect_status(res).await.map(|_| ())
+        }
     }
 }

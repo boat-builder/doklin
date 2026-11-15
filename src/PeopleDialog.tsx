@@ -1,5 +1,5 @@
-// Who is in the workspace, and its agents — the workspace menu's *People…*
-// and *Agents…*. A window of its own rather than a view of the Cloud panel:
+// Who is in the workspace, their devices, and its agents — the workspace
+// menu's *People…*, *Devices…* and *Agents…*. A window of its own rather than a view of the Cloud panel:
 // who is here is the workspace's business, not sync's. The body is
 // CloudPeople, one tab each.
 
@@ -43,7 +43,7 @@ export default function PeopleDialog({
     }
   }, []);
 
-  const title = mayOn(cloud, "agents.own") ? "People and agents" : "People";
+  const title = mayOn(cloud, "agents.own") ? "People, devices and agents" : "People";
   return (
     <div className="modal-overlay">
       <div ref={cardRef} className="modal cloud-modal" role="dialog" aria-modal="true" aria-label={title}>

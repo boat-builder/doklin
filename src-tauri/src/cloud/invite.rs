@@ -109,6 +109,17 @@ pub fn agent_code_expires_at(now_ms: u64) -> u64 {
     now_ms + AGENT_CODE_MINUTES * 60 * 1000
 }
 
+/// How long a device code is good for. It is made on one device to be pasted
+/// on the one beside it, so an hour is already generous; the worker accepts
+/// up to a day (`MAX_DEVICE_CODE_TTL_MS`, cloud-worker/src/members.ts) only
+/// so two clocks that disagree do not refuse each other.
+pub const DEVICE_CODE_MINUTES: u64 = 60;
+
+/// When a device code minted now runs out.
+pub fn device_code_expires_at(now_ms: u64) -> u64 {
+    now_ms + DEVICE_CODE_MINUTES * 60 * 1000
+}
+
 /// The one line the owner hands to whoever sets the bot up — or pastes
 /// straight into the agent's chat: `doklin login https://notes.example.com
 /// dkla-K7QM2-9XVR4-8TBHN-3WGYD`. It is the command itself, so there is

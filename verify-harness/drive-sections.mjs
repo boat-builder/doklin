@@ -418,7 +418,7 @@ await poll(async () => (await tid("private-nobody").count()) === 1);
 const nobody = await tid("private-nobody").innerText();
 const noPlus = (await tid("new-private").count()) === 0;
 await tid("private-nobody").locator(".tree-section-link").click();
-await poll(async () => (await dialog("People and agents").count()) === 1);
+await poll(async () => (await dialog("People, devices and agents").count()) === 1);
 step(
   "nobody a Private could belong to: the Private list says to say who you are, and its link opens People",
   nobody.includes("Say who you are") && noPlus,
