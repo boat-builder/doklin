@@ -177,7 +177,9 @@ function closedRanges(md: string): { from: number; to: number; why: string }[] {
   };
   const front = /^---\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(md);
   if (front) out.push({ from: 0, to: front[0].length, why: "the frontmatter at the top" });
-  add(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\1[`~]*[ \t]*(?=\n|$)|$)/gm, "a code block");
+  // A fence with no end runs to the end of the text: `(?![\s\S])`, not `$`,
+  // which under the m flag is the end of any line.
+  add(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\1[`~]*[ \t]*(?=\n|$)|(?![\s\S]))/gm, "a code block");
   add(/`[^`\n]+`/g, "code");
   add(/\]\([^)\n]*\)/g, "a link's address");
   add(/<[^>\n]+>/g, "an html tag");

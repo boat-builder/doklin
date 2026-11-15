@@ -20,17 +20,23 @@ final class CommentsTests: XCTestCase {
     }()
 
     private func cases(_ key: String) -> [JSValue] {
-        guard let all = Self.fixture[key]?.array, !all.isEmpty else {
+        guard let all = Self.fixture[JSString(key)]?.array, !all.isEmpty else {
             XCTFail("the fixture has no \(key) cases")
             return []
         }
         return all
     }
 
-    private func text(_ value: JSValue?) -> String? { value?.string }
+    /// A string of the fixture to show, or to hand to what takes a Swift string.
+    private func text(_ value: JSValue?) -> String? { value?.string?.string }
+
+    /// A string of the fixture as JavaScript holds it, half a character and all.
+    private func js(_ value: JSValue?) -> JSString? { value?.string }
 
     private func entry(_ value: JSValue) -> CommentEntry {
-        CommentEntry(author: value["author"]?.string ?? "", at: value["at"]?.number ?? .nan, body: value["body"]?.string ?? "")
+        var entry = CommentEntry(author: value["author"]?.string ?? "", at: value["at"]?.number ?? .nan, body: value["body"]?.string ?? "")
+        entry.eid = value["eid"]
+        return entry
     }
 
     private func entries(_ value: JSValue?) -> [CommentEntry] { value?.array?.map(entry) ?? [] }
@@ -56,28 +62,28 @@ final class CommentsTests: XCTestCase {
 
     func testSpans() {
         for c in cases("parseSpans") {
-            let spans = text(c["spans"])!
+            let spans = js(c["spans"])!
             let want = c["parsed"]!
             switch CriticMarkup.parseSpans(spans) {
             case .ref(let id):
-                XCTAssertEqual(want["kind"]?.string, "ref", spans)
-                XCTAssertEqual(id, want["id"]?.string, spans)
+                XCTAssertEqual(text(want["kind"]), "ref", spans.string)
+                XCTAssertEqual(id, text(want["id"]), spans.string)
             case .thread(let id, let comments):
-                XCTAssertEqual(want["kind"]?.string, "thread", spans)
-                XCTAssertEqual(id, want["id"]?.string, spans)
-                assertEntries(comments, want["comments"], spans)
+                XCTAssertEqual(text(want["kind"]), "thread", spans.string)
+                XCTAssertEqual(id, text(want["id"]), spans.string)
+                assertEntries(comments, want["comments"], spans.string)
             }
         }
     }
 
     func testSanitizing() {
         for c in cases("sanitizeBody") { XCTAssertEqual(CriticMarkup.sanitizeBody(text(c["in"])!), text(c["out"])) }
-        for c in cases("sanitizeAuthor") { XCTAssertEqual(CriticMarkup.sanitizeAuthor(text(c["in"])!), text(c["out"])) }
+        for c in cases("sanitizeAuthor") { XCTAssertEqual(CriticMarkup.sanitizeAuthor(text(c["in"])!), js(c["out"])) }
     }
 
     func testWritingAThread() {
         for c in cases("formatThreadSpans") {
-            XCTAssertEqual(CriticMarkup.formatThreadSpans(id: text(c["id"])!, comments: entries(c["comments"])), text(c["out"]), text(c["id"])!)
+            XCTAssertEqual(CriticMarkup.formatThreadSpans(id: text(c["id"])!, comments: entries(c["comments"])), js(c["out"]), text(c["id"])!)
         }
     }
 
@@ -87,7 +93,7 @@ final class CommentsTests: XCTestCase {
 
     func testDerivedIds() {
         for c in cases("deriveId") {
-            XCTAssertEqual(MetaFile.deriveId(text(c["material"])!, Int(c["index"]?.number ?? -1)), text(c["id"]))
+            XCTAssertEqual(MetaFile.deriveId(js(c["material"])!, Int(c["index"]?.number ?? -1)), text(c["id"]))
         }
     }
 
@@ -105,28 +111,28 @@ final class CommentsTests: XCTestCase {
 
     func testExpandAndExtract() {
         for c in cases("expand") {
-            let md = text(c["md"])!
+            let md = js(c["md"])!
             let r = MetaFile.expand(md, mthreads(c["mthreads"]))
-            XCTAssertEqual(r.md, text(c["out"]), md)
-            XCTAssertEqual(r.orphanIds, c["orphanIds"]?.array?.compactMap(\.string), md)
+            XCTAssertEqual(r.md, js(c["out"]), md.string)
+            XCTAssertEqual(r.orphanIds, c["orphanIds"]?.array?.compactMap(\.string), md.string)
         }
         for c in cases("extract") {
-            let md = text(c["md"])!
+            let md = js(c["md"])!
             let r = MetaFile.extract(md)
-            XCTAssertEqual(r.md, text(c["out"]), md)
+            XCTAssertEqual(r.md, js(c["out"]), md.string)
             let want = mthreads(c["mthreads"])
-            XCTAssertEqual(r.mthreads.map(\.id), want.map(\.id), md)
-            for (got, expected) in zip(r.mthreads, c["mthreads"]?.array ?? []) { assertEntries(got.comments, expected["comments"], md) }
+            XCTAssertEqual(r.mthreads.map(\.id), want.map(\.id), md.string)
+            for (got, expected) in zip(r.mthreads, c["mthreads"]?.array ?? []) { assertEntries(got.comments, expected["comments"], md.string) }
         }
     }
 
     func testMigration() {
         for c in cases("migrate") {
-            let md = text(c["md"])
+            let md = js(c["md"])
             let before = text(c["meta"]).map(MetaFile.parse) ?? EntityMeta()
             let r = MetaFile.migrate(md: md, meta: before)
-            let what = md ?? "no markdown"
-            XCTAssertEqual(r.md, text(c["outMd"]), what)
+            let what = md?.string ?? "no markdown"
+            XCTAssertEqual(r.md, js(c["outMd"]), what)
             XCTAssertEqual(MetaFile.serialize(r.meta), text(c["outMeta"]), what)
             XCTAssertEqual(r.md != md, c["mdChanged"] == .bool(true), what)
             XCTAssertEqual(MetaFile.serialize(r.meta) != MetaFile.serialize(before), c["metaChanged"] == .bool(true), what)
@@ -142,12 +148,12 @@ final class CommentsTests: XCTestCase {
             let about = text(c["about"]) ?? ""
             let threads = DocumentComments(md: text(c["md"]), meta: text(c["meta"]), html: text(c["html"])).threads
             let want = c["threads"]?.array ?? []
-            XCTAssertEqual(threads.map(\.id), want.compactMap { $0["id"]?.string }, about)
+            XCTAssertEqual(threads.map(\.id), want.compactMap { text($0["id"]) }, about)
             for (got, expected) in zip(threads, want) {
-                XCTAssertEqual(got.version.rawValue, expected["version"]?.string, about)
-                XCTAssertEqual(got.on, expected["on"]?.string, about)
+                XCTAssertEqual(got.version.rawValue, text(expected["version"]), about)
+                XCTAssertEqual(got.on, text(expected["on"]), about)
                 XCTAssertEqual(got.line, expected["line"]?.number.map { Int($0) }, "\(about): line of \(got.id)")
-                XCTAssertEqual(got.tag, expected["tag"]?.string, about)
+                XCTAssertEqual(got.tag, text(expected["tag"]), about)
                 XCTAssertEqual(got.orphaned, expected["orphaned"] == .bool(true), "\(about): \(got.id) orphaned")
                 assertEntries(got.comments, expected["comments"], about)
             }
@@ -162,7 +168,7 @@ final class CommentsTests: XCTestCase {
         case .oneLine: return .object([("kind", .string("oneLine"))])
         case .formatting: return .object([("kind", .string("formatting"))])
         case .missing: return .object([("kind", .string("missing"))])
-        case .inside(_, let why): return .object([("kind", .string("inside")), ("why", .string(why.rawValue))])
+        case .inside(_, let why): return .object([("kind", .string("inside")), ("why", .string(JSString(why.rawValue)))])
         case .many(_, let count): return .object([("kind", .string("many")), ("count", .number(Double(count)))])
         case .nothingSaid: return .object([("kind", .string("nothingSaid"))])
         case .noMarkdown: return .object([("kind", .string("noMarkdown"))])
@@ -179,20 +185,20 @@ final class CommentsTests: XCTestCase {
             do {
                 if let start = op["start"] {
                     try document.start(
-                        on: start["on"]!.string!, body: start["body"]!.string!, author: start["author"]!.string!,
-                        at: start["at"]!.number!, id: start["id"]!.string!
+                        on: text(start["on"])!, body: text(start["body"])!, author: text(start["author"])!,
+                        at: start["at"]!.number!, id: text(start["id"])!
                     )
                 } else if let reply = op["reply"] {
-                    try document.reply(to: reply["id"]!.string!, body: reply["body"]!.string!, author: reply["author"]!.string!, at: reply["at"]!.number!)
+                    try document.reply(to: text(reply["id"])!, body: text(reply["body"])!, author: text(reply["author"])!, at: reply["at"]!.number!)
                 } else if let remove = op["remove"] {
-                    try document.remove(remove["id"]!.string!)
+                    try document.remove(text(remove["id"])!)
                 } else if let delete = op["deleteReply"] {
-                    try document.deleteReply(of: delete["id"]!.string!, at: Int(delete["index"]!.number!))
+                    try document.deleteReply(of: text(delete["id"])!, entry: entry(delete["entry"]!), at: Int(delete["index"]!.number!))
                 } else {
                     XCTFail("\(about): an operation the test does not know")
                 }
                 XCTAssertNil(c["refusal"], "\(about): done, where the Mac refuses")
-                XCTAssertEqual(document.md, text(c["outMd"]), about)
+                XCTAssertEqual(document.md, js(c["outMd"]), about)
                 XCTAssertEqual(document.metaText(fileExists: raw != nil), text(c["outMeta"]), about)
             } catch let refusal as CommentRefusal {
                 XCTAssertEqual(kind(refusal), c["refusal"], "\(about): \(refusal.message)")
@@ -224,6 +230,18 @@ final class CommentsTests: XCTestCase {
         XCTAssertFalse([first, second].contains(id))
         XCTAssertEqual(id.count, 6)
         XCTAssertTrue(id.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber) })
+    }
+
+    /// Patterns run over the Swift string of a `JSString` and cut its code
+    /// units at the offsets they find: a half shown as U+FFFD must keep
+    /// its place, and come back out whole.
+    func testHalfACharacterKeepsItsPlace() {
+        let half = JSString(units: [0x61, 0xD83D, 0x62, 0xDE00, 0xD83D, 0xDE00])
+        XCTAssertEqual(half.string.utf16.count, half.units.count)
+        XCTAssertEqual(JSValue.string(half).json, "\"a\\ud83db\\ude00😀\"")
+        XCTAssertEqual(JSValue.parse("\"a\\uD83Db\\ude00\\ud83d\\ude00\""), .string(half))
+        let md = JSString("{==w==}{>>#abcd ") + JSString(units: [0xD83D]) + " · 1970-01-01T00:00:01Z: x<<}"
+        XCTAssertEqual(CriticMarkup.blocks(in: md).first?.spans, JSString("{>>#abcd ") + JSString(units: [0xD83D]) + " · 1970-01-01T00:00:01Z: x<<}")
     }
 
     func testEveryRefusalIsASentence() {

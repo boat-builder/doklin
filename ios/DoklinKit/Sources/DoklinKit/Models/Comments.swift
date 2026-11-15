@@ -76,8 +76,9 @@ public final class CommentsModel {
         try await change { document, _, _, _ in try document.remove(id) }
     }
 
-    public func deleteReply(of id: String, at index: Int) async throws {
-        try await change { document, _, _, _ in try document.deleteReply(of: id, at: index) }
+    /// Delete a reply: `entry`, shown at `index` of the thread.
+    public func deleteReply(of id: String, entry: CommentEntry, at index: Int) async throws {
+        try await change { document, _, _, _ in try document.deleteReply(of: id, entry: entry, at: index) }
     }
 
     /// The name comments written here are signed with: this device's, as a
@@ -101,8 +102,8 @@ public final class CommentsModel {
         // Only what changed is written: a file written for nothing is one
         // more change for every other device to take.
         var changed: [String] = []
-        if let md = document.md, let disk = before.disk, JSText.key(md) != JSText.key(disk) {
-            changed += try files.write(path, Data(md.utf8))
+        if let md = document.md, let disk = before.disk, md != JSString(disk) {
+            changed += try files.write(path, Data(md.string.utf8))
         }
         if let text = document.metaText(fileExists: metaText != nil), metaText.map(JSText.key) != JSText.key(text) {
             changed += try files.write(metaPath, Data(text.utf8))

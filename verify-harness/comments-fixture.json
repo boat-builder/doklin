@@ -543,6 +543,10 @@
     {
       "in": "line\nbreak",
       "out": "line break"
+    },
+    {
+      "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀b",
+      "out": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d"
     }
   ],
   "formatThreadSpans": [
@@ -729,6 +733,12 @@
       "raw": "   {\"t\":\"prop\" , \"id\":\"x\",  \"v\" : [1, 2]}   \n",
       "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"prop\" , \"id\":\"x\",  \"v\" : [1, 2]}\n",
       "empty": false
+    },
+    {
+      "about": "half a character: kept, and written as JavaScript writes it",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\uD83D\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair \\ud83d\\ude00 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair 😀 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
+      "empty": false
     }
   ],
   "expand": [
@@ -891,6 +901,23 @@
       ],
       "out": "{==x==}{>>#un1x B · 2026-01-02T00:00:00Z: second<<}{>>A · 2026-01-01T00:00:00Z: first<<}{>>C · 2026-01-04T00:00:00Z: fourth<<}\n",
       "orphanIds": []
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "mthreads": [
+        {
+          "id": "half1",
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        }
+      ],
+      "out": "# T\n\nSome {==words==}{>>#half1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d · 1970-01-01T00:00:01Z: Signed with a long name.<<} here.\n",
+      "orphanIds": []
     }
   ],
   "extract": [
@@ -1035,6 +1062,22 @@
           ]
         }
       ]
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d · 1970-01-01T00:00:01Z: Signed with a long name.<<} here.\n",
+      "out": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "mthreads": [
+        {
+          "id": "half1",
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        }
+      ]
     }
   ],
   "migrate": [
@@ -1109,6 +1152,15 @@
       "mdChanged": true,
       "metaChanged": true,
       "againChanged": true
+    },
+    {
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n",
+      "outMd": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n",
+      "mdChanged": false,
+      "metaChanged": false,
+      "againChanged": false
     }
   ],
   "threads": [
@@ -1319,6 +1371,40 @@
               "author": "W",
               "at": 2000,
               "body": "another tag"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "half a character: an author's name and a page thread's words, cut as the Mac cuts them",
+      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
+      "html": "<!doctype html><html><body><p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀 and the line goes on</p></body></html>",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n",
+      "threads": [
+        {
+          "id": "half1",
+          "version": "md",
+          "on": "words",
+          "line": 3,
+          "comments": [
+            {
+              "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d",
+              "at": 1000,
+              "body": "Signed with a long name."
+            }
+          ]
+        },
+        {
+          "id": "hs1",
+          "version": "html",
+          "on": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ud83d",
+          "tag": "p",
+          "comments": [
+            {
+              "author": "W",
+              "at": 5000,
+              "body": "On the long line."
             }
           ]
         }
@@ -1595,6 +1681,42 @@
       }
     },
     {
+      "about": "only on the second line of a code block",
+      "md": "# T\n\n```js\nconst a = 1;\nconst hello = world;\nmore code here\n```\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "hello = world",
+          "body": "Rename it.",
+          "author": "Pat",
+          "at": 1757000000000,
+          "id": "cb2nd1"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code block"
+      }
+    },
+    {
+      "about": "in a code block that is never closed, to the end of the note",
+      "md": "# T\n\nWords before it.\n\n```\nfirst\nthe words further down\n",
+      "meta": null,
+      "do": {
+        "start": {
+          "on": "the words further down",
+          "body": "In code.",
+          "author": "Pat",
+          "at": 1757000000000,
+          "id": "cbopen"
+        }
+      },
+      "refusal": {
+        "kind": "inside",
+        "why": "code block"
+      }
+    },
+    {
       "about": "only in a link's address",
       "md": "---\nsecret: words in the frontmatter\n---\n# Heading words\n\nSee `code words` and [a link](http://link-words.example) <span class=\"tag-words\">x</span>.\n\n```\nfenced words\n```\n\n- list item\n\nthe twice, the twice. Only once here, and `only once here` in code.\n",
       "meta": null,
@@ -1838,6 +1960,11 @@
       "do": {
         "deleteReply": {
           "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
           "index": 1
         }
       },
@@ -1851,12 +1978,102 @@
       "do": {
         "deleteReply": {
           "id": "plain1",
+          "entry": {
+            "author": "Ada",
+            "at": 1757000000000,
+            "body": "Say it plainer."
+          },
           "index": 0
         }
       },
       "refusal": {
         "kind": "gone"
       }
+    },
+    {
+      "about": "a reply that moved since it was shown is still the one deleted",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"No.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
+          "index": 1
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"}]}\n"
+    },
+    {
+      "about": "a reply already gone is not looked for elsewhere",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Cy\",\"at\":1757000030000,\"body\":\"Inserted.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "No."
+          },
+          "index": 1
+        }
+      },
+      "refusal": {
+        "kind": "gone"
+      }
+    },
+    {
+      "about": "two replies alike: the one shown goes",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"One.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"Two.\"}]}\n",
+      "do": {
+        "deleteReply": {
+          "id": "plain1",
+          "entry": {
+            "author": "Bo",
+            "at": 1757000060000,
+            "body": "Two."
+          },
+          "index": 2
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Bo\",\"at\":1757000060000,\"body\":\"One.\"}]}\n"
+    },
+    {
+      "about": "a reply beside a page thread holding half a character: that line stays as it was",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "plain1",
+          "body": "Plainer, then.",
+          "author": "Ada's iPhone",
+          "at": 1757000123456
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"Ada's iPhone\",\"at\":1757000123000,\"body\":\"Plainer, then.\"}]}\n"
+    },
+    {
+      "about": "a reply signed with a name cut through a character",
+      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
+      "do": {
+        "reply": {
+          "id": "plain1",
+          "body": "Long name.",
+          "author": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀 more",
+          "at": 1757000123456
+        }
+      },
+      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
+      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1757000123000,\"body\":\"Long name.\"}]}\n"
     }
   ]
 }

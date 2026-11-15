@@ -147,7 +147,7 @@ struct CommentsView: View {
                                 }
                             } else {
                                 Button(role: .destructive) {
-                                    deleteReply(index, of: thread)
+                                    deleteReply(entry, at: index, of: thread)
                                 } label: {
                                     Label("Delete reply", systemImage: "trash")
                                 }
@@ -216,8 +216,8 @@ struct CommentsView: View {
         }
     }
 
-    private func deleteReply(_ index: Int, of thread: CommentThread) {
-        run { try await model.deleteReply(of: thread.id, at: index) }
+    private func deleteReply(_ entry: CommentEntry, at index: Int, of thread: CommentThread) {
+        run { try await model.deleteReply(of: thread.id, entry: entry, at: index) }
     }
 
     private func remove() {
@@ -243,7 +243,7 @@ private struct CommentRow: View {
                         .foregroundStyle(Theme.text3)
                 }
             }
-            Text(entry.body)
+            Text(entry.body.string)
                 .foregroundStyle(Theme.text1)
         }
         .padding(.vertical, 2)

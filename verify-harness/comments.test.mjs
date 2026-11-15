@@ -134,10 +134,16 @@ function operate(c) {
       return { refusal: { kind: "gone" } };
     }
   } else if (op.deleteReply) {
-    const { id, index } = op.deleteReply;
+    // The reply shown at `index`, found again by who wrote it and when (the
+    // fold key of metaFile.ts): sync may have moved the thread on since.
+    const { id, entry, index } = op.deleteReply;
     const found = m.mthreads.find((t) => t.id === id) ?? m.hthreads.find((t) => t.id === id);
-    if (!found || !(index > 0 && index < found.comments.length)) return { refusal: { kind: "gone" } };
-    found.comments = found.comments.filter((_, i) => i !== index);
+    if (!found) return { refusal: { kind: "gone" } };
+    const key = (e) => e.eid ?? `${e.author}|${e.at}`;
+    const matching = found.comments.flatMap((e, i) => (i > 0 && key(e) === key(entry) ? [i] : []));
+    const at = matching.includes(index) ? index : matching[0];
+    if (at === undefined) return { refusal: { kind: "gone" } };
+    found.comments = found.comments.filter((_, i) => i !== at);
   }
   // The Mac never makes a meta file for nothing, and empties one it has.
   return { outMd: md, outMeta: mf.metaIsEmpty(m) && c.meta === null ? null : mf.serializeEntityMeta(m) };

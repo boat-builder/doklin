@@ -1,10 +1,40 @@
 // What the comment files need of JavaScript's own rules, so that this port
-// writes the bytes the Mac writes: its whitespace, its `trim`, its string
-// order (UTF-16 code units), its number-to-text, and `JSON.parse` and
-// `JSON.stringify` as V8 does them — object keys in their order, no spaces,
-// `/` and non-ASCII left as they are.
+// writes the bytes the Mac writes: its strings (UTF-16 code units, half a
+// character included), its whitespace, its `trim`, its string order, its
+// number-to-text, and `JSON.parse` and `JSON.stringify` as V8 does them —
+// object keys in their order, no spaces, `/` and non-ASCII left as they
+// are, half a character written as `\udxxx`.
 
 import Foundation
+
+/// Text as JavaScript holds it: UTF-16 code units, any of them. That
+/// includes half of a character — what `slice` leaves when it cuts between
+/// the two halves, as the Mac does to an anchor's text at 120 units and to
+/// an author's name at 80 — which JSON writes as `\udxxx` and reads back
+/// whole. A Swift string cannot hold half a character and shows one as
+/// U+FFFD, so whatever comes out of a meta file stays a `JSString` until it
+/// is shown: written back, it must be the bytes it came as.
+public struct JSString: Hashable, Sendable, ExpressibleByStringLiteral, CustomDebugStringConvertible {
+    public var units: [UInt16]
+
+    public init(_ text: String) { units = Array(text.utf16) }
+    public init(units: [UInt16]) { self.units = units }
+    public init<S: Sequence>(units: S) where S.Element == UInt16 { self.units = Array(units) }
+    public init(stringLiteral value: String) { self.init(value) }
+
+    /// The text to show, a lone half as U+FFFD. That is one code unit too,
+    /// so an offset into this is the same offset into `units` — and no
+    /// pattern of the port tells the two apart, as none names a half.
+    public var string: String { String(decoding: units, as: UTF16.self) }
+
+    public var isEmpty: Bool { units.isEmpty }
+    public var debugDescription: String { string.debugDescription }
+
+    /// The units an `NSRange` of `string` covers.
+    subscript(range: NSRange) -> JSString { JSString(units: units[range.location..<(range.location + range.length)]) }
+
+    static func + (a: JSString, b: JSString) -> JSString { JSString(units: a.units + b.units) }
+}
 
 enum JSText {
     /// `\s` and what `trim()` removes: the same set in JavaScript.
@@ -20,19 +50,20 @@ enum JSText {
     /// different set.
     static let spaceClass = "\\t\\n\\x{0B}\\f\\r \\x{A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}"
 
-    static func trim(_ text: String) -> String {
-        let units = Array(text.utf16)
+    static func trim(_ text: JSString) -> JSString {
+        let units = text.units
         var start = 0
         var end = units.count
         while start < end, isSpace(units[start]) { start += 1 }
         while end > start, isSpace(units[end - 1]) { end -= 1 }
-        if start == 0, end == units.count { return text }
-        return String(decoding: units[start..<end], as: UTF16.self)
+        return start == 0 && end == units.count ? text : JSString(units: units[start..<end])
     }
 
+    static func trim(_ text: String) -> String { trim(JSString(text)).string }
+
     /// `a < b` on strings.
-    static func less(_ a: String, _ b: String) -> Bool {
-        a.utf16.lexicographicallyPrecedes(b.utf16)
+    static func less(_ a: [UInt16], _ b: [UInt16]) -> Bool {
+        a.lexicographicallyPrecedes(b)
     }
 
     /// A string as JavaScript tells two apart: by its code units. Swift's
@@ -111,36 +142,36 @@ enum JSText {
     }
 }
 
-/// A JSON value as JavaScript holds one: numbers are doubles, and an
-/// object's keys keep the order JavaScript enumerates them in.
+/// A JSON value as JavaScript holds one: numbers are doubles, strings are
+/// code units, and an object's keys keep the order JavaScript enumerates
+/// them in.
 indirect enum JSValue: Equatable, Sendable {
     case null
     case bool(Bool)
     case number(Double)
-    case string(String)
+    case string(JSString)
     case array([JSValue])
-    case object([(String, JSValue)])
+    case object([(JSString, JSValue)])
 
     static func == (a: JSValue, b: JSValue) -> Bool {
         switch (a, b) {
         case (.null, .null): return true
         case (.bool(let x), .bool(let y)): return x == y
         case (.number(let x), .number(let y)): return x == y
-        case (.string(let x), .string(let y)): return JSText.key(x) == JSText.key(y)
+        case (.string(let x), .string(let y)): return x == y
         case (.array(let x), .array(let y)): return x == y
         case (.object(let x), .object(let y)):
-            return x.count == y.count && zip(x, y).allSatisfy { JSText.key($0.0) == JSText.key($1.0) && $0.1 == $1.1 }
+            return x.count == y.count && zip(x, y).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
         default: return false
         }
     }
 
-    subscript(key: String) -> JSValue? {
+    subscript(key: JSString) -> JSValue? {
         guard case .object(let fields) = self else { return nil }
-        let wanted = JSText.key(key)
-        return fields.first { JSText.key($0.0) == wanted }?.1
+        return fields.first { $0.0 == key }?.1
     }
 
-    var string: String? {
+    var string: JSString? {
         if case .string(let s) = self { return s }
         return nil
     }
@@ -190,36 +221,45 @@ indirect enum JSValue: Equatable, Sendable {
 
     /// The keys that read as array indexes first, by number, then the rest
     /// as they were made — the order JavaScript lists an object's keys in.
-    private static func enumerationOrder(_ fields: [(String, JSValue)]) -> [(String, JSValue)] {
-        func index(_ key: String) -> UInt32? {
-            guard let n = UInt32(key), n != UInt32.max, String(n) == key else { return nil }
+    private static func enumerationOrder(_ fields: [(JSString, JSValue)]) -> [(JSString, JSValue)] {
+        func index(_ key: JSString) -> UInt32? {
+            guard let n = UInt32(key.string), n != UInt32.max, JSString(String(n)) == key else { return nil }
             return n
         }
         let indexed = fields.compactMap { field in index(field.0).map { ($0, field) } }.sorted { $0.0 < $1.0 }.map(\.1)
         return indexed + fields.filter { index($0.0) == nil }
     }
 
-    static func quote(_ s: String) -> String {
-        var out = "\""
-        for scalar in s.unicodeScalars {
-            switch scalar {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\u{08}": out += "\\b"
-            case "\u{0C}": out += "\\f"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            default:
-                if scalar.value < 0x20 {
-                    let hex = String(scalar.value, radix: 16)
-                    out += "\\u" + String(repeating: "0", count: 4 - hex.count) + hex
-                } else {
-                    out.unicodeScalars.append(scalar)
-                }
-            }
+    /// A string as `JSON.stringify` writes it: the few escapes JSON needs,
+    /// and half a character as `\udxxx` — anything else as it is.
+    static func quote(_ s: JSString) -> String {
+        var out: [UInt16] = [0x22]
+        func escape(_ unit: UInt16) {
+            let hex = Array(String(unit, radix: 16).utf16)
+            out += Array("\\u".utf16) + Array(repeating: 0x30, count: 4 - hex.count) + hex
         }
-        return out + "\""
+        let units = s.units
+        var i = 0
+        while i < units.count {
+            let unit = units[i]
+            switch unit {
+            case 0x22: out += Array("\\\"".utf16)
+            case 0x5C: out += Array("\\\\".utf16)
+            case 0x08: out += Array("\\b".utf16)
+            case 0x0C: out += Array("\\f".utf16)
+            case 0x0A: out += Array("\\n".utf16)
+            case 0x0D: out += Array("\\r".utf16)
+            case 0x09: out += Array("\\t".utf16)
+            case 0xD800...0xDBFF where i + 1 < units.count && (0xDC00...0xDFFF).contains(units[i + 1]):
+                out += [unit, units[i + 1]]
+                i += 1
+            case 0xD800...0xDFFF, 0..<0x20: escape(unit)
+            default: out.append(unit)
+            }
+            i += 1
+        }
+        out.append(0x22)
+        return String(decoding: out, as: UTF16.self)
     }
 }
 
@@ -258,7 +298,7 @@ private struct JSONReader {
 
     mutating func object() -> JSValue? {
         i += 1
-        var fields: [(String, JSValue)] = []
+        var fields: [(JSString, JSValue)] = []
         skipSpace()
         if i < units.count, units[i] == 0x7D {
             i += 1
@@ -273,8 +313,7 @@ private struct JSONReader {
             skipSpace()
             guard let value = value() else { return nil }
             // A key given twice keeps its first place and its last value.
-            let wanted = JSText.key(key)
-            if let at = fields.firstIndex(where: { JSText.key($0.0) == wanted }) { fields[at].1 = value } else { fields.append((key, value)) }
+            if let at = fields.firstIndex(where: { $0.0 == key }) { fields[at].1 = value } else { fields.append((key, value)) }
             skipSpace()
             guard i < units.count else { return nil }
             if units[i] == 0x2C {
@@ -311,14 +350,15 @@ private struct JSONReader {
         }
     }
 
-    mutating func string() -> String? {
+    /// A string's code units, `\udxxx` read as the half it is.
+    mutating func string() -> JSString? {
         i += 1
         var out: [UInt16] = []
         while i < units.count {
             let c = units[i]
             if c == 0x22 {
                 i += 1
-                return String(decoding: out, as: UTF16.self)
+                return JSString(units: out)
             }
             if c < 0x20 { return nil }
             if c != 0x5C {

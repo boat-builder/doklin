@@ -9,14 +9,14 @@
 //
 // One record a line, sorted, keys in a fixed order: sync merges the file
 // line by line with what the Mac writes (engine/src/cloud/merge.rs), so two
-// devices holding the same threads must write the same bytes. A port of
-// src/metaFile.ts — change both; verify-harness/comments-fixture.json holds
-// them to it.
+// devices holding the same threads must write the same bytes — which is why
+// what a record says is kept as `JSString`s. A port of src/metaFile.ts —
+// change both; verify-harness/comments-fixture.json holds them to it.
 
 import Foundation
 
 public struct MdThread: Equatable, Sendable {
-    public var id: String
+    public var id: JSString
     public var comments: [CommentEntry]
 }
 
@@ -24,27 +24,27 @@ public struct MdThread: Equatable, Sendable {
 /// the top, and the element's tag and the start of its text for when the
 /// page was made again and the path no longer leads there.
 public struct HtmlAnchor: Equatable, Sendable {
-    public var path: String
-    public var tag: String
-    public var text: String
+    public var path: JSString
+    public var tag: JSString
+    public var text: JSString
 }
 
 public struct HtmlThread: Equatable, Sendable {
-    public var id: String
+    public var id: JSString
     public var anchor: HtmlAnchor
     public var comments: [CommentEntry]
 }
 
 /// A table's column widths, kept for the Mac; the phone only carries them.
 struct TableCols: Equatable, Sendable {
-    var id: String
+    var id: JSString
     var cols: [Double]
 }
 
 /// A record of a kind this version does not know, kept line for line.
 struct ForeignRecord: Equatable, Sendable {
-    var t: String
-    var sortId: String
+    var t: JSString
+    var sortId: JSString
     var raw: String
 }
 
@@ -99,16 +99,16 @@ public enum MetaFile {
     /// record given twice is the first valid one.
     public static func parse(_ raw: String) -> EntityMeta {
         var meta = EntityMeta()
-        var seen = Set<[UInt16]>()
+        var seen = Set<JSString>()
         for line in JSText.lines(raw) {
             let trimmed = JSText.trim(line)
             guard !trimmed.isEmpty, let value = JSValue.parse(trimmed), value.isObjectLike else { continue }
             if value["doklin"]?.string != nil { continue }
             guard let t = value["t"]?.string, !t.isEmpty else { continue }
             let id = value["id"]?.string ?? ""
-            let key = JSText.key("\(t) \(id)")
+            let key = t + " " + id
             if seen.contains(key) { continue }
-            switch t {
+            switch t.string {
             case "mthread":
                 guard !id.isEmpty, let comments = entries(value["comments"]) else { continue }
                 seen.insert(key)
@@ -135,7 +135,7 @@ public enum MetaFile {
     }
 
     private static func json(_ entry: CommentEntry) -> JSValue {
-        var fields: [(String, JSValue)] = [("author", .string(entry.author)), ("at", .number(entry.at)), ("body", .string(entry.body))]
+        var fields: [(JSString, JSValue)] = [("author", .string(entry.author)), ("at", .number(entry.at)), ("body", .string(entry.body))]
         if let eid = entry.eid { fields.append(("eid", eid)) }
         if let codeId = entry.codeId { fields.append(("codeId", codeId)) }
         if let label = entry.label { fields.append(("label", label)) }
@@ -145,28 +145,28 @@ public enum MetaFile {
     /// The file's bytes for these records: the same records, in any order,
     /// always the same bytes.
     public static func serialize(_ meta: EntityMeta) -> String {
-        var rows: [(key: String, line: String)] = []
+        var rows: [(key: JSString, line: String)] = []
         for thread in meta.hthreads {
             let anchor = JSValue.object([("path", .string(thread.anchor.path)), ("tag", .string(thread.anchor.tag)), ("text", .string(thread.anchor.text))])
             let line = JSValue.object([
                 ("t", .string("hthread")), ("id", .string(thread.id)), ("anchor", anchor), ("comments", .array(thread.comments.map(json))),
             ]).json
-            rows.append(("hthread \(thread.id)", line))
+            rows.append(("hthread " + thread.id, line))
         }
         for thread in meta.mthreads {
             let line = JSValue.object([("t", .string("mthread")), ("id", .string(thread.id)), ("comments", .array(thread.comments.map(json)))]).json
-            rows.append(("mthread \(thread.id)", line))
+            rows.append(("mthread " + thread.id, line))
         }
         for table in meta.tcols {
             let line = JSValue.object([("t", .string("tcols")), ("id", .string(table.id)), ("cols", .array(table.cols.map(JSValue.number)))]).json
-            rows.append(("tcols \(table.id)", line))
+            rows.append(("tcols " + table.id, line))
         }
         for record in meta.foreign {
-            rows.append(("\(record.t) \(record.sortId) \(record.raw)", record.raw))
+            rows.append((record.t + " " + record.sortId + " " + JSString(record.raw), record.raw))
         }
         let sorted = rows.enumerated().sorted { a, b in
-            if JSText.less(a.element.key, b.element.key) { return true }
-            if JSText.less(b.element.key, a.element.key) { return false }
+            if JSText.less(a.element.key.units, b.element.key.units) { return true }
+            if JSText.less(b.element.key.units, a.element.key.units) { return false }
             return a.offset < b.offset
         }
         return ([header] + sorted.map(\.element.line)).joined(separator: "\n") + "\n"
@@ -174,18 +174,9 @@ public enum MetaFile {
 
     /* ---------- The markdown and its records ---------- */
 
-    /// Two copies of one entry: the same stamp, else the same author and time.
-    private static func foldKey(_ entry: CommentEntry) -> [UInt16] {
-        switch entry.eid {
-        case .none, .null?: return JSText.key("s:\(entry.author)|\(JSText.number(entry.at))")
-        case .string(let eid)?: return JSText.key("s:\(eid)")
-        case let other?: return JSText.key("v:\(other.json)")
-        }
-    }
-
     private static func union(_ a: [CommentEntry], _ b: [CommentEntry]) -> [CommentEntry] {
-        let have = Set(a.map(foldKey))
-        let extra = b.enumerated().filter { !have.contains(foldKey($0.element)) }
+        let have = Set(a.map(\.identity))
+        let extra = b.enumerated().filter { !have.contains($0.element.identity) }
             .sorted { $0.element.at == $1.element.at ? $0.offset < $1.offset : $0.element.at < $1.element.at }
             .map(\.element)
         return a + extra
@@ -203,8 +194,8 @@ public enum MetaFile {
 
     /// An id made from what a thread is, so two devices give the same
     /// thread the same id; `index` keeps two identical threads apart.
-    public static func deriveId(_ material: String, _ index: Int) -> String {
-        let units = Array("\(index) \(material)".utf16)
+    public static func deriveId(_ material: JSString, _ index: Int) -> String {
+        let units = Array("\(index) ".utf16) + material.units
         let id = String(fnv1a(units, seed: 0x811C_9DC5), radix: 36) + String(fnv1a(units, seed: 0x0123_4567), radix: 36)
         return String((id + "000000").prefix(8))
     }
@@ -212,63 +203,64 @@ public enum MetaFile {
     /// The markdown as the Mac's editor reads it: each thread's entries put
     /// back on the first run of its words. A marker whose id has no record
     /// stays as it is; a record with no marker is an orphan, kept.
-    public static func expand(_ md: String, _ mthreads: [MdThread]) -> (md: String, orphanIds: [String]) {
-        var bodies: [[UInt16]: [CommentEntry]] = [:]
+    public static func expand(_ md: JSString, _ mthreads: [MdThread]) -> (md: JSString, orphanIds: [JSString]) {
+        var bodies: [JSString: [CommentEntry]] = [:]
         // `new Map(…)`: a later record of one id replaces an earlier one.
-        for thread in mthreads { bodies[JSText.key(thread.id)] = thread.comments }
-        var rooted = Set<[UInt16]>()
+        for thread in mthreads { bodies[thread.id] = thread.comments }
+        var rooted = Set<JSString>()
         let out = CriticMarkup.replacingBlocks(in: md) { block in
-            let whole = "{==\(block.anchor)==}\(block.spans)"
             switch CriticMarkup.parseSpans(block.spans) {
             case .ref(let id):
-                if !rooted.contains(JSText.key(id)), let meta = bodies[JSText.key(id)], !meta.isEmpty {
-                    rooted.insert(JSText.key(id))
-                    return "{==\(block.anchor)==}\(CriticMarkup.formatThreadSpans(id: id, comments: meta))"
+                let key = JSString(id)
+                if !rooted.contains(key), let meta = bodies[key], !meta.isEmpty {
+                    rooted.insert(key)
+                    return "{==" + block.anchor + "==}" + CriticMarkup.formatThreadSpans(id: id, comments: meta)
                 }
-                return whole
+                return block.whole
             case .thread(let id?, let comments):
-                if rooted.contains(JSText.key(id)) { return whole }
-                rooted.insert(JSText.key(id))
-                if let meta = bodies[JSText.key(id)], !meta.isEmpty {
-                    return "{==\(block.anchor)==}\(CriticMarkup.formatThreadSpans(id: id, comments: union(comments, meta)))"
+                let key = JSString(id)
+                if rooted.contains(key) { return block.whole }
+                rooted.insert(key)
+                if let meta = bodies[key], !meta.isEmpty {
+                    return "{==" + block.anchor + "==}" + CriticMarkup.formatThreadSpans(id: id, comments: union(comments, meta))
                 }
-                return whole
+                return block.whole
             case .thread(nil, _):
-                return whole
+                return block.whole
             }
         }
-        return (out, mthreads.filter { !rooted.contains(JSText.key($0.id)) }.map(\.id))
+        return (out, mthreads.filter { !rooted.contains($0.id) }.map(\.id))
     }
 
     /// Every thread id a marker in the markdown names.
-    public static func markerIds(_ md: String) -> Set<String> {
+    public static func markerIds(_ md: JSString) -> Set<String> {
         Set(CriticMarkup.blocks(in: md).compactMap { CriticMarkup.parseSpans($0.spans).id })
     }
 
     /// The markdown as it goes on disk: every marker bare, each thread's
     /// entries out into a record — the first run's, when a thread's words
     /// span blocks. A thread with no id gets one made from what it is.
-    public static func extract(_ fullMd: String) -> (md: String, mthreads: [MdThread]) {
+    public static func extract(_ fullMd: JSString) -> (md: JSString, mthreads: [MdThread]) {
         var reserved = markerIds(fullMd)
         var records: [MdThread] = []
         var seen = Set<String>()
         var legacy = 0
         let md = CriticMarkup.replacingBlocks(in: fullMd) { block in
             let parsed = CriticMarkup.parseSpans(block.spans)
-            guard case .thread(let named, let comments) = parsed else { return "{==\(block.anchor)==}\(block.spans)" }
+            guard case .thread(let named, let comments) = parsed else { return block.whole }
             var id = named ?? ""
             if named == nil {
                 repeat {
-                    id = deriveId("\(block.anchor) \(block.spans)", legacy)
+                    id = deriveId(block.anchor + " " + block.spans, legacy)
                     legacy += 1
                 } while reserved.contains(id)
                 reserved.insert(id)
             }
             if !seen.contains(id) {
                 seen.insert(id)
-                if !comments.isEmpty { records.append(MdThread(id: id, comments: comments)) }
+                if !comments.isEmpty { records.append(MdThread(id: JSString(id), comments: comments)) }
             }
-            return "{==\(block.anchor)==}{>>#\(id)<<}"
+            return "{==" + block.anchor + JSString("==}{>>#\(id)<<}")
         }
         return (md, records)
     }
@@ -276,13 +268,26 @@ public enum MetaFile {
     /// A document in the layout it is kept in: bare markers in the
     /// markdown, every entry in a record. Running it again changes nothing.
     /// `md` nil is a page with no markdown, whose records are left alone.
-    public static func migrate(md: String?, meta: EntityMeta) -> (md: String?, meta: EntityMeta) {
+    public static func migrate(md: JSString?, meta: EntityMeta) -> (md: JSString?, meta: EntityMeta) {
         guard let md else { return (nil, meta) }
         let expanded = expand(md, meta.mthreads)
         let extracted = extract(expanded.md)
-        let orphans = Set(expanded.orphanIds.map(JSText.key))
+        let orphans = Set(expanded.orphanIds)
         var out = meta
-        out.mthreads = extracted.mthreads + meta.mthreads.filter { orphans.contains(JSText.key($0.id)) }
+        out.mthreads = extracted.mthreads + meta.mthreads.filter { orphans.contains($0.id) }
         return (extracted.md, out)
+    }
+}
+
+extension CommentEntry {
+    /// Which entry this is, whatever its body says now: its stamp when it
+    /// has one, else who wrote it and when — the same entry in two copies
+    /// of a thread, and in two readings of one file.
+    var identity: [UInt16] {
+        switch eid {
+        case .none, .null?: return Array("s:".utf16) + author.units + Array("|\(JSText.number(at))".utf16)
+        case .string(let eid)?: return Array("s:".utf16) + eid.units
+        case let other?: return Array("v:\(other.json)".utf16)
+        }
     }
 }

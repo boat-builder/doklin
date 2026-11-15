@@ -6,7 +6,8 @@
 //
 // The worker does the same for an agent (cloud-worker/src/agentComments.ts:
 // `threadsOf`, `anchorProblem`, `placeForMarker`), and where a thread may
-// sit is its rule, said here in sentences for a person.
+// sit is its rule, said here in sentences for a person — change both;
+// verify-harness/comments-fixture.json holds the two to the same answers.
 
 import Foundation
 
@@ -17,6 +18,8 @@ public enum CommentVersion: String, Equatable, Sendable {
 }
 
 public struct CommentThread: Identifiable, Equatable, Sendable {
+    /// Its id as it is shown and asked for. One holding half a character —
+    /// only a hand edit makes one — reads here, and is answered on a Mac.
     public let id: String
     public let version: CommentVersion
     /// What it is on: the marked words, or the start of the element's text.
@@ -109,7 +112,7 @@ public struct DocumentComments: Equatable, Sendable {
     private let read: EntityMeta
     /// The markdown with every marker bare: what a change starts from, and
     /// what is written back.
-    public private(set) var md: String?
+    public private(set) var md: JSString?
     public private(set) var meta: EntityMeta
 
     /// The document's files as they are: the markdown, the meta file's
@@ -118,7 +121,7 @@ public struct DocumentComments: Equatable, Sendable {
         disk = md
         self.html = html
         read = meta.map(MetaFile.parse) ?? EntityMeta()
-        (self.md, self.meta) = MetaFile.migrate(md: md, meta: read)
+        (self.md, self.meta) = MetaFile.migrate(md: md.map { JSString($0) }, meta: read)
     }
 
     /* ---------- Reading ---------- */
@@ -130,33 +133,35 @@ public struct DocumentComments: Equatable, Sendable {
         if let disk {
             // Old inline threads and new bare markers read alike: entries
             // put back, then taken out again, as the Mac does on opening.
-            let expanded = MetaFile.expand(disk, read.mthreads)
+            let text = JSString(disk)
+            let expanded = MetaFile.expand(text, read.mthreads)
             let extracted = MetaFile.extract(expanded.md)
-            var bodies: [String: [CommentEntry]] = [:]
+            var bodies: [JSString: [CommentEntry]] = [:]
             for thread in extracted.mthreads { bodies[thread.id] = thread.comments }
-            let raw = CriticMarkup.blocks(in: disk)
+            let raw = CriticMarkup.blocks(in: text)
             let bare = CriticMarkup.blocks(in: extracted.md)
             var seen = Set<String>()
             for (i, block) in bare.enumerated() {
-                guard let id = CriticMarkup.parseSpans(block.spans).id, !seen.contains(id), let comments = bodies[id] else { continue }
+                guard let id = CriticMarkup.parseSpans(block.spans).id, !seen.contains(id), let comments = bodies[JSString(id)] else { continue }
                 seen.insert(id)
                 let line = raw.count == bare.count ? Self.line(in: disk, at: raw[i].range.location) : nil
-                out.append(CommentThread(id: id, version: .md, on: block.anchor, line: line, tag: nil, orphaned: false, comments: comments))
+                out.append(CommentThread(id: id, version: .md, on: block.anchor.string, line: line, tag: nil, orphaned: false, comments: comments))
             }
-            let orphans = Set(expanded.orphanIds.map(JSText.key))
-            for thread in read.mthreads where orphans.contains(JSText.key(thread.id)) {
-                out.append(CommentThread(id: thread.id, version: .md, on: "", line: nil, tag: nil, orphaned: true, comments: thread.comments))
+            let orphans = Set(expanded.orphanIds)
+            for thread in read.mthreads where orphans.contains(thread.id) {
+                out.append(CommentThread(id: thread.id.string, version: .md, on: "", line: nil, tag: nil, orphaned: true, comments: thread.comments))
             }
         } else {
             for thread in read.mthreads {
-                out.append(CommentThread(id: thread.id, version: .md, on: "", line: nil, tag: nil, orphaned: true, comments: thread.comments))
+                out.append(CommentThread(id: thread.id.string, version: .md, on: "", line: nil, tag: nil, orphaned: true, comments: thread.comments))
             }
         }
         let elements = read.hthreads.isEmpty ? nil : html.map(HtmlText.elements)
         for thread in read.hthreads {
             let found = elements.map { HtmlText.resolves(thread.anchor, in: $0) } ?? false
             out.append(CommentThread(
-                id: thread.id, version: .html, on: thread.anchor.text, line: nil, tag: thread.anchor.tag, orphaned: !found, comments: thread.comments
+                id: thread.id.string, version: .html, on: thread.anchor.text.string, line: nil, tag: thread.anchor.tag.string,
+                orphaned: !found, comments: thread.comments
             ))
         }
         return out
@@ -172,9 +177,10 @@ public struct DocumentComments: Equatable, Sendable {
     /// hold as `#id` anywhere.
     public func freshId<R: RandomNumberGenerator>(using random: inout R) -> String {
         let taken = Set(meta.mthreads.map(\.id) + meta.hthreads.map(\.id))
+        let text = md?.string ?? ""
         while true {
             let id = CriticMarkup.newThreadId(using: &random)
-            if !taken.contains(id), !(md ?? "").contains("#\(id)") { return id }
+            if !taken.contains(JSString(id)), !text.contains("#\(id)") { return id }
         }
     }
 
@@ -182,7 +188,7 @@ public struct DocumentComments: Equatable, Sendable {
     /// time, so a finer stamp would differ from its own round trip and every
     /// Mac would write the file again to say so.
     static func entry(author: String, at: Double, body: String) -> CommentEntry {
-        CommentEntry(author: CriticMarkup.sanitizeAuthor(author), at: (at / 1000).rounded(.down) * 1000, body: body)
+        CommentEntry(author: CriticMarkup.sanitizeAuthor(author), at: (at / 1000).rounded(.down) * 1000, body: JSString(body))
     }
 
     /// Start a thread on `words` of the note, saying `body`.
@@ -192,11 +198,10 @@ public struct DocumentComments: Equatable, Sendable {
         guard !said.isEmpty else { throw CommentRefusal.nothingSaid }
         let on = JSText.trim(words)
         if let problem = Placing.problem(on) { throw problem }
-        let index = try Placing.place(on, in: md)
-        let units = Array(md.utf16)
+        let index = try Placing.place(on, in: md.string)
         let marked = Array("{==\(on)==}{>>#\(id)<<}".utf16)
-        self.md = String(decoding: Array(units[0..<index]) + marked + Array(units[(index + on.utf16.count)...]), as: UTF16.self)
-        meta.mthreads.append(MdThread(id: id, comments: [Self.entry(author: author, at: at, body: said)]))
+        self.md = JSString(units: md.units[0..<index] + marked + md.units[(index + on.utf16.count)...])
+        meta.mthreads.append(MdThread(id: JSString(id), comments: [Self.entry(author: author, at: at, body: said)]))
     }
 
     /// Answer a thread. The markdown does not change.
@@ -204,24 +209,34 @@ public struct DocumentComments: Equatable, Sendable {
         let said = CriticMarkup.sanitizeBody(body)
         guard !said.isEmpty else { throw CommentRefusal.nothingSaid }
         let entry = Self.entry(author: author, at: at, body: said)
-        if let index = meta.mthreads.firstIndex(where: { $0.id == id }) {
+        let key = JSString(id)
+        if let index = meta.mthreads.firstIndex(where: { $0.id == key }) {
             meta.mthreads[index].comments.append(entry)
-        } else if let index = meta.hthreads.firstIndex(where: { $0.id == id }) {
+        } else if let index = meta.hthreads.firstIndex(where: { $0.id == key }) {
             meta.hthreads[index].comments.append(entry)
         } else {
             throw CommentRefusal.gone
         }
     }
 
-    /// Take a reply out of a thread; the first entry is the thread itself,
+    /// Take a reply out of a thread: `entry`, as it was shown at `index`.
+    /// The files are read again for every change and sync may have moved
+    /// the thread on since, so the entry is found by who wrote it and when —
+    /// the one at `index` when that is still it — and a reply that is gone
+    /// is not looked for elsewhere. The first entry is the thread itself,
     /// which `remove` takes.
-    public mutating func deleteReply(of id: String, at index: Int) throws {
-        if let t = meta.mthreads.firstIndex(where: { $0.id == id }) {
-            guard index > 0, index < meta.mthreads[t].comments.count else { throw CommentRefusal.gone }
-            meta.mthreads[t].comments.remove(at: index)
-        } else if let t = meta.hthreads.firstIndex(where: { $0.id == id }) {
-            guard index > 0, index < meta.hthreads[t].comments.count else { throw CommentRefusal.gone }
-            meta.hthreads[t].comments.remove(at: index)
+    public mutating func deleteReply(of id: String, entry: CommentEntry, at index: Int) throws {
+        func drop(from comments: inout [CommentEntry]) throws {
+            let wanted = entry.identity
+            let matching = comments.indices.dropFirst().filter { comments[$0].identity == wanted }
+            guard let at = matching.contains(index) ? index : matching.first else { throw CommentRefusal.gone }
+            comments.remove(at: at)
+        }
+        let key = JSString(id)
+        if let t = meta.mthreads.firstIndex(where: { $0.id == key }) {
+            try drop(from: &meta.mthreads[t].comments)
+        } else if let t = meta.hthreads.firstIndex(where: { $0.id == key }) {
+            try drop(from: &meta.hthreads[t].comments)
         } else {
             throw CommentRefusal.gone
         }
@@ -230,15 +245,16 @@ public struct DocumentComments: Equatable, Sendable {
     /// Remove a thread: its record goes, and its marker with it — the words
     /// it was on stay.
     public mutating func remove(_ id: String) throws {
-        if meta.mthreads.contains(where: { $0.id == id }) {
-            meta.mthreads.removeAll { $0.id == id }
+        let key = JSString(id)
+        if meta.mthreads.contains(where: { $0.id == key }) {
+            meta.mthreads.removeAll { $0.id == key }
             md = md.map { md in
                 CriticMarkup.replacingBlocks(in: md) { block in
-                    CriticMarkup.parseSpans(block.spans).id == id ? block.anchor : "{==\(block.anchor)==}\(block.spans)"
+                    CriticMarkup.parseSpans(block.spans).id == id ? block.anchor : block.whole
                 }
             }
-        } else if meta.hthreads.contains(where: { $0.id == id }) {
-            meta.hthreads.removeAll { $0.id == id }
+        } else if meta.hthreads.contains(where: { $0.id == key }) {
+            meta.hthreads.removeAll { $0.id == key }
         } else {
             throw CommentRefusal.gone
         }
@@ -253,7 +269,8 @@ public struct DocumentComments: Equatable, Sendable {
 }
 
 /// Where in a note new words can carry a marker: the worker's rule for an
-/// agent's comment (agentComments.ts), word for word.
+/// agent's comment (agentComments.ts `anchorProblem`, `closedRanges`,
+/// `placeForMarker`), word for word — change both.
 enum Placing {
     private static let formatting: Set<UInt16> = Set("*`[]<>|\\{}".utf16)
     private static let edgeBefore: Set<UInt16> = Set("(".utf16)
@@ -283,7 +300,9 @@ enum Placing {
     private static let space = "[\(JSText.spaceClass)]"
     private static let frontmatter = pattern("\\A---\\r?\\n[\\s\\S]*?\\r?\\n(?:---|\\.\\.\\.)[ \\t]*(?:\\r?\\n|\\z)")
     private static let closedKinds: [(NSRegularExpression, CommentRefusal.Closed)] = [
-        (pattern("^ {0,3}(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?(?:\\n {0,3}\\1[`~]*[ \\t]*(?=\\n|$)|$)", .anchorsMatchLines), .codeBlock),
+        // A fence with no end runs to the end of the note: `\z`, not `$`,
+        // which is the end of any line here.
+        (pattern("^ {0,3}(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?(?:\\n {0,3}\\1[`~]*[ \\t]*(?=\\n|$)|\\z)", .anchorsMatchLines), .codeBlock),
         (pattern("`[^`\\n]+`"), .code),
         (pattern("\\]\\([^)\\n]*\\)"), .link),
         (pattern("<[^>\\n]+>"), .htmlTag),

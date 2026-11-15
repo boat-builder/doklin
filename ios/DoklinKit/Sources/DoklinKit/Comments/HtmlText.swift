@@ -1,15 +1,18 @@
 // Enough of an html page's markup to say whether a thread on it still has
 // its element: every element, and what its text begins with. The Mac finds
 // the element in a real browser (src/htmlBridge.ts); the worker, which has
-// none, reads the markup this way (cloud-worker/src/htmlText.ts), and so
-// does the phone — the same reading, so both say the same thread is gone.
+// none, reads the markup this way (cloud-worker/src/htmlText.ts: `elementsOf`,
+// `anchorResolves`), and so does the phone — the same reading, so both say
+// the same thread is gone. Change both; verify-harness/comments-fixture.json
+// holds the two to the same answers.
 
 import Foundation
 
 struct HtmlElement: Equatable {
     let tag: String
-    /// Its text, whitespace collapsed, trimmed, cut to what an anchor keeps.
-    var text: String
+    /// Its text, whitespace collapsed, trimmed, cut to what an anchor keeps —
+    /// through a character, as an anchor's own text is cut.
+    var text: JSString
 }
 
 enum HtmlText {
@@ -185,7 +188,7 @@ enum HtmlText {
         func done(_ open: Open) {
             var text = open.text
             while let last = text.last, JSText.isSpace(last) { text.removeLast() }
-            out[open.index].text = String(decoding: text.prefix(anchorLength), as: UTF16.self)
+            out[open.index].text = JSString(units: text.prefix(anchorLength))
         }
         func close(to depth: Int) {
             while stack.count > depth { done(stack.removeLast()) }
@@ -240,10 +243,10 @@ enum HtmlText {
     /// checked without a browser, so it counts as found.
     static func resolves(_ anchor: HtmlAnchor, in elements: [HtmlElement]) -> Bool {
         if anchor.text.isEmpty { return true }
-        let want = Array(anchor.text.utf16)
+        let want = anchor.text.units
         return elements.contains { element in
-            guard JSText.key(element.tag) == JSText.key(anchor.tag), !element.text.isEmpty else { return false }
-            let have = Array(element.text.utf16)
+            guard JSString(element.tag) == anchor.tag, !element.text.isEmpty else { return false }
+            let have = element.text.units
             return have.starts(with: want) || want.starts(with: have)
         }
     }

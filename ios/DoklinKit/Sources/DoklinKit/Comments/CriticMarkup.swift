@@ -9,17 +9,18 @@
 //
 // A port of src/criticMarkup.ts, rule for rule — change both. The shared
 // cases in verify-harness/comments-fixture.json hold the two to the same
-// bytes.
+// bytes. What an entry says is a `JSString`: it comes from the meta file and
+// goes back there, half a character and all.
 
 import Foundation
 
 /// One entry of a thread. `author` "" and `at` 0 mean not known: a
 /// hand-written comment, or one from before entries were signed.
 public struct CommentEntry: Equatable, Sendable {
-    public var author: String
+    public var author: JSString
     /// Milliseconds since 1970.
     public var at: Double
-    public var body: String
+    public var body: JSString
     /// What older sidecars stamped an entry with. Nothing writes these any
     /// more; they are kept so such a thread still reads and writes back
     /// byte for byte.
@@ -27,14 +28,14 @@ public struct CommentEntry: Equatable, Sendable {
     var codeId: JSValue?
     var label: JSValue?
 
-    public init(author: String, at: Double, body: String) {
+    public init(author: JSString, at: Double, body: JSString) {
         self.author = author
         self.at = at
         self.body = body
     }
 
     /// Who wrote it, in words: an unsigned entry is nobody's.
-    public var authorWords: String { author.isEmpty ? "Unknown" : author }
+    public var authorWords: String { author.isEmpty ? "Unknown" : author.string }
 }
 
 /// What a marker's run of `{>>…<<}` spans means: a whole thread, or a
@@ -64,44 +65,48 @@ public enum CriticMarkup {
     /// A marker in a text, by UTF-16 offsets.
     struct Block {
         let range: NSRange
-        let anchor: String
-        let spans: String
+        let anchor: JSString
+        let spans: JSString
+
+        /// The marker as the text has it.
+        var whole: JSString { "{==" + anchor + "==}" + spans }
     }
 
-    static func blocks(in text: String) -> [Block] {
-        let ns = text as NSString
-        return blockPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
-            Block(range: $0.range, anchor: ns.substring(with: $0.range(at: 1)), spans: ns.substring(with: $0.range(at: 2)))
-        }
+    /// Where `pattern` matches `text`. It runs over the text as Swift shows
+    /// it, which has the same offsets and, for these patterns, the same
+    /// matches; what is cut out is cut from the code units.
+    private static func matches(_ pattern: NSRegularExpression, in text: JSString) -> [NSTextCheckingResult] {
+        pattern.matches(in: text.string, range: NSRange(location: 0, length: text.units.count))
+    }
+
+    static func blocks(in text: JSString) -> [Block] {
+        matches(blockPattern, in: text).map { Block(range: $0.range, anchor: text[$0.range(at: 1)], spans: text[$0.range(at: 2)]) }
     }
 
     /// `text` with every marker put through `change`, which answers what
     /// goes in its place — `String.replace` with a function.
-    static func replacingBlocks(in text: String, _ change: (Block) -> String) -> String {
-        let ns = text as NSString
-        var out = ""
+    static func replacingBlocks(in text: JSString, _ change: (Block) -> JSString) -> JSString {
+        var out: [UInt16] = []
         var at = 0
         for block in blocks(in: text) {
-            out += ns.substring(with: NSRange(location: at, length: block.range.location - at))
-            out += change(block)
+            out += text.units[at..<block.range.location]
+            out += change(block).units
             at = block.range.location + block.range.length
         }
-        return out + ns.substring(from: at)
+        return JSString(units: out + text.units[at...])
     }
 
     /// The text of every `{>>…<<}` in a marker's spans.
-    static func spans(_ raw: String) -> [String] {
-        let ns = raw as NSString
-        return spanPattern.matches(in: raw, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) }
+    static func spans(_ raw: JSString) -> [JSString] {
+        matches(spanPattern, in: raw).map { raw[$0.range(at: 1)] }
     }
 
-    public static func parseSpans(_ raw: String) -> ParsedSpans {
+    public static func parseSpans(_ raw: JSString) -> ParsedSpans {
         let all = spans(raw)
         guard let first = all.first else { return .thread(id: nil, comments: []) }
-        let ns = first as NSString
-        if let match = idPattern.firstMatch(in: first, range: NSRange(location: 0, length: ns.length)) {
-            let id = ns.substring(with: match.range(at: 1))
-            let rest = match.range(at: 2).location == NSNotFound ? nil : ns.substring(with: match.range(at: 2))
+        if let match = matches(idPattern, in: first).first {
+            let id = first[match.range(at: 1)].string
+            let rest = match.range(at: 2).location == NSNotFound ? nil : first[match.range(at: 2)]
             if rest == nil, all.count == 1 { return .ref(id: id) }
             let entries = (rest.map { [$0] } ?? []) + all.dropFirst()
             return .thread(id: id, comments: entries.map(parseEntry))
@@ -111,12 +116,12 @@ public enum CriticMarkup {
 
     /// The id a marker's first span names, or nil for one that names none.
     public static func threadID(ofSpan span: String) -> String? {
-        parseSpans("{>>\(span)<<}").id
+        parseSpans(JSString("{>>\(span)<<}")).id
     }
 
     /// `author · ISO time: body`, or the whole span as an unsigned body.
-    static func parseEntry(_ raw: String) -> CommentEntry {
-        guard let (author, time, body) = splitEntry(Array(raw.utf16)) else {
+    static func parseEntry(_ raw: JSString) -> CommentEntry {
+        guard let (author, time, body) = splitEntry(raw.units) else {
             return CommentEntry(author: "", at: 0, body: JSText.trim(raw))
         }
         return CommentEntry(author: author, at: ISOTime.parse(time) ?? 0, body: body)
@@ -126,18 +131,14 @@ public enum CriticMarkup {
     /// JavaScript counts the author's 200 in UTF-16 code units. The author
     /// is the shortest that leaves a time after it, so a name holding " · "
     /// still reads.
-    private static func splitEntry(_ units: [UInt16]) -> (String, [UInt16], String)? {
+    private static func splitEntry(_ units: [UInt16]) -> (JSString, [UInt16], JSString)? {
         let dot: [UInt16] = [0x20, 0xB7, 0x20]
         var k = 0
         while k <= 200, k + 3 <= units.count {
             if Array(units[k..<(k + 3)]) == dot, let end = ISOTime.scan(units, from: k + 3),
                end + 2 <= units.count, units[end] == 0x3A, units[end + 1] == 0x20
             {
-                return (
-                    String(decoding: units[0..<k], as: UTF16.self),
-                    Array(units[(k + 3)..<end]),
-                    String(decoding: units[(end + 2)...], as: UTF16.self)
-                )
+                return (JSString(units: units[0..<k]), Array(units[(k + 3)..<end]), JSString(units: units[(end + 2)...]))
             }
             k += 1
         }
@@ -159,24 +160,25 @@ public enum CriticMarkup {
         JSText.trim(JSText.replacingAll("<<}", with: "<< }", in: replace(lineBreaks, in: body, with: " ")))
     }
 
-    public static func sanitizeAuthor(_ author: String) -> String {
+    /// A name to sign an entry with, cut to 80 code units as JavaScript
+    /// cuts it: through a character, when that is where the 80th unit falls.
+    public static func sanitizeAuthor(_ author: String) -> JSString {
         let clean = JSText.trim(JSText.replacingAll("<<}", with: "<< }", in: replace(spaceRuns, in: author, with: " ")))
-        let units = Array(clean.utf16)
-        return units.count <= 80 ? clean : String(decoding: units[0..<80], as: UTF16.self)
+        return JSString(units: clean.utf16.prefix(80))
     }
 
-    static func formatEntry(_ entry: CommentEntry) -> String {
+    static func formatEntry(_ entry: CommentEntry) -> JSString {
         let known = !(entry.at == 0 || entry.at.isNaN)
         if entry.author.isEmpty, !known { return entry.body }
-        return "\(entry.author) · \(ISOTime.format(known ? entry.at : 0)): \(entry.body)"
+        return entry.author + JSString(" · \(ISOTime.format(known ? entry.at : 0)): ") + entry.body
     }
 
     /// A thread written whole on one run of its words: `{>>#id entry<<}{>>entry<<}…`.
-    public static func formatThreadSpans(id: String, comments: [CommentEntry]) -> String {
-        if comments.isEmpty { return "{>>#\(id)<<}" }
-        return comments.enumerated().map { index, entry in
-            index == 0 ? "{>>#\(id) \(formatEntry(entry))<<}" : "{>>\(formatEntry(entry))<<}"
-        }.joined()
+    public static func formatThreadSpans(id: String, comments: [CommentEntry]) -> JSString {
+        if comments.isEmpty { return JSString("{>>#\(id)<<}") }
+        return comments.enumerated().reduce(JSString(units: [])) { out, item in
+            out + (item.offset == 0 ? JSString("{>>#\(id) ") : "{>>") + formatEntry(item.element) + "<<}"
+        }
     }
 
     private static let anySpan = try! NSRegularExpression(pattern: "\\{>>[\\s\\S]*?<<\\}")
