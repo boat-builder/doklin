@@ -31,6 +31,9 @@ export type Action =
   | "agents.own"
   /** See everybody's agents, and remove any of them. */
   | "agents.manage"
+  /** Add devices of one's own — another Mac, an iPhone — see them, and sign
+   *  one out. Signing out somebody else's is `people.remove`. */
+  | "devices.own"
   /** See every public address on the domain, and take any page down. */
   | "pages.manage"
   /** Bind the domain to a workspace, and erase everything on it. */
@@ -44,6 +47,7 @@ const TABLE: Readonly<Record<Action, readonly PersonRole[]>> = {
   "people.roles": ["owner"],
   "agents.own": ["owner", "member"],
   "agents.manage": ["owner"],
+  "devices.own": ["owner", "member"],
   "pages.manage": ["owner"],
   "workspace.manage": ["owner"],
 };

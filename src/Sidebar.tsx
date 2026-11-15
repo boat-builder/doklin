@@ -127,6 +127,7 @@ type Props = {
   // Who is in the workspace, and its agents — the workspace menu's own
   // doors. Each is offered only when it is passed.
   onOpenPeople?: () => void;
+  onOpenDevices?: () => void;
   onOpenAgents?: () => void;
   // Sections (a connected workspace whose status says `sections`): making a
   // restricted folder — empty, or out of a folder that is there (`from`) —
@@ -222,6 +223,7 @@ export default function Sidebar({
   onResizeWidth,
   onOpenCloud,
   onOpenPeople,
+  onOpenDevices,
   onOpenAgents,
   onNewRestricted,
   onManageAccess,
@@ -1155,6 +1157,7 @@ export default function Sidebar({
         onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
         onOpenCloud={onOpenCloud}
         onOpenPeople={onOpenPeople}
+        onOpenDevices={onOpenDevices}
         onOpenAgents={onOpenAgents}
         sectioned={sectioned}
       />
@@ -1348,6 +1351,7 @@ function SidebarHeader({
   onNewFolder,
   onOpenCloud,
   onOpenPeople,
+  onOpenDevices,
   onOpenAgents,
   sectioned,
 }: {
@@ -1372,6 +1376,7 @@ function SidebarHeader({
   onNewFolder: () => void;
   onOpenCloud?: () => void;
   onOpenPeople?: () => void;
+  onOpenDevices?: () => void;
   onOpenAgents?: () => void;
   // The tree below is in sections, and this row heads the first of them.
   sectioned: boolean;
@@ -1443,8 +1448,9 @@ function SidebarHeader({
               </button>
             )}
             {(workspaces.length > 0 || onJoinWorkspace) && <div className="sidebar-menu-sep" role="separator" />}
-            {/* Who is in this workspace, and its agents: the workspace's
-                own, so they are here rather than behind the sync panel. */}
+            {/* Who is in this workspace, their devices, and its agents: the
+                workspace's own, so they are here rather than behind the sync
+                panel. */}
             {onOpenPeople && (
               <button
                 role="menuitem"
@@ -1456,6 +1462,19 @@ function SidebarHeader({
                 }}
               >
                 People…
+              </button>
+            )}
+            {onOpenDevices && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                data-testid="sidebar-menu-devices"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenDevices();
+                }}
+              >
+                Devices…
               </button>
             )}
             {onOpenAgents && (

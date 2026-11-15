@@ -130,7 +130,7 @@
         joinError: null,
         // What this Mac's credential may do, as the status reports it: every
         // action for an owner. A drive narrows it to a member's.
-        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"],
+        can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
         token: "ab".repeat(32),
         // Who this Mac is on the scripted domain — what the engine resolved
         // its own signature to.
@@ -204,7 +204,7 @@
           // never asked who was binding it. Adopting an identity is the
           // panel's job, and sets this to the new row's id.
           me: null,
-          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"],
+          can: ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"],
           // This Mac. A Mac only appears in the list below under its own id
           // if it redeemed a code rather than holding the domain's own
           // token — which is exactly when "this Mac" is worth saying.
@@ -729,8 +729,25 @@
               return Promise.resolve(null);
             }
             case "cloud_token": {
+              // Only the Mac that holds the domain's own token is answered.
+              if (!window.__cloud.people.creator) {
+                return Promise.reject("this Mac has a sign-in of its own, which is never shown");
+              }
               const s = window.__cloud.statuses.find((s) => s.root === args.root);
               return Promise.resolve({ endpoint: s?.endpoint ?? "", token: window.__cloud.token });
+            }
+            case "cloud_device_code": {
+              // A string here is what the next call rejects with.
+              if (typeof window.__cloud.deviceCodeError === "string") {
+                return Promise.reject(window.__cloud.deviceCodeError);
+              }
+              const s = window.__cloud.statuses.find((s) => s.root === args.root);
+              const code = "dkln-D3V1C-2QWXM-7NBKD-5HGVZ";
+              return Promise.resolve({
+                code,
+                blob: `doklin-invite ${s?.endpoint ?? ""} ${code}`,
+                expiresAt: Date.now() + 60 * 60 * 1000,
+              });
             }
             case "cloud_wipe":
               window.__setStatuses(window.__cloud.statuses.filter((s) => s.root !== args.root));

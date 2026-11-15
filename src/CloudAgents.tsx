@@ -1,4 +1,4 @@
-// The Agents tab of the workspace's "People and agents" view.
+// The Agents tab of the workspace's "People, devices and agents" view.
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
 // copy of the folder. It belongs to the person who adds it here, and sees

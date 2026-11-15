@@ -65,7 +65,8 @@ export type TokenIdentity = {
   role: PersonRole;
 };
 
-export type TokenRow = {
+/** One signed-in device: a Mac, an iPhone. Its `id` is its token's. */
+export type Device = {
   id: string;
   memberId: string;
   email: string;
@@ -86,6 +87,12 @@ export type Invite = {
 /** An invite may be dated this far out and no further — a year of "pending" is
  *  not a pending invite, it is a credential nobody is watching. */
 export const MAX_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** A device code is pasted on the device beside the one that made it, so the
+ *  app dates it an hour out (src-tauri/src/cloud/invite.rs,
+ *  `DEVICE_CODE_MINUTES`); the ceiling is looser only to absorb a clock that
+ *  is wrong. */
+export const MAX_DEVICE_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /* ---------- Normalizing what people type ---------- */
 
@@ -274,16 +281,23 @@ export async function listDirectory(env: Env): Promise<{ id: string; name: strin
   });
 }
 
-/** The creator's own row, if they have said who they are. Identity, never
- *  authority: the env secret is what authenticates them, and this is only how
- *  `GET /api/meta` can tell them what they are called. */
-export async function findCreator(env: Env): Promise<Member | null> {
+/** The creator's own row — `"none"` when they have not said who they are,
+ *  null when the database cannot say. Identity, never authority: the env
+ *  secret is what authenticates them. */
+export async function creatorRow(env: Env): Promise<Member | "none" | null> {
   return withDb(env, async (db) => {
     const row = await db
       .prepare(`SELECT ${MEMBER_COLS} FROM members m JOIN creator c ON c.member_id = m.id LIMIT 1`)
       .first<MemberRow>();
-    return row ? toMember(row) : null;
+    return row ? toMember(row) : ("none" as const);
   });
+}
+
+/** The creator's own row, if they have said who they are — how
+ *  `GET /api/meta` can tell them what they are called. */
+export async function findCreator(env: Env): Promise<Member | null> {
+  const row = await creatorRow(env);
+  return row === "none" ? null : row;
 }
 
 /**
@@ -483,18 +497,21 @@ export async function removeMember(env: Env, id: string): Promise<true | Refusal
   });
 }
 
-/* ---------- Tokens ---------- */
+/* ---------- Devices ---------- */
 
-/** Every signed-in device. Never the hash: the owner does not get to hold
- *  anyone's credential, only to name it. */
-export async function listTokens(env: Env): Promise<TokenRow[] | null> {
+/** The signed-in devices: one person's (`of`), or everybody's (`null`, an
+ *  owner's view). Never the hash: nobody gets to hold a credential, only to
+ *  name it. */
+export async function listDevices(env: Env, of: string | null): Promise<Device[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
       .prepare(
         `SELECT t.id, t.member_id, t.device_id, t.device_name, t.created_at, m.email
            FROM tokens t JOIN members m ON m.id = t.member_id
+          WHERE ?1 IS NULL OR t.member_id = ?1
           ORDER BY t.created_at, t.id`,
       )
+      .bind(of)
       .all<{
         id: string;
         member_id: string;
@@ -514,24 +531,39 @@ export async function listTokens(env: Env): Promise<TokenRow[] | null> {
   });
 }
 
-/** Revoke one device. Takes effect on that device's very next request: the
- *  bearer resolves through this table, so there is no session to expire.
- *  Its presence row and its lease go in the same batch — a Mac that has just
- *  been shown the door should not stay "here now", or keep a document
- *  view-only for everyone else, for the TTL's minute and a half. The token is
- *  written down in `removed_tokens` first, so that Mac is told its access was
- *  taken away and deletes its copy (`isRemovedToken`). */
-export async function deleteToken(env: Env, id: string): Promise<boolean | null> {
+/** Sign one device out — one of `of`'s own, or anybody's (`null`, an owner).
+ *  Takes effect on that device's very next request: the bearer resolves
+ *  through this table, so there is no session to expire. Its presence row and
+ *  its lease go in the same batch — a device that has just been shown the
+ *  door should not stay "here now", or keep a document view-only for everyone
+ *  else, for the TTL's minute and a half. The token is written down in
+ *  `removed_tokens` first, so that device is told its access was taken away
+ *  and deletes its copy (`isRemovedToken`). */
+export async function signOutDevice(env: Env, id: string, of: string | null): Promise<boolean | null> {
+  const mine = "id = ?1 AND (?2 IS NULL OR member_id = ?2)";
   return withDb(env, async (db) => {
     const results = await db.batch([
       db
-        .prepare("INSERT OR IGNORE INTO removed_tokens (hash, removed_at) SELECT hash, ?1 FROM tokens WHERE id = ?2")
-        .bind(Date.now(), id),
-      db
-        .prepare("DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)")
-        .bind(id),
-      db.prepare("DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)").bind(id),
-      db.prepare("DELETE FROM tokens WHERE id = ?").bind(id),
+        .prepare(`INSERT OR IGNORE INTO removed_tokens (hash, removed_at) SELECT hash, ?3 FROM tokens WHERE ${mine}`)
+        .bind(id, of, Date.now()),
+      db.prepare(`DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, of),
+      db.prepare(`DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE ${mine})`).bind(id, of),
+      db.prepare(`DELETE FROM tokens WHERE ${mine}`).bind(id, of),
+    ]);
+    return (results.at(-1)?.meta.changes ?? 0) > 0;
+  });
+}
+
+/** A device ending its own sign-in: it is leaving, not being shown the door.
+ *  So nothing goes to `removed_tokens` — that list is what has a device
+ *  delete its copy, and what a person does with the copy on a device they
+ *  are holding is theirs to say. Its presence and its lease go with it. */
+export async function endSession(env: Env, tokenId: string): Promise<boolean | null> {
+  return withDb(env, async (db) => {
+    const results = await db.batch([
+      db.prepare("DELETE FROM presence WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)").bind(tokenId),
+      db.prepare("DELETE FROM leases WHERE device_id = (SELECT device_id FROM tokens WHERE id = ?)").bind(tokenId),
+      db.prepare("DELETE FROM tokens WHERE id = ?").bind(tokenId),
     ]);
     return (results.at(-1)?.meta.changes ?? 0) > 0;
   });
@@ -540,18 +572,19 @@ export async function deleteToken(env: Env, id: string): Promise<boolean | null>
 /* ---------- Invites ---------- */
 
 /**
- * Put a pending invite on this member, replacing any they already had. One
- * pending invite per person is the whole rule: a second Mac never needs one
- * (the panel already shows the token it holds), so a second invite is always
- * "they lost the code", and the old one should stop working the moment the
- * new one is made.
+ * Put a pending code on this member, replacing any they already had. One
+ * pending code per person is the whole rule: a code is a way in as that
+ * person, whoever made it — an owner inviting them, or they themselves adding
+ * a device (`POST /api/auth/devices/code`) — so a second one is always "the
+ * first is not going to be used", and the old one should stop working the
+ * moment the new one is made.
  *
  * `codeHash` is sha256 of the canonical code and arrives from the app — the
  * worker never sees the plaintext at this end.
  */
 export async function putInvite(
   env: Env,
-  member: Member,
+  member: Pick<Member, "id" | "email" | "name">,
   codeHash: string,
   expiresAt: number,
 ): Promise<Invite | null> {
@@ -652,7 +685,7 @@ export async function redeemInvite(
         .prepare(
           "INSERT OR REPLACE INTO tokens (hash, id, member_id, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(await sha256Hex(token), tokenId, row.id, deviceId, validName(deviceName, "A Mac"), now),
+        .bind(await sha256Hex(token), tokenId, row.id, deviceId, validName(deviceName, "A device"), now),
       db.prepare("DELETE FROM invites WHERE hash = ?").bind(codeHash),
       // From here somebody has signed in as this person (`Member.lastSeenAt`).
       db.prepare("UPDATE members SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL").bind(now, row.id),

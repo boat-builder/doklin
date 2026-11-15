@@ -113,7 +113,8 @@ manifest, rendered by the worker from the synced files.
 - **Connect**: mint token → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` → `cloud_connect` binds, uploads, writes `cloud.json` + marker, spawns the engine.
 - **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
 - **Resume**: empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
-- **Disconnect**: stop the engine, drop the `cloud.json` entry and state; folder, marker and cloud stay.
+- **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`. *Open with the domain's token* is the same from `cloud_probe` on, for the creator's recovery only: [cloud-people-agents.md](cloud-people-agents.md) *Devices*.
+- **Disconnect**: stop the engine, end this Mac's sign-in, drop the `cloud.json` entry and state; folder, marker and cloud stay.
 - **Wipe** (`cloud_wipe`, owner): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
 - Token rotation is not built.
 

@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use super::manifest::{PublicKind, SpaceKind};
-use super::remote::{AgentRecord, InviteRecord, MemberRecord, TokenRecord, WorkspaceRecord};
+use super::remote::{AgentRecord, InviteRecord, MemberRecord, DeviceRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -215,8 +215,9 @@ pub struct Probe {
     pub workspace: Option<WorkspaceRecord>,
 }
 
-/// What a second Mac needs to download a workspace: shown in the Cloud
-/// panel behind "Connect another Mac", never carried by a status.
+/// The domain's own token, as the Mac that made the workspace holds it: the
+/// creator's copy to keep for getting back in when every device is lost.
+/// Never how a device is added (`DeviceCode`), and never carried by a status.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
@@ -225,8 +226,8 @@ pub struct Credentials {
 }
 
 /// `cloud_redeem`: this Mac's own credential, and who the domain says the
-/// person holding it is. The token goes straight into `cloud_join` — the
-/// invitee's flow is the second Mac's flow from here on.
+/// person holding it is. The token goes straight into `cloud_join`, or into
+/// `cloud_resume` when the open folder is already that workspace.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Redeemed {
@@ -250,6 +251,20 @@ pub struct Invited {
     pub invite: InviteRecord,
 }
 
+/// `cloud_device_code`: a fresh code for another device of this person's own
+/// — a Mac, an iPhone — and the line that carries it. Shown once; the domain
+/// keeps only its sha256, and the device that redeems it gets a sign-in of
+/// its own.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCode {
+    pub code: String,
+    /// The one line to paste on the other device: address and code together
+    /// (`cloud/invite.rs`), the line an invite is.
+    pub blob: String,
+    pub expires_at: u64,
+}
+
 /// `cloud_people`: everything the People view shows.
 ///
 /// Who this Mac is here, and what it may do, is asked rather than remembered:
@@ -269,19 +284,18 @@ pub struct People {
     pub can: Vec<String>,
     /// This Mac's own device id, so the list can mark which Mac is this one.
     pub device_id: String,
-    /// The row in `devices` that is the credential this Mac syncs with —
-    /// which may carry another Mac's device id, when the token was handed
-    /// over through *Connect another Mac…*. Never offered for signing out:
-    /// that would delete the copy in hand. None for the creator's secret.
+    /// The row in `devices` that is the credential this Mac syncs with.
+    /// Never offered for signing out: that would delete the copy in hand.
+    /// None for the creator's secret.
     pub token_id: Option<String>,
     /// Everyone, newest last.
     pub members: Vec<MemberRecord>,
     /// The pending, unexpired invites. Empty for whoever may not invite.
     pub invites: Vec<InviteRecord>,
-    /// Every signed-in Mac. Empty for whoever may not sign one out. The
-    /// creator's own are not among them — their credential is the domain's
-    /// env secret, which has no row (remote.rs).
-    pub devices: Vec<TokenRecord>,
+    /// The signed-in devices: this person's own, and for an owner
+    /// everybody's. The Mac that holds the domain's secret is not among them
+    /// — that credential has no row (remote.rs).
+    pub devices: Vec<DeviceRecord>,
 }
 
 /// A fresh login code for an agent, and the line that carries it — the one

@@ -68,7 +68,8 @@ use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, Events, Invited, People,
+    emit_statuses, snapshot, AgentAdded, AgentLogin, AppEvents, CloudStatus, Credentials, DeviceCode, Events, Invited,
+    People,
     Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
@@ -540,22 +541,25 @@ pub(crate) fn cloud_parse_invite(text: String) -> invite::Pasted {
     invite::parse_pasted(&text)
 }
 
-/// Trade an invite code for this Mac's own credential.
+/// Trade a code for this Mac's own credential — an invite somebody sent, or
+/// a device code from another device of this person's own. To the domain the
+/// two are one thing, and so they are here.
 ///
 /// The one command that runs before this Mac holds any credential at all,
 /// which inverts the order every other entrance uses: redeem first, then
-/// probe with what the redeem minted. An invitee cannot ask a domain
-/// anything until they have a token, because `/api/meta` is inside the gate
+/// probe with what the redeem minted. A joining device cannot ask a domain
+/// anything until it has a token, because `/api/meta` is inside the gate
 /// and `POST /api/auth/join` is the only route above it.
 ///
-/// It writes nothing and spawns nothing: `cloud_join` with the token this
-/// answers is the second Mac's flow, unchanged.
+/// It writes nothing and spawns nothing: `cloud_join` (a download) or
+/// `cloud_resume` (the open folder is already that workspace) takes the
+/// token this answers.
 #[tauri::command]
 pub(crate) async fn cloud_redeem(app: AppHandle, endpoint: String, code: String) -> Result<Redeemed, String> {
     let endpoint = normalize_endpoint(&endpoint)?;
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
     let Some(canonical) = invite::normalize_code(&code) else {
-        return Err("that isn't a Doklin invite code — one looks like dkln-K7QM2-9XVR4-8TBHN-3WGYD".into());
+        return Err("that isn't a Doklin code — one looks like dkln-K7QM2-9XVR4-8TBHN-3WGYD".into());
     };
     let device = with_inner(&app, |inner| Ok(inner.device.clone()))?;
     // No token, on purpose: there is none yet, and the route that answers
@@ -578,7 +582,7 @@ pub(crate) async fn cloud_redeem(app: AppHandle, endpoint: String, code: String)
 fn describe_redeem(domain: &str, e: remote::RemoteError) -> String {
     match e {
         remote::RemoteError::Unauthorized => {
-            "that invite code doesn't work — it may have been used already, or run out. Ask for a fresh one.".into()
+            "that code doesn't work — it may have been used already, or run out. Get a fresh one.".into()
         }
         remote::RemoteError::Outdated(_) | remote::RemoteError::NotFound => {
             format!("{} runs a worker too old to take invites — whoever set it up needs to update it", domain)
@@ -612,15 +616,49 @@ pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
     read_marker(Path::new(&root))
 }
 
-/// The endpoint and the owner token of a connected workspace — what a
-/// second Mac needs to download it ("Connect another Mac" in the panel).
+/// The endpoint and the domain's own token, on the Mac that holds it — the
+/// creator's copy to keep for the day every device is lost. A person's own
+/// sign-in is never shown: a device is added with a code (`cloud_device_code`)
+/// and gets a credential of its own, so no token is ever carried between two.
 #[tauri::command]
 pub(crate) fn cloud_token(app: AppHandle, root: String) -> Result<Credentials, String> {
     with_inner(&app, |inner| {
         let file = read_cloud_file(&inner.data_dir);
         let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
+        if !entry.creator {
+            return Err("this Mac has a sign-in of its own, which is never shown — to add a device, use Add a device".into());
+        }
         Ok(Credentials { endpoint: entry.endpoint.clone(), token: entry.token.clone() })
     })
+}
+
+/// A one-time code for another device of this person's own — a second Mac,
+/// an iPhone. Minted and hashed here, as an invite's is: only its sha256
+/// goes up, and the line comes back once, in the answer. Whoever pastes it
+/// joins as this person, on a credential of its own that can be signed out
+/// without touching this one.
+#[tauri::command]
+pub(crate) async fn cloud_device_code(app: AppHandle, root: String) -> Result<DeviceCode, String> {
+    let call = workspace_call(&app, &root)?;
+    let canonical = invite::random_code();
+    let code = invite::format_code(&canonical);
+    let expires_at = invite::device_code_expires_at(scan::now_ms());
+    call.remote
+        .device_code(&invite::code_hash(&canonical), expires_at)
+        .await
+        .map_err(|e| describe_devices(&call.domain, e))?;
+    Ok(DeviceCode { blob: invite::blob(&call.endpoint, &code), code, expires_at })
+}
+
+/// A failed device call in words. `NotFound` is a worker from before a device
+/// was added this way: it has no such route.
+fn describe_devices(domain: &str, e: remote::RemoteError) -> String {
+    match e {
+        remote::RemoteError::NotFound => {
+            format!("{} runs a worker too old to add a device — update it from the Cloud panel", domain)
+        }
+        other => describe_people(domain, other),
+    }
 }
 
 /// Invite someone to this workspace by email (owner only): the code is
@@ -729,13 +767,14 @@ pub(crate) async fn cloud_revoke_person(app: AppHandle, root: String, member_id:
     revoked(&call.domain, call.remote.delete_member(&member_id).await)
 }
 
-/// Sign one Mac out, leaving the person and their other Macs alone; that Mac
-/// deletes its copy when it hears. What is named here is not the credential —
-/// the domain never had it in the clear — it is the row that resolves it.
+/// Sign one device out — one of this person's own, or as an owner anybody's
+/// — leaving the person and their other devices alone; that device deletes
+/// its copy when it hears. What is named here is not the credential — the
+/// domain never had it in the clear — it is the row that resolves it.
 #[tauri::command]
 pub(crate) async fn cloud_revoke_device(app: AppHandle, root: String, token_id: String) -> Result<(), String> {
     let call = workspace_call(&app, &root)?;
-    revoked(&call.domain, call.remote.delete_token(&token_id).await)
+    revoked(&call.domain, call.remote.sign_out_device(&token_id).await)
 }
 
 /// Withdraw a code nobody has traded in yet. The person's row stays: they
@@ -770,7 +809,7 @@ async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str)
     let (members, invites, devices) = tokio::try_join!(
         async { if may("people.see") { remote.list_members().await } else { Ok(Vec::new()) } },
         async { if may("people.invite") { remote.list_invites().await } else { Ok(Vec::new()) } },
-        async { if may("people.remove") { remote.list_tokens().await } else { Ok(Vec::new()) } },
+        async { if may("devices.own") { remote.list_devices().await } else { Ok(Vec::new()) } },
     )
     .map_err(|e| describe_people(domain, e))?;
     Ok(People {
@@ -1117,12 +1156,38 @@ pub(crate) async fn cloud_resume(
 /// Forget a workspace on this Mac: the engine stops, the entry and the
 /// sync state go; the folder, its marker and the cloud stay.
 #[tauri::command]
-pub(crate) fn cloud_disconnect(app: AppHandle, root: String) -> Result<(), String> {
-    with_inner(&app, |inner| {
+pub(crate) async fn cloud_disconnect(app: AppHandle, root: String) -> Result<(), String> {
+    // The engine first, so nothing is mid-request with a credential that is
+    // about to stop resolving.
+    let held = with_inner(&app, |inner| {
         stop_engine(inner, &root);
+        let file = read_cloud_file(&inner.data_dir);
+        Ok(file.by_root(&root).map(|w| (w.endpoint.clone(), w.token.clone(), w.creator, inner.device.id.clone())))
+    })?;
+    // This Mac's sign-in ends with it: the token is about to be forgotten,
+    // and a row nobody holds would sit among its person's devices for good.
+    // Best effort and bounded — a Mac that cannot reach the domain
+    // disconnects all the same, and the row is then theirs to sign out from
+    // another device. The domain's secret is no sign-in: nothing to end.
+    if let Some((endpoint, token, false, device_id)) = held {
+        let remote = HttpRemote::new(&endpoint, &token, &device_id);
+        let _ = tokio::time::timeout(END_SESSION_WAIT, remote.end_session()).await;
+    }
+    forget_workspace(&app, &root)
+}
+
+/// How long Disconnect waits on the domain to end this Mac's sign-in before
+/// forgetting the workspace regardless.
+const END_SESSION_WAIT: Duration = Duration::from_secs(5);
+
+/// Drop a workspace's entry and sync state from this Mac, engine stopped.
+/// The folder and its marker are not touched.
+fn forget_workspace(app: &AppHandle, root: &str) -> Result<(), String> {
+    with_inner(app, |inner| {
+        stop_engine(inner, root);
         let mut file = read_cloud_file(&inner.data_dir);
-        let ws_id = file.by_root(&root).map(|w| w.ws_id.clone());
-        file.remove_root(&root);
+        let ws_id = file.by_root(root).map(|w| w.ws_id.clone());
+        file.remove_root(root);
         write_cloud_file(&inner.data_dir, &file)?;
         if let Some(ws_id) = ws_id {
             let _ = std::fs::remove_dir_all(state_dir(&inner.data_dir, &ws_id));
@@ -1393,7 +1458,9 @@ pub(crate) async fn cloud_wipe(app: AppHandle, root: String) -> Result<u64, Stri
     match purged {
         Ok(n) => {
             remove_marker(Path::new(&root));
-            cloud_disconnect(app, root)?;
+            // The wipe emptied every sign-in with everything else: there is
+            // none to end, only a workspace to forget.
+            forget_workspace(&app, &root)?;
             Ok(n)
         }
         Err(e) => {

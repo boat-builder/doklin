@@ -71,8 +71,15 @@
 //   DELETE /api/auth/members/<id>    owner; remove the person: every credential they hold, and
 //                                    the restricted folders they were in (204). Their row stays,
 //                                    out of the People list. Never your own, never the creator's (409)
-//   GET    /api/auth/tokens          owner; {id, memberId, email, deviceName, createdAt} — never a hash
-//   DELETE /api/auth/tokens/<id>     owner; revoke one device, effective on its next request (204)
+//   POST   /api/auth/devices/code    anyone; {codeHash, expiresAt} → 201 {code}: a one-time code
+//                                    for a device of the caller's own, redeemed by the join above.
+//                                    Replaces the pending code they had
+//   GET    /api/auth/devices         anyone; the caller's devices, an owner everyone's: {id,
+//                                    memberId, email, deviceId, deviceName, createdAt} — never a hash
+//   DELETE /api/auth/devices/<id>    its person, or an owner; sign one device out, effective on
+//                                    its next request (204). Never the calling one (409)
+//   DELETE /api/auth/session         a device ending its own sign-in (204): it is forgotten, and
+//                                    told to delete nothing
 //
 //   A credential an owner took away — a person removed, a Mac signed out — is answered
 //   `401 {error, removed: true}` on every route from then on, where any other bearer nobody
@@ -135,22 +142,25 @@ import { emptyManifest, validateManifest, type Manifest } from "./manifest";
 import {
   ENTITY_ID_RE,
   HASH_RE,
+  MAX_DEVICE_CODE_TTL_MS,
   MAX_INVITE_TTL_MS,
   MEMBER_ID_RE,
   adoptCreator,
+  creatorRow,
   deleteInvite,
-  deleteToken,
+  endSession,
   findCreator,
   findMemberByEmail,
+  listDevices,
   listDirectory,
   listInvites,
   listMembers,
-  listTokens,
   normalizeCode,
   normalizeEmail,
   putInvite,
   redeemInvite,
   removeMember,
+  signOutDevice,
   setMemberRole,
   upsertMember,
 } from "./members";
@@ -421,24 +431,42 @@ async function handleAuth(request: Request, env: Env, parts: string[], auth: Aut
     return gone === true ? new Response(null, { status: 204 }) : json({ error: "no such member" }, 404);
   }
 
-  if (kind === "tokens") {
-    if (!can(auth.role, "people.remove")) return notAllowed();
+  if (kind === "devices") {
+    if (!can(auth.role, "devices.own")) return notAllowed();
+    // Whose devices the caller may name: an owner anybody's, everyone else
+    // their own — and to them somebody else's is what an unknown id is.
+    const everyone = can(auth.role, "people.remove");
+    const self = everyone ? null : auth.memberId;
+    if (!everyone && self === null) return notAllowed();
     if (id === undefined) {
       if (method !== "GET") return methodNotAllowed();
-      const tokens = await listTokens(env);
-      return tokens === null ? noDatabase() : json({ tokens });
+      const devices = await listDevices(env, self);
+      return devices === null ? noDatabase() : json({ devices });
+    }
+    if (id === "code") {
+      if (method !== "POST") return methodNotAllowed();
+      return createDeviceCode(request, env, auth);
     }
     if (method !== "DELETE") return methodNotAllowed();
-    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid token id" }, 400);
-    // Never the credential that is asking: a signed-out Mac deletes its copy
-    // of the workspace, and that is not something to do to the Mac in hand.
-    // Disconnecting is how a Mac stops syncing.
+    if (!ENTITY_ID_RE.test(id)) return json({ error: "invalid device id" }, 400);
+    // Never the credential that is asking: a signed-out device deletes its
+    // copy of the workspace, and that is not something to do to the device in
+    // hand. Ending its own sign-in is how a device leaves (`session`, below).
     if (auth.tokenId === id) {
-      return json({ error: "that is the Mac you are on — disconnect it instead of signing it out" }, 409);
+      return json({ error: "that is the device you are on — disconnect it instead of signing it out" }, 409);
     }
-    const gone = await deleteToken(env, id);
+    const gone = await signOutDevice(env, id, self);
     if (gone === null) return noDatabase();
-    return gone ? new Response(null, { status: 204 }) : json({ error: "no such token" }, 404);
+    return gone ? new Response(null, { status: 204 }) : json({ error: "no such device" }, 404);
+  }
+
+  if (kind === "session" && id === undefined) {
+    if (method !== "DELETE") return methodNotAllowed();
+    // The domain's secret is no row: there is no sign-in to end, and the Mac
+    // that holds it stops by forgetting it.
+    if (auth.creator) return json({ error: "the domain's own token is not a sign-in, so there is none to end" }, 409);
+    const gone = await endSession(env, auth.tokenId);
+    return gone === null ? noDatabase() : new Response(null, { status: 204 });
   }
 
   // `join` only ever answers POST, and that one is handled above the gate.
@@ -490,6 +518,51 @@ async function createInvite(request: Request, env: Env, auth: Auth): Promise<Res
   if (!member) return noDatabase();
   const invite = await putInvite(env, member, codeHash, expiresAt);
   return invite === null ? noDatabase() : json({ invite }, 201);
+}
+
+/**
+ * A one-time code for another device of the caller's own: a second Mac, an
+ * iPhone. It is an invite for a person who is already here, made by that
+ * person — so `POST /api/auth/join` redeems it as it redeems any invite, and
+ * the device it lets in is signed in as them, with a token of its own that
+ * can be taken back without touching their other devices.
+ *
+ * The domain's secret is asked for a code as the person who holds it. A
+ * creator who has not said who they are has no row to sign a device in as:
+ * the first Mac is the secret, and every other device is a person's.
+ */
+async function createDeviceCode(request: Request, env: Env, auth: Auth): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const codeHash = typeof body.codeHash === "string" ? body.codeHash.trim().toLowerCase() : "";
+  if (!HASH_RE.test(codeHash)) return json({ error: "codeHash must be the sha256 of the code, in hex" }, 400);
+  const now = Date.now();
+  const expiresAt =
+    typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? Math.floor(body.expiresAt) : 0;
+  if (expiresAt <= now || expiresAt > now + MAX_DEVICE_CODE_TTL_MS) {
+    const hours = MAX_DEVICE_CODE_TTL_MS / 3_600_000;
+    return json({ error: `expiresAt must be a time within the next ${hours} hours` }, 400);
+  }
+
+  let person: { id: string; email: string; name: string } | null = null;
+  if (auth.creator) {
+    const creator = await creatorRow(env);
+    if (creator === null) return noDatabase();
+    if (creator === "none") {
+      return json(
+        { error: "say who you are first — your name and email, under People — then add a device", code: "no_identity" },
+        409,
+      );
+    }
+    person = creator;
+  } else if (auth.memberId !== null && auth.email !== null) {
+    person = { id: auth.memberId, email: auth.email, name: auth.name };
+  }
+  if (person === null) return notAllowed();
+
+  const invite = await putInvite(env, person, codeHash, expiresAt);
+  if (invite === null) return noDatabase();
+  return json({ code: { id: invite.id, createdAt: invite.createdAt, expiresAt: invite.expiresAt } }, 201);
 }
 
 /** The creator saying who they are. Identity, not authority — `OWNER_TOKEN`

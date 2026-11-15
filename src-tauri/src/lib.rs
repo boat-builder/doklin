@@ -1743,6 +1743,7 @@ pub fn run() {
             cloud::cloud_probe,
             cloud::cloud_marker,
             cloud::cloud_token,
+            cloud::cloud_device_code,
             cloud::cloud_invite,
             cloud::cloud_people,
             cloud::cloud_adopt_owner,

@@ -9,7 +9,7 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - A token carries its person's `members.role`, read on every request, so a role change bites on the next call. There can be several owners.
 - Who may do what is one table: `can(role, action)` in `roles.ts`. Every gated route asks it; `/api/meta` answers the caller's row as `you.can` and the app hides by it (`may` / `mayOn`, `src/cloud.ts`; an empty `can` on a status means not yet known, so the control shows). Change a permission there, nowhere else.
 - A member is not a limited account: `PUT /api/manifest` isn't role-gated. Owners only = invite, remove, sign out, roles, other people's agents, bind, wipe.
-- Nobody removes or demotes their own row, or deletes the token the call is made with.
+- Nobody removes or demotes their own row, or signs out the device the call is made with.
 - Codes are 100 bits (Crockford base32): no throttle, lockout or counter. Revoking a row bites on the next request.
 - `last_seen_at` (beat) and `last_used_at` (agent request) move at most hourly.
 
@@ -22,7 +22,18 @@ Routes, tables, status codes: [cloud-worker/README.md](../cloud-worker/README.md
 - Redeem runs first (`/api/meta` is behind the gate): `cloud_redeem`, then probe, `cloud_join`. The code is spent at redeem; later failures retry the probe only.
 - `CloudPeople.tsx` asks (`cloud_people`), never stores: no role is on disk. Everyone reads the list; lists a role may not act on come back empty.
 - `cloud_join(endpoint, token)` asks for no folder: the workspace lands in `~/Doklin/<name>` (`Name 2` when taken).
-- An owner's unused codes go with them: removing or demoting an owner withdraws **every** pending invite. Otherwise a removed owner returns on a code they kept.
+- An owner's unused codes go with them: removing or demoting an owner withdraws **every** pending invite, device codes among them. Otherwise a removed owner returns on a code they kept.
+
+## Devices
+
+- A device (a Mac, an iPhone) is a row in `tokens`: one sign-in, one device. It gets there by `POST /api/auth/join` and no other way — with an invite somebody made for its person, or a **device code** that person made for themselves (`cloud_device_code` → `POST /api/auth/devices/code`).
+- To the domain a device code is that person's pending invite: same table, same grammar, same line (`doklin-invite <endpoint> <code>`), same redeem, one pending code a person. Never give it a prefix, a table or a route of its own to redeem.
+- **No person's token is ever shown or carried between two devices.** `cloud_token` answers only the Mac that holds the domain's secret (`creator` in `cloud.json`), for the creator to keep a copy of: the door that takes it (*Open with the domain's token*) is the way back in when every device is lost, never how one is added.
+- That Mac is not a device row: not listed, not signed out. The secret asks for a device code as the creator's person and is refused (`409 no_identity`) until they have one (`cloud_adopt_owner`). The creator's other devices are rows like anyone's — role `owner`, `creator: false` — and obey a removal.
+- Everyone lists and signs out their own (`devices.own`); an owner anybody's (`people.remove`). Somebody else's is a `404` to a member.
+- Signing a device out is a removal (`removed_tokens`: it deletes its copy). A device leaving is not: `DELETE /api/auth/session` forgets the row and says nothing. Disconnect calls it, bounded by `END_SESSION_WAIT` and never waited on to succeed; a wipe does not (it empties the table).
+- `DEVICE_CODE_MINUTES` (`invite.rs`) is the lifetime; the worker's `MAX_DEVICE_CODE_TTL_MS` is looser only to absorb clock skew.
+- A join whose open folder carries that workspace's marker offers *Resume* (`CloudSetup.tsx`): the only way a disconnected Mac's folder syncs again, since nobody can type a token for it.
 
 ## Losing access (`engine.rs`, `mod.rs`)
 

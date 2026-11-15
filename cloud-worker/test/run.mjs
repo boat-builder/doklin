@@ -307,15 +307,15 @@ await test("identity: a code survives case, spacing and the prefix — and nothi
   }
 
   // Revoking a device takes effect on its next request — there is no session.
-  const tokens = await call("/api/auth/tokens", { token: OWNER });
-  assert.equal(tokens.status, 200);
-  assert.ok(!tokens.text.includes(sha256(BOB)), "the owner is told what exists, never handed it");
-  const bobToken = tokens.json.tokens.find((t) => t.email === "bob@example.com");
+  const devices = await call("/api/auth/devices", { token: OWNER });
+  assert.equal(devices.status, 200);
+  assert.ok(!devices.text.includes(sha256(BOB)), "the owner is told what exists, never handed it");
+  const bobToken = devices.json.devices.find((t) => t.email === "bob@example.com");
   assert.equal(bobToken.deviceName, "Bob's mini");
   assert.equal(bobToken.deviceId, "d-bobmac");
-  assert.equal((await call(`/api/auth/tokens/${bobToken.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call(`/api/auth/devices/${bobToken.id}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.equal((await call("/api/meta", { token: BOB })).status, 401, "revoked on the very next request");
-  assert.equal((await call(`/api/auth/tokens/${bobToken.id}`, { method: "DELETE", token: OWNER })).status, 404);
+  assert.equal((await call(`/api/auth/devices/${bobToken.id}`, { method: "DELETE", token: OWNER })).status, 404);
 });
 
 await test("identity: one email is one person — case, spacing and a re-invite reach the same row", async () => {
@@ -477,7 +477,7 @@ await test("identity: removing a person takes every credential they hold, and ke
   }
 });
 
-await test("identity: POST /api/auth/join is the whole carve-out, and of the other auth routes only the People list is a member's", async () => {
+await test("identity: POST /api/auth/join is the whole carve-out, and of the other auth routes only the People list and their own devices are a member's", async () => {
   // Reaching a 400 without a bearer is the proof it is above the gate: the
   // body was read, so the request was never turned away for being anonymous.
   assert.equal((await call("/api/auth/join", { method: "POST", body: { code: "junk" } })).status, 400);
@@ -490,7 +490,9 @@ await test("identity: POST /api/auth/join is the whole carve-out, and of the oth
     ["/api/auth/invites", "POST"],
     ["/api/auth/invites", "GET"],
     ["/api/auth/members", "GET"],
-    ["/api/auth/tokens", "GET"],
+    ["/api/auth/devices", "GET"],
+    ["/api/auth/devices/code", "POST"],
+    ["/api/auth/session", "DELETE"],
     ["/api/meta", "GET"],
     ["/api/manifest", "GET"],
   ]) {
@@ -507,8 +509,6 @@ await test("identity: POST /api/auth/join is the whole carve-out, and of the oth
     ["/api/auth/members", "POST"],
     [`/api/auth/members/${ALICE.id}`, "PATCH"],
     [`/api/auth/members/${ALICE.id}`, "DELETE"],
-    ["/api/auth/tokens", "GET"],
-    ["/api/auth/tokens/t-00000000", "DELETE"],
   ]) {
     const res = await call(path, { method, token: MEMBER, body: method === "GET" ? undefined : {} });
     assert.equal(res.status, 403, `${method} ${path} as a member`);
@@ -521,7 +521,7 @@ await test("identity: POST /api/auth/join is the whole carve-out, and of the oth
 
   assert.equal((await call("/api/auth/join", { method: "POST", token: OWNER, body: { code: ALICE_CODE } })).status, 401);
   assert.equal((await call("/api/auth/nonsense", { token: OWNER })).status, 404);
-  assert.equal((await call("/api/auth/tokens", { method: "POST", token: OWNER, body: {} })).status, 405);
+  assert.equal((await call("/api/auth/devices", { method: "POST", token: OWNER, body: {} })).status, 405);
   assert.equal((await call("/api/auth/join", { method: "PUT", token: OWNER, body: {} })).status, 405);
 });
 
@@ -535,7 +535,7 @@ await test("identity: the owner needs no database, and everyone else is one", as
     assert.equal((await call("/api/meta", { token: MEMBER, bindings })).status, 401, "a member cannot be resolved");
     assert.equal((await call("/api/auth/members", { token: OWNER, bindings })).status, 503, "identity IS the database");
     assert.equal((await call("/api/auth/invites", { token: OWNER, bindings })).status, 503);
-    assert.equal((await call("/api/auth/tokens", { token: OWNER, bindings })).status, 503);
+    assert.equal((await call("/api/auth/devices", { token: OWNER, bindings })).status, 503);
     const join = await call("/api/auth/join", { method: "POST", bindings, body: { code: ALICE_CODE, deviceId: DEVICE } });
     assert.equal(join.status, 503, "and a redeem says so rather than 'wrong code'");
   }
@@ -694,20 +694,20 @@ await test("identity: the creator is a person for attribution, and a secret for 
     403,
     "saying who holds the secret is the secret's alone",
   );
-  const mine = (await call("/api/auth/tokens", { token: OWNER })).json.tokens.find((t) => t.deviceId === "d-sherin2");
-  assert.equal((await call(`/api/auth/tokens/${mine.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  const mine = (await call("/api/auth/devices", { token: OWNER })).json.devices.find((t) => t.deviceId === "d-sherin2");
+  assert.equal((await call(`/api/auth/devices/${mine.id}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.equal((await call("/api/meta", { token: redeemed.json.token })).json.removed, true, "signed out like any other Mac");
 });
 
 await test("roles: a role is the person's — an owner makes another, and it lands on their very next request", async () => {
-  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "pages.manage", "workspace.manage"];
+  const EVERYTHING = ["work", "people.see", "people.invite", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"];
   const role = (id, to, token = OWNER) =>
     call(`/api/auth/members/${id}`, { method: "PATCH", token, body: { role: to } });
   const creator = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
 
   // What each role may do is one table, and the probe answers the caller's
   // row of it — the same answer every gated route below is decided by.
-  assert.deepEqual((await call("/api/meta", { token: MEMBER })).json.you.can, ["work", "people.see", "agents.own"]);
+  assert.deepEqual((await call("/api/meta", { token: MEMBER })).json.you.can, ["work", "people.see", "agents.own", "devices.own"]);
   assert.deepEqual((await call("/api/meta", { token: OWNER })).json.you.can, EVERYTHING);
 
   assert.equal((await role(ALICE.id, "owner", MEMBER)).status, 403, "a member cannot make an owner — themselves least of all");
@@ -720,7 +720,7 @@ await test("roles: a role is the person's — an owner makes another, and it lan
   const you = (await call("/api/meta", { token: MEMBER })).json.you;
   assert.equal(you.role, "owner");
   assert.deepEqual(you.can, EVERYTHING);
-  for (const path of ["/api/auth/invites", "/api/auth/tokens", "/api/auth/agents"]) {
+  for (const path of ["/api/auth/invites", "/api/auth/devices", "/api/auth/agents"]) {
     assert.equal((await call(path, { token: MEMBER })).status, 200, `${path} answers the new owner`);
   }
   assert.equal(
@@ -765,7 +765,7 @@ await test("roles: a role is the person's — an owner makes another, and it lan
   const mine = (await call("/api/meta", { token: MEMBER })).json.you.tokenId;
   assert.ok(/^t-[a-f0-9]{8}$/.test(mine));
   assert.equal((await call("/api/meta", { token: OWNER })).json.you.tokenId, null, "the secret is no row");
-  assert.equal((await call(`/api/auth/tokens/${mine}`, { method: "DELETE", token: MEMBER })).status, 409);
+  assert.equal((await call(`/api/auth/devices/${mine}`, { method: "DELETE", token: MEMBER })).status, 409);
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 200, "still signed in");
 
   // And back: a member again, on the next request, with the same token —
@@ -817,6 +817,112 @@ await test("roles: a role is the person's — an owner makes another, and it lan
   assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", ALICE.id), 1, "and Alice's row has the one Mac it had");
 });
 
+await test("devices: anyone adds a device of their own with a one-time code, sees and signs out their own — and a device leaves by ending its own sign-in", async () => {
+  const HOUR = 60 * 60 * 1000;
+  const deviceCode = (body, token, expiresAt = Date.now() + HOUR) =>
+    call("/api/auth/devices/code", { method: "POST", token, body: { codeHash: sha256(body), expiresAt } });
+  const join = (body, deviceId, deviceName) =>
+    call("/api/auth/join", { method: "POST", device: deviceId, body: { code: code(body), deviceId, deviceName } });
+  const namesOf = (res) => res.json.devices.map((d) => d.deviceName).sort();
+
+  // A member, not an owner — and no address in the request: the code is for
+  // nobody but the person asking.
+  const made = await deviceCode("PHNE0000000000000001", MEMBER);
+  assert.equal(made.status, 201);
+  assert.ok(/^i-[a-f0-9]{8}$/.test(made.json.code.id));
+  assert.ok(made.json.code.expiresAt > Date.now());
+  assert.equal(db.value("SELECT member_id FROM invites WHERE hash = ?", sha256("PHNE0000000000000001")), ALICE.id);
+
+  // The join that redeems an invite redeems it: the phone is Alice, on a
+  // token of its own.
+  const phone = await join("PHNE0000000000000001", "d-alicephone", "Alice's iPhone");
+  assert.equal(phone.status, 201);
+  assert.equal(phone.json.member.id, ALICE.id, "signed in as her");
+  assert.notEqual(phone.json.token, MEMBER, "…with a credential of its own");
+  assert.equal((await call("/api/meta", { token: phone.json.token, device: "d-alicephone" })).json.you.memberId, ALICE.id);
+  assert.equal((await join("PHNE0000000000000001", "d-thief", "Somebody else")).status, 401, "a code works once");
+
+  // Any number of them, one code at a time: a new code stops the one before.
+  assert.equal((await deviceCode("PHNE0000000000000002", MEMBER)).status, 201);
+  assert.equal((await deviceCode("PHNE0000000000000003", MEMBER)).status, 201);
+  assert.equal((await join("PHNE0000000000000002", "d-alicepad", "Alice's iPad")).status, 401, "the code it replaced is dead");
+  const pad = await join("PHNE0000000000000003", "d-alicepad", "Alice's iPad");
+  assert.equal(pad.status, 201);
+
+  // The secret asks as the person who holds it: the creator's second Mac is
+  // an owner's sign-in like any other, and no longer the secret.
+  const creator = (await call("/api/auth/members", { token: OWNER })).json.members.find((m) => m.creator);
+  assert.equal((await deviceCode("CRTR0000000000000001", OWNER)).status, 201);
+  const mini = await join("CRTR0000000000000001", "d-sherinmini", "Sherin's mini");
+  assert.equal(mini.json.member.id, creator.id);
+  const miniIs = (await call("/api/meta", { token: mini.json.token, device: "d-sherinmini" })).json.you;
+  assert.equal(miniIs.role, "owner");
+  assert.equal(miniIs.creator, false, "the secret alone is the creator's credential");
+  assert.equal(miniIs.tokenId, mini.json.tokenId);
+
+  // Her devices are hers to see, and nobody else's are: an owner sees everyone's.
+  const hers = await call("/api/auth/devices", { token: MEMBER });
+  assert.equal(hers.status, 200);
+  assert.deepEqual(namesOf(hers), ["Alice's Air", "Alice's iPad", "Alice's iPhone"]);
+  assert.ok(hers.json.devices.every((d) => d.memberId === ALICE.id));
+  assert.ok(!hers.text.includes(sha256(phone.json.token)), "told what exists, never handed it");
+  assert.deepEqual(namesOf(await call("/api/auth/devices", { token: phone.json.token, device: "d-alicephone" })), namesOf(hers), "from any of them");
+  const all = await call("/api/auth/devices", { token: OWNER });
+  assert.deepEqual(namesOf(all), ["Alice's Air", "Alice's iPad", "Alice's iPhone", "Sherin's mini"]);
+  assert.deepEqual(namesOf(await call("/api/auth/devices", { token: mini.json.token, device: "d-sherinmini" })), namesOf(all), "an owner's sign-in is an owner");
+
+  // Somebody else's device is, to a member, what an unknown id is.
+  const others = await call(`/api/auth/devices/${mini.json.tokenId}`, { method: "DELETE", token: MEMBER });
+  assert.equal(others.status, 404);
+  assert.equal((await call("/api/meta", { token: mini.json.token, device: "d-sherinmini" })).status, 200, "…and it is still signed in");
+  assert.equal((await call("/api/auth/devices/nope", { method: "DELETE", token: MEMBER })).status, 400);
+
+  // One of her own, signed out from another: told so, as when an owner does
+  // it, because that is what has the device delete its copy.
+  assert.equal((await call(`/api/auth/devices/${pad.json.tokenId}`, { method: "DELETE", token: MEMBER })).status, 204);
+  const padNow = await call("/api/meta", { token: pad.json.token, device: "d-alicepad" });
+  assert.equal(padNow.status, 401);
+  assert.equal(padNow.json.removed, true);
+  assert.equal((await call(`/api/auth/devices/${pad.json.tokenId}`, { method: "DELETE", token: MEMBER })).status, 404, "gone is gone");
+
+  // A device that leaves ends its own sign-in. It is forgotten, and told to
+  // delete nothing: that is for a device somebody else showed the door.
+  await call("/api/poll", { method: "POST", token: phone.json.token, device: "d-alicephone", body: { name: "Alice's iPhone" } });
+  assert.equal(db.value("SELECT COUNT(*) FROM presence WHERE device_id = 'd-alicephone'"), 1);
+  assert.equal((await call("/api/auth/session", { method: "DELETE", token: phone.json.token, device: "d-alicephone" })).status, 204);
+  const phoneNow = await call("/api/meta", { token: phone.json.token, device: "d-alicephone" });
+  assert.equal(phoneNow.status, 401);
+  assert.equal(phoneNow.json.removed, undefined, "a bare refusal");
+  assert.equal(db.value("SELECT COUNT(*) FROM removed_tokens WHERE hash = ?", sha256(phone.json.token)), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM presence WHERE device_id = 'd-alicephone'"), 0, "and it is not here now");
+  assert.deepEqual(namesOf(await call("/api/auth/devices", { token: MEMBER })), ["Alice's Air"]);
+  // The secret is no sign-in, so there is none to end.
+  assert.equal((await call("/api/auth/session", { method: "DELETE", token: OWNER })).status, 409);
+  assert.equal((await call("/api/meta", { token: OWNER })).status, 200);
+
+  // A pending code is a way in as its person, so an owner sees it among the
+  // pending invites and can withdraw it.
+  const pending = await deviceCode("PHNE0000000000000004", MEMBER);
+  const listed = (await call("/api/auth/invites", { token: OWNER })).json.invites;
+  assert.ok(listed.some((i) => i.id === pending.json.code.id && i.memberId === ALICE.id));
+  assert.equal((await call(`/api/auth/invites/${pending.json.code.id}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await join("PHNE0000000000000004", "d-alicepad", "Alice's iPad")).status, 401);
+
+  // What a code request has to be.
+  assert.equal((await deviceCode("PHNE0000000000000005", MEMBER, Date.now() + 25 * HOUR)).status, 400, "an hour, not a month");
+  assert.equal((await deviceCode("PHNE0000000000000005", MEMBER, Date.now() - 1)).status, 400);
+  const noHash = await call("/api/auth/devices/code", { method: "POST", token: MEMBER, body: { codeHash: "nope", expiresAt: Date.now() + HOUR } });
+  assert.equal(noHash.status, 400);
+  assert.equal((await call("/api/auth/devices/code", { token: MEMBER })).status, 405);
+  assert.equal((await call("/api/auth/session", { token: MEMBER })).status, 405);
+  assert.equal(db.value("SELECT COUNT(*) FROM invites"), 0, "nothing is left pending");
+
+  // Back to what the tests below stand on: Alice on her one Mac, the creator on the secret.
+  assert.equal((await call(`/api/auth/devices/${mini.json.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", ALICE.id), 1);
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE member_id = ?", creator.id), 0);
+});
+
 await test("removal: a credential an owner took away is told so — and no other refusal ever says it", async () => {
   await call("/api/auth/invites", {
     method: "POST",
@@ -828,7 +934,7 @@ await test("removal: a credential an owner took away is told so — and no other
 
   // Signing one Mac out leaves the person, and tells that Mac why it is
   // refused — on every route, not just the one it happened to ask first.
-  assert.equal((await call(`/api/auth/tokens/${zed.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call(`/api/auth/devices/${zed.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.equal(db.value("SELECT COUNT(*) FROM removed_tokens WHERE hash = ?", sha256(zed.token)), 1, "kept by its hash, as the token was");
   for (const [path, method] of [
     ["/api/meta", "GET"],
@@ -972,6 +1078,18 @@ await test("d1: a database from before roles learns who its creator was — once
   assert.equal(answered.d1, D1_SCHEMA);
   assert.equal(answered.you.memberId, null, "nobody adopted an identity, so nobody is named");
   assert.equal(blank.value("SELECT COUNT(*) FROM creator"), 0);
+  // …and nobody to sign a second device in as: the Mac that holds the secret
+  // is the only one until its holder says who they are.
+  const noPerson = await second.fetch(
+    new Request("https://blank.example.com/api/auth/devices/code", {
+      method: "POST",
+      headers: { authorization: `Bearer ${OWNER}`, "content-type": "application/json" },
+      body: JSON.stringify({ codeHash: sha256("NNNNNNNNNNNNNNNNNNN0"), expiresAt: Date.now() + 60 * 60 * 1000 }),
+    }),
+    { OWNER_TOKEN: OWNER, DATA: new FakeR2(), DB: blank },
+  );
+  assert.equal(noPerson.status, 409);
+  assert.equal((await noPerson.json()).code, "no_identity");
   // The creator's agent is then nobody's in particular: it has the shared
   // workspace, and no Private until its person says who they are.
   const orphan = await second.fetch(
@@ -1556,7 +1674,7 @@ await test("poll: revoking a Mac or removing a person takes them out of presence
   await call("/api/poll", { method: "POST", token: gail.token, device: "d-gail", body: { name: "Air", path: "Gail.md" } });
   assert.ok(presenceRows().some((r) => r.device_id === "d-gail"));
   assert.ok(leaseRows().some((r) => r.device_id === "d-gail"));
-  assert.equal((await call(`/api/auth/tokens/${gail.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
+  assert.equal((await call(`/api/auth/devices/${gail.tokenId}`, { method: "DELETE", token: OWNER })).status, 204);
   assert.ok(!presenceRows().some((r) => r.device_id === "d-gail"), "not 'here now' for the TTL's minute and a half");
   assert.ok(!leaseRows().some((r) => r.device_id === "d-gail"), "…and not holding a document anyone else wants");
 
@@ -2805,7 +2923,7 @@ await test("agents: the gate — an agent's token is answered on /api/agent and 
     ["GET", "/api/auth/members"],
     ["GET", "/api/auth/invites"],
     ["POST", "/api/auth/invites", { email: "bot@example.com", codeHash: sha256("x"), expiresAt: Date.now() + DAY }],
-    ["GET", "/api/auth/tokens"],
+    ["GET", "/api/auth/devices"],
     ["GET", "/api/auth/agents"],
     ["POST", "/api/auth/agents", { name: "Another", scopes: ["edit"], codeHash: sha256("y"), expiresAt: Date.now() + HOUR }],
     ["POST", "/api/admin/wipe", { confirm: "wipe" }],

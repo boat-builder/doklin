@@ -88,7 +88,7 @@ struct FakeWorker {
     /// token -> the row that resolves it. Deleting the entry is revoking it,
     /// and it bites on that Mac's next call because every call comes through
     /// `ready` — which is the whole of what a session would have been.
-    tokens: BTreeMap<String, TokenRecord>,
+    tokens: BTreeMap<String, DeviceRecord>,
     /// The tokens an owner took away — `removed_tokens`. A bearer found here
     /// is answered `Removed`, which is the one refusal a Mac deletes its copy
     /// on; a bearer found nowhere is merely `Unauthorized`.
@@ -193,13 +193,14 @@ impl Caller {
         let all = [
             "work",
             "people.see",
+            "devices.own",
             "people.invite",
             "people.remove",
             "people.roles",
             "agents.manage",
             "workspace.manage",
         ];
-        let held = if self == Caller::Member { &all[..2] } else { &all[..] };
+        let held = if self == Caller::Member { &all[..3] } else { &all[..] };
         held.iter().map(|action| action.to_string()).collect()
     }
 }
@@ -1040,7 +1041,7 @@ impl Remote for FakeRemote {
             let token_id = FakeRemote::mint_id(&mut b, "t");
             b.tokens.insert(
                 token.clone(),
-                TokenRecord {
+                DeviceRecord {
                     id: token_id.clone(),
                     member_id: member.id.clone(),
                     email: invited.email,
@@ -1204,33 +1205,99 @@ impl Remote for FakeRemote {
         }
     }
 
-    fn list_tokens(&self) -> impl std::future::Future<Output = RemoteResult<Vec<TokenRecord>>> + Send {
+    fn device_code(
+        &self,
+        code_hash: &str,
+        expires_at: u64,
+    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let this = self.clone();
+        let code_hash = code_hash.to_string();
         async move {
-            this.owner_only()?;
-            let b = this.be.lock().unwrap();
-            // The rows, never the keys they are filed under: the owner is told
-            // who holds a credential, never what it is.
-            Ok(b.tokens.values().cloned().collect())
+            // Anyone's to ask, and only ever for themselves: the secret asks
+            // as the person who holds it, and has to have said who that is.
+            let caller = this.ready()?;
+            let mut b = this.be.lock().unwrap();
+            let Some(me) = this.member_id(&b, caller) else {
+                return Err(RemoteError::Other(
+                    "say who you are first — your name and email, under People — then add a device".into(),
+                ));
+            };
+            let Some(member) = b.members.values().find(|m| m.id == me).cloned() else {
+                return Err(RemoteError::Forbidden);
+            };
+            // To the domain it is an invite for somebody already here: one
+            // pending code per person, whoever made it.
+            b.invites.retain(|_, held| held.member_id != member.id);
+            let id = FakeRemote::mint_id(&mut b, "i");
+            b.invites.insert(
+                code_hash,
+                InviteRecord {
+                    id,
+                    member_id: member.id,
+                    email: member.email,
+                    name: member.name,
+                    created_at: now_ms(),
+                    expires_at,
+                },
+            );
+            Ok(())
         }
     }
 
-    fn delete_token(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+    fn list_devices(&self) -> impl std::future::Future<Output = RemoteResult<Vec<DeviceRecord>>> + Send {
+        let this = self.clone();
+        async move {
+            let caller = this.ready()?;
+            let b = this.be.lock().unwrap();
+            let me = this.member_id(&b, caller);
+            // The rows, never the keys they are filed under: a credential is
+            // named, never carried. One's own; an owner everybody's.
+            Ok(b.tokens
+                .values()
+                .filter(|t| caller != Caller::Member || Some(&t.member_id) == me.as_ref())
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn sign_out_device(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
         let this = self.clone();
         let id = id.to_string();
         async move {
-            this.owner_only()?;
+            let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
-            let Some(token) = b.tokens.iter().find(|(_, t)| t.id == id).map(|(k, _)| k.clone()) else {
+            let me = this.member_id(&b, caller);
+            // Somebody else's device is, to a member, what an unknown id is.
+            let Some(token) = b
+                .tokens
+                .iter()
+                .find(|(_, t)| t.id == id && (caller != Caller::Member || Some(&t.member_id) == me.as_ref()))
+                .map(|(k, _)| k.clone())
+            else {
                 return Err(RemoteError::NotFound);
             };
             if token == this.token {
                 return Err(RemoteError::Other(
-                    "that is the Mac you are on — disconnect it instead of signing it out".into(),
+                    "that is the device you are on — disconnect it instead of signing it out".into(),
                 ));
             }
             b.tokens.remove(&token);
             b.removed.insert(token);
+            Ok(())
+        }
+    }
+
+    fn end_session(&self) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
+        let this = self.clone();
+        async move {
+            if this.ready()? == Caller::Creator {
+                return Err(RemoteError::Other(
+                    "the domain's own token is not a sign-in, so there is none to end".into(),
+                ));
+            }
+            // Forgotten, and not written down as taken away: a device that
+            // leaves is told to delete nothing.
+            this.be.lock().unwrap().tokens.remove(&this.token);
             Ok(())
         }
     }
@@ -2500,8 +2567,8 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
         .await
         .unwrap();
 
-    // From here the invitee's flow IS the second Mac's flow: the token goes
-    // into the same download the panel's "Connect another Mac" feeds.
+    // From here an invitee's flow is any joining device's: the token the
+    // redeem minted goes into the download.
     let bob = Arc::new(FakeRemote::with_token(&be, "d-bob", &redeemed.token));
     let parent = tempfile::tempdir().unwrap();
     let dest = parent.path().join("Notes");
@@ -2702,7 +2769,7 @@ async fn the_owner_sees_everyone_and_what_each_of_them_holds() {
     assert_eq!(invites[0].email, "carol@example.com");
 
     // Every signed-in Mac, named — and never the credential that names it.
-    let devices = owner.list_tokens().await.unwrap();
+    let devices = owner.list_devices().await.unwrap();
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|t| t.member_id == bob.id));
     assert!(devices.iter().any(|t| t.device_id.as_deref() == Some("d-bob") && t.device_name.as_deref() == Some("Bob's Mac")));
@@ -2733,9 +2800,9 @@ async fn people_is_everybodys_to_see_and_an_owners_to_change() {
     assert!(seen.can.iter().any(|c| c == "people.invite"));
 
     // A member sees who is here — a workspace you belong to is one whose
-    // people you can name — and none of what is an owner's to act on. Nothing
-    // on disk said which they are: the domain did, and the view asked for
-    // exactly the lists that role is answered.
+    // people you can name — their own devices, and none of what is an owner's
+    // to act on. Nothing on disk said which they are: the domain did, and the
+    // view asked for exactly the lists that role is answered.
     let bob = FakeRemote::with_token(&be, "d-bob", &token);
     let mine = super::people_of(&bob, "d-bob", "notes.example.com").await.unwrap();
     assert_eq!(mine.role, "member");
@@ -2744,8 +2811,10 @@ async fn people_is_everybodys_to_see_and_an_owners_to_change() {
     assert_eq!(mine.members.len(), 2, "the People list answers a member");
     assert_eq!(mine.me, mine.members.iter().find(|m| m.email == "bob@example.com").map(|m| m.id.clone()));
     assert!(mine.members.iter().any(|m| m.creator && m.role == "owner"));
-    assert!(mine.invites.is_empty() && mine.devices.is_empty());
-    assert_eq!(mine.can, vec!["work".to_string(), "people.see".to_string()]);
+    assert!(mine.invites.is_empty());
+    assert_eq!(mine.devices.len(), 1, "their own Mac, and nobody else's");
+    assert_eq!(mine.devices[0].device_id.as_deref(), Some("d-bob"));
+    assert_eq!(mine.can, vec!["work".to_string(), "people.see".to_string(), "devices.own".to_string()]);
     assert!(matches!(bob.list_invites().await, Err(RemoteError::Forbidden)), "…and the routes agree");
 
     // A credential nobody minted is a failure, not a role.
@@ -2823,13 +2892,13 @@ async fn a_signed_out_mac_is_told_its_access_was_removed() {
 
     // An owner finds that Mac in the list and signs it out.
     let row = owner
-        .list_tokens()
+        .list_devices()
         .await
         .unwrap()
         .into_iter()
         .find(|t| t.device_id.as_deref() == Some("d-bob"))
         .expect("Bob's Mac is listed");
-    owner.delete_token(&row.id).await.unwrap();
+    owner.sign_out_device(&row.id).await.unwrap();
 
     // It bites on the very next call: the bearer resolves through the table
     // the delete emptied, so there is no session to wait out. And the refusal
@@ -2842,7 +2911,7 @@ async fn a_signed_out_mac_is_told_its_access_was_removed() {
     assert!(bob.root.path().join("readme.md").exists(), "the engine touched nothing on its way out");
     // The person stays: a Mac was signed out, not a colleague removed.
     assert_eq!(owner.list_members().await.unwrap().len(), 1);
-    assert!(owner.list_tokens().await.unwrap().is_empty());
+    assert!(owner.list_devices().await.unwrap().is_empty());
 
     // And the owner's own sync never noticed any of it.
     alice.write("after.md", "still fine\n");
@@ -2938,6 +3007,68 @@ async fn the_creators_mac_never_deletes_on_anybodys_word() {
 }
 
 #[tokio::test]
+async fn a_device_is_added_with_a_code_by_anyone_for_themselves() {
+    let be = fake_worker();
+    let owner = FakeRemote::new(&be, "d-alice");
+    let code_for = |remote: &FakeRemote| {
+        let remote = remote.clone();
+        async move {
+            let code = invite::random_code();
+            remote.device_code(&invite::code_hash(&code), invite::device_code_expires_at(now_ms())).await.map(|_| code)
+        }
+    };
+    let join = |code: String, device: &'static str, name: &'static str| {
+        let be = be.clone();
+        async move { FakeRemote::with_token(&be, device, "").redeem(&code, name).await }
+    };
+
+    // The secret asks as the person who holds it — so it has to have said
+    // who that is. Until then the Mac that made the workspace is the only one.
+    assert!(code_for(&owner).await.is_err());
+    let ada = owner.adopt_owner("ada@example.com", Some("Ada")).await.unwrap();
+    let mini = join(code_for(&owner).await.unwrap(), "d-ada-mini", "Ada's mini").await.unwrap();
+    assert_eq!(mini.member.id, ada.id);
+    let mini = FakeRemote::with_token(&be, "d-ada-mini", &mini.token);
+    let as_mini = super::people_of(&mini, "d-ada-mini", "d").await.unwrap();
+    assert_eq!(as_mini.role, "owner");
+    assert!(!as_mini.creator, "the secret alone is the creator's credential");
+    assert!(as_mini.token_id.is_some(), "…and this one is a row, which can be signed out");
+
+    // A member, with nobody's leave: a phone of their own, signed in as them
+    // on a credential of its own.
+    let bob_token = invite_and_redeem(&be, &owner, "bob@example.com", "Bob", "d-bob").await;
+    let bob = FakeRemote::with_token(&be, "d-bob", &bob_token);
+    let code = code_for(&bob).await.unwrap();
+    let phone = join(code.clone(), "d-bob-phone", "Bob's iPhone").await.unwrap();
+    assert_ne!(phone.token, bob_token);
+    assert!(matches!(join(code, "d-thief", "Somebody").await, Err(RemoteError::Unauthorized)), "a code works once");
+    let phone_remote = FakeRemote::with_token(&be, "d-bob-phone", &phone.token);
+    let as_phone = super::people_of(&phone_remote, "d-bob-phone", "d").await.unwrap();
+    assert_eq!(as_phone.me, super::people_of(&bob, "d-bob", "d").await.unwrap().me);
+
+    // A member is listed their own devices and nobody else's; an owner everyone's.
+    let mine = super::people_of(&bob, "d-bob", "d").await.unwrap();
+    assert_eq!(mine.devices.len(), 2);
+    assert!(mine.devices.iter().all(|d| Some(&d.member_id) == mine.me.as_ref()));
+    assert_eq!(super::people_of(&owner, "d-alice", "d").await.unwrap().devices.len(), 3);
+
+    // Somebody else's is, to a member, not there; their own they sign out —
+    // and that device is told so, which is what has it delete its copy.
+    let minis_row = as_mini.token_id.clone().unwrap();
+    assert!(matches!(bob.sign_out_device(&minis_row).await, Err(RemoteError::NotFound)));
+    assert!(mini.meta().await.is_ok());
+    bob.sign_out_device(&phone.token_id).await.unwrap();
+    assert!(matches!(phone_remote.meta().await, Err(RemoteError::Removed)));
+
+    // A device that leaves ends its own sign-in: forgotten, and told to
+    // delete nothing. The secret is no sign-in, so it has none to end.
+    mini.end_session().await.unwrap();
+    assert!(matches!(mini.meta().await, Err(RemoteError::Unauthorized)));
+    assert!(owner.end_session().await.is_err());
+    assert_eq!(super::people_of(&owner, "d-alice", "d").await.unwrap().devices.len(), 1);
+}
+
+#[tokio::test]
 async fn nobody_signs_out_the_mac_in_hand_and_no_owners_code_outlives_them() {
     let be = fake_worker();
     let owner = FakeRemote::new(&be, "d-alice");
@@ -2950,16 +3081,11 @@ async fn nobody_signs_out_the_mac_in_hand_and_no_owners_code_outlives_them() {
     owner.set_member_role(&bob_id, "owner").await.unwrap();
 
     // Which row is this Mac's credential comes with the answer, so the view
-    // never offers it — and the domain refuses it anyway. The same token on a
-    // second Mac (handed over through Connect another Mac…) is the same row,
-    // whatever device id that row carries.
+    // never offers it — and the domain refuses it anyway.
     let mine = super::people_of(&bob, "d-bob", "d").await.unwrap();
     let my_row = mine.token_id.clone().expect("a person's token is a row");
     assert!(mine.devices.iter().any(|d| d.id == my_row));
-    assert!(bob.delete_token(&my_row).await.is_err());
-    let second_mac = FakeRemote::with_token(&be, "d-bob-studio", &token);
-    assert_eq!(super::people_of(&second_mac, "d-bob-studio", "d").await.unwrap().token_id, Some(my_row.clone()));
-    assert!(second_mac.delete_token(&my_row).await.is_err());
+    assert!(bob.sign_out_device(&my_row).await.is_err());
     assert!(super::people_of(&owner, "d-alice", "d").await.unwrap().token_id.is_none(), "the secret is no row");
 
     // A code is a way in as the person it is for. One for another owner's
