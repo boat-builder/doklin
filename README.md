@@ -79,13 +79,13 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   html page made from it are one document to it, and its comments open in
   the app's comment rail. `doklin help agent` is the brief an agent reads
   once.
-- **On the phone** — an iPhone and iPad app (`ios/`, Swift) opens a connected
-  workspace from anywhere, with no copy of the folder: browse and search it,
-  read notes, tick checklists, edit a note's markdown, comment, publish. It
-  logs in the way an agent does — add an agent under *Cloud → Agents*, paste
-  the login into the phone — so it sees exactly what you see and does what
-  you ticked. Build it from `ios/Doklin.xcodeproj`:
-  [docs/ios.md](docs/ios.md).
+- **On the phone** — an iPhone and iPad app (`ios/`, Swift) is one more
+  device of yours: on a Mac choose *Devices… → Add a device*, paste the line
+  into the phone, and the whole workspace is on it, synced in the background
+  by the same engine as the Mac's. Browse, search, read, edit, tick
+  checklists, comment, publish, and see who is here; people, devices,
+  agents, sections and history are there too. Build it from
+  `ios/Doklin.xcodeproj`: [docs/ios.md](docs/ios.md).
 - **Themes** — system / light / sepia / dark.
 - **Launches from Finder or the terminal** — double-click a `.md` file or folder,
   or run `doklin open path/to/file.md`. Anything inside a connected workspace

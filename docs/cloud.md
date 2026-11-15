@@ -22,11 +22,11 @@ manifest, rendered by the worker from the synced files.
 ## Rules
 
 1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only an owner's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
-2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS. True of the iPhone's screens too: Swift calls the same commands and holds no token.
+2. **The engine is the only code that talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS. True of the iPhone's screens too: Swift calls the same commands, and touches a token only to hand `cloud_redeem`'s to `cloud_join` and to keep it in the Keychain for the engine (`Host::secrets`).
 9. **The engine crate (`engine/`) knows nothing of the app around it**: no Tauri, no Swift, no `cfg` on which app. What differs is said once in `Setup` and asked through `Host` (`engine/src/host.rs`). A command is written once, in the engine; each app only reaches it.
 3. **The manifest is the only truth about what is public.** The frontend's view is `CloudStatus.public`; no `localStorage` registry.
 4. **A public page is a rendering of synced files.** The worker stores no page content.
-5. **Disk is the source of truth for content.** Merge, never clobber; overlaps become a conflict copy beside the file; deletions go to the macOS Trash.
+5. **Disk is the source of truth for content.** Merge, never clobber; overlaps become a conflict copy beside the file; deletions go to the macOS Trash (`Host::trash`). The iPhone has none: a deletion there is outright, and the version store keeps what went.
 6. **A skewed app/worker refuses legibly and never corrupts** (see Worker versions).
 7. **No accounts, dashboard or terminal for the user.** Setup and teardown are prompts for an agent running wrangler; the update is a script.
 8. **The worker imports only pure `src/` modules** — nothing touching Tauri or React.
@@ -122,7 +122,8 @@ manifest, rendered by the worker from the synced files.
 
 ## Local files
 
-- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token, creator}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected); the only place a token lives.
+- `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token, creator}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected; an entry with no token = not connected). It is read and written only by `read_cloud_file`/`write_cloud_file` (`cloud/config.rs`).
+- Where the token lives: in that entry on a Mac. An app whose `Host::secrets` keeps sign-ins (the iPhone: its Keychain, by `wsId`, this device only, never in a backup) gets each token there and finds `token: ""` in the file; a workspace dropped from the file has its kept sign-in deleted with it. A phone restored from a backup has no sign-in and joins again as a new device.
 - `<root>/.doklin/cloud.json`: the marker `{domain, wsId}`. Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
 - `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops; merge bases. Each space's are under `spaces/<spaceId>/` in it.
 - `<folder>/.doklin/space.json`: a space's marker (*Sections*). No secret.

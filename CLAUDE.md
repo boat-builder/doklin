@@ -16,8 +16,12 @@ pnpm build && pnpm lint                        # typecheck + build the frontend,
 cd src-tauri && cargo test --lib               # Rust: the Mac app's own (tree, untitled, pdf)
 pnpm typecheck:worker && pnpm test:worker      # the cloud worker
 (cd cli && cargo build --release)              # the CLI
-swift test --package-path ios/DoklinKit        # the iOS app's core (Mac or Linux)
+node verify-harness/drive-ios.mjs             # the iOS app's core against a harness worker
+node verify-harness/drive-ios.mjs --app       # the iOS app in a simulator (a Mac with Xcode)
 ```
+
+`swift test --package-path ios/DoklinKit` links the engine: `scripts/ios-engine.sh
+host` first, and `-Xlinker -L$PWD/ios/Engine/host` (drive-ios.mjs does both).
 
 `verify-harness/drive-*.mjs` drive real `src/` components in Chromium with
 Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on

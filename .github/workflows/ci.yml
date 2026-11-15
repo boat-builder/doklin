@@ -14,11 +14,13 @@ name: ci
 #     exit code. Nothing else builds it before a release ships it to machines
 #     that cannot be asked how it went, and its drive is the one automated
 #     check that the command and the worker still agree
-#   - the iOS app's core (ios/DoklinKit), tested and then driven against the
-#     worker this branch carries (verify-harness/drive-ios.mjs), for the
-#     reason the command is: it is another client of the document API, and
-#     nothing else checks that it and the worker still agree. The app itself
-#     needs Xcode, and is built by ios.yml when ios/ changes
+#   - the iOS app's core (ios/DoklinKit) with the engine it links, tested and
+#     then driven against the worker this branch carries
+#     (verify-harness/drive-ios.mjs): it joins as a device, holds the
+#     workspace as files and syncs a change up, so the phone's half of the
+#     engine (the C interface, the Keychain hook, paths under an anchor) and
+#     the worker are checked together. The app itself needs Xcode, and is
+#     built by ios.yml when ios/ changes
 #   - the sync engine and the version store (engine/), with the C interface
 #     the iPhone app links: a crate with no Tauri in it, so its tests — the
 #     in-memory worker and the two-device matrix — run on Linux in a few
