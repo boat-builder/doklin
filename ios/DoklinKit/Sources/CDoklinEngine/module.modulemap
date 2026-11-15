@@ -1,0 +1,6 @@
+// The engine's C interface, as Swift imports it. The header is the engine's
+// own (engine/ffi/include), read where it is rather than copied here.
+module CDoklinEngine {
+    header "../../../../engine/ffi/include/doklin_engine.h"
+    export *
+}

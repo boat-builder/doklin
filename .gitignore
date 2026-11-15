@@ -58,3 +58,6 @@ ios/build
 DerivedData
 xcuserdata
 *.xcuserstate
+
+# The engine library scripts/ios-engine.sh builds for the iPhone app
+ios/Engine/

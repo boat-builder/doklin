@@ -3,15 +3,17 @@
 // workspace (cloud-worker/test/seed.mjs). The views are not driven: they
 // need a simulator. Everything they call is.
 //
-// It starts the harness worker itself, on a port of its own, adds the agents
-// the tests log in as — the way the owner's app does, minting a code and
-// sending only its hash — and runs the package's tests with the address and
-// the codes in the environment:
+// It starts the harness worker itself, on a port of its own, builds the
+// engine this machine links (scripts/ios-engine.sh host), adds the agents
+// the tests log in as and mints the device code the engine joins with — the
+// way the owner's app does, sending only a code's hash — and runs the
+// package's tests with the address and the codes in the environment:
 //
-//   DOKLIN_TEST_ENDPOINT   http://localhost:<port>
-//   DOKLIN_TEST_CODES      {"<agent>": "dkla-…"} — each code works once
+//   DOKLIN_TEST_ENDPOINT      http://localhost:<port>
+//   DOKLIN_TEST_CODES         {"<agent>": "dkla-…"} — each code works once
+//   DOKLIN_TEST_DEVICE_LINE   doklin-invite http://localhost:<port> dkln-… — works once
 //
-// Run (a Mac with Xcode, or any machine with a Swift toolchain):
+// Run (a Mac with Xcode, or any machine with a Swift toolchain, and cargo):
 //
 //   node verify-harness/drive-ios.mjs
 //   node verify-harness/drive-ios.mjs -- <command…>   # another way to run `swift test`,
@@ -121,20 +123,64 @@ const AGENTS = {
 const codes = {};
 for (const [name, scopes] of Object.entries(AGENTS)) codes[name] = await addAgent(`${name} (iOS drive)`, scopes);
 
+const asOwner = { authorization: `Bearer ${OWNER}`, "content-type": "application/json", "x-doklin-device": "d-drive", "x-doklin-client": "0.0.0-drive" };
+
+// A device is added by a person, for themselves, and the domain's secret is
+// nobody until its holder says who they are: say so, as the Mac's People
+// view does, then mint the code a second device of theirs joins with.
+{
+  const res = await fetch(`${WORKER}/api/auth/members`, {
+    method: "POST",
+    headers: asOwner,
+    body: JSON.stringify({ email: "ada@example.com", name: "Ada (drive)" }),
+  });
+  if (!res.ok) throw new Error(`could not say who the creator is: ${res.status} ${await res.text()}`);
+}
+async function deviceLine() {
+  const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
+  const res = await fetch(`${WORKER}/api/auth/devices/code`, {
+    method: "POST",
+    headers: asOwner,
+    body: JSON.stringify({ codeHash: sha256(canonical), expiresAt: Date.now() + 3_600_000 }),
+  });
+  if (res.status !== 201) throw new Error(`could not mint a device code: ${res.status} ${await res.text()}`);
+  return `doklin-invite ${WORKER} dkln-${canonical.match(/.{5}/g).join("-")}`;
+}
+
+/** Whether the shared workspace's manifest lists a file at `path`. */
+async function onTheDomain(path) {
+  const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
+  if (!res.ok) throw new Error(`could not read the manifest: ${res.status}`);
+  const manifest = await res.json();
+  return Object.values(manifest.files ?? {}).some((file) => file.path === path && !file.deleted);
+}
+
 /* ---------- The core: `swift test`, or the command after `--` ---------- */
 
 async function driveCore() {
   const split = process.argv.indexOf("--");
-  const command = split >= 0 ? process.argv.slice(split + 1) : ["swift", "test", "--package-path", join(ROOT, "ios/DoklinKit")];
+  // The package links the engine; `swift test` is told where this machine's is.
+  const engine = join(ROOT, "ios/Engine/host");
+  if (split < 0) execFileSync(join(ROOT, "scripts/ios-engine.sh"), ["host"], { stdio: "inherit" });
+  const command =
+    split >= 0 ? process.argv.slice(split + 1) : ["swift", "test", "--package-path", join(ROOT, "ios/DoklinKit"), "-Xlinker", `-L${engine}`];
   console.log(`running: ${command.join(" ")}`);
-  return new Promise((resolve, reject) => {
+  const status = await new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
-      env: { ...process.env, DOKLIN_TEST_ENDPOINT: WORKER, DOKLIN_TEST_CODES: JSON.stringify(codes) },
+      env: { ...process.env, DOKLIN_TEST_ENDPOINT: WORKER, DOKLIN_TEST_CODES: JSON.stringify(codes), DOKLIN_TEST_DEVICE_LINE: line },
       stdio: "inherit",
     });
     child.on("error", reject);
     child.on("exit", (code) => resolve(code ?? 1));
   });
+  if (status !== 0) return status;
+  // What the engine said it synced, asked of the domain itself.
+  if (!(await onTheDomain("From the phone.md"))) {
+    console.error("the note the engine wrote never reached the domain");
+    return 1;
+  }
+  console.log("the note the engine wrote is on the domain");
+  return 0;
 }
 
 /* ---------- The app: its UI tests in a simulator ---------- */
@@ -207,6 +253,7 @@ async function driveApp() {
   return status;
 }
 
+const line = await deviceLine();
 const status = await (process.argv.includes("--app") ? driveApp() : driveCore());
 cleanup();
 process.exit(status);
