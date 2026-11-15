@@ -52,19 +52,16 @@
   --fs-md: 13px;
   --fs-lg: 14px;
 
-  /* The document. Two font choices, like the Claude Docs viewer: the text
-     face (--font-text: sans by default, serif or mono) and the heading face
-     (--font-heading: serif by default, or sans). The body size is the 100%
-     rung and --doc-zoom multiplies it. Heading sizes are fixed px, so a
-     serif or mono text face never resizes the headings; zoom multiplies
-     them too. The measure is a fixed 672px column; "Wide page" lets it grow
-     to 900px. */
+  /* The document, as the Claude Docs viewer sets it: sans text under
+     regular-weight serif headings, in a fixed 672px column. These are not
+     reader choices; only the theme is. The body size is the 100% rung and
+     --doc-zoom multiplies it. Heading sizes are fixed px, multiplied by
+     zoom too. */
   --font-text: var(--font-sans);
   --font-heading: var(--font-serif);
   --doc-size: 16px;
   --doc-leading: 1.5;
   --doc-measure: 672px;
-  --doc-measure-wide: 900px;
   --doc-h1: 32px;
   --doc-h2: 22px;
   --doc-h3: 18px;
@@ -72,8 +69,6 @@
   --doc-h5: 14px;
   --doc-heading-weight: 400;
   --doc-h1-track: -0.01em;
-  --doc-h2-track: 0em;
-  --doc-h3-track: 0em;
 
   --r-xs: 4px;
   --r-sm: 5px;
@@ -105,28 +100,6 @@
   --dg-good: #0ca30c;
   --dg-warn: #fab219;
   --dg-bad: #d03b3b;
-}
-
-/* Document font choices (Settings → Appearance), on <html>. A serif text
-   face runs a step larger and mono a step smaller, so all three read at
-   the same optical size. Sans headings take weight and tighter tracking,
-   as a sans display face needs. */
-:root[data-text-font="serif"] {
-  --font-text: var(--font-serif);
-  --doc-size: 17px;
-}
-
-:root[data-text-font="mono"] {
-  --font-text: var(--font-mono);
-  --doc-size: 15px;
-}
-
-:root[data-heading-font="sans"] {
-  --font-heading: var(--font-sans);
-  --doc-heading-weight: 600;
-  --doc-h1-track: -0.02em;
-  --doc-h2-track: -0.015em;
-  --doc-h3-track: -0.01em;
 }
 
 /* ---------- Light ---------- */

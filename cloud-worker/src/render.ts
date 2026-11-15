@@ -477,8 +477,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--selection); }
-/* The document: the app's 672px column plus its side padding, the text face
-   at the text size, headings in the heading face at fixed sizes. */
+/* The document: the app's 672px column plus its side padding, sans text at
+   the text size, serif headings at fixed sizes. */
 main.doc {
   width: 100%;
   max-width: calc(var(--doc-measure) + 128px);
@@ -499,8 +499,8 @@ main.doc {
   color: var(--text-1);
 }
 .doc h1 { font-size: var(--doc-h1); line-height: 1.2; letter-spacing: var(--doc-h1-track); margin: 0 0 0.25em; }
-.doc h2 { font-size: var(--doc-h2); line-height: 1.3; letter-spacing: var(--doc-h2-track); margin: 1.6em 0 0.5em; }
-.doc h3 { font-size: var(--doc-h3); line-height: 1.35; letter-spacing: var(--doc-h3-track); margin: 1.4em 0 0.4em; }
+.doc h2 { font-size: var(--doc-h2); line-height: 1.3; margin: 1.6em 0 0.5em; }
+.doc h3 { font-size: var(--doc-h3); line-height: 1.35; margin: 1.4em 0 0.4em; }
 .doc h4, .doc h5, .doc h6 { font-family: var(--font-text); font-weight: 600; }
 .doc h4 { font-size: var(--doc-h4); line-height: 1.4; margin: 1.3em 0 0.3em; }
 .doc h5, .doc h6 { font-size: var(--doc-h5); line-height: 1.45; margin: 1.2em 0 0.25em; }

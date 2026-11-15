@@ -1,12 +1,9 @@
 // Verification harness: the REAL Editor (Crepe + figure blocks) showing a
 // document with every block type, to judge the document look — type,
-// rhythm, palettes, drawings and restyled Mermaid — in each theme and font
-// choice. Not part of the app.
+// rhythm, palettes, drawings and restyled Mermaid — in each theme. Not part
+// of the app.
 //
 //   ?theme=light|dark|paper        [data-theme] on <html>
-//   ?text=sans|serif|mono          [data-text-font] on <html> (default sans)
-//   ?heading=serif|sans            [data-heading-font] on <html> (default serif)
-//   ?wide=1                        [data-page-width=wide]
 //   ?ro=1                          read-only mount
 //   ?bar=0                         hide the switcher (for screenshots)
 import { StrictMode, useCallback } from "react";
@@ -87,13 +84,10 @@ const DOC = SAMPLE;
 const readOnly = params.get("ro") === "1";
 const root = document.documentElement;
 root.dataset.theme = params.get("theme") ?? "light";
-if (params.get("text")) root.dataset.textFont = params.get("text")!;
-if (params.get("heading")) root.dataset.headingFont = params.get("heading")!;
-if (params.get("wide") === "1") root.dataset.pageWidth = "wide";
 window.__md = DOC;
 
 // The switcher: each choice reloads with the new query, the simplest way to
-// get a clean mount for every combination.
+// get a clean mount for every theme.
 function Switch({ name, options }: { name: string; options: string[] }) {
   const current = params.get(name) ?? options[0];
   return (
@@ -124,8 +118,6 @@ function Look() {
       {params.get("bar") !== "0" && (
         <div className="look-bar">
           <Switch name="theme" options={["light", "dark", "paper"]} />
-          <Switch name="text" options={["sans", "serif", "mono"]} />
-          <Switch name="heading" options={["serif", "sans"]} />
         </div>
       )}
       <div

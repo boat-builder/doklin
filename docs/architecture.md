@@ -125,14 +125,12 @@
   (`cloud-worker/src/theme.ts`): keep it a flat list of rules with the
   `:root`, `:root, [data-theme="light"]` and `[data-theme="dark"]` blocks, or
   the worker tests fail.
-- Document fonts are two choices on `<html>`: `data-heading-font`
-  (serif|sans) and `data-text-font` (sans|serif|mono). Heading sizes are fixed
-  px × zoom, so a text face never resizes headings.
+- The theme is the only appearance setting. The document's faces (serif
+  `--font-heading`, sans `--font-text`) and its 672px `--doc-measure` are
+  fixed tokens, not reader choices. Heading sizes are fixed px × zoom.
 - Bundled fonts (Inter, Literata, Roboto Mono, OFL) are named in
   `src/styles/fonts.css`; the worker imports each file by name
   (`cloud-worker/src/theme.ts`) — change both.
 - Code block placeholders must match the mounted editor's height exactly
   (App.css "Code block placeholder parity"); the tools row floats out of flow.
-- `localStorage` keys: `doklin:theme`, `doklin:heading-font`,
-  `doklin:text-font`, `doklin:page-wide`. `doklin:doc-font` is read once and
-  removed (one-time migration in `readStoredDocFonts`).
+- `localStorage` key: `doklin:theme`.
