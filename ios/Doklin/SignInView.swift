@@ -51,7 +51,7 @@ struct SignInView: View {
                 if let failure {
                     Text(failure).foregroundStyle(Theme.errorInk)
                 } else {
-                    Text("A line works once, within an hour of being made.")
+                    Text("A line works once.")
                 }
             }
 

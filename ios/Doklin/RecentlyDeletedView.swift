@@ -28,7 +28,7 @@ struct RecentlyDeletedView: View {
                         row(document, dates)
                     }
                 } footer: {
-                    Text("Deleted in the last 30 days, since this iPhone joined. Something deleted comes back where it was, or beside it when that name is taken.")
+                    Text("Deleted recently, since this iPhone joined. Something deleted comes back where it was, or beside it when that name is taken.")
                 }
             }
         }
@@ -60,7 +60,7 @@ struct RecentlyDeletedView: View {
                 Text(document.name)
                     .foregroundStyle(Theme.text1)
                     .lineLimit(2)
-                Text("\(model.place(of: document)) · last seen \(dates.ago(document.lastSeenMs))")
+                Text("\(model.place(of: document)) · last seen \(Clock.ago(document.lastSeenMs))")
                     .font(.footnote)
                     .foregroundStyle(Theme.text3)
             }

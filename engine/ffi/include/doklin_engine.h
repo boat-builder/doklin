@@ -16,8 +16,8 @@ extern "C" {
 // (event name, payload as JSON), from any thread.
 typedef void (*doklin_event_callback)(const char *event, const char *payload);
 
-// (context, ok, answer): the command's answer as JSON when `ok`, else a
-// sentence saying why not. Called once, from a thread of the engine's.
+// (context, ok, answer): the command's answer as JSON when `ok`, else the
+// engine's words saying why not. Called once, from a thread of the engine's.
 typedef void (*doklin_done_callback)(void *context, bool ok, const char *answer);
 
 // (workspace id, out): true when the keeper answered — *token then the

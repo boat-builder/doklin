@@ -6,8 +6,8 @@
 //! A snapshot is a whole workspace keyed by path, so a file's history is a
 //! walk back through the retained set: follow the path, follow a rename
 //! when the path disappears under it, and emit one row per distinct
-//! content. The contract this answers with is mirrored in src/versions.ts —
-//! change both.
+//! content. The contract this answers with is mirrored in src/versions.ts and
+//! ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift — change all three.
 //!
 //! The retained set is this Mac's snapshots *and* the ones other devices
 //! mirrored into the bucket, in one ts-ordered walk — a rename another Mac

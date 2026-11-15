@@ -2,7 +2,8 @@
 // the types the engine's status event and commands carry, one typed wrapper
 // per command, and the listeners. No `fetch` anywhere — the Rust engine is
 // the only code that holds a token or talks to a domain; this file only
-// asks it things. Mirrored by engine/src/cloud/status.rs — change both.
+// asks it things. Mirrored by engine/src/cloud/status.rs and the iPhone's
+// Payloads.swift — change all three.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";

@@ -55,6 +55,12 @@ struct WorkspaceHistoryView: View {
         .task { await timeline.load() }
         .refreshable { await timeline.load() }
         .onChange(of: workspace.changes) { Task { await timeline.load() } }
+        .onChange(of: workspace.left) { _, left in
+            // The section shown left this iPhone, its history with it.
+            if let left, workspace.relative(timeline.store).map(left.holds) == true {
+                Task { await timeline.show(workspace.root) }
+            }
+        }
     }
 
     @ViewBuilder private var emptiness: some View {

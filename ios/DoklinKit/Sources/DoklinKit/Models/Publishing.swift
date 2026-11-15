@@ -118,7 +118,7 @@ public enum Publishing {
         case .stale:
             switch status.phase {
             case .offline:
-                let synced = status.lastSyncMs.map { "synced \(timeAgo($0, now: now))" } ?? "not synced yet"
+                let synced = status.lastSyncMs.map { "synced \(Clock.ago($0, now: now))" } ?? "not synced yet"
                 return "Offline, so the page keeps what it had (\(synced))."
             case .paused: return "Sync is paused, so the page keeps what it had."
             case .pendingDeletes: return "Sync is holding a deletion for your go, and the page waits with it."
@@ -128,16 +128,6 @@ public enum Publishing {
         }
     }
 
-    /// "just now", "2 min ago", "3 h ago", "12 d ago".
-    public static func timeAgo(_ ms: Int, now: Int) -> String {
-        let secs = max(0, (Double(now - ms) / 1000).rounded())
-        if secs < 45 { return "just now" }
-        let mins = (secs / 60).rounded()
-        if mins < 60 { return "\(Int(mins)) min ago" }
-        let hours = (mins / 60).rounded()
-        if hours < 24 { return "\(Int(hours)) h ago" }
-        return "\(Int((hours / 24).rounded())) d ago"
-    }
 
     /// What a page is called in a list: its title, else its file's or
     /// folder's name, else the workspace's.
@@ -153,7 +143,7 @@ public enum Publishing {
     /// A page that does not say when it was published says nothing of when.
     public static func byline(of page: PublicPage, in status: CloudStatus, now: Int) -> String {
         let known = page.at > 0
-        let ago = timeAgo(page.at, now: now)
+        let ago = Clock.ago(page.at, now: now)
         if !page.by.isEmpty, page.by != status.me { return known ? "Published by \(page.by) · \(ago)" : "Published by \(page.by)" }
         return known ? "Published \(ago) by you" : "Published by you"
     }
@@ -161,7 +151,7 @@ public enum Publishing {
     /// The sub-line of a page in Published pages.
     public static func detail(of page: PublicPage, now: Int) -> String {
         let parts = [page.path.isEmpty ? "the whole workspace" : page.path, "/\(page.slug)", page.by.isEmpty ? "someone" : page.by]
-        return (parts + (page.at > 0 ? [timeAgo(page.at, now: now)] : [])).joined(separator: " · ")
+        return (parts + (page.at > 0 ? [Clock.ago(page.at, now: now)] : [])).joined(separator: " · ")
     }
 
     /// What a typed address is sent as: trimmed and lowercased, as the

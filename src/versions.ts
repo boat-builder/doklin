@@ -2,8 +2,8 @@
 // the types the versioner's status event and
 // commands carry, one typed wrapper per command, and the listener. No
 // `fetch` and no filesystem here — the Rust versioner owns the store; this
-// file only asks it things. Mirrored by engine/src/versions/status.rs —
-// change both.
+// file only asks it things. Mirrored by engine/src/versions/status.rs and
+// the iPhone's Payloads.swift — change all three.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -34,7 +34,8 @@ export type VersionsStatus = {
 };
 
 /** One version of one document, as the history rail lists it. Mirrored by
- *  engine/src/versions/history.rs — change both. */
+ *  engine/src/versions/history.rs and the iPhone's Payloads.swift — change
+ *  all three. */
 export type FileVersion = {
   ts: number;
   /** The full sha256, whichever store the version came out of. */
@@ -76,7 +77,8 @@ export type RestoreOutcome = {
 };
 
 /** One file a retained snapshot and the folder disagree about. Mirrored by
- *  engine/src/versions/workspace.rs — change both. */
+ *  engine/src/versions/workspace.rs and the iPhone's Payloads.swift — change
+ *  all three. */
 export type ChangedFile = {
   path: string;
   /** The content the snapshot holds — what a restore would write. */
@@ -298,7 +300,8 @@ export const versionsRunning = (s: VersionsStatus | null): boolean =>
   s != null && s.phase !== "disabled" && s.phase !== "too-large" && s.phase !== "error";
 
 /** The small word a row wears, so a list of times reads as a list of
- *  moments. Kept beside the contract because the reasons are the contract. */
+ *  moments. Kept beside the contract because the reasons are the contract.
+ *  The iPhone says the same (`HistoryWords.reason`) — change both. */
 export function versionReasonWord(v: Pick<FileVersion, "reason" | "source">): string {
   // A mirrored version carries the reason the device that took it recorded,
   // and `by` already says which Mac that was — so the word is the same on

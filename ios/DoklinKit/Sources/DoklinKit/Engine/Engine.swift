@@ -190,7 +190,7 @@ private func engineAnswered(_ context: UnsafeMutableRawPointer?, _ ok: Bool, _ a
     if ok {
         pending.continuation.resume(returning: Data(text.utf8))
     } else {
-        pending.continuation.resume(throwing: DoklinError(text))
+        pending.continuation.resume(throwing: DoklinError(DoklinError.sentence(text)))
     }
 }
 

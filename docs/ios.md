@@ -16,11 +16,11 @@
 - **What a person may do is the worker's role table** (`CloudStatus.can`, `Workspace.may`); empty means not known yet, and the engine refuses in words.
 - **Comments are written as the Mac writes them**: bare markers in the markdown, bodies in `<stem>.meta.jsonl`, byte for byte — sync merges that file line by line with a Mac's. `Comments/` ports `src/criticMarkup.ts`, `src/metaFile.ts` and the worker's placement and html-anchor rules, held to `verify-harness/comments-fixture.json` with the TS (**change both**). Entries are stamped to the second; an emptied meta file is emptied, never deleted. The author is the engine's `device_name`.
 - **Rules the Mac's frontend states are ported, not re-invented**, and both sides say so: `timeAgo`/`timeUntil` (`Clock`), `widerAudience` (`Sections.wider`), `mayInviteAgain`, `buildAgentLoginPrompt` (`AgentPrompt`). An address (slug) is checked as the Mac checks it; the engine has the last word.
-- **History has no Trash either**: a moment's restore removes what the Mac would move to the Trash, so the moment kept before it is pinned (never thinned) and what went stays under Recently deleted. Recently deleted, the timeline and a note's versions read this iPhone's own stores, since it joined.
+- **History has no Trash either**: a moment's restore removes what the Mac would move to the Trash, so the moment kept before it is pinned (never thinned) and what went stays under Recently deleted. Recently deleted and the timeline read this iPhone's own stores, since it joined; a note's versions also include what other devices mirrored.
 - **The engine's sentences say what this device is** (`Setup::device_kind`, `UIDevice.current.model`: iPhone, iPad).
 - **Colours are generated, never typed**: `node scripts/ios-colors.mjs` writes every colour set in `Assets.xcassets` from `src/styles/tokens.css`, for the names `Theme.swift` asks for. `--check` runs in CI.
 - **`DoklinKit` imports nothing Apple-only** outside `#if canImport(…)`, so its tests run on Linux. Views go in `ios/Doklin/`; logic a view needs goes in the kit.
-- User-facing errors are sentences, here too: the engine's refusals already are, and are shown as they stand.
+- User-facing errors are sentences, here too: the engine answers a refusal as a phrase (`that code doesn't work`), and `Engine` makes it a sentence where it comes in (`DoklinError.sentence`); screens show it as it stands.
 
 ## Layout
 

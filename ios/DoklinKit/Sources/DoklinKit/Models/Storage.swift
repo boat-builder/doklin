@@ -15,6 +15,16 @@ public struct DoklinError: Error, LocalizedError, Equatable, Sendable {
         self.message = message
     }
 
+    /// The engine's words as a sentence: it answers a refusal as a phrase —
+    /// `that code doesn't work` — which the Mac's screens set in a sentence
+    /// of their own. Here it is made one where it comes in.
+    public static func sentence(_ words: String) -> String {
+        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return "" }
+        let capital = first.uppercased() + trimmed.dropFirst()
+        return ".?!".contains(capital.last ?? ".") ? capital : capital + "."
+    }
+
     public var errorDescription: String? { message }
 }
 

@@ -39,10 +39,10 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(dates.since(ms(2025, 6, 3)), "3 Jun")
 
         let now = ms(2025, 9, 3, 10)
-        XCTAssertEqual(dates.ago(now - 10_000), "just now")
-        XCTAssertEqual(dates.ago(now - 5 * 60_000), "5 min ago")
-        XCTAssertEqual(dates.ago(now - 3 * 3_600_000), "3 h ago")
-        XCTAssertEqual(dates.ago(now - 2 * 86_400_000), "2 d ago")
+        XCTAssertEqual(Clock.ago(now - 10_000, now: now), "just now")
+        XCTAssertEqual(Clock.ago(now - 5 * 60_000, now: now), "5 min ago")
+        XCTAssertEqual(Clock.ago(now - 3 * 3_600_000, now: now), "3 h ago")
+        XCTAssertEqual(Clock.ago(now - 2 * 86_400_000, now: now), "2 d ago")
     }
 
     func testAHistoryFallsIntoDaysAndOnlyTheLastTwoStayOpen() {
@@ -100,21 +100,12 @@ final class HistoryTests: XCTestCase {
     }
 
     func testAnEngineRefusalReadsAsASentence() {
-        XCTAssertEqual(HistoryWords.sentence("there's no version to restore"), "There's no version to restore.")
-        XCTAssertEqual(HistoryWords.sentence("That folder isn't connected."), "That folder isn't connected.")
+        XCTAssertEqual(DoklinError.sentence("there's no version to restore"), "There's no version to restore.")
+        XCTAssertEqual(DoklinError.sentence("That folder isn't connected."), "That folder isn't connected.")
         XCTAssertEqual(
-            HistoryWords.failed("Couldn't restore that version", DoklinError("that version couldn't be read")),
-            "Couldn't restore that version: that version couldn't be read."
+            HistoryWords.failed("Couldn't restore that version", DoklinError("That version couldn't be read.")),
+            "Couldn't restore that version. That version couldn't be read."
         )
-    }
-
-    func testAnEngineRefusalSaysThisIPhoneWhereTheMacSaysThisMac() {
-        XCTAssertEqual(HistoryWords.sentence("that file isn't on this Mac any more"), "That file isn't on this iPhone any more.")
-        XCTAssertEqual(
-            HistoryWords.failed("Couldn't compare", DoklinError("versions are turned off on this Mac — turn them back on to restore")),
-            "Couldn't compare: versions are turned off on this iPhone — turn them back on to restore."
-        )
-        XCTAssertEqual(HistoryWords.sentence("this Mac can't reach the cloud"), "This iPhone can't reach the cloud.")
     }
 
     func testAComparisonReadsLineByLine() {

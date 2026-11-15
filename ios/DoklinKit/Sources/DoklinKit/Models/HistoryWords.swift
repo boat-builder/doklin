@@ -114,17 +114,6 @@ public struct HistoryDates {
         "\(dayFormat.string(from: date(ms))), \(time(ms))"
     }
 
-    /// `just now`, `2 min ago`, `3 h ago`, `12 d ago`.
-    public func ago(_ ms: Int) -> String {
-        let seconds = max(0, Int((now.timeIntervalSince1970 * 1000 - Double(ms)) / 1000))
-        if seconds < 45 { return "just now" }
-        let minutes = Int((Double(seconds) / 60).rounded())
-        if minutes < 60 { return "\(minutes) min ago" }
-        let hours = Int((Double(minutes) / 60).rounded())
-        if hours < 24 { return "\(hours) h ago" }
-        return "\(Int((Double(hours) / 24).rounded())) d ago"
-    }
-
     /// Newest first, in days. The history comes newest first, so a day's
     /// rows are already together.
     public func groups<Item: Moment>(_ items: [Item]) -> [DayGroup<Item>] {
@@ -153,7 +142,8 @@ public struct HistoryDates {
 }
 
 public enum HistoryWords {
-    /// The small word a version or a moment wears: why it was kept.
+    /// The small word a version or a moment wears: why it was kept. The
+    /// Mac's `versionReasonWord` (src/versions.ts) — change both.
     public static func reason(_ reason: String) -> String {
         switch reason {
         case "interval": return "while editing"
@@ -200,20 +190,11 @@ public enum HistoryWords {
         return parts.isEmpty ? "Nothing needed changing." : "Restored — \(parts.joined(separator: ", "))."
     }
 
-    /// Why something failed, as a sentence: the engine says what went wrong
-    /// in words of its own, which start small and stop short — and name the
-    /// Mac it was first written for, where this is this iPhone.
-    public static func sentence(_ words: String) -> String {
-        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "this Mac", with: "this iPhone")
-        guard let first = trimmed.first else { return "" }
-        let capital = first.uppercased() + trimmed.dropFirst()
-        return ".?!".contains(capital.last ?? ".") ? capital : capital + "."
-    }
 
-    /// `Couldn't restore that version: there's no version to restore.`
+    /// `Couldn't restore that version. There's no version to restore.`
     public static func failed(_ lead: String, _ error: Error) -> String {
         let words = (error as? DoklinError)?.message ?? error.localizedDescription
-        return sentence("\(lead): \(words)")
+        return "\(lead). \(DoklinError.sentence(words))"
     }
 
     /// A file name in two: before its extension, and the extension — which

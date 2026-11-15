@@ -21,8 +21,8 @@ use serde_json::Value;
 
 /// `(event name, payload as JSON)`.
 pub type EventCallback = extern "C" fn(event: *const c_char, payload: *const c_char);
-/// `(context, ok, answer)`: the command's answer as JSON when `ok`, else a
-/// sentence saying why not.
+/// `(context, ok, answer)`: the command's answer as JSON when `ok`, else the
+/// engine's words saying why not.
 pub type DoneCallback = extern "C" fn(context: *mut c_void, ok: bool, answer: *const c_char);
 /// `(workspace id, out)`: true when the keeper answered — `*out` then the
 /// sign-in kept for it, as a string the app allocated with `malloc` (the

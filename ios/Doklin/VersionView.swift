@@ -211,7 +211,9 @@ struct VersionView: View {
             if let deleted = opened.deleted {
                 do {
                     let path = try await deleted.bringBack(in: workspace)
-                    route.removeLast()
+                    // Only this screen, if it is still on top: the person
+                    // may have gone back while the restore ran.
+                    if route.last == .history(.version(opened)) { route.removeLast() }
                     toaster.show("\(deleted.name) is back.", action: Toaster.Action(label: "Open") { [$route] in
                         $route.wrappedValue.append(.document(path))
                     })

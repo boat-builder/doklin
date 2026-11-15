@@ -54,7 +54,7 @@ class UITestCase: XCTestCase {
     }
 
     func text(containing words: String) -> XCUIElement {
-        app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", words)).firstMatch
+        app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", words)).firstMatch
     }
 
     /// What is on screen, into the log and the result bundle.
@@ -99,8 +99,14 @@ class UITestCase: XCTestCase {
 
     /// Take the workspace being looked at off this iPhone, through its menu.
     func removeFromThisPhone() {
-        marked("workspace-menu").tap()
-        expect(app.buttons["Remove from this iPhone"], "Remove from this iPhone in the menu").tap()
+        let remove = app.buttons["Remove from this iPhone"]
+        // A tap the moment the app has launched can be lost on older iOS:
+        // open the menu again when it did not open.
+        for _ in 0..<3 where !remove.exists {
+            marked("workspace-menu").tap()
+            _ = remove.waitForExistence(timeout: 5)
+        }
+        expect(remove, "Remove from this iPhone in the menu").tap()
         let confirm = app.sheets.buttons["Remove from this iPhone"]
         if confirm.waitForExistence(timeout: 5) {
             confirm.tap()

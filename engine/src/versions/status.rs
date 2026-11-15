@@ -1,8 +1,8 @@
 //! The versioner's side of the frontend contract:
 //! the status that is the frontend's whole
 //! model of the local store, the event that carries it, and the snapshot row
-//! the commands answer with. Mirrored in TypeScript by src/versions.ts —
-//! change both.
+//! the commands answer with. Mirrored in TypeScript by src/versions.ts and in
+//! Swift by ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift — change all three.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

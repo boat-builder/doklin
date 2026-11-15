@@ -287,7 +287,7 @@ public struct WorkspaceFiles: Sendable {
             var pairs = [(row.path, join(dir, "\(name).\(ext)"))]
             if let html = row.html { pairs.append((html, join(dir, "\(name).html"))) }
             let meta = DocLinks.metaFile(of: row.path)
-            if exists(meta) { pairs.append((meta, join(dir, "\(name).meta.jsonl"))) }
+            if exists(meta) { pairs.append((meta, DocLinks.metaFile(of: pairs[0].1))) }
             return pairs
         }
     }

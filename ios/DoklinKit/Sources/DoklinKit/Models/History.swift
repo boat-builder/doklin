@@ -50,7 +50,7 @@ extension Workspace {
 }
 
 private func words(_ error: Error) -> String {
-    HistoryWords.sentence((error as? DoklinError)?.message ?? error.localizedDescription)
+    (error as? DoklinError)?.message ?? error.localizedDescription
 }
 
 /* ---------- A note's versions ---------- */

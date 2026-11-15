@@ -47,7 +47,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 - Row: `{ts, reason, files, bytes, digest, pinned, label, restoredFrom}`. `ts` is unique (collision → last + 1). `digest` = sha256 over `<path>\0<h>\n` in path order.
 - `h` = full sha256 (sync `hash16` is its first 16 chars). `s`/`m` are the stat cache.
 - `horizonDays` has three states: absent = settings default, `null` = forever, a number = days (`Option<Option<u32>>`, `chosen_horizon`).
-- Reasons live in `store.rs`, `src/versions.ts` and the worker's `REASONS`; change all three (the worker 400s an unknown one).
+- Reasons live in `store.rs`, `src/versions.ts` (`versionReasonWord`), the worker's `REASONS` and the iPhone's `HistoryWords.reason`; change all four (the worker 400s an unknown one).
 - `scripts/versions.sh` duplicates the key derivation. A moved folder starts a new store.
 - Under `Setup::anchor` (iOS, where the app's folder gets a new path on an update) the key and the index's `root` are relative to it (`engine/src/paths.rs`), so a store survives the move.
 
@@ -66,7 +66,7 @@ versions/blobs/<sha256>                       create-only, local gzip bytes
 
 ## Contracts (change both sides)
 
-- `versions/{status,history,workspace,stores}.rs` + commands in `versions/mod.rs` ⇄ `src/versions.ts`
+- `versions/{status,history,workspace,stores}.rs` + commands in `versions/mod.rs` ⇄ `src/versions.ts` ⇄ the iPhone's `Payloads.swift` (status, history, workspace)
 - `cloud/versions.rs` ⇄ `cloud-worker/src/versions.ts` and `layout.ts`
 - `VersionsMirror` in `cloud/status.rs` ⇄ `src/cloud.ts`
 

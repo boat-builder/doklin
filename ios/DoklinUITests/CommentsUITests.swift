@@ -34,10 +34,14 @@ final class CommentsUITests: UITestCase {
         record("a note's comments")
         app.buttons["Done"].tap()
 
-        // Words under a comment open its thread from the reader.
-        expect(app.links["a highlighted phrase"], "the commented words, a link").tap()
-        expect(text(containing: "Say it plainer."), "the thread, opened from its words")
-        app.buttons["Done"].tap()
+        // Words under a comment open its thread from the reader. Before iOS
+        // 26 a paragraph is one element to the tests, its links inside it
+        // out of their reach, so the tap is made where they can make it.
+        if #available(iOS 26, *) {
+            expect(app.links["a highlighted phrase"], "the commented words, a link").tap()
+            expect(text(containing: "Say it plainer."), "the thread, opened from its words")
+            app.buttons["Done"].tap()
+        }
 
         // A new thread on words of the note, the sheet pulled up to its full height.
         marked("comments").tap()

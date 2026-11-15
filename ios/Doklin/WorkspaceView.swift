@@ -117,6 +117,12 @@ struct WorkspaceView: View {
             case .access(let id):
                 // Still listed when the engine says it left, or listed no more.
                 return workspace.space(id: id).map { left.holds($0.path) } ?? true
+            case .history(.note(let note)):
+                return left.holds(note)
+            case .history(.version(let opened)):
+                return left.holds(opened.path) || (workspace.relative(opened.store).map(left.holds) ?? false)
+            case .history(.moment(let store, _)):
+                return workspace.relative(store).map(left.holds) ?? false
             default:
                 return false
             }

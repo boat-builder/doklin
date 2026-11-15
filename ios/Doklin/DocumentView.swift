@@ -39,6 +39,11 @@ struct DocumentView: View {
                 if model.isAffected(by: workspace.lastChanged) { model.load() }
                 if comments.isAffected(by: workspace.lastChanged) { comments.load() }
             }
+            .onChange(of: model.html == nil) { _, gone in
+                // The page went (removed, or moved off on another device):
+                // what is shown, edited and outlined is the markdown again.
+                if gone { showingPage = false }
+            }
             .fullScreenCover(isPresented: $editing) {
                 EditorView(model: model)
             }

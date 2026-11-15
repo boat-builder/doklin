@@ -6,6 +6,8 @@
 //! Everything here reads the store; the one thing that writes writes into
 //! the *workspace*, through the same `write_workspace_file` the rest of the
 //! app uses, and never into a store. Only `retain.rs` deletes from a store.
+//! What it answers is mirrored in src/versions.ts and
+//! ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift — change all three.
 //!
 //! A restore at this scale is the file restore's shape, one size up:
 //! capture the state it is about to leave, write, trash what was not there

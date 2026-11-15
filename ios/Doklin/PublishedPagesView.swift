@@ -210,7 +210,7 @@ struct PublishedPagesView: View {
                         Text(page.title.isEmpty ? page.slug : page.title)
                             .foregroundStyle(Theme.text1)
                             .lineLimit(1)
-                        Text("/\(page.slug) · \(page.by.isEmpty ? "someone" : page.by)\(page.at > 0 ? " · \(Publishing.timeAgo(page.at, now: now))" : "")")
+                        Text("/\(page.slug) · \(page.by.isEmpty ? "someone" : page.by)\(page.at > 0 ? " · \(Clock.ago(page.at, now: now))" : "")")
                             .font(.footnote)
                             .foregroundStyle(Theme.text3)
                     }

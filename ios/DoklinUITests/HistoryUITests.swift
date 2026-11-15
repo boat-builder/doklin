@@ -9,7 +9,7 @@ final class HistoryUITests: UITestCase {
     /// Anything on screen whose words hold `words`: a row of a list, a line
     /// of a comparison, as well as a text.
     private func anything(containing words: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", words)).firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", words)).firstMatch
     }
 
     /// Wait for something to go.

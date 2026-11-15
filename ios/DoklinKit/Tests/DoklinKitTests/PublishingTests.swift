@@ -102,14 +102,6 @@ final class PublishingTests: XCTestCase {
         for (name, slug) in suggested { XCTAssertEqual(Publishing.suggestSlug(name), slug, name) }
     }
 
-    func testTimeAgo() {
-        XCTAssertEqual(Publishing.timeAgo(0, now: 44_000), "just now")
-        XCTAssertEqual(Publishing.timeAgo(0, now: 90_000), "2 min ago")
-        XCTAssertEqual(Publishing.timeAgo(0, now: 3 * 3_600_000), "3 h ago")
-        XCTAssertEqual(Publishing.timeAgo(0, now: 30 * 3_600_000), "1 d ago")
-        XCTAssertEqual(Publishing.timeAgo(5_000, now: 0), "just now")
-    }
-
     func testWhenACommentWasWritten() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
