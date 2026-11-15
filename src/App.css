@@ -746,8 +746,7 @@ body,
    The canvas padding stays fixed: zoom is about type size, not margins.
 
    The measure is --doc-measure (a 672px column × zoom) plus the fixed side
-   padding; "Wide page" (data-page-width on <html>) widens the column to
-   900px for tables and diagrams. */
+   padding. */
 .editor-wrap .milkdown .ProseMirror {
   max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
   margin: 0 auto;
@@ -757,10 +756,6 @@ body,
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
   line-height: var(--doc-leading);
   color: var(--text-1);
-}
-
-:root[data-page-width="wide"] .editor-wrap .milkdown .ProseMirror {
-  max-width: calc(var(--doc-measure-wide) * var(--doc-zoom, 1) + 128px);
 }
 
 @media (max-width: 720px) {
@@ -1110,9 +1105,8 @@ body,
 }
 
 /* ---------- Document type and rhythm ----------
-   The Claude Docs viewer's scale: headings in the heading face at a regular
-   weight (sans headings take 600, tokens.css), fixed px × zoom; h4–h6 drop
-   to the text face. Block spacing is margins in em, so the rhythm follows
+   The Claude Docs viewer's scale: headings in the serif heading face at a
+   regular weight, fixed px × zoom; h4–h6 drop to the sans text face. Block spacing is margins in em, so the rhythm follows
    the text size. Crepe's reset pads headings and paragraphs; the margins
    here replace that padding outright. */
 .editor-wrap .milkdown .ProseMirror h1,
@@ -1136,13 +1130,11 @@ body,
 .editor-wrap .milkdown .ProseMirror h2 {
   font-size: calc(var(--doc-h2) * var(--doc-zoom, 1));
   line-height: 1.3;
-  letter-spacing: var(--doc-h2-track);
   margin: 1.6em 0 0.5em;
 }
 .editor-wrap .milkdown .ProseMirror h3 {
   font-size: calc(var(--doc-h3) * var(--doc-zoom, 1));
   line-height: 1.35;
-  letter-spacing: var(--doc-h3-track);
   margin: 1.4em 0 0.4em;
 }
 .editor-wrap .milkdown .ProseMirror h4,
@@ -1604,8 +1596,7 @@ body,
   text-align: left;
 }
 
-/* Figures set their words in the UI face (sans), whichever text face the
-   document reads in, as the viewer's diagrams do. */
+/* Figures set their words in the UI face, as the viewer's diagrams do. */
 .milkdown .milkdown-code-block .preview .dk-figure > svg {
   max-width: 100%;
   flex: none;
@@ -2171,24 +2162,13 @@ body,
   color: var(--text-1);
 }
 
-.settings-option.is-active .settings-option-label {
-  font-weight: 600;
-}
-
-/* Appearance: the themes and the document fonts as rows of tiles — a
-   preview over its name, the chosen one ringed in the accent. */
+/* Appearance: the themes as a row of tiles — a preview over its name, the
+   chosen one ringed in the accent. */
 .settings-tiles {
   display: grid;
+  grid-template-columns: repeat(4, 58px);
   gap: 6px;
   padding: 4px 6px 8px;
-}
-
-.settings-tiles.is-themes {
-  grid-template-columns: repeat(4, 58px);
-}
-
-.settings-tiles.is-fonts {
-  grid-template-columns: repeat(3, 1fr);
 }
 
 .settings-tile {
@@ -2282,42 +2262,6 @@ body,
   height: 3px;
   border-radius: 2px;
   background: var(--accent);
-}
-
-/* A document font, as "Ag" in that face on the sheet; a heading sample
-   takes the weight a heading in that face is set in. */
-.settings-font-sample {
-  display: grid;
-  place-items: center;
-  background: var(--sheet);
-  color: var(--text-1);
-  font-size: 18px;
-  line-height: 1;
-}
-
-.settings-font-sample.is-serif {
-  font-family: var(--font-serif);
-  font-size: 20px;
-}
-
-.settings-font-sample.is-sans {
-  font-family: var(--font-sans);
-}
-
-.settings-font-sample.is-heading.is-sans {
-  font-weight: 600;
-}
-
-.settings-font-sample.is-mono {
-  font-family: var(--font-mono);
-  font-size: 16px;
-}
-
-/* "Headings" / "Text" over their rows of font tiles. */
-.settings-subsection-label {
-  padding: 2px 10px 0;
-  font-size: var(--fs-xs);
-  color: var(--text-2);
 }
 
 /* ---------- Custom checkbox ----------
@@ -4065,12 +4009,8 @@ body.tree-dragging.tree-drag-invalid * {
   margin: 0 auto;
   padding: 20px 64px 0;
   box-sizing: border-box;
-  font-family: var(--doc-font);
+  font-family: var(--font-text);
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
-}
-
-:root[data-page-width="wide"] .doc-frontmatter {
-  max-width: var(--doc-measure-wide);
 }
 
 .doc-frontmatter pre {

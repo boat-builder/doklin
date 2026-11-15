@@ -2366,8 +2366,8 @@ await test("public: every page wears the app's own theme — its tokens light an
     assert.ok(css.slice(0, media).includes(`--link: ${light.link}`) && css.slice(0, media).includes(`--sheet: ${light.sheet}`), `${p}: light is :root`);
     assert.ok(css.slice(media).includes(`--link: ${dark.link}`) && css.slice(media).includes(`--sheet: ${dark.sheet}`), `${p}: dark under the media query`);
     assert.ok(
-      !css.includes("data-theme") && !css.includes(paper) && !css.includes("data-text-font") && !css.includes("data-heading-font"),
-      `${p}: no palette or font choice a browser can't ask for`,
+      !css.includes("data-theme") && !css.includes(paper),
+      `${p}: no palette a browser can't ask for`,
     );
     assert.ok(
       ["inter-latin-opsz-normal", "literata-latin-opsz-normal", "roboto-mono-latin-wght-normal"].every((f) => css.includes(`url("/__web/fonts/${f}.woff2")`)) &&

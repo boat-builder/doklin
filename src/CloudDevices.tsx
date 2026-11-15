@@ -163,43 +163,53 @@ export default function CloudDevices({
       </div>
 
       <div className="cloud-section-label">Your devices</div>
-      <ul className="cloud-macs" data-testid="device-list">
+      {/* A card each, as the People and Agents tabs list theirs: the name
+          and its tag, what it is on a line of its own, then its action. */}
+      <ul className="cloud-people" data-testid="device-list">
         {people.creator && (
-          <li className="cloud-mac-row" data-testid="device-secret">
-            <span className="cloud-mac-name">This Mac</span>
-            <span className="cloud-presence-what">holds the domain’s own token · can’t be signed out</span>
+          <li className="cloud-person" data-testid="device-secret">
+            <div className="cloud-person-head">
+              <span className="cloud-person-name">This Mac</span>
+            </div>
+            <div className="cloud-hint">It holds the domain’s own token, so it can’t be signed out.</div>
           </li>
         )}
         {mine.map((d) => {
           const thisMac = d.id === people.tokenId;
           return (
-            <li className="cloud-mac-row" key={d.id} data-testid={`device-${d.id}`}>
-              <span className="cloud-mac-name">{d.deviceName || "A device"}</span>
-              {thisMac && <span className="cloud-person-tag">this Mac</span>}
-              <span className="cloud-presence-what">joined {timeAgo(d.createdAt, now)}</span>
+            <li className="cloud-person" key={d.id} data-testid={`device-${d.id}`}>
+              <div className="cloud-person-head">
+                <span className="cloud-person-name">{d.deviceName || "A device"}</span>
+                {thisMac && <span className="cloud-person-tag">this Mac</span>}
+              </div>
+              <div className="cloud-hint">Joined {timeAgo(d.createdAt, now)}</div>
               {/* Never this Mac: signing it out would delete the copy being
                   looked at. Disconnect is the way to stop syncing here. */}
-              {thisMac ? null : confirm === d.id ? (
-                <span className="cloud-inline-confirm">
-                  <span className="cloud-hint">
-                    It stops syncing, and deletes its copy of {name} the next time Doklin runs there.
-                  </span>
-                  <button
-                    className="modal-btn is-danger-solid"
-                    data-testid={`device-sign-out-yes-${d.id}`}
-                    disabled={busy}
-                    onClick={() => void signOut(d.id)}
-                  >
-                    Sign out
-                  </button>
-                  <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
-                    Cancel
-                  </button>
-                </span>
-              ) : (
-                <button className="modal-btn" data-testid={`device-sign-out-${d.id}`} onClick={() => setConfirm(d.id)}>
-                  Sign out
-                </button>
+              {!thisMac && (
+                <div className="cloud-actions">
+                  {confirm === d.id ? (
+                    <span className="cloud-inline-confirm">
+                      <span className="cloud-hint">
+                        It stops syncing, and deletes its copy of {name} the next time Doklin runs there.
+                      </span>
+                      <button
+                        className="modal-btn is-danger-solid"
+                        data-testid={`device-sign-out-yes-${d.id}`}
+                        disabled={busy}
+                        onClick={() => void signOut(d.id)}
+                      >
+                        Sign out
+                      </button>
+                      <button className="modal-btn" disabled={busy} onClick={() => setConfirm(null)}>
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button className="modal-btn" data-testid={`device-sign-out-${d.id}`} onClick={() => setConfirm(d.id)}>
+                      Sign out
+                    </button>
+                  )}
+                </div>
               )}
             </li>
           );

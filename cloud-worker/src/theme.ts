@@ -5,14 +5,11 @@
 // note in the app, in any browser, and a palette change in the app reaches
 // published pages with the next worker build instead of by hand.
 //
-// Two things differ, because a visitor's browser is not the app:
-//   - The app paints a theme by setting data-theme on <html>, resolved in
-//     JavaScript. A public page has to read right with scripts off, so the
-//     light palette is :root and the dark one answers prefers-color-scheme.
-//     Paper is a choice made inside the app; no browser can ask for it.
-//   - The document fonts are each reader's own setting in the app
-//     (data-heading-font, data-text-font). A public page is always the
-//     default: serif headings over sans text.
+// One thing differs, because a visitor's browser is not the app: the app
+// paints a theme by setting data-theme on <html>, resolved in JavaScript. A
+// public page has to read right with scripts off, so the light palette is
+// :root and the dark one answers prefers-color-scheme. Paper is a choice
+// made inside the app; no browser can ask for it.
 
 import tokensCss from "../../src/styles/tokens.css?raw";
 import fontsCss from "../../src/styles/fonts.css?raw";
@@ -85,7 +82,7 @@ export const FONT_PRELOAD = ["inter-latin-opsz-normal.woff2", "literata-latin-op
 /**
  * tokens.css as a public page can use it: the theme-independent :root (type,
  * radii, motion), the light palette as :root, and the dark palette under
- * prefers-color-scheme. Paper and the font-choice variants are left out.
+ * prefers-color-scheme. Paper is left out.
  * tokens.css is a flat list of rules, so its blocks are read by selector;
  * one that can't be found is an error, never a page quietly missing a
  * palette.

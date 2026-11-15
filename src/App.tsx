@@ -341,64 +341,6 @@ const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
-const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
-const HEADING_FONT_STORAGE_KEY = "doklin:heading-font";
-const TEXT_FONT_STORAGE_KEY = "doklin:text-font";
-
-/* The document fonts (Settings → Appearance), two choices as in the Claude
-   Docs viewer: the heading face (serif by default, or sans) and the text
-   face (sans by default, or serif or mono). They set the note only — never
-   the chrome, colour or status — so they are per app, like zoom and the
-   theme. Applied as data-heading-font and data-text-font on <html>, which
-   tokens.css keys --font-heading, --font-text and --doc-size on. */
-type HeadingFont = "serif" | "sans";
-type TextFont = "sans" | "serif" | "mono";
-type DocFonts = { heading: HeadingFont; text: TextFont };
-const HEADING_FONTS: HeadingFont[] = ["serif", "sans"];
-const TEXT_FONTS: TextFont[] = ["sans", "serif", "mono"];
-const FONT_LABEL: Record<TextFont, string> = { serif: "Serif", sans: "Sans", mono: "Mono" };
-
-function readStoredDocFonts(): DocFonts {
-  const fonts: DocFonts = { heading: "serif", text: "sans" };
-  try {
-    // One-time migration (2026-11): builds before the heading/text split
-    // stored a single "doklin:doc-font" (serif, the old default, or sans or
-    // mono). An explicit mono choice carries over as the text face; sans and
-    // serif take the new defaults. Read once, then the old key is removed.
-    const old = localStorage.getItem("doklin:doc-font");
-    if (old !== null) {
-      if (old === "mono" && localStorage.getItem(TEXT_FONT_STORAGE_KEY) === null) {
-        localStorage.setItem(TEXT_FONT_STORAGE_KEY, "mono");
-      }
-      localStorage.removeItem("doklin:doc-font");
-    }
-    const h = localStorage.getItem(HEADING_FONT_STORAGE_KEY);
-    if (h && (HEADING_FONTS as string[]).includes(h)) fonts.heading = h as HeadingFont;
-    const t = localStorage.getItem(TEXT_FONT_STORAGE_KEY);
-    if (t && (TEXT_FONTS as string[]).includes(t)) fonts.text = t as TextFont;
-  } catch {
-    // localStorage may be unavailable; fall through
-  }
-  return fonts;
-}
-
-function applyDocFonts(f: DocFonts) {
-  document.documentElement.dataset.headingFont = f.heading;
-  document.documentElement.dataset.textFont = f.text;
-}
-
-/* "Wide page": the document column normally holds a 672px reading measure
-   (--doc-measure, tokens.css); wide lets it grow to 900px for tables,
-   boards and diagrams. Per app, like zoom: it's about how the reader likes
-   to read, not about the file. Applied as data-page-width on <html>, which
-   App.css keys the measure on. */
-function readStoredPageWide(): boolean {
-  try {
-    return localStorage.getItem(PAGE_WIDE_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 
 /* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
    One factor scales BOTH versions of a document, so switching MD↔HTML never
@@ -539,10 +481,9 @@ function applyTheme(t: Theme) {
   root.dataset.themePref = t;
 }
 
-// Paint the stored theme and document fonts before the first render, not after it.
+// Paint the stored theme before the first render, not after it.
 if (typeof document !== "undefined") {
   applyTheme(readStoredTheme());
-  applyDocFonts(readStoredDocFonts());
 }
 
 function isWriteError(e: unknown): e is WriteErrorPayload {
@@ -777,8 +718,6 @@ export default function App() {
   // needs no editor internals. In-memory only — a fresh launch starts at top.
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
-  const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
-  const [docFonts, setDocFonts] = useState<DocFonts>(() => readStoredDocFonts());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -1266,25 +1205,6 @@ export default function App() {
     darkSchemeQuery.addEventListener("change", onScheme);
     return () => darkSchemeQuery.removeEventListener("change", onScheme);
   }, [theme]);
-
-  useEffect(() => {
-    applyDocFonts(docFonts);
-    try {
-      localStorage.setItem(HEADING_FONT_STORAGE_KEY, docFonts.heading);
-      localStorage.setItem(TEXT_FONT_STORAGE_KEY, docFonts.text);
-    } catch {
-      // ignore
-    }
-  }, [docFonts]);
-
-  useEffect(() => {
-    document.documentElement.dataset.pageWidth = pageWide ? "wide" : "normal";
-    try {
-      localStorage.setItem(PAGE_WIDE_STORAGE_KEY, pageWide ? "1" : "0");
-    } catch {
-      // ignore
-    }
-  }, [pageWide]);
 
   // The markdown editor reads the factor straight off <html> (App.css); the
   // html rendition gets it as a prop, since only the bridge can reach inside
@@ -5566,12 +5486,8 @@ export default function App() {
   const settingsMenu = (
     <Settings
       docked={showSidebar}
-      pageWide={pageWide}
-      onTogglePageWide={() => setPageWide((w) => !w)}
       theme={theme}
       onTheme={setTheme}
-      docFonts={docFonts}
-      onDocFonts={setDocFonts}
       onNewNote={() => void newUntitled()}
       onOpenFile={openFilePicker}
       onOpenFolder={openFolderPicker}
@@ -6609,12 +6525,8 @@ function ThemeSwatch({ theme }: { theme: ResolvedTheme }) {
 
 function Settings({
   docked,
-  pageWide,
-  onTogglePageWide,
   theme,
   onTheme,
-  docFonts,
-  onDocFonts,
   onNewNote,
   onOpenFile,
   onOpenFolder,
@@ -6630,12 +6542,8 @@ function Settings({
 }: {
   /** In the left column's footer (true) or floating bottom-left. */
   docked: boolean;
-  pageWide: boolean;
-  onTogglePageWide: () => void;
   theme: Theme;
   onTheme: (t: Theme) => void;
-  docFonts: DocFonts;
-  onDocFonts: (f: DocFonts) => void;
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
@@ -6808,7 +6716,7 @@ function Settings({
           {/* Live choices: the menu stays open so the note behind it can be
               read in each one. A swatch is drawn from its own theme's
               tokens: data-theme scopes a palette to any element. */}
-          <div className="settings-tiles is-themes" role="group" aria-label="Theme">
+          <div className="settings-tiles" role="group" aria-label="Theme">
             {THEMES.map((t) => (
               <button
                 key={t}
@@ -6832,56 +6740,6 @@ function Settings({
               </button>
             ))}
           </div>
-          <div className="settings-subsection-label">Headings</div>
-          <div className="settings-tiles is-fonts" role="group" aria-label="Heading font">
-            {HEADING_FONTS.map((f) => (
-              <button
-                key={f}
-                role="menuitemradio"
-                aria-checked={docFonts.heading === f}
-                className={`settings-tile ${docFonts.heading === f ? "is-active" : ""}`}
-                data-testid={`settings-heading-font-${f}`}
-                title={`Set headings in ${FONT_LABEL[f].toLowerCase()}`}
-                onClick={() => onDocFonts({ ...docFonts, heading: f })}
-              >
-                <span className={`settings-tile-face settings-font-sample is-heading is-${f}`} aria-hidden>
-                  Ag
-                </span>
-                <span className="settings-tile-name">{FONT_LABEL[f]}</span>
-              </button>
-            ))}
-          </div>
-          <div className="settings-subsection-label">Text</div>
-          <div className="settings-tiles is-fonts" role="group" aria-label="Text font">
-            {TEXT_FONTS.map((f) => (
-              <button
-                key={f}
-                role="menuitemradio"
-                aria-checked={docFonts.text === f}
-                className={`settings-tile ${docFonts.text === f ? "is-active" : ""}`}
-                data-testid={`settings-text-font-${f}`}
-                title={`Set text in ${FONT_LABEL[f].toLowerCase()}`}
-                onClick={() => onDocFonts({ ...docFonts, text: f })}
-              >
-                <span className={`settings-tile-face settings-font-sample is-${f}`} aria-hidden>
-                  Ag
-                </span>
-                <span className="settings-tile-name">{FONT_LABEL[f]}</span>
-              </button>
-            ))}
-          </div>
-          <button
-            role="menuitemcheckbox"
-            aria-checked={pageWide}
-            className={`settings-option ${pageWide ? "is-active" : ""}`}
-            title="Widen the column to 900px for tables, boards and diagrams"
-            onClick={onTogglePageWide}
-          >
-            <span className="settings-option-check">
-              {pageWide ? <CheckIcon /> : null}
-            </span>
-            <span className="settings-option-label">Wide page</span>
-          </button>
           <div className="settings-divider" />
           <div className="settings-section-label">Updates</div>
           {updateAvailable ? (
@@ -7090,23 +6948,6 @@ function FolderIcon() {
   );
 }
 
-function CheckIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
 
 function SidebarIcon() {
   return (
