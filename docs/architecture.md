@@ -83,10 +83,24 @@
   path-shaped hrefs resolve through `src/docLinks.ts` into a tab; other schemes
   are dropped; a `javascript:` href must never run. The html rendition posts
   its clicks out through `htmlBridge.ts`.
-- Mermaid (`src/mermaid.ts`): a diagram block is diagram *or* source, never
-  both, driven by `:focus-within` plus the `.dk-mermaid-editing` class. Any
-  stylesheet that renders diagrams must reset page-level `p` styles inside
-  `.dk-mermaid`, or label boxes clip.
+- Figure blocks (```` ```mermaid ```` in `src/mermaid.ts`, ```` ```svg ```` drawings
+  in `src/drawing.ts`): the block is picture *or* source, never both, driven
+  by `:focus-within` plus the `.dk-figure-editing` class (`src/figureBlock.ts`).
+  Any stylesheet that renders diagrams must reset page-level `p` styles inside
+  `.dk-mermaid`, and must also apply the Mermaid label sizes globally (App.css
+  "Mermaid labels", restated in the worker's page CSS): Mermaid measures labels
+  on `<body>` before its own stylesheet exists, so a size it didn't measure
+  clips the box. Mermaid's SVG is not well-formed XML (`<br>` in labels):
+  post-process it with an HTML parser.
+- Drawings go through `sanitizeDrawing` (`src/drawingSvg.ts`, pure, also run by
+  the worker): an element/attribute allowlist re-serialized from its own
+  parse, and every `id`/`url(#…)` prefixed per drawing so two drawings never
+  share a marker. Colours are `--dg-*` tokens — a contract documents depend
+  on: never rename one, only add. The drawing grammar agents follow is
+  `doklin help drawings` (`cli/src/help.rs`); `verify-harness/drive-drawing.mjs`
+  renders its examples, so change the two together.
+- Mermaid's `look` and `layout` are pinned (`mermaidConfig`): an upgrade that
+  changes either default would re-lay out every diagram people wrote.
 - Sidebar and tab drags are pointer-based: Tauri intercepts HTML5 drag.
 - Zoom (`⌘+`/`⌘-`/`⌘0`) scales the markdown editor through `--doc-zoom` and
   the html rendition through its frame's bridge; app chrome never scales.
@@ -111,4 +125,14 @@
   (`cloud-worker/src/theme.ts`): keep it a flat list of rules with the
   `:root`, `:root, [data-theme="light"]` and `[data-theme="dark"]` blocks, or
   the worker tests fail.
-- `localStorage` keys: `doklin:theme`, `doklin:doc-font`, `doklin:page-wide`.
+- Document fonts are two choices on `<html>`: `data-heading-font`
+  (serif|sans) and `data-text-font` (sans|serif|mono). Heading sizes are fixed
+  px × zoom, so a text face never resizes headings.
+- Bundled fonts (Inter, Literata, Roboto Mono, OFL) are named in
+  `src/styles/fonts.css`; the worker imports each file by name
+  (`cloud-worker/src/theme.ts`) — change both.
+- Code block placeholders must match the mounted editor's height exactly
+  (App.css "Code block placeholder parity"); the tools row floats out of flow.
+- `localStorage` keys: `doklin:theme`, `doklin:heading-font`,
+  `doklin:text-font`, `doklin:page-wide`. `doklin:doc-font` is read once and
+  removed (one-time migration in `readStoredDocFonts`).

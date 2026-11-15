@@ -133,12 +133,46 @@ step(
     darkSvg.length > 200 &&
     lightSvg !== darkSvg &&
     lightBg === "rgb(255, 255, 255)" &&
-    darkBg === "rgb(0, 0, 0)" &&
+    darkBg === "rgb(11, 11, 11)" &&
     (await page.locator("code.language-mermaid").count()) === 0,
   `${lightBg} / ${darkBg}`,
 );
 
-/* 6b — the app's look: its serif, its measure, its palettes */
+/* 6a — drawings are drawn by the worker: there with scripts off, each with
+   its own marker, in the page's drawing tokens light and dark */
+const drawingLook = async (scheme) => {
+  const p = await pageIn({ colorScheme: scheme, javaScriptEnabled: false });
+  await p.goto(`${BASE}/diagram`);
+  const got = await p.evaluate(() => {
+    const svgs = [...document.querySelectorAll(".dk-drawing svg")];
+    return {
+      count: svgs.length,
+      width: Math.round(svgs[0]?.getBoundingClientRect().width ?? 0),
+      stroke: svgs[0] ? getComputedStyle(svgs[0].querySelector("line")).stroke : "",
+      markers: svgs.map((s) => s.querySelector("marker")?.id),
+      scripts: document.querySelectorAll(".dk-drawing script").length,
+      broken: document.querySelectorAll("code.language-svg").length,
+    };
+  });
+  await p.screenshot({ path: SHOTS + `public-06a-drawings-${scheme}.png`, fullPage: true });
+  await p.context().close();
+  return got;
+};
+const lightDrawings = await drawingLook("light");
+const darkDrawings = await drawingLook("dark");
+step(
+  "drawings: drawn with scripts off, full column width, own markers, nothing executable, the theme's rule colour light and dark, a broken one left as source",
+  lightDrawings.count === 2 &&
+    lightDrawings.width === 672 &&
+    lightDrawings.markers.join() === "dg1-arrow,dg2-arrow" &&
+    lightDrawings.scripts === 0 &&
+    lightDrawings.broken === 1 &&
+    lightDrawings.stroke === "rgb(195, 194, 183)" &&
+    darkDrawings.stroke === "rgb(56, 56, 53)",
+  JSON.stringify({ lightDrawings, darkStroke: darkDrawings.stroke }),
+);
+
+/* 6b — the app's look: its fonts, its measure, its palettes */
 await page.goto(`${BASE}/home`);
 await page.evaluate(() => document.fonts.ready);
 const type = await page.evaluate(() => {
@@ -146,8 +180,12 @@ const type = await page.evaluate(() => {
   const p = getComputedStyle(document.querySelector("main.doc p"));
   return {
     face: doc.fontFamily.split(",")[0].replace(/"/g, ""),
+    heading: (() => {
+      const h1 = getComputedStyle(document.querySelector("main.doc h1"));
+      return `${h1.fontFamily.split(",")[0].replace(/"/g, "")} ${h1.fontWeight} ${h1.fontSize}`;
+    })(),
     size: p.fontSize,
-    loaded: document.fonts.check('18px "Newsreader"'),
+    loaded: document.fonts.check('16px "Inter"') && document.fonts.check('32px "Literata"'),
     served: performance.getEntriesByType("resource").some((r) => r.name.includes("/__web/fonts/")),
     chrome: getComputedStyle(document.querySelector("footer")).fontFamily.split(",")[0],
     // The reading measure: the column's content box, without its padding.
@@ -166,16 +204,16 @@ await darkHome.screenshot({ path: SHOTS + "public-06b-home-dark.png" });
 await darkHome.context().close();
 await page.screenshot({ path: SHOTS + "public-06b-home-light.png" });
 step(
-  "the app's look: the note is set in the bundled Newsreader at 18px in a reading measure, the chrome in the UI face, links in the light and dark accents",
-  type.face === "Newsreader" &&
-    type.size === "18px" &&
+  "the app's look: text in the bundled Inter at 16px and headings in Literata 400 at 32px, in the 672px column, the chrome in the UI face, links in the light and dark link colours",
+  type.face === "Inter" &&
+    type.heading === "Literata 400 32px" &&
+    type.size === "16px" &&
     type.loaded &&
     type.served &&
-    type.chrome !== "Newsreader" &&
-    type.measure > 600 &&
-    type.measure < 720 &&
-    type.accent === "rgb(34, 103, 238)" &&
-    darkLink === "rgb(77, 148, 255)",
+    type.chrome === "Inter" &&
+    type.measure === 672 &&
+    type.accent === "rgb(37, 106, 191)" &&
+    darkLink === "rgb(57, 135, 229)",
   JSON.stringify({ ...type, darkLink }),
 );
 

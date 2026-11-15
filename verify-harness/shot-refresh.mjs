@@ -6,10 +6,12 @@
 //   PORT=1437 node verify-harness/shot-refresh.mjs   (vite serving the worktree)
 //
 // Writes verify-harness/shots/refresh-*.png and prints a few computed-style
-// probes (document font, measure, popover surface) per theme and document
-// font. Then Settings → Appearance (swatches from each theme's own tokens,
-// live choices, persistence), and the window layout, in light and dark: the title row with the sidebar hidden (the lead
-// moves into the tab bar and the toggles must not move), and a split.
+// probes (document fonts, measure, popover surface) per theme and font
+// choice. Then Settings → Appearance (swatches from each theme's own tokens,
+// live heading/text choices, persistence, the one-time doc-font migration),
+// and the flat window layout, in light and dark: the title row with the
+// sidebar hidden (the lead moves into the tab bar and the toggles must not
+// move), and a split.
 import { webkit } from "playwright";
 import { mkdirSync } from "node:fs";
 
@@ -25,8 +27,9 @@ const cases = [
   { name: "system-dark", theme: "system", scheme: "dark" },
   { name: "system-light", theme: "system", scheme: "light" },
   { name: "light-wide", theme: "light", scheme: "light", wide: true },
-  { name: "light-sans", theme: "light", scheme: "light", font: "sans" },
-  { name: "dark-mono", theme: "dark", scheme: "dark", font: "mono" },
+  { name: "light-serif-text", theme: "light", scheme: "light", text: "serif" },
+  { name: "light-sans-head", theme: "light", scheme: "light", heading: "sans" },
+  { name: "dark-mono", theme: "dark", scheme: "dark", text: "mono" },
 ];
 
 const browser = await webkit.launch();
@@ -45,12 +48,13 @@ for (const c of cases) {
   await page.goto(PAGE);
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
   await page.evaluate(
-    ([theme, wide, font]) => {
+    ([theme, wide, heading, text]) => {
       localStorage.setItem("doklin:theme", theme);
       localStorage.setItem("doklin:page-wide", wide ? "1" : "0");
-      localStorage.setItem("doklin:doc-font", font);
+      localStorage.setItem("doklin:heading-font", heading);
+      localStorage.setItem("doklin:text-font", text);
     },
-    [c.theme, !!c.wide, c.font ?? "serif"],
+    [c.theme, !!c.wide, c.heading ?? "serif", c.text ?? "sans"],
   );
   await page.reload();
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
@@ -63,14 +67,16 @@ for (const c of cases) {
     const pm = document.querySelector(".editor-wrap .ProseMirror");
     const p = pm.querySelector("p");
     const cs = getComputedStyle(p);
+    const h1 = getComputedStyle(pm.querySelector("h1"));
     return {
       dataTheme: root.dataset.theme,
       pref: root.dataset.themePref,
-      docFont: root.dataset.docFont,
+      fonts: `${root.dataset.headingFont}/${root.dataset.textFont}`,
       bg: getComputedStyle(document.body).backgroundColor,
       font: cs.fontFamily.split(",")[0],
       size: cs.fontSize,
-      newsreader: document.fonts.check(`18px Newsreader`),
+      heading: `${h1.fontFamily.split(",")[0]} ${h1.fontWeight} ${h1.fontSize}`,
+      loaded: ["Inter", "Literata", "Roboto Mono"].filter((f) => document.fonts.check(`16px "${f}"`)).join("+"),
       measure: Math.round(pm.getBoundingClientRect().width),
       footer: !!document.querySelector(".side-footer .settings-wrap.is-docked"),
     };
@@ -102,7 +108,8 @@ for (const c of cases) {
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
   await page.evaluate(() => {
     localStorage.setItem("doklin:theme", "light");
-    localStorage.removeItem("doklin:doc-font");
+    localStorage.removeItem("doklin:heading-font");
+    localStorage.removeItem("doklin:text-font");
   });
   await page.reload();
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
@@ -113,20 +120,26 @@ for (const c of cases) {
       (theme) => getComputedStyle(document.querySelector(`[data-testid="settings-theme-${theme}"] .settings-swatch-face`)).backgroundColor,
       t,
     );
-  const before = { font: await bodyFont(), attr: await page.evaluate(() => document.documentElement.dataset.docFont) };
+  const fontsAttr = () =>
+    page.evaluate(() => `${document.documentElement.dataset.headingFont}/${document.documentElement.dataset.textFont}`);
+  const headFont = () =>
+    page.evaluate(() => getComputedStyle(document.querySelector(".editor-wrap .ProseMirror h1")).fontFamily.split(",")[0]);
+  const before = { font: await bodyFont(), head: await headFont(), attr: await fontsAttr() };
   await page.click(".settings-fab");
   await page.waitForSelector(".settings-tiles.is-themes");
   const swatches = { light: await faceBg("light"), paper: await faceBg("paper"), dark: await faceBg("dark") };
   const systemFaces = await page.locator('[data-testid="settings-theme-system"] .settings-swatch-face').count();
   await page.click('[data-testid="settings-theme-paper"]');
-  await page.click('[data-testid="settings-font-sans"]');
+  await page.click('[data-testid="settings-heading-font-sans"]');
+  await page.click('[data-testid="settings-text-font-serif"]');
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${OUT}refresh-appearance.png` });
   const live = {
     open: await page.locator(".settings-popover").count(),
     theme: await page.evaluate(() => document.documentElement.dataset.theme),
-    attr: await page.evaluate(() => document.documentElement.dataset.docFont),
+    attr: await fontsAttr(),
     font: await bodyFont(),
+    head: await headFont(),
     checked: await page.locator('.settings-tile[aria-checked="true"]').evaluateAll((els) => els.map((e) => e.dataset.testid)),
   };
   await page.click('[data-testid="settings-theme-dark"]');
@@ -136,25 +149,41 @@ for (const c of cases) {
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
   const after = {
     theme: await page.evaluate(() => document.documentElement.dataset.theme),
-    attr: await page.evaluate(() => document.documentElement.dataset.docFont),
+    attr: await fontsAttr(),
     font: await bodyFont(),
   };
+  // The one-time migration: a stored mono choice from the single-font era
+  // becomes the text face, and the old key is gone.
+  await page.evaluate(() => {
+    localStorage.removeItem("doklin:heading-font");
+    localStorage.removeItem("doklin:text-font");
+    localStorage.setItem("doklin:doc-font", "mono");
+  });
+  await page.reload();
+  await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
+  const migrated = {
+    attr: await fontsAttr(),
+    oldKey: await page.evaluate(() => localStorage.getItem("doklin:doc-font")),
+  };
   const checks = {
-    serifByDefault: before.attr === "serif" && /Newsreader/.test(before.font),
+    serifHeadingsSansTextByDefault:
+      before.attr === "serif/sans" && /Inter/.test(before.font) && /Literata/.test(before.head),
     swatchesOwnTokens:
-      swatches.light === "rgb(238, 243, 250)" && swatches.paper === "rgb(238, 225, 204)" && swatches.dark === "rgb(0, 0, 0)",
+      swatches.light === "rgb(249, 249, 247)" && swatches.paper === "rgb(243, 241, 236)" && swatches.dark === "rgb(11, 11, 11)",
     systemIsTwoFaces: systemFaces === 2,
     menuStaysOpen: live.open === 1,
-    appliesLive: live.theme === "paper" && live.attr === "sans" && !/Newsreader/.test(live.font),
-    oneCheckedPerRow: live.checked.join() === "settings-theme-paper,settings-font-sans",
-    survivesReload: after.theme === "dark" && after.attr === "sans" && after.font === live.font,
+    appliesLive: live.theme === "paper" && live.attr === "sans/serif" && /Literata/.test(live.font) && /Inter/.test(live.head),
+    oneCheckedPerRow:
+      live.checked.join() === "settings-theme-paper,settings-heading-font-sans,settings-text-font-serif",
+    survivesReload: after.theme === "dark" && after.attr === "sans/serif" && after.font === live.font,
+    migratesMono: migrated.attr === "serif/mono" && migrated.oldKey === null,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
   if (bad.length || errors.length) failed = true;
   console.log(
     "appearance".padEnd(13),
     bad.length ? `FAIL ${bad.join(",")}` : "ok",
-    JSON.stringify({ before, swatches, live, after }),
+    JSON.stringify({ before, swatches, live, after, migrated }),
     errors.length ? `ERRORS ${errors}` : "",
   );
   await ctx.close();
@@ -202,8 +231,9 @@ for (const theme of ["light", "dark"]) {
   const checks = {
     barIs40: withSide.bar?.h === 40,
     togglesStay: withSide.toggle?.x === noSide.toggle?.x && withSide.toggle?.y === noSide.toggle?.y,
-    sheetInsetNoSide: noSide.sheet?.x === 8 && noSide.sheet?.y === 40,
-    sheetAgainstSidebar: withSide.sheet?.x === 240,
+    sheetFlushNoSide: noSide.sheet?.x === 0 && noSide.sheet?.y === 40,
+    sheetAgainstSidebar: withSide.sheet?.x === 240 && withSide.sheet?.y === 40,
+    sheetToWindowEdge: noSide.sheet?.w === 1280 && noSide.sheet?.h === 780,
     tabsAfterLead: noSide.firstTab != null && noSide.firstTab.x > noSide.toggle.x + 28,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);

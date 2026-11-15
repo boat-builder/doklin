@@ -36,7 +36,7 @@ for (const theme of ["light", "paper", "dark"]) {
   console.log(`[${theme}] shot written; svgs:`,
     await page.evaluate(() => document.querySelectorAll(".dk-mermaid > svg").length),
     "errors:",
-    await page.evaluate(() => document.querySelectorAll(".dk-mermaid-error").length));
+    await page.evaluate(() => document.querySelectorAll(".dk-figure-error").length));
   await page.close();
 }
 await browser.close();

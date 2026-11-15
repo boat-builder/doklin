@@ -12,7 +12,8 @@
 //   Ideas.md                         a note outside the folder, linked with ../
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
-//   Diagram.md                       a ```mermaid block
+//   Diagram.md                       a ```mermaid block and ```svg drawings (two
+//                                    sharing a marker id, one that doesn't parse)
 //   Scratch.md                       synced, never published
 import { createHash } from "node:crypto";
 
@@ -93,6 +94,25 @@ flowchart LR
 \`\`\`
 
 Words after the diagram.
+
+\`\`\`svg
+<svg viewBox="0 0 760 80" role="img" aria-label="One drawing">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"><path d="M0 0L10 5L0 10z" fill="var(--dg-rule)"/></marker></defs>
+<script>alert(1)</script>
+<line x1="24" y1="40" x2="200" y2="40" stroke="var(--dg-rule)" marker-end="url(#arrow)" onclick="alert(2)"/>
+</svg>
+\`\`\`
+
+\`\`\`svg
+<svg viewBox="0 0 760 80" role="img" aria-label="Another drawing">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"><path d="M0 0L10 5L0 10z" fill="var(--dg-accent)"/></marker></defs>
+<line x1="24" y1="40" x2="200" y2="40" stroke="var(--dg-accent)" marker-end="url(#arrow)"/>
+</svg>
+\`\`\`
+
+\`\`\`svg
+<svg viewBox="0 0 760 80"><g></svg>
+\`\`\`
 `,
   "Scratch.md": `# Scratch
 

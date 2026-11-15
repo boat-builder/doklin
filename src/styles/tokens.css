@@ -25,39 +25,61 @@
    diagrams silently fall back to body colours. (color-mix() is fine in
    component rules that consume tokens — just not as a token's value.)
 
-   One accent (Doklin Blue). Everything keyed to it reads --accent, so an
-   accent picker stays possible later without touching components. */
+   The look is the Claude Docs viewer's: warm neutrals, #0b0b0b dark, one
+   blue accent. Everything keyed to the accent reads --accent (fills) or
+   --link (accent as text), so an accent picker stays possible later
+   without touching components.
+
+   --dg-* is the drawing palette: ```svg blocks in documents (drawing.ts)
+   and restyled Mermaid name these tokens inside their SVG. Documents depend
+   on the names, so they are a contract: never rename one, only add. */
 
 /* ---------- Type, radius, motion, sizing (theme-independent) ---------- */
 
 :root {
-  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
-  --font-serif: "Newsreader", ui-serif, "New York", Georgia, "Times New Roman", serif;
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-serif: "Literata", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: "Roboto Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Chrome type scale: four steps, nothing in between.
+  /* Chrome type scale: four steps, nothing in between (the Claude Docs
+     viewer's desktop scale: caption 11, footnote 12, body 13, heading 14).
      xs  meta, counts, captions      sm  secondary labels, buttons
      md  the UI default: tabs, rows, menus
      lg  panel titles */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;
-  --fs-lg: 15px;
+  --fs-lg: 14px;
 
-  /* The document. Size is the 100% rung — --doc-zoom multiplies it. The
-     measure is in ch of the document font, so it tracks font and zoom. */
-  --doc-font: var(--font-serif);
-  --doc-size: 18px;
-  --doc-leading: 1.6;
-  --doc-measure: 68ch;
-  --doc-measure-wide: 1080px;
+  /* The document. Two font choices, like the Claude Docs viewer: the text
+     face (--font-text: sans by default, serif or mono) and the heading face
+     (--font-heading: serif by default, or sans). The body size is the 100%
+     rung and --doc-zoom multiplies it. Heading sizes are fixed px, so a
+     serif or mono text face never resizes the headings; zoom multiplies
+     them too. The measure is a fixed 672px column; "Wide page" lets it grow
+     to 900px. */
+  --font-text: var(--font-sans);
+  --font-heading: var(--font-serif);
+  --doc-size: 16px;
+  --doc-leading: 1.5;
+  --doc-measure: 672px;
+  --doc-measure-wide: 900px;
+  --doc-h1: 32px;
+  --doc-h2: 22px;
+  --doc-h3: 18px;
+  --doc-h4: 16px;
+  --doc-h5: 14px;
+  --doc-heading-weight: 400;
+  --doc-h1-track: -0.01em;
+  --doc-h2-track: 0em;
+  --doc-h3-track: 0em;
 
-  --r-xs: 5px;
-  --r-sm: 7px;
-  --r-md: 10px;
-  --r-lg: 12px;
-  --r-xl: 16px;
+  --r-xs: 4px;
+  --r-sm: 5px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
 
   --dur-fast: 120ms;
   --dur: 160ms;
@@ -67,8 +89,10 @@
   --row-h: 28px;
 
   /* Window chrome. The title row holds the traffic lights, the tabs and
-     the page actions (tauri.conf.json centres the traffic lights in it);
-     the document sheet floats --inset off the window edge. */
+     the page actions (tauri.conf.json centres the traffic lights in it).
+     The layout is flat: the document meets the chrome at a hairline
+     (--sheet-edge), and --inset is the gap the title row's ends and the
+     floating panels keep from the window's edge. */
   --bar-h: 40px;
   --inset: 8px;
 
@@ -76,19 +100,33 @@
   --on-identity: #ffffff;   /* initials on a person's avatar hue */
   --knob: #ffffff;          /* a switch's thumb */
   --html-page: #ffffff;     /* an html rendition paints its own page on white */
+
+  /* Drawing hues that read on every ground. */
+  --dg-good: #0ca30c;
+  --dg-warn: #fab219;
+  --dg-bad: #d03b3b;
 }
 
-/* Document font choice (Settings → Appearance). Sans and mono run a little
-   smaller than the serif so the three read at the same optical size. */
-:root[data-doc-font="sans"] {
-  --doc-font: var(--font-sans);
+/* Document font choices (Settings → Appearance), on <html>. A serif text
+   face runs a step larger and mono a step smaller, so all three read at
+   the same optical size. Sans headings take weight and tighter tracking,
+   as a sans display face needs. */
+:root[data-text-font="serif"] {
+  --font-text: var(--font-serif);
   --doc-size: 17px;
 }
 
-:root[data-doc-font="mono"] {
-  --doc-font: var(--font-mono);
+:root[data-text-font="mono"] {
+  --font-text: var(--font-mono);
   --doc-size: 15px;
-  --doc-leading: 1.65;
+}
+
+:root[data-heading-font="sans"] {
+  --font-heading: var(--font-sans);
+  --doc-heading-weight: 600;
+  --doc-h1-track: -0.02em;
+  --doc-h2-track: -0.015em;
+  --doc-h3-track: -0.01em;
 }
 
 /* ---------- Light ---------- */
@@ -97,23 +135,26 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --canvas: #eef3fa;
+  --canvas: #f9f9f7;
   --sheet: #ffffff;
   --raised: #ffffff;
-  --sunken: #f4f7fb;
-  --hover: #e5eaf2;
-  --border: #dee2e9;
-  --border-strong: #ced3db;
+  --sunken: #f5f3ed;
+  --hover: rgba(31, 30, 29, 0.05);
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: rgba(11, 11, 11, 0.2);
 
-  --text-1: #1c222c;
-  --text-2: #4f5662;
-  --text-3: #686e79;
+  /* --text-3 is 3.6:1 on the sheet: placeholders and decoration only.
+     Meta text people must read takes --text-2. */
+  --text-1: #1f1e1d;
+  --text-2: #52514e;
+  --text-3: #898781;
 
-  --accent: #2267ee;
+  --accent: #2a78d6;
+  --link: #256abf;
   --on-fill: #ffffff;
-  --accent-wash: rgba(34, 103, 238, 0.1);
-  --accent-ring: rgba(34, 103, 238, 0.35);
-  --selection: rgba(34, 103, 238, 0.18);
+  --accent-wash: rgba(42, 120, 214, 0.1);
+  --accent-ring: rgba(42, 120, 214, 0.35);
+  --selection: rgba(42, 120, 214, 0.18);
 
   /* Status: the dot (fill) and the ink (text on the sheet). Green is live
      or in sync, amber needs you, red is broken. Working is the accent.
@@ -126,55 +167,75 @@
   --error: #d33b36;
   --error-ink: #be2e31;
 
-  --code-ink: #1c222c;
-  --code-bg: #f1f4f9;
+  --code-ink: #1f1e1d;
+  --code-bg: #f8f8f6;
+  --code-inline-bg: #f3f1ec;
   /* Syntax roles in a code block (codeTheme.ts), each ≥4.5:1 on --code-bg. */
   --code-keyword: #8a2fb8;
   --code-string: #1d7a3a;
   --code-number: #a8560a;
   --code-def: #1a5fd0;
   --code-type: #0a7580;
-  --code-comment: #636a77;
+  --code-comment: #6b6964;
   --code-special: #c0392b;
-  --quote-bar: #ced3db;
+  --quote-bar: #dbd9d4;
+  --table-rule: #e8e5dc;
+  --table-head: #f5f3ed;
   --mark: rgba(255, 214, 0, 0.4);
   --mark-current: rgba(255, 145, 0, 0.55);
   --mark-ring: rgba(255, 145, 0, 0.85);
-  --scrim: rgba(16, 24, 40, 0.32);
+  --scrim: rgba(31, 30, 29, 0.32);
 
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.07);
-  --shadow-card-hover: 0 2px 4px rgba(16, 24, 40, 0.06), 0 6px 16px rgba(16, 24, 40, 0.09);
-  --shadow-pop: 0 4px 12px rgba(16, 24, 40, 0.08), 0 12px 32px rgba(16, 24, 40, 0.12);
-  --shadow-panel: -12px 0 30px rgba(16, 24, 40, 0.14);
-  --shadow-drop: drop-shadow(0 2px 5px rgba(16, 24, 40, 0.3));
-  /* The document sheet's edge against the canvas, and the active tab that
-     reads as part of it. */
-  --shadow-sheet: 0 0 0 1px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --dg-ink: #1f1e1d;
+  --dg-ink-2: #52514e;
+  --dg-rule: #c3c2b7;
+  --dg-grid: rgba(11, 11, 11, 0.1);
+  --dg-accent: #2a78d6;
+  --dg-tint: rgba(137, 135, 129, 0.15);
+  --dg-cat-1: #2a78d6;
+  --dg-cat-2: #eb6834;
+  --dg-cat-3: #1baf7a;
+  --dg-cat-4: #eda100;
+  --dg-cat-5: #e87ba4;
+  --dg-cat-6: #008300;
+  --dg-cat-7: #6250d6;
+  --dg-cat-8: #e34948;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.06), 0 6px 16px rgba(0, 0, 0, 0.08);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
+  --shadow-panel: -12px 0 30px rgba(0, 0, 0, 0.12);
+  --shadow-drop: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.25));
+  /* The hairline where the document meets the chrome, and the active tab. */
+  --sheet-edge: rgba(11, 11, 11, 0.07);
   --tab-active: #ffffff;
 }
 
-/* ---------- Paper ---------- */
+/* ---------- Paper ----------
+   The warm ground the Claude Docs viewer gives its embedded frames, made a
+   whole theme: the viewer itself has no paper mode. */
 
 [data-theme="paper"] {
   color-scheme: light;
 
-  --canvas: #eee1cc;
-  --sheet: #faf3e3;
-  --raised: #fffaf0;
-  --sunken: #f3e9d6;
-  --hover: #e7d9c2;
-  --border: #ddcfba;
-  --border-strong: #cfbfa6;
+  --canvas: #f3f1ec;
+  --sheet: #faf9f5;
+  --raised: #fffefb;
+  --sunken: #efece4;
+  --hover: rgba(31, 30, 29, 0.05);
+  --border: rgba(15, 12, 8, 0.12);
+  --border-strong: rgba(15, 12, 8, 0.2);
 
-  --text-1: #392a1e;
-  --text-2: #5e4d3e;
-  --text-3: #776554;
+  --text-1: #1f1e1d;
+  --text-2: #5e5d59;
+  --text-3: #8a8882;
 
-  --accent: #285cc2;
+  --accent: #2a78d6;
+  --link: #256abf;
   --on-fill: #ffffff;
-  --accent-wash: rgba(40, 92, 194, 0.1);
-  --accent-ring: rgba(40, 92, 194, 0.35);
-  --selection: rgba(40, 92, 194, 0.18);
+  --accent-wash: rgba(42, 120, 214, 0.1);
+  --accent-ring: rgba(42, 120, 214, 0.35);
+  --selection: rgba(42, 120, 214, 0.18);
 
   --live: #0f9a48;
   --live-ink: #1d6e36;
@@ -183,55 +244,77 @@
   --error: #c8382f;
   --error-ink: #b02c2a;
 
-  --code-ink: #392a1e;
-  --code-bg: #f1e6d0;
+  --code-ink: #1f1e1d;
+  --code-bg: #f3f1ec;
+  --code-inline-bg: #efece4;
   --code-keyword: #86307c;
   --code-string: #3c6b1e;
   --code-number: #94500a;
   --code-def: #2a58b5;
   --code-type: #1f6b70;
-  --code-comment: #715f4e;
+  --code-comment: #6b6964;
   --code-special: #ad3326;
-  --quote-bar: #cfbfa6;
+  --quote-bar: #d6d3cb;
+  --table-rule: #e3dfd4;
+  --table-head: #efece4;
   --mark: rgba(240, 190, 40, 0.38);
   --mark-current: rgba(230, 130, 0, 0.5);
   --mark-ring: rgba(230, 130, 0, 0.8);
-  --scrim: rgba(57, 42, 30, 0.32);
+  --scrim: rgba(31, 30, 29, 0.32);
 
-  --shadow-card: 0 1px 2px rgba(57, 42, 30, 0.06), 0 1px 3px rgba(57, 42, 30, 0.08);
-  --shadow-card-hover: 0 2px 4px rgba(57, 42, 30, 0.07), 0 6px 16px rgba(57, 42, 30, 0.1);
-  --shadow-pop: 0 4px 12px rgba(57, 42, 30, 0.1), 0 12px 32px rgba(57, 42, 30, 0.14);
-  --shadow-panel: -12px 0 30px rgba(57, 42, 30, 0.16);
-  --shadow-drop: drop-shadow(0 2px 5px rgba(57, 42, 30, 0.3));
-  --shadow-sheet: 0 0 0 1px rgba(57, 42, 30, 0.08), 0 1px 3px rgba(57, 42, 30, 0.07);
-  --tab-active: #faf3e3;
+  --dg-ink: #1f1e1d;
+  --dg-ink-2: #5e5d59;
+  --dg-rule: #c3c2b7;
+  --dg-grid: rgba(15, 12, 8, 0.1);
+  --dg-accent: #2a78d6;
+  --dg-tint: rgba(137, 135, 129, 0.15);
+  --dg-cat-1: #2a78d6;
+  --dg-cat-2: #eb6834;
+  --dg-cat-3: #1baf7a;
+  --dg-cat-4: #eda100;
+  --dg-cat-5: #e87ba4;
+  --dg-cat-6: #008300;
+  --dg-cat-7: #6250d6;
+  --dg-cat-8: #e34948;
+
+  --shadow-card: 0 1px 2px rgba(15, 12, 8, 0.05), 0 1px 3px rgba(15, 12, 8, 0.07);
+  --shadow-card-hover: 0 2px 4px rgba(15, 12, 8, 0.06), 0 6px 16px rgba(15, 12, 8, 0.09);
+  --shadow-pop: 0 8px 24px rgba(15, 12, 8, 0.12), 0 2px 6px rgba(15, 12, 8, 0.08);
+  --shadow-panel: -12px 0 30px rgba(15, 12, 8, 0.14);
+  --shadow-drop: drop-shadow(0 2px 5px rgba(15, 12, 8, 0.25));
+  --sheet-edge: rgba(15, 12, 8, 0.08);
+  --tab-active: #faf9f5;
+
 }
 
-/* ---------- Dark (pitch black) ----------
-   True black canvas and sheet. On black, shadows can't show elevation, so
-   raised surfaces step up in lightness and carry a border instead. Text on
-   accent fills is black: the bright blue holds 7:1 against it. */
+/* ---------- Dark ----------
+   A near-black ground (#0b0b0b, not pure black) with three surfaces stepping
+   up in lightness: on a dark ground shadows can't show elevation, so raised
+   things are lighter and carry a hairline. Hairlines are white at 10–20%.
+   The accent fill stays the light theme's blue (white text on it); accent
+   as text is the brighter --link. */
 
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --canvas: #000000;
-  --sheet: #000000;
-  --raised: #121214;
-  --sunken: #0c0c0e;
-  --hover: #18181b;
-  --border: #232326;
-  --border-strong: #303034;
+  --canvas: #0b0b0b;
+  --sheet: #0b0b0b;
+  --raised: #20201f;
+  --sunken: #151515;
+  --hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
 
-  --text-1: #ededef;
-  --text-2: #a8a8ae;
-  --text-3: #7d7d84;
+  --text-1: #f0efec;
+  --text-2: #c3c2b7;
+  --text-3: #898781;
 
-  --accent: #4d94ff;
-  --on-fill: #000000;
-  --accent-wash: rgba(77, 148, 255, 0.14);
-  --accent-ring: rgba(77, 148, 255, 0.45);
-  --selection: rgba(77, 148, 255, 0.3);
+  --accent: #2a78d6;
+  --link: #3987e5;
+  --on-fill: #ffffff;
+  --accent-wash: rgba(57, 135, 229, 0.16);
+  --accent-ring: rgba(57, 135, 229, 0.45);
+  --selection: rgba(57, 135, 229, 0.3);
 
   --live: #47c86e;
   --live-ink: #75d78d;
@@ -240,28 +323,47 @@
   --error: #f66d67;
   --error-ink: #fb817a;
 
-  --code-ink: #ededef;
-  --code-bg: #141416;
+  --code-ink: #f0efec;
+  --code-bg: #151515;
+  --code-inline-bg: rgba(255, 255, 255, 0.06);
   --code-keyword: #d19bf5;
   --code-string: #9fd27f;
   --code-number: #f0ae73;
   --code-def: #7cb3ff;
   --code-type: #62cfd9;
-  --code-comment: #8b8f98;
+  --code-comment: #94928b;
   --code-special: #f38a7f;
-  --quote-bar: #3a3a3f;
+  --quote-bar: rgba(255, 255, 255, 0.2);
+  --table-rule: rgba(255, 255, 255, 0.1);
+  --table-head: #151515;
   --mark: rgba(255, 214, 0, 0.28);
   --mark-current: rgba(255, 145, 0, 0.5);
   --mark-ring: rgba(255, 145, 0, 0.85);
   --scrim: rgba(0, 0, 0, 0.6);
 
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.6);
-  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.6);
-  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.6);
-  --shadow-panel: -12px 0 30px rgba(0, 0, 0, 0.6);
+  --dg-ink: #f0efec;
+  --dg-ink-2: #c3c2b7;
+  --dg-rule: #383835;
+  --dg-grid: rgba(255, 255, 255, 0.1);
+  --dg-accent: #3987e5;
+  --dg-tint: rgba(151, 149, 141, 0.15);
+  --dg-cat-1: #3987e5;
+  --dg-cat-2: #d95926;
+  --dg-cat-3: #199e70;
+  --dg-cat-4: #c98500;
+  --dg-cat-5: #d55181;
+  --dg-cat-6: #008300;
+  --dg-cat-7: #9085e9;
+  --dg-cat-8: #e66767;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.2);
+  --shadow-panel: -12px 0 30px rgba(0, 0, 0, 0.5);
   --shadow-drop: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.6));
-  /* Black on black: the sheet's edge is a hairline, and the active tab
-     steps up to the raised surface. */
-  --shadow-sheet: 0 0 0 1px #232326;
-  --tab-active: #121214;
+  /* One dark ground: the document's edge is the only thing between it and
+     the chrome, and the active tab steps up a surface. */
+  --sheet-edge: rgba(255, 255, 255, 0.1);
+  --tab-active: #1a1a19;
+
 }

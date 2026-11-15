@@ -3,8 +3,8 @@
 // module string (mermaid's lazy diagram chunks flattened in — there is no
 // second asset route to load them from) and splices it into src/assets.ts.
 // A public page that carries a ```mermaid block loads it lazily to draw its
-// diagrams with the same page-derived palette the editor uses — hence the
-// theme re-export. Browser code: typechecked with the app, never bundled
+// diagrams in the same grammar and page-derived palette the editor uses —
+// hence the config and post-processing re-exports. Browser code: typechecked with the app, never bundled
 // into it.
 export { default } from "mermaid";
-export { mermaidThemeVariables } from "../../src/mermaidTheme";
+export { finishMermaidSvg, mermaidConfig } from "../../src/mermaidTheme";

@@ -51,8 +51,8 @@ await page.locator(".milkdown .ProseMirror").last().press("Control+End").catch((
 await page.evaluate(() => {
   document.querySelector(".editor-wrap")?.scrollTo(0, 10 ** 6);
 });
-await poll(async () => page.locator(".dk-mermaid-error").count());
-const errText = await page.locator(".dk-mermaid-error").textContent();
+await poll(async () => page.locator(".dk-figure-error").count());
+const errText = await page.locator(".dk-figure-error").textContent();
 step(
   "broken source shows the quiet error card (with mermaid's message)",
   errText.includes("doesn’t parse yet") && errText.toLowerCase().includes("parse error"),
@@ -104,7 +104,7 @@ const atRest =
 step("reading state shows the diagram alone (source hidden)", atRest);
 
 await block.hover();
-await block.locator(".dk-mermaid .dk-mermaid-edit").click();
+await block.locator(".dk-figure .dk-figure-source").click();
 await poll(async () => block.locator(".cm-content").isVisible());
 const sourceOnly = await block.locator(".preview-panel").isHidden();
 step("Source chip switches to the source alone (diagram put away)", sourceOnly);
@@ -133,7 +133,7 @@ step("typing a new edge live-updates the rendered diagram", true, `${nodesBefore
 // brackets, which would desync the backspace count below.)
 const BROKEN = "\n  C -->";
 await page.keyboard.type(BROKEN);
-await poll(async () => page.locator(".dk-mermaid-error").count());
+await poll(async () => page.locator(".dk-figure-error").count());
 step("mid-edit syntax error swaps in the error card", true);
 for (let i = 0; i < BROKEN.length; i++) await page.keyboard.press("Backspace");
 await poll(async () => page.locator(".dk-mermaid > svg").count());

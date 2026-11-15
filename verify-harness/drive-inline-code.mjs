@@ -49,11 +49,18 @@ await poll(async () =>
 
 /* ---------- Parse: the newline never reaches the document ---------- */
 
+// Inline code is display: inline, so a span near a line's end wraps like
+// any text. Fragments are counted with wrapping off (white-space: pre keeps
+// a literal newline as a break and nothing else), so only a newline that
+// reached the document can split a span.
 const codes = await page.evaluate(() =>
-  [...document.querySelectorAll(".milkdown .ProseMirror code")].map((c) => ({
-    text: c.textContent,
-    fragments: c.getClientRects().length,
-  })),
+  [...document.querySelectorAll(".milkdown .ProseMirror code")].map((c) => {
+    const was = c.style.whiteSpace;
+    c.style.whiteSpace = "pre";
+    const fragments = c.getClientRects().length;
+    c.style.whiteSpace = was;
+    return { text: c.textContent, fragments };
+  }),
 );
 step(
   "wrapped list-item span parses to a single-space value",
