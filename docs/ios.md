@@ -65,7 +65,7 @@ node scripts/ios-colors.mjs [--check]     # colour sets from tokens.css
 
 The app reaches phones through TestFlight only, never the App Store.
 
-- A build goes up from Xcode: Product → Archive, then Distribute App → App Store Connect, with *Manage Version and Build Number* on. Every upload needs a higher build number than the last, and Xcode takes the next one; nothing in the repository counts them.
+- A build goes up from Xcode: Product → Archive, then Distribute App → App Store Connect, with *Manage Version and Build Number* on. Every upload needs a higher build number than the last, and Xcode takes the next one; nothing in the repository counts them. The same from the command line, with the account Xcode is signed in to: `xcodebuild archive -allowProvisioningUpdates`, then `xcodebuild -exportArchive -allowProvisioningUpdates` with export options `method` app-store-connect, `destination` upload, `manageAppVersionAndBuildNumber` true.
 - Archiving needs one device registered to the team, even though nothing is installed from Xcode: automatic signing signs the archive for development first, and Apple makes no development profile for a team with no devices. Xcode registers a connected iPhone only with Developer Mode on; its UDID added under Devices on developer.apple.com does the same without it.
 - `MARKETING_VERSION` stays put between builds: testers outside the App Store Connect team see a build only after Apple's beta review, which runs once per version.
 - A build expires 90 days after it is uploaded, and the app stops opening: a newer one goes up at least that often.
