@@ -1,9 +1,10 @@
 // What every journey through the app's screens shares: the device line it
 // joins with, finding things, and keeping what was on screen.
 //
-// `node verify-harness/drive-ios.mjs --app` mints one line per test class —
-// one for each `*UITests.swift` here, by its name — since a line works
-// once. A class run without the drive skips itself.
+// `node verify-harness/drive-ios.mjs --app` serves what only the domain's
+// side can do, at an address in the environment: each test class asks it for
+// a line of its own as it starts — a line works once, and a new one stops the
+// one before. A class run without the drive skips itself.
 
 import XCTest
 
@@ -11,15 +12,39 @@ class UITestCase: XCTestCase {
     let app = XCUIApplication()
     /// `doklin-invite <address> <code>`, for this class alone.
     var line = ""
+    /// Where the drive answers.
+    private var drive: URL!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        let name = String(describing: type(of: self))
-        guard let raw = ProcessInfo.processInfo.environment["DOKLIN_TEST_DEVICE_LINES"],
-              let lines = try? JSONDecoder().decode([String: String].self, from: Data(raw.utf8)),
-              let line = lines[name]
-        else { throw XCTSkip("no worker to talk to — run: node verify-harness/drive-ios.mjs --app") }
-        self.line = line
+        guard let raw = ProcessInfo.processInfo.environment["DOKLIN_TEST_DRIVE"], let drive = URL(string: raw) else {
+            throw XCTSkip("no worker to talk to — run: node verify-harness/drive-ios.mjs --app")
+        }
+        self.drive = drive
+        line = try ask("line")
+    }
+
+    /// Ask the drive for something only the domain's side can do: `line`, or
+    /// `editing?path=<workspace-relative>` — another device editing it now.
+    /// What the drive could not do fails the journey there, in its words,
+    /// rather than later as something else.
+    @discardableResult
+    func ask(_ what: String) throws -> String {
+        let url = try XCTUnwrap(URL(string: what, relativeTo: drive), "the drive cannot be asked for \(what)")
+        let answer = DriveAnswer()
+        let answered = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            answer.body = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            answer.status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            answer.error = error
+            answered.signal()
+        }.resume()
+        guard answered.wait(timeout: .now() + 120) == .success else {
+            throw DriveRefused(what: what, why: "it did not answer within two minutes")
+        }
+        if let error = answer.error { throw DriveRefused(what: what, why: error.localizedDescription) }
+        guard answer.status == 200 else { throw DriveRefused(what: what, why: "\(answer.status) \(answer.body)") }
+        return answer.body
     }
 
     /* ---------- Finding things ---------- */
@@ -83,4 +108,19 @@ class UITestCase: XCTestCase {
             app.buttons.matching(identifier: "Remove from this iPhone").firstMatch.tap()
         }
     }
+}
+
+/// The drive's answer to one question, filled in on URLSession's queue and
+/// read once the semaphore says it is there.
+private final class DriveAnswer: @unchecked Sendable {
+    var body = ""
+    var status = 0
+    var error: Error?
+}
+
+private struct DriveRefused: LocalizedError {
+    let what: String
+    let why: String
+
+    var errorDescription: String? { "the drive could not answer \(what): \(why)" }
 }

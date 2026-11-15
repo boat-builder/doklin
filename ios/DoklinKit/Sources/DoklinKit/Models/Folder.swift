@@ -102,18 +102,6 @@ public final class FolderModel {
     /// Moving `entry` into `folder` lets more people see it: the sentence
     /// that says who, to confirm first — or nil when nobody new will.
     public func widening(_ entry: FolderEntry, into folder: String) -> String? {
-        let before = workspace.audience(of: entry.path)
-        let after = workspace.audience(of: folder)
-        guard before != after else { return nil }
-        switch (before, after) {
-        case (_, .everyone):
-            return "Everyone in \(workspace.name) will be able to see it."
-        case (.onlyYou, .folder(let name)), (.nowhere, .folder(let name)):
-            return "The people of “\(name)” will be able to see it."
-        case (.folder, .folder(let name)):
-            return "The people of “\(name)” will be able to see it, and they may not be the same people."
-        default:
-            return nil
-        }
+        Sections.wider(in: workspace.status, from: entry.path, to: folder)
     }
 }

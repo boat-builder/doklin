@@ -92,6 +92,9 @@ public final class DocumentModel {
     /// nothing is written over it.
     public func save(_ source: String, over expected: String) async throws {
         guard isNote else { throw DoklinError("Only a note's markdown can be edited here.") }
+        guard exists else {
+            throw DoklinError("\(title) was not saved: it is no longer on this iPhone — moved or removed on another device, or its folder left.")
+        }
         let now = try workspace.files.text(path)
         guard now == expected || now == source else { throw ChangedElsewhere() }
         try workspace.files.write(path, Data(source.utf8))

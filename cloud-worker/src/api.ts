@@ -491,7 +491,8 @@ async function createInvite(request: Request, env: Env, auth: Auth): Promise<Res
   // removed since — a code for them is theirs to make, or the creator's:
   // another owner's would open that person's Private and the folders they
   // are in. A row nobody has signed in as is still only an invitation, and
-  // any owner may replace its code.
+  // any owner may replace its code. The apps ask the same before offering a
+  // new code (`mayInviteAgain`, src/cloud.ts and ios/DoklinKit) — change all three.
   const existing = await findMemberByEmail(env, email);
   if (existing === undefined) return noDatabase();
   const established = existing !== null && (existing.creator || existing.lastSeenAt !== null);

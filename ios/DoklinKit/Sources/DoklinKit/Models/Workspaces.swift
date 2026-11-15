@@ -45,6 +45,9 @@ public final class Workspaces {
     /// asking for a new line. Held in memory only.
     @ObservationIgnored private var bought: (endpoint: String, code: String, redeemed: Redeemed)?
     @ObservationIgnored private var starting = false
+    /// Restricted folders this person is giving up here, as `<root>/<path>`
+    /// lowercased: when one goes, that is no news to them.
+    @ObservationIgnored private var givenUp: Set<String> = []
 
     public init(remembered: UserDefaults = .standard) {
         self.remembered = remembered
@@ -248,8 +251,10 @@ public final class Workspaces {
             }
         case "cloud-space-left":
             if let left = event.decode(CloudSpaceLeft.self) {
-                open[left.root]?.changed([left.path])
-                say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
+                open[left.root]?.lost(left.path)
+                if givenUp.remove("\(left.root)/\(left.path)".lowercased()) == nil {
+                    say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
+                }
             }
         case "cloud-address-taken":
             if let taken = event.decode(CloudAddressTaken.self) {
@@ -267,6 +272,13 @@ public final class Workspaces {
 
     private func say(_ root: String, _ text: String, path: String?) {
         notices.append(Notice(root: root, text: text, path: path))
+    }
+
+    /// This person is giving up the restricted folder at `path` (or, with
+    /// `false`, is not after all).
+    func givingUp(_ root: String, _ path: String, _ giving: Bool) {
+        let key = "\(root)/\(path)".lowercased()
+        if giving { givenUp.insert(key) } else { givenUp.remove(key) }
     }
 
     public func dismiss(_ notice: Notice) {
@@ -299,6 +311,9 @@ public final class Workspace: Identifiable {
     public private(set) var changes = 0
     /// The workspace-relative paths of the last change.
     public private(set) var lastChanged: Set<String> = []
+    /// The last restricted folder to leave this iPhone: the screens inside
+    /// it close when it moves.
+    public private(set) var left: FolderLeft?
 
     public nonisolated var id: String { root }
 
@@ -320,9 +335,21 @@ public final class Workspace: Identifiable {
         try? await Engine.shared.run("cloud_sync_now", ["root": .string(root)])
     }
 
+    /// This person is leaving or deleting the restricted folder at `path`.
+    func givingUp(_ path: String, _ giving: Bool = true) {
+        device?.givingUp(root, path, giving)
+    }
+
     func changed(_ paths: [String]) {
         lastChanged = Set(paths.map { $0.lowercased() })
         changes += 1
+    }
+
+    /// The restricted folder at `folder` left this iPhone, its copy already
+    /// deleted by the engine.
+    func lost(_ folder: String) {
+        left = FolderLeft(path: folder, count: (left?.count ?? 0) + 1)
+        changed([folder])
     }
 
     /// A change made from this device: the engine hears of it, and so does
@@ -373,12 +400,11 @@ public enum Audience: Equatable, Sendable {
 
     public static func of(_ path: String, in status: CloudStatus?) -> Audience {
         guard let status, status.sections else { return .everyone }
-        let lower = path.lowercased()
-        let under = { (folder: String) in lower == folder || lower.hasPrefix(folder + "/") }
-        for space in status.spaces where under(space.path.lowercased()) {
+        let under = { (folder: String) in Sections.holds(folder, path) }
+        for space in status.spaces where under(space.path) {
             return space.kind == .private ? .onlyYou : .folder(space.name)
         }
-        if lower == "restricted" { return .folders }
+        if path.lowercased() == "restricted" { return .folders }
         if under("restricted") || under("private") { return .nowhere }
         return .everyone
     }

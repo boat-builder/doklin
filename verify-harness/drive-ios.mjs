@@ -27,15 +27,18 @@
 // builds it, starts an iPhone simulator and runs ios/DoklinUITests — one
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
-// remove from this iPhone), one class after another. What was on screen at
-// each step is printed (the lines that begin `UI>`), and the whole xcodebuild
-// log and each class's screenshots (screenshots/<class>/, manifest.json
-// naming them) are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset;
-// the path is printed). DOKLIN_ONLY=<class> runs one class;
-// DOKLIN_SIMULATOR=<udid> picks the simulator rather than the newest iPhone.
+// remove from this iPhone; PeopleUITests: people, devices, agents, who is
+// here, restricted folders). A journey asks this script, at an address it
+// serves, for what only the domain's side can do: its line, another device
+// editing a document, and a restricted folder deleted elsewhere. What was on screen at each step is printed (the
+// lines that begin `UI>`), and the whole xcodebuild log and the screenshots
+// are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
+// printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
+// picks the simulator rather than the newest iPhone.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,6 +125,33 @@ async function deviceLine() {
   return `doklin-invite ${WORKER} dkln-${canonical.match(/.{5}/g).join("-")}`;
 }
 
+/** Another device of Ada's — the Mac this script stands for — editing
+ *  `path` now: it is here, and holds the document until it stops beating. */
+async function editingElsewhere(path) {
+  const res = await fetch(`${WORKER}/api/poll`, {
+    method: "POST",
+    headers: asOwner,
+    body: JSON.stringify({ name: "Ada's Mac (drive)", path }),
+  });
+  if (!res.ok) throw new Error(`could not say another device is editing ${path}: ${res.status} ${await res.text()}`);
+  return `editing ${path}`;
+}
+
+/** The restricted folder called `name` deleted for everyone in it, on
+ *  another device of Ada's: the domain's secret acts as her, and she is in
+ *  every folder she made. */
+async function deletedElsewhere(name) {
+  const listed = await fetch(`${WORKER}/api/spaces`, { headers: asOwner });
+  if (!listed.ok) throw new Error(`could not list the restricted folders: ${listed.status} ${await listed.text()}`);
+  const space = (await listed.json()).spaces.find((s) => s.kind === "restricted" && s.name === name);
+  if (!space) throw new Error(`no restricted folder called ${name}`);
+  for (;;) {
+    const res = await fetch(`${WORKER}/api/spaces/${space.id}`, { method: "DELETE", headers: asOwner });
+    if (!res.ok) throw new Error(`could not delete ${name}: ${res.status} ${await res.text()}`);
+    if (!(await res.json()).remaining) return `deleted ${name}`;
+  }
+}
+
 /** Whether the shared workspace's manifest lists a file at `path`. */
 async function onTheDomain(path) {
   const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
@@ -178,13 +208,60 @@ function pickSimulator() {
   throw new Error("There is no iPhone simulator this Xcode can run — add one under Xcode → Settings → Components.");
 }
 
-/** Run xcodebuild, its output into `log`, saying what a reader of the run
- *  wants: the screens, the tests, and anything that went wrong. Answers its
- *  exit code. */
-function xcodebuild(log, args, env = {}) {
+async function driveApp() {
+  // What a journey asks of the domain's side (ios/DoklinUITests/UITestCase.swift):
+  //   /line                 a device line. A line works once, and a person has
+  //                         one code waiting at a time — a new one stops the
+  //                         last — so each class asks for its own as it starts,
+  //                         rather than every line being minted up front, when
+  //                         only the last would still work.
+  //   /editing?path=<rel>   another device editing a document of the workspace.
+  //   /deleted?name=<name>  a restricted folder deleted on another device.
+  const drive = createHttpServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const asks = {
+      "/line": () => deviceLine(),
+      "/editing": () => editingElsewhere(url.searchParams.get("path") ?? ""),
+      "/deleted": () => deletedElsewhere(url.searchParams.get("name") ?? ""),
+    };
+    const asked = asks[url.pathname]?.() ?? Promise.reject(new Error(`nothing at ${url.pathname}`));
+    asked.then(
+      (said) => res.writeHead(200, { "content-type": "text/plain" }).end(said),
+      (e) => res.writeHead(500, { "content-type": "text/plain" }).end(String(e)),
+    );
+  });
+  await new Promise((resolve) => drive.listen(0, "localhost", resolve));
+  const driveAt = `http://localhost:${drive.address().port}`;
+  const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
+  mkdirSync(out, { recursive: true });
+  const result = join(out, "DoklinUITests.xcresult");
+  rmSync(result, { recursive: true, force: true });
+  const simulator = process.env.DOKLIN_SIMULATOR
+    ? { udid: process.env.DOKLIN_SIMULATOR, name: `the simulator ${process.env.DOKLIN_SIMULATOR}` }
+    : pickSimulator();
+  console.log(`driving the app on ${simulator.name}; the full log and the screenshots go to ${out}`);
+
+  const log = createWriteStream(join(out, "xcodebuild.log"));
+  // What a reader of the run wants: the screens, the tests, and anything that went wrong.
   const worthSaying = /^UI> |^Test (Case|Suite) |^\s*Executed |^\*\* |error:|: error |Testing failed|Testing started/;
-  return new Promise((resolve, reject) => {
-    const child = spawn("xcodebuild", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const status = await new Promise((resolve, reject) => {
+    const child = spawn(
+      "xcodebuild",
+      [
+        "test",
+        "-project", join(ROOT, "ios/Doklin.xcodeproj"),
+        "-scheme", "Doklin",
+        "-destination", `id=${simulator.udid}`,
+        "-resultBundlePath", result,
+        ...(process.env.DOKLIN_ONLY ? [`-only-testing:DoklinUITests/${process.env.DOKLIN_ONLY}`] : []),
+        ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
+      ],
+      {
+        // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
+        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DRIVE: driveAt },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let rest = "";
     const hear = (chunk) => {
       log.write(chunk);
@@ -197,68 +274,23 @@ function xcodebuild(log, args, env = {}) {
     child.on("error", reject);
     child.on("exit", (code) => resolve(code ?? 1));
   });
-}
+  await new Promise((resolve) => log.end(resolve));
+  drive.close();
 
-async function driveApp() {
-  const classes = readdirSync(join(ROOT, "ios/DoklinUITests"))
-    .filter((f) => f.endsWith("UITests.swift"))
-    .map((f) => f.replace(/\.swift$/, ""))
-    .filter((name) => !process.env.DOKLIN_ONLY || name === process.env.DOKLIN_ONLY);
-  if (classes.length === 0) {
-    console.error(`there is no test class called ${process.env.DOKLIN_ONLY} in ios/DoklinUITests`);
+  // The screenshots out of the result bundle, as files anybody can open. Best effort.
+  try {
+    execFileSync("xcrun", ["xcresulttool", "export", "attachments", "--path", result, "--output-path", join(out, "screenshots")], { stdio: "ignore" });
+  } catch {
+    console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
+  }
+  if (status !== 0 || (process.env.DOKLIN_ONLY && process.env.DOKLIN_ONLY !== "DoklinUITests")) return status;
+  // What the app said it wrote, asked of the domain itself.
+  if (!(await onTheDomain("Phone list.md"))) {
+    console.error("the note made in the app never reached the domain");
     return 1;
   }
-  const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
-  mkdirSync(out, { recursive: true });
-  const simulator = process.env.DOKLIN_SIMULATOR
-    ? { udid: process.env.DOKLIN_SIMULATOR, name: `the simulator ${process.env.DOKLIN_SIMULATOR}` }
-    : pickSimulator();
-  console.log(`driving the app on ${simulator.name}; the full log and the screenshots go to ${out}`);
-
-  const log = createWriteStream(join(out, "xcodebuild.log"));
-  const where = [
-    "-project", join(ROOT, "ios/Doklin.xcodeproj"),
-    "-scheme", "Doklin",
-    "-destination", `id=${simulator.udid}`,
-    ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
-  ];
-  // Built once; then each class runs on its own, with a line minted just
-  // before it (UITestCase.swift reads its own): a person has one waiting
-  // code at a time, so a line minted ahead of another class's run would
-  // cancel that one's.
-  let status = await xcodebuild(log, ["build-for-testing", ...where]);
-  for (const name of status === 0 ? classes : []) {
-    const result = join(out, `${name}.xcresult`);
-    const screenshots = join(out, "screenshots", name);
-    for (const old of [result, screenshots]) rmSync(old, { recursive: true, force: true });
-    const ran = await xcodebuild(
-      log,
-      ["test-without-building", ...where, "-resultBundlePath", result, `-only-testing:DoklinUITests/${name}`],
-      // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
-      { TEST_RUNNER_DOKLIN_TEST_DEVICE_LINES: JSON.stringify({ [name]: await deviceLine() }) },
-    );
-    // The screenshots out of the result bundle, as files anybody can open. Best effort.
-    try {
-      execFileSync("xcrun", ["xcresulttool", "export", "attachments", "--path", result, "--output-path", screenshots], {
-        stdio: "ignore",
-      });
-    } catch {
-      console.log(`${name}'s screenshots stay inside its result bundle — this Xcode's xcresulttool does not export them`);
-    }
-    if (ran !== 0) {
-      status = ran;
-    } else if (name === "DoklinUITests") {
-      // What the app said it wrote, asked of the domain itself.
-      if (await onTheDomain("Phone list.md")) {
-        console.log("the note made in the app is on the domain");
-      } else {
-        console.error("the note made in the app never reached the domain");
-        status = 1;
-      }
-    }
-  }
-  await new Promise((resolve) => log.end(resolve));
-  return status;
+  console.log("the note made in the app is on the domain");
+  return 0;
 }
 
 const status = await (process.argv.includes("--app") ? driveApp() : driveCore());

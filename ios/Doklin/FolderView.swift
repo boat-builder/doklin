@@ -12,6 +12,7 @@ struct FolderView: View {
     @State private var renaming: FolderEntry?
     @State private var moving: FolderEntry?
     @State private var removing: FolderEntry?
+    @State private var restricting: RestrictedSource?
     @State private var failure: String?
 
     enum NewThing { case note, folder }
@@ -47,13 +48,15 @@ struct FolderView: View {
                     }
                 }
                 .contextMenu {
-                    if mayChange, !model.isManaged(entry) {
+                    if mayChange, model.renamable(entry) {
                         Button {
                             newName = entry.name
                             renaming = entry
                         } label: {
                             Label("Rename", systemImage: "pencil")
                         }
+                    }
+                    if mayChange, !model.isManaged(entry) {
                         Button {
                             moving = entry
                         } label: {
@@ -63,6 +66,27 @@ struct FolderView: View {
                             removing = entry
                         } label: {
                             Label("Remove", systemImage: "trash")
+                        }
+                    }
+                    if let space = workspace.restrictedFolder(at: entry.path) {
+                        Button {
+                            path.append(.access(space.id))
+                        } label: {
+                            Label("Manage access…", systemImage: "person.2")
+                        }
+                    }
+                    if model.restrictable(entry) {
+                        Button {
+                            restricting = .folder(entry.path)
+                        } label: {
+                            Label("Restrict access…", systemImage: "lock")
+                        }
+                    }
+                    if model.shareable(entry) {
+                        Button {
+                            restricting = .note(entry.path)
+                        } label: {
+                            Label("Share with…", systemImage: "person.crop.circle.badge.plus")
                         }
                     }
                 }
@@ -93,10 +117,33 @@ struct FolderView: View {
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }
+                        if model.dir.isEmpty, workspace.mayRestrict {
+                            Button {
+                                restricting = .new
+                            } label: {
+                                Label("New restricted folder", systemImage: "folder.badge.person.crop")
+                            }
+                        }
                     } label: {
                         Label("New", systemImage: "plus")
                     }
                     .accessibilityIdentifier("new")
+                }
+                if model.holdsRestrictedFolders, workspace.mayRestrict {
+                    Button {
+                        restricting = .new
+                    } label: {
+                        Label("New restricted folder", systemImage: "plus")
+                    }
+                    .accessibilityIdentifier("new-restricted")
+                }
+                if let space = workspace.restrictedFolder(at: model.dir) {
+                    Button {
+                        path.append(.access(space.id))
+                    } label: {
+                        Label("Who can open this", systemImage: "person.2")
+                    }
+                    .accessibilityIdentifier("access")
                 }
             }
         }
@@ -115,6 +162,10 @@ struct FolderView: View {
             TextField("Name", text: $newName)
             Button("Cancel", role: .cancel) { renaming = nil }
             Button("Rename") { rename() }
+        } message: {
+            if let renaming, workspace.restrictedFolder(at: renaming.path) != nil {
+                Text("It is renamed for everyone in it.")
+            }
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "")?",
@@ -128,6 +179,9 @@ struct FolderView: View {
         }
         .sheet(item: $moving) { entry in
             MoveSheet(model: model, entry: entry) { message in failure = message }
+        }
+        .sheet(item: $restricting) { source in
+            RestrictedFolderSheet(workspace: workspace, source: source) { folder in path.append(.folder(folder)) }
         }
         .alert("That did not work", isPresented: failureShown) {
             Button("OK", role: .cancel) { failure = nil }
@@ -166,10 +220,14 @@ struct FolderView: View {
         case .failed(let message):
             ContentUnavailableView("Could not open this folder", systemImage: "exclamationmark.triangle", description: Text(message))
         case .loaded where model.entries.isEmpty:
+            let next = !mayChange ? "This folder is empty."
+                : model.canHoldNotes ? "Make a note with the plus above."
+                : model.holdsRestrictedFolders && workspace.mayRestrict ? "Make one with the plus above."
+                : "This folder is empty."
             ContentUnavailableView(
                 "Nothing here yet",
                 systemImage: "tray",
-                description: Text(mayChange && model.canHoldNotes ? "Make a note with the plus above." : "This folder is empty.")
+                description: Text(model.emptyHint.map { "\($0) \(next)" } ?? next)
             )
         default:
             EmptyView()
@@ -345,7 +403,7 @@ private struct MoveSheet: View {
             }
             .onAppear { folders = model.workspace.files.everyFolder() }
             .confirmationDialog(
-                "Move \(entry.name) to \(widening.map { $0.folder.isEmpty ? "the workspace" : "“\(DocLinks.name(of: $0.folder))”" } ?? "")?",
+                widening.map { model.wideningTitle(entry, into: $0.folder) } ?? "",
                 isPresented: wideningShown,
                 titleVisibility: .visible
             ) {

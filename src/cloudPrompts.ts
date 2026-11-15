@@ -273,7 +273,8 @@ export type AgentLoginPromptInput = {
  *  sees, so "under Private/" is an instruction here and nowhere a setting.
  *  `doklin help agent` is the briefing; this only gets the agent that far.
  *  It carries the login code, which works once — the one prompt here with a
- *  secret in it besides setup's. */
+ *  secret in it besides setup's. The iPhone hands out the same words
+ *  (`AgentPrompt`, ios/DoklinKit) — change both. */
 export function buildAgentLoginPrompt(i: AgentLoginPromptInput): string {
   // UTC and spelled out: the reader is on another machine, in no known zone.
   const expires = `${new Date(i.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;

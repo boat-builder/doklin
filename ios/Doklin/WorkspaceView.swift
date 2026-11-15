@@ -32,12 +32,28 @@ struct WorkspaceView: View {
                         SearchView(workspace: workspace)
                     case .history(let place):
                         HistoryScreen(place: place, workspace: workspace, route: $path)
+                    case .people:
+                        PeopleView(workspace: workspace)
+                    case .devices:
+                        DevicesView(workspace: workspace)
+                    case .agents:
+                        AgentsView(workspace: workspace)
+                    case .hereNow:
+                        HereNowView(workspace: workspace)
+                    case .access(let id):
+                        SpaceAccessView(workspace: workspace, id: id)
                     }
                 }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { notice }
+        .onChange(of: workspace.left) { _, left in
+            if let left { close(left) }
+        }
+        // What sync said, and what was just done, sit over the sync line, as
+        // a Mac's notes sit at the bottom: at the top they would cover the
+        // screen's navigation bar.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                notice
                 ToastBar(toaster: toaster)
                 SyncLine(workspace: workspace)
             }
@@ -85,6 +101,22 @@ struct WorkspaceView: View {
         Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
     }
 
+    /// A restricted folder left this iPhone: every screen inside it closes,
+    /// and its access screen, as a Mac closes its tabs. The rest stay.
+    private func close(_ left: FolderLeft) {
+        path.removeAll { route in
+            switch route {
+            case .folder(let dir), .document(let dir):
+                return left.holds(dir)
+            case .access(let id):
+                // Still listed when the engine says it left, or listed no more.
+                return workspace.space(id: id).map { left.holds($0.path) } ?? true
+            default:
+                return false
+            }
+        }
+    }
+
     private var menu: some View {
         Menu {
             Section("Workspaces") {
@@ -103,6 +135,32 @@ struct WorkspaceView: View {
                     joining = true
                 } label: {
                     Label("Join another workspace", systemImage: "plus")
+                }
+            }
+            Section {
+                Button {
+                    path.append(.people)
+                } label: {
+                    Label("People", systemImage: "person.2")
+                }
+                if workspace.may("devices.own") {
+                    Button {
+                        path.append(.devices)
+                    } label: {
+                        Label("Devices", systemImage: "laptopcomputer.and.iphone")
+                    }
+                }
+                if workspace.may("agents.own") {
+                    Button {
+                        path.append(.agents)
+                    } label: {
+                        Label("Agents", systemImage: "terminal")
+                    }
+                }
+                Button {
+                    path.append(.hereNow)
+                } label: {
+                    Label("Here now", systemImage: "dot.radiowaves.left.and.right")
                 }
             }
             Section {
