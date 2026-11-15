@@ -19,9 +19,13 @@ name: ci
 #     reason the command is: it is another client of the document API, and
 #     nothing else checks that it and the worker still agree. The app itself
 #     needs Xcode, and is built by ios.yml when ios/ changes
-# The app's Rust is deliberately not built here — it would dominate the
-# runtime and the release build covers it. The command line is a small crate
-# of its own and takes a minute.
+#   - the sync engine and the version store (engine/), with the C interface
+#     the iPhone app links: a crate with no Tauri in it, so its tests — the
+#     in-memory worker and the two-device matrix — run on Linux in a few
+#     minutes. Nothing else runs them before a release ships the engine
+# The Mac app's own Rust (src-tauri/) is deliberately not built here — it
+# would dominate the runtime and the release build covers it. The command
+# line is a small crate of its own and takes a minute.
 
 on:
   pull_request:
@@ -94,6 +98,22 @@ jobs:
 
       - name: Drive it against the worker
         run: node verify-harness/drive-cli.mjs
+
+  engine:
+    name: Engine (test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # --locked: a Cargo.lock left behind by a dependency change fails here.
+      - name: Test the engine and its C interface
+        run: cargo test --workspace --locked --manifest-path engine/Cargo.toml
 
   ios:
     name: iOS core (test + drive)

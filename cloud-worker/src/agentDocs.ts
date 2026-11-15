@@ -99,7 +99,7 @@ function utf8(bytes: Uint8Array): string | null {
 
 /**
  * Keep the public map true after a change, the way the engine does on every
- * manifest it writes (`fold_public`, src-tauri/src/cloud/engine.rs):
+ * manifest it writes (`fold_public`, engine/src/cloud/engine.rs):
  *
  *   · a page's path snapshot follows its file when the file moved;
  *   · a page whose file is gone adopts a file that now sits at its path —

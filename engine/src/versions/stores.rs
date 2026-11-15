@@ -66,9 +66,10 @@ pub fn list(data_dir: &Path) -> Vec<StoreInfo> {
             continue;
         }
         let index: Index = crate::cloud::scan::read_json(&entry.path().join("index.json")).unwrap_or_default();
+        let root = crate::paths::resolved(&index.root);
         out.push(StoreInfo {
-            exists: !index.root.is_empty() && Path::new(&index.root).is_dir(),
-            root: index.root,
+            exists: !root.is_empty() && Path::new(&root).is_dir(),
+            root,
             bytes: dir_bytes(&entry.path()),
             snapshots: index.snapshots.len() as u64,
             newest_ms: index.snapshots.last().map(|row| row.ts),

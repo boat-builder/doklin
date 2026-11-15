@@ -94,7 +94,7 @@ export const AGENT_TOKEN_PREFIX = "dka_";
 
 /**
  * A login code may be dated this far out and no further. The app asks for an
- * hour (src-tauri/src/cloud/invite.rs, `AGENT_CODE_MINUTES`); the ceiling is
+ * hour (engine/src/cloud/invite.rs, `AGENT_CODE_MINUTES`); the ceiling is
  * wider only so two clocks that disagree by a few minutes do not refuse each
  * other. The line a code travels in gets pasted into chats, so a code is
  * meant to be worthless soon.

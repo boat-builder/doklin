@@ -186,8 +186,10 @@ pub fn versions_dir(data_dir: &Path) -> PathBuf {
 /// and a moved folder simply starts a new store.
 pub fn store_key(root: &Path) -> String {
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // As it is written down (`paths`): where the platform can move the app's
+    // folder, a folder inside it keeps its key — and its history — when it does.
     let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.update(crate::paths::stored(&canonical.to_string_lossy()).as_bytes());
     let digest = hasher.finalize();
     let hex: String = digest.iter().take(8).map(|b| format!("{:02x}", b)).collect();
     format!("r-{}", hex)
@@ -252,17 +254,25 @@ impl Store {
     pub fn read_index(&self) -> Index {
         let mut index: Index = crate::cloud::scan::read_json(&self.index_path()).unwrap_or_default();
         index.version = STORE_VERSION;
-        if index.root.is_empty() {
-            index.root = self.root.to_string_lossy().to_string();
-        }
+        // Written the way `paths` writes a path; held as it is now.
+        index.root = if index.root.is_empty() {
+            self.root.to_string_lossy().to_string()
+        } else {
+            crate::paths::resolved(&index.root)
+        };
         index.snapshots.sort_by_key(|s| s.ts);
         index
     }
 
     pub fn write_index(&self, index: &Index) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("create the version store: {}", e))?;
-        crate::cloud::scan::write_json(&self.index_path(), index)
-            .map_err(|e| format!("write the version index: {}", e))
+        let root = crate::paths::stored(&index.root);
+        let written = if root == index.root {
+            crate::cloud::scan::write_json(&self.index_path(), index)
+        } else {
+            crate::cloud::scan::write_json(&self.index_path(), &Index { root, ..index.clone() })
+        };
+        written.map_err(|e| format!("write the version index: {}", e))
     }
 
     pub fn read_snapshot(&self, ts: u64) -> Option<Snapshot> {

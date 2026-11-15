@@ -573,18 +573,22 @@ pub struct HttpRemote {
     endpoint: String,
     token: String,
     device_id: String,
+    app: String,
     /// `spaces/<id>/` when this remote is one space's (`Remote::space`), and
     /// empty for the shared workspace: what the sync routes sit under.
     scope: String,
 }
 
 impl HttpRemote {
-    pub fn new(endpoint: &str, token: &str, device_id: &str) -> Self {
+    /// `app` is what `x-doklin-client` says: which app speaks, and which
+    /// version of it (`Setup::client`).
+    pub fn new(endpoint: &str, token: &str, device_id: &str, app: &str) -> Self {
         HttpRemote {
             client: http_client(),
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
             device_id: device_id.to_string(),
+            app: app.to_string(),
             scope: String::new(),
         }
     }
@@ -605,7 +609,7 @@ impl HttpRemote {
     /// because it has nothing else to send.
     fn tags(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.header("x-doklin-device", &self.device_id)
-            .header("x-doklin-client", env!("CARGO_PKG_VERSION"))
+            .header("x-doklin-client", &self.app)
     }
 
     /// The bearer, plus the attribution headers.

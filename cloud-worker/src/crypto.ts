@@ -18,7 +18,7 @@ export function timingEq(a: string, b: string): boolean {
 }
 
 /** `bytes` from the CSPRNG, hex. 32 is what a bearer token gets — the same
- *  256 bits the app mints the owner's with (src-tauri/src/cloud/scan.rs). */
+ *  256 bits the app mints the owner's with (engine/src/cloud/scan.rs). */
 export function randomHex(bytes: number): string {
   const buf = new Uint8Array(bytes);
   crypto.getRandomValues(buf);

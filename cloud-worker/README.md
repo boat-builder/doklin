@@ -151,7 +151,7 @@ its path names, with that space's manifest mounted at its folder
 creator with no member row → `409`. `tree`, `search` and `pages` at the top
 cover every section, opening at most 8 spaces a request (`notListed`,
 `sectionsNotSearched`). A restricted folder's name is the Mac's (`candidates`,
-`src-tauri/src/cloud/space.rs`, **change both**), given out in creation order.
+`engine/src/cloud/space.rs`, **change both**), given out in creation order.
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
@@ -236,7 +236,7 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`. Old `presence.json` / `history/` are dead.
 
-## Manifest v4 (`src/manifest.ts` ⇄ `src-tauri/src/cloud/manifest.rs`)
+## Manifest v4 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
 
 ```json
 {

@@ -10,7 +10,7 @@
 // somebody asks for it — so an address answers the moment the entry lands.
 //
 // The rules an entry keeps are the engine's (`queue_publish` and
-// `fold_public`, src-tauri/src/cloud/engine.rs): one page per thing, a slug
+// `fold_public`, engine/src/cloud/engine.rs): one page per thing, a slug
 // that is free or already its own, the first publisher's name and date kept
 // when a page is republished. A document's page belongs to its markdown file
 // when it has one and to its html when it has not.
@@ -42,7 +42,7 @@ import { mirrorAfter } from "./search";
 import { isHtmlPath, isMarkdownPath } from "./workspace";
 
 /** The alphabet a random slug is drawn from — no look-alikes, as the engine's
- *  is (`SLUG_ALPHABET`, src-tauri/src/cloud/manifest.rs). */
+ *  is (`SLUG_ALPHABET`, engine/src/cloud/manifest.rs). */
 const SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 const RANDOM_SLUG_LEN = 8;
 

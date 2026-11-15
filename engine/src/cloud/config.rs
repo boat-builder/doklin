@@ -81,6 +81,11 @@ pub fn cloud_file_path(data_dir: &Path) -> PathBuf {
 
 pub fn read_cloud_file(data_dir: &Path) -> CloudFile {
     let mut file: CloudFile = read_json(&cloud_file_path(data_dir)).unwrap_or_default();
+    // A root is written the way `paths` writes one: relative, where the
+    // platform can move the app's folder.
+    for w in &mut file.workspaces {
+        w.root = crate::paths::resolved(&w.root);
+    }
     // Tolerate a hand-edited file: entries missing what an engine needs are
     // nothing to sync.
     file.workspaces.retain(|w| {
@@ -95,7 +100,11 @@ pub fn read_cloud_file(data_dir: &Path) -> CloudFile {
 }
 
 pub fn write_cloud_file(data_dir: &Path, file: &CloudFile) -> Result<(), String> {
-    write_json(&cloud_file_path(data_dir), file).map_err(|e| format!("write cloud.json: {}", e))
+    let mut written = file.clone();
+    for w in &mut written.workspaces {
+        w.root = crate::paths::stored(&w.root);
+    }
+    write_json(&cloud_file_path(data_dir), &written).map_err(|e| format!("write cloud.json: {}", e))
 }
 
 /// The engine's state for one workspace: `state.json` + `base/`.
@@ -103,15 +112,15 @@ pub fn state_dir(data_dir: &Path, ws_id: &str) -> PathBuf {
     data_dir.join("cloud").join(ws_id)
 }
 
-/// The device identity, minted on first use: a random id and the Mac's
-/// user-facing name, capped to what the worker keeps.
-pub fn ensure_device(data_dir: &Path, file: &mut CloudFile) -> DeviceIdentity {
+/// The device identity, minted on first use: a random id and the device's
+/// user-facing name (`Setup::device_name`), capped to what the worker keeps.
+pub fn ensure_device(data_dir: &Path, file: &mut CloudFile, display_name: &str) -> DeviceIdentity {
     if let Some(d) = file.device.clone() {
         if !d.id.is_empty() {
             return d;
         }
     }
-    let d = DeviceIdentity { id: random_id("d"), name: clean_name(&device_display_name(), "This Mac") };
+    let d = DeviceIdentity { id: random_id("d"), name: clean_name(display_name, "This device") };
     file.device = Some(d.clone());
     file.version = CLOUD_FILE_VERSION;
     let _ = write_cloud_file(data_dir, file);
@@ -203,8 +212,8 @@ pub fn sanitize_folder_name(name: &str) -> String {
     }
 }
 
-/// This Mac's user-facing name (System Settings → General → About), the
-/// hostname as a fallback.
+/// A Mac's user-facing name (System Settings → General → About), the
+/// hostname as a fallback: what the Mac app gives as `Setup::device_name`.
 pub fn device_display_name() -> String {
     // macOS-only: `scutil --get ComputerName`; the hostname elsewhere.
     let pretty = std::process::Command::new("scutil")

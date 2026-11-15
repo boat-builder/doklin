@@ -1,13 +1,13 @@
 //! The engine's side of the frontend contract:
 //! the status that is the frontend's entire model, the events, and the
 //! small result types the commands answer with. Mirrored in TypeScript by
-//! src/cloud.ts — change both.
+//! src/cloud.ts and in Swift by ios/DoklinKit/Sources/DoklinKit/Engine/
+//! Payloads.swift — change all three.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 
 use super::manifest::{PublicKind, SpaceKind};
 use super::remote::{AgentRecord, InviteRecord, MemberRecord, DeviceRecord, WorkspaceRecord};
@@ -319,18 +319,10 @@ pub struct AgentAdded {
     pub login: AgentLogin,
 }
 
-/* ---------- Event sink (AppHandle in prod, a collector in tests) ---------- */
+/* ---------- Event sink (the host in an app, a collector in tests) ---------- */
 
 pub trait Events: Send + Sync + 'static {
     fn emit_json(&self, event: &str, payload: serde_json::Value);
-}
-
-pub struct AppEvents(pub AppHandle);
-
-impl Events for AppEvents {
-    fn emit_json(&self, event: &str, payload: serde_json::Value) {
-        let _ = self.0.emit(event, payload);
-    }
 }
 
 /// Every connected workspace's status, keyed by root — shared by the

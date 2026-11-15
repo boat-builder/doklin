@@ -91,7 +91,7 @@ await new Promise((resolve, reject) => {
 });
 
 // The app mints the code, shows it once and sends only its sha256
-// (src-tauri/src/cloud/invite.rs): twenty Crockford characters, hashed in
+// (engine/src/cloud/invite.rs): twenty Crockford characters, hashed in
 // their canonical form, shown as dkla-XXXXX-XXXXX-XXXXX-XXXXX.
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 async function addAgent(name, scopes) {

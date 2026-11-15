@@ -1366,7 +1366,7 @@ fn device_as(
             data_dir: data.path().to_path_buf(),
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
-            use_trash: false,
+            trash: None,
             creator: false,
             on_creator: None,
             on_spaces: None,
@@ -2966,7 +2966,7 @@ async fn the_creators_mac_never_deletes_on_anybodys_word() {
             data_dir: data.path().to_path_buf(),
             device_id: "d-alice".into(),
             device_name: "Alice".into(),
-            use_trash: false,
+            trash: None,
             creator: false,
             on_creator: Some(Box::new(move || heard.store(true, std::sync::atomic::Ordering::SeqCst))),
             on_spaces: None,
@@ -3327,8 +3327,7 @@ fn only_a_folder_that_says_it_is_that_workspace_is_deleted() {
 #[test]
 fn a_joined_workspace_lands_in_a_folder_of_its_own() {
     let home = tempfile::tempdir().unwrap();
-    let parent = super::join_parent(home.path());
-    assert_eq!(parent, home.path().join("Doklin"));
+    let parent = home.path().join("Doklin");
 
     // Its own name, the first time.
     assert_eq!(super::free_folder(&parent, "Acme"), parent.join("Acme"));

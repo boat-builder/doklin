@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { describeCloud, syncWords, type CloudStatus, type SyncTone } from "./cloud";
 
 /** The engine passes through "syncing" on every cycle (one every 15 s,
- *  src-tauri/src/cloud/engine.rs POLL_INTERVAL), and most finish in a blink.
+ *  engine/src/cloud/engine.rs POLL_INTERVAL), and most finish in a blink.
  *  The words change to Syncing… only once a pass has run this long, so the
  *  footer moves when there is something to wait for. */
 const SYNCING_SHOWS_AFTER_MS = 800;

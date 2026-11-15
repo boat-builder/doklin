@@ -73,7 +73,9 @@ pub(crate) fn handle_external_open(app: &AppHandle, opened: Vec<PathBuf>) {
     if opened.is_empty() {
         return;
     }
-    let roots: Vec<(String, PathBuf)> = crate::cloud::connected_roots(app)
+    let roots: Vec<(String, PathBuf)> = crate::engine::try_core(app)
+        .map(|core| doklin_engine::cloud::connected_roots(&core))
+        .unwrap_or_default()
         .into_iter()
         .map(|root| {
             let resolved = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));

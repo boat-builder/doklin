@@ -27,7 +27,7 @@ use serde_json::Value;
 /// `2` bad usage · `3` not found · `4` not permitted · `5` conflict ·
 /// `6` not logged in, or the login was revoked · `7` the workspace's worker
 /// is too old for this command · `1` anything else. The Doklin app reads `6`
-/// off the bundled copy (src-tauri/src/cloud/terminal.rs) — change both.
+/// off the bundled copy (engine/src/cloud/terminal.rs) — change both.
 #[derive(Debug)]
 pub struct Failure {
     pub exit: i32,
@@ -248,7 +248,7 @@ fn run(raw: &[String], json: bool) -> Result<(), Failure> {
 
 /// A refusal, on stderr: a sentence for a person, or the domain's own JSON
 /// for a program — either way with what is needed to act on it. The Doklin
-/// app reads the JSON's `error` (src-tauri/src/cloud/terminal.rs) — change
+/// app reads the JSON's `error` (engine/src/cloud/terminal.rs) — change
 /// both.
 fn report(failure: &Failure, json: bool) {
     if json {

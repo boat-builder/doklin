@@ -13,7 +13,7 @@ manifest, rendered by the worker from the synced files.
 ## Vocabulary
 
 - **Workspace** — the folder Doklin opens; unit of sync and publishing. Untitled notes are in none.
-- **Domain** — a worker's hostname (custom or `workers.dev`). "Backend" here means the Tauri side, never the worker.
+- **Domain** — a worker's hostname (custom or `workers.dev`). "Backend" here means the app's Rust side, never the worker.
 - **Section** — a part of a workspace with its own people: the shared workspace (everyone), a person's Private, a restricted folder. The last two are *spaces* on the domain.
 - **Engine** — the Rust task syncing a workspace. **Unit** — its sync of one section.
 - **Manifest** — a section's one mutable object: every file's path, rev, hash, plus the public map.
@@ -22,7 +22,8 @@ manifest, rendered by the worker from the synced files.
 ## Rules
 
 1. **One domain ⇄ one workspace.** A second bind is `409` → the app offers join, never a second binding. Only an owner's wipe frees a domain. A folder whose marker names domain A cannot connect to B.
-2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS.
+2. **The engine is the only code that holds a token or talks to the domain.** The frontend never fetches: commands in, events out. It sees a token only to display it (`cloud_mint_token`, `cloud_token`). The worker writes the manifest only for agents (no engine), by the same CAS. True of the iPhone's screens too: Swift calls the same commands and holds no token.
+9. **The engine crate (`engine/`) knows nothing of the app around it**: no Tauri, no Swift, no `cfg` on which app. What differs is said once in `Setup` and asked through `Host` (`engine/src/host.rs`). A command is written once, in the engine; each app only reaches it.
 3. **The manifest is the only truth about what is public.** The frontend's view is `CloudStatus.public`; no `localStorage` registry.
 4. **A public page is a rendering of synced files.** The worker stores no page content.
 5. **Disk is the source of truth for content.** Merge, never clobber; overlaps become a conflict copy beside the file; deletions go to the macOS Trash.
@@ -35,8 +36,9 @@ manifest, rendered by the worker from the synced files.
 | Area | Where |
 | --- | --- |
 | Worker | `cloud-worker/src/`; bundled to one file by `scripts/bundle-worker.mjs`, released as `doklin-cloud-worker.js` |
-| Engine | `src-tauri/src/cloud/`: `mod.rs` manager, commands · `engine.rs` task, poll, presence, status, sections · `unit.rs` one section's cycle · `space.rs` sections on disk · `remote.rs` `Remote` + `HttpRemote` · `flows.rs` bind, download, wipe · `merge.rs` · `scan.rs` · `bus.rs` · `config.rs` · `invite.rs` · `manifest.rs` wire types · `status.rs` · `versions.rs` version mirror · `tests.rs` in-memory worker |
-| Edit bus | `src-tauri/src/edits.rs` |
+| Engine crate | `engine/`: `host.rs` `Core`, `Setup`, `Host` · `paths.rs` paths as written down · `command.rs` every command by name · `cloud/` · `versions/` ([versioning.md](versioning.md)) · `ffi/` the C interface for the iPhone ([ios.md](ios.md)) |
+| Engine | `engine/src/cloud/`: `mod.rs` manager, commands · `engine.rs` task, poll, presence, status, sections · `unit.rs` one section's cycle · `space.rs` sections on disk · `remote.rs` `Remote` + `HttpRemote` · `flows.rs` bind, download, wipe · `merge.rs` · `scan.rs` · `bus.rs` · `config.rs` · `invite.rs` · `manifest.rs` wire types · `status.rs` · `versions.rs` version mirror · `tests.rs` in-memory worker |
+| Mac app's side | `src-tauri/src/engine.rs` its `Setup` and `Host` · `cloud.rs`, `versions.rs` one Tauri command per engine command · `edits.rs` the edit bus (`Core::touched`) |
 | Frontend contract | `src/cloud.ts`: types, `invoke` wrappers, listeners, shared derivations |
 | Prompts, naming | `src/cloudPrompts.ts` (`build*Prompt`, `resourceName`, `deploymentNames`) |
 | Surfaces (`src/`) | `App.tsx` (`cloudStatuses`), `CloudPanel`, `CloudSetup` (wizard), `CloudPeople`, `CloudAgents`, `WorkerUpdate`, `LiveChip`, `PublishFolder`, `PublishedPages`, `SyncStatus`, `LeaseBanner`, `Avatar` |
@@ -44,9 +46,9 @@ manifest, rendered by the worker from the synced files.
 
 ## Engine ⇄ frontend contract
 
-- Commands: `cloud_*` in `mod.rs`, wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
+- Commands: `cloud_*` in `engine/src/cloud/mod.rs`, each with a Tauri wrapper in `src-tauri/src/cloud.rs` and an arm in `engine/src/command.rs` (a test fails without the arm), wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
 - Every path in a status or an event is workspace-relative, whichever section it is in (`Private/x.md`); a lease's `path` is that, lowercased.
-- Payload types: `status.rs` serde structs ⇄ `src/cloud.ts`. **Change both.**
+- Payload types: `status.rs` serde structs ⇄ `src/cloud.ts` ⇄ `ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift`. **Change all three.**
 - `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes revoked worker-outdated error`.
 - A status `by` is already a name (resolved via `/api/meta` `people`).
 

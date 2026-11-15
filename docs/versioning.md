@@ -1,6 +1,6 @@
 # Versioning
 
-A local snapshot store per open folder, mirrored to the bucket when connected. Code: `src-tauri/src/versions/`, mirror `src-tauri/src/cloud/versions.rs`, worker `cloud-worker/src/versions.ts`. Sync: docs/cloud.md. Inspect: `scripts/versions.sh [-w] <folder>`.
+A local snapshot store per open folder, mirrored to the bucket when connected. Code: `engine/src/versions/`, mirror `engine/src/cloud/versions.rs`, worker `cloud-worker/src/versions.ts`. Sync: docs/cloud.md. Inspect: `scripts/versions.sh [-w] <folder>`.
 
 ## Rules
 
@@ -11,7 +11,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 - The versioner is independent of the cloud engine: own watcher plus `edits::touched`, own `scan_local`, path-keyed snapshots (no sync file ids); works with no cloud.
 - Write order: blobs → snapshot → index (`write_atomic`). Sweep order: index → snapshots → blobs. A crash leaves orphans, never a row missing bytes.
 - A restore is one Rust command (`versions_restore_file`, `versions_restore_snapshot`): capture `pre-restore`, write through the app's write path, capture `restore` with `restoredFrom`. Never a capture plus `write_file` from the frontend: the cadence can land between them. Undo is another restore (of `preRestoreHash`, or `preRestoreTs` + same paths). History never branches.
-- A snapshot restore checks every blob first, writes via `write_workspace_bytes` (never through `String`), and trashes via `workspace::trash_or_remove` plus `edits::touched`.
+- A snapshot restore checks every blob first, writes via `Host::write_file` (the app's own write path: `write_workspace_bytes` on the Mac; never through `String`), and trashes via `workspace::trash_or_remove` plus `Core::touched`.
 - The preview is a `readOnly` `Editor`: an old version can't be autosaved over the current one. `flushPendingAutosave` first.
 - The engine only reads a local store (it writes only `cloud-cache/`). Bucket `versions/` never references sync `blobs/<fid>/`; `gc_blobs` knows nothing of snapshots.
 - No `versions` worker feature: no mirror, null `CloudStatus.versions`, not an error; hourly re-probe.
@@ -37,7 +37,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 ```
 <app_data>/versions/
   settings.json               {version, enabled, horizonDays}
-  <key>/                      "r-" + first 16 hex of sha256(canonical root)
+  <key>/                      "r-" + first 16 hex of sha256(canonical root, as `paths::stored` writes it)
     index.json                {version, root, createdMs, lastCaptureMs, lastSweepMs, horizonDays?, snapshots[]}
     snapshots/<ts13>.json.gz  {version, ts, reason, restoredFrom, by, files: {path: {h, s, m}}}
     blobs/<hh>/<sha256>.gz
@@ -49,6 +49,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 - `horizonDays` has three states: absent = settings default, `null` = forever, a number = days (`Option<Option<u32>>`, `chosen_horizon`).
 - Reasons live in `store.rs`, `src/versions.ts` and the worker's `REASONS`; change all three (the worker 400s an unknown one).
 - `scripts/versions.sh` duplicates the key derivation. A moved folder starts a new store.
+- Under `Setup::anchor` (iOS, where the app's folder gets a new path on an update) the key and the index's `root` are relative to it (`engine/src/paths.rs`), so a store survives the move.
 
 ## Cloud store
 

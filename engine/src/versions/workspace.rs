@@ -207,15 +207,9 @@ pub fn plan(diff: &SnapshotDiff, only: Option<&BTreeSet<String>>) -> (Vec<String
     (write, trash)
 }
 
-/// Move a file out of the workspace the way the app does: to the Trash on
-/// macOS, and — when the Trash refuses, or off macOS — by removing it. The
+/// Move a file out of the workspace the way the app does: to the platform's
+/// trash, and — when it refuses, or there is none — by removing it. The
 /// engine's `delete_local` makes the same choice for the same reason.
-pub fn trash_or_remove(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        if crate::trash_path_impl(&path.to_string_lossy()).is_ok() {
-            return true;
-        }
-    }
-    std::fs::remove_file(path).is_ok()
+pub fn trash_or_remove(host: &dyn crate::Host, path: &Path) -> bool {
+    host.trash(path).is_ok() || std::fs::remove_file(path).is_ok()
 }

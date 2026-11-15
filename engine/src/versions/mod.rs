@@ -2,8 +2,9 @@
 //! that captures snapshots on the cadence rule, thins them on the retention
 //! ladder, and never deletes anything anywhere else. This file is the
 //! manager — one versioner task per open root, the routing table the edit
-//! bus writes into, and the Tauri commands
-//! (mirrored in src/versions.ts).
+//! bus writes into, and the commands an app calls (`versions_*`: the Mac
+//! frontend through src-tauri/src/versions.rs, mirrored in src/versions.ts;
+//! the iPhone through command.rs).
 //!
 //! ```text
 //! mod.rs        the manager, the versioner task, the commands, init at boot
@@ -26,31 +27,30 @@
 //! a workspace contains.
 
 mod capture;
-mod history;
+pub mod history;
 // The cloud mirror reads the ladder and the store on disk; nothing outside
 // this module ever writes into one.
 pub(crate) mod retain;
 mod settings;
-mod status;
-pub(crate) mod store;
-mod stores;
+pub mod status;
+pub mod store;
+pub mod stores;
 #[cfg(test)]
 mod tests;
-mod workspace;
+pub mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use notify::Watcher as _;
-use tauri::{AppHandle, Manager};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::cloud::scan::{rel_for_touch, MAX_SYNC_ENTRIES};
-use crate::cloud::status::{AppEvents, Events};
+use crate::cloud::status::Events;
 use crate::cloud::versions::VersionsEntry;
+use crate::Core;
 
 use capture::{Cadence, CaptureError};
 use history::{FileHistory, SnapshotCache};
@@ -519,8 +519,8 @@ impl Versioner {
 }
 
 /// How a restore puts bytes down and how it takes a file away: the app's own
-/// `write_workspace_bytes` and the macOS Trash, handed in rather than reached
-/// for, so the versioner stays testable without a window around it.
+/// write path and trash (`Host`), handed in rather than reached for, so the
+/// versioner stays testable without an app around it.
 type WriteBytes<'a> = &'a dyn Fn(&Path, &[u8]) -> Result<(), String>;
 type TrashFile<'a> = &'a dyn Fn(&Path) -> bool;
 
@@ -550,7 +550,7 @@ enum VersionerCmd {
         reply: oneshot::Sender<FileHistory>,
     },
     RestoreFile {
-        app: AppHandle,
+        core: Arc<Core>,
         path: PathBuf,
         from_ts: Option<u64>,
         hash: Option<String>,
@@ -565,7 +565,7 @@ enum VersionerCmd {
         reply: oneshot::Sender<Result<Vec<DeletedFile>, String>>,
     },
     RestoreSnapshot {
-        app: AppHandle,
+        core: Arc<Core>,
         ts: u64,
         paths: Option<Vec<String>>,
         reply: oneshot::Sender<Result<RestoreReport, String>>,
@@ -662,10 +662,10 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                         let _ = reply.send(history);
                     }
                 }
-                Some(VersionerCmd::RestoreFile { app, path, from_ts, hash, text, reply }) => {
+                Some(VersionerCmd::RestoreFile { core, path, from_ts, hash, text, reply }) => {
                     let answer = blocking(&state, move |v| {
                         v.restore_file(&path, from_ts, hash, text, &|path, contents| {
-                            crate::write_workspace_file(&app, path, contents).map(|_| ())
+                            core.host.write_file(path, contents.as_bytes())
                         })
                     })
                     .await;
@@ -681,18 +681,18 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
                     let _ = reply
                         .send(answer.unwrap_or_else(|| Err("that folder's deleted files couldn't be read".to_string())));
                 }
-                Some(VersionerCmd::RestoreSnapshot { app, ts, paths, reply }) => {
+                Some(VersionerCmd::RestoreSnapshot { core, ts, paths, reply }) => {
                     let answer = blocking(&state, move |v| {
                         v.restore_snapshot(
                             ts,
                             paths.as_deref(),
-                            &|path, bytes| crate::write_workspace_bytes(&app, path, bytes).map(|_| ()),
+                            &|path, bytes| core.host.write_file(path, bytes),
                             &|path| {
-                                let gone = workspace::trash_or_remove(path);
+                                let gone = workspace::trash_or_remove(core.host.as_ref(), path);
                                 // The cloud engine hears the deletion the
                                 // same way it hears a write.
                                 if gone {
-                                    crate::edits::touched(&app, &path.to_string_lossy());
+                                    core.touched(&path.to_string_lossy());
                                 }
                                 gone
                             },
@@ -746,9 +746,9 @@ struct Route {
     tx: mpsc::UnboundedSender<VersionerCmd>,
 }
 
-/// One row per running versioner, as Tauri state — so a write command
-/// reaches it without touching the manager's lock. The cloud's edit bus is
-/// the same shape; both filter with `cloud::scan::rel_for_touch`.
+/// One row per running versioner, beside the manager — so a write reaches
+/// it without touching the manager's lock. The cloud's edit bus is the same
+/// shape; both filter with `cloud::scan::rel_for_touch`.
 #[derive(Default)]
 pub struct VersionBus {
     routes: RwLock<Vec<Route>>,
@@ -784,14 +784,6 @@ impl VersionBus {
     }
 }
 
-/// Half of `edits::touched`. A no-op before the manager exists, or for a
-/// path under no open root.
-pub(crate) fn touched(app: &AppHandle, path: &str) {
-    if let Some(bus) = app.try_state::<VersionBus>() {
-        bus.touch(Path::new(path));
-    }
-}
-
 /* ---------- The manager ---------- */
 
 struct VersionerHandle {
@@ -800,11 +792,10 @@ struct VersionerHandle {
     /// The store this versioner owns; no two may share one.
     key: String,
     // Held so the folder watcher lives exactly as long as the versioner.
-    _watcher: Option<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>>,
+    _watcher: Option<crate::cloud::Watcher>,
 }
 
-struct ManagerInner {
-    app: AppHandle,
+pub(crate) struct ManagerInner {
     data_dir: PathBuf,
     /// The name a snapshot is attributed to.
     by: String,
@@ -814,48 +805,33 @@ struct ManagerInner {
     statuses: StatusTable,
 }
 
-#[derive(Default)]
-pub struct VersionsManager {
-    inner: Mutex<Option<ManagerInner>>,
-}
-
-/// Called once from tauri's setup, after `cloud::init`: read the settings,
+/// Called once as the app boots, after `cloud::init`: read the settings,
 /// then start a versioner for every root already open.
-pub(crate) fn init(app: &AppHandle) {
-    let Ok(data_dir) = app.path().app_data_dir() else { return };
+pub fn init(core: &Arc<Core>) {
+    let data_dir = core.data_dir.clone();
     let _ = std::fs::create_dir_all(versions_dir(&data_dir));
     let settings = read_settings(&data_dir);
-    let by = crate::cloud::device_name(&data_dir);
+    let by = crate::cloud::device_name(core);
 
     let inner = ManagerInner {
-        app: app.clone(),
         data_dir,
         by,
         settings,
         versioners: HashMap::new(),
         statuses: Arc::new(Mutex::new(Default::default())),
     };
-    if let Ok(mut guard) = app.state::<VersionsManager>().inner.lock() {
+    if let Ok(mut guard) = core.versions.lock() {
         *guard = Some(inner);
     }
-    reconcile(app);
+    reconcile(core);
 }
 
-/// Which folders are open, from the window registry. Called whenever a
-/// window reports its content and when one is destroyed, so no new frontend
-/// call is needed to start or stop a versioner. An untitled note is in no
-/// folder, so it has no history: it is unsaved, and gone when its tab closes.
-fn open_roots(app: &AppHandle) -> BTreeSet<String> {
-    let mut roots = BTreeSet::new();
-    if let Some(registry) = app.try_state::<crate::WindowRegistry>() {
-        if let Ok(map) = registry.0.lock() {
-            for content in map.values() {
-                if let Some(folder) = content.folder.as_ref().filter(|f| !f.is_empty()) {
-                    roots.insert(folder.clone());
-                }
-            }
-        }
-    }
+/// Which folders are open, as the app says (`Host::open_folders`). Asked
+/// whenever what is open may have changed (`reconcile`), so nothing else is
+/// needed to start or stop a versioner. An untitled note is in no folder, so
+/// it has no history: it is unsaved, and gone when its tab closes.
+fn open_roots(core: &Core) -> BTreeSet<String> {
+    let mut roots = core.host.open_folders();
     // A connected workspace's Private and restricted folders are sections of
     // their own: the workspace's store leaves them out (`shared_skip`), and
     // each keeps its history in a store only its own people's Macs have.
@@ -869,23 +845,23 @@ fn open_roots(app: &AppHandle) -> BTreeSet<String> {
 }
 
 /// Bring the running versioners in line with what is open.
-pub(crate) fn reconcile(app: &AppHandle) {
-    let open = open_roots(app);
-    let _ = with_inner(app, |inner| {
+pub fn reconcile(core: &Arc<Core>) {
+    let open = open_roots(core);
+    let _ = with_inner(core, |inner| {
         let stale: Vec<String> = inner.versioners.keys().filter(|root| !open.contains(*root)).cloned().collect();
         for root in stale {
-            stop_versioner(inner, &root);
+            stop_versioner(core, inner, &root);
         }
         for root in &open {
             if !inner.versioners.contains_key(root) {
-                start_versioner(inner, root);
+                start_versioner(core, inner, root);
             }
         }
         Ok(())
     });
 }
 
-fn start_versioner(inner: &mut ManagerInner, display_root: &str) {
+fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &str) {
     let root = PathBuf::from(display_root);
     if !root.is_dir() {
         return;
@@ -905,43 +881,21 @@ fn start_versioner(inner: &mut ManagerInner, display_root: &str) {
     }
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<VersionerCmd>();
-    let (fs_tx, fs_rx) = mpsc::unbounded_channel::<()>();
-
     // The same recursive watcher the engine uses, for the same reason: an
     // edit made outside the app still ends a session.
-    let watch_root = root.clone();
-    let watcher = notify_debouncer_full::new_debouncer(
-        Duration::from_millis(500),
-        None,
-        move |result: notify_debouncer_full::DebounceEventResult| {
-            if result.is_ok() {
-                let _ = fs_tx.send(());
-            }
-        },
-    )
-    .ok()
-    .and_then(|mut w| {
-        w.watcher().watch(&watch_root, notify::RecursiveMode::Recursive).ok()?;
-        w.cache().add_root(&watch_root, notify::RecursiveMode::Recursive);
-        Some(w)
-    });
-    if watcher.is_none() {
-        eprintln!("versions: no filesystem watcher for {} — capturing on the edit bus alone", display_root);
-    }
+    let (watcher, fs_rx) = crate::cloud::watch_folder(core, &root, "versions");
 
     let versioner = Versioner::new(
         Store::open(&inner.data_dir, &key, &root),
         inner.by.clone(),
         &inner.settings,
         inner.statuses.clone(),
-        Arc::new(AppEvents(inner.app.clone())),
+        core.events(),
         Clock::wall(),
     );
-    tauri::async_runtime::spawn(run(Arc::new(Mutex::new(versioner)), cmd_rx, fs_rx));
+    core.runtime.spawn(run(Arc::new(Mutex::new(versioner)), cmd_rx, fs_rx));
 
-    if let Some(bus) = inner.app.try_state::<VersionBus>() {
-        bus.register(root.clone(), cmd_tx.clone());
-    }
+    core.version_bus.register(root.clone(), cmd_tx.clone());
     inner
         .versioners
         .insert(display_root.to_string(), VersionerHandle { tx: cmd_tx, root, key, _watcher: watcher });
@@ -949,27 +903,24 @@ fn start_versioner(inner: &mut ManagerInner, display_root: &str) {
 
 /// Stop the versioner for `root` — it captures the session's last state on
 /// the way out — and forget its status row.
-fn stop_versioner(inner: &mut ManagerInner, root: &str) {
+fn stop_versioner(core: &Core, inner: &mut ManagerInner, root: &str) {
     let Some(handle) = inner.versioners.remove(root) else { return };
     let _ = handle.tx.send(VersionerCmd::Shutdown);
-    if let Some(bus) = inner.app.try_state::<VersionBus>() {
-        bus.unregister(&handle.root);
-    }
+    core.version_bus.unregister(&handle.root);
     if let Ok(mut table) = inner.statuses.lock() {
         table.remove(root);
     }
-    emit_statuses(&AppEvents(inner.app.clone()), &inner.statuses);
+    emit_statuses(core.events().as_ref(), &inner.statuses);
 }
 
-fn with_inner<T>(app: &AppHandle, f: impl FnOnce(&mut ManagerInner) -> Result<T, String>) -> Result<T, String> {
-    let manager = app.state::<VersionsManager>();
-    let mut guard = manager.inner.lock().map_err(|_| "the versions manager is wedged".to_string())?;
+fn with_inner<T>(core: &Core, f: impl FnOnce(&mut ManagerInner) -> Result<T, String>) -> Result<T, String> {
+    let mut guard = core.versions.lock().map_err(|_| "the versions manager is wedged".to_string())?;
     let inner = guard.as_mut().ok_or_else(|| "versions aren't ready yet".to_string())?;
     f(inner)
 }
 
-fn sender_for(app: &AppHandle, root: &str) -> Result<mpsc::UnboundedSender<VersionerCmd>, String> {
-    with_inner(app, |inner| {
+fn sender_for(core: &Arc<Core>, root: &str) -> Result<mpsc::UnboundedSender<VersionerCmd>, String> {
+    with_inner(core, |inner| {
         inner
             .versioners
             .get(root)
@@ -980,9 +931,9 @@ fn sender_for(app: &AppHandle, root: &str) -> Result<mpsc::UnboundedSender<Versi
 
 /// The versioner whose root holds `path` — the deepest, should roots ever
 /// nest — with its display root and the path inside it.
-fn route(app: &AppHandle, path: &str) -> Result<(mpsc::UnboundedSender<VersionerCmd>, String, String), String> {
+fn route(core: &Arc<Core>, path: &str) -> Result<(mpsc::UnboundedSender<VersionerCmd>, String, String), String> {
     let abs = PathBuf::from(path);
-    with_inner(app, move |inner| {
+    with_inner(core, move |inner| {
         let (display, handle) = inner
             .versioners
             .iter()
@@ -1014,16 +965,14 @@ const ABANDON_TIMEOUT: Duration = Duration::from_secs(20);
 /// `store_dir` is the store as it was found while the folder still existed —
 /// a store's key comes from the folder's canonical path, which cannot be
 /// asked for once the folder is gone.
-pub(crate) async fn forget_root(app: &AppHandle, root: &str, store_dir: PathBuf) {
-    let stopping = with_inner(app, |inner| {
+pub(crate) async fn forget_root(core: &Core, root: &str, store_dir: PathBuf) {
+    let stopping = with_inner(core, |inner| {
         let Some(handle) = inner.versioners.remove(root) else { return Ok(None) };
-        if let Some(bus) = inner.app.try_state::<VersionBus>() {
-            bus.unregister(&handle.root);
-        }
+        core.version_bus.unregister(&handle.root);
         if let Ok(mut table) = inner.statuses.lock() {
             table.remove(root);
         }
-        emit_statuses(&AppEvents(inner.app.clone()), &inner.statuses);
+        emit_statuses(core.events().as_ref(), &inner.statuses);
         let (reply_tx, reply_rx) = oneshot::channel();
         let _ = handle.tx.send(VersionerCmd::Abandon { reply: reply_tx });
         // The handle drops here, and its watcher with it.
@@ -1035,7 +984,7 @@ pub(crate) async fn forget_root(app: &AppHandle, root: &str, store_dir: PathBuf)
         let _ = tokio::time::timeout(ABANDON_TIMEOUT, stopped).await;
     }
     // Inside the stores' own directory and nowhere else, whatever was passed.
-    let stores = with_inner(app, |inner| Ok(versions_dir(&inner.data_dir))).ok();
+    let stores = with_inner(core, |inner| Ok(versions_dir(&inner.data_dir))).ok();
     if stores.is_some_and(|stores| store_dir.parent() == Some(stores.as_path())) {
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&store_dir)).await;
     }
@@ -1043,8 +992,8 @@ pub(crate) async fn forget_root(app: &AppHandle, root: &str, store_dir: PathBuf)
 
 /// A store to read from without going through its versioner: reads are pure
 /// filesystem and have no business queueing behind a capture.
-fn store_for(app: &AppHandle, root: &str) -> Result<Store, String> {
-    with_inner(app, |inner| {
+fn store_for(core: &Arc<Core>, root: &str) -> Result<Store, String> {
+    with_inner(core, |inner| {
         let handle = inner
             .versioners
             .get(root)
@@ -1063,13 +1012,10 @@ async fn ask<T>(
     reply_rx.await.map_err(|_| "that folder's versioner has stopped".to_string())
 }
 
-/// Capture whatever is pending everywhere, within `deadline` — the last
-/// thing that happens before the app exits, so a session that ends mid-edit
-/// still ends in a snapshot. Blocks the caller; runs on the main thread at
-/// quit, never inside the async runtime.
-pub(crate) fn flush_all_blocking(app: &AppHandle, deadline: Duration) {
+/// Ask every versioner to capture what is pending; the answers to wait on.
+fn ask_all_to_flush(core: &Core) -> Vec<oneshot::Receiver<()>> {
     let mut waiting = Vec::new();
-    let _ = with_inner(app, |inner| {
+    let _ = with_inner(core, |inner| {
         for handle in inner.versioners.values() {
             let (reply, rx) = oneshot::channel();
             if handle.tx.send(VersionerCmd::Flush { reply }).is_ok() {
@@ -1078,35 +1024,50 @@ pub(crate) fn flush_all_blocking(app: &AppHandle, deadline: Duration) {
         }
         Ok(())
     });
+    waiting
+}
+
+/// Capture whatever is pending everywhere, within `deadline` — the last
+/// thing that happens before the app exits, so a session that ends mid-edit
+/// still ends in a snapshot. Blocks the caller; runs on the main thread at
+/// quit, never inside the async runtime.
+pub fn flush_all_blocking(core: &Core, deadline: Duration) {
+    let waiting = ask_all_to_flush(core);
     if waiting.is_empty() {
         return;
     }
-    tauri::async_runtime::block_on(async move {
+    core.runtime.block_on(async move {
         let _ = tokio::time::timeout(deadline, futures_util::future::join_all(waiting)).await;
     });
 }
 
-/* ---------- Tauri commands ---------- */
+/// `flush_all_blocking` for a caller already inside the runtime: an app that
+/// is told it is leaving the screen, not quitting.
+pub async fn flush_all(core: &Core, deadline: Duration) {
+    let waiting = ask_all_to_flush(core);
+    if !waiting.is_empty() {
+        let _ = tokio::time::timeout(deadline, futures_util::future::join_all(waiting)).await;
+    }
+}
+
+/* ---------- The commands ---------- */
 
 /// Every version store's status — the frontend's whole model.
-#[tauri::command]
-pub(crate) fn versions_status(app: AppHandle) -> Result<Vec<VersionsStatus>, String> {
-    with_inner(&app, |inner| Ok(status::snapshot(&inner.statuses)))
+pub fn versions_status(core: &Arc<Core>) -> Result<Vec<VersionsStatus>, String> {
+    with_inner(core, |inner| Ok(status::snapshot(&inner.statuses)))
 }
 
 /// A folder's retained snapshots, newest first.
-#[tauri::command]
-pub(crate) async fn versions_snapshots(app: AppHandle, root: String) -> Result<Vec<SnapshotMeta>, String> {
-    let tx = sender_for(&app, &root)?;
+pub async fn versions_snapshots(core: &Arc<Core>, root: String) -> Result<Vec<SnapshotMeta>, String> {
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::Snapshots { reply }).await
 }
 
 /// Capture now, whatever the cadence says. A `manual` capture (the default)
 /// is pinned and may carry a name; the answer is null when the folder is
 /// already exactly what the newest snapshot holds and no name was given.
-#[tauri::command]
-pub(crate) async fn versions_capture_now(
-    app: AppHandle,
+pub async fn versions_capture_now(
+    core: &Arc<Core>,
     root: String,
     reason: Option<String>,
     label: Option<String>,
@@ -1115,28 +1076,26 @@ pub(crate) async fn versions_capture_now(
         None => Reason::Manual,
         Some(name) => Reason::parse(name).ok_or_else(|| format!("\"{}\" isn't a kind of snapshot", name))?,
     };
-    let tx = sender_for(&app, &root)?;
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::CaptureNow { reason, label, reply }).await?
 }
 
 /// Keep a version out of the ladder's reach, and optionally name it.
-#[tauri::command]
-pub(crate) async fn versions_set_pinned(
-    app: AppHandle,
+pub async fn versions_set_pinned(
+    core: &Arc<Core>,
     root: String,
     ts: u64,
     pinned: bool,
     label: Option<String>,
 ) -> Result<(), String> {
-    let tx = sender_for(&app, &root)?;
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::SetPinned { ts, pinned, label, reply }).await?
 }
 
 /// The kill switch. Nothing already captured is touched; capture simply
 /// stops until it is turned back on.
-#[tauri::command]
-pub(crate) fn versions_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
-    with_inner(&app, |inner| {
+pub fn versions_set_enabled(core: &Arc<Core>, enabled: bool) -> Result<(), String> {
+    with_inner(core, |inner| {
         inner.settings.enabled = enabled;
         write_settings(&inner.data_dir, &inner.settings)?;
         for handle in inner.versioners.values() {
@@ -1156,9 +1115,9 @@ const CLOUD_PREFETCH: usize = 48;
 /// the rail is about to read pulled into the store's cache. Empty for a
 /// folder that isn't connected, or one whose worker predates `versions` —
 /// history is ungated, so neither is an error.
-async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEntry> {
-    let Ok(Some(index)) = crate::cloud::versions_index_for(app, path).await else { return Vec::new() };
-    let Ok(store) = store_for(app, root) else { return index.snapshots };
+async fn mirrored_set(core: &Arc<Core>, path: &str, root: &str) -> Vec<VersionsEntry> {
+    let Ok(Some(index)) = crate::cloud::versions_index_for(core, path).await else { return Vec::new() };
+    let Ok(store) = store_for(core, root) else { return index.snapshots };
     let mut newest = index.snapshots.clone();
     newest.sort_by(|a, b| b.ts.cmp(&a.ts));
     let mut fetched = 0;
@@ -1171,7 +1130,7 @@ async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEn
         }
         // Offline, or a snapshot another device's sweep has since dropped:
         // stop asking rather than time out once per row.
-        if crate::cloud::version_snapshot(app, path, &entry.id).await.is_err() {
+        if crate::cloud::version_snapshot(core, path, &entry.id).await.is_err() {
             break;
         }
         fetched += 1;
@@ -1182,24 +1141,23 @@ async fn mirrored_set(app: &AppHandle, path: &str, root: &str) -> Vec<VersionsEn
 /// Every version of one document, newest first — the rail's whole model.
 /// This Mac's snapshots and the ones other devices mirrored are one walk,
 /// and that walk is the whole answer.
-#[tauri::command]
-pub(crate) async fn versions_history(app: AppHandle, path: String) -> Result<FileHistory, String> {
-    let (tx, root, rel) = route(&app, &path)?;
-    let cloud = mirrored_set(&app, &path, &root).await;
+pub async fn versions_history(core: &Arc<Core>, path: String) -> Result<FileHistory, String> {
+    let (tx, root, rel) = route(core, &path)?;
+    let cloud = mirrored_set(core, &path, &root).await;
     ask(tx, move |reply| VersionerCmd::History { rel, cloud, reply }).await
 }
 
 /// One version's text: this Mac's blob, or — for a version only another
 /// device ever held — the mirrored one, fetched through the engine.
-async fn version_text(app: &AppHandle, root: &str, hash: &str) -> Result<String, String> {
-    let store = store_for(app, root)?;
+async fn version_text(core: &Arc<Core>, root: &str, hash: &str) -> Result<String, String> {
+    let store = store_for(core, root)?;
     let owned = hash.to_string();
     let local = tokio::task::spawn_blocking(move || history::read_version(&store, &owned))
         .await
         .map_err(|_| "that version couldn't be read".to_string())?;
     match local {
         Ok(text) => Ok(text),
-        Err(missing) => match crate::cloud::version_blob(app, root, hash).await {
+        Err(missing) => match crate::cloud::version_blob(core, root, hash).await {
             Ok(bytes) => history::text_of(bytes),
             Err(_) => Err(missing),
         },
@@ -1207,16 +1165,14 @@ async fn version_text(app: &AppHandle, root: &str, hash: &str) -> Result<String,
 }
 
 /// One version's text, for the preview.
-#[tauri::command]
-pub(crate) async fn versions_read(app: AppHandle, root: String, hash: String) -> Result<String, String> {
-    version_text(&app, &root, &hash).await
+pub async fn versions_read(core: &Arc<Core>, root: String, hash: String) -> Result<String, String> {
+    version_text(core, &root, &hash).await
 }
 
 /// A unified diff between two versions. A null hash means the file on disk,
 /// which is how the newest version is compared against now.
-#[tauri::command]
-pub(crate) async fn versions_diff(
-    app: AppHandle,
+pub async fn versions_diff(
+    core: &Arc<Core>,
     root: String,
     path: Option<String>,
     from: Option<String>,
@@ -1224,7 +1180,7 @@ pub(crate) async fn versions_diff(
 ) -> Result<String, String> {
     let side = |hash: Option<String>| async {
         match hash {
-            Some(hash) => version_text(&app, &root, &hash).await,
+            Some(hash) => version_text(core, &root, &hash).await,
             None => {
                 let on_disk = path.clone().ok_or_else(|| "there's no file to compare with".to_string())?;
                 tokio::task::spawn_blocking(move || history::read_disk(Path::new(&on_disk)))
@@ -1240,33 +1196,30 @@ pub(crate) async fn versions_diff(
 
 /// What restoring one snapshot would do to the folder as it is now — the
 /// three lists the workspace timeline shows before anything happens.
-#[tauri::command]
-pub(crate) async fn versions_snapshot_diff(app: AppHandle, root: String, ts: u64) -> Result<SnapshotDiff, String> {
-    let tx = sender_for(&app, &root)?;
+pub async fn versions_snapshot_diff(core: &Arc<Core>, root: String, ts: u64) -> Result<SnapshotDiff, String> {
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::SnapshotDiff { ts, reply }).await?
 }
 
 /// Every file this folder's history holds and the folder itself does not —
 /// *Recently deleted*, newest sighting first.
-#[tauri::command]
-pub(crate) async fn versions_deleted(app: AppHandle, root: String) -> Result<Vec<DeletedFile>, String> {
-    let tx = sender_for(&app, &root)?;
+pub async fn versions_deleted(core: &Arc<Core>, root: String) -> Result<Vec<DeletedFile>, String> {
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::Deleted { reply }).await?
 }
 
 /// Put a whole moment back — or the part of it the user ticked. Like the
 /// file restore it captures the state it leaves first, so the whole thing
 /// is undone by restoring `preRestoreTs` with the same paths.
-#[tauri::command]
-pub(crate) async fn versions_restore_snapshot(
-    app: AppHandle,
+pub async fn versions_restore_snapshot(
+    core: &Arc<Core>,
     root: String,
     ts: u64,
     paths: Option<Vec<String>>,
 ) -> Result<RestoreReport, String> {
-    let tx = sender_for(&app, &root)?;
-    let handle = app.clone();
-    ask(tx, move |reply| VersionerCmd::RestoreSnapshot { app: handle, ts, paths, reply }).await?
+    let tx = sender_for(core, &root)?;
+    let core = core.clone();
+    ask(tx, move |reply| VersionerCmd::RestoreSnapshot { core, ts, paths, reply }).await?
 }
 
 /* ---------- Settings: the horizons, the stores, the export ---------- */
@@ -1274,24 +1227,21 @@ pub(crate) async fn versions_restore_snapshot(
 /// How far back this folder keeps, `null` for forever. Written into the
 /// store's own index — a folder the user has never answered for follows
 /// settings.json's default — and applied at once.
-#[tauri::command]
-pub(crate) async fn versions_set_horizon(app: AppHandle, root: String, days: Option<u32>) -> Result<(), String> {
-    let tx = sender_for(&app, &root)?;
+pub async fn versions_set_horizon(core: &Arc<Core>, root: String, days: Option<u32>) -> Result<(), String> {
+    let tx = sender_for(core, &root)?;
     ask(tx, |reply| VersionerCmd::SetHorizon { days, reply }).await?
 }
 
 /// How far back the *bucket* keeps. One CAS on the cloud index, because a
 /// horizon every device disagreed about would be no horizon at all.
-#[tauri::command]
-pub(crate) async fn versions_set_cloud_horizon(app: AppHandle, root: String, days: Option<u32>) -> Result<(), String> {
-    crate::cloud::set_cloud_horizon(&app, &root, days).await
+pub async fn versions_set_cloud_horizon(core: &Arc<Core>, root: String, days: Option<u32>) -> Result<(), String> {
+    crate::cloud::set_cloud_horizon(core, &root, days).await
 }
 
 /// Every version store on this Mac, whether or not its folder is open —
 /// what *Other folders* lists, and where the space goes.
-#[tauri::command]
-pub(crate) async fn versions_stores(app: AppHandle) -> Result<Vec<StoreInfo>, String> {
-    let data_dir = with_inner(&app, |inner| Ok(inner.data_dir.clone()))?;
+pub async fn versions_stores(core: &Arc<Core>) -> Result<Vec<StoreInfo>, String> {
+    let data_dir = with_inner(core, |inner| Ok(inner.data_dir.clone()))?;
     tokio::task::spawn_blocking(move || stores::list(&data_dir))
         .await
         .map_err(|_| "That list didn't finish.".to_string())
@@ -1300,9 +1250,8 @@ pub(crate) async fn versions_stores(app: AppHandle) -> Result<Vec<StoreInfo>, St
 /// Delete one store outright. Refused while its folder is open: a running
 /// versioner holds an index it would write back a moment later, and the
 /// user asked to forget the history, not to restart it.
-#[tauri::command]
-pub(crate) async fn versions_forget(app: AppHandle, key: String) -> Result<(), String> {
-    let (data_dir, open) = with_inner(&app, |inner| {
+pub async fn versions_forget(core: &Arc<Core>, key: String) -> Result<(), String> {
+    let (data_dir, open) = with_inner(core, |inner| {
         let open: BTreeSet<String> = inner.versioners.values().map(|handle| handle.key.clone()).collect();
         Ok((inner.data_dir.clone(), open))
     })?;
@@ -1314,14 +1263,12 @@ pub(crate) async fn versions_forget(app: AppHandle, key: String) -> Result<(), S
 /// One archive holding the folder as it is now and its whole history, written
 /// into `dest`. The answer to "what if the cloud goes away": plain tar.gz,
 /// readable by anything, with no Doklin needed to open it.
-#[tauri::command]
-pub(crate) async fn versions_export(app: AppHandle, root: String, dest: String) -> Result<ExportReport, String> {
-    let store = store_for(&app, &root)?;
+pub async fn versions_export(core: &Arc<Core>, root: String, dest: String) -> Result<ExportReport, String> {
+    let store = store_for(core, &root)?;
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let handle = app.clone();
+    let events = core.events();
     let for_event = root.clone();
     tokio::task::spawn_blocking(move || {
-        let events = AppEvents(handle);
         stores::export(Path::new(&root), &store, Path::new(&dest), &day, &|done, total| {
             events.emit_json(EV_PROGRESS, serde_json::json!({ "root": for_event, "done": done, "total": total }));
         })
@@ -1335,19 +1282,18 @@ pub(crate) async fn versions_export(app: AppHandle, root: String, dest: String) 
 /// version in this store) or by `text` (one only the cloud still holds);
 /// `ts` is the version's own, and the snapshot this makes records it as
 /// where the content came from.
-#[tauri::command]
-pub(crate) async fn versions_restore_file(
-    app: AppHandle,
+pub async fn versions_restore_file(
+    core: &Arc<Core>,
     root: String,
     path: String,
     ts: Option<u64>,
     hash: Option<String>,
     text: Option<String>,
 ) -> Result<RestoreOutcome, String> {
-    let tx = sender_for(&app, &root)?;
-    let handle = app.clone();
+    let tx = sender_for(core, &root)?;
+    let core = core.clone();
     ask(tx, move |reply| VersionerCmd::RestoreFile {
-        app: handle,
+        core,
         path: PathBuf::from(path),
         from_ts: ts,
         hash,

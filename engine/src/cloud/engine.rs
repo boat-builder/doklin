@@ -185,6 +185,9 @@ pub struct SpacesChanged {
     pub removed: Vec<(String, PathBuf)>,
 }
 
+/// Moves a file to the platform's trash; true when it did.
+pub type Trash = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
 /* ---------- The engine ---------- */
 
 pub struct EngineConfig {
@@ -201,8 +204,9 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub device_id: String,
     pub device_name: String,
-    /// Real deletions go to the macOS Trash; tests flip this off.
-    pub use_trash: bool,
+    /// Where a real deletion goes: the platform's trash (`Host::trash`).
+    /// None — the tests, and a platform with no trash — removes outright.
+    pub trash: Option<Trash>,
     /// This Mac holds the domain's own token, as `cloud.json` last knew
     /// (`WorkspaceEntry::creator`). Such an engine never acts on `Removed`.
     pub creator: bool,
@@ -812,7 +816,7 @@ impl<R: Remote> Engine<R> {
             people: &self.people,
             events: self.events.as_ref(),
             ws_root: &ws_root,
-            use_trash: self.cfg.use_trash,
+            trash: self.cfg.trash.clone(),
             releasing: &releasing,
             moved_out: &moved_out,
         };

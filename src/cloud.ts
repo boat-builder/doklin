@@ -2,7 +2,7 @@
 // the types the engine's status event and commands carry, one typed wrapper
 // per command, and the listeners. No `fetch` anywhere — the Rust engine is
 // the only code that holds a token or talks to a domain; this file only
-// asks it things. Mirrored by src-tauri/src/cloud/status.rs — change both.
+// asks it things. Mirrored by engine/src/cloud/status.rs — change both.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -82,7 +82,7 @@ export type LeaseHolder = {
 };
 
 /** How much of this Mac's version history is in the bucket, and how much is
- *  up there in total. Mirrored by src-tauri/src/cloud/status.rs. */
+ *  up there in total. Mirrored by engine/src/cloud/status.rs. */
 export type VersionsMirror = {
   mirrored: number;
   cloud: number;

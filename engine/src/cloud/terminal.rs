@@ -15,11 +15,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
-use tauri::AppHandle;
 
 use super::manifest::clean_name;
 use super::remote::{AgentRecord, Remote as _};
 use super::{describe_agents, flows, mint_agent_login, workspace_call, WorkspaceCall};
+use crate::Core;
 
 /// Everything an agent may do.
 const SCOPES: [&str; 4] = ["read", "comment", "edit", "publish"];
@@ -28,8 +28,8 @@ const SCOPES: [&str; 4] = ["read", "comment", "edit", "publish"];
 /// bundled `doklin`). A terminal that is already logged in there — by an
 /// earlier login, or a line somebody ran by hand — is left alone. Answers a
 /// sentence either way. Blocking: it runs the helper and waits on the domain.
-pub(crate) fn log_cli_in(app: &AppHandle, root: &str, helper: &Path) -> Result<String, String> {
-    let call = workspace_call(app, root).map_err(|why| format!("Could not log doklin in to {}: {}.", root, why))?;
+pub fn log_cli_in(core: &Core, root: &str, helper: &Path) -> Result<String, String> {
+    let call = workspace_call(core, root).map_err(|why| format!("Could not log doklin in to {}: {}.", root, why))?;
     let domain = call.domain.clone();
     let failed = |why: String| format!("Could not log doklin in to {}: {}.", domain, why.trim_end_matches('.'));
     match run(helper, &["whoami", "-w", &domain, "--json"], None) {
@@ -38,7 +38,7 @@ pub(crate) fn log_cli_in(app: &AppHandle, root: &str, helper: &Path) -> Result<S
         Err(refused) if refused.exit == NOT_LOGGED_IN => {}
         Err(refused) => return Err(failed(refused.message)),
     }
-    let code = tauri::async_runtime::block_on(terminal_code(&call)).map_err(failed)?;
+    let code = core.runtime.block_on(terminal_code(&call)).map_err(failed)?;
     let answer = run(helper, &["login", &call.endpoint, "-", "--json"], Some(&code)).map_err(|r| failed(r.message))?;
     Ok(format!("Logged doklin in to {} as {}.", domain, agent_of(&answer)))
 }

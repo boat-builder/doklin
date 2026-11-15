@@ -28,7 +28,7 @@ const MD_EXTENSIONS = ["md", "markdown", "mdown", "mkd"] as const;
 /** Folder names a Mac's scan never descends into (`is_hidden_or_ignored`,
  *  src-tauri/src/lib.rs). A file put under one would sync to nobody. Change both. */
 const IGNORED_NAMES: ReadonlySet<string> = new Set(["node_modules", "target", "dist", "build", "__pycache__"]);
-/** The engine's own in-flight writes (`TMP_SUFFIX`, src-tauri/src/cloud/scan.rs). */
+/** The engine's own in-flight writes (`TMP_SUFFIX`, engine/src/cloud/scan.rs). */
 const TMP_SUFFIX = ".doklin-sync-tmp";
 
 /** How much older than its markdown an html version may be before it is

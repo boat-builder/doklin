@@ -20,32 +20,23 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-# Async plumbing for the cloud engine, versioning and the PDF export
-# (tauri already ships tokio; the direct dep names the features they use).
+# Async plumbing for the PDF export and the engine's runtime handle (tauri
+# already ships tokio; the direct dep names the features they use).
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 notify = "6"
 notify-debouncer-full = "0.3"
-# The cloud engine (src/cloud/): HTTPS to the workspace's worker, content
-# hashing, three-way merge for concurrent edits, random ids and tokens, and
-# local-time labels on conflict copies.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-sha2 = "0.10"
-diffy = "0.4"
-getrandom = "0.2"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Versioning (src/versions/): the snapshot store gzips its blobs and its
-# snapshot files. flate2 is pure Rust (miniz_oxide) and was already in the
-# lockfile as a transitive dependency — no new C build on any platform.
-flate2 = "1"
-# The export (src/versions/stores.rs) writes one tar.gz of the workspace and
-# its store; `tar` is pure Rust and was already in the lockfile under cargo's
-# own dependency tree.
-tar = "0.4"
+# The sync engine and the version store (engine/), shared with the iPhone
+# app: this crate is its Tauri commands and its host.
+doklin-engine = { path = "../engine" }
 # PDF export (src/pdf_export.rs): a hand-rolled CDP client over websocket
 # drives the pinned headless-Chromium engine, and the validation gate reads
 # the emitted PDF (structure via lopdf — default features off, its `time`
 # datetime feature doesn't compile; text via pdf-extract, which builds its
-# own lopdf 0.42 so features never unify with ours).
+# own lopdf 0.42 so features never unify with ours). The engine download is
+# fetched over HTTPS and sha256-verified, into a randomly named staging dir.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
+getrandom = "0.2"
 tokio-tungstenite = "0.30.0"
 futures-util = "0.3.34"
 lopdf = { version = "0.44", default-features = false }
@@ -53,11 +44,6 @@ pdf-extract = "0.12.0"
 base64 = "0.23.1"
 pdfium-render = "0.9.3"
 png = "0.18.1"
-
-[dev-dependencies]
-tempfile = "3"
-# Paused virtual time for the engine's settle-timing tests (src/cloud/tests.rs).
-tokio = { version = "1", features = ["test-util"] }
 
 # In-app auto-updater (desktop only, per Tauri's plugin guidance).
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

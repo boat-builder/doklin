@@ -1042,9 +1042,7 @@ name = "doklin"
 version = "0.1.106"
 dependencies = [
  "base64 0.23.1",
- "chrono",
- "diffy",
- "flate2",
+ "doklin-engine",
  "futures-util",
  "getrandom 0.2.17",
  "lopdf 0.44.0",
@@ -1058,16 +1056,34 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
- "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "doklin-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "diffy",
+ "flate2",
+ "futures-util",
+ "getrandom 0.2.17",
+ "notify",
+ "notify-debouncer-full",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tokio",
  "url",
 ]
 

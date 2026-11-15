@@ -89,7 +89,7 @@ export type Invite = {
 export const MAX_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** A device code is pasted on the device beside the one that made it, so the
- *  app dates it an hour out (src-tauri/src/cloud/invite.rs,
+ *  app dates it an hour out (engine/src/cloud/invite.rs,
  *  `DEVICE_CODE_MINUTES`); the ceiling is looser only to absorb a clock that
  *  is wrong. */
 export const MAX_DEVICE_CODE_TTL_MS = 24 * 60 * 60 * 1000;

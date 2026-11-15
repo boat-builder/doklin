@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use super::engine::PublishRequest;
+use super::engine::{PublishRequest, Trash};
 use super::manifest::{
     clean_text, dedupe_paths, files_under, random_slug, unique_slug, valid_rel_path, valid_slug, Manifest,
     ManifestFile, PublicEntry, PublicKind, Target, Tombstone, MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN,
@@ -212,7 +212,7 @@ pub(crate) struct Ctx<'a> {
     pub events: &'a dyn Events,
     /// The workspace's root, as every event names it.
     pub ws_root: &'a str,
-    pub use_trash: bool,
+    pub trash: Option<Trash>,
     /// Public addresses another section on this Mac still has to give up.
     pub releasing: &'a HashSet<String>,
     /// Files of this unit that are in another section on this Mac now.
@@ -842,7 +842,7 @@ impl<R: Remote> Unit<R> {
                 }
                 Some(_) => {
                     // Clean local copy — honor the deletion, recoverably.
-                    self.delete_local(&abs, ctx.use_trash);
+                    self.delete_local(&abs, ctx.trash.as_ref());
                     touched.push(fstate.path.clone());
                 }
                 None => {}
@@ -1467,14 +1467,9 @@ impl<R: Remote> Unit<R> {
         let _ = write_atomic(&self.base_path(fid), theirs);
     }
 
-    fn delete_local(&self, abs: &Path, use_trash: bool) {
-        if use_trash {
-            #[cfg(target_os = "macos")]
-            {
-                if crate::trash_path_impl(&abs.to_string_lossy()).is_ok() {
-                    return;
-                }
-            }
+    fn delete_local(&self, abs: &Path, trash: Option<&Trash>) {
+        if trash.is_some_and(|trash| trash(abs)) {
+            return;
         }
         let _ = std::fs::remove_file(abs);
     }

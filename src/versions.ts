@@ -2,7 +2,7 @@
 // the types the versioner's status event and
 // commands carry, one typed wrapper per command, and the listener. No
 // `fetch` and no filesystem here — the Rust versioner owns the store; this
-// file only asks it things. Mirrored by src-tauri/src/versions/status.rs —
+// file only asks it things. Mirrored by engine/src/versions/status.rs —
 // change both.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -34,7 +34,7 @@ export type VersionsStatus = {
 };
 
 /** One version of one document, as the history rail lists it. Mirrored by
- *  src-tauri/src/versions/history.rs — change both. */
+ *  engine/src/versions/history.rs — change both. */
 export type FileVersion = {
   ts: number;
   /** The full sha256, whichever store the version came out of. */
@@ -76,7 +76,7 @@ export type RestoreOutcome = {
 };
 
 /** One file a retained snapshot and the folder disagree about. Mirrored by
- *  src-tauri/src/versions/workspace.rs — change both. */
+ *  engine/src/versions/workspace.rs — change both. */
 export type ChangedFile = {
   path: string;
   /** The content the snapshot holds — what a restore would write. */
@@ -117,7 +117,7 @@ export type RestoreReport = {
 
 /** One version store on this Mac, whether or not its folder is open — a row
  *  of *Other folders* in the Versions settings. Mirrored by
- *  src-tauri/src/versions/stores.rs — change both. */
+ *  engine/src/versions/stores.rs — change both. */
 export type StoreInfo = {
   /** The store directory's name: `r-<16 hex>`. */
   key: string;

@@ -50,11 +50,11 @@ fn run(app: &AppHandle) -> Result<(), String> {
     if matches!(found, Found::Nothing) {
         installed.push_str(&format!(" Your terminal's PATH leaves out {} — add it to use doklin.", LINK_DIR));
     }
-    let roots = crate::cloud::connected_roots(app);
+    let roots = crate::engine::try_core(app).map(|core| doklin_engine::cloud::connected_roots(&core)).unwrap_or_default();
     let logins: Vec<String> = if roots.is_empty() {
         vec!["Connect a workspace and doklin is logged in to it too.".into()]
     } else {
-        roots.iter().map(|root| crate::cloud::log_cli_in(app, root, &helper).unwrap_or_else(|why| why)).collect()
+        roots.iter().map(|root| log_cli_in(app, root, &helper).unwrap_or_else(|why| why)).collect()
     };
     let words = format!("{}\n\n{}", installed, logins.join("\n"));
     let Found::Other(other) = found else {
@@ -90,10 +90,17 @@ pub(crate) fn after_connect(app: &AppHandle, root: &str) {
         if !matches!(first_on_terminal_path(), Found::Same) {
             return;
         }
-        if let Err(why) = crate::cloud::log_cli_in(&app, &root, &helper) {
+        if let Err(why) = log_cli_in(&app, &root, &helper) {
             eprintln!("cli: {}", why);
         }
     });
+}
+
+/// Log the terminal in to the workspace at `root` (the engine's
+/// `log_cli_in`): a sentence either way.
+fn log_cli_in(app: &AppHandle, root: &str, helper: &Path) -> Result<String, String> {
+    let core = crate::engine::core(app).map_err(|why| format!("Could not log doklin in to {}: {}.", root, why))?;
+    doklin_engine::cloud::log_cli_in(&core, root, helper)
 }
 
 /// `Contents/Helpers/doklin` of the app this is running from.
