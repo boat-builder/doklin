@@ -45,6 +45,12 @@ struct PublishView: View {
         return DocLinks.stem(of: DocLinks.name(of: path))
     }
 
+    /// Why the typed address cannot be one. A note left without one gets
+    /// random letters; a folder always needs one, as on the Mac.
+    private var problem: String? {
+        isFolder || Publishing.slug(typed: slug) != nil ? Publishing.slugProblem(slug) : nil
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -85,9 +91,10 @@ struct PublishView: View {
         }
     }
 
-    /// A fresh sheet starts from the page as it is.
+    /// A fresh sheet starts from the page as it is; a folder not yet
+    /// public, from an address made of its name.
     private func fill() {
-        slug = page?.slug ?? ""
+        slug = page?.slug ?? (isFolder ? Publishing.suggestSlug(name) : "")
         title = page?.title ?? (isFolder ? name : "")
         desc = page?.desc ?? ""
     }
@@ -96,22 +103,37 @@ struct PublishView: View {
 
     @ViewBuilder private func unpublished(_ status: CloudStatus) -> some View {
         Section {
-            address(status, placeholder: "random letters")
+            address(status, placeholder: isFolder ? "" : "random letters")
             if isFolder { folderFields }
         } header: {
             Text("Publish “\(name)”")
                 .textCase(nil)
         } footer: {
-            Text(isFolder ? folderWords(published: false) : "Anyone with the link can read it. Leave the address empty for a random one.")
+            if isFolder {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(folderWords(published: false))
+                    folderPreview(status)
+                }
+            } else {
+                Text("Anyone with the link can read it. Leave the address empty for a random one.")
+            }
         }
         insideLines(status, lead: "Already public inside")
         if workspace.mayPublish {
             Section {
                 Button(busy ? "Publishing…" : (isFolder ? "Publish folder" : "Publish")) { publish() }
-                    .disabled(busy || (isFolder && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                    .disabled(busy || problem != nil || (isFolder && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                     .accessibilityIdentifier("publish-go")
             }
         }
+    }
+
+    /// Where a folder's pages will be, as the Mac's folder dialog says it.
+    private func folderPreview(_ status: CloudStatus) -> some View {
+        let at = "\(status.domain)/\(problem == nil ? Publishing.slug(typed: slug) ?? "" : "…")"
+        return Text("The folder at \(at) · a note at \(at)/Some-folder/A-note")
+            .foregroundStyle(Theme.text3)
+            .accessibilityIdentifier("publish-preview")
     }
 
     private var folderFields: some View {
@@ -135,7 +157,8 @@ struct PublishView: View {
         return "\(what) — \(count) note\(count == 1 ? "" : "s") \(published ? "is" : "will be") public, every note in it, at addresses under one slug. Notes added later are public the moment they sync; a note can still be published on its own too."
     }
 
-    private func address(_ status: CloudStatus, placeholder: String) -> some View {
+    /// The address field, and under it why what is typed cannot be one.
+    @ViewBuilder private func address(_ status: CloudStatus, placeholder: String) -> some View {
         HStack(spacing: 2) {
             Text("\(status.domain)/")
                 .foregroundStyle(Theme.text3)
@@ -144,6 +167,12 @@ struct PublishView: View {
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
                 .accessibilityIdentifier("publish-slug")
+        }
+        if let problem {
+            Text(problem)
+                .font(.footnote)
+                .foregroundStyle(Theme.errorInk)
+                .accessibilityIdentifier("publish-slug-problem")
         }
     }
 
@@ -210,12 +239,12 @@ struct PublishView: View {
                     address(status, placeholder: page.slug)
                     folderFields
                     Button(busy ? "Saving…" : "Save changes") { publish() }
-                        .disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(busy || problem != nil || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("publish-save")
                 } else if editing {
                     address(status, placeholder: page.slug)
                     Button(busy ? "Changing…" : "Change") { publish() }
-                        .disabled(busy || Publishing.slug(typed: slug) == nil || Publishing.slug(typed: slug) == page.slug)
+                        .disabled(busy || problem != nil || Publishing.slug(typed: slug) == nil || Publishing.slug(typed: slug) == page.slug)
                         .accessibilityIdentifier("publish-rename")
                 } else {
                     Button("Change address") {
@@ -224,6 +253,8 @@ struct PublishView: View {
                     }
                     .accessibilityIdentifier("publish-change")
                 }
+            } footer: {
+                if isFolder { folderPreview(status) }
             }
             Section {
                 Button("Stop publishing", role: .destructive) { confirmingStop = true }
@@ -302,8 +333,8 @@ struct PublishView: View {
             defer { busy = false }
             do {
                 try await workspace.unpublish(page.slug)
-                slug = ""
                 await device.refresh()
+                fill()
             } catch {
                 failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }

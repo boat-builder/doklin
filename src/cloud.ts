@@ -814,7 +814,8 @@ export const cloudNeedsAttention = (statuses: CloudStatus[]): boolean => statuse
 
 /* ---------- Publishing ---------- */
 
-/** A slug's grammar — the same rule the engine and the worker check. */
+/** A slug's grammar — the same rule the engine, the worker and the iPhone
+ *  (ios/DoklinKit/Sources/DoklinKit/Models/Publishing.swift) check; change all. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 /** Slugs the worker's own routes speak for. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
@@ -828,7 +829,8 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "join",
 ]);
 
-/** Why a typed slug can't be one, or null when it can. The engine says the same things. */
+/** Why a typed slug can't be one, or null when it can. The engine says the same
+ *  things; the iPhone checks with a port (Publishing.swift `slugProblem`) — change both. */
 export function slugProblem(raw: string): string | null {
   const s = raw.trim().toLowerCase();
   if (!SLUG_RE.test(s)) {
@@ -904,7 +906,8 @@ export function livePathsOf(s: CloudStatus | null): Set<string> {
   return out;
 }
 
-/** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows. */
+/** A slug to suggest for a name: lowercase, dashes for anything else, never shorter than the grammar allows.
+ *  The iPhone suggests the same (Publishing.swift `suggestSlug`) — change both. */
 export function suggestSlug(name: string): string {
   const base = name
     .toLowerCase()

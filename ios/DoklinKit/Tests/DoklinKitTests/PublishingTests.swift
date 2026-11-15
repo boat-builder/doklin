@@ -78,6 +78,30 @@ final class PublishingTests: XCTestCase {
         XCTAssertNil(Publishing.slug(typed: "   "))
     }
 
+    /// The Mac's `slugProblem` and `suggestSlug` (src/cloud.ts), case for case.
+    func testTypedAddresses() {
+        let grammar = "An address is 3 to 64 characters: lowercase letters, digits and dashes, starting with a letter or digit."
+        XCTAssertNil(Publishing.slugProblem("my-plan"))
+        XCTAssertNil(Publishing.slugProblem("  My-Plan "))
+        XCTAssertNil(Publishing.slugProblem("a2c"))
+        XCTAssertNil(Publishing.slugProblem(String(repeating: "x", count: 64)))
+        XCTAssertEqual(Publishing.slugProblem(""), grammar)
+        XCTAssertEqual(Publishing.slugProblem("ab"), grammar)
+        XCTAssertEqual(Publishing.slugProblem("-plan"), grammar)
+        XCTAssertEqual(Publishing.slugProblem("my plan"), grammar)
+        XCTAssertEqual(Publishing.slugProblem("plan_b"), grammar)
+        XCTAssertEqual(Publishing.slugProblem(String(repeating: "x", count: 65)), grammar)
+        XCTAssertEqual(Publishing.slugProblem("API"), "“api” is taken by the site itself.")
+        XCTAssertEqual(Publishing.slugProblem("join"), "“join” is taken by the site itself.")
+
+        let suggested: [(String, String)] = [
+            ("Notes", "notes"), ("Q3 Plans & Ideas", "q3-plans-ideas"), ("Café Menü", "cafe-menu"), ("AI", "ai-notes"),
+            ("", "notes"), ("api", "api-notes"), ("---", "notes"), ("日本語 notes", "notes"), ("Ünïcødé — Straße", "u-ni-c-de-stra-e"),
+            (String(repeating: "a", count: 63) + " b", String(repeating: "a", count: 63) + "-"),
+        ]
+        for (name, slug) in suggested { XCTAssertEqual(Publishing.suggestSlug(name), slug, name) }
+    }
+
     func testTimeAgo() {
         XCTAssertEqual(Publishing.timeAgo(0, now: 44_000), "just now")
         XCTAssertEqual(Publishing.timeAgo(0, now: 90_000), "2 min ago")

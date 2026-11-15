@@ -1,9 +1,10 @@
 // Comments and publishing, driven through the real screens against the
 // harness worker (`node verify-harness/drive-ios.mjs --app`): a note's
 // thread from the seed, read with its words and its author; a thread
-// started on words of the note, answered and removed; a note published,
-// its address seen, and stopped; every published page listed, and the
-// home page moved.
+// started on words of the note, answered, its reply deleted, and removed; a
+// note published once its address can be one, its address seen, and
+// stopped; a folder offered an address made of its name; every published
+// page listed, and the home page moved.
 
 import XCTest
 
@@ -59,6 +60,12 @@ final class CommentsUITests: UITestCase {
         expect(text(containing: "And a reply."), "the reply in the thread")
         record("a thread, answered")
 
+        // The reply deleted: the thread stays.
+        expect(marked("reply-\(id)-1"), "the reply").swipeLeft()
+        expect(app.buttons["Delete reply"], "Delete reply on the reply").tap()
+        XCTAssertTrue(text(containing: "And a reply.").waitForNonExistence(timeout: 15), "the deleted reply is still listed")
+        expect(text(containing: "From the phone."), "the thread, still there")
+
         // Removed: the conversation goes, the words stay.
         expect(marked("thread-\(id)"), "the new thread's first comment").swipeLeft()
         expect(app.buttons["Remove"], "Remove on the thread").tap()
@@ -83,7 +90,13 @@ final class CommentsUITests: UITestCase {
         expect(app.staticTexts["Not public."], "Scratch's text")
         app.buttons["More"].tap()
         expect(marked("publish"), "Publish… in the menu").tap()
-        type("phone-scratch", into: expect(marked("publish-slug"), "the address field"))
+        let address = expect(marked("publish-slug"), "the address field")
+        type("API", into: address)
+        expect(text(containing: "“api” is taken by the site itself."), "why the address cannot be one")
+        XCTAssertFalse(marked("publish-go").isEnabled, "Publish, with an address that cannot be one")
+        record("an address that cannot be one")
+        address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 3) + "phone-scratch")
+        XCTAssertFalse(marked("publish-slug-problem").exists, "a problem with an address that can be one")
         marked("publish-go").tap()
         expect(text(containing: "/phone-scratch"), "the page's address")
         expect(marked("publish-state"), "where the page stands")
@@ -93,6 +106,23 @@ final class CommentsUITests: UITestCase {
         expect(app.buttons["Stop"], "the confirmation").tap()
         expect(marked("publish-go"), "Publish again, once stopped")
         record("a note, stopped")
+        app.buttons["Done"].tap()
+        back()
+
+        // A folder not yet public is offered an address made of its name,
+        // and none at all is not one.
+        expect(marked("entry-Projects"), "the Projects folder").tap()
+        expect(marked("entry-Roadmap"), "the Roadmap folder").press(forDuration: 1.2)
+        expect(app.buttons["Publish folder…"], "Publish folder… in its menu").tap()
+        let folderAddress = expect(marked("publish-slug"), "the folder's address field")
+        XCTAssertEqual(folderAddress.value as? String, "roadmap", "the address offered for Roadmap")
+        expect(text(containing: "/roadmap · a note at"), "where the folder's pages will be")
+        record("a folder, about to be published")
+        folderAddress.tap()
+        folderAddress.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
+        expect(text(containing: "An address is 3 to 64 characters"), "why no address is not one")
+        XCTAssertFalse(marked("publish-go").isEnabled, "Publish folder, with no address")
+        record("a folder, with no address")
         app.buttons["Done"].tap()
         back()
 
@@ -113,6 +143,7 @@ final class CommentsUITests: UITestCase {
         expect(text(containing: "“Projects” is live"), "the folder's page, live")
         expect(marked("publish-title"), "the folder page's title")
         expect(text(containing: "notes is public, every note in it"), "what the folder page shows")
+        expect(text(containing: "/projects · a note at"), "where the folder's pages are")
         record("a folder's page")
         app.buttons["Done"].tap()
 

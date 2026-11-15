@@ -47,13 +47,14 @@ struct PublishedPagesView: View {
                 Text(workspace.domain)
                     .textCase(nil)
             }
-            if workspace.may("pages.manage"), !every.elsewhere.isEmpty || every.problem != nil {
+            if every.seesAll, !every.elsewhere.isEmpty || every.problem != nil {
                 elsewhere
             }
         }
         .navigationTitle("Published pages")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await every.load() }
+        // Again once the domain has said what this person may do.
+        .task(id: every.seesAll) { await every.load() }
         .refreshable {
             await workspace.syncNow()
             await every.load()

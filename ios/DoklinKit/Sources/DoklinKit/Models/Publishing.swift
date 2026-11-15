@@ -170,6 +170,47 @@ public enum Publishing {
         let slug = typed.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return slug.isEmpty ? nil : slug
     }
+
+    /* ---------- Addresses ---------- */
+
+    /// What an address may be, and the ones the worker's own routes speak
+    /// for: the rule src/cloud.ts, the engine (manifest.rs) and the worker
+    /// (layout.ts) check — change all.
+    private static let slugGrammar = try! NSRegularExpression(pattern: "\\A[a-z0-9][a-z0-9-]{2,63}\\z")
+    static let reservedSlugs: Set<String> = ["api", "__web", "raw", "og.png", "robots.txt", "favicon.ico", "apple-touch-icon.png", "join"]
+
+    /// Why a typed address cannot be one, in a sentence; nil when it can.
+    /// The engine refuses the same, in its own words.
+    public static func slugProblem(_ typed: String) -> String? {
+        let slug = slug(typed: typed) ?? ""
+        if slugGrammar.firstMatch(in: slug, range: NSRange(location: 0, length: (slug as NSString).length)) == nil {
+            return "An address is 3 to 64 characters: lowercase letters, digits and dashes, starting with a letter or digit."
+        }
+        if reservedSlugs.contains(slug) { return "“\(slug)” is taken by the site itself." }
+        return nil
+    }
+
+    /// An address to offer for a name: lowercase, a dash for anything else,
+    /// never shorter than an address can be — src/cloud.ts `suggestSlug`,
+    /// change both.
+    public static func suggestSlug(_ name: String) -> String {
+        var base = ""
+        var dashed = false
+        for scalar in name.lowercased().decomposedStringWithCompatibilityMapping.unicodeScalars {
+            if ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar) {
+                base.unicodeScalars.append(scalar)
+                dashed = false
+            } else if !dashed {
+                base += "-"
+                dashed = true
+            }
+        }
+        while base.hasPrefix("-") { base.removeFirst() }
+        while base.hasSuffix("-") { base.removeLast() }
+        base = String(base.prefix(64))
+        let padded = base.count >= 3 ? base : base + (base.isEmpty ? "" : "-") + "notes"
+        return reservedSlugs.contains(padded) ? padded + "-notes" : padded
+    }
 }
 
 private enum MarkdownExtension {
@@ -248,8 +289,12 @@ public final class EveryPageModel {
         self.workspace = workspace
     }
 
+    /// Whether this person may see every page: known to, not merely not
+    /// yet known not to — the domain refuses anyone else.
+    public var seesAll: Bool { workspace.status?.can.contains("pages.manage") == true }
+
     public func load() async {
-        guard workspace.may("pages.manage") else { return }
+        guard seesAll else { return }
         do {
             let every: EveryPages = try await Engine.shared.call("cloud_pages", ["root": .string(workspace.root)])
             let mine = Set(workspace.status?.public.map(\.slug) ?? [])
