@@ -40,6 +40,10 @@
 // extractMarkdown convert at the IO boundary, and expand∘extract is the
 // identity on a migrated file, which is what makes the one-time migration
 // safe to re-run anywhere, any number of times.
+//
+// The iPhone writes the same bytes with a port of this file
+// (ios/DoklinKit/Sources/DoklinKit/Comments/MetaFile.swift), both held to
+// verify-harness/comments-fixture.json — change both.
 
 import {
   CRITIC_BLOCK_RE,

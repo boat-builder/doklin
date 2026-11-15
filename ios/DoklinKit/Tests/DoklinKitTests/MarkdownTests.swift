@@ -287,6 +287,9 @@ final class EditingTests: XCTestCase {
         // Words that occur twice and cannot be told apart offer nothing.
         XCTAssertNil(MarkdownEditing.commentAnchor(in: source, line: 5))
         XCTAssertNil(MarkdownEditing.commentAnchor(in: source, line: 1))
+        // Words a comment is on already are passed over for the next.
+        let commented = "A sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n"
+        XCTAssertEqual(MarkdownEditing.commentAnchor(in: commented, line: 0), "and more after it.")
     }
 
     func testLinkTargets() {

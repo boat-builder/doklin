@@ -13,6 +13,7 @@ struct WorkspaceView: View {
     /// What has not synced would go with the copy: asked once more.
     @State private var confirmingUnsynced = false
     @State private var leaving = false
+    @State private var publishingWorkspace = false
     @State private var failure: String?
     @State private var toaster = Toaster()
 
@@ -42,6 +43,8 @@ struct WorkspaceView: View {
                         HereNowView(workspace: workspace)
                     case .access(let id):
                         SpaceAccessView(workspace: workspace, id: id)
+                    case .publishedPages:
+                        PublishedPagesView(workspace: workspace, route: $path)
                     }
                 }
         }
@@ -64,6 +67,9 @@ struct WorkspaceView: View {
             NavigationStack {
                 SignInView(canCancel: true)
             }
+        }
+        .sheet(isPresented: $publishingWorkspace) {
+            PublishView(workspace: workspace, path: "", kind: .dir) { path.append(.publishedPages) }
         }
         .confirmationDialog(
             "Remove \(workspace.name) from this iPhone?",
@@ -173,6 +179,20 @@ struct WorkspaceView: View {
                     path.append(.history(.deleted))
                 } label: {
                     Label("Recently deleted", systemImage: "trash")
+                }
+            }
+            Section {
+                Button {
+                    path.append(.publishedPages)
+                } label: {
+                    Label("Published pages (\(workspace.status?.public.count ?? 0))", systemImage: "globe")
+                }
+                if workspace.mayPublish {
+                    Button {
+                        publishingWorkspace = true
+                    } label: {
+                        Label(workspace.pages(of: "").contains { $0.kind == .dir } ? "Edit the workspace’s page…" : "Publish the whole workspace…", systemImage: "network")
+                    }
                 }
             }
             Section {

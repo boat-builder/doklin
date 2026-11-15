@@ -2,18 +2,24 @@ import DoklinKit
 import SwiftUI
 import UIKit
 
-/// One document, open for reading — and the way to editing it.
+/// One document, open for reading — and the way to editing it, to its
+/// comments and to its page on the web.
 struct DocumentView: View {
     @Binding var route: [Route]
     @State private var model: DocumentModel
+    @State private var comments: CommentsModel
     @State private var editing = false
     @State private var showingPage = false
     @State private var scrollTarget: Int?
+    /// The comments sheet, and what it opens on: a thread, or words for a new one.
+    @State private var commentStart: CommentStart?
+    @State private var publishing = false
     @Environment(\.openURL) private var openInSystem
 
     init(workspace: Workspace, path: String, route: Binding<[Route]>) {
         _route = route
         _model = State(initialValue: DocumentModel(workspace: workspace, path: path))
+        _comments = State(initialValue: CommentsModel(workspace: workspace, path: path))
     }
 
     private var workspace: Workspace { model.workspace }
@@ -24,13 +30,23 @@ struct DocumentView: View {
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbar }
-            .onAppear { model.load() }
+            .onAppear {
+                model.load()
+                comments.load()
+            }
             .onChange(of: workspace.changes) {
                 // Sync, or a restore, wrote this document: read it again.
                 if model.isAffected(by: workspace.lastChanged) { model.load() }
+                if comments.isAffected(by: workspace.lastChanged) { comments.load() }
             }
             .fullScreenCover(isPresented: $editing) {
                 EditorView(model: model)
+            }
+            .sheet(item: $commentStart) { start in
+                CommentsView(model: comments, start: start, mayComment: mayComment)
+            }
+            .sheet(isPresented: $publishing) {
+                PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
             }
             .alert("Doklin", isPresented: problemShown) {
                 Button("OK", role: .cancel) { model.problem = nil }
@@ -89,7 +105,10 @@ struct DocumentView: View {
         }
         .environment(\.openURL, OpenURLAction { url in
             guard let tap = NoteLink.tap(url) else { return .systemAction }
-            if case .href(let href) = tap { follow(href) }
+            switch tap {
+            case .thread(let id): commentStart = CommentStart(version: .md, thread: id)
+            case .href(let href): follow(href)
+            }
             return .handled
         })
     }
@@ -101,7 +120,30 @@ struct DocumentView: View {
                 Task { await model.toggleTask(line: line) }
             }
         }
+        if mayComment, model.isNote {
+            actions.comment = { line in
+                let words = model.text.flatMap { MarkdownEditing.commentAnchor(in: $0, line: line) } ?? ""
+                commentStart = CommentStart(version: .md, words: words, composing: true)
+            }
+        }
         return actions
+    }
+
+    /// Comments are written here: this person may work, and no other device
+    /// holds the document.
+    private var mayComment: Bool { workspace.may("work") && model.lease == nil }
+
+    /// The form being read, whose threads the comments sheet shows.
+    private var shownVersion: CommentVersion { model.kind == .html || showingPage ? .html : .md }
+
+    /// The publish entry in words: the page's state and address, as the
+    /// Mac's chip says them.
+    private func publishWords(_ status: CloudStatus) -> String? {
+        guard let page = Publishing.page(for: model.path, kind: .file, in: status) else {
+            return workspace.mayPublish ? "Publish…" : nil
+        }
+        let state = Publishing.state(of: page, in: status, pending: workspace.changedSinceSync(model.path))
+        return "\(state.label) · /\(page.slug)"
     }
 
     /// Follow a link written in the note, the way the Mac app does: another
@@ -130,6 +172,14 @@ struct DocumentView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
+            if model.phase == .loaded, model.isNote || model.kind == .html {
+                Button {
+                    commentStart = CommentStart(version: shownVersion)
+                } label: {
+                    Label("Comments", systemImage: comments.threads(on: shownVersion).isEmpty ? "bubble.left" : "bubble.left.fill")
+                }
+                .accessibilityIdentifier("comments")
+            }
             if model.canEdit, !showingPage {
                 Button {
                     editing = true
@@ -167,7 +217,8 @@ struct DocumentView: View {
             }
         }
         if let text = model.text {
-            ShareLink(item: text) {
+            // A copy out of the app reads clean: no comment markers.
+            ShareLink(item: CriticMarkup.stripComments(text)) {
                 Label("Share the text", systemImage: "square.and.arrow.up")
             }
         }
@@ -176,6 +227,16 @@ struct DocumentView: View {
                 route.append(.history(.note(model.path)))
             } label: {
                 Label("Version history", systemImage: "clock.arrow.circlepath")
+            }
+        }
+        if let status = workspace.status, model.isNote || model.kind == .html, let words = publishWords(status) {
+            Section {
+                Button {
+                    publishing = true
+                } label: {
+                    Label(words, systemImage: "globe")
+                }
+                .accessibilityIdentifier("publish")
             }
         }
     }

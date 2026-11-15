@@ -28,7 +28,10 @@
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
 // remove from this iPhone; PeopleUITests: people, devices, agents, who is
-// here, restricted folders). A journey asks this script, at an address it
+// here, restricted folders; HistoryUITests: a note's versions, the
+// workspace's moments, recently deleted; CommentsUITests: a thread read,
+// started, answered and removed, a note published and stopped, published
+// pages), each then checked against what it left on the domain. A journey asks this script, at an address it
 // serves, for what only the domain's side can do: its line, another device
 // editing a document, and a restricted folder deleted elsewhere. What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
@@ -42,6 +45,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SEED_FILES } from "../cloud-worker/test/seed.mjs";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const OWNER = "owner-secret"; // what serve-worker.mjs binds the domain with
@@ -159,6 +163,43 @@ async function onTheDomain(path) {
   const manifest = await res.json();
   return Object.values(manifest.files ?? {}).some((file) => file.path === path && !file.deleted);
 }
+
+/** The text of a file in the shared workspace, as the domain holds it; null when it holds none. */
+async function textOnTheDomain(path) {
+  const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
+  if (!res.ok) throw new Error(`could not read the manifest: ${res.status}`);
+  const found = Object.entries((await res.json()).files ?? {}).find(([, file]) => file.path === path && !file.deleted);
+  if (!found) return null;
+  const blob = await fetch(`${WORKER}/api/blobs/${found[0]}/${found[1].hash}`, { headers: asOwner });
+  return blob.ok ? blob.text() : null;
+}
+
+/** What each journey left on the domain, asked of the domain itself. */
+const ON_THE_DOMAIN = {
+  DoklinUITests: async () => {
+    if (!(await onTheDomain("Phone list.md"))) {
+      console.error("the note made in the app never reached the domain");
+      return false;
+    }
+    console.log("the note made in the app is on the domain");
+    return true;
+  },
+  // The note as the seed has it (the thread started and removed, unwrapped
+  // again), and the seed's thread with the reply that stayed — in the bytes a
+  // Mac writes, stamped to the second.
+  CommentsUITests: async () => {
+    const md = await textOnTheDomain("Comments.md");
+    const meta = await textOnTheDomain("Comments.meta.jsonl");
+    const want =
+      /^\{"doklin":"meta","v":1\}\n\{"t":"mthread","id":"plain1","comments":\[\{"author":"Ada","at":1757000000000,"body":"Say it plainer\."\},\{"author":"[^"]+","at":\d+000,"body":"Plainer, then\."\}\]\}\n$/;
+    if (md !== SEED_FILES["Comments.md"] || !want.test(meta ?? "")) {
+      console.error(`the comments the app wrote are not on the domain as a Mac would write them:\n${md}\n${meta}`);
+      return false;
+    }
+    console.log("the comments the app wrote are on the domain");
+    return true;
+  },
+};
 
 /* ---------- The core: `swift test`, or the command after `--` ---------- */
 
@@ -283,13 +324,11 @@ async function driveApp() {
   } catch {
     console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
   }
-  if (status !== 0 || (process.env.DOKLIN_ONLY && process.env.DOKLIN_ONLY !== "DoklinUITests")) return status;
-  // What the app said it wrote, asked of the domain itself.
-  if (!(await onTheDomain("Phone list.md"))) {
-    console.error("the note made in the app never reached the domain");
-    return 1;
+  if (status !== 0) return status;
+  const only = process.env.DOKLIN_ONLY;
+  for (const [name, check] of Object.entries(ON_THE_DOMAIN)) {
+    if ((!only || only === name) && !(await check())) return 1;
   }
-  console.log("the note made in the app is on the domain");
   return 0;
 }
 

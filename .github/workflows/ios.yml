@@ -23,6 +23,8 @@ on:
       - "engine/**"
       - "scripts/ios-engine.sh"
       - "verify-harness/drive-ios.mjs"
+      # The comment cases the core's tests read, beside the Mac's.
+      - "verify-harness/comments-fixture.json"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 

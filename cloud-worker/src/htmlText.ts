@@ -11,6 +11,10 @@
 // browser (src/htmlBridge.ts, `resolveAnchor`), by the element's tag and the
 // start of its text; this only has to agree with the browser about those two
 // things for ordinary markup, and it never has to produce a tree.
+//
+// The iPhone reads a page's threads with a port of `elementsOf` and
+// `anchorResolves` (ios/DoklinKit/Sources/DoklinKit/Comments/HtmlText.swift),
+// both held to verify-harness/comments-fixture.json — change both.
 
 /** As much of an element's text as an anchor keeps (htmlBridge.ts `normText`). */
 export const ANCHOR_TEXT_LEN = 120;

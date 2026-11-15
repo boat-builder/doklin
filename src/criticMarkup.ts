@@ -16,6 +16,10 @@
 // continuation of that thread. Spans with no `#id` ("{>>free text<<}", the
 // format older Doklin versions wrote, and hand-written CriticMarkup) parse
 // as a thread with one authorless entry.
+//
+// The iPhone writes the same bytes with a port of this file
+// (ios/DoklinKit/Sources/DoklinKit/Comments/CriticMarkup.swift), both held
+// to verify-harness/comments-fixture.json — change both.
 
 export type CommentEntry = {
   author: string; // display name; "" = unknown (legacy / hand-written)

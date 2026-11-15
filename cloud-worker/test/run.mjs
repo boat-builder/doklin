@@ -2394,7 +2394,7 @@ await test("public: column widths come from the meta sidecar under the app's own
 
   const comments = await pub("/comments");
   assert.ok(comments.text.includes("A sentence with a highlighted phrase and more after it."), "the highlight unwrapped, the marker gone");
-  assert.ok(!comments.text.includes("{==") && !comments.text.includes("<<}") && !comments.text.includes("c-1"));
+  assert.ok(!comments.text.includes("{==") && !comments.text.includes("<<}") && !comments.text.includes("plain1"));
   assert.ok(!comments.text.includes("Say it plainer"), "bodies never leave the sidecar");
 
   const diagram = await pub("/diagram");
