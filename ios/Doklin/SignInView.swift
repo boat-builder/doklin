@@ -1,17 +1,17 @@
 import DoklinKit
 import SwiftUI
 
-/// Logging this device in to a workspace. The way in is the one an agent has:
-/// a line from the Mac app — `doklin login <address> <code>` — whose code
-/// works once. Pasting the line, or the whole prompt around it, fills both fields.
+/// Joining a workspace as a device of yours: one line from another device —
+/// a Mac's Add a device — or from an invite, pasted here. The code in it
+/// works once and becomes this iPhone's own sign-in; then the whole
+/// workspace downloads and stays in step.
 struct SignInView: View {
     /// Shown as a sheet over a workspace: there is something to go back to.
     var canCancel = false
 
-    @Environment(AccountStore.self) private var store
+    @Environment(Workspaces.self) private var device
     @Environment(\.dismiss) private var dismiss
-    @State private var address = ""
-    @State private var code = ""
+    @State private var line = ""
     @State private var working = false
     @State private var failure: String?
 
@@ -19,9 +19,9 @@ struct SignInView: View {
         Form {
             Section {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Open a workspace")
+                    Text("Join a workspace")
                         .font(.system(.title2, design: .serif))
-                    Text("On your Mac, open Doklin and choose Cloud → Agents → Add agent. Name it after this device, tick what it may do, and copy the login it shows.")
+                    Text("On a Mac that has the workspace, open its menu and choose Devices… → Add a device. Paste the line it shows here. A line from an invite works too.")
                         .font(.callout)
                         .foregroundStyle(Theme.text2)
                 }
@@ -29,96 +29,69 @@ struct SignInView: View {
             }
 
             Section {
-                PasteButton(payloadType: String.self) { strings in
-                    let pasted = strings.joined(separator: "\n")
-                    DispatchQueue.main.async { paste(pasted) }
-                }
-                .labelStyle(.titleAndIcon)
-            } footer: {
-                Text("Paste the login from your Mac, or fill in the two fields.")
-            }
-
-            Section {
-                TextField("notes.example.com", text: $address)
+                TextField("doklin-invite https://… dkln-…", text: $line, axis: .vertical)
+                    .lineLimit(2...5)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .accessibilityIdentifier("address")
-                    .onChange(of: address) { before, typed in
-                        // The whole line pasted into the first field is the line all the same.
-                        if pasted(before, typed), let line = LoginLine.find(in: typed) { fill(line) }
+                    .font(.system(.callout, design: .monospaced))
+                    .accessibilityIdentifier("line")
+                    .disabled(working)
+                PasteButton(payloadType: String.self) { strings in
+                    let pasted = strings.joined(separator: "\n")
+                    DispatchQueue.main.async {
+                        line = pasted
+                        failure = nil
                     }
-                TextField("Login code", text: $code)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("code")
-                    .onChange(of: code) { before, typed in
-                        if pasted(before, typed), let line = LoginLine.find(in: typed) { fill(line) }
-                    }
+                }
+                .labelStyle(.titleAndIcon)
+                .disabled(working)
             } header: {
-                Text("Address and login code")
+                Text("The line")
             } footer: {
                 if let failure {
                     Text(failure).foregroundStyle(Theme.errorInk)
                 } else {
-                    Text("A code works once and runs out an hour after it is made.")
+                    Text("A line works once, within an hour of being made.")
                 }
             }
 
             Section {
                 Button {
-                    Task { await signIn() }
+                    Task { await join() }
                 } label: {
                     HStack {
-                        Text("Log in")
+                        Text(working ? (device.joiningWords ?? "Joining…") : "Join")
                         if working {
                             Spacer()
                             ProgressView()
                         }
                     }
                 }
-                .disabled(working || address.trimmingCharacters(in: .whitespaces).isEmpty || code.trimmingCharacters(in: .whitespaces).isEmpty)
-                .accessibilityIdentifier("login")
+                .disabled(working || line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("join")
+            } footer: {
+                Text("Everything in the workspace downloads to this iPhone and stays in step with your other devices. Doklin keeps the sign-in in this iPhone's Keychain.")
             }
         }
         .navigationTitle("Doklin")
         .navigationBarTitleDisplayMode(.inline)
+        .interactiveDismissDisabled(working)
         .toolbar {
             if canCancel {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(working)
                 }
             }
         }
     }
 
-    /// Whether a field's text arrived all at once. A line being typed is
-    /// left alone: its code is not whole until the last character.
-    private func pasted(_ before: String, _ after: String) -> Bool {
-        after.count - before.count > 8
-    }
-
-    private func fill(_ line: LoginLine) {
-        address = line.address
-        code = line.code
-        failure = nil
-    }
-
-    private func paste(_ text: String) {
-        if let line = LoginLine.find(in: text) {
-            fill(line)
-        } else {
-            failure = "That is not a Doklin login — on your Mac, copy it from Cloud → Agents."
-        }
-    }
-
-    private func signIn() async {
+    private func join() async {
         working = true
         failure = nil
         defer { working = false }
         do {
-            try await store.signIn(address: address, code: code, host: Device.name)
+            try await device.join(pasted: line)
             if canCancel { dismiss() }
         } catch {
             failure = (error as? DoklinError)?.message ?? error.localizedDescription

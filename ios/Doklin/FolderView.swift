@@ -1,46 +1,42 @@
 import DoklinKit
 import SwiftUI
 
-/// What a folder holds. A row opens; a long press or a swipe renames, moves
-/// or removes — each through the same call the `doklin` command makes.
+/// What a folder holds, on this iPhone. A row opens; a long press or a
+/// swipe renames, moves or removes. Every change is made here first and
+/// reaches every other device through sync.
 struct FolderView: View {
     @Binding var path: [Route]
     @State private var model: FolderModel
-    @State private var naming = false
+    @State private var naming: NewThing?
     @State private var newName = ""
     @State private var renaming: FolderEntry?
     @State private var moving: FolderEntry?
     @State private var removing: FolderEntry?
     @State private var failure: String?
 
-    init(session: Session, dir: String, path: Binding<[Route]>) {
+    enum NewThing { case note, folder }
+
+    init(workspace: Workspace, dir: String, path: Binding<[Route]>) {
         _path = path
-        _model = State(initialValue: FolderModel(session: session, dir: dir))
+        _model = State(initialValue: FolderModel(workspace: workspace, dir: dir))
     }
 
-    private var session: Session { model.session }
+    private var workspace: Workspace { model.workspace }
+    private var mayChange: Bool { workspace.may("work") }
 
     var body: some View {
         List {
-            if let notice = model.notice {
-                Section {
-                    NoticeBar(text: notice)
-                        .listRowInsets(EdgeInsets())
-                }
-            }
             ForEach(model.entries) { entry in
                 NavigationLink(value: route(for: entry)) {
-                    EntryRow(entry: entry, audience: session.audience(of: entry.path))
+                    EntryRow(entry: entry, audience: workspace.audience(of: entry.path), published: !workspace.pages(of: entry.path).isEmpty)
                 }
                 .accessibilityIdentifier("entry-\(entry.name)")
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    if session.may(.edit), movable(entry) {
-                        if !isFolder(entry) {
-                            Button(role: .destructive) {
-                                removing = entry
-                            } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
+                    if mayChange, !model.isManaged(entry) {
+                        Button(role: .destructive) {
+                            removing = entry
+                        } label: {
+                            Label("Remove", systemImage: "trash")
                         }
                         Button {
                             moving = entry
@@ -51,7 +47,7 @@ struct FolderView: View {
                     }
                 }
                 .contextMenu {
-                    if session.may(.edit), movable(entry) {
+                    if mayChange, !model.isManaged(entry) {
                         Button {
                             newName = entry.name
                             renaming = entry
@@ -63,19 +59,10 @@ struct FolderView: View {
                         } label: {
                             Label("Move…", systemImage: "folder")
                         }
-                        if !isFolder(entry) {
-                            Button(role: .destructive) {
-                                removing = entry
-                            } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
-                        }
-                    }
-                    ForEach(entry.addresses, id: \.self) { address in
-                        if let url = URL(string: address) {
-                            ShareLink(item: url) {
-                                Label("Share public link", systemImage: "globe")
-                            }
+                        Button(role: .destructive) {
+                            removing = entry
+                        } label: {
+                            Label("Remove", systemImage: "trash")
                         }
                     }
                 }
@@ -92,24 +79,37 @@ struct FolderView: View {
                 } label: {
                     Label("Search", systemImage: "magnifyingglass")
                 }
-                if session.may(.edit), canHoldNotes {
-                    Button {
-                        newName = ""
-                        naming = true
+                if mayChange, model.canHoldNotes {
+                    Menu {
+                        Button {
+                            newName = ""
+                            naming = .note
+                        } label: {
+                            Label("New note", systemImage: "square.and.pencil")
+                        }
+                        Button {
+                            newName = ""
+                            naming = .folder
+                        } label: {
+                            Label("New folder", systemImage: "folder.badge.plus")
+                        }
                     } label: {
-                        Label("New note", systemImage: "square.and.pencil")
+                        Label("New", systemImage: "plus")
                     }
+                    .accessibilityIdentifier("new")
                 }
             }
         }
-        .refreshable { await model.load() }
-        .task(id: session.stamp) { await model.load() }
-        .alert("New note", isPresented: $naming) {
+        .refreshable { await workspace.syncNow() }
+        .onAppear { model.load() }
+        .onChange(of: workspace.changes) { model.load() }
+        .alert(naming == .folder ? "New folder" : "New note", isPresented: namingShown) {
             TextField("Name", text: $newName)
-            Button("Cancel", role: .cancel) {}
+                .accessibilityIdentifier("new-name")
+            Button("Cancel", role: .cancel) { naming = nil }
             Button("Create") { create() }
         } message: {
-            Text(whoSeesNew)
+            if let who = model.whoSeesNew { Text(who) }
         }
         .alert("Rename", isPresented: renamingShown) {
             TextField("Name", text: $newName)
@@ -124,7 +124,7 @@ struct FolderView: View {
             Button("Remove", role: .destructive) { remove() }
             Button("Cancel", role: .cancel) { removing = nil }
         } message: {
-            Text("It is removed from every Mac that syncs this workspace. A Mac's version history can bring it back.")
+            Text(removingWords)
         }
         .sheet(item: $moving) { entry in
             MoveSheet(model: model, entry: entry) { message in failure = message }
@@ -134,6 +134,10 @@ struct FolderView: View {
         } message: {
             Text(failure ?? "")
         }
+    }
+
+    private var namingShown: Binding<Bool> {
+        Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })
     }
 
     private var renamingShown: Binding<Bool> {
@@ -148,25 +152,24 @@ struct FolderView: View {
         Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
     }
 
+    private var removingWords: String {
+        let everywhere = "It goes from every device that has \(workspace.name). Its history keeps it, under Recently deleted."
+        if case .folder(let dir) = removing {
+            let count = workspace.files.count(under: dir)
+            return count == 0 ? "The folder is empty." : "The \(count) file\(count == 1 ? "" : "s") in it go from every device that has \(workspace.name). The workspace's history keeps them, under Recently deleted."
+        }
+        return everywhere
+    }
+
     @ViewBuilder private var emptiness: some View {
         switch model.phase {
-        case .loading:
-            ProgressView()
         case .failed(let message):
-            ContentUnavailableView {
-                Label("Could not open this folder", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message)
-            } actions: {
-                Button("Try again") {
-                    Task { await model.load() }
-                }
-            }
+            ContentUnavailableView("Could not open this folder", systemImage: "exclamationmark.triangle", description: Text(message))
         case .loaded where model.entries.isEmpty:
             ContentUnavailableView(
                 "Nothing here yet",
                 systemImage: "tray",
-                description: Text(session.may(.edit) && canHoldNotes ? "Make a note with the pencil above." : "This folder is empty.")
+                description: Text(mayChange && model.canHoldNotes ? "Make a note with the plus above." : "This folder is empty.")
             )
         default:
             EmptyView()
@@ -178,51 +181,19 @@ struct FolderView: View {
         return .document(entry.path)
     }
 
-    private func isFolder(_ entry: FolderEntry) -> Bool {
-        if case .folder = entry { return true }
-        return false
-    }
-
-    /// A section of the workspace is not a folder to rename or move: only
-    /// what is inside one is.
-    private func movable(_ entry: FolderEntry) -> Bool {
-        guard isFolder(entry) else { return true }
-        switch session.audience(of: entry.path) {
-        case .everyone: return true
-        case .folders: return false
-        case .onlyYou, .folder: return entry.path.lowercased() != sectionRoot(of: entry.path)
-        }
-    }
-
-    /// The folder a section starts at, for a path inside one.
-    private func sectionRoot(of path: String) -> String {
-        let lower = path.lowercased()
-        for mount in session.me?.sections ?? [] where lower == mount.lowercased() || lower.hasPrefix(mount.lowercased() + "/") {
-            return mount.lowercased()
-        }
-        return ""
-    }
-
-    /// Nothing syncs from directly under the folder that holds the restricted folders.
-    private var canHoldNotes: Bool { session.audience(of: model.dir) != .folders }
-
-    private var whoSeesNew: String {
-        switch session.audience(of: model.dir) {
-        case .everyone: return "Everyone in \(session.account.workspace) will see it."
-        case .onlyYou: return "Only you will see it."
-        case .folder(let name): return "The people of \(name) will see it."
-        case .folders: return ""
-        }
-    }
-
     private func create() {
         let name = newName
+        let what = naming
+        naming = nil
         Task {
             do {
-                let made = try await model.createNote(named: name)
-                path.append(.document(made))
+                if what == .folder {
+                    _ = try await model.createFolder(named: name)
+                } else {
+                    path.append(.document(try await model.createNote(named: name)))
+                }
             } catch {
-                failure = session.explain(error)
+                failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }
         }
     }
@@ -235,7 +206,7 @@ struct FolderView: View {
             do {
                 try await model.rename(entry, to: name)
             } catch {
-                failure = session.explain(error)
+                failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }
         }
     }
@@ -245,20 +216,18 @@ struct FolderView: View {
         removing = nil
         Task {
             do {
-                let answer = try await model.remove(entry)
-                if let still = answer.stillPublic, !still.isEmpty {
-                    failure = "\(entry.name) is removed, and its public address is still held: \(still.joined(separator: ", ")). Stop it under Published pages."
-                }
+                try await model.remove(entry)
             } catch {
-                failure = session.explain(error)
+                failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }
         }
     }
 }
 
-private struct EntryRow: View {
+struct EntryRow: View {
     let entry: FolderEntry
     let audience: Audience
+    var published = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -278,7 +247,7 @@ private struct EntryRow: View {
                 }
             }
             Spacer(minLength: 0)
-            if !entry.addresses.isEmpty {
+            if published {
                 Image(systemName: "globe")
                     .font(.footnote)
                     .foregroundStyle(Theme.live)
@@ -288,11 +257,6 @@ private struct EntryRow: View {
         .padding(.vertical, 2)
     }
 
-    private var isSectionRow: Bool {
-        if case .folder = entry { return audience != .everyone }
-        return false
-    }
-
     private var icon: String {
         switch entry {
         case .folder:
@@ -300,15 +264,16 @@ private struct EntryRow: View {
             case .everyone: return "folder"
             case .onlyYou: return "lock"
             case .folder, .folders: return "person.2"
+            case .nowhere: return "icloud.slash"
             }
         case .document(let row):
-            return row.md == nil ? "doc.richtext" : "doc.text"
+            return row.isHTML ? "doc.richtext" : "doc.text"
         case .file(let row):
             switch FileKind.of(row.path) {
             case .image: return "photo"
             case .pdf: return "doc.viewfinder"
             case .text: return "doc.plaintext"
-            case .other: return "doc"
+            default: return "doc"
             }
         }
     }
@@ -320,22 +285,23 @@ private struct EntryRow: View {
 
     private var detail: Text? {
         switch entry {
-        case .folder:
+        case .folder(let path):
             switch audience {
             case .everyone: return nil
-            case .onlyYou: return Text("Only you")
-            case .folder(let name): return isSectionRow ? Text("Only the people of \(name)") : nil
+            case .onlyYou: return path.contains("/") ? nil : Text("Only you")
+            case .folder(let name): return path.split(separator: "/").count == 2 ? Text("Only the people of \(name)") : nil
             case .folders: return Text("Folders with their own people")
+            case .nowhere: return Text("In no restricted folder, so it stays on this iPhone")
             }
         case .document(let row):
-            let page = row.html != nil && row.md != nil ? Text(" · with a page") : Text("")
-            if let changed = entry.changed {
+            let page = row.html != nil ? Text(" · with a page") : Text("")
+            if let changed = entry.modified {
                 return Text(changed, format: .relative(presentation: .named)) + page
             }
-            return row.html != nil && row.md == nil ? Text("Page") : nil
+            return row.isHTML ? Text("Page") : nil
         case .file(let row):
             let size = Text(Int64(row.size), format: .byteCount(style: .file))
-            if let changed = entry.changed {
+            if let changed = entry.modified {
                 return Text(changed, format: .relative(presentation: .named)) + Text(" · ") + size
             }
             return size
@@ -343,40 +309,33 @@ private struct EntryRow: View {
     }
 }
 
-/// Choosing the folder something moves into.
+/// Choosing the folder something moves into — and, when more people would
+/// see it there, saying so first.
 private struct MoveSheet: View {
     let model: FolderModel
     let entry: FolderEntry
     let failed: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var folders: [String]?
-    @State private var problem: String?
-    @State private var working = false
+    @State private var folders: [String] = []
+    @State private var widening: (folder: String, words: String)?
 
     var body: some View {
         NavigationStack {
             List {
-                if let folders {
+                Button {
+                    choose("")
+                } label: {
+                    Label(model.workspace.name, systemImage: "tray.full")
+                }
+                ForEach(folders.filter(allowed), id: \.self) { folder in
                     Button {
-                        move(into: "")
+                        choose(folder)
                     } label: {
-                        Label(model.session.account.workspace, systemImage: "tray.full")
+                        Label(folder, systemImage: "folder")
                     }
-                    ForEach(folders.filter(allowed), id: \.self) { folder in
-                        Button {
-                            move(into: folder)
-                        } label: {
-                            Label(folder, systemImage: "folder")
-                        }
-                    }
-                } else if let problem {
-                    Text(problem).foregroundStyle(Theme.errorInk)
-                } else {
-                    ProgressView()
                 }
             }
-            .disabled(working)
             .navigationTitle("Move \(entry.name) to")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -384,33 +343,48 @@ private struct MoveSheet: View {
                     Button("Cancel") { dismiss() }
                 }
             }
-            .task {
-                do {
-                    folders = try await model.everyFolder()
-                } catch {
-                    problem = model.session.explain(error)
+            .onAppear { folders = model.workspace.files.everyFolder() }
+            .confirmationDialog(
+                "Move \(entry.name) to \(widening.map { $0.folder.isEmpty ? "the workspace" : "“\(DocLinks.name(of: $0.folder))”" } ?? "")?",
+                isPresented: wideningShown,
+                titleVisibility: .visible
+            ) {
+                Button("Move") {
+                    if let folder = widening?.folder { move(into: folder) }
                 }
+                Button("Cancel", role: .cancel) { widening = nil }
+            } message: {
+                Text(widening?.words ?? "")
             }
         }
     }
 
-    /// Not where it already is, not itself, and not the folder that only holds other folders.
+    private var wideningShown: Binding<Bool> {
+        Binding(get: { widening != nil }, set: { if !$0 { widening = nil } })
+    }
+
+    /// Not where it already is, not itself, and not the folder that only
+    /// holds other folders.
     private func allowed(_ folder: String) -> Bool {
         if folder == DocLinks.directory(of: entry.path) { return false }
         if case .folder(let own) = entry, folder == own || folder.hasPrefix(own + "/") { return false }
-        return model.session.audience(of: folder) != .folders
+        return model.workspace.audience(of: folder) != .folders
+    }
+
+    private func choose(_ folder: String) {
+        if let words = model.widening(entry, into: folder) {
+            widening = (folder, words)
+        } else {
+            move(into: folder)
+        }
     }
 
     private func move(into folder: String) {
-        working = true
         Task {
             do {
-                let unpublished = try await model.move(entry, into: folder)
-                if !unpublished.isEmpty {
-                    failed("It moved, and these addresses stopped being public: \(unpublished.joined(separator: ", ")).")
-                }
+                try await model.move(entry, into: folder)
             } catch {
-                if let message = model.session.explain(error) { failed(message) }
+                failed((error as? DoklinError)?.message ?? error.localizedDescription)
             }
             dismiss()
         }

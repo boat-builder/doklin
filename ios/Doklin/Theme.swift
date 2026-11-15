@@ -40,13 +40,13 @@ extension Font {
     static let docCode = Font.system(.footnote, design: .monospaced)
 }
 
-/// A line above a list or a note: what is shown is a kept copy, or why
-/// something did not happen.
+/// A line above a note: why it cannot be changed here right now.
 struct NoticeBar: View {
     let text: String
+    var symbol = "lock"
 
     var body: some View {
-        Label(text, systemImage: "icloud.slash")
+        Label(text, systemImage: symbol)
             .font(.footnote)
             .foregroundStyle(Theme.warnInk)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -61,5 +61,4 @@ enum Route: Hashable {
     case folder(String)
     case document(String)
     case search
-    case pages
 }

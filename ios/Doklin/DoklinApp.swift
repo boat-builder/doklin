@@ -4,78 +4,102 @@ import UIKit
 
 @main
 struct DoklinApp: App {
-    @State private var store = AccountStore.onDevice()
+    @State private var device = Workspaces()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environment(store)
+                .environment(device)
                 .tint(Theme.accent)
+                .task { device.start(.onThisPhone) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background: settle()
+            case .active: Task { await device.woke() }
+            default: break
+            }
+        }
+    }
+
+    /// Leaving the screen: what was written here is kept and sent while iOS
+    /// still lets the app run — about thirty seconds.
+    private func settle() {
+        let application = UIApplication.shared
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = application.beginBackgroundTask(withName: "Sync") {
+            application.endBackgroundTask(task)
+            task = .invalid
+        }
+        Task {
+            await device.settle(within: 25)
+            if task != .invalid { application.endBackgroundTask(task) }
         }
     }
 }
 
-extension AccountStore {
-    /// The store this device keeps: the list of workspaces in Application
-    /// Support, copies of what was read in Caches, tokens in the Keychain.
-    static func onDevice() -> AccountStore {
+extension EngineSetup {
+    /// Where this iPhone keeps things: the engine's own files in Application
+    /// Support, each workspace in Documents, sign-ins in the Keychain.
+    /// Everything written down is relative to the app's folder, which iOS
+    /// moves on an update.
+    @MainActor static var onThisPhone: EngineSetup {
         let files = FileManager.default
-        let support = (files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? files.temporaryDirectory)
-            .appendingPathComponent("Doklin")
-        let caches = (files.urls(for: .cachesDirectory, in: .userDomainMask).first ?? files.temporaryDirectory)
-            .appendingPathComponent("Doklin")
+        let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Doklin")
+        let documents = files.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-        return AccountStore(
-            directory: support,
-            cacheDirectory: caches,
+        return EngineSetup(
             secrets: KeychainSecretStore(service: Bundle.main.bundleIdentifier ?? "doklin"),
-            clientName: "ios/\(version)"
+            dataDirectory: support,
+            workspacesDirectory: documents,
+            anchor: URL(fileURLWithPath: NSHomeDirectory()),
+            client: "ios/\(version)",
+            deviceName: UIDevice.current.name
         )
     }
 }
 
-/// What a Mac's Agents panel lists this device as.
-enum Device {
-    @MainActor static var name: String { UIDevice.current.name }
-}
-
 struct RootView: View {
-    @Environment(AccountStore.self) private var store
+    @Environment(Workspaces.self) private var device
 
     var body: some View {
-        if let session = store.current {
-            if let message = session.loggedOut {
-                LoggedOutView(session: session, message: message)
+        Group {
+            if !device.ready {
+                ProgressView()
+            } else if let failure = device.failure {
+                ContentUnavailableView("Doklin could not start", systemImage: "exclamationmark.triangle", description: Text(failure))
+            } else if let workspace = device.current {
+                WorkspaceView(workspace: workspace)
+                    .id(workspace.root)
             } else {
-                WorkspaceView(session: session)
-                    .id(session.id)
+                NavigationStack {
+                    SignInView()
+                }
             }
-        } else {
-            NavigationStack {
-                SignInView()
-            }
+        }
+        .alert(removedTitle, isPresented: removedShown) {
+            Button("OK", role: .cancel) { device.dismissRemoved() }
+        } message: {
+            Text(removedWords)
         }
     }
-}
 
-/// The domain said this device's login is gone. Nothing of the workspace is
-/// shown past this point: the person removed it, or logged the device out.
-struct LoggedOutView: View {
-    let session: Session
-    let message: String
-    @Environment(AccountStore.self) private var store
+    private var removedShown: Binding<Bool> {
+        Binding(get: { device.removed != nil }, set: { if !$0 { device.dismissRemoved() } })
+    }
 
-    var body: some View {
-        ContentUnavailableView {
-            Label("Logged out of \(session.account.workspace)", systemImage: "person.crop.circle.badge.xmark")
-        } description: {
-            Text(message)
-        } actions: {
-            Button("Remove from this device") {
-                store.forget(session.account)
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .background(Theme.canvas)
+    private var removedTitle: String {
+        "This iPhone is signed out of \(device.removed?.name ?? "the workspace")"
+    }
+
+    /// The domain said this device's sign-in is gone: it was signed out from
+    /// another device, or an owner took its access away.
+    private var removedWords: String {
+        guard let gone = device.removed else { return "" }
+        let copy = gone.deleted
+            ? "Its copy on this iPhone has been deleted."
+            : "It no longer syncs, but its folder on this iPhone could not be deleted."
+        return "It was signed out from another device, or an owner of \(gone.domain) took its access away. \(copy) Nothing was deleted in the cloud. To come back, add this iPhone again from a device that is still signed in."
     }
 }

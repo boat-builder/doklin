@@ -88,6 +88,8 @@ final class SourceEditorController: NSObject {
 struct SourceEditor: UIViewRepresentable {
     @Binding var text: String
     let controller: SourceEditorController
+    /// False while another device holds the note: it can be read, not typed in.
+    var editable = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -107,6 +109,7 @@ struct SourceEditor: UIViewRepresentable {
         view.smartInsertDeleteType = .no
         view.autocapitalizationType = .sentences
         view.text = text
+        view.isEditable = editable
         // Typing that starts before any tap goes on at the end of the note, not in front of its title.
         view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
         controller.view = view
@@ -118,6 +121,7 @@ struct SourceEditor: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         if view.text != text { view.text = text }
+        if view.isEditable != editable { view.isEditable = editable }
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {

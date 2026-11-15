@@ -53,7 +53,7 @@ struct MarkdownView: View {
     let document: MarkdownDocument
     /// The file the markdown is from: links and pictures are relative to it.
     let file: String
-    let session: Session
+    let workspace: Workspace
     var actions = MarkdownActions()
 
     var body: some View {
@@ -62,7 +62,7 @@ struct MarkdownView: View {
                 FrontmatterView(text: frontmatter)
             }
             ForEach(document.blocks) { node in
-                BlockView(node: node, file: file, session: session, actions: actions)
+                BlockView(node: node, file: file, workspace: workspace, actions: actions)
                     .contextMenu {
                         Button {
                             UIPasteboard.general.string = node.plainText
@@ -107,7 +107,7 @@ private struct FrontmatterView: View {
 struct BlockView: View {
     let node: BlockNode
     let file: String
-    let session: Session
+    let workspace: Workspace
     let actions: MarkdownActions
 
     var body: some View {
@@ -123,7 +123,7 @@ struct BlockView: View {
         case .blockquote(let blocks):
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(blocks) { inner in
-                    BlockView(node: inner, file: file, session: session, actions: actions)
+                    BlockView(node: inner, file: file, workspace: workspace, actions: actions)
                 }
             }
             .padding(.leading, 15)
@@ -133,13 +133,13 @@ struct BlockView: View {
                     .frame(width: 3)
             }
         case .list(let list):
-            ListView(list: list, file: file, session: session, actions: actions)
+            ListView(list: list, file: file, workspace: workspace, actions: actions)
         case .code(let language, let text):
             CodeView(language: language, text: text)
         case .table(let table):
             TableView(table: table)
         case .image(let source, let alt):
-            DocImage(source: source, alt: alt, file: file, session: session)
+            DocImage(source: source, alt: alt, file: file, workspace: workspace)
         case .html(let text):
             Text(text)
                 .font(.docCode)
@@ -199,7 +199,7 @@ struct InlineText: View {
 private struct ListView: View {
     let list: ListBlock
     let file: String
-    let session: Session
+    let workspace: Workspace
     let actions: MarkdownActions
 
     var body: some View {
@@ -209,7 +209,7 @@ private struct ListView: View {
                     marker(item, index)
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(item.blocks) { inner in
-                            BlockView(node: inner, file: file, session: session, actions: actions)
+                            BlockView(node: inner, file: file, workspace: workspace, actions: actions)
                         }
                     }
                 }
@@ -348,13 +348,13 @@ private struct TableView: View {
     }
 }
 
-/// A picture a note shows: one of the workspace's own files, read through
-/// the document API, or one on the web.
+/// A picture a note shows: one of the workspace's own files on this iPhone,
+/// or one on the web.
 private struct DocImage: View {
     let source: String
     let alt: String
     let file: String
-    let session: Session
+    let workspace: Workspace
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -385,7 +385,7 @@ private struct DocImage: View {
             let data: Data
             switch DocLinks.target(of: source, from: file) {
             case .document(let path):
-                data = try await session.client.read(path).data
+                data = try workspace.files.read(path)
             case .external(let address):
                 guard let url = URL(string: address), url.scheme == "https" else {
                     failed = true

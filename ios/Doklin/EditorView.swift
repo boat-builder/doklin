@@ -1,85 +1,72 @@
 import DoklinKit
 import SwiftUI
 
-/// Editing a note as its markdown. A save says which revision was read, so a
-/// note that changed on a Mac meanwhile is never written over without a
-/// person choosing to — and what is typed is kept on the device until it is
-/// saved or thrown away.
+/// Editing a note as its markdown, saved as it is typed. While it is open,
+/// other devices see it being edited here and open it view-only; one that
+/// holds it already makes it view-only here, until this iPhone takes over.
+/// Sync merges what was typed here with what changed elsewhere meanwhile —
+/// unless both changed while this editor held unsaved text: then the person
+/// chooses, as on a Mac.
 struct EditorView: View {
     let model: DocumentModel
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var text: String
-    @State private var baseRev: Int
-    @State private var restored: Bool
+    /// What the file holds, as far as this editor knows.
+    @State private var saved: String
+    /// What is being written right now.
+    @State private var writing: String?
     @State private var controller = SourceEditorController()
-    @State private var conflict: String?
+    /// The file changed elsewhere while something typed here was unsaved.
+    @State private var changedElsewhere = false
+    @State private var takingOver = false
     @State private var failure: String?
-    @State private var confirmingDiscard = false
-    /// Saved or thrown away: closing the sheet keeps no draft.
-    @State private var settled = false
+    @State private var pending: Task<Void, Never>?
 
     init(model: DocumentModel) {
         self.model = model
-        let draft = model.draft
-        _text = State(initialValue: draft?.text ?? model.text ?? "")
-        _baseRev = State(initialValue: draft?.rev ?? model.content?.rev ?? 0)
-        _restored = State(initialValue: draft != nil)
+        _text = State(initialValue: model.text ?? "")
+        _saved = State(initialValue: model.text ?? "")
     }
 
-    private var changed: Bool { text != model.text }
+    private var lease: LeaseHolder? { model.lease }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if restored {
-                    Label("These are changes you had not saved.", systemImage: "arrow.uturn.backward.circle")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.text2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Theme.sunken)
+                if let lease {
+                    banner(LeaseWords.line(lease), symbol: "lock") {
+                        Button(takingOver ? "Taking over…" : "Take over") { takeOver() }
+                            .disabled(takingOver)
+                            .accessibilityHint(LeaseWords.takeOverHint(lease))
+                    }
                 }
-                SourceEditor(text: $text, controller: controller)
+                if changedElsewhere {
+                    banner("This note changed on another device while you were typing.", symbol: "exclamationmark.triangle") {
+                        Button("Reload") { reload() }
+                        Button("Keep mine") { keepMine() }
+                    }
+                }
+                SourceEditor(text: $text, controller: controller, editable: lease == nil)
+                    .accessibilityIdentifier("editor")
             }
             .background(Theme.sheet)
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        if changed { confirmingDiscard = true } else { close(discarding: true) }
-                    }
-                }
                 ToolbarItem(placement: .confirmationAction) {
-                    if model.busy {
-                        ProgressView()
-                    } else {
-                        Button("Save") { save() }
-                            .disabled(!changed)
-                    }
+                    Button("Done") { close() }
+                        .accessibilityIdentifier("done")
                 }
             }
-            .interactiveDismissDisabled(changed)
+            .onChange(of: text) { schedule() }
+            .onChange(of: model.workspace.changes) { heardChange() }
+            .onChange(of: lease) { takingOver = false }
             .onChange(of: scenePhase) { _, phase in
-                if phase != .active, !settled { model.keepDraft(text, over: baseRev) }
+                if phase != .active { Task { await save() } }
             }
-            .onDisappear {
-                if !settled { model.keepDraft(text, over: baseRev) }
-            }
-            .confirmationDialog("Throw away your changes?", isPresented: $confirmingDiscard, titleVisibility: .visible) {
-                Button("Throw away", role: .destructive) { close(discarding: true) }
-                Button("Keep editing", role: .cancel) {}
-            }
-            .confirmationDialog("This note changed somewhere else", isPresented: conflictShown, titleVisibility: .visible) {
-                Button("Replace it with mine", role: .destructive) { overwrite() }
-                Button("Keep theirs, throw mine away", role: .destructive) { takeTheirs() }
-                Button("Keep editing", role: .cancel) { conflict = nil }
-            } message: {
-                Text(conflict ?? "")
-            }
+            .task { await model.editing(true) }
             .alert("Not saved", isPresented: failureShown) {
                 Button("OK", role: .cancel) { failure = nil }
             } message: {
@@ -88,55 +75,91 @@ struct EditorView: View {
         }
     }
 
-    private var conflictShown: Binding<Bool> {
-        Binding(get: { conflict != nil }, set: { if !$0 { conflict = nil } })
-    }
-
     private var failureShown: Binding<Bool> {
         Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
     }
 
-    private func close(discarding: Bool) {
-        settled = true
-        if discarding { model.discardDraft() }
-        dismiss()
+    private func banner<Actions: View>(_ words: String, symbol: String, @ViewBuilder actions: () -> Actions) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(words, systemImage: symbol)
+                .font(.footnote)
+                .foregroundStyle(Theme.text1)
+            HStack(spacing: 16) { actions() }
+                .font(.footnote.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.sunken)
     }
 
-    private func save() {
-        let typed = text
-        Task {
-            do {
-                try await model.save(typed, over: baseRev)
-                close(discarding: false)
-            } catch let error as DoklinError where error.kind == .conflict {
-                conflict = "Someone saved it after you opened it here. Replacing it writes your text over theirs; a Mac's version history keeps both."
-            } catch let error as DoklinError where error.code == "comments" {
-                // The worker's sentence names a command; this is the same rule for a person.
-                failure = "A comment's marker — the {==words==}{>>#…<<} around commented words — was changed or removed. Put it back as it was, or remove the comment first, then save."
-            } catch {
-                failure = model.session.explain(error)
-            }
+    /// Save once the typing pauses.
+    private func schedule() {
+        pending?.cancel()
+        guard text != saved, !changedElsewhere, lease == nil else { return }
+        pending = Task {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard !Task.isCancelled else { return }
+            await save()
         }
     }
 
-    private func overwrite() {
+    private func save() async {
         let typed = text
-        conflict = nil
-        Task {
-            do {
-                try await model.overwrite(typed)
-                close(discarding: false)
-            } catch let error as DoklinError where error.code == "comments" {
-                failure = "A comment's marker — the {==words==}{>>#…<<} around commented words — was changed or removed. Put it back as it was, or remove the comment first, then save."
-            } catch {
-                failure = model.session.explain(error)
-            }
+        guard typed != saved, !changedElsewhere, lease == nil else { return }
+        writing = typed
+        defer { writing = nil }
+        do {
+            try await model.save(typed)
+            saved = typed
+        } catch {
+            failure = (error as? DoklinError)?.message ?? error.localizedDescription
         }
     }
 
-    private func takeTheirs() {
-        conflict = nil
-        close(discarding: true)
-        Task { await model.load() }
+    /// Files of the workspace changed: when this note is one of them and
+    /// not by this editor's hand, take the new text — or, with unsaved
+    /// typing here, ask.
+    private func heardChange() {
+        guard model.isAffected(by: model.workspace.lastChanged),
+              let disk = try? model.workspace.files.text(model.path),
+              disk != saved, disk != writing
+        else { return }
+        if text == saved {
+            text = disk
+            saved = disk
+        } else {
+            pending?.cancel()
+            changedElsewhere = true
+        }
+    }
+
+    private func reload() {
+        guard let disk = try? model.workspace.files.text(model.path) else { return }
+        changedElsewhere = false
+        text = disk
+        saved = disk
+    }
+
+    private func keepMine() {
+        changedElsewhere = false
+        // What the other device wrote stays in the note's history.
+        saved = (try? model.workspace.files.text(model.path)) ?? saved
+        Task { await save() }
+    }
+
+    private func takeOver() {
+        takingOver = true
+        Task { await model.takeOver() }
+    }
+
+    private func close() {
+        pending?.cancel()
+        Task {
+            await save()
+            await model.editing(false)
+            model.load()
+            dismiss()
+        }
     }
 }

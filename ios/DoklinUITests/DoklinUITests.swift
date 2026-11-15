@@ -1,11 +1,12 @@
 // The app itself, driven in a simulator against the real worker — the
 // harness worker over the seed workspace, started by
-// `node verify-harness/drive-ios.mjs --app`, which also adds the agent this
-// logs in as. Skipped when run without it (from Xcode's Test button, say).
+// `node verify-harness/drive-ios.mjs --app`, which also mints the device
+// line this joins with (UITestCase.swift). Skipped when run without it
+// (from Xcode's Test button, say).
 //
-// One journey, in the order a person would take it: log in with a code,
-// look around, read a note, edit one, make one, tick a box in it, search,
-// quit and come back, log out.
+// One journey, in the order a person would take it: join with a line from
+// another device, look around, read a note, edit one, make one, tick a box
+// in it, search, quit and come back, remove the workspace from this iPhone.
 //
 // Every step prints what is on screen (lines that begin `UI>`) and keeps a
 // screenshot in the result bundle, so a run can be read afterwards without
@@ -13,79 +14,22 @@
 
 import XCTest
 
-final class DoklinUITests: XCTestCase {
-    private let app = XCUIApplication()
-    private var endpoint = ""
-    private var code = ""
-
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-        let environment = ProcessInfo.processInfo.environment
-        guard let endpoint = environment["DOKLIN_TEST_ENDPOINT"], let raw = environment["DOKLIN_TEST_CODES"],
-              let codes = try? JSONDecoder().decode([String: String].self, from: Data(raw.utf8)), let code = codes["app"]
-        else { throw XCTSkip("no worker to talk to — run: node verify-harness/drive-ios.mjs --app") }
-        self.endpoint = endpoint
-        self.code = code
-    }
-
-    /* ---------- Finding things ---------- */
-
-    private func marked(_ identifier: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
-    }
-
-    private func text(containing words: String) -> XCUIElement {
-        app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", words)).firstMatch
-    }
-
-    /// What is on screen, into the log and the result bundle.
-    private func record(_ title: String) {
-        print("UI> ---- \(title)")
-        for row in app.debugDescription.split(separator: "\n") { print("UI> \(row)") }
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = title
-        shot.lifetime = .keepAlways
-        add(shot)
-    }
-
-    @discardableResult
-    private func expect(_ element: XCUIElement, _ what: String, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-        if !element.waitForExistence(timeout: timeout) {
-            record("missing — \(what)")
-            XCTFail("\(what) never appeared", file: file, line: line)
-        }
-        return element
-    }
-
+final class DoklinUITests: UITestCase {
     /// Put the caret where a person adding to a note puts it: after the last line.
     private func tapBelowTheText(of editor: XCUIElement) {
         editor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
     }
 
-    private func back() {
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-    }
-
-    /* ---------- The journey ---------- */
-
     func testAPersonsWayThroughTheApp() throws {
-        app.launch()
+        // Joining: the line from another device, typed as a paste would put it.
+        launchAndJoin()
 
-        // Logging in: the address and the code from a Mac, typed.
-        let address = expect(marked("address"), "the address field")
-        record("first launch")
-        address.tap()
-        address.typeText(endpoint)
-        let codeField = marked("code")
-        codeField.tap()
-        codeField.typeText(code)
-        marked("login").tap()
-
-        // The workspace: its folders and notes, and no sidecar among them.
-        expect(marked("entry-Projects"), "the Projects folder")
+        // The workspace, downloaded: its folders and notes, and no comment
+        // file among them.
         expect(marked("entry-Home"), "the Home note")
+        expect(text(containing: "Synced"), "the sync line")
         record("the workspace")
-        XCTAssertFalse(marked("entry-Comments.meta.jsonl").exists, "a comments sidecar is listed as a file")
+        XCTAssertFalse(marked("entry-Comments.meta.jsonl").exists, "a comment file is listed")
 
         // A folder, and a note in it, read.
         marked("entry-Projects").tap()
@@ -96,15 +40,15 @@ final class DoklinUITests: XCTestCase {
         back()
         back()
 
-        // Editing: what is typed and saved is what the note then says.
+        // Editing: what is typed is what the note then says.
         expect(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Scratch"], "Scratch's heading")
-        app.buttons["Edit"].tap()
+        marked("edit").tap()
         let editor = expect(app.textViews.firstMatch, "the editor")
         tapBelowTheText(of: editor)
         editor.typeText("\n\nTyped in the simulator.")
         record("the editor")
-        app.buttons["Save"].tap()
+        marked("done").tap()
         // A paragraph of its own under what was there, and the title still the title.
         expect(app.staticTexts["Typed in the simulator."], "the saved text, as its own paragraph")
         expect(app.staticTexts["Scratch"], "Scratch's heading after the edit")
@@ -113,17 +57,18 @@ final class DoklinUITests: XCTestCase {
         back()
 
         // A new note, a task in it, and the box ticked from the reading view.
-        app.buttons["New note"].tap()
+        marked("new").tap()
+        expect(app.buttons["New note"], "New note in the menu").tap()
         let name = expect(app.alerts.textFields.firstMatch, "the new note's name field")
         name.tap()
         name.typeText("Phone list")
         app.alerts.buttons["Create"].tap()
         expect(app.staticTexts["Phone list"], "the new note's heading")
-        app.buttons["Edit"].tap()
+        marked("edit").tap()
         let fresh = expect(app.textViews.firstMatch, "the editor for the new note")
         tapBelowTheText(of: fresh)
         fresh.typeText("- [ ] milk")
-        app.buttons["Save"].tap()
+        marked("done").tap()
         expect(app.buttons["Not done"], "the unticked box").tap()
         expect(app.buttons["Done"], "the ticked box")
         expect(app.staticTexts["milk"], "the task's words")
@@ -137,28 +82,20 @@ final class DoklinUITests: XCTestCase {
         let search = expect(app.searchFields.firstMatch, "the search field")
         search.tap()
         search.typeText("ship it by june")
-        expect(app.staticTexts["plan"], "the plan among the results")
-        // The matching line reads as the note does, not as its source.
-        expect(app.staticTexts["Ship it by June. See the status and the ideas."], "the matching line, read")
+        expect(marked("result-plan"), "the plan among the results")
         record("search")
+        back()
 
-        // Quit and come back: still logged in, and the edit is still there.
+        // Quit and come back: still joined, and the edit is still there.
         app.terminate()
         app.launch()
         expect(marked("entry-Scratch"), "the workspace after a relaunch").tap()
         expect(app.staticTexts["Typed in the simulator."], "the edit after a relaunch")
         back()
 
-        // Logging out goes back to the first screen.
-        app.buttons["Workspaces"].tap()
-        expect(app.buttons["Log out"], "Log out in the menu").tap()
-        let confirm = app.sheets.buttons["Log out"]
-        if confirm.waitForExistence(timeout: 5) {
-            confirm.tap()
-        } else {
-            app.buttons.matching(identifier: "Log out").firstMatch.tap()
-        }
-        expect(marked("address"), "the first screen after logging out")
-        record("logged out")
+        // Removing the workspace from this iPhone goes back to the first screen.
+        removeFromThisPhone()
+        expect(marked("line"), "the first screen after removing the workspace")
+        record("removed")
     }
 }

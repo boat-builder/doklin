@@ -4,14 +4,12 @@ Throwaway working file. Not for `main`: it lives only on the iOS branch, and is 
 
 ## Status
 
-- **PR 1 (devices) is merged: #120.**
-- **The iOS branch is rebased on `main`** (after #120 and #121).
-- **PR 2, step 1 (the engine as its own crate): done.** `engine/` holds the sync engine and the version store, with no Tauri. The Mac app keeps one wrapper per command (`src-tauri/src/cloud.rs`, `versions.rs`) and its `Setup`/`Host` (`src-tauri/src/engine.rs`). Engine tests 181, Mac app tests 18, `pnpm build`, `pnpm lint`: pass on Linux. `ci.yml` has a new `engine` job.
-- **Step 2 (bridge and build): mostly done.** `engine/ffi` (C interface, header in `engine/ffi/include`), `engine/src/command.rs` (every command by name), Swift `Engine` (`ios/DoklinKit/Sources/DoklinKit/Engine/Engine.swift`), `scripts/ios-engine.sh`, an Xcode build phase, `ios.yml`. Left: the Swift payload types (below).
-- **Step 0 (proof): mostly done.**
-  - Linux: `EngineLiveTests` (Swift linked to the engine) joins the harness worker with a device code, downloads the workspace, syncs a new note up (`drive-ios.mjs` checks it reached the domain), mints another device code, leaves and deletes the copy. Passes.
-  - Mac CI runner (run 5): the engine built for `aarch64-apple-ios`; `swift test` linked to it passed. The simulator app build failed only on a missing Intel slice. Fixed by excluding `x86_64` for the simulator (Apple Silicon only, as decided). **Run 6 checks it; not yet seen.**
-- **Not checked by anything yet: the Mac app itself after the engine move.** Its macOS-only lines (Trash via `trash_path_impl`, `cli_install::after_connect`) compile only on a Mac, and `ci.yml` does not build `src-tauri/`. See "On your Mac", first item.
+- **PR 1 (devices) is merged: #120.** The iOS branch is rebased on `main` (after #120 and #121).
+- **On your Mac: done (2026-11-15).** ios.yml run 6 passed. The Mac app after the engine move: `cargo check` clean and `cargo test --lib` (18) in src-tauri, engine 182 + ffi 2; a test build under its own identifier joined a harness workspace, synced both ways, sent a delete from elsewhere to the Trash, restored a version (with Undo) and showed Add a device's line. Two Mac bugs found and fixed: a file opened from Finder on a cold launch lost its workspace window (the move), and a previewed version sat below the live editor (older; drive-versions now checks it). iOS toolchain: Rust iOS targets, iOS 26.5 platform; `drive-ios.mjs` and `drive-ios.mjs --app` both pass locally.
+- **Step 1 (the engine as its own crate): done.**
+- **Step 2 (bridge and build): done.** `Payloads.swift` mirrors status.rs.
+- **Step 3 (the app on local files): built, being checked in the simulator.** The sign-in is in the Keychain (`Host::secrets`, two more C callbacks; cloud.json holds an empty token on the phone). DoklinKit: `Workspaces` (the engine's model, events, join, leave, settle), `Workspace`, `WorkspaceFiles` (list, read, write, rename, move, remove, search), `FolderModel`, `DocumentModel`, `SearchModel`. Views: sign-in by pasted line, folders, reader, editor (autosave, changed-elsewhere banner, view-only under a lease, take over), search, sync line, notices. The agent client, login, drafts, offline cache and their tests are deleted. UI tests: one class per journey, one device line each (`UITestCase.swift`).
+- **Steps 4–6: not started.**
 
 ## Decided
 

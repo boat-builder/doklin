@@ -1,16 +1,14 @@
-// Drives the iOS app's core (ios/DoklinKit) end to end — its client and its
-// models against the real worker, served by serve-worker.mjs over the seed
-// workspace (cloud-worker/test/seed.mjs). The views are not driven: they
-// need a simulator. Everything they call is.
+// Drives the iOS app's core (ios/DoklinKit) end to end — the engine it
+// links and the models the screens use, against the real worker, served by
+// serve-worker.mjs over the seed workspace (cloud-worker/test/seed.mjs). The
+// views are not driven: they need a simulator. Everything they call is.
 //
 // It starts the harness worker itself, on a port of its own, builds the
-// engine this machine links (scripts/ios-engine.sh host), adds the agents
-// the tests log in as and mints the device code the engine joins with — the
-// way the owner's app does, sending only a code's hash — and runs the
-// package's tests with the address and the codes in the environment:
+// engine this machine links (scripts/ios-engine.sh host), mints the device
+// code the phone joins with — the way a Mac's Add a device does, sending
+// only the code's hash — and runs the package's tests with the line in the
+// environment:
 //
-//   DOKLIN_TEST_ENDPOINT      http://localhost:<port>
-//   DOKLIN_TEST_CODES         {"<agent>": "dkla-…"} — each code works once
 //   DOKLIN_TEST_DEVICE_LINE   doklin-invite http://localhost:<port> dkln-… — works once
 //
 // Run (a Mac with Xcode, or any machine with a Swift toolchain, and cargo):
@@ -27,14 +25,16 @@
 //   node verify-harness/drive-ios.mjs --app
 //
 // builds it, starts an iPhone simulator and runs ios/DoklinUITests — one
-// journey through the real screens against this worker: log in, browse, read,
-// edit, tick a box, search, relaunch, log out. What was on screen at each
-// step is printed (the lines that begin `UI>`), and the whole xcodebuild log
-// and the screenshots are left in $DOKLIN_DRIVE_OUT (a temporary folder when
-// unset; the path is printed).
+// journey per test class through the real screens against this worker
+// (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
+// remove from this iPhone). What was on screen at each step is printed (the
+// lines that begin `UI>`), and the whole xcodebuild log and the screenshots
+// are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
+// printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
+// picks the simulator rather than the newest iPhone.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,34 +94,8 @@ await new Promise((resolve, reject) => {
 
 // The app mints the code, shows it once and sends only its sha256
 // (engine/src/cloud/invite.rs): twenty Crockford characters, hashed in
-// their canonical form, shown as dkla-XXXXX-XXXXX-XXXXX-XXXXX.
+// their canonical form, shown as dkln-XXXXX-XXXXX-XXXXX-XXXXX.
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-async function addAgent(name, scopes) {
-  const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
-  const res = await fetch(`${WORKER}/api/auth/agents`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${OWNER}`, "content-type": "application/json", "x-doklin-device": "d-drive", "x-doklin-client": "0.0.0-drive" },
-    body: JSON.stringify({ name, scopes, codeHash: sha256(canonical), expiresAt: Date.now() + 3_600_000 }),
-  });
-  if (res.status !== 201) throw new Error(`could not add the agent ${name}: ${res.status} ${await res.text()}`);
-  return `dkla-${canonical.match(/.{5}/g).join("-")}`;
-}
-
-// One agent a test that logs in: a code is spent by its first login.
-const ALL = ["read", "comment", "edit", "publish"];
-const AGENTS = {
-  phone: ALL,
-  tasks: ALL,
-  comments: ALL,
-  publisher: ALL,
-  reader: ["read"],
-  searcher: ["read"],
-  leaving: ALL,
-  twice: ALL,
-  app: ALL,
-};
-const codes = {};
-for (const [name, scopes] of Object.entries(AGENTS)) codes[name] = await addAgent(`${name} (iOS drive)`, scopes);
 
 const asOwner = { authorization: `Bearer ${OWNER}`, "content-type": "application/json", "x-doklin-device": "d-drive", "x-doklin-client": "0.0.0-drive" };
 
@@ -158,6 +132,7 @@ async function onTheDomain(path) {
 /* ---------- The core: `swift test`, or the command after `--` ---------- */
 
 async function driveCore() {
+  const line = await deviceLine();
   const split = process.argv.indexOf("--");
   // The package links the engine; `swift test` is told where this machine's is.
   const engine = join(ROOT, "ios/Engine/host");
@@ -167,7 +142,7 @@ async function driveCore() {
   console.log(`running: ${command.join(" ")}`);
   const status = await new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
-      env: { ...process.env, DOKLIN_TEST_ENDPOINT: WORKER, DOKLIN_TEST_CODES: JSON.stringify(codes), DOKLIN_TEST_DEVICE_LINE: line },
+      env: { ...process.env, DOKLIN_TEST_DEVICE_LINE: line },
       stdio: "inherit",
     });
     child.on("error", reject);
@@ -203,11 +178,19 @@ function pickSimulator() {
 }
 
 async function driveApp() {
+  // A line works once: one for each test class, by its file's name
+  // (ios/DoklinUITests/UITestCase.swift reads its own).
+  const lines = {};
+  for (const file of readdirSync(join(ROOT, "ios/DoklinUITests")).filter((f) => f.endsWith("UITests.swift"))) {
+    lines[file.replace(/\.swift$/, "")] = await deviceLine();
+  }
   const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
   mkdirSync(out, { recursive: true });
   const result = join(out, "DoklinUITests.xcresult");
   rmSync(result, { recursive: true, force: true });
-  const simulator = pickSimulator();
+  const simulator = process.env.DOKLIN_SIMULATOR
+    ? { udid: process.env.DOKLIN_SIMULATOR, name: `the simulator ${process.env.DOKLIN_SIMULATOR}` }
+    : pickSimulator();
   console.log(`driving the app on ${simulator.name}; the full log and the screenshots go to ${out}`);
 
   const log = createWriteStream(join(out, "xcodebuild.log"));
@@ -222,11 +205,12 @@ async function driveApp() {
         "-scheme", "Doklin",
         "-destination", `id=${simulator.udid}`,
         "-resultBundlePath", result,
+        ...(process.env.DOKLIN_ONLY ? [`-only-testing:DoklinUITests/${process.env.DOKLIN_ONLY}`] : []),
         ...(process.env.DOKLIN_DERIVED_DATA ? ["-derivedDataPath", process.env.DOKLIN_DERIVED_DATA] : []),
       ],
       {
         // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
-        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_ENDPOINT: WORKER, TEST_RUNNER_DOKLIN_TEST_CODES: JSON.stringify(codes) },
+        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DEVICE_LINES: JSON.stringify(lines) },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -250,10 +234,16 @@ async function driveApp() {
   } catch {
     console.log("the screenshots stay inside the result bundle — this Xcode's xcresulttool does not export them");
   }
-  return status;
+  if (status !== 0 || (process.env.DOKLIN_ONLY && process.env.DOKLIN_ONLY !== "DoklinUITests")) return status;
+  // What the app said it wrote, asked of the domain itself.
+  if (!(await onTheDomain("Phone list.md"))) {
+    console.error("the note made in the app never reached the domain");
+    return 1;
+  }
+  console.log("the note made in the app is on the domain");
+  return 0;
 }
 
-const line = await deviceLine();
 const status = await (process.argv.includes("--app") ? driveApp() : driveCore());
 cleanup();
 process.exit(status);

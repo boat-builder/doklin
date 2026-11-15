@@ -5,13 +5,14 @@ import UIKit
 /// A plain file — anything that is not a document — shown as what it is: a
 /// picture, a PDF, text. Whatever it is, it can be handed to another app.
 struct FileView: View {
-    let content: DocContent
+    let path: String
+    let data: Data
 
     var body: some View {
         Group {
-            switch FileKind.of(content.file) {
+            switch FileKind.of(path) {
             case .image:
-                if let image = UIImage(data: content.data) {
+                if let image = UIImage(data: data) {
                     ScrollView([.horizontal, .vertical]) {
                         Image(uiImage: image)
                             .resizable()
@@ -23,13 +24,13 @@ struct FileView: View {
                     unshown
                 }
             case .pdf:
-                if let pages = PDFPages(data: content.data) {
+                if let pages = PDFPages(data: data) {
                     pages
                 } else {
                     unshown
                 }
-            case .text, .other:
-                if let text = content.text {
+            default:
+                if let text = String(data: data, encoding: .utf8) {
                     ScrollView {
                         Text(text)
                             .font(.docCode)
@@ -47,7 +48,7 @@ struct FileView: View {
             ToolbarItem(placement: .bottomBar) {
                 if let url = exported {
                     ShareLink(item: url) {
-                        Label("Share \(DocLinks.name(of: content.file))", systemImage: "square.and.arrow.up")
+                        Label("Share \(DocLinks.name(of: path))", systemImage: "square.and.arrow.up")
                     }
                 }
             }
@@ -65,10 +66,10 @@ struct FileView: View {
     /// The file under its own name in the temporary folder, for the share sheet.
     private var exported: URL? {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-share", isDirectory: true)
-        let url = folder.appendingPathComponent(DocLinks.name(of: content.file))
+        let url = folder.appendingPathComponent(DocLinks.name(of: path))
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try content.data.write(to: url, options: .atomic)
+            try data.write(to: url, options: .atomic)
             return url
         } catch {
             return nil

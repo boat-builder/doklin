@@ -40,6 +40,7 @@ public final class Workspaces {
     @ObservationIgnored private let remembered: UserDefaults
     /// A workspace just joined, whose status the engine has not sent yet.
     @ObservationIgnored private var arriving: String?
+    @ObservationIgnored private var starting = false
 
     public init(remembered: UserDefaults = .standard) {
         self.remembered = remembered
@@ -47,8 +48,10 @@ public final class Workspaces {
 
     /* ---------- Starting ---------- */
 
-    /// Start the engine and listen to it. Called once, at launch.
+    /// Start the engine and listen to it, once: a second call changes nothing.
     public func start(_ setup: EngineSetup) {
+        guard !starting else { return }
+        starting = true
         let events = Engine.shared.events()
         Task { [weak self] in
             for await event in events {
@@ -279,6 +282,11 @@ public final class Workspace: Identifiable {
 
     /// Whether this device may do `action` here, in the worker's words.
     public func may(_ action: String) -> Bool { status?.may(action) ?? true }
+
+    /// Sync now rather than at the next poll.
+    public func syncNow() async {
+        try? await Engine.shared.run("cloud_sync_now", ["root": .string(root)])
+    }
 
     func changed(_ paths: [String]) {
         lastChanged = Set(paths.map { $0.lowercased() })
