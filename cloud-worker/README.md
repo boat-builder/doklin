@@ -8,12 +8,12 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ## Headers and auth
 
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
-- A bearer an owner took away (person removed, Mac signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the Mac delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
+- A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`.
 - Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → `owner`, the **creator** (no D1 read); `dka_…` → `agent_tokens` → `agent`; else `tokens` → the role on that person's `members` row (`owner` | `member`), read every request.
-- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see` and `agents.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
+- Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`, `workspace.manage`.
 - Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {"error":"only an owner can do that"}`.
-- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`.
+- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`. A join is how every device but the creator's first Mac gets its bearer: an invite's code, or a device code.
 - No `DB` / D1 down: `/api/auth/*`, `/api/spaces/*`, search → `503`; member/agent bearers → `401`; the shared workspace's sync unaffected; `/api/meta` `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
 
@@ -92,8 +92,8 @@ the space, the path or the file. `shared` = in the shared workspace.
 
 ## Auth routes (`src/api.ts`, `src/agentApi.ts`)
 
-Owners only, except join, `GET members` and the agent routes. Deletes → `204`; unknown id `404`; malformed id `400`.
-`409`: changing or removing your own row or the creator's; deleting the token the call is made with.
+Owners only, except join, `GET members`, the device routes and the agent routes. Deletes → `204`; unknown id `404`; malformed id `400`.
+`409`: changing or removing your own row or the creator's; signing out the device the call is made with.
 
 ```
 POST   /api/auth/join  no bearer; {code, deviceId?, deviceName?} → 201 {token, tokenId, member};
@@ -112,8 +112,16 @@ PATCH  /api/auth/members/<id>  {role: owner|member} → {member}; owner → memb
 DELETE /api/auth/members/<id>  the row stays with disabled = 1, role member; their invite, tokens,
        presence, leases, restricted-folder memberships and agents go (their Private stays); token
        hashes go to removed_tokens; removing an owner withdraws every pending invite
-GET    /api/auth/tokens  [{id, memberId, email, deviceName, createdAt}] — never a hash
-DELETE /api/auth/tokens/<id>  its hash goes to removed_tokens
+POST   /api/auth/devices/code  anyone; {codeHash, expiresAt ≤ 24 h} → 201 {code: {id, createdAt, expiresAt}}:
+       a code for a device of the caller's own, stored as their pending invite (replacing it) and
+       redeemed by join; the domain's secret asks as the creator's person, 409 {code: "no_identity"}
+       when they have not said who they are
+GET    /api/auth/devices  anyone; the caller's devices, an owner everyone's: {devices: [{id, memberId,
+       email, deviceId, deviceName, createdAt}]} — never a hash
+DELETE /api/auth/devices/<id>  its person, or an owner; its hash goes to removed_tokens. Somebody
+       else's is `404` to a member
+DELETE /api/auth/session  a device ending its own sign-in: its row, presence and lease go, nothing
+       goes to removed_tokens; 409 for the domain's secret
 POST   /api/auth/agents  anyone; {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}: the caller's
 GET    /api/auth/agents  anyone; the caller's agents, an owner everyone's: {agents: [{id, name, scopes,
        createdAt, lastUsedAt, memberId|null, mine, machines: [{id, host, createdAt}],
