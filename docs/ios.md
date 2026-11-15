@@ -60,4 +60,4 @@ node verify-harness/drive-ios.mjs --app   # the app in a simulator; DOKLIN_ONLY=
 node scripts/ios-colors.mjs [--check]     # colour sets from tokens.css
 ```
 
-To try the app in the simulator with no domain: `node verify-harness/serve-worker.mjs --no-mermaid`, mint a device line with the owner token (`drive-ios.mjs` shows how), and paste it.
+To try the app in the simulator with no domain: `node verify-harness/serve-worker.mjs --no-mermaid`, mint a device line with the superadmin token it prints (`drive-ios.mjs` shows how), and paste it.

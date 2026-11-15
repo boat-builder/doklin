@@ -133,7 +133,7 @@ manifest, rendered by the worker from the synced files.
 
 ## Worker versions and updates
 
-- `cloud-worker/src/version.ts` is the one source of `WORKER_VERSION`, `WORKER_FEATURES`, `MANIFEST_VERSION`, `COMPATIBILITY_DATE`. Parsed, never copied, by `src-tauri/build.rs`, `vite.config.ts` (`virtual:cloud-worker-version`) and the bundle script: keep the one-line shape `/^export const WORKER_VERSION = (\d+);$/m`.
+- `cloud-worker/src/version.ts` is the one source of `WORKER_VERSION`, `WORKER_FEATURES`, `MANIFEST_VERSION`, `COMPATIBILITY_DATE`. Parsed, never copied, by `engine/build.rs`, `vite.config.ts` (`virtual:cloud-worker-version`) and the bundle script: keep the one-line shape `/^export const WORKER_VERSION = (\d+);$/m`.
 - **Bump `WORKER_VERSION` for every wire change and any change to how a public page looks** (renderer, theme, tokens, fonts). It drives the update badge; without it deployed domains never update.
 - A name in `WORKER_FEATURES` is a promise about behaviour, added only once it exists. The engine gates on `versions` (mirror), `presence` (beat; else plain `GET` polls), `leases` (claims), `spaces` (sections) and re-probes hourly while one is missing (`ASKED_AGAIN_FOR`). The CLI gates each command on its `agent-*` feature.
 - Neither side must work with the other's next release; a skewed pair must say so (badge, `worker-outdated`, `426`) and never corrupt. So retired routes and fields are deleted, not kept.
