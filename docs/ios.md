@@ -19,6 +19,7 @@
 - **History has no Trash either**: a moment's restore removes what the Mac would move to the Trash, so the moment kept before it is pinned (never thinned) and what went stays under Recently deleted. Recently deleted and the timeline read this iPhone's own stores, since it joined; a note's versions also include what other devices mirrored.
 - **The engine's sentences say what this device is** (`Setup::device_kind`, `UIDevice.current.model`: iPhone, iPad).
 - **Colours are generated, never typed**: `node scripts/ios-colors.mjs` writes every colour set in `Assets.xcassets` from `src/styles/tokens.css`, for the names `Theme.swift` asks for. `--check` runs in CI.
+- **`ios/Doklin/PrivacyInfo.xcprivacy` lists every "required reason" API the app calls, the engine's Rust included** (UserDefaults; file timestamps, which Rust's `stat` counts as): App Store Connect checks each upload's binary against it. A new one (a free-space check, `mach_absolute_time`) is an entry there too.
 - **`DoklinKit` imports nothing Apple-only** outside `#if canImport(…)`, so its tests run on Linux. Views go in `ios/Doklin/`; logic a view needs goes in the kit.
 - User-facing errors are sentences, here too: the engine answers a refusal as a phrase (`that code doesn't work`), and `Engine` makes it a sentence where it comes in (`DoklinError.sentence`); screens show it as it stands.
 
@@ -54,10 +55,20 @@
 
 ```sh
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-open ios/Doklin.xcodeproj                 # set a team under Signing, then run (the first build compiles the engine: minutes)
+open ios/Doklin.xcodeproj                 # run (the first build compiles the engine: minutes)
 node verify-harness/drive-ios.mjs         # the core against the harness worker (builds the host engine, runs swift test)
 node verify-harness/drive-ios.mjs --app   # the app in a simulator; DOKLIN_ONLY=<class>, DOKLIN_SIMULATOR=<udid>
 node scripts/ios-colors.mjs [--check]     # colour sets from tokens.css
 ```
+
+## TestFlight
+
+The app reaches phones through TestFlight only, never the App Store.
+
+- A build goes up from Xcode: Product → Archive, then Distribute App → App Store Connect, with *Manage Version and Build Number* on. Every upload needs a higher build number than the last, and Xcode takes the next one; nothing in the repository counts them. The same from the command line, with the account Xcode is signed in to: `xcodebuild archive -allowProvisioningUpdates`, then `xcodebuild -exportArchive -allowProvisioningUpdates` with export options `method` app-store-connect, `destination` upload, `manageAppVersionAndBuildNumber` true.
+- Archiving needs one device registered to the team, even though nothing is installed from Xcode: automatic signing signs the archive for development first, and Apple makes no development profile for a team with no devices. Xcode registers a connected iPhone only with Developer Mode on; its UDID added under Devices on developer.apple.com does the same without it.
+- `MARKETING_VERSION` stays put between builds: testers outside the App Store Connect team see a build only after Apple's beta review, which runs once per version.
+- A build expires 90 days after it is uploaded, and the app stops opening: a newer one goes up at least that often.
+- Export compliance is answered in the project (`ITSAppUsesNonExemptEncryption = NO`): the app's only encryption is HTTPS to its workers.
 
 To try the app in the simulator with no domain: `node verify-harness/serve-worker.mjs --no-mermaid`, mint a device line with the superadmin token it prints (`drive-ios.mjs` shows how), and paste it.

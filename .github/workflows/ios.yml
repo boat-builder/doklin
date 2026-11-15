@@ -14,8 +14,8 @@ name: ios
 #     comments and publishing, history — each checked against what it left
 #     on the domain. The log of what was on screen at each step, and the
 #     screenshots, are kept with the run
-# Nothing here ships anything. The app is archived and signed from Xcode by
-# hand (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
+# Nothing here ships anything. The app goes to TestFlight from Xcode by hand
+# (docs/ios.md), and a push to main that touches only ios/ cuts no Mac
 # release (release.yml).
 
 on:
