@@ -5,9 +5,9 @@
    anyone else.
 
    Colours are copied from the app's src/styles/tokens.css, each written as
-   light-dark(light, dark). The page follows the reader's appearance, and
-   anything set to color-scheme: dark (the agent bands, the terminal, the
-   markdown pane) takes the dark value on the light page too. */
+   light-dark(light, dark). The page is always light, whatever the reader's
+   appearance; anything set to color-scheme: dark (the agent bands, the
+   terminal, the markdown pane) takes the dark values. */
 
 @font-face {
   font-family: "Inter";
@@ -42,7 +42,7 @@
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   --serif: "Literata", ui-serif, Georgia, "Times New Roman", serif;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
