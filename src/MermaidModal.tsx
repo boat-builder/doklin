@@ -1,8 +1,10 @@
-// A zoomable / pannable canvas for a single mermaid diagram.
+// A zoomable / pannable canvas for a single figure: a mermaid diagram or an
+// svg drawing.
 //
-// A rendered diagram in the doc is a self-contained <svg> (mermaid inlines its
-// own styles), so the "expand" chip on a diagram (src/mermaid.ts) hands us that
-// SVG's outerHTML through a `dk-mermaid-expand` CustomEvent; App mounts this
+// A rendered figure in the doc is a self-contained <svg> (mermaid inlines its
+// own styles; drawings name the page's tokens), so the "expand" chip on a
+// figure (src/figureBlock.ts) hands us that SVG's outerHTML through a
+// `dk-figure-expand` CustomEvent; App mounts this
 // full-screen canvas with it. No pan/zoom library — the diagram is one node,
 // so wheel-zoom toward the cursor and drag-to-pan are hand-rolled.
 //

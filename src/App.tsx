@@ -342,36 +342,56 @@ const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const PAGE_WIDE_STORAGE_KEY = "doklin:page-wide";
-const DOC_FONT_STORAGE_KEY = "doklin:doc-font";
+const HEADING_FONT_STORAGE_KEY = "doklin:heading-font";
+const TEXT_FONT_STORAGE_KEY = "doklin:text-font";
 
-/* The document font (Settings → Appearance): the bundled Newsreader serif by
-   default, or the system sans or mono. It sets the note body only — never
-   the chrome, colour or status — so it is per app, like zoom and the theme.
-   Applied as data-doc-font on <html>, which tokens.css keys --doc-font,
-   --doc-size and --doc-leading on. */
-type DocFont = "serif" | "sans" | "mono";
-const DOC_FONTS: DocFont[] = ["serif", "sans", "mono"];
-const DOC_FONT_LABEL: Record<DocFont, string> = { serif: "Serif", sans: "Sans", mono: "Mono" };
+/* The document fonts (Settings → Appearance), two choices as in the Claude
+   Docs viewer: the heading face (serif by default, or sans) and the text
+   face (sans by default, or serif or mono). They set the note only — never
+   the chrome, colour or status — so they are per app, like zoom and the
+   theme. Applied as data-heading-font and data-text-font on <html>, which
+   tokens.css keys --font-heading, --font-text and --doc-size on. */
+type HeadingFont = "serif" | "sans";
+type TextFont = "sans" | "serif" | "mono";
+type DocFonts = { heading: HeadingFont; text: TextFont };
+const HEADING_FONTS: HeadingFont[] = ["serif", "sans"];
+const TEXT_FONTS: TextFont[] = ["sans", "serif", "mono"];
+const FONT_LABEL: Record<TextFont, string> = { serif: "Serif", sans: "Sans", mono: "Mono" };
 
-function readStoredDocFont(): DocFont {
+function readStoredDocFonts(): DocFonts {
+  const fonts: DocFonts = { heading: "serif", text: "sans" };
   try {
-    const v = localStorage.getItem(DOC_FONT_STORAGE_KEY);
-    if (v && (DOC_FONTS as string[]).includes(v)) return v as DocFont;
+    // One-time migration (2026-11): builds before the heading/text split
+    // stored a single "doklin:doc-font" (serif, the old default, or sans or
+    // mono). An explicit mono choice carries over as the text face; sans and
+    // serif take the new defaults. Read once, then the old key is removed.
+    const old = localStorage.getItem("doklin:doc-font");
+    if (old !== null) {
+      if (old === "mono" && localStorage.getItem(TEXT_FONT_STORAGE_KEY) === null) {
+        localStorage.setItem(TEXT_FONT_STORAGE_KEY, "mono");
+      }
+      localStorage.removeItem("doklin:doc-font");
+    }
+    const h = localStorage.getItem(HEADING_FONT_STORAGE_KEY);
+    if (h && (HEADING_FONTS as string[]).includes(h)) fonts.heading = h as HeadingFont;
+    const t = localStorage.getItem(TEXT_FONT_STORAGE_KEY);
+    if (t && (TEXT_FONTS as string[]).includes(t)) fonts.text = t as TextFont;
   } catch {
     // localStorage may be unavailable; fall through
   }
-  return "serif";
+  return fonts;
 }
 
-function applyDocFont(f: DocFont) {
-  document.documentElement.dataset.docFont = f;
+function applyDocFonts(f: DocFonts) {
+  document.documentElement.dataset.headingFont = f.heading;
+  document.documentElement.dataset.textFont = f.text;
 }
 
-/* "Wide page": the document column normally holds a reading measure
-   (--doc-measure, 68ch — tokens.css); wide trades it for the 1080px canvas
-   for tables, boards and diagrams. Per app, like zoom: it's about how the
-   reader likes to read, not about the file. Applied as data-page-width on
-   <html>, which App.css keys the measure on. */
+/* "Wide page": the document column normally holds a 672px reading measure
+   (--doc-measure, tokens.css); wide lets it grow to 900px for tables,
+   boards and diagrams. Per app, like zoom: it's about how the reader likes
+   to read, not about the file. Applied as data-page-width on <html>, which
+   App.css keys the measure on. */
 function readStoredPageWide(): boolean {
   try {
     return localStorage.getItem(PAGE_WIDE_STORAGE_KEY) === "1";
@@ -519,10 +539,10 @@ function applyTheme(t: Theme) {
   root.dataset.themePref = t;
 }
 
-// Paint the stored theme and document font before the first render, not after it.
+// Paint the stored theme and document fonts before the first render, not after it.
 if (typeof document !== "undefined") {
   applyTheme(readStoredTheme());
-  applyDocFont(readStoredDocFont());
+  applyDocFonts(readStoredDocFonts());
 }
 
 function isWriteError(e: unknown): e is WriteErrorPayload {
@@ -758,7 +778,7 @@ export default function App() {
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
   const [pageWide, setPageWide] = useState<boolean>(() => readStoredPageWide());
-  const [docFont, setDocFont] = useState<DocFont>(() => readStoredDocFont());
+  const [docFonts, setDocFonts] = useState<DocFonts>(() => readStoredDocFonts());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -1125,20 +1145,20 @@ export default function App() {
   );
 
 
-  // The SVG of a rendered mermaid diagram opened in the zoom/pan canvas; null
-  // when closed. Set by the `dk-mermaid-expand` event a diagram's expand chip
-  // fires (src/mermaid.ts).
+  // The SVG of a rendered figure (a mermaid diagram or an svg drawing) opened
+  // in the zoom/pan canvas; null when closed. Set by the `dk-figure-expand`
+  // event a figure's expand chip fires (src/figureBlock.ts).
   const [zoomDiagramSvg, setZoomDiagramSvg] = useState<string | null>(null);
 
-  // A rendered mermaid diagram's expand chip (src/mermaid.ts) fires this with
-  // the diagram's SVG; open the zoom/pan canvas on it.
+  // A rendered figure's expand chip fires this with its SVG; open the
+  // zoom/pan canvas on it.
   useEffect(() => {
     const onExpand = (e: Event) => {
       const detail = (e as CustomEvent<{ svg?: string }>).detail;
       if (detail && typeof detail.svg === "string") setZoomDiagramSvg(detail.svg);
     };
-    window.addEventListener("dk-mermaid-expand", onExpand);
-    return () => window.removeEventListener("dk-mermaid-expand", onExpand);
+    window.addEventListener("dk-figure-expand", onExpand);
+    return () => window.removeEventListener("dk-figure-expand", onExpand);
   }, []);
 
   // Land a markdown save's thread bodies in the entity meta of a document
@@ -1248,13 +1268,14 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    applyDocFont(docFont);
+    applyDocFonts(docFonts);
     try {
-      localStorage.setItem(DOC_FONT_STORAGE_KEY, docFont);
+      localStorage.setItem(HEADING_FONT_STORAGE_KEY, docFonts.heading);
+      localStorage.setItem(TEXT_FONT_STORAGE_KEY, docFonts.text);
     } catch {
       // ignore
     }
-  }, [docFont]);
+  }, [docFonts]);
 
   useEffect(() => {
     document.documentElement.dataset.pageWidth = pageWide ? "wide" : "normal";
@@ -5549,8 +5570,8 @@ export default function App() {
       onTogglePageWide={() => setPageWide((w) => !w)}
       theme={theme}
       onTheme={setTheme}
-      docFont={docFont}
-      onDocFont={setDocFont}
+      docFonts={docFonts}
+      onDocFonts={setDocFonts}
       onNewNote={() => void newUntitled()}
       onOpenFile={openFilePicker}
       onOpenFolder={openFolderPicker}
@@ -6587,8 +6608,8 @@ function Settings({
   onTogglePageWide,
   theme,
   onTheme,
-  docFont,
-  onDocFont,
+  docFonts,
+  onDocFonts,
   onNewNote,
   onOpenFile,
   onOpenFolder,
@@ -6608,8 +6629,8 @@ function Settings({
   onTogglePageWide: () => void;
   theme: Theme;
   onTheme: (t: Theme) => void;
-  docFont: DocFont;
-  onDocFont: (f: DocFont) => void;
+  docFonts: DocFonts;
+  onDocFonts: (f: DocFonts) => void;
   onNewNote: () => void;
   onOpenFile: () => void;
   onOpenFolder: () => void;
@@ -6806,21 +6827,41 @@ function Settings({
               </button>
             ))}
           </div>
-          <div className="settings-tiles is-fonts" role="group" aria-label="Document font">
-            {DOC_FONTS.map((f) => (
+          <div className="settings-subsection-label">Headings</div>
+          <div className="settings-tiles is-fonts" role="group" aria-label="Heading font">
+            {HEADING_FONTS.map((f) => (
               <button
                 key={f}
                 role="menuitemradio"
-                aria-checked={docFont === f}
-                className={`settings-tile ${docFont === f ? "is-active" : ""}`}
-                data-testid={`settings-font-${f}`}
-                title={`Set notes in ${DOC_FONT_LABEL[f].toLowerCase()}`}
-                onClick={() => onDocFont(f)}
+                aria-checked={docFonts.heading === f}
+                className={`settings-tile ${docFonts.heading === f ? "is-active" : ""}`}
+                data-testid={`settings-heading-font-${f}`}
+                title={`Set headings in ${FONT_LABEL[f].toLowerCase()}`}
+                onClick={() => onDocFonts({ ...docFonts, heading: f })}
+              >
+                <span className={`settings-tile-face settings-font-sample is-heading is-${f}`} aria-hidden>
+                  Ag
+                </span>
+                <span className="settings-tile-name">{FONT_LABEL[f]}</span>
+              </button>
+            ))}
+          </div>
+          <div className="settings-subsection-label">Text</div>
+          <div className="settings-tiles is-fonts" role="group" aria-label="Text font">
+            {TEXT_FONTS.map((f) => (
+              <button
+                key={f}
+                role="menuitemradio"
+                aria-checked={docFonts.text === f}
+                className={`settings-tile ${docFonts.text === f ? "is-active" : ""}`}
+                data-testid={`settings-text-font-${f}`}
+                title={`Set text in ${FONT_LABEL[f].toLowerCase()}`}
+                onClick={() => onDocFonts({ ...docFonts, text: f })}
               >
                 <span className={`settings-tile-face settings-font-sample is-${f}`} aria-hidden>
                   Ag
                 </span>
-                <span className="settings-tile-name">{DOC_FONT_LABEL[f]}</span>
+                <span className="settings-tile-name">{FONT_LABEL[f]}</span>
               </button>
             ))}
           </div>
@@ -6828,7 +6869,7 @@ function Settings({
             role="menuitemcheckbox"
             aria-checked={pageWide}
             className={`settings-option ${pageWide ? "is-active" : ""}`}
-            title="Use the full 1080px canvas instead of a reading-width column"
+            title="Widen the column to 900px for tables, boards and diagrams"
             onClick={onTogglePageWide}
           >
             <span className="settings-option-check">

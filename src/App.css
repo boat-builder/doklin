@@ -108,8 +108,9 @@ body,
    to the start of the tab bar, so the tabs always begin after the traffic
    lights. Every gap in the row drags the window (windowDrag.ts).
 
-   Everything sits on the canvas except the document area: the one sheet,
-   inset from the window edge with rounded corners. */
+   Flat, like the Claude Docs viewer: the chrome sits on the canvas and the
+   document area on the sheet, meeting at a hairline (--sheet-edge) — no
+   floating card, no radius, no shadow. */
 .app {
   display: grid;
   grid-template-columns: 0 1fr;
@@ -520,9 +521,9 @@ body,
 
 /* The editor grid cell: the document sheet. Holds one pane, or two side by
    side (split view) with a draggable divider; the drop overlay (dragging a
-   tab out of the bar) floats over the whole area. Inset from the window's
-   right and bottom edges — and its left one too when no left column is
-   showing — with rounded corners that clip whatever it holds. */
+   tab out of the bar) floats over the whole area. It runs to the window's
+   right and bottom edges; a hairline parts it from the title row above and
+   from the left column when one shows. */
 .editor-area {
   grid-area: main;
   position: relative;
@@ -530,15 +531,14 @@ body,
   align-items: stretch;
   min-width: 0;
   min-height: 0;
-  margin: 0 var(--inset) var(--inset) 0;
-  border-radius: var(--r-lg);
   background: var(--sheet);
-  box-shadow: var(--shadow-sheet);
+  border-top: 1px solid var(--sheet-edge);
+  border-left: 1px solid var(--sheet-edge);
   overflow: hidden;
 }
 
 .app:not(.with-sidebar) .editor-area {
-  margin-left: var(--inset);
+  border-left: none;
 }
 
 /* One pane: an optional slim header (split mode) over the scrolling canvas. */
@@ -722,7 +722,7 @@ body,
    row — trim the document's min-height so short docs don't grow a phantom
    scroll range. */
 .editor-pane.is-split .editor-wrap .milkdown .ProseMirror {
-  min-height: calc(100vh - var(--bar-h) - var(--inset) - 30px);
+  min-height: calc(100vh - var(--bar-h) - 1px - 30px);
 }
 
 .editor-wrap .milkdown {
@@ -738,33 +738,34 @@ body,
    (sidebar, tabs, menus) is deliberately untouched.
 
    Everything in the document derives from the .ProseMirror base below: the
-   headings are in em, and crepe leaves the rest (lists, quotes, table cells,
-   CodeMirror content) inheriting. Keep it that way — a px font-size added
-   anywhere inside .ProseMirror silently opts that element out of zoom.
+   body text is --doc-size × zoom, block spacing is in em of it, and crepe
+   leaves the rest (lists, quotes, table cells, CodeMirror content)
+   inheriting. Headings are the one fixed-px exception (tokens.css: a text
+   face never resizes them), and they multiply by --doc-zoom themselves.
+   Any other px font-size inside .ProseMirror opts that element out of zoom.
    The canvas padding stays fixed: zoom is about type size, not margins.
 
-   The measure is --doc-measure (68ch of the document font, so it follows
-   both the font choice and zoom) plus the fixed side padding; "Wide page"
-   (data-page-width on <html>) trades it for the old 1080px canvas for
-   tables and diagrams. */
+   The measure is --doc-measure (a 672px column × zoom) plus the fixed side
+   padding; "Wide page" (data-page-width on <html>) widens the column to
+   900px for tables and diagrams. */
 .editor-wrap .milkdown .ProseMirror {
-  max-width: calc(var(--doc-measure) + 128px);
+  max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
   margin: 0 auto;
-  padding: 24px 64px 240px;
-  min-height: calc(100vh - var(--bar-h) - var(--inset));
-  font-family: var(--doc-font);
+  padding: 64px 64px 240px;
+  min-height: calc(100vh - var(--bar-h) - 1px);
+  font-family: var(--font-text);
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
   line-height: var(--doc-leading);
   color: var(--text-1);
 }
 
 :root[data-page-width="wide"] .editor-wrap .milkdown .ProseMirror {
-  max-width: var(--doc-measure-wide);
+  max-width: calc(var(--doc-measure-wide) * var(--doc-zoom, 1) + 128px);
 }
 
 @media (max-width: 720px) {
   .editor-wrap .milkdown .ProseMirror {
-    padding: 24px 28px 200px;
+    padding: 40px 28px 200px;
   }
 }
 
@@ -1108,48 +1109,139 @@ body,
   color: var(--text-3);
 }
 
+/* ---------- Document type and rhythm ----------
+   The Claude Docs viewer's scale: headings in the heading face at a regular
+   weight (sans headings take 600, tokens.css), fixed px × zoom; h4–h6 drop
+   to the text face. Block spacing is margins in em, so the rhythm follows
+   the text size. Crepe's reset pads headings and paragraphs; the margins
+   here replace that padding outright. */
 .editor-wrap .milkdown .ProseMirror h1,
 .editor-wrap .milkdown .ProseMirror h2,
 .editor-wrap .milkdown .ProseMirror h3,
 .editor-wrap .milkdown .ProseMirror h4,
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
-  font-family: inherit;
-  font-weight: 650;
-  letter-spacing: -0.012em;
+  font-family: var(--font-heading);
+  font-weight: var(--doc-heading-weight);
   color: var(--text-1);
+  padding: 0;
 }
 
-/* Sizes are em of the document base (--doc-size; 18px serif at 100%) so
-   zoom and the font choice carry them: 2em = 36px, 1.389em = 25px,
-   1.111em = 20px, 1em = 18px. */
 .editor-wrap .milkdown .ProseMirror h1 {
-  font-size: 2em;
-  line-height: 1.18;
-  letter-spacing: -0.02em;
-  margin-top: 28px;
+  font-size: calc(var(--doc-h1) * var(--doc-zoom, 1));
+  line-height: 1.2;
+  letter-spacing: var(--doc-h1-track);
+  margin: 0 0 0.25em;
 }
 .editor-wrap .milkdown .ProseMirror h2 {
-  font-size: 1.389em;
-  line-height: 1.28;
-  margin-top: 26px;
+  font-size: calc(var(--doc-h2) * var(--doc-zoom, 1));
+  line-height: 1.3;
+  letter-spacing: var(--doc-h2-track);
+  margin: 1.6em 0 0.5em;
 }
 .editor-wrap .milkdown .ProseMirror h3 {
-  font-size: 1.111em;
+  font-size: calc(var(--doc-h3) * var(--doc-zoom, 1));
   line-height: 1.35;
-  margin-top: 20px;
+  letter-spacing: var(--doc-h3-track);
+  margin: 1.4em 0 0.4em;
 }
 .editor-wrap .milkdown .ProseMirror h4,
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
-  font-size: 1em;
-  margin-top: 16px;
+  font-family: var(--font-text);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.editor-wrap .milkdown .ProseMirror h4 {
+  font-size: calc(var(--doc-h4) * var(--doc-zoom, 1));
+  line-height: 1.4;
+  margin: 1.3em 0 0.3em;
+}
+.editor-wrap .milkdown .ProseMirror h5,
+.editor-wrap .milkdown .ProseMirror h6 {
+  font-size: calc(var(--doc-h5) * var(--doc-zoom, 1));
+  line-height: 1.45;
+  margin: 1.2em 0 0.25em;
+}
+.editor-wrap .milkdown .ProseMirror h6 {
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+/* The first block in the document, and whatever follows the title, sit
+   flush: the column's padding is the top margin. */
+.editor-wrap .milkdown .ProseMirror > :first-child,
+.editor-wrap .milkdown .ProseMirror > h1 + * {
+  margin-top: 0;
 }
 
 .editor-wrap .milkdown .ProseMirror p {
   font-size: 1em;
   line-height: var(--doc-leading);
-  padding: 3px 0;
+  padding: 0;
+  margin: 0.6em 0;
+}
+
+/* Lists: native-looking markers in a 1.855em indent, a quarter line
+   between items. Crepe draws <ul>/<ol> holding one block per item, each a
+   flex row (marker widget + children); the marker box is one line tall so
+   the marker centres on the first line, and its width plus the gap is the
+   indent. The bullet is a disc drawn here (Crepe's icon is a small circle in
+   a 24px box), centred 1.2em in, as a native disc sits. Paragraphs inside
+   an item carry no margin of their own. */
+.editor-wrap .milkdown .ProseMirror ul,
+.editor-wrap .milkdown .ProseMirror ol {
+  margin: 0.6em 0;
+}
+
+.editor-wrap .milkdown .ProseMirror li ul,
+.editor-wrap .milkdown .ProseMirror li ol {
+  margin: 0;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block + .milkdown-list-item-block,
+.editor-wrap .milkdown .ProseMirror li li {
+  margin-top: 0.25em;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li {
+  gap: 0.485em;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li .label-wrapper {
+  width: 1.37em;
+  height: calc(1em * var(--doc-leading));
+  justify-content: flex-end;
+  color: var(--text-1);
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li .label-wrapper .label {
+  height: auto;
+  width: auto;
+  padding: 0;
+  line-height: var(--doc-leading);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li .label-wrapper .bullet svg {
+  display: none;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li .label-wrapper .bullet::before {
+  content: "";
+  display: block;
+  width: 0.34em;
+  height: 0.34em;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.editor-wrap .milkdown .ProseMirror .milkdown-list-item-block p {
+  margin: 0;
+}
+
+.editor-wrap .milkdown .ProseMirror strong {
+  font-weight: 600;
 }
 
 .editor-wrap .milkdown .crepe-placeholder::before {
@@ -1159,50 +1251,101 @@ body,
 
 /* Links follow on click (linkOpen.ts), so they get a link's cursor — set on
    the anchor itself, which beats the text cursor the surface (and web.css's
-   read-only rule) hands down by inheritance. The Crepe theme already gives
-   them the underline; hovering brings up Crepe's tooltip with the URL. */
+   read-only rule) hands down by inheritance. No underline until hovered,
+   as in the viewer; hovering also brings up Crepe's tooltip with the URL. */
 .editor-wrap .milkdown .ProseMirror a {
   cursor: pointer;
-  color: var(--accent);
-  text-decoration-line: underline;
-  text-decoration-thickness: 1px;
+  color: var(--link);
+  text-decoration: none;
   text-underline-offset: 0.2em;
-  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  transition: text-decoration-color var(--dur-fast) var(--ease);
+  text-decoration-thickness: 1px;
 }
 
 .editor-wrap .milkdown .ProseMirror a:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-line: underline;
 }
 
-/* Quotes: a quiet bar and the secondary ink, not a tinted slab. */
+/* Quotes: a quiet 3px bar; the words stay in the body ink. */
 .editor-wrap .milkdown .ProseMirror blockquote {
-  padding-left: 22px;
-  color: var(--text-2);
+  margin: 0.8em 0;
+  padding: 0.1em 1em;
+  box-sizing: border-box;
+  color: var(--text-1);
 }
 
 .editor-wrap .milkdown .ProseMirror blockquote::before {
   width: 3px;
+  top: 0;
+  bottom: 0;
+  border-radius: 0;
   background: var(--quote-bar);
 }
 
-/* Code: the mono face, a size step down from the prose so a serif page
-   doesn't shout in 18px monospace. Applied to exactly the two elements the
-   placeholder parity rule (below) pairs — the live CodeMirror and its static
-   placeholder — never to the whole block: the tools row and the mermaid
-   preview must keep their geometry (sizing the block broke the mermaid
-   live-edit drive). */
-.editor-wrap .milkdown .milkdown-code-block .cm-editor,
-.editor-wrap .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
-  font-size: 0.85em;
+.editor-wrap .milkdown .ProseMirror blockquote p {
+  margin: 0.3em 0;
 }
 
+.editor-wrap .milkdown .ProseMirror img {
+  border-radius: 4px;
+}
+
+/* Code: the mono face at .875em of the text. Applied to exactly the two
+   elements the placeholder parity rule (below) pairs — the live CodeMirror
+   and its static placeholder — never to the whole block: the tools and the
+   diagram preview must keep their geometry (sizing the block broke the
+   mermaid live-edit drive). */
+.editor-wrap .milkdown .milkdown-code-block .cm-editor,
+.editor-wrap .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
+  font-size: 0.875em;
+}
+
+/* A code block is a plain tinted box, as in the viewer: radius 6, padding
+   .75rem .9rem. Crepe's tools row (language picker, Copy) floats over the
+   top-right corner and shows on hover or while editing, instead of taking
+   a 30px row above the code. */
 .editor-wrap .milkdown .milkdown-code-block {
   /* Crepe paints the block, its gutter and panels from "surface", which is
      the floating-menu surface elsewhere (--raised: white on light, so the
      block vanished). Scope it to the code tint here. */
   --crepe-color-surface: var(--code-bg);
-  border-radius: var(--r-md);
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  margin: 0.6em 0;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .tools {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 2;
+  gap: 6px;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .tools .language-button {
+  margin-bottom: 0;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .language-picker {
+  top: 34px;
+  right: 8px;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-content {
+  padding: 0;
+}
+
+/* No line numbers: a code block in a document reads as quoted code. */
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-gutters {
+  display: none;
+}
+
+.editor-wrap .milkdown .milkdown-code-block .cm-editor .cm-line {
+  padding: 0;
 }
 
 /* The code editor's chrome on the theme's tokens; the syntax colours are
@@ -1268,23 +1411,74 @@ body,
   color: var(--text-1);
 }
 
+/* Inline code: a small warm pill in the mono face. */
 .editor-wrap .milkdown .ProseMirror code {
   font-family: var(--font-mono);
+  font-size: 0.9em;
+  line-height: inherit;
+  display: inline;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  color: var(--code-ink);
+  background: var(--code-inline-bg);
 }
 
 .editor-wrap .milkdown .ProseMirror hr {
-  background-color: var(--border);
+  background-color: var(--border-strong);
+  height: 1px;
+  padding: 0;
+  margin: 1.4em 0;
 }
 
-/* Tables: hairlines from the theme, a sunken header row. */
+/* Tables: as wide as their content (not stretched to the column), a step
+   smaller than the text, warm hairlines and a tinted header row in the body
+   weight. A cell wraps past 42ch unless a drag gave its column a width. The
+   scroller adds room above and below, and may run 64px into the right
+   margin before it scrolls, as the viewer lets a wide table bleed. */
+.editor-wrap .milkdown .milkdown-table-block {
+  margin: 0.6em 0;
+}
+
+.editor-wrap .milkdown .milkdown-table-block .table-wrapper {
+  margin: 2px -64px -8px 0;
+  padding: 16px 0 18px;
+}
+
+@media (max-width: 720px) {
+  .editor-wrap .milkdown .milkdown-table-block .table-wrapper {
+    margin-right: -28px;
+  }
+}
+
+.editor-wrap .milkdown .milkdown-table-block table {
+  width: max-content;
+  max-width: none;
+  font-size: 0.94em;
+  line-height: 1.45;
+}
+
 .editor-wrap .milkdown .milkdown-table-block th,
 .editor-wrap .milkdown .milkdown-table-block td {
-  border-color: var(--border);
+  border-color: var(--table-rule);
+  padding: 6px 10px;
+  vertical-align: top;
+}
+
+.editor-wrap .milkdown .milkdown-table-block td:not([data-colwidth]):not(.column-resize-dragging),
+.editor-wrap .milkdown .milkdown-table-block th:not([data-colwidth]):not(.column-resize-dragging) {
+  max-width: 42ch;
 }
 
 .editor-wrap .milkdown .milkdown-table-block th {
-  background: var(--sunken);
-  font-weight: 600;
+  background: var(--table-head);
+  font-weight: inherit;
+  text-align: left;
+}
+
+.editor-wrap .milkdown .milkdown-table-block th p,
+.editor-wrap .milkdown .milkdown-table-block td p {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Task lists: the checked box takes the accent. */
@@ -1327,17 +1521,18 @@ body,
    after 5s off-screen. The swap happens mid-scroll, so the placeholder must
    occupy EXACTLY the height of the mounted editor or the document shifts
    under the reader (blink + scroll jump). Mounted geometry (crepe 7.21.1 +
-   CM6 base theme): 30px .tools row, then .cm-content at inherited font-size,
-   monospace, line-height 1.4, 4px vertical padding, no wrapping; each
-   .cm-line is padded 0 2px 0 6px. The `pre` type selector outranks the crepe
-   theme rule regardless of stylesheet order. Mermaid blocks keep their own
-   height dance (diagram ≠ source, inherently). Re-measure if crepe updates. */
+   CM6 base theme, as restyled above): the .tools row floats out of flow,
+   then .cm-content at inherited font-size, the mono face, line-height 1.5,
+   no padding, no wrapping; each .cm-line unpadded. The `pre` type selector
+   outranks the crepe theme rule regardless of stylesheet order. Mermaid
+   blocks keep their own height dance (diagram ≠ source, inherently).
+   Re-measure if crepe updates. */
 .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
   margin: 0;
-  padding: 34px 0 4px; /* 30px tools row + 4px cm-content top; 4px bottom */
+  padding: 0;
   font-family: var(--font-mono);
   font-size: inherit;
-  line-height: 1.4;
+  line-height: 1.5;
   white-space: pre;
   word-break: normal;
   overflow-x: hidden;
@@ -1345,81 +1540,103 @@ body,
 
 .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder > code {
   display: block;
-  padding: 0 2px 0 6px;
-  /* The inline-code pill rule (.ProseMirror code, 87.5%/1.4286) reaches this
-     code element too — reclaim the pre's metrics or lines land at 20px
-     instead of CM's 22.4px. */
+  padding: 0;
+  /* The inline-code pill rule (.ProseMirror code) reaches this code element
+     too — reclaim the pre's metrics and drop the pill. */
   font: inherit;
+  background: none;
+  border-radius: 0;
 }
 
-/* ---------- Mermaid diagrams (```mermaid code blocks) ----------
-   The SVG itself is colored from the app tokens at render time
-   (src/mermaid.ts) — this is layout and framing only. The diagram sits on
-   its own paper canvas (--sheet) inside the code block's tinted card, like
-   a mounted figure; wide charts scroll sideways within it.
+/* ---------- Figure blocks (```mermaid diagrams, ```svg drawings) ----------
+   A figure block reads as the picture alone, set into the column like an
+   image: no code card, no language chip or Copy row, full column width.
+   Mermaid colours its SVG from the drawing tokens at render time
+   (mermaidTheme.ts); drawings name the tokens themselves (drawing.ts). This
+   is layout and framing only.
 
-   A diagram block is two-state, never both at once: reading (nothing in the
-   block focused) shows the diagram alone; the Source button — or arrowing
-   the caret in — shows the source alone, and leaving the block flips back.
-   The .dk-mermaid-editing class (managed in src/mermaid.ts) bridges the gap
-   where :focus-within can't reach: a display:none editor can't take focus. */
+   Two states, never both at once (figureBlock.ts): reading (nothing in the
+   block focused) shows the picture; the Source chip — or arrowing the caret
+   in — shows the source alone as an ordinary code block, and leaving the
+   block flips back. The .dk-figure-editing class bridges the gap where
+   :focus-within can't reach: a display:none editor can't take focus. */
 
-.milkdown .milkdown-code-block:has(.preview .dk-mermaid):not(:focus-within):not(.dk-mermaid-editing)
-  .codemirror-host {
+.milkdown .milkdown-code-block:has(.preview .dk-figure):not(:focus-within):not(.dk-figure-editing) {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.milkdown .milkdown-code-block:has(.preview .dk-figure):not(:focus-within):not(.dk-figure-editing)
+  :is(.codemirror-host, .tools) {
   display: none;
 }
 
 .milkdown
-  .milkdown-code-block:has(.preview .dk-mermaid):is(:focus-within, .dk-mermaid-editing)
+  .milkdown-code-block:has(.preview .dk-figure):is(:focus-within, .dk-figure-editing)
   .preview-panel {
   display: none;
 }
 
 /* Read-only sessions mount preview-only (the component marks the editor
-   .hidden, !important) — the Source button must still win there. */
+   .hidden, !important) — the Source chip must still win there. */
 .milkdown
-  .milkdown-code-block:has(.preview .dk-mermaid):is(:focus-within, .dk-mermaid-editing)
+  .milkdown-code-block:has(.preview .dk-figure):is(:focus-within, .dk-figure-editing)
   .codemirror-host.hidden {
   display: block !important;
 }
 
 /* The stock preview toggle ("Hide"/"Edit") would fight the two-state model —
-   drop it for diagram blocks only (LaTeX previews keep it). Same for the
+   drop it for figure blocks only (LaTeX previews keep it). Same for the
    "PREVIEW" divider + label: they exist to separate a preview from the
-   source above it, and a diagram never shows beside its source. */
-.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-toggle-button,
-.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-divider,
-.milkdown .milkdown-code-block:has(.preview .dk-mermaid) .preview-label {
+   source above it, and a figure never shows beside its source. */
+.milkdown .milkdown-code-block:has(.preview .dk-figure) .preview-toggle-button,
+.milkdown .milkdown-code-block:has(.preview .dk-figure) .preview-divider,
+.milkdown .milkdown-code-block:has(.preview .dk-figure) .preview-label {
   display: none;
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid {
+.milkdown .milkdown-code-block .preview .dk-figure {
   position: relative;
   display: flex;
   justify-content: safe center;
-  background: var(--sheet);
-  border-radius: 8px;
-  padding: 20px 16px;
   overflow-x: auto;
+  text-align: left;
 }
 
-/* The switch into source view: a quiet chip riding the diagram's top-right
+/* Figures set their words in the UI face (sans), whichever text face the
+   document reads in, as the viewer's diagrams do. */
+.milkdown .milkdown-code-block .preview .dk-figure > svg {
+  max-width: 100%;
+  flex: none;
+  font-family: var(--font-ui);
+}
+
+/* A drawing fills the column: its 760-wide frame scales to fit, as the
+   viewer scales its 760 frame to the 672 column. */
+.milkdown .milkdown-code-block .preview .dk-drawing > svg {
+  width: 100%;
+  height: auto;
+}
+
+/* The switch into source view: a quiet chip riding the figure's top-right
    corner (inside the error card too), visible while the pointer is over the
-   block — the same reveal the block's language/copy tools use. */
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit,
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand {
+   block. Expand rides the opposite corner and is icon-only. */
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-source,
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-expand {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 0;
+  right: 0;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
   font-size: var(--fs-sm);
   font-weight: 600;
-  font-family: inherit;
-  color: var(--text-3);
-  background: var(--sheet);
+  font-family: var(--font-ui);
+  line-height: 16px;
+  color: var(--text-2);
+  background: var(--raised);
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
@@ -1427,43 +1644,71 @@ body,
   transition: opacity 0.15s ease;
 }
 
-/* Expand rides the opposite corner from Source (top-left) and is icon-only. */
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand {
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-expand {
   right: auto;
-  left: 8px;
+  left: 0;
   gap: 0;
   padding: 4px;
 }
 
-.milkdown .milkdown-code-block:hover .preview .dk-mermaid .dk-mermaid-edit,
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:focus-visible,
-.milkdown .milkdown-code-block:hover .preview .dk-mermaid .dk-mermaid-expand,
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand:focus-visible {
+.milkdown .milkdown-code-block:hover .preview .dk-figure .dk-figure-source,
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-source:focus-visible,
+.milkdown .milkdown-code-block:hover .preview .dk-figure .dk-figure-expand,
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-expand:focus-visible {
   opacity: 1;
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-edit:hover,
-.milkdown .milkdown-code-block .preview .dk-mermaid .dk-mermaid-expand:hover {
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-source:hover,
+.milkdown .milkdown-code-block .preview .dk-figure .dk-figure-expand:hover {
   color: var(--text-1);
   background: var(--hover);
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid svg {
-  max-width: 100%;
-  flex: none;
-}
-
 /* The editor's paragraph styling (.ProseMirror p above) must not restyle the
    HTML labels inside a diagram: mermaid measures them outside the editor
-   cascade, so any extra font-size/padding here clips the label boxes. */
-.editor-wrap .milkdown .ProseMirror .dk-mermaid p {
+   cascade, so any extra font-size/padding/margin here clips the label boxes. */
+.editor-wrap .milkdown .ProseMirror .dk-figure p {
   font-size: inherit;
   line-height: inherit;
   padding: 0;
   margin: 0;
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid-loading {
+/* Mermaid labels, globally: mermaid measures a label in a scratch node on
+   <body> before the diagram's own stylesheet exists, so the sizes its theme
+   CSS draws (mermaidTheme.ts) must already apply there, or boxes clip. A
+   name over a line ("<b>Name</b><br/>line") is 13/600 over 11.5; a plain
+   label is 13. */
+.nodeLabel,
+.edgeLabel {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.nodeLabel:has(b),
+.edgeLabel,
+.cluster-label .nodeLabel {
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.nodeLabel b {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cluster-label .nodeLabel {
+  font-weight: 600;
+}
+
+.nodeLabel p,
+.edgeLabel p {
+  margin: 0;
+  padding: 0;
+  line-height: inherit;
+}
+
+.milkdown .milkdown-code-block .preview .dk-figure-loading {
   justify-content: center;
   font-size: var(--fs-md);
   color: var(--text-3);
@@ -1471,30 +1716,41 @@ body,
 }
 
 /* A source that doesn't parse (the normal state mid-typing): a quiet card,
-   not an alarm — heading in muted ink, mermaid's message in small mono. */
-.milkdown .milkdown-code-block .preview .dk-mermaid-error {
+   not an alarm — heading in muted ink, the parser's message in small mono. */
+.milkdown .milkdown-code-block .preview .dk-figure-error {
   display: block;
+  /* The editor sets pre-wrap; the card's markup newlines are not text. */
+  white-space: normal;
   text-align: left;
   padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--code-bg);
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid-error-head {
+.milkdown .milkdown-code-block .preview .dk-figure-error-head {
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--text-3);
+  font-family: var(--font-ui);
+  color: var(--text-2);
 }
 
-.milkdown .milkdown-code-block .preview .dk-mermaid-error-msg {
+.milkdown .milkdown-code-block .preview .dk-figure-error-msg {
   margin: 8px 0 0;
   font-size: var(--fs-sm);
   line-height: 1.5;
   font-family: var(--font-mono);
-  color: var(--text-3);
+  color: var(--text-2);
   white-space: pre-wrap;
   overflow-x: auto;
+}
+
+/* The error card's Source chip sits inside its padding. */
+.milkdown .milkdown-code-block .preview .dk-figure-error .dk-figure-source {
+  top: 8px;
+  right: 8px;
 }
 
 /* ---------- Mermaid zoom/pan canvas (MermaidModal.tsx) ----------
@@ -1664,9 +1920,9 @@ body,
      which macOS ships, so without these the document fell back to Arial.
      "default" is Crepe's own chrome (slash menu, toolbars, code-block tools)
      and takes the UI face; the document text itself is set on .ProseMirror
-     from --doc-font. */
+     from --font-text, its headings from --font-heading. */
   --crepe-font-default: var(--font-ui);
-  --crepe-font-title: var(--doc-font);
+  --crepe-font-title: var(--font-heading);
   --crepe-font-code: var(--font-mono);
 }
 
@@ -1825,7 +2081,7 @@ body,
   left: -2px;
 }
 
-/* Floating (no left column): just inside the sheet's bottom-left corner. */
+/* Floating (no left column): just inside the document's bottom-left corner. */
 .settings-wrap {
   position: fixed;
   bottom: calc(var(--inset) + 12px);
@@ -2006,9 +2262,8 @@ body,
   gap: 4px;
   height: 100%;
   padding: 7px 8px;
-  border-radius: 5px 0 0 0;
   background: var(--sheet);
-  box-shadow: var(--shadow-sheet);
+  box-shadow: -1px -1px 0 var(--sheet-edge);
 }
 
 .settings-swatch-line {
@@ -2029,7 +2284,8 @@ body,
   background: var(--accent);
 }
 
-/* A document font, as "Ag" in that face on the sheet. */
+/* A document font, as "Ag" in that face on the sheet; a heading sample
+   takes the weight a heading in that face is set in. */
 .settings-font-sample {
   display: grid;
   place-items: center;
@@ -2041,16 +2297,27 @@ body,
 
 .settings-font-sample.is-serif {
   font-family: var(--font-serif);
-  font-size: 21px;
+  font-size: 20px;
 }
 
 .settings-font-sample.is-sans {
   font-family: var(--font-sans);
 }
 
+.settings-font-sample.is-heading.is-sans {
+  font-weight: 600;
+}
+
 .settings-font-sample.is-mono {
   font-family: var(--font-mono);
   font-size: 16px;
+}
+
+/* "Headings" / "Text" over their rows of font tiles. */
+.settings-subsection-label {
+  padding: 2px 10px 0;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
 }
 
 /* ---------- Custom checkbox ----------

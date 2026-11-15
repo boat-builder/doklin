@@ -376,7 +376,7 @@ await check("help: the overview lists every command; each topic and each command
     "the overview says the exit codes": /Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflict/.test(overview.out),
   };
   for (const name of COMMANDS) facts[`the overview lists ${name}`] = new RegExp(`^  ${name}\\b`, "m").test(overview.out);
-  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["agent", "FOR AN AGENT"]]) {
+  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
     const r = await doklin(nobody, ["help", topic]);
     facts[`help ${topic}`] = r.code === 0 && r.out.startsWith(headline) && overview.out.includes(`doklin help ${topic}`);
   }

@@ -13,7 +13,7 @@
 //                                rendition at …/raw, or an image / PDF / html file by exact path
 //   GET /og.png · /<slug>/og.png the site's static Open Graph image
 //   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
-//   GET /__web/fonts/<file>      the Newsreader files the app bundles (theme.ts)
+//   GET /__web/fonts/<file>      the font files the app bundles (theme.ts)
 //   robots.txt, favicon.ico, apple-touch-icon.png
 //
 // Every page carries <meta name="robots" content="noindex">.

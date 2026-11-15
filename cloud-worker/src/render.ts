@@ -5,13 +5,15 @@
 // the mermaid hydration script. Pure string work: what feeds it (pages.ts)
 // does the reading.
 //
-// Everything renders without JavaScript. A diagram keeps its source as a
-// code block until the hydrator swaps the SVG in, and stays a code block for
-// a reader with scripts off.
+// Everything renders without JavaScript. A ```svg drawing is drawn here,
+// through the app's own sanitizer (src/drawingSvg.ts); a mermaid diagram
+// keeps its source as a code block until the hydrator swaps the SVG in, and
+// stays a code block for a reader with scripts off.
 
 import { Marked, Renderer, type Tokens } from "marked";
 import { escapeHtml } from "./http";
 import { deriveId, type TableCols } from "../../src/metaFile";
+import { isDrawingLanguage, sanitizeDrawing } from "../../src/drawingSvg";
 import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 
 /* ---------- Words ---------- */
@@ -107,6 +109,7 @@ export type MarkdownInputs = {
 export function markdownHtml(md: string, inputs: MarkdownInputs): string {
   const byId = new Map(inputs.tcols.map((r) => [r.id, r.cols]));
   const seenSignatures = new Map<string, number>();
+  let drawings = 0;
   const base = new Renderer();
   const borrow = (self: Renderer) => {
     base.parser = self.parser;
@@ -139,6 +142,16 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
           "<table>",
           `<table class="dk-cols"><colgroup>${group}</colgroup>`,
         )}</div>`;
+      },
+      code(this: Renderer, token: Tokens.Code): string {
+        borrow(this);
+        // A drawing: the app's sanitizer, with a namespace per drawing so two
+        // on one page never share a marker. One that doesn't parse stays its
+        // source, as the app shows it.
+        if (!isDrawingLanguage(String(token.lang ?? ""))) return base.code(token);
+        const drawn = sanitizeDrawing(token.text, `dg${++drawings}-`);
+        if (!drawn.ok) return base.code(token);
+        return `<figure class="dk-drawing">${drawn.svg}</figure>\n`;
       },
       link(this: Renderer, token: Tokens.Link): string {
         borrow(this);
@@ -393,9 +406,10 @@ ${footerHtml(p.meta.hostname)}
 
 /**
  * The diagram renderer, injected only into pages whose markdown carries a
- * ```mermaid block. It imports the mermaid module the worker serves
- * (mermaidThemeVariables rides along in it, so diagrams take the page
- * palette — light and dark) and swaps each code block for its rendered SVG.
+ * ```mermaid block. It imports the mermaid module the worker serves (the
+ * app's mermaidConfig and finishMermaidSvg ride along in it, so diagrams are
+ * drawn in the app's drawing grammar, from this page's palette — light and
+ * dark) and swaps each code block for its rendered SVG.
  * A source that doesn't parse keeps its plain code block, and without
  * JavaScript the page still shows every source.
  */
@@ -417,17 +431,11 @@ function mermaidHydrator(tag: string): string {
   const renderAll = async () => {
     // Re-initialized per pass: the palette derives from the page's current
     // colors, and the prefers-color-scheme listener below re-renders on flips.
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      suppressErrorRendering: true,
-      theme: "base",
-      themeVariables: mod.mermaidThemeVariables(),
-    });
+    mermaid.initialize(mod.mermaidConfig());
     for (const spot of spots) {
       try {
         const { svg } = await mermaid.render("dk-mermaid-" + ++seq, spot.source);
-        spot.holder.innerHTML = svg;
+        spot.holder.innerHTML = mod.finishMermaidSvg(svg);
         if (!spot.holder.isConnected) spot.pre.replaceWith(spot.holder);
       } catch {
         if (spot.holder.isConnected) spot.holder.replaceWith(spot.pre);
@@ -444,12 +452,12 @@ function mermaidHydrator(tag: string): string {
 /* ---------- Styles ---------- */
 
 // The reading page, in the app's own theme (theme.ts: tokens.css and the
-// Newsreader face, light and dark from the visitor's preference). The rules
-// below restate the app's DOCUMENT rules (App.css: the editor's type, links,
-// quotes, code, tables) for marked's plain
-// HTML, so a published note and the note in the app read as one document.
-// The chrome around the document — the crumb, the MD/HTML pill, the footer —
-// is the app's UI face at its UI sizes.
+// bundled faces, light and dark from the visitor's preference). The rules
+// below restate the app's DOCUMENT rules (App.css: the editor's type, rhythm,
+// links, quotes, code, tables and figures) for
+// marked's plain HTML, so a published note and the note in the app read as
+// one document. The chrome around the document — the crumb, the MD/HTML
+// pill, the footer — is the app's UI face at its UI sizes.
 const PAGE_CSS = `${PAGE_THEME}
 * { box-sizing: border-box; }
 /* The document flows vertically and never scrolls sideways — like the app's
@@ -469,14 +477,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--selection); }
-/* The document: the app's reading measure (68ch of the document font) plus
-   its side padding, set in the document font at the document size. */
+/* The document: the app's 672px column plus its side padding, the text face
+   at the text size, headings in the heading face at fixed sizes. */
 main.doc {
   width: 100%;
   max-width: calc(var(--doc-measure) + 128px);
   margin: 0 auto;
-  padding: 56px 64px 96px;
-  font-family: var(--doc-font);
+  padding: 64px 64px 96px;
+  font-family: var(--font-text);
   font-size: var(--doc-size);
   line-height: var(--doc-leading);
 }
@@ -485,97 +493,106 @@ main.doc {
 }
 .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
   margin: 0;
-  padding: 2px 0;
-  font-family: inherit;
-  font-weight: 650;
-  letter-spacing: -0.012em;
+  padding: 0;
+  font-family: var(--font-heading);
+  font-weight: var(--doc-heading-weight);
   color: var(--text-1);
 }
-.doc h1 { font-size: 2em; line-height: 1.18; letter-spacing: -0.02em; margin-top: 28px; }
-.doc h2 { font-size: 1.389em; line-height: 1.28; margin-top: 26px; }
-.doc h3 { font-size: 1.111em; line-height: 1.35; margin-top: 20px; }
-.doc h4, .doc h5, .doc h6 { font-size: 1em; margin-top: 16px; }
-.doc > :first-child { margin-top: 0; }
-.doc p { margin: 0; padding: 3px 0; }
-.doc ul, .doc ol { margin: 2px 0; padding-left: 1.4em; }
-.doc li { padding: 2px 0; }
-.doc li::marker { color: var(--text-3); }
-.doc li > p { padding: 0; }
+.doc h1 { font-size: var(--doc-h1); line-height: 1.2; letter-spacing: var(--doc-h1-track); margin: 0 0 0.25em; }
+.doc h2 { font-size: var(--doc-h2); line-height: 1.3; letter-spacing: var(--doc-h2-track); margin: 1.6em 0 0.5em; }
+.doc h3 { font-size: var(--doc-h3); line-height: 1.35; letter-spacing: var(--doc-h3-track); margin: 1.4em 0 0.4em; }
+.doc h4, .doc h5, .doc h6 { font-family: var(--font-text); font-weight: 600; }
+.doc h4 { font-size: var(--doc-h4); line-height: 1.4; margin: 1.3em 0 0.3em; }
+.doc h5, .doc h6 { font-size: var(--doc-h5); line-height: 1.45; margin: 1.2em 0 0.25em; }
+.doc h6 { font-weight: 500; color: var(--text-2); }
+.doc > :first-child, .doc > h1 + * { margin-top: 0; }
+.doc p { margin: 0.6em 0; padding: 0; }
+.doc strong { font-weight: 600; }
+.doc ul, .doc ol { margin: 0.6em 0; padding-left: 1.855em; }
+.doc li ul, .doc li ol { margin: 0; }
+.doc li + li, .doc li > ul, .doc li > ol { margin-top: 0.25em; }
+.doc li > p { margin: 0; }
 .doc input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.45em 0 0; }
 .doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
-/* Quotes: a quiet bar and the secondary ink, not a tinted slab. */
+/* Quotes: a quiet 3px bar; the words stay in the body ink. */
 .doc blockquote {
-  position: relative;
-  margin: 4px 0;
-  padding: 0 0 0 22px;
-  color: var(--text-2);
+  margin: 0.8em 0;
+  padding: 0.1em 1em;
+  border-left: 3px solid var(--quote-bar);
 }
-.doc blockquote::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 100px;
-  background: var(--quote-bar);
-}
+.doc blockquote p { margin: 0.3em 0; }
+/* Links: the accent as text, underlined on hover only. */
 .doc a {
-  color: var(--accent);
-  text-decoration-line: underline;
-  text-decoration-thickness: 1px;
+  color: var(--link);
+  text-decoration: none;
   text-underline-offset: 0.2em;
-  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  transition: text-decoration-color var(--dur-fast) var(--ease);
+  text-decoration-thickness: 1px;
 }
-.doc a:hover { text-decoration-color: var(--accent); }
-/* Code: the mono face, a step down from the prose; inline code a neutral pill. */
+.doc a:hover { text-decoration-line: underline; }
+/* Code: a small warm pill inline; a plain tinted box for a block. */
 .doc code {
   font-family: var(--font-mono);
-  font-size: 87.5%;
-  line-height: 1.4286;
-  padding: 0 2px;
-  border-radius: 4px;
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
   color: var(--code-ink);
-  background: color-mix(in srgb, var(--code-bg), transparent 40%);
+  background: var(--code-inline-bg);
 }
 .doc pre {
-  margin: 8px 0;
-  padding: 14px 18px;
-  border-radius: var(--r-md);
+  margin: 0.6em 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 6px;
   background: var(--code-bg);
   overflow-x: auto;
 }
-.doc pre code { padding: 0; background: none; font-size: 0.85em; line-height: 1.5; }
-.doc img { max-width: 100%; vertical-align: bottom; border-radius: var(--r-xs); }
-/* Rendered mermaid diagrams (the hydrator swaps them in for their fenced
-   code blocks). Colors live inside the SVG, derived from this page's palette
-   — this is layout only: a centered figure, wide charts scroll within it.
-   Mermaid measures its labels against the body, so a diagram is set in the
-   body's face and size, never the document's: a mismatch clips the label
-   boxes. The same goes for the page's paragraph styling (.doc p). */
+.doc pre code { padding: 0; border-radius: 0; background: none; font-size: 0.875em; line-height: 1.5; }
+.doc img { max-width: 100%; vertical-align: bottom; border-radius: 4px; }
+.doc hr { border: none; border-top: 1px solid var(--border-strong); margin: 1.4em 0; }
+/* Figures: a drawing fills the column (its 760 frame scales to fit) and a
+   mermaid diagram (the hydrator swaps it in for its fenced code block) is
+   centred. Their words are the UI face, as in the app. Mermaid measures its
+   labels against the body, so a diagram is set in the body's face and size,
+   never the document's — and the label sizes the theme draws must already
+   apply there, globally (the same rules as App.css's "Mermaid labels"). */
+.doc .dk-drawing { margin: 0.6em 0; }
+.doc .dk-drawing > svg { display: block; width: 100%; height: auto; font-family: var(--font-ui); }
 .doc .dk-mermaid {
   display: flex;
   justify-content: safe center;
-  margin: 8px 0;
-  padding: 12px 0;
+  margin: 0.6em 0;
   overflow-x: auto;
   font-family: var(--font-ui);
   font-size: var(--fs-md);
   line-height: 1.5;
 }
-.doc .dk-mermaid svg { max-width: 100%; flex: none; }
-.doc .dk-mermaid p { font-size: inherit; line-height: inherit; padding: 0; }
-.doc hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
-/* Tables: hairlines from the theme, a sunken header row. */
-.doc table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+.doc .dk-mermaid > svg { max-width: 100%; flex: none; }
+.doc .dk-mermaid p { font-size: inherit; line-height: inherit; margin: 0; padding: 0; }
+.nodeLabel, .edgeLabel { font-size: 13px; line-height: 18px; }
+.nodeLabel:has(b), .edgeLabel, .cluster-label .nodeLabel { font-size: 11.5px; line-height: 16px; }
+.nodeLabel b { font-size: 13px; font-weight: 600; }
+.cluster-label .nodeLabel { font-weight: 600; }
+.nodeLabel p, .edgeLabel p { margin: 0; padding: 0; line-height: inherit; }
+/* Tables: as wide as their content, a step smaller than the text, warm
+   hairlines and a tinted header row in the body weight; a cell wraps past
+   42ch. */
+.doc table {
+  border-collapse: collapse;
+  margin: calc(0.6em + 16px) 0 calc(0.6em + 10px);
+  display: block;
+  overflow-x: auto;
+  width: max-content;
+  max-width: 100%;
+  font-size: 0.94em;
+  line-height: 1.45;
+}
 /* A table WITH stored column widths: the widths come from a colgroup, which
    only takes effect on a real table box — so the horizontal scroll that
    display:block gives every other table moves out to a wrapper. */
-.doc .dk-table-scroll { overflow-x: auto; margin: 8px 0; }
-.doc table.dk-cols { display: table; table-layout: fixed; margin: 0; }
-.doc th, .doc td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; vertical-align: top; }
-.doc th { background: var(--sunken); font-weight: 600; }
+.doc .dk-table-scroll { overflow-x: auto; margin: calc(0.6em + 16px) 0 calc(0.6em + 10px); font-size: 0.94em; line-height: 1.45; }
+.doc table.dk-cols { display: table; table-layout: fixed; margin: 0; font-size: 1em; }
+.doc th, .doc td { border: 1px solid var(--table-rule); padding: 6px 10px; text-align: left; vertical-align: top; }
+.doc table:not(.dk-cols) :is(th, td) { max-width: 42ch; overflow-wrap: anywhere; }
+.doc th { background: var(--table-head); font-weight: inherit; }
 /* ---- The page's own chrome, floating over the document ---- */
 /* MD/HTML version pill (only rendered when a page has both versions), pinned
    top-right: the app's segmented control — a tinted track, the chosen side
@@ -651,11 +668,11 @@ main.doc.toc { max-width: 680px; font-family: var(--font-ui); font-size: var(--f
 .doc h1.toc-title {
   margin: 0;
   padding: 0;
-  font-family: var(--font-serif);
+  font-family: var(--font-heading);
   font-size: clamp(30px, 5.4vw, 40px);
   line-height: 1.15;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-weight: var(--doc-heading-weight);
+  letter-spacing: var(--doc-h1-track);
 }
 .doc p.toc-desc {
   margin: 12px 0 0;

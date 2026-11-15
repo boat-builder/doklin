@@ -116,10 +116,13 @@ function readToken(
   };
 }
 
-// Everything mermaid needs to draw like a Doklin document: near-paper node
-// fills, muted ink lines and borders, the accent reserved for emphasis
-// (notes, "today", active tasks), and a soft hue ramp around the accent for
-// the inherently-categorical diagrams (pie slices, git branches).
+// Everything mermaid needs to draw in the drawing grammar (the one ```svg
+// drawings follow, drawing.ts): boxes are outlines on the page with no fill,
+// borders and connectors in the rule colour, words in the drawing inks, the
+// accent kept for the one emphasised thing, and the drawing hues
+// (--dg-cat-*) for the categorical diagrams (pie slices, git branches).
+// Most of a flowchart's look is THEME_CSS below, which names the tokens
+// directly; these hex values serve the diagram types it doesn't reach.
 export function mermaidThemeVariables(): Record<string, string> {
   const styles = getComputedStyle(document.documentElement);
   const bodyStyles = getComputedStyle(document.body);
@@ -129,44 +132,43 @@ export function mermaidThemeVariables(): Record<string, string> {
   const dark = luminance(bg) < 0.5;
   const ink = readToken(
     styles,
-    "--text-1",
-    parseColor(bodyStyles.color)?.rgb ?? (dark ? { r: 235, g: 235, b: 235 } : { r: 55, g: 53, b: 47 }),
+    "--dg-ink",
+    parseColor(bodyStyles.color)?.rgb ?? (dark ? { r: 240, g: 239, b: 236 } : { r: 31, g: 30, b: 29 }),
     bg,
   );
+  const ink2 = readToken(styles, "--dg-ink-2", { r: ink.r, g: ink.g, b: ink.b }, bg);
+  const rule = readToken(styles, "--dg-rule", dark ? { r: 56, g: 56, b: 53 } : { r: 195, g: 194, b: 183 }, bg);
   const accent = readToken(
     styles,
-    "--accent",
-    dark ? { r: 92, g: 150, b: 242 } : { r: 47, g: 111, b: 221 },
+    "--dg-accent",
+    dark ? { r: 57, g: 135, b: 229 } : { r: 42, g: 120, b: 214 },
     bg,
   );
 
   const inkAt = (w: number) => mix(ink, bg, w);
   const paper = toHex(bg);
   const text = toHex(ink);
-  const fill = inkAt(0.05); // node interiors: barely-there tint
-  const fill2 = inkAt(0.1);
-  const subtle = inkAt(0.03); // clusters, section stripes
-  const border = inkAt(0.42);
-  const borderSoft = inkAt(0.22);
-  const line = inkAt(0.6); // edges & arrows: muted ink
+  const quiet = toHex(ink2);
+  const fill = paper; // no fill: a box is its outline
+  const fill2 = inkAt(0.04); // the rare second surface (alternating rows)
+  const subtle = paper;
+  const border = toHex(rule);
+  const borderSoft = toHex(rule);
+  const line = toHex(rule);
 
-  // Categorical ramp: gentle rotations around the accent hue, softened toward
-  // the page so a pie chart doesn't shout in a quiet document.
-  const [hue] = rgbToHsl(accent);
-  const sat = dark ? 0.38 : 0.45;
-  const lig = dark ? 0.62 : 0.6;
-  const ramp = [0, 40, -45, 85, -95, 135, 180, -140, 20, -25, 60, -70].map((off, i) =>
-    mix(hslToRgb(hue + off, sat, lig + (i % 2 ? -0.07 : 0)), bg, 0.85),
+  // Categorical hues: the drawing palette, in order.
+  const ramp = Array.from({ length: 8 }, (_, i) =>
+    toHex(readToken(styles, `--dg-cat-${i + 1}`, hslToRgb(rgbToHsl(accent)[0] + i * 45, 0.6, 0.5), bg)),
   );
   // Branch/commit chips carry their label ON the color: pick per-chip ink.
-  const onRamp = ramp.map((c) => (luminance(parseColor(c)!.rgb) > 0.55 ? "#28261f" : "#f5f5f2"));
+  const onRamp = ramp.map((c) => (luminance(parseColor(c)!.rgb) > 0.55 ? "#1f1e1d" : "#ffffff"));
 
   const accentSoft = mix(accent, bg, 0.12);
-  const accentEdge = mix(accent, bg, 0.55);
+  const accentEdge = toHex(accent);
 
   return {
     fontFamily: bodyFontStack(),
-    fontSize: "14px",
+    fontSize: "13px",
     background: paper,
     textColor: text,
     lineColor: line,
@@ -178,7 +180,7 @@ export function mermaidThemeVariables(): Record<string, string> {
     secondaryTextColor: text,
     secondaryBorderColor: borderSoft,
     tertiaryColor: subtle,
-    tertiaryTextColor: text,
+    tertiaryTextColor: quiet,
     tertiaryBorderColor: borderSoft,
     // flowchart
     mainBkg: fill,
@@ -223,11 +225,13 @@ export function mermaidThemeVariables(): Record<string, string> {
     attributeBackgroundColorOdd: paper,
     attributeBackgroundColorEven: subtle,
     // pie
-    ...Object.fromEntries(ramp.map((c, i) => [`pie${i + 1}`, c])),
+    ...Object.fromEntries([...ramp, ...ramp].map((c, i) => [`pie${i + 1}`, c])),
     pieSectionTextColor: text,
     pieLegendTextColor: text,
     pieTitleTextColor: text,
     pieStrokeColor: paper,
+    pieTitleTextSize: "15px",
+    pieSectionTextSize: "13px",
     pieOuterStrokeColor: paper,
     pieOpacity: "1",
     // gantt
@@ -235,18 +239,18 @@ export function mermaidThemeVariables(): Record<string, string> {
     altSectionBkgColor: paper,
     sectionBkgColor2: subtle,
     excludeBkgColor: subtle,
-    taskBkgColor: mix(accent, bg, 0.16),
+    taskBkgColor: accentSoft,
     taskBorderColor: accentEdge,
     taskTextColor: text,
     taskTextOutsideColor: text,
     taskTextLightColor: text,
     taskTextDarkColor: text,
     activeTaskBkgColor: mix(accent, bg, 0.3),
-    activeTaskBorderColor: toHex(accent),
+    activeTaskBorderColor: accentEdge,
     doneTaskBkgColor: fill2,
     doneTaskBorderColor: border,
     gridColor: borderSoft,
-    todayLineColor: toHex(accent),
+    todayLineColor: accentEdge,
     // git graph
     ...Object.fromEntries(ramp.slice(0, 8).map((c, i) => [`git${i}`, c])),
     ...Object.fromEntries(onRamp.slice(0, 8).map((c, i) => [`gitBranchLabel${i}`, c])),
@@ -256,4 +260,92 @@ export function mermaidThemeVariables(): Record<string, string> {
     tagLabelBackground: accentSoft,
     tagLabelBorder: accentEdge,
   };
+}
+
+/* ---------- The flowchart grammar ---------- */
+
+// Flowchart labels follow one convention: `"<b>Name</b><br/>line"` is a name
+// over a quieter line (13/600 ink over 11.5 secondary), a label without <b>
+// is plain 13px ink, and `X:::focus` (or `class X focus`) is the one
+// emphasised box — no classDef needed. Colours are --dg-* tokens resolved by
+// the page, so these rules hold in every theme. Mermaid scopes themeCSS
+// under the diagram's id. The label SIZES must also exist as global CSS
+// (App.css, "Mermaid labels"): mermaid measures labels before this
+// stylesheet is in the SVG, and a size it didn't measure clips the box.
+const THEME_CSS = `
+  .node rect, .node polygon, .node circle, .node ellipse, .node path {
+    fill: none !important; stroke: var(--dg-rule) !important; stroke-width: 1.25px !important;
+  }
+  .node.focus rect, .node.focus polygon, .node.focus circle, .node.focus ellipse, .node.focus path {
+    fill: color-mix(in srgb, var(--dg-accent) 12%, transparent) !important;
+    stroke: var(--dg-accent) !important; stroke-width: 2px !important;
+  }
+  .nodeLabel, .nodeLabel p { color: var(--dg-ink) !important; }
+  .nodeLabel:has(b), .nodeLabel:has(b) p { color: var(--dg-ink-2) !important; }
+  .nodeLabel b { color: var(--dg-ink); font-weight: 600; }
+  .nodeLabel i { font-style: italic; }
+  .edgeLabel, .edgeLabel p, .edgeLabel span { color: var(--dg-ink-2) !important; }
+  .edgeLabel rect, .labelBkg { fill: var(--sheet) !important; background: var(--sheet) !important; }
+  .flowchart-link, .edgePath .path { stroke: var(--dg-rule) !important; stroke-width: 1.25px !important; }
+  .marker, .arrowheadPath, .arrowMarkerPath { fill: var(--dg-rule) !important; stroke: var(--dg-rule) !important; }
+  .cluster rect { fill: none !important; stroke: var(--dg-grid) !important; stroke-width: 1px !important; }
+  .cluster-label .nodeLabel, .cluster-label span, .cluster-label p { color: var(--dg-ink-2) !important; font-weight: 600; }
+  .flowchartTitleText, .pieTitleText, .titleText { fill: var(--dg-ink) !important; font-size: 15px !important; font-weight: 600; }
+  .flowchartTitleText { text-anchor: start !important; }
+`;
+
+// Pinned on purpose: Mermaid 12 makes another look and layout the default,
+// and an upgrade must not re-lay out or restyle documents people wrote.
+const FLOWCHART = {
+  htmlLabels: true,
+  curve: "linear",
+  nodeSpacing: 24,
+  rankSpacing: 36,
+  padding: 14,
+  wrappingWidth: 520,
+  diagramPadding: 8,
+  subGraphTitleMargin: { top: 6, bottom: 6 },
+  useMaxWidth: true,
+} as const;
+
+/** The full mermaid.initialize config, read from the page's tokens now. */
+export function mermaidConfig() {
+  return {
+    startOnLoad: false,
+    // Shared documents can carry anyone's markdown — keep label sanitizing
+    // on and interactions off (mermaid also runs its own DOMPurify pass).
+    securityLevel: "strict" as const,
+    suppressErrorRendering: true,
+    theme: "base" as const,
+    look: "classic" as const,
+    layout: "dagre",
+    fontFamily: bodyFontStack(),
+    themeVariables: mermaidThemeVariables(),
+    themeCSS: THEME_CSS,
+    flowchart: FLOWCHART,
+  };
+}
+
+/**
+ * What CSS can't do to a rendered diagram: the title moves to the drawing's
+ * left edge (drawings put their title top-left), and node rectangles take
+ * the grammar's 8px corners as attributes (WebKit ignores rx as CSS).
+ */
+export function finishMermaidSvg(svg: string): string {
+  // Parsed as HTML, the way it is inserted: mermaid's labels carry HTML
+  // (<br>) that an XML parser refuses.
+  const holder = document.createElement("template");
+  holder.innerHTML = svg;
+  const root = holder.content.firstElementChild;
+  if (!root || root.nodeName.toLowerCase() !== "svg") return svg;
+  const box = (root.getAttribute("viewBox") ?? "").split(/[\s,]+/).map(Number);
+  const title = root.querySelector("text.flowchartTitleText");
+  if (title && box.length === 4 && box.every(Number.isFinite)) {
+    title.setAttribute("x", String(box[0] + FLOWCHART.diagramPadding));
+  }
+  for (const rect of root.querySelectorAll("g.node rect.label-container, g.node rect.basic")) {
+    rect.setAttribute("rx", "8");
+    rect.setAttribute("ry", "8");
+  }
+  return holder.innerHTML;
 }

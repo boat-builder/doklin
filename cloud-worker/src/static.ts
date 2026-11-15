@@ -21,7 +21,7 @@ const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
 
 // The landing and 404 pages wear the same theme as a rendered note
-// (theme.ts: the app's own tokens and Newsreader), so the domain reads as
+// (theme.ts: the app's own tokens and bundled fonts), so the domain reads as
 // one site.
 const SHELL_CSS = `${PAGE_THEME}
 * { box-sizing: border-box; }
@@ -33,8 +33,8 @@ body {
 ::selection { background: var(--selection); }
 main { width: 100%; max-width: 640px; margin: auto; padding: 64px 24px; }
 h1 {
-  margin: 0 0 12px; font-family: var(--font-serif); font-size: 42px; font-weight: 650;
-  line-height: 1.12; letter-spacing: -0.02em;
+  margin: 0 0 12px; font-family: var(--font-heading); font-size: 42px; font-weight: var(--doc-heading-weight);
+  line-height: 1.12; letter-spacing: var(--doc-h1-track);
 }
 p { margin: 0; padding: 4px 0; }
 .eyebrow { color: var(--text-3); font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -117,7 +117,7 @@ export const appleTouchIcon = (): Response => assetResponse(APPLE_TOUCH, "image/
 export const ogImage = (): Response => assetResponse(OG_PNG, "image/png");
 
 /**
- * A Newsreader file at /__web/fonts/<file> — the very files the app bundles
+ * A font file at /__web/fonts/<file> — the very files the app bundles
  * (theme.ts). Addressed by name like the icons, so cached for the same week.
  */
 export function fontFile(file: string): Response | null {

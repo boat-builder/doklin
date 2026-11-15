@@ -23,6 +23,7 @@ import {
   queueMermaidPreview,
   MERMAID_PREVIEW_LOADING,
 } from "./mermaid";
+import { drawingLanguage, drawingPreview, isDrawingLanguage } from "./drawing";
 import {
   searchKey,
   searchPlugin,
@@ -395,17 +396,22 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         },
       },
     });
-    // Mermaid diagrams: put "mermaid" in the code block's language picker and
-    // chain a diagram renderer in front of the stock preview handlers (LaTeX
-    // et al) — registered after the Crepe constructor, so `prev` already
-    // carries the feature-installed chain. Rendering itself (loading, theming,
-    // debouncing) lives in mermaid.ts.
+    // Figure blocks: put "mermaid" and "svg" in the code block's language
+    // picker and chain their renderers in front of the stock preview handlers
+    // (LaTeX et al) — registered after the Crepe constructor, so `prev`
+    // already carries the feature-installed chain. Rendering itself lives in
+    // mermaid.ts (async: loading, theming, debouncing) and drawing.ts
+    // (synchronous: sanitize and show).
     crepe.editor.config((ctx) => {
       ctx.update(codeBlockConfig.key, (prev) => ({
         ...prev,
-        languages: [...prev.languages, mermaidLanguage],
+        languages: [...prev.languages, mermaidLanguage, drawingLanguage(prev.languages)],
         previewLoading: MERMAID_PREVIEW_LOADING,
         renderPreview: (language, content, applyPreview) => {
+          if (isDrawingLanguage(language)) {
+            if (!content.trim()) return null;
+            return drawingPreview(content);
+          }
           if (isMermaidLanguage(language)) {
             if (!content.trim()) return null;
             queueMermaidPreview(content, applyPreview);

@@ -205,7 +205,7 @@ Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensiti
                         that space (cache key carries its etag and id); held by nobody → 404, uncached
 /og.png · /<slug>/og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
 /__web/<tag>/mermaid.js  immutable, content-tagged
-/__web/fonts/<file>      bundled Newsreader
+/__web/fonts/<file>      the app's bundled fonts
 anything else            404 page
 ```
 
