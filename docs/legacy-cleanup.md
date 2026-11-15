@@ -453,7 +453,17 @@ still holds a dead `presence.json`.
 - 11: an empty `can`.
 - 106: exit 7's "missing feature".
 
+**`.github/workflows/release.yml`**
+- 394–395: "Intel installs of old universal builds simply stop seeing
+  updates". Keep "only darwin-aarch64 is listed" as the rule.
+
 **This file**
+
+Areas audited: `cloud-worker/`, `scripts/`, `engine/`, `src-tauri/`,
+`cli/`, `ios/`, `src/`, `verify-harness/`, `docs/`, `site/`, `.github/` and
+the top-level files. The last step of the cleanup is a repo-wide sweep for
+"older", "before v", "legacy", "used to", "no longer", "migrat" and
+"compat", to catch anything this list missed.
 
 ## Stays — not compatibility
 
