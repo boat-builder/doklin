@@ -100,17 +100,13 @@ export type SpaceRow = {
   members: string | null;
 };
 
-/** The caller as a person, in SQL: their member id (bound as ?1), or — for
- *  the domain's secret, which carries none — the row the `creator` table
- *  names. A creator who never said who they are is nobody, in no space. */
-export const CALLER_SQL = "COALESCE(?1, (SELECT member_id FROM creator))";
-
-/** Every space the caller is in, each with everyone in it. One statement, so
- *  the poll can carry it in the batch it already sends (presence.ts). */
+/** Every space the caller (their member id, bound as ?1) is in, each with
+ *  everyone in it. One statement, so the poll can carry it in the batch it
+ *  already sends (presence.ts). */
 export const SPACES_SQL = `SELECT s.id, s.kind, s.name, s.created_by, s.created_at, s.etag,
        (SELECT group_concat(x.member_id) FROM space_members x WHERE x.space_id = s.id) AS members
   FROM space_members mine JOIN spaces s ON s.id = mine.space_id
- WHERE mine.member_id = ${CALLER_SQL}`;
+ WHERE mine.member_id = ?1`;
 
 const SPACES_ORDER = " ORDER BY s.kind, s.created_at, s.id";
 
@@ -151,12 +147,6 @@ export async function openSpace(env: Env, auth: Auth, id: string): Promise<Space
   return withDb(env, async (db) => (await readSpace(db, auth, id)) ?? ("none" as const));
 }
 
-/** The caller's member id — for the domain's secret, the creator's row. */
-async function callerId(db: D1Database, auth: Auth): Promise<string | null> {
-  if (auth.memberId) return auth.memberId;
-  return (await db.prepare("SELECT member_id FROM creator").first<string>("member_id")) ?? null;
-}
-
 /* ---------- Making ---------- */
 
 /**
@@ -174,19 +164,14 @@ async function makeManifest(env: Env, id: string, name: string): Promise<string 
   return made?.etag ?? (await bucket.head(MANIFEST_KEY))?.etag ?? null;
 }
 
-/** "nobody": the domain's secret, held by a creator who never said who they
- *  are — there is no person for a space to belong to. */
-export type Nobody = "nobody";
-
 /**
  * The caller's own Private, made if this is the first time they ask. Asking
  * again changes nothing: the id is the person's, and both rows are
  * insert-or-ignore.
  */
-export async function ensurePrivate(env: Env, auth: Auth): Promise<Space | Nobody | null> {
+export async function ensurePrivate(env: Env, auth: Auth): Promise<Space | null> {
   return withDb(env, async (db) => {
-    const me = await callerId(db, auth);
-    if (!me) return "nobody" as const;
+    const me = auth.memberId;
     const id = `p-${me.slice(2)}`;
     const have = await readSpace(db, auth, id);
     if (have) return have;
@@ -234,10 +219,9 @@ export async function createSpace(
   auth: Auth,
   name: string,
   people: readonly string[],
-): Promise<Space | Nobody | { unknown: string[] } | null> {
+): Promise<Space | { unknown: string[] } | null> {
   return withDb(env, async (db) => {
-    const me = await callerId(db, auth);
-    if (!me) return "nobody" as const;
+    const me = auth.memberId;
     const wanted = [...new Set([me, ...people])];
     const here = await peopleHere(db, wanted);
     const unknown = wanted.filter((id) => !here.has(id));
@@ -284,14 +268,13 @@ export async function addToSpace(
   person: string,
 ): Promise<Space | "missing" | null> {
   return withDb(env, async (db) => {
-    const me = await callerId(db, auth);
     // `SELECT … FROM members` is the check: no row for a person who is not here.
     await db
       .prepare(
         `INSERT OR IGNORE INTO space_members (member_id, space_id, added_by, added_at)
          SELECT id, ?2, ?3, ?4 FROM members WHERE id = ?1 AND disabled = 0`,
       )
-      .bind(person, space.id, me ?? person, Date.now())
+      .bind(person, space.id, auth.memberId, Date.now())
       .run();
     const now = await readSpace(db, auth, space.id);
     return now && now.members.includes(person) ? now : ("missing" as const);
