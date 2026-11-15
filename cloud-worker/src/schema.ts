@@ -4,44 +4,42 @@
 // `wrangler d1 migrations apply` is not available to a domain being updated:
 // the worker has to migrate itself. It does that from an ordered list of
 // steps and a `schema_version` in `meta`, and three properties keep that safe
-// when two isolates reach a fresh database at the same moment:
+// when two isolates reach the database at the same moment:
 //
 //   · Idempotent statements. Every step is `CREATE TABLE IF NOT EXISTS` and
 //     `CREATE INDEX IF NOT EXISTS`, so a step that runs twice converges
 //     instead of colliding. A table whose shape changes is dropped and made
-//     again, and only ever one that holds nothing worth keeping (step 7
-//     does). A table that does hold something gains a column instead, and
-//     only after the runner has looked and found it missing (`columns`).
+//     again only when it holds nothing worth keeping. One that does hold
+//     something gains a column instead, and only after the step has looked
+//     and found it missing: `ALTER TABLE … ADD COLUMN` is not idempotent.
 //   · A guarded bump. The version only ever moves with
-//     `UPDATE meta SET schema_version = <to> WHERE schema_version = <to-1>`,
+//     `UPDATE meta SET schema_version = <to> WHERE schema_version = <read>`,
 //     so exactly one isolate wins each step and the loser re-reads and finds
 //     the work done. A statement that moves *data* cannot lean on being
 //     repeatable, so it carries the guard itself: it names the version it
-//     migrates from in its own WHERE (step 7's does), and moves nothing once
-//     the bump has landed.
+//     migrates from in its own WHERE, and moves nothing once the bump has
+//     landed.
 //   · A per-isolate flag. `migrated` only goes false → true, so a stale one
 //     costs one extra pass over idempotent statements, never a wrong answer.
 //
-// A worker whose `DB` binding is missing or broken — every domain deployed
-// before the binding existed — still answers the probe and reports
-// `d1: null`. Nobody can sign in to it: every credential is a row here
-// (members.ts), the superadmin's devices' included, so a database that is
-// gone is a workspace that is down for everyone until it answers again.
+// A step that has shipped is never renumbered or removed: a database stores
+// only the number it reached, so a number that changes meaning makes the
+// runner skip a step it never ran.
+//
+// A worker whose `DB` binding is missing or broken still answers the probe
+// and reports `d1: null`. Nobody can sign in to it: every credential is a row
+// here (members.ts), the superadmin's devices' included, so a database that
+// cannot answer is a workspace that is down for everyone until it answers
+// again.
 
 import type { Env } from "./env";
 
 type Step = {
   /** The schema version this step produces. */
   to: number;
-  /** The tables it creates — what a wipe empties. One a wipe leaves, as it
-   *  leaves `meta`, is made by `sql` and not listed. */
+  /** The tables it creates — what a wipe empties, in this order. One a wipe
+   *  leaves, as it leaves `meta`, is made by `sql` and not listed. */
   tables: readonly string[];
-  /** Tables an earlier step made that this one moves out of and drops — no
-   *  longer anything a wipe empties. */
-  retires?: readonly string[];
-  /** Columns it adds to tables an earlier step made, each only when the
-   *  table does not have it yet. Added before `sql` runs. */
-  columns?: readonly { table: string; column: string; type: string }[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
 };
@@ -49,145 +47,89 @@ type Step = {
 /** Where a database starts once `meta` exists: Doklin's, and empty. */
 const BASE_VERSION = 1;
 
-// Step 7 has a name because step 8 runs it again.
-const SPACES_STEP: Step = {
-  // A workspace with sections: roles, spaces, and agents that are a
-  // person's.
-  //
-  // Roles as data. Until here `members.role` was a label and a token
-  // always authenticated as a member; from here a token carries the role
-  // on its person's row, so there can be several owners, and two things
-  // that used to be implied need saying.
-  //
-  // `creator` says which person holds the domain's env secret. It used to
-  // be "the one row whose role is owner"; with several owners that no
-  // longer picks anybody out. One row or none — the CHECK is what makes a
-  // second creator impossible to write.
-  //
-  // `removed_tokens` remembers the credentials an owner took away, by the
-  // same sha256 `tokens` held them under. It is what lets the worker tell
-  // a Mac "your access was removed" — the one answer that has that Mac
-  // delete its copy of the workspace — apart from a token it has merely
-  // never heard of (a wiped domain, a rotated secret, a database that
-  // cannot answer), which deletes nothing.
-  //
-  // Spaces: a restricted folder, or one person's Private, is a small
-  // workspace of its own stored under `spaces/<id>/` in the bucket, with
-  // its own people. The shared workspace is not a row here — it is
-  // everything outside that prefix, and everybody's.
-  //
-  // `spaces.etag` is the space's manifest etag, written by the worker
-  // after each write it makes there: it is how one poll says which of a
-  // person's spaces moved without a bucket read for each.
-  //
-  // `addresses` says which space each public address belongs to ('' the
-  // shared workspace). The primary key is what makes an address one
-  // space's, and it is how the renderer finds a page that is not in the
-  // shared workspace's own map.
-  //
-  // Presence and leases are made again with the space each row is in:
-  // a lease is now one document in one space. Both hold only what the
-  // last minute and a half wrote, so dropping them costs a beat.
-  //
-  // An agent belongs to a person, and sees what that person sees.
-  // `agents.member_id` is whose it is. NULL is the creator's — whoever
-  // holds the domain's secret, whether or not they have said who they are
-  // — which is what every agent made before this step is, with nothing to
-  // move: the creator was the only one who could make them.
-  //
-  // The search mirror is kept once per space ('' the shared workspace), so
-  // a search reads only the text its caller's person may read. Both tables
-  // are derived: dropped here, and filled again by the next search.
-  to: 7,
-  tables: ["creator", "removed_tokens", "space_members", "addresses", "spaces"],
-  columns: [{ table: "agents", column: "member_id", type: "TEXT" }],
-  sql: [
-    `CREATE TABLE IF NOT EXISTS creator (
-       id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
-       member_id TEXT NOT NULL                        -- m-xxxxxxxx: who holds the env secret
-     )`,
-    // One-time move of stored data: before this step exactly one row could
-    // carry the owner role, and it was the creator's. Guarded by the
-    // version it migrates from, so an isolate that runs it after the bump
-    // — when somebody may already have been promoted — moves nothing.
-    `INSERT OR IGNORE INTO creator (id, member_id)
-       SELECT 1, id FROM members
-        WHERE role = 'owner' AND (SELECT schema_version FROM meta WHERE key = 'schema') < 7
-        ORDER BY created_at, id LIMIT 1`,
-    `CREATE TABLE IF NOT EXISTS removed_tokens (
-       hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
-       removed_at INTEGER NOT NULL
-     )`,
-    `CREATE TABLE IF NOT EXISTS spaces (
-       id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
-       kind       TEXT NOT NULL,              -- 'restricted' | 'private'
-       name       TEXT NOT NULL,
-       created_by TEXT NOT NULL,              -- m-xxxxxxxx
-       created_at INTEGER NOT NULL,
-       etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
-     )`,
-    `CREATE TABLE IF NOT EXISTS space_members (
-       member_id TEXT NOT NULL,
-       space_id  TEXT NOT NULL,
-       added_by  TEXT NOT NULL,               -- m-xxxxxxxx
-       added_at  INTEGER NOT NULL,
-       PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
-     )`,
-    `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
-    `CREATE TABLE IF NOT EXISTS addresses (
-       slug     TEXT PRIMARY KEY,
-       space_id TEXT NOT NULL                 -- '' is the shared workspace
-     )`,
-    `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
-    `DROP TABLE IF EXISTS presence`,
-    `CREATE TABLE IF NOT EXISTS presence (
-       device_id   TEXT PRIMARY KEY,          -- x-doklin-device
-       member_id   TEXT,                      -- the person; null for a creator nobody named
-       device_name TEXT NOT NULL,
-       space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
-       path        TEXT,                      -- what they are editing, when anything
-       ts          INTEGER NOT NULL
-     )`,
-    `DROP TABLE IF EXISTS leases`,
-    `CREATE TABLE IF NOT EXISTS leases (
-       space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
-       path        TEXT NOT NULL,             -- relative to its space, lowercased
-       device_id   TEXT NOT NULL,             -- the Mac that holds it
-       member_id   TEXT,                      -- whose Mac; null for a creator nobody named
-       device_name TEXT NOT NULL,
-       until       INTEGER NOT NULL,
-       PRIMARY KEY (space_id, path)
-     )`,
-    `DROP TABLE IF EXISTS search_text`,
-    `CREATE TABLE IF NOT EXISTS search_text (
-       space_id TEXT NOT NULL,                -- '' the shared workspace
-       fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
-       folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
-       PRIMARY KEY (space_id, fid)
-     )`,
-    `DROP TABLE IF EXISTS search_state`,
-    `CREATE TABLE IF NOT EXISTS search_state (
-       space_id TEXT PRIMARY KEY,             -- '' the shared workspace
-       etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
-       held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
-     )`,
-  ],
-};
-
 const STEPS: readonly Step[] = [
   {
-    // People and the credentials they hold. The
-    // separation is the whole point: a *member* is permanent and keyed by
-    // their email, so a new Mac re-reaches the same person; a *token* is
-    // per-device and disposable; an *invite* is a token that has not been
-    // claimed yet. Nothing here stores a code or a token in the clear —
-    // both tables are keyed by the sha256 of the secret, so the database is
-    // not a list of credentials.
-    to: 2,
+    // People and the credentials they hold. The separation is the whole
+    // point: a *member* is permanent and keyed by their email, so a new Mac
+    // re-reaches the same person; a *token* is per-device and disposable; an
+    // *invite* is a token that has not been claimed yet. Nothing here stores
+    // a code or a token in the clear — every credential table is keyed by
+    // the sha256 of the secret, so the database is not a list of credentials.
+    //
+    // `superadmin` says who the one superadmin is: the person who last proved
+    // they control the Cloudflare account, by trading the domain's key
+    // (`claimSuperadmin`, members.ts). The CHECK is what makes a second
+    // superadmin impossible to write.
+    //
+    // `spent_keys` remembers each key already traded, by its sha256, so a
+    // key works once: a copy left in an agent's chat after setup or a
+    // recovery lets nobody in. A wipe leaves it, as it leaves `meta` —
+    // otherwise the key a freed domain was set up with would bind it again.
+    //
+    // `removed_tokens` remembers the credentials an owner took away, by the
+    // same sha256 `tokens` held them under. It is what lets the worker tell
+    // a Mac "your access was removed" — the one answer that has that Mac
+    // delete its copy of the workspace — apart from a token it has merely
+    // never heard of (a wiped domain's), which deletes nothing.
+    //
+    // Who is here, a row per device: an upsert of one row is atomic by
+    // itself. Who holds which document, a row per leased path: one atomic
+    // upsert is the whole of acquiring, renewing and refusing — the primary
+    // key is the lock, and the upsert's WHERE says whose it may be. Both are
+    // advisory, lapse by their time rather than by a reaper, and carry the
+    // space each row is in. No index on `ts` or `device_id`: each table holds
+    // a row per live device or open document, and an index would be a second
+    // write on every beat.
+    //
+    // Agents and the credentials they hold — the same three lifetimes as
+    // people, in tables of their own: an agent is not a member (no email,
+    // permissions a member does not have, and a token that is only answered
+    // on the document API). `scopes` is the permissions, space-separated
+    // ("read comment edit"): four fixed words do not earn a table. `host` is
+    // what the machine that logged in calls itself — a label for the People
+    // view, never authority. `member_id` is the person the agent belongs to,
+    // and sees what they see.
+    //
+    // The search mirror, once per space ('' the shared workspace): one row
+    // per document holding its text, lower-cased, so "which documents contain
+    // this" is one scan instead of a blob read per document, and a search
+    // reads only the text its caller's person may read. `search_state` is the
+    // manifest etag each space's mirror was last whole at, and `held` — a
+    // JSON map of file id to the content hashes each row was read from.
+    // Derived data, all of it: a wipe empties it and the next search fills
+    // it again.
+    //
+    // Spaces: a restricted folder, or one person's Private, is a small
+    // workspace of its own stored under `spaces/<id>/` in the bucket, with
+    // its own people. The shared workspace is not a row here — it is
+    // everything outside that prefix, and everybody's. `spaces.etag` is the
+    // space's manifest etag, written by the worker after each write it makes
+    // there: it is how one poll says which of a person's spaces moved without
+    // a bucket read for each. `addresses` says which space each public
+    // address belongs to ('' the shared workspace): the primary key is what
+    // makes an address one space's, and it is how the renderer finds a page
+    // that is not in the shared workspace's own map.
+    to: 9,
     // Children before parents: the wipe walks this list in order, so it
-    // empties the tables that reference `members` before `members` itself
-    // and never leans on whether foreign keys are being enforced.
-    tables: ["tokens", "invites", "members"],
+    // empties the tables that reference `members` and `agents` before those
+    // themselves, and never leans on whether foreign keys are being enforced.
+    tables: [
+      "tokens",
+      "invites",
+      "members",
+      "presence",
+      "leases",
+      "agent_tokens",
+      "agent_codes",
+      "agents",
+      "search_text",
+      "search_state",
+      "removed_tokens",
+      "space_members",
+      "addresses",
+      "spaces",
+      "superadmin",
+    ],
     sql: [
       `CREATE TABLE IF NOT EXISTS members (
          id           TEXT PRIMARY KEY,         -- m-xxxxxxxx
@@ -215,72 +157,42 @@ const STEPS: readonly Step[] = [
          expires_at INTEGER NOT NULL
        )`,
       `CREATE INDEX IF NOT EXISTS invites_by_member ON invites(member_id)`,
-    ],
-  },
-  {
-    // Who is here, a row per device. It used to be one
-    // shared R2 object read, mutated and written back with no CAS — two beats
-    // landing together lost one, and every beat was a Class A write. A row
-    // per device, upserted, is atomic by itself.
-    //
-    // `member_id` is nullable: an owner who never adopted an identity is here
-    // all the same, as their Mac's name.
-    // No index on `ts`: the table holds one row per live device, every read
-    // filters by the TTL, and an index would be a second write on every beat.
-    to: 3,
-    tables: ["presence"],
-    sql: [
+      `CREATE TABLE IF NOT EXISTS superadmin (
+         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
+         member_id TEXT NOT NULL                        -- m-xxxxxxxx
+       )`,
+      `CREATE TABLE IF NOT EXISTS spent_keys (
+         hash     TEXT PRIMARY KEY,             -- sha256(key), as it was traded
+         spent_at INTEGER NOT NULL
+       )`,
+      `CREATE TABLE IF NOT EXISTS removed_tokens (
+         hash       TEXT PRIMARY KEY,           -- sha256(token), as the tokens table held it
+         removed_at INTEGER NOT NULL
+       )`,
       `CREATE TABLE IF NOT EXISTS presence (
          device_id   TEXT PRIMARY KEY,          -- x-doklin-device
-         member_id   TEXT,                      -- the person; null for an owner nobody named
+         member_id   TEXT,                      -- the person
          device_name TEXT NOT NULL,
+         space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
          path        TEXT,                      -- what they are editing, when anything
          ts          INTEGER NOT NULL
        )`,
-    ],
-  },
-  {
-    // Who holds which document. Keyed by the path, so
-    // one atomic upsert is the whole of acquiring, renewing and refusing: the
-    // primary key is the lock, and the upsert's WHERE says whose it may be.
-    //
-    // Advisory, always — nothing on the sync path reads this table. Like
-    // `presence`, a lease lapses by its `until` rather than by a reaper, and
-    // `member_id` is nullable for the same owner nobody named. No index on
-    // `device_id`: the table holds one row per document somebody has open,
-    // and an index would be a second write on every renewal.
-    to: 4,
-    tables: ["leases"],
-    sql: [
       `CREATE TABLE IF NOT EXISTS leases (
-         path        TEXT PRIMARY KEY,          -- workspace-relative, lowercased
+         space_id    TEXT NOT NULL DEFAULT '',  -- '' the shared workspace
+         path        TEXT NOT NULL,             -- relative to its space, lowercased
          device_id   TEXT NOT NULL,             -- the Mac that holds it
-         member_id   TEXT,                      -- whose Mac; null for an owner nobody named
+         member_id   TEXT,                      -- whose Mac
          device_name TEXT NOT NULL,
-         until       INTEGER NOT NULL
+         until       INTEGER NOT NULL,
+         PRIMARY KEY (space_id, path)
        )`,
-    ],
-  },
-  {
-    // Agents and the credentials they hold — the same
-    // three lifetimes as people, in tables of their own: an agent is not a
-    // member (no email, permissions a member does not have, and a token that
-    // is only answered on the document API). Both secrets are stored as their
-    // sha256, exactly as a person's are.
-    //
-    // `scopes` is the permissions, space-separated ("read comment edit"):
-    // four fixed words do not earn a table. `host` is what the machine that
-    // logged in calls itself — a label for the People view, never authority.
-    to: 5,
-    tables: ["agent_tokens", "agent_codes", "agents"],
-    sql: [
       `CREATE TABLE IF NOT EXISTS agents (
          id           TEXT PRIMARY KEY,         -- a-xxxxxxxx
          name         TEXT NOT NULL,
          scopes       TEXT NOT NULL,            -- 'read comment edit publish', any subset holding 'read'
          created_at   INTEGER NOT NULL,
          last_used_at INTEGER,                  -- moved by a request, at most once an hour
-         disabled     INTEGER NOT NULL DEFAULT 0
+         member_id    TEXT                      -- m-xxxxxxxx: whose agent it is
        )`,
       `CREATE TABLE IF NOT EXISTS agent_codes (
          hash       TEXT PRIMARY KEY,           -- sha256(code) — never the plaintext
@@ -298,102 +210,38 @@ const STEPS: readonly Step[] = [
          created_at INTEGER NOT NULL
        )`,
       `CREATE INDEX IF NOT EXISTS agent_tokens_by_agent ON agent_tokens(agent_id)`,
-    ],
-  },
-  {
-    // The search mirror: one row per document holding
-    // its text, lower-cased, so "which documents contain this" is one scan in
-    // the database instead of a blob read per document. Keyed by file id, so
-    // a move or a rename costs it nothing.
-    //
-    // `search_state` is one row: the manifest etag the mirror was last whole
-    // at, and `held` — a JSON map of file id to the content hashes each row
-    // was read from. Finding what is stale is then one row read and a diff
-    // against the manifest, not a scan of every row.
-    //
-    // Derived data, all of it: a wipe empties it and the next search fills
-    // it again.
-    to: 6,
-    tables: ["search_text", "search_state"],
-    sql: [
       `CREATE TABLE IF NOT EXISTS search_text (
-         fid    TEXT PRIMARY KEY,               -- the document's markdown file, or its html when it has no markdown
-         folded TEXT                            -- lower-cased text, then comment bodies; NULL when too large to hold
+         space_id TEXT NOT NULL,                -- '' the shared workspace
+         fid      TEXT NOT NULL,                -- the document's markdown file, or its html when it has no markdown
+         folded   TEXT,                         -- lower-cased text, then comment bodies; NULL when too large to hold
+         PRIMARY KEY (space_id, fid)
        )`,
       `CREATE TABLE IF NOT EXISTS search_state (
-         key  TEXT PRIMARY KEY,                 -- 'mirror'
-         etag TEXT NOT NULL,                    -- the manifest etag the mirror was last whole at ('' = never)
-         held TEXT NOT NULL                     -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
+         space_id TEXT PRIMARY KEY,             -- '' the shared workspace
+         etag     TEXT NOT NULL,                -- the manifest etag the mirror was last whole at ('' = never)
+         held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
        )`,
-    ],
-  },
-  SPACES_STEP,
-  {
-    // Step 7 again, because removing boards renumbered steps that had
-    // already shipped. Worker v11 made `board_cards` as step 7; v12 and v13
-    // made it as step 7 and what is now step 7 as step 8. So a database at 7
-    // may hold none of step 7 (worker v11 left it there), and one at 8 holds
-    // all of it whichever numbering it came by. Every statement of step 7 is
-    // safe to run twice, so running it again here lands both histories on
-    // the same database before step 9. `board_cards` itself goes in step 9,
-    // which both reach.
-    ...SPACES_STEP,
-    to: 8,
-    tables: [],
-  },
-  {
-    // No credential is matched without a row any more: the domain's key
-    // (`OWNER_TOKEN`) stopped being a sign-in, and is traded once for a
-    // device sign-in of the workspace's superadmin (`claimSuperadmin`,
-    // members.ts). That takes two tables and a move.
-    //
-    // `superadmin` says who the one superadmin is: the person who last proved
-    // they control the Cloudflare account, by trading a key. It is what
-    // `creator` said — whose row held the env secret — under the name of
-    // what it now confers, so its row moves across and `creator` goes. The
-    // CHECK is what makes a second superadmin impossible to write. Every
-    // statement is self-contained so two isolates converge: the
-    // `CREATE … creator` is what lets one that runs behind another, which
-    // already dropped it, read an empty table rather than fail.
-    //
-    // `spent_keys` remembers each key already traded, by its sha256, so a
-    // key works once: a copy left in an agent's chat after setup or a
-    // recovery lets nobody in. A wipe leaves it, as it leaves `meta` —
-    // otherwise the key a freed domain was set up with would bind it again.
-    //
-    // Agents: `member_id` NULL was the creator's — whoever held the secret,
-    // named or not. One-time move, guarded by the version it migrates from:
-    // each goes to the superadmin, who is that creator; one with nobody to go
-    // to — a creator who never said who they were — goes, with its codes and
-    // machines, and the app logs its terminal in again on the way back in.
-    //
-    // `board_cards` is what boards kept, on a database that ran worker
-    // v11–v13. Boards are gone, and so is their table.
-    to: 9,
-    tables: ["superadmin"],
-    retires: ["creator"],
-    sql: [
-      `CREATE TABLE IF NOT EXISTS superadmin (
-         id        INTEGER PRIMARY KEY CHECK (id = 1),  -- one row, or none
-         member_id TEXT NOT NULL                        -- m-xxxxxxxx
+      `CREATE TABLE IF NOT EXISTS spaces (
+         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
+         kind       TEXT NOT NULL,              -- 'restricted' | 'private'
+         name       TEXT NOT NULL,
+         created_by TEXT NOT NULL,              -- m-xxxxxxxx
+         created_at INTEGER NOT NULL,
+         etag       TEXT NOT NULL               -- its manifest's etag, as of the worker's last write there
        )`,
-      `CREATE TABLE IF NOT EXISTS creator (
-         id        INTEGER PRIMARY KEY CHECK (id = 1),
-         member_id TEXT NOT NULL
+      `CREATE TABLE IF NOT EXISTS space_members (
+         member_id TEXT NOT NULL,
+         space_id  TEXT NOT NULL,
+         added_by  TEXT NOT NULL,               -- m-xxxxxxxx
+         added_at  INTEGER NOT NULL,
+         PRIMARY KEY (member_id, space_id)      -- "which spaces is this person in" is the poll's question
        )`,
-      `INSERT OR IGNORE INTO superadmin (id, member_id)
-         SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 9`,
-      `UPDATE agents SET member_id = (SELECT member_id FROM superadmin)
-        WHERE member_id IS NULL AND (SELECT schema_version FROM meta WHERE key = 'schema') < 9`,
-      `DELETE FROM agent_tokens WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
-      `DELETE FROM agent_codes WHERE agent_id IN (SELECT id FROM agents WHERE member_id IS NULL)`,
-      `DELETE FROM agents WHERE member_id IS NULL`,
-      `DROP TABLE IF EXISTS creator`,
-      `CREATE TABLE IF NOT EXISTS spent_keys (
-         hash     TEXT PRIMARY KEY,             -- sha256(key), as it was traded
-         spent_at INTEGER NOT NULL
+      `CREATE INDEX IF NOT EXISTS space_members_by_space ON space_members(space_id)`,
+      `CREATE TABLE IF NOT EXISTS addresses (
+         slug     TEXT PRIMARY KEY,
+         space_id TEXT NOT NULL                 -- '' is the shared workspace
        )`,
-      `DROP TABLE IF EXISTS board_cards`,
+      `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
     ],
   },
 ];
@@ -401,11 +249,10 @@ const STEPS: readonly Step[] = [
 /** What a fully migrated database reports. */
 export const SCHEMA_VERSION = STEPS.at(-1)?.to ?? BASE_VERSION;
 
-/** Every table the steps list and have not retired. The
- *  wipe empties these and leaves `meta`, which is the runner's own
- *  bookkeeping, and `spent_keys`, which is the domain's rather than anyone's. */
-const RETIRED = new Set(STEPS.flatMap((s) => s.retires ?? []));
-export const DATA_TABLES: readonly string[] = STEPS.flatMap((s) => s.tables).filter((t) => !RETIRED.has(t));
+/** Every table the steps list. The wipe empties these and leaves `meta`,
+ *  which is the runner's own bookkeeping, and `spent_keys`, which is the
+ *  domain's rather than anyone's. */
+export const DATA_TABLES: readonly string[] = STEPS.flatMap((s) => s.tables);
 
 // Per isolate, not per request: the check costs one round trip the first time
 // an isolate needs the database and nothing after that.
@@ -414,8 +261,8 @@ let migrated = false;
 /**
  * Bring the database up to `SCHEMA_VERSION` and answer the version it is at —
  * or null when this deployment has no `DB` binding, or D1 could not be
- * reached. Callers read null as "no database": in this phase that is every
- * route but the `/api/meta` probe, which reports it.
+ * reached. Every route but the `/api/meta` probe reads null as "no
+ * database"; the probe reports it.
  */
 export async function ensureSchema(env: Env): Promise<number | null> {
   const db = env.DB;
@@ -425,11 +272,10 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     let version = await bootstrap(db);
     for (const step of STEPS) {
       if (version >= step.to) continue;
-      for (const c of step.columns ?? []) await ensureColumn(db, c.table, c.column, c.type);
       for (const sql of step.sql) await db.prepare(sql).run();
       const bump = await db
         .prepare("UPDATE meta SET schema_version = ? WHERE key = 'schema' AND schema_version = ?")
-        .bind(step.to, step.to - 1)
+        .bind(step.to, version)
         .run();
       version = bump.meta.changes === 1 ? step.to : await readVersion(db);
       // Another isolate is mid-migration and holds the step: leave the rest
@@ -440,30 +286,6 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     return version;
   } catch {
     return null;
-  }
-}
-
-/**
- * Add a column to a table that holds something worth keeping — when it is
- * not there. Reading the column is the question: it fails on a table without
- * it, whatever the table holds. Two isolates that both find it missing both
- * add it, and the loser's failure is not one: the column is there.
- */
-async function ensureColumn(db: D1Database, table: string, column: string, type: string): Promise<void> {
-  // The names come from STEPS, never from a request.
-  const there = async (): Promise<boolean> => {
-    try {
-      await db.prepare(`SELECT ${column} FROM ${table} LIMIT 1`).first();
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (await there()) return;
-  try {
-    await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
-  } catch (e) {
-    if (!(await there())) throw e;
   }
 }
 

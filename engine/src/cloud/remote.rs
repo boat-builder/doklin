@@ -36,26 +36,20 @@ pub struct CreatedBy {
     pub device_name: String,
 }
 
-/// `GET /api/meta`: liveness, the credential, "is this domain bound" — and,
-/// since worker v6, identity: who this bearer is and what everyone here is
-/// called. A worker older than that answers neither
-/// field, and attribution falls back to device names.
+/// `GET /api/meta`: liveness, the credential, "is this domain bound", and
+/// identity: who this bearer is and what everyone here is called.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Meta {
     pub version: u32,
     #[serde(default)]
-    pub features: Vec<String>,
-    #[serde(default)]
     pub workspace: Option<WorkspaceRecord>,
+    /// Who the bearer is. None when it is the domain's key, which is
+    /// nobody's sign-in: the setup wizard probes with it before trading it
+    /// for one of its own (`HttpRemote::recover`).
     #[serde(default)]
     pub you: Option<Identity>,
-    /// True when the bearer is the domain's key, which is nobody's sign-in:
-    /// the worker answers it the probe and nothing else, and the app trades
-    /// it for a sign-in of its own (`HttpRemote::recover`).
-    #[serde(default)]
-    pub key: bool,
     /// The workspace's superadmin — whom to ask for what only they can do.
-    /// None until somebody has traded a key, and from a worker before v17.
+    /// None on a domain nobody has traded a key on yet.
     #[serde(default)]
     pub superadmin: Option<Person>,
     /// The directory: every person's id and display name, and nothing else.
@@ -69,19 +63,14 @@ pub struct Meta {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     /// `superadmin`, `owner` or `member` — the role this person holds.
-    #[serde(default)]
     pub role: String,
     /// What that role may do, as the worker's one table spells it
-    /// (cloud-worker/src/roles.ts) — what the app hides the rest by. Empty
-    /// from a worker older than v11, which had no such table to answer from.
-    #[serde(default)]
+    /// (cloud-worker/src/roles.ts) — what the app hides the rest by.
     pub can: Vec<String>,
     /// Which row of the signed-in devices this credential is (`t-…`). What
     /// keeps the app from offering to sign out the Mac it is running on.
-    #[serde(default)]
-    pub token_id: Option<String>,
-    #[serde(default)]
-    pub member_id: Option<String>,
+    pub token_id: String,
+    pub member_id: String,
     #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
@@ -349,9 +338,7 @@ pub trait Remote: Send + Sync + 'static {
         device_name: &str,
     ) -> impl std::future::Future<Output = RemoteResult<Bound>> + Send;
     /// The 15-second poll. With no beat it is a `GET` and writes nothing;
-    /// with one it is a `POST` that also says this Mac is here, or leaving
-    /// (worker v7). The engine only hands it a beat
-    /// when the worker lists `presence`.
+    /// with one it is a `POST` that also says this Mac is here, or leaving.
     fn poll(&self, beat: Option<&Beat>) -> impl std::future::Future<Output = RemoteResult<PollResponse>> + Send;
 
     /* ----- spaces ----- */
@@ -604,8 +591,7 @@ impl HttpRemote {
 impl HttpRemote {
     /// `DELETE /api/auth/<kind>/<id>` — the shape all three revocations
     /// take. A `404` is left as it is: the caller decides whether "already
-    /// gone" is the same as done (mod.rs — it is, once the list has proved
-    /// the routes are there).
+    /// gone" is the same as done (mod.rs: it is).
     fn revoke<'a>(&'a self, kind: &str, id: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send + 'a {
         let url = self.url(&format!("auth/{}/{}", kind, id));
         async move {
@@ -635,9 +621,9 @@ impl HttpRemote {
 impl HttpRemote {
     /// `POST /api/auth/recover`: trade the key this remote holds for this
     /// device's own sign-in, as the superadmin — `email`'s person, who
-    /// becomes it, or with `None` the superadmin there is. The key works once:
-    /// a spent one, like a wrong one, is `Unauthorized`.
-    pub async fn recover(&self, email: Option<&str>, name: Option<&str>, device_name: &str) -> RemoteResult<RedeemedToken> {
+    /// becomes it. The key works once: a spent one, like a wrong one, is
+    /// `Unauthorized`.
+    pub async fn recover(&self, email: &str, name: Option<&str>, device_name: &str) -> RemoteResult<RedeemedToken> {
         let body = json!({ "email": email, "name": name, "deviceId": self.device_id, "deviceName": device_name });
         let res = self
             .auth(self.client.post(self.url("auth/recover")))
@@ -789,8 +775,7 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
             // Two refusals share the status, and only the body tells them
             // apart: `removed: true` is said of a credential an owner took
             // away, and of nothing else. Anything that is not exactly that —
-            // no body, a proxy's page, a worker too old to say it — is the
-            // ordinary one.
+            // no body, a proxy's page — is the ordinary one.
             let v = res.json::<serde_json::Value>().await.unwrap_or_default();
             Err(match v.get("removed").and_then(|r| r.as_bool()) {
                 Some(true) => RemoteError::Removed,
@@ -1296,20 +1281,6 @@ impl Remote for HttpRemote {
                 .send()
                 .await
                 .map_err(transport_err)?;
-            if res.status().as_u16() == 401 {
-                // A worker that predates the identity routes has no carve-out
-                // above its gate, so a bearer-less POST comes back as the
-                // gate's own bare `unauthorized` — the one error in the
-                // worker that is a code word rather than a sentence. The join
-                // route answers a sentence, so the body is what tells "this
-                // code is no good" from "this worker has never heard of
-                // invites".
-                let v = res.json::<serde_json::Value>().await.unwrap_or_default();
-                return Err(match body_error(&v).as_deref() {
-                    Some("unauthorized") => RemoteError::Outdated("the worker predates invites".into()),
-                    _ => RemoteError::Unauthorized,
-                });
-            }
             let res = expect_status(res).await?;
             res.json::<RedeemedToken>().await.map_err(transport_err)
         }

@@ -140,18 +140,16 @@ public enum Publishing {
     /// Who published it and when, for this device: "Published 3 min ago by
     /// you" — `me` is the person this device works as, so a page published
     /// from their other device reads as theirs too.
-    /// A page that does not say when it was published says nothing of when.
     public static func byline(of page: PublicPage, in status: CloudStatus, now: Int) -> String {
-        let known = page.at > 0
         let ago = Clock.ago(page.at, now: now)
-        if !page.by.isEmpty, page.by != status.me { return known ? "Published by \(page.by) · \(ago)" : "Published by \(page.by)" }
-        return known ? "Published \(ago) by you" : "Published by you"
+        if !page.by.isEmpty, page.by != status.me { return "Published by \(page.by) · \(ago)" }
+        return "Published \(ago) by you"
     }
 
     /// The sub-line of a page in Published pages.
     public static func detail(of page: PublicPage, now: Int) -> String {
         let parts = [page.path.isEmpty ? "the whole workspace" : page.path, "/\(page.slug)", page.by.isEmpty ? "someone" : page.by]
-        return (parts + (page.at > 0 ? [Clock.ago(page.at, now: now)] : [])).joined(separator: " · ")
+        return (parts + [Clock.ago(page.at, now: now)]).joined(separator: " · ")
     }
 
     /// What a typed address is sent as: trimmed and lowercased, as the

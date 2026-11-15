@@ -151,7 +151,7 @@ function pagesOf(m: Manifest, origin: string, names: ReadonlyMap<string, string>
         ...(e.desc ? { desc: e.desc } : {}),
         ...(e.root ? { home: true } : {}),
         ...(e.by ? { by: e.by, ...(names.has(e.by) ? { byName: names.get(e.by) } : {}) } : {}),
-        ...(e.at ? { at: e.at } : {}),
+        at: e.at,
         // A page outlives its file: it answers 404 until the file is back.
         ...(e.kind === "file" && !live ? { missing: true } : {}),
       };

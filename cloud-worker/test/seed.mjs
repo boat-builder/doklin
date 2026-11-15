@@ -120,25 +120,28 @@ Not public.
 `,
 };
 
+/** Who wrote and published the seed: a member id, as every `by` is. */
+export const SEED_BY = "m-5eed0001";
+
 /** The public map over those files. */
 export const SEED_PUBLIC = {
-  home: { kind: "file", file: fidOf("Home.md"), path: "Home.md", root: true, by: "Sherin's MacBook Pro", at: 1757000000000 },
-  plan: { kind: "file", file: fidOf("Projects/plan.md"), path: "Projects/plan.md", by: "Sherin's MacBook Pro", at: 1757000001000 },
+  home: { kind: "file", file: fidOf("Home.md"), path: "Home.md", root: true, by: SEED_BY, at: 1757000000000 },
+  plan: { kind: "file", file: fidOf("Projects/plan.md"), path: "Projects/plan.md", by: SEED_BY, at: 1757000001000 },
   projects: {
     kind: "dir",
     path: "Projects",
     title: "Projects",
     desc: "Everything we're building",
-    by: "Sherin's MacBook Pro",
+    by: SEED_BY,
     at: 1757000002000,
   },
-  ship: { kind: "file", file: fidOf("Projects/Roadmap/Ship the boat.md"), path: "Projects/Roadmap/Ship the boat.md" },
-  ideas: { kind: "file", file: fidOf("Ideas.md"), path: "Ideas.md" },
-  sizes: { kind: "file", file: fidOf("Sizes.md"), path: "Sizes.md" },
-  comments: { kind: "file", file: fidOf("Comments.md"), path: "Comments.md" },
-  diagram: { kind: "file", file: fidOf("Diagram.md"), path: "Diagram.md" },
+  ship: { kind: "file", file: fidOf("Projects/Roadmap/Ship the boat.md"), path: "Projects/Roadmap/Ship the boat.md", by: SEED_BY, at: 1757000003000 },
+  ideas: { kind: "file", file: fidOf("Ideas.md"), path: "Ideas.md", by: SEED_BY, at: 1757000003000 },
+  sizes: { kind: "file", file: fidOf("Sizes.md"), path: "Sizes.md", by: SEED_BY, at: 1757000003000 },
+  comments: { kind: "file", file: fidOf("Comments.md"), path: "Comments.md", by: SEED_BY, at: 1757000003000 },
+  diagram: { kind: "file", file: fidOf("Diagram.md"), path: "Diagram.md", by: SEED_BY, at: 1757000003000 },
   // Deleted last week; the page 404s until the file is back. Kept on purpose.
-  ghost: { kind: "file", file: "f-gone", path: "Old.md" },
+  ghost: { kind: "file", file: "f-gone", path: "Old.md", by: SEED_BY, at: 1757000003000 },
 };
 
 const contentTypeOf = (path) =>
@@ -153,7 +156,7 @@ export function seedManifestFiles(files = SEED_FILES) {
     const bytes = typeof content === "string" ? Buffer.from(content, "utf8") : content;
     const fid = fidOf(path);
     const hash = blobHash(bytes);
-    entries[fid] = { path, rev: 1, hash, size: bytes.length, mtime: 1757000000000 + i * 60000, by: "Sherin's MacBook Pro" };
+    entries[fid] = { path, rev: 1, hash, size: bytes.length, mtime: 1757000000000 + i * 60000, by: SEED_BY };
     blobs.push({ fid, hash, bytes, contentType: contentTypeOf(path) });
     i += 1;
   }

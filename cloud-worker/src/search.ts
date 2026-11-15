@@ -30,8 +30,8 @@
 //   · Until somebody searches there is no mirror, and nothing here costs
 //     anything.
 //
-// It is the database or nothing: a domain without one answers 503 to a search
-// and loses nothing else.
+// It is the database or nothing: a database that cannot answer is a 503 to a
+// search, and costs nothing else.
 
 import { refuse, type Call } from "./agentCall";
 import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
@@ -279,7 +279,7 @@ export async function getSearch(c: Call): Promise<Response> {
   }
   const asked = Number(url.searchParams.get("limit") ?? DEFAULT_LIMIT);
   const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, MAX_LIMIT) : DEFAULT_LIMIT;
-  const unavailable = (): Response => json({ error: "search needs this domain's database — update the worker" }, 503);
+  const unavailable = (): Response => json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);
 
   // A folder is in one section. The workspace itself is all of them, and
   // `Restricted` every restricted folder.

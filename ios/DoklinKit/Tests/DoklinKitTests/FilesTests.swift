@@ -151,11 +151,11 @@ final class FilesTests: XCTestCase {
 /// Who sees what, read off the sections the engine lists.
 final class AudienceTests: XCTestCase {
     /// A status as the engine writes one, with these sections.
-    private func status(sections: Bool, spaces: String) throws -> CloudStatus {
+    private func status(spaces: String) throws -> CloudStatus {
         let json = """
         {"root":"/w","domain":"d","endpoint":"https://d","wsId":"w-1","name":"Notes","phase":"idle",
          "lastSyncMs":1,"error":null,"pendingDeletes":0,"me":"Ada","meId":"m-1","can":[],"workerVersion":17,
-         "public":[],"presence":[],"leases":[],"sections":\(sections),"spaces":\(spaces)}
+         "public":[],"presence":[],"leases":[],"spaces":\(spaces)}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
     }
@@ -165,19 +165,17 @@ final class AudienceTests: XCTestCase {
         [{"id":"s-p","kind":"private","name":"Private","path":"Private","by":"Ada","members":["m-1"]},
          {"id":"s-f","kind":"restricted","name":"Finance","path":"Restricted/Finance","by":"Ada","members":["m-1","m-2"]}]
         """
-        let s = try status(sections: true, spaces: spaces)
+        let s = try status(spaces: spaces)
         XCTAssertEqual(Audience.of("Projects/plan.md", in: s), .everyone)
         XCTAssertEqual(Audience.of("private/diary.md", in: s), .onlyYou)
         XCTAssertEqual(Audience.of("Restricted/Finance/q3.md", in: s), .folder("Finance"))
         XCTAssertEqual(Audience.of("Restricted", in: s), .folders)
         XCTAssertEqual(Audience.of("Restricted/Loose", in: s), .nowhere)
-        // A workspace not in sections has shared folders by those names.
-        XCTAssertEqual(Audience.of("Private/diary.md", in: try status(sections: false, spaces: "[]")), .everyone)
         XCTAssertEqual(Audience.of("anything", in: nil), .everyone)
     }
 
     func testAStatusFromBeforeTheDomainAnsweredMayEverything() throws {
-        let s = try status(sections: false, spaces: "[]")
+        let s = try status(spaces: "[]")
         XCTAssertTrue(s.may("people.invite"))
     }
 }

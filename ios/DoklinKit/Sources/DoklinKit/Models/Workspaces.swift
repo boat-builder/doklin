@@ -399,7 +399,7 @@ public enum Audience: Equatable, Sendable {
     case nowhere
 
     public static func of(_ path: String, in status: CloudStatus?) -> Audience {
-        guard let status, status.sections else { return .everyone }
+        guard let status else { return .everyone }
         let under = { (folder: String) in Sections.holds(folder, path) }
         for space in status.spaces where under(space.path) {
             return space.kind == .private ? .onlyYou : .folder(space.name)

@@ -13,27 +13,17 @@
 // carrying the same id; every run serializes the thread in full and the
 // parser folds them back into one thread (the first run's entries win). A
 // bare reference — {==rest of anchor==}{>>#c7k2x9<<} — also parses as a
-// continuation of that thread. Spans with no `#id` ("{>>free text<<}", the
-// format older Doklin versions wrote, and hand-written CriticMarkup) parse
-// as a thread with one authorless entry.
+// continuation of that thread. Spans with no `#id` — hand-written
+// CriticMarkup, "{>>free text<<}" — parse as a thread of authorless entries.
 //
 // The iPhone writes the same bytes with a port of this file
 // (ios/DoklinKit/Sources/DoklinKit/Comments/CriticMarkup.swift), both held
 // to verify-harness/comments-fixture.json — change both.
 
 export type CommentEntry = {
-  author: string; // display name; "" = unknown (legacy / hand-written)
+  author: string; // display name; "" = unknown (hand-written)
   at: number; // epoch ms; 0 = unknown
   body: string;
-  // Provenance older sidecars carry from the previous cloud's web sessions:
-  // a stable entry id, and the code and label that wrote it. Nothing writes
-  // them any more; they are kept so an old thread still parses, dedupes by
-  // id and re-serializes byte for byte. Only html-rendition threads carry
-  // them (they travel as JSON); the CriticMarkup serialization below doesn't
-  // encode them — markdown entries never have them.
-  eid?: string;
-  codeId?: string;
-  label?: string;
 };
 
 // {==anchor==} directly followed by one or more {>>…<<} spans. `[\s\S]` (not
@@ -82,7 +72,7 @@ export function parseSpans(raw: string): ParsedSpans {
     const entries = rest === undefined ? spans.slice(1) : [rest, ...spans.slice(1)];
     return { kind: "thread", id: idMatch[1], comments: entries.map(parseEntry) };
   }
-  // No id: legacy or hand-written CriticMarkup.
+  // No id: hand-written CriticMarkup.
   return { kind: "thread", id: null, comments: spans.map(parseEntry) };
 }
 

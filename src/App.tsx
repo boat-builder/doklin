@@ -72,7 +72,6 @@ import Sidebar, {
   pruneNestedSelection,
   type SidebarSelection,
   type FileClipboardPayload,
-  type TreeNode,
 } from "./Sidebar";
 import TabBar from "./TabBar";
 import {
@@ -103,7 +102,6 @@ import {
   expandMarkdown,
   extractMarkdown,
   markerIds,
-  migrateEntity,
   type EntityMeta,
   type MdThread,
   type ForeignRecord,
@@ -442,14 +440,7 @@ const THEME_LABEL: Record<Theme, string> = {
 
 function readStoredTheme(): Theme {
   try {
-    let v = localStorage.getItem(THEME_STORAGE_KEY);
-    // Builds before 0.1.87 stored the paper theme as "sepia". Rewritten in
-    // place, so this keeps a reader's choice across the rename and then
-    // never matches again.
-    if (v === "sepia") {
-      v = "paper";
-      localStorage.setItem(THEME_STORAGE_KEY, v);
-    }
+    const v = localStorage.getItem(THEME_STORAGE_KEY);
     if (v && (THEMES as string[]).includes(v)) return v as Theme;
   } catch {
     // localStorage may be unavailable; fall through
@@ -550,36 +541,27 @@ function sanitizeTabs(raw: unknown): StoredTab[] {
     : [];
 }
 
-// Read the whole keyed-session map, migrating a legacy v1 blob
-// ({ tabs, activeId, workspaceRoot }) into a single keyed entry on the way so an
-// existing user's open tabs survive the upgrade under their own workspace.
+// Read the whole keyed-session map. Anything that is not a version-2 map
+// reads as no saved session.
 function readAllSessions(): StoredSessions {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return { lastRoot: null, sessions: {} };
     const parsed = JSON.parse(raw);
-    if (parsed?.version === 2 && parsed?.sessions && typeof parsed.sessions === "object") {
-      const sessions: Record<string, SessionEntry> = {};
-      for (const [key, val] of Object.entries(parsed.sessions as Record<string, unknown>)) {
-        const v = val as { tabs?: unknown; activeId?: unknown; split?: unknown };
-        sessions[key] = {
-          tabs: sanitizeTabs(v?.tabs),
-          activeId: typeof v?.activeId === "string" ? v.activeId : null,
-          split: sanitizeSplit(v?.split),
-        };
-      }
-      const lastRoot = typeof parsed.lastRoot === "string" ? parsed.lastRoot : null;
-      return { lastRoot, sessions };
+    if (parsed?.version !== 2 || !parsed?.sessions || typeof parsed.sessions !== "object") {
+      return { lastRoot: null, sessions: {} };
     }
-    // Legacy v1 → keep the single blob under its workspace key.
-    const tabs = sanitizeTabs(parsed?.tabs);
-    const activeId = typeof parsed?.activeId === "string" ? parsed.activeId : null;
-    const workspaceRoot =
-      typeof parsed?.workspaceRoot === "string" ? parsed.workspaceRoot : null;
-    return {
-      lastRoot: workspaceRoot,
-      sessions: { [sessionKeyFor(workspaceRoot)]: { tabs, activeId } },
-    };
+    const sessions: Record<string, SessionEntry> = {};
+    for (const [key, val] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+      const v = val as { tabs?: unknown; activeId?: unknown; split?: unknown };
+      sessions[key] = {
+        tabs: sanitizeTabs(v?.tabs),
+        activeId: typeof v?.activeId === "string" ? v.activeId : null,
+        split: sanitizeSplit(v?.split),
+      };
+    }
+    const lastRoot = typeof parsed.lastRoot === "string" ? parsed.lastRoot : null;
+    return { lastRoot, sessions };
   } catch {
     return { lastRoot: null, sessions: {} };
   }
@@ -633,18 +615,6 @@ function forgetStoredSession(root: string) {
         sessions: all.sessions,
       }),
     );
-  } catch {
-    // ignore
-  }
-}
-
-// One-time cleanup: builds up to 0.1.89 had a Drafts panel, and kept its
-// numbering and open state under these keys. Nothing reads them any more.
-function forgetDraftsPanelKeys() {
-  try {
-    for (const key of ["doklin:draft-seq", "doklin:drafts-meta", "doklin:drafts-open"]) {
-      localStorage.removeItem(key);
-    }
   } catch {
     // ignore
   }
@@ -735,7 +705,7 @@ export default function App() {
   const htmlContentRef = useRef<string | null>(null);
   const htmlPathRef = useRef<string | null>(null);
   // Comment threads on the ACTIVE document's html rendition, mirrored from
-  // the entity META file (see metaFile.ts; formerly its own sidecar). The ref
+  // the entity META file (see metaFile.ts). The ref
   // mirrors state for async readers (watcher events, debounced writes) —
   // same pattern as pathRef. `htmlSidecarExistsRef` remembers whether the
   // meta file is on disk: an empty thread list never CREATES a file, and the
@@ -1039,8 +1009,8 @@ export default function App() {
   const [versionStatuses, setVersionStatuses] = useState<VersionsStatus[]>([]);
   const [versionsSettingsOpen, setVersionsSettingsOpen] = useState(false);
   const historyForRef = useRef<string | null>(null);
-  // What ⌘⌥H opens history for: the active tab's file. A board has no
-  // document to version, and an untitled note has no history.
+  // What ⌘⌥H opens history for: the active tab's file. An untitled note has
+  // no history.
   const historyTargetRef = useRef<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
@@ -1389,30 +1359,19 @@ export default function App() {
   }, []);
 
   // Read an entity's meta from disk WITHOUT touching the active-doc refs
-  // (missing file = no comments yet). Never writes; migration (and ordinary
-  // saves) normalize later.
+  // (missing file = no comments yet). Never writes.
   const readEntityMeta = useCallback(
-    async (
-      docPath: string,
-    ): Promise<{
-      meta: EntityMeta;
-      metaExists: boolean;
-      // The meta FILE's bytes — what a migration write-back must diff
-      // against to know the disk needs updating.
-      diskRaw: string | null;
-    }> => {
+    async (docPath: string): Promise<{ meta: EntityMeta; metaExists: boolean }> => {
       let meta = emptyMeta();
       let metaExists = false;
-      let diskRaw: string | null = null;
       try {
         const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(docPath) });
         meta = parseEntityMeta(r.contents);
         metaExists = true;
-        diskRaw = r.contents;
       } catch {
         // no meta file yet
       }
-      return { meta, metaExists, diskRaw };
+      return { meta, metaExists };
     },
     [],
   );
@@ -1447,17 +1406,14 @@ export default function App() {
   // Read an entity's meta and install it as the active one's (no document =
   // no meta).
   const loadEntityMeta = useCallback(
-    async (
-      docPath: string | null,
-      md: string | null,
-    ): Promise<{ meta: EntityMeta; diskRaw: string | null }> => {
+    async (docPath: string | null, md: string | null): Promise<EntityMeta> => {
       if (!docPath) {
         adoptEntityMeta(emptyMeta(), false, null);
-        return { meta: emptyMeta(), diskRaw: null };
+        return emptyMeta();
       }
-      const { meta, metaExists, diskRaw } = await readEntityMeta(docPath);
+      const { meta, metaExists } = await readEntityMeta(docPath);
       adoptEntityMeta(meta, metaExists, md);
-      return { meta, diskRaw };
+      return meta;
     },
     [adoptEntityMeta, readEntityMeta],
   );
@@ -1555,83 +1511,6 @@ export default function App() {
     return writeSidecarNow();
   }, [writeSidecarNow]);
 
-  /* ---------- The one-time layout migration ----------
-     Normalize an entity's files to the hybrid layout: full inline threads in
-     the markdown move to meta records (bare markers stay). Pure logic in
-     metaFile.migrateEntity; this wrapper does the guarded IO. Idempotent and
-     conflict-safe: markdown writes are conditional on the snapshot the
-     content was read at, so racing a concurrent edit (or another device's
-     migration — byte-identical by construction) just skips; the next open
-     retries. */
-  const migrateEntityOnDisk = useCallback(
-    async (
-      docPath: string,
-      known?: { md: string; snapshot: FileSnapshot; meta: EntityMeta; diskRaw: string | null },
-    ): Promise<void> => {
-      const htmlOnly = isHtmlPath(docPath);
-      let md: string | null = null;
-      let snapshot: FileSnapshot | null = null;
-      let meta: EntityMeta;
-      let diskRaw: string | null;
-      if (known) {
-        md = htmlOnly ? null : known.md;
-        snapshot = known.snapshot;
-        meta = known.meta;
-        diskRaw = known.diskRaw;
-      } else {
-        if (!htmlOnly) {
-          try {
-            const r = await invoke<ReadFileResult>("read_file", { path: docPath });
-            md = r.contents;
-            snapshot = r.snapshot;
-          } catch {
-            return; // unreadable right now; nothing to migrate
-          }
-        }
-        const read = await readEntityMeta(docPath);
-        meta = read.meta;
-        diskRaw = read.diskRaw;
-      }
-      const result = migrateEntity({ diskMd: md, meta });
-      if (result.mdChanged && result.md !== null) {
-        try {
-          const newSnap = await invoke<FileSnapshot>("write_file", {
-            path: docPath,
-            contents: result.md,
-            expected: snapshot,
-          });
-          // The active document's disk baseline moved (its EXPANDED editor
-          // content is unchanged — that's the point of the split layout).
-          if (pathRef.current === docPath) {
-            snapshotRef.current = newSnap;
-            // The disk baseline is the body — the migration rewrote the whole
-            // file, frontmatter block and all (it only touches CriticMarkup).
-            lastDiskMdRef.current = splitFrontmatter(result.md).body;
-          }
-        } catch {
-          return; // lost to a concurrent edit; retried on the next open
-        }
-      }
-      const desired = serializeEntityMeta(result.meta);
-      const mustWriteMeta =
-        diskRaw === null ? !metaIsEmpty(result.meta) : desired !== diskRaw;
-      if (mustWriteMeta) {
-        try {
-          await invoke<FileSnapshot>("write_file", {
-            path: metaFileOf(docPath),
-            contents: desired,
-            expected: null,
-          });
-          if ((pathRef.current ?? htmlPathRef.current) === docPath) {
-            htmlSidecarExistsRef.current = true;
-          }
-        } catch (e) {
-          console.error("meta migration write failed", docPath, e);
-        }
-      }
-    },
-    [readEntityMeta],
-  );
 
 
   // HtmlView reports every thread mutation here; disk follows.
@@ -1994,7 +1873,7 @@ export default function App() {
       );
       if (exists) htmlPath = sibling;
     }
-    const { meta, metaExists, diskRaw } = await readEntityMeta(tab.path);
+    const { meta, metaExists } = await readEntityMeta(tab.path);
     // Everything is read; from here to the editor's key the document is
     // installed in one go — unless a newer load has started meanwhile.
     if (superseded()) return;
@@ -2019,17 +1898,6 @@ export default function App() {
     setConflict(null);
     htmlPathRef.current = htmlPath;
     setHasHtml(htmlPath != null);
-    // Old-layout content (full threads inline) normalizes on open —
-    // fire-and-forget; conditional writes make racing edits safe.
-    if (tab.kind === "file" && snapshot) {
-      const snap = snapshot;
-      void migrateEntityOnDisk(tab.path, {
-        md: contents,
-        snapshot: snap,
-        meta,
-        diskRaw,
-      });
-    }
     const view: DocView =
       htmlOnly || (htmlPath != null && viewPrefsRef.current.get(tab.path) === "html")
         ? "html"
@@ -2070,7 +1938,6 @@ export default function App() {
     flushSidecarWrite,
     readEntityMeta,
     adoptEntityMeta,
-    migrateEntityOnDisk,
     refreshWatchSet,
     bumpEditorSeq,
   ]);
@@ -2489,7 +2356,7 @@ export default function App() {
       // The disk holds hybrid markdown; refresh the meta alongside it and
       // hand the editor the expanded form (same boundary as the first load).
       const body = adoptFrontmatter(result.contents).body;
-      const { meta } = await loadEntityMeta(target, body);
+      const meta = await loadEntityMeta(target, body);
       const full = expandMarkdown(body, meta.mthreads).md;
       baselineCapturedRef.current = false;
       setInitialMarkdown(full);
@@ -3926,7 +3793,7 @@ export default function App() {
   const confirmMove = useCallback(
     async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
       const cloud = cloudForRootRef.current;
-      const toRel = cloud?.sections ? relPathIn(cloud.root, toDir) : null;
+      const toRel = cloud ? relPathIn(cloud.root, toDir) : null;
       if (!cloud || toRel === null || entries.length === 0) return true;
       const one = entries.length === 1;
       const label = (en: SidebarSelection) =>
@@ -4155,8 +4022,6 @@ export default function App() {
         setReady(true);
         return;
       }
-
-      forgetDraftsPanelKeys();
 
       // Which workspace are we opening? A CLI / Finder folder launch
       // (pendingFolder) targets that folder; otherwise reopen the last-active
@@ -4461,61 +4326,6 @@ export default function App() {
     adoptFrontmatter,
   ]);
 
-
-  // The one-time layout migration, workspace-wide: every entity the tree
-  // knows normalizes to the hybrid layout (inline thread bodies → meta
-  // records). Runs once per
-  // workspace root in the main window; open tabs are skipped — they
-  // migrate through their own load/save path. Interrupted or failed runs
-  // leave the flag unset and retry on the next launch; re-running is safe
-  // (migrateEntity is idempotent, and two devices migrating the same file
-  // concurrently produce byte-identical writes).
-  useEffect(() => {
-    if (!ready || !workspaceRoot || !isMainWindow) return;
-    const FLAG = `doklin:meta-migrated-v1:${workspaceRoot}`;
-    try {
-      if (localStorage.getItem(FLAG) === "1") return;
-    } catch {
-      // storage unavailable; sweep anyway (idempotent)
-    }
-    let cancelled = false;
-    void (async () => {
-      let tree: TreeNode;
-      try {
-        tree = await invoke<TreeNode>("list_md_tree", { path: workspaceRoot, all: false });
-      } catch {
-        return; // workspace unreadable right now; retried next launch
-      }
-      const files: string[] = [];
-      const walk = (n: TreeNode) => {
-        if (n.kind === "file") files.push(n.path);
-        else for (const c of n.children) walk(c);
-      };
-      walk(tree);
-      const open = new Set(tabsRef.current.map((t) => t.path));
-      for (const f of files) {
-        if (cancelled) return;
-        if (open.has(f)) continue;
-        try {
-          await migrateEntityOnDisk(f);
-        } catch (e) {
-          console.error("meta migration failed", f, e);
-          return; // flag stays unset; the next launch retries
-        }
-        // Yield between entities so a large workspace never janks the UI.
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      if (cancelled) return;
-      try {
-        localStorage.setItem(FLAG, "1");
-      } catch {
-        // storage unavailable — the sweep just reruns next launch
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [ready, workspaceRoot, migrateEntityOnDisk]);
 
   // Closing the window. Two things have to happen before it goes.
   //
@@ -5672,7 +5482,7 @@ export default function App() {
           onOpenDevices={mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
           onOpenAgents={mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
           onNewRestricted={
-            cloudForRoot?.sections
+            cloudForRoot
               ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })
               : undefined
           }

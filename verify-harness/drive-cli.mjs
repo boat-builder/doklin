@@ -30,7 +30,7 @@
 // Two things are not the real worker, and say so where they are made: the
 // "Mac" (the superadmin's device token on the sync API, as an engine would
 // use it) and
-// the worker that is behind (a stand-in that lacks the later features —
+// the worker that is behind (a stand-in that lacks the later routes —
 // exit 7 cannot be had from a worker that is current). The terminal steps
 // are skipped, out loud, where there is no script(1).
 //
@@ -154,6 +154,9 @@ const owner = (path, { json, ...init } = {}) =>
     },
   });
 
+/** The owner's member id: what a Mac signs its changes with. */
+const OWNER_ID = (await (await owner("/api/meta")).json()).you.memberId;
+
 /* ---------- The relay the CLI talks through ---------- */
 
 /** Every request the CLI made, in order: {method, url, status, headers, body}. */
@@ -235,7 +238,7 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
       const hash = blobHash(bytes);
       const put = await owner(`/api/blobs/${fid}/${hash}`, { method: "PUT", headers: { "content-type": "text/markdown" }, body: bytes });
       if (put.status !== 200) throw new Error(`blob for ${path} failed: ${put.status} ${await put.text()}`);
-      manifest.files[fid] = { path, rev: (manifest.files[fid]?.rev ?? 0) + 1, hash, size: bytes.length, mtime, by: "Sherin's MacBook Pro" };
+      manifest.files[fid] = { path, rev: (manifest.files[fid]?.rev ?? 0) + 1, hash, size: bytes.length, mtime, by: OWNER_ID };
     }
     manifest.seq += 1;
     const res = await owner("/api/manifest", { method: "PUT", headers: { "x-base-etag": etag, "content-type": "application/json" }, body: JSON.stringify(manifest) });
@@ -362,7 +365,6 @@ async function check(name, fn) {
 const canon = (v) =>
   Array.isArray(v) ? v.map(canon) : v !== null && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v;
 const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
-const ALL_FEATURES = ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search"];
 const ALL_SCOPES = ["read", "comment", "edit", "publish"];
 
 /* ====================================================================== */
@@ -526,7 +528,6 @@ await check("login: the line the owner hands over logs this machine in — the a
     "it sent the code and this machine's name": same(JSON.parse(sent.body), { code: editor.code, host: hostname() }),
     "the credentials file": creds.version === 1 && creds.workspaces.length === 1 && entry.endpoint === BASE && entry.name === "Notes" && entry.agent === "Editor bot",
     "it holds the token": /^dka_[0-9a-f]{64}$/.test(entry.token),
-    "it remembers what the worker can do": ALL_FEATURES.every((f) => entry.features.includes(f)),
     "the file is 0600": (statSync(editorBox.creds).mode & 0o777) === 0o600,
     "its directory is 0700": (statSync(editorBox.dir).mode & 0o777) === 0o700,
     "nothing was left beside it": !existsSync(`${editorBox.creds}.tmp`),
@@ -620,7 +621,7 @@ await check("the reviewer and the writer log in on machines of their own", async
 /* 3 — reading: whoami, ls, info, read                                    */
 /* ====================================================================== */
 
-await check("whoami: the workspace, the agent, what it may do and what the worker can do — piped and with --json alike", async () => {
+await check("whoami: the workspace, the agent, what it may do and the worker's version — piped and with --json alike", async () => {
   const piped = await doklin(editorBox, ["whoami"]);
   const flagged = await doklin(editorBox, ["whoami", "--json"]);
   const me = piped.json;
@@ -629,7 +630,7 @@ await check("whoami: the workspace, the agent, what it may do and what the worke
     "exit 0": piped.code === 0 && flagged.code === 0,
     who: same(me.agent, { id: editor.id, name: "Editor bot" }) && me.workspace.name === "Notes",
     "what it may do": same(me.scopes, ALL_SCOPES) && same(readerMe.scopes, ["read"]) && readerMe.agent.name === "Reader bot",
-    "the worker": Number.isInteger(me.version) && ALL_FEATURES.every((f) => me.features.includes(f)),
+    "the worker": Number.isInteger(me.version),
     "--json is the same answer": same(flagged.json, me),
     "one line of JSON, nothing on stderr": piped.out.trim().split("\n").length === 1 && piped.err === "",
   };
@@ -1574,63 +1575,35 @@ await check("logout: --dry-run only says; logout revokes this machine's token on
 /* 14 — a worker that is behind                                           */
 /* ====================================================================== */
 
-// Not the real worker: a stand-in that answers the way one from an earlier
-// phase would — it knows agents and documents, and nothing after.
-const behind = { features: ["sync", "agents", "agent-docs"], asked: [] };
+// Not the real worker: a stand-in that answers login and `me` and knows no
+// other route — the way one from an earlier release answers a command it
+// has no route for.
+const behind = { asked: [] };
 const behindPort = await serve(async (req) => {
   const route = new URL(req.url, "http://x").pathname.replace(/^\/api\/agent\//, "");
   behind.asked.push(`${req.method} ${route}`);
-  const about = { agent: { id: "a-00000000", name: "Old bot" }, scopes: ALL_SCOPES, workspace: { id: "w-old", name: "Old notes" }, version: 9, features: behind.features };
+  const about = { agent: { id: "a-00000000", name: "Old bot" }, scopes: ALL_SCOPES, workspace: { id: "w-old", name: "Old notes" }, version: 9 };
   if (req.method === "POST" && route === "login") return [201, { token: `dka_${"0".repeat(64)}`, ...about }];
   if (req.method === "GET" && route === "me") return [200, about];
   if (route === "doc") return [405, { error: "method not allowed" }];
-  if (req.method === "GET" && route === "search" && behind.features.includes("agent-search")) return [200, { query: "x", dir: "", results: [], total: 0 }];
   return [404, { error: "not found" }];
 });
 const behindBox = machine("behind");
 
-await check("a worker that is behind: a command it lacks the feature for is exit 7 without being tried; so is a route or a method it does not know; once it is updated, the command works", async () => {
+await check("a worker that is behind: a route it does not know, or a method, is exit 7 and says whose worker", async () => {
   const login = await doklin(behindBox, ["login", `http://localhost:${behindPort}`, mintCode().shown]);
   const whoami = await doklin(behindBox, ["whoami"]);
-  let from = behind.asked.length;
+  const from = behind.asked.length;
   const search = await doklin(behindBox, ["search", "x"]);
   const searchAsked = behind.asked.slice(from);
-  const pages = await doklin(behindBox, ["published"]);
-  const comments = await doklin(behindBox, ["comments", "Home"]);
-  from = behind.asked.length;
-  const comment = await doklin(behindBox, ["comment", "Home", "--on", "a", "-m", "b"]);
-  const commentAsked = behind.asked.slice(from);
-  const publish = await doklin(behindBox, ["publish", "Home"]);
   const ls = await doklin(behindBox, ["ls"]);
   const read = await doklin(behindBox, ["read", "Home"]);
-
-  behind.features = [...behind.features, "agent-search"]; // the owner updates the worker
-  from = behind.asked.length;
-  const updated = await doklin(behindBox, ["search", "x"]);
-  const updatedAsked = behind.asked.slice(from);
-  from = behind.asked.length;
-  await doklin(behindBox, ["search", "x"]);
-  const rememberedAsked = behind.asked.slice(from);
   return {
     "login and whoami work": login.code === 0 && whoami.code === 0 && whoami.json.agent.name === "Old bot",
-    "search is exit 7, and says whose worker": refused(search, 7, new RegExp(`the worker on localhost:${behindPort} is too old for this command`)),
-    "…it asked what the worker can do, and did not try": same(searchAsked, ["GET me"]),
-    "published, comments, comment and publish too": [pages, comments, comment, publish].every((r) => refused(r, 7, /too old/)),
-    "the comment was never sent": same(commentAsked, ["GET me"]),
-    "a route the worker does not know": refused(ls, 7, /too old/),
+    "a route the worker does not know is exit 7, and says whose worker": refused(search, 7, new RegExp(`the worker on localhost:${behindPort} is too old for this command`)),
+    "…it was asked once": same(searchAsked, ["GET search"]),
+    "ls too": refused(ls, 7, /too old/),
     "a method it does not know": refused(read, 7, /too old/),
-    "after the update the command works": updated.code === 0 && updated.json.total === 0 && same(updatedAsked, ["GET me", "GET search"]),
-    "what the worker can do is remembered": credsOf(behindBox).workspaces[0].features.includes("agent-search") && same(rememberedAsked, ["GET search"]),
-  };
-});
-
-await check("a worker from before agents: login is exit 7 and says to update it", async () => {
-  const beforeAgents = await serve(async () => [401, { error: "unauthorized" }]);
-  const box = machine("before-agents");
-  const r = await doklin(box, ["login", `http://localhost:${beforeAgents}`, mintCode().shown]);
-  return {
-    "exit 7": refused(r, 7, /too old for agents — the workspace's owner can update it/),
-    "no credentials are kept": !existsSync(box.creds),
   };
 });
 

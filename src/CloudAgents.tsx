@@ -168,8 +168,8 @@ export default function CloudAgents({
   };
 
   if (!agents) {
-    // A worker that predates agents says so here, under what an agent is; the
-    // People tab is unaffected.
+    // Until the domain answers, or when it cannot, this says so under what an
+    // agent is; the People tab is unaffected.
     return (
       <>
         {INTRO}

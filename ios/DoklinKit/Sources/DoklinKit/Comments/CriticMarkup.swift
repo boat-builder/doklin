@@ -3,7 +3,7 @@
 // replies). On disk the words carry a bare marker — `{==words==}{>>#id<<}` —
 // and the entries live in the note's `.meta.jsonl` (MetaFile.swift); the
 // inline form, with every entry in the markdown, is what the Mac's editor
-// speaks and what older notes still hold:
+// speaks:
 //
 //   {==words==}{>>#c7k2x9 Sherin's Mac · 2026-07-14T09:12:33Z: This reads odd<<}{>>Aisha · 2026-07-14T10:01:05Z: agree<<}
 //
@@ -15,18 +15,12 @@
 import Foundation
 
 /// One entry of a thread. `author` "" and `at` 0 mean not known: a
-/// hand-written comment, or one from before entries were signed.
+/// hand-written comment.
 public struct CommentEntry: Equatable, Sendable {
     public var author: JSString
     /// Milliseconds since 1970.
     public var at: Double
     public var body: JSString
-    /// What older sidecars stamped an entry with. Nothing writes these any
-    /// more; they are kept so such a thread still reads and writes back
-    /// byte for byte.
-    var eid: JSValue?
-    var codeId: JSValue?
-    var label: JSValue?
 
     public init(author: JSString, at: Double, body: JSString) {
         self.author = author

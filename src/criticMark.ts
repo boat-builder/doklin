@@ -171,7 +171,7 @@ function splitCriticText(value: string): any[] {
     if (parsed.kind === "ref") {
       node.refId = parsed.id;
     } else {
-      node.threadId = parsed.id; // null = legacy span, id assigned below
+      node.threadId = parsed.id; // null = hand-written span, id assigned below
       node.comments = parsed.comments;
     }
     out.push(node);
@@ -185,7 +185,7 @@ function splitCriticText(value: string): any[] {
 
 // Second parse pass: roots register their thread (several runs may carry the
 // same id — the serializer writes multi-block threads in full on every run —
-// and the first one wins), legacy spans get a fresh id, refs adopt their
+// and the first one wins), hand-written spans get a fresh id, refs adopt their
 // root's thread. A ref whose root no longer exists (e.g. the root paragraph
 // was deleted in another editor) unwraps to plain text rather than surviving
 // as an empty ghost comment.

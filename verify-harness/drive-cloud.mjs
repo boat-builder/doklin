@@ -15,8 +15,7 @@
 // code shown once, and the three ways access goes away, and under the people
 // its Agents section: adding an agent with publishing off until it is ticked,
 // the two lines to hand over shown once, a new login code, changing what it
-// may do, logging one machine out, removing it, and a worker too old for
-// agents saying so without taking the people down — and publishing:
+// may do, logging one machine out, and removing it — and publishing:
 // the Live chip's not-connected
 // door, publishing a note at a random then a chosen address, the chip's five
 // states and the tab's live glyph, the sidebar's live dots, the folder
@@ -110,6 +109,8 @@ const versionCalls = (cmd) =>
 const lastVersionCall = async (cmd) => (await versionCalls(cmd)).at(-1) ?? null;
 const dialog = (label) => page.locator(`[role="dialog"][aria-label="${label}"]`);
 const tid = (id) => page.locator(`[data-testid="${id}"]`);
+/** Everything the superadmin may do: what the domain answers this Mac by default. */
+const SUPERADMIN_CAN = ["work", "people.see", "people.invite", "people.recover", "people.remove", "people.roles", "agents.own", "agents.manage", "devices.own", "pages.manage", "workspace.manage"];
 const status = (over = {}) => ({
   root: "/docs",
   domain: "notes.example.com",
@@ -121,11 +122,15 @@ const status = (over = {}) => ({
   error: null,
   pendingDeletes: 0,
   me: "Sherin",
+  meId: "m-owner",
+  can: SUPERADMIN_CAN,
+  superadmin: "Ada",
   workerVersion: WORKER_VERSION,
-  versions: null,
+  versions: { mirrored: 0, cloud: 0, lastMirrorMs: null, horizonDays: null },
   public: [],
   presence: [],
   leases: [],
+  spaces: [],
   ...over,
 });
 const openPanelFromGear = async () => {
@@ -228,7 +233,7 @@ step(
 
 /* 6 — probe: a fresh domain → Connect & upload */
 await setCloud({
-  probe: { workerVersion: WORKER_VERSION, bundledVersion: WORKER_VERSION, features: ["sync", "wipe"], workspace: null },
+  probe: { workerVersion: WORKER_VERSION, bundledVersion: WORKER_VERSION, workspace: null },
 });
 await tid("probe-button").click();
 await poll(async () => (await tid("probe-outcome").count()) === 1);
@@ -563,22 +568,22 @@ await page.keyboard.press("Escape");
 step("worker behind: the panel's card, the gear badge, the menu item's dot", behindCard && gearBadge && menuDot);
 
 /* 11b — the version store's line: how much of this Mac's history the domain
-   holds, and what a worker one version behind says instead of it */
-await setStatuses([status({ versions: { mirrored: 12, cloud: 30, lastMirrorMs: Date.now() - 5 * 60000 } })]);
+   holds, and what it says while the domain holds none */
+await setStatuses([status({ versions: { mirrored: 12, cloud: 30, lastMirrorMs: Date.now() - 5 * 60000, horizonDays: null } })]);
 await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
 const mirrorLine = await tid("versions-line").textContent();
-await setStatuses([status({ workerVersion: WORKER_VERSION - 1, versions: null })]);
-await poll(async () => (await tid("worker-behind").count()) === 1);
-const oldWorkerLine = await tid("versions-line").textContent();
+await setStatuses([status({ versions: { mirrored: 0, cloud: 0, lastMirrorMs: null, horizonDays: null } })]);
+await poll(async () => (await tid("versions-line").textContent()).includes("Nothing on"));
+const emptyLine = await tid("versions-line").textContent();
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
 step(
-  "version history: the panel says what the domain holds; one version behind, it says it can't and offers the update",
+  "version history: the panel says what the domain holds, and when it holds none, that this Mac's history goes up",
   mirrorLine.includes("30 snapshots on notes.example.com") &&
     mirrorLine.includes("12 from this Mac") &&
-    oldWorkerLine.includes("too old to keep version history"),
-  `${mirrorLine} / ${oldWorkerLine}`,
+    emptyLine.includes("Nothing on notes.example.com yet"),
+  `${mirrorLine} / ${emptyLine}`,
 );
 
 /* 12 — the update card: v→v, the script commands and a prompt that runs them
@@ -710,7 +715,14 @@ await poll(async () => (await dialog("Cloud").count()) === 0);
 await page.locator('[data-tree-path="/docs/notes.md"]').click();
 await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "notes");
 const noFacesAlone = (await tid("note-facepile").count()) === 0;
-const here = (deviceId, name) => ({ deviceId, memberId: null, name, device: `${name}'s Mac`, path: "notes.md", ts: Date.now() });
+const here = (deviceId, name) => ({
+  deviceId,
+  memberId: `m-${name.split(" ")[0].toLowerCase()}`,
+  name,
+  device: `${name}'s Mac`,
+  path: "notes.md",
+  ts: Date.now(),
+});
 await setStatuses([
   status({
     presence: [
@@ -910,7 +922,6 @@ await setCloud({
   probe: {
     workerVersion: WORKER_VERSION,
     bundledVersion: WORKER_VERSION,
-    features: ["sync", "wipe"],
     workspace: {
       id: "w-1",
       name: "Notes",
@@ -1450,36 +1461,6 @@ step(
     (await tid("person-m-owner").count()) === 1 &&
     (await tid("person-m-bob").count()) === 1,
 );
-
-/* 24e — a worker that predates agents, reached by the menu's Agents door:
-   the tab says so in a line under what an agent is, and the People tab is
-   still there to manage */
-await page.keyboard.press("Escape");
-await poll(async () => (await dialog("People, devices and agents").count()) === 0);
-const TOO_OLD = "notes.example.com runs a worker too old for agents \u2014 update it from the Cloud panel";
-await page.evaluate((error) => {
-  window.__cloud.agents.error = error;
-}, TOO_OLD);
-await openAccess("agents");
-await poll(async () => (await tid("agents-unavailable").count()) === 1);
-await poll(async () => (await tid("agents-unavailable").textContent()).includes("too old for agents"));
-const landedOnAgents = (await selected("agents")) && (await tid("agents-unavailable").isVisible()) && !(await tid("pane-people").isVisible());
-const tooOld = (await tid("agents-unavailable").textContent()).trim();
-const stillSaysWhat = await tid("agents-intro").isVisible();
-await tid("tab-people").click();
-step(
-  "Agents (an older worker): Agents opens the view on its Agents tab; one line saying the worker is too old, under what an agent is, no list and no door — and the People tab still lists and invites",
-  landedOnAgents &&
-    tooOld === TOO_OLD &&
-    stillSaysWhat &&
-    (await tid("agent-list").count()) === 0 &&
-    (await tid("agent-open").count()) === 0 &&
-    (await tid("person-m-bob").isVisible()) &&
-    (await tid("invite-open").isVisible()),
-);
-await page.evaluate(() => {
-  window.__cloud.agents.error = null;
-});
 
 /* 25 — the same workspace on a Mac that joined with a code: who is here
    is everybody's to see, and nothing that is an owner's to do is offered —

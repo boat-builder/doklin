@@ -73,7 +73,7 @@ export async function listEveryPage(env: Env): Promise<{ pages: EveryPage[]; tru
     kind: entry.kind,
     title: titleOf(entry, sectionName),
     by: entry.by ? (names.get(entry.by) ?? entry.by) : "",
-    at: entry.at ?? 0,
+    at: entry.at,
     shared: isShared,
   });
 

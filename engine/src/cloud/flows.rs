@@ -13,7 +13,7 @@ use serde_json::json;
 
 use super::space::RESERVED_DIRS;
 use super::unit::{FileState, WorkspaceState};
-use super::manifest::{Manifest, ManifestFile, MANIFEST_VERSION};
+use super::manifest::{Manifest, ManifestFile};
 use super::remote::{Bound, Remote, RemoteError, WorkspaceRecord};
 use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, scan_local, stat_pair, write_atomic,
@@ -74,8 +74,9 @@ pub async fn bind_domain<R: Remote>(remote: &Arc<R>, name: &str, device_name: &s
 
 /// After a won bind: read + hash + upload everything under `root`, a few
 /// files in flight at a time, then publish the first manifest over the
-/// empty one the bind created. Returns the engine state to start from
-/// (its base copies written under `state_dir/base`).
+/// empty one the bind created, every file signed `by` — the member id of
+/// the person connecting. Returns the engine state to start from (its base
+/// copies written under `state_dir/base`).
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_upload<R: Remote>(
     remote: &Arc<R>,
@@ -83,7 +84,7 @@ pub async fn seed_upload<R: Remote>(
     state_dir: &Path,
     name: &str,
     manifest_etag0: &str,
-    device_name: &str,
+    by: &str,
     events: &Arc<dyn Events>,
     progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
@@ -130,13 +131,7 @@ pub async fn seed_upload<R: Remote>(
                 hash: hash.clone(),
                 size: bytes.len() as u64,
                 mtime: now_ms(),
-                // The seed signs with the Mac's name, and it is not a
-                // fallback: a domain gets its first member row from the
-                // People panel, which needs a connected workspace — so at
-                // the moment a folder is uploaded nobody has said who this
-                // is yet. Everything the engine writes afterwards is signed
-                // with the person.
-                by: device_name.to_string(),
+                by: by.to_string(),
             },
         );
         states.insert(
@@ -158,7 +153,6 @@ pub async fn seed_upload<R: Remote>(
         .map_err(|e| FlowError::Other(format!("publish the manifest: {}", e)))?;
 
     Ok(WorkspaceState {
-        version: MANIFEST_VERSION,
         manifest_etag: Some(etag),
         manifest,
         files: states,
@@ -230,7 +224,6 @@ pub async fn seed_download<R: Remote>(
     }
 
     Ok(WorkspaceState {
-        version: MANIFEST_VERSION,
         manifest_etag: Some(etag),
         manifest,
         files: states,

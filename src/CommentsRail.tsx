@@ -32,10 +32,9 @@ type Props = {
   editing: EditTarget;
   // Who is looking at the rail — the same identity new entries are stamped
   // with (the Mac's device name).
-  // Only entries whose author matches get an Edit affordance: rewording
-  // someone else's comment by casually clicking on it was terrible UX in a
-  // rail that other synced Macs share. Display-name
-  // matching, not security — the document format has no identity stronger
+  // Only entries whose author matches get an Edit affordance, so nobody
+  // rewords someone else's comment by clicking on it in a rail other synced
+  // Macs share. Display-name matching, not security — the document format has no identity stronger
   // than a name, and that's fine here.
   selfAuthor: string;
   onActivate: (id: string) => void;

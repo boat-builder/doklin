@@ -32,13 +32,13 @@ import {
 import {
   META_SUFFIX,
   emptyMeta,
-  expandMarkdown,
   extractMarkdown,
+  markerIds,
   metaIsEmpty,
-  migrateEntity,
   parseEntityMeta,
   serializeEntityMeta,
   type EntityMeta,
+  type MdThread,
 } from "../../src/metaFile";
 
 export type Thread = {
@@ -64,6 +64,18 @@ const lineAt = (text: string, index: number): number => {
   return line;
 };
 
+/**
+ * A document's markdown threads as they are stored: bare markers in the text,
+ * bodies in the sidecar. Hand-written CriticMarkup — spans with no `#id` — is
+ * given its id and its record the way the app's save gives them
+ * (`extractMarkdown`), so a comment somebody typed is a thread here too.
+ */
+function storedThreads(md: string, meta: EntityMeta): { md: string; mthreads: MdThread[] } {
+  const extracted = extractMarkdown(md);
+  const held = new Set(meta.mthreads.map((t) => t.id));
+  return { md: extracted.md, mthreads: [...meta.mthreads, ...extracted.mthreads.filter((t) => !held.has(t.id))] };
+}
+
 /** Every CriticMarkup block in a text: where it is, and the words it wraps. */
 function blocksOf(md: string): { index: number; end: number; anchor: string; spans: string }[] {
   const out: { index: number; end: number; anchor: string; spans: string }[] = [];
@@ -87,13 +99,10 @@ export function threadsOf(md: string | null, html: string | null, meta: EntityMe
   const out: Thread[] = [];
 
   if (md !== null) {
-    // The app's own reading of the pair: bodies re-inlined, then split out
-    // again, so an old inline-format thread and a hybrid one look the same.
-    const expanded = expandMarkdown(md, meta.mthreads);
-    const extracted = extractMarkdown(expanded.md);
-    const bodies = new Map(extracted.mthreads.map((t) => [t.id, t.comments]));
+    const stored = storedThreads(md, meta);
+    const bodies = new Map(stored.mthreads.map((t) => [t.id, t.comments]));
     const raw = blocksOf(md);
-    const bare = blocksOf(extracted.md);
+    const bare = blocksOf(stored.md);
     const seen = new Set<string>();
     bare.forEach((block, i) => {
       const parsed = parseSpans(block.spans);
@@ -108,8 +117,9 @@ export function threadsOf(md: string | null, html: string | null, meta: EntityMe
         comments: entries(bodies.get(id) ?? []),
       });
     });
+    const marked = markerIds(stored.md);
     for (const t of meta.mthreads) {
-      if (expanded.orphanIds.includes(t.id)) out.push({ id: t.id, version: "md", on: "", orphaned: true, comments: entries(t.comments) });
+      if (!marked.has(t.id)) out.push({ id: t.id, version: "md", on: "", orphaned: true, comments: entries(t.comments) });
     }
   } else {
     for (const t of meta.mthreads) out.push({ id: t.id, version: "md", on: "", orphaned: true, comments: entries(t.comments) });
@@ -245,16 +255,16 @@ export function placeForMarker(md: string, on: string, name: string): number | R
 
 /* ---------- Changing ---------- */
 
-/** The document's sidecar and markdown as a change starts from them: parsed,
- *  and normalized to the hybrid layout the way the app normalizes on open —
- *  so every change below works on bare markers and sidecar records only. */
+/** The document's sidecar and markdown as a change starts from them, with
+ *  hand-written comments given their records (`storedThreads`) — so every
+ *  change below works on bare markers and sidecar records only. */
 async function openThreads(tx: Tx, doc: Doc): Promise<{ md: string | null; meta: EntityMeta } | Refusal> {
   const meta = doc.meta ? parseEntityMeta((await tx.readText(doc.meta.fid)) ?? "") : emptyMeta();
   if (!doc.md) return { md: null, meta };
   const md = await tx.readText(doc.md.fid);
   if (md === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-  const migrated = migrateEntity({ diskMd: md, meta });
-  return { md: migrated.md, meta: migrated.meta };
+  const stored = storedThreads(md, meta);
+  return { md: stored.md, meta: { ...meta, mthreads: stored.mthreads } };
 }
 
 /** Store what a change left: the markdown when it changed, and the sidecar —
@@ -303,8 +313,8 @@ export async function postComment(c: Call): Promise<Response> {
     if (open instanceof Refusal) return open;
     // To the second: the markdown form of a thread keeps no finer time
     // (criticMarkup.ts, `formatEntry`), so a record stamped more finely would
-    // differ from its own round trip — and every Mac that opened the document
-    // would rewrite the sidecar to say so (`migrateEntity`).
+    // differ from its own round trip — and the app's next save of the
+    // document would rewrite the sidecar to say so.
     const entry: CommentEntry = { author: sanitizeAuthor(who.name), at: Math.floor(tx.now / 1000) * 1000, body: said };
     const value = thread ? reply(doc, open, thread, entry) : await start(tx, doc, open, on, asked, entry);
     if (value instanceof Refusal) return value;

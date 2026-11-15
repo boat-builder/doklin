@@ -57,9 +57,6 @@ impl Failure {
     pub fn not_logged_in(message: impl Into<String>) -> Self {
         Self::with(6, message)
     }
-    pub fn too_old(message: impl Into<String>) -> Self {
-        Self::with(7, message)
-    }
 }
 
 pub struct Command {

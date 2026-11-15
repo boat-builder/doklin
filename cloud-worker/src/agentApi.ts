@@ -7,11 +7,11 @@
 // in the section its path names.
 //
 //   POST   /api/agent/login       NO BEARER — {code, host?} → 201 {token, agent, workspace,
-//                                 version, features}; 401 when the code is unknown, used or
+//                                 version}; 401 when the code is unknown, used or
 //                                 expired. One of the two routes above the gate (api.ts).
 //   DELETE /api/agent/login       this token revokes itself (204)
 //   GET    /api/agent/me          {agent, person: {id, name} | null, scopes, sections: [folder],
-//                                 workspace, version, features}
+//                                 workspace, version}
 //
 //   read       GET    /api/agent/tree?dir=&deep=1
 //              GET    /api/agent/doc?path=&v=[&clean=1][&info=1]
@@ -78,10 +78,10 @@ import { validName } from "./layout";
 import { HASH_RE } from "./members";
 import { can } from "./roles";
 import { getSearch } from "./search";
-import { WORKER_FEATURES, WORKER_VERSION } from "./version";
+import { WORKER_VERSION } from "./version";
 
 const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 405);
-const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
+const noDatabase = (): Response => json({ error: "the domain's database isn't answering — try again in a moment" }, 503);
 
 /** What the worker is, for a client deciding which commands it can offer. */
 const about = async (env: Env): Promise<Record<string, unknown>> => {
@@ -89,7 +89,6 @@ const about = async (env: Env): Promise<Record<string, unknown>> => {
   return {
     workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
     version: WORKER_VERSION,
-    features: WORKER_FEATURES,
   };
 };
 

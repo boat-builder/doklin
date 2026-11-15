@@ -85,8 +85,7 @@ for (const c of cases) {
 // ---------- Settings → Appearance ----------
 // The theme is the only choice: the swatches paint from their own theme's
 // tokens, a pick applies live with the menu still open and survives a
-// relaunch, and the document's faces and measure are fixed — the keys the
-// font and wide-page settings of v0.1.104 left behind change nothing.
+// relaunch, and the document's faces and measure are fixed.
 {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 2 });
   const page = await ctx.newPage();
@@ -132,12 +131,7 @@ for (const c of cases) {
   await page.click('[data-testid="settings-theme-dark"]');
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${OUT}refresh-appearance-dark.png` });
-  // A relaunch with the old font and wide-page keys still stored.
-  await page.evaluate(() => {
-    localStorage.setItem("doklin:heading-font", "sans");
-    localStorage.setItem("doklin:text-font", "mono");
-    localStorage.setItem("doklin:page-wide", "1");
-  });
+  // A relaunch.
   await page.reload();
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
   const after = { theme: await page.evaluate(() => document.documentElement.dataset.theme), ...(await docLook()) };
@@ -153,7 +147,7 @@ for (const c of cases) {
     menuStaysOpen: live.open === 1,
     appliesLive: live.theme === "paper" && live.checked.join() === "settings-theme-paper",
     survivesReload: after.theme === "dark",
-    oldKeysIgnored: after.text === before.text && after.head === before.head && after.measure === before.measure,
+    facesFixed: after.text === before.text && after.head === before.head && after.measure === before.measure,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
   if (bad.length || errors.length) failed = true;

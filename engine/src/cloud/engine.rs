@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::manifest::{
-    is_directory_id, lease_key, valid_rel_path, Beat, LeaseEntry, Manifest, PollResponse, PublicKind, SpaceEntry,
+    lease_key, valid_rel_path, Beat, LeaseEntry, Manifest, PollResponse, PublicKind, SpaceEntry,
     SpaceKind,
 };
 use super::merge::conflict_copy_path;
@@ -69,20 +69,12 @@ pub(crate) const PRESENCE_BEAT: Duration = Duration::from_secs(45);
 /// and think without the document going to somebody else; short enough that a
 /// Mac left on with a note open lets go of it by the time anyone minds.
 pub(crate) const ACTIVITY_FRESH: Duration = Duration::from_secs(5 * 60);
-/// What an engine asks `/api/meta` about again, hourly, while the worker
-/// lacks it — so updating the worker reaches a Mac that is already running.
-const ASKED_AGAIN_FOR: [&str; 4] = ["versions", "presence", "leases", "spaces"];
 /// The least time between two fetches of the workspace's directory. A
 /// manifest naming somebody this engine cannot name asks for it again — a
 /// colleague invited an hour ago should not need a restart to get a name —
 /// but an id belonging to somebody since removed never resolves, and that
 /// must cost one request every so often rather than one per cycle.
 pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
-/// The least time between two asks to trade the domain's key (`on_key`): a
-/// Mac still holding it probes every poll, and a trade that cannot be made
-/// (a workspace with no superadmin to come back as) must cost one request
-/// every so often rather than four a minute.
-pub(crate) const KEY_TRADE_GAP: Duration = Duration::from_secs(300);
 
 /* ---------- Commands ---------- */
 
@@ -195,11 +187,6 @@ pub type Trash = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
 
 /* ---------- The engine ---------- */
 
-/// What a Mac still holding the domain's key says while the manager trades
-/// it for a sign-in of its own — and goes on saying if the trade cannot be
-/// made (a workspace nobody ever named a superadmin for).
-const KEY_SENTENCE: &str = "this Mac still signs in with the domain's key, which is no longer a sign-in — Doklin is trading it for one of its own. If this stays, disconnect this Mac, then choose Recover with your Cloudflare account with this folder open";
-
 pub struct EngineConfig {
     pub ws_id: String,
     pub name: String,
@@ -219,11 +206,6 @@ pub struct EngineConfig {
     /// Where a real deletion goes: the platform's trash (`Host::trash`).
     /// None — the tests, and a platform with no trash — removes outright.
     pub trash: Option<Trash>,
-    /// Called whenever a probe says this device's token is the domain's key
-    /// — a connection made when the key was a sign-in — so the manager can
-    /// trade it for a sign-in of this device's own and start a new engine on
-    /// that. Until it does, this engine syncs nothing.
-    pub on_key: Option<Box<dyn Fn() + Send + Sync>>,
     /// Called when a space's folder appears on this Mac or leaves it, so the
     /// manager can start and stop what follows a folder — its versioner.
     pub on_spaces: Option<Box<dyn Fn(SpacesChanged) + Send + Sync>>,
@@ -258,11 +240,10 @@ pub struct Engine<R: Remote> {
     /// and always here; a unit is out of the map only while its cycle runs.
     units: BTreeMap<String, Unit<R>>,
     /// The spaces this person is in, as the last poll that could say listed
-    /// them. `None` until one has, and from a worker without `spaces`.
+    /// them. `None` until one has.
     spaces: Option<Vec<SpaceEntry>>,
     /// How many times the domain would not make this person a Private. After
-    /// a few it is not asked again until the app restarts: there is nobody
-    /// to make it for.
+    /// a few it is not asked again until the app restarts.
     private_refusals: u8,
     /// Folders under `Restricted/` the domain would not make a restricted
     /// folder of, so each is asked about once rather than on every poll.
@@ -275,27 +256,18 @@ pub struct Engine<R: Remote> {
     /// Cycles stop until `/api/meta` reports a newer worker.
     outdated: Option<u32>,
     worker_version: Option<u32>,
-    /// What `/api/meta` last listed. A worker without `versions` is mirrored
-    /// to not at all — and says so in the status.
-    worker_features: Vec<String>,
     /// The member id this Mac signs with here, as `/api/meta` last said it.
-    /// None on a domain that has not been asked
-    /// yet, or one whose owner has never adopted an identity — then work is
-    /// signed with the Mac's name, exactly as it was before v3.
+    /// None until the domain has answered, and nothing syncs until it has:
+    /// there is nobody to sign the work with.
     me: Option<String>,
     /// What this Mac's credential may do here, as the same answer spelled it
     /// (`you.can` — the worker's role table). Empty until the domain has
-    /// answered, and from a worker older than the table.
+    /// answered.
     can: Vec<String>,
     /// The domain answered `Removed`: an owner took this Mac's access away.
     /// Set wherever a request can hear it (`heard_removed`), read by the task
     /// loop — which stops the engine and hands the rest to the manager.
     removed: bool,
-    /// The domain said this Mac's token is its key, which is no sign-in:
-    /// nothing syncs until the manager has traded it (`on_key`).
-    key: bool,
-    /// When the manager was last asked to trade it (`KEY_TRADE_GAP`).
-    key_asked: Option<Instant>,
     /// The superadmin's name, as the probe last said — whom to ask.
     superadmin: Option<String>,
     /// id → display name for everyone on this workspace, from the same
@@ -304,8 +276,7 @@ pub struct Engine<R: Remote> {
     /// When the directory was last fetched, so meeting an id nobody can name
     /// asks again — once, not once a cycle (`DIRECTORY_MIN_GAP`).
     people_at: Option<Instant>,
-    /// When the hourly pass last ran: the mirror's floor, and the probe that
-    /// asks an older worker whether it has been updated.
+    /// When the hourly pass last ran: the mirror's floor.
     last_hourly: Option<Instant>,
     /// Absolute path the user is actively editing (frontend-reported).
     activity: Option<(String, Instant)>,
@@ -358,12 +329,9 @@ impl<R: Remote> Engine<R> {
             paused: false,
             outdated: None,
             worker_version: None,
-            worker_features: Vec::new(),
             me: None,
             can: Vec::new(),
             removed: false,
-            key: false,
-            key_asked: None,
             superadmin: None,
             people: BTreeMap::new(),
             people_at: None,
@@ -382,7 +350,7 @@ impl<R: Remote> Engine<R> {
     }
 
     fn space_unit(cfg: &EngineConfig, remote: &Arc<R>, marker: &SpaceMarker, dir: PathBuf, rel: String) -> Unit<R> {
-        let mut unit = Unit::new(
+        Unit::new(
             UnitConfig {
                 id: marker.space.clone(),
                 name: marker.name.clone(),
@@ -393,19 +361,23 @@ impl<R: Remote> Engine<R> {
                 device_id: cfg.device_id.clone(),
             },
             Arc::new(remote.space(&marker.space)),
-        );
-        // A space has no history from before the version store: nothing for
-        // the retired-manifest clean-up to walk.
-        unit.state.legacy_cleanup.done = true;
-        unit
+        )
     }
 
     fn root_key(&self) -> String {
         self.cfg.root.to_string_lossy().to_string()
     }
 
+    /// Whether a pass may run: not paused, not waiting on a worker update,
+    /// and the domain has said who this device is.
     fn can_cycle(&self) -> bool {
-        !self.paused && self.outdated.is_none() && !self.key
+        !self.paused && self.answered()
+    }
+
+    /// The domain answers this engine: its worker is not one this app
+    /// waits to see updated, and it has said who this device is.
+    fn answered(&self) -> bool {
+        self.outdated.is_none() && self.me.is_some()
     }
 
     /// The shared workspace's unit.
@@ -464,13 +436,6 @@ impl<R: Remote> Engine<R> {
             .collect()
     }
 
-    /// Whether `Private` and `Restricted` are sections here rather than
-    /// shared folders: a folder already says it is one, or the domain can
-    /// make them and the shared workspace holds nothing under those names.
-    fn in_sections(&self) -> bool {
-        self.units.len() > 1 || (self.worker_has("spaces") && self.shared().reserved_clear())
-    }
-
     fn set_status(&mut self, phase: Phase, error: Option<String>) {
         self.phase = phase;
         self.error = error;
@@ -490,22 +455,21 @@ impl<R: Remote> Engine<R> {
             last_sync_ms: self.last_sync_ms,
             error: self.error.clone(),
             pending_deletes: self.units.values().map(|u| u.held_deletes.len() as u32).sum(),
-            me: self.name_of(&self.signature()),
+            me: self.me.as_deref().map(|id| self.name_of(id)).unwrap_or_default(),
             me_id: self.me.clone(),
             can: self.can.clone(),
             superadmin: self.superadmin.clone(),
             worker_version: self.worker_version,
-            versions: self.worker_has("versions").then(|| VersionsMirror {
+            versions: VersionsMirror {
                 mirrored: mirror.map(|m| m.mirrored).unwrap_or(0),
                 cloud: mirror.map(|m| m.cloud).unwrap_or(0),
                 last_mirror_ms: self.shared().last_mirror_ms,
                 horizon_days: mirror.and_then(|m| m.horizon_days),
-            }),
+            },
             public: self.public_pages(),
             presence: self.presence.clone(),
             leases: self.lease_holders(),
             spaces: self.space_statuses(),
-            sections: self.in_sections(),
         };
         if let Ok(mut table) = self.statuses.lock() {
             table.insert(self.root_key(), status);
@@ -521,26 +485,16 @@ impl<R: Remote> Engine<R> {
         match self.remote.meta().await {
             Ok(meta) => {
                 self.worker_version = Some(meta.version);
-                self.worker_features = meta.features;
                 // Identity rides on the probe because the probe is what happens
                 // before this engine writes anything: `me` is what a manifest it
                 // publishes signs with, `can` is what this Mac's role may do,
                 // and `people` is what the `by` in a manifest it reads is shown
-                // as. A worker older than v6 answers none of it, and
-                // attribution falls back to device names.
-                let you = meta.you.unwrap_or_default();
-                self.me = you.member_id.filter(|id| !id.is_empty());
-                self.can = you.can;
-                self.superadmin = meta.superadmin.map(|p| p.name);
-                self.key = meta.key;
-                if self.key {
-                    self.set_status(Phase::Error, Some(KEY_SENTENCE.into()));
-                    let due = self.key_asked.is_none_or(|at| at.elapsed() >= KEY_TRADE_GAP);
-                    if let (true, Some(trade)) = (due, &self.cfg.on_key) {
-                        self.key_asked = Some(Instant::now());
-                        trade();
-                    }
+                // as.
+                if let Some(you) = meta.you {
+                    self.me = Some(you.member_id);
+                    self.can = you.can;
                 }
+                self.superadmin = meta.superadmin.map(|p| p.name);
                 self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
                 self.people_at = Some(Instant::now());
                 if let Some(seen_at) = self.outdated {
@@ -549,9 +503,10 @@ impl<R: Remote> Engine<R> {
                     }
                 }
             }
-            Err(RemoteError::Removed) => {
-                self.heard_removed();
-            }
+            Err(RemoteError::Removed) => self.heard_removed(),
+            // Until the domain has answered once, the probe is the only
+            // request this engine makes, so its failure is the status.
+            Err(e) if self.me.is_none() => self.heard_failure(&e),
             Err(_) => {}
         }
     }
@@ -568,21 +523,9 @@ impl<R: Remote> Engine<R> {
         self.removed
     }
 
-    /// What this Mac signs its work with on this workspace: the person the
-    /// domain says it is, and its own name when the domain has not said.
-    ///
-    /// One answer, used everywhere something is attributed — the manifest's
-    /// `by`, a tombstone's, a published page's — so "who did this" never
-    /// depends on which code path wrote it down.
-    pub(crate) fn signature(&self) -> String {
-        self.me.clone().unwrap_or_else(|| self.cfg.device_name.clone())
-    }
-
-    /// A `by` in words. A person's or an agent's id resolves through the
-    /// directory; anything else is shown as it stands — a device name from before v3, or from a
-    /// Mac that signed while the domain had not said who it was. An id
-    /// nobody can name (a person since removed) stays an id rather than
-    /// becoming "someone".
+    /// A `by` in words: a person's or an agent's id, resolved through the
+    /// directory. An id nobody can name (a person since removed) stays an id
+    /// rather than becoming "someone".
     pub(crate) fn name_of(&self, by: &str) -> String {
         self.people.get(by).cloned().unwrap_or_else(|| by.to_string())
     }
@@ -599,15 +542,11 @@ impl<R: Remote> Engine<R> {
             .map(|f| f.by.as_str())
             .chain(m.tombstones.values().map(|t| t.by.as_str()))
             .chain(m.public.values().map(|e| e.by.as_str()))
-            .any(|by| is_directory_id(by) && !self.people.contains_key(by));
+            .any(|by| !self.people.contains_key(by));
         if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
             return;
         }
         self.probe_worker().await;
-    }
-
-    fn worker_has(&self, feature: &str) -> bool {
-        self.worker_features.iter().any(|f| f == feature)
     }
 
     /* ----- the pass ----- */
@@ -621,8 +560,8 @@ impl<R: Remote> Engine<R> {
     /// a cycle, in an order that writes a moved file's new section before it
     /// leaves the old one, and the workspace's one status says how it went.
     pub(crate) async fn pass(&mut self, which: Which) -> RemoteResult<()> {
-        if self.outdated.is_some() || self.key {
-            return Ok(()); // waiting for the worker update, or the key's trade
+        if !self.answered() {
+            return Ok(()); // waiting for the worker update, or to be told who this device is
         }
         if !self.cfg.root.is_dir() {
             // Root missing (unmounted disk, renamed folder…): touch nothing.
@@ -755,30 +694,37 @@ impl<R: Remote> Engine<R> {
                     self.mirror_versions().await;
                 }
             }
-            Some(RemoteError::Offline(m)) => self.set_status(Phase::Offline, Some(m.clone())),
-            Some(RemoteError::Unauthorized) => self.set_status(
+            Some(e) => self.heard_failure(e),
+        }
+        match failure {
+            None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
+    /// What a request that failed says about this workspace, in the status.
+    fn heard_failure(&mut self, e: &RemoteError) {
+        match e {
+            RemoteError::Offline(m) => self.set_status(Phase::Offline, Some(m.clone())),
+            RemoteError::Unauthorized => self.set_status(
                 Phase::Revoked,
                 Some(format!("the domain no longer accepts this {}'s token", self.cfg.device_kind)),
             ),
             // It has no status of its own: the task loop ends the engine, and
             // the workspace leaves this Mac — row and all — a moment later.
-            Some(RemoteError::Removed) => self.heard_removed(),
-            Some(RemoteError::Outdated(m)) => {
+            RemoteError::Removed => self.heard_removed(),
+            RemoteError::Outdated(m) => {
                 self.outdated = Some(self.worker_version.unwrap_or(0));
                 self.set_status(
                     Phase::WorkerOutdated,
                     Some(format!("this {}'s changes are waiting on a worker update ({})", self.cfg.device_kind, m)),
                 );
             }
-            Some(RemoteError::NotFound) => self.set_status(
+            RemoteError::NotFound => self.set_status(
                 Phase::Error,
                 Some(format!("{} no longer holds this workspace", self.cfg.domain)),
             ),
-            Some(e) => self.set_status(Phase::Error, Some(e.to_string())),
-        }
-        match failure {
-            None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) => Ok(()),
-            Some(e) => Err(e),
+            e => self.set_status(Phase::Error, Some(e.to_string())),
         }
     }
 
@@ -793,6 +739,9 @@ impl<R: Remote> Engine<R> {
     }
 
     async fn cycle_taken(&mut self, unit: &mut Unit<R>, moves: &[CrossMove]) -> RemoteResult<Vec<String>> {
+        // Nothing is written before the domain has said whom to sign it
+        // with (`answered`, which the pass checks first).
+        let Some(signature) = self.me.clone() else { return Ok(Vec::new()) };
         // Where the domain is — read before it is applied, for two things
         // only the engine can do: put a name to somebody new, and deal with
         // files that moved to another section.
@@ -815,7 +764,6 @@ impl<R: Remote> Engine<R> {
                 (m.fid.clone(), MovedOut { to: m.to.clone(), landed })
             })
             .collect();
-        let signature = self.signature();
         let ws_root = self.root_key();
         let ctx = Ctx {
             signature: &signature,
@@ -980,15 +928,7 @@ impl<R: Remote> Engine<R> {
     /// becomes a restricted folder with only this person in it, and one
     /// renamed here is renamed for everyone in it.
     pub(crate) async fn reconcile_spaces(&mut self) {
-        if !self.worker_has("spaces") {
-            return;
-        }
         let Some(mut list) = self.spaces.clone() else { return };
-        // Until the shared workspace holds nothing under the reserved names,
-        // the folders spaces would use are still shared content.
-        if !self.units.get(SHARED).is_some_and(|shared| shared.reserved_clear()) {
-            return;
-        }
         let root = self.cfg.root.clone();
         if !root.is_dir() {
             return;
@@ -996,8 +936,8 @@ impl<R: Remote> Engine<R> {
         let ws_id = self.cfg.ws_id.clone();
         let mut changed: Option<SpacesChanged> = None;
 
-        // Everyone has a Private — once the domain has said who this Mac is.
-        if !list.iter().any(|s| s.kind == SpaceKind::Private) && self.me.is_some() && self.private_refusals < 3 {
+        // Everyone has a Private.
+        if !list.iter().any(|s| s.kind == SpaceKind::Private) && self.private_refusals < 3 {
             match self.remote.ensure_private().await {
                 Ok(mine) => list.push(mine),
                 Err(RemoteError::Offline(_)) => {}
@@ -1155,6 +1095,11 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// Why a command that needs the domain's word cannot run yet.
+    fn not_caught_up(&self) -> String {
+        format!("This {} has not caught up with the workspace yet — try again in a moment.", self.cfg.device_kind)
+    }
+
     /// Make a restricted folder holding this person and `members`. With
     /// `from` — a folder in this workspace — that folder becomes it: what was
     /// in it leaves the section it was in as a move, so it is deleted
@@ -1166,17 +1111,10 @@ impl<R: Remote> Engine<R> {
         members: &[String],
         from: Option<&Path>,
     ) -> Result<SpaceStatus, String> {
-        if !self.worker_has("spaces") {
-            return Err(format!(
-                "{} runs a worker too old for restricted folders — update it from the Cloud panel.",
-                self.cfg.domain
-            ));
-        }
-        // Who this device is, and the list of this person's spaces, are what
-        // decide which folders stay here: a folder is only added to one the
-        // domain gave, for somebody it named.
-        if self.me.is_none() || self.spaces.is_none() || !self.shared().reserved_clear() {
-            return Err(format!("This {} has not caught up with the workspace yet — try again in a moment.", self.cfg.device_kind));
+        // The list of this person's spaces is what decides which folders
+        // stay here: a folder is only added to one the domain gave.
+        if self.spaces.is_none() {
+            return Err(self.not_caught_up());
         }
         let name = name.trim();
         if !space::valid_folder_name(name) {
@@ -1293,21 +1231,7 @@ impl<R: Remote> Engine<R> {
         if self.paused || self.outdated.is_some() {
             return;
         }
-        let hourly = self.hourly_due();
         self.last_hourly = Some(Instant::now());
-        if hourly && ASKED_AGAIN_FOR.iter().any(|f| !self.worker_has(f)) {
-            // Either `/api/meta` never answered (the app started offline) or
-            // the worker predates something this app can use — the version
-            // store, the poll that carries a beat, the beat that claims a
-            // lease, spaces. Ask again on the hourly pass: each is meant to
-            // start the moment the worker is updated, on every Mac and
-            // without a restart — but never once per cycle.
-            self.probe_worker().await;
-            self.refresh_status();
-        }
-        if !self.worker_has("versions") {
-            return;
-        }
         let mut landed = false;
         for unit in self.units.values_mut().filter(|u| !u.gone) {
             landed |= unit.mirror_versions().await;
@@ -1319,9 +1243,6 @@ impl<R: Remote> Engine<R> {
 
     /// How far back the bucket keeps, for the section `rel` is in.
     pub(crate) async fn set_cloud_horizon(&mut self, rel: &str, days: Option<u32>) -> Result<(), String> {
-        if !self.worker_has("versions") {
-            return Err("This workspace's worker is too old to keep version history.".to_string());
-        }
         let Some((id, _)) = self.place(rel) else { return Err("That folder isn't connected.".to_string()) };
         let Some(unit) = self.units.get_mut(&id) else { return Err("That folder isn't connected.".to_string()) };
         unit.set_cloud_horizon(days).await?;
@@ -1346,7 +1267,7 @@ impl<R: Remote> Engine<R> {
             .filter(|(other, _)| **other != id)
             .flat_map(|(_, unit)| unit.effective_public().into_keys())
             .collect();
-        let signature = self.signature();
+        let Some(signature) = self.me.clone() else { return Err(self.not_caught_up()) };
         let Some(unit) = self.units.get_mut(&id) else { return Err("that path can't be published".to_string()) };
         let slug = unit.queue_publish(PublishRequest { rel, ..req }, &signature, &elsewhere)?;
         unit.poke = true;
@@ -1442,29 +1363,20 @@ impl<R: Remote> Engine<R> {
     /// being edited is there to claim. Every device beats, editing or idle,
     /// so the others see who is around; one that goes quiet falls out of
     /// presence by the worker's TTL, and out of its lease with it.
-    ///
-    /// Never to a worker without `presence`: before v7 the poll was `GET`
-    /// only, and the beat a route this app no longer speaks. Such a Mac polls
-    /// and stays invisible until the worker is updated, which the update badge
-    /// is already asking for.
     fn beat_due(&self) -> bool {
-        self.worker_has("presence")
-            && (self.last_beat.map(|t| t.elapsed() >= PRESENCE_BEAT).unwrap_or(true)
-                || self.beaconed != self.activity_rel()
-                || self.claim_owed())
+        self.last_beat.map(|t| t.elapsed() >= PRESENCE_BEAT).unwrap_or(true)
+            || self.beaconed != self.activity_rel()
+            || self.claim_owed()
     }
 
     /// When the next beat is owed: now, when the edited path has moved since
     /// the last one or its document is free to claim, and a beat's length
-    /// after the last one otherwise. None when this worker takes no beat.
-    fn beat_deadline(&self) -> Option<Instant> {
-        if !self.worker_has("presence") {
-            return None;
-        }
+    /// after the last one otherwise.
+    fn beat_deadline(&self) -> Instant {
         if self.beaconed != self.activity_rel() || self.claim_owed() {
-            return Some(Instant::now());
+            return Instant::now();
         }
-        Some(self.last_beat.map(|t| t + PRESENCE_BEAT).unwrap_or_else(Instant::now))
+        self.last_beat.map(|t| t + PRESENCE_BEAT).unwrap_or_else(Instant::now)
     }
 
     /// The document being edited is owed a claim now rather than at the next
@@ -1474,9 +1386,6 @@ impl<R: Remote> Engine<R> {
     /// (the poll will say when they stop), and not when the domain could not
     /// say who holds what: then there is no lock to claim.
     fn claim_owed(&self) -> bool {
-        if !self.worker_has("leases") {
-            return false;
-        }
         // A path the worker would not take records no claim, so it could
         // never stop being owed one.
         let Some((id, rel)) = self.activity_place().filter(|(_, rel)| valid_rel_path(rel)) else { return false };
@@ -1500,9 +1409,10 @@ impl<R: Remote> Engine<R> {
     /// the next one forward would spin on a domain that is not answering.
     fn next_poll_after_cycle(&self) -> Instant {
         let clock = Instant::now() + POLL_INTERVAL;
-        match self.beat_deadline() {
-            Some(owed) if self.outdated.is_none() && !self.paused => clock.min(owed),
-            _ => clock,
+        if self.outdated.is_none() && !self.paused {
+            clock.min(self.beat_deadline())
+        } else {
+            clock
         }
     }
 
@@ -1510,7 +1420,7 @@ impl<R: Remote> Engine<R> {
     /// others stop showing it now rather than at the end of the TTL.
     /// Best effort — the TTL is what catches a Mac that could not say so.
     async fn leave(&mut self) {
-        if self.worker_has("presence") && self.last_beat.is_some() {
+        if self.last_beat.is_some() {
             let _ = self.remote.poll(Some(&Beat::Leave)).await;
         }
     }
@@ -1619,9 +1529,6 @@ impl<R: Remote> Engine<R> {
         } else if presence_changed || leases_changed {
             self.refresh_status();
         }
-        if let Some(shared) = self.units.get_mut(SHARED) {
-            shared.legacy_cleanup().await;
-        }
         Ok(())
     }
 
@@ -1640,8 +1547,8 @@ impl<R: Remote> Engine<R> {
             .filter(|l| l.device_id != self.cfg.device_id)
             .filter_map(|l| {
                 let unit = self.units.get(l.space.as_deref().unwrap_or(SHARED))?;
-                let own = l.member_id.is_some() && l.member_id == self.me;
-                let person = l.member_id.as_deref().filter(|_| !own).and_then(|m| self.people.get(m));
+                let own = self.me.as_deref() == Some(l.member_id.as_str());
+                let person = Some(&l.member_id).filter(|_| !own).and_then(|m| self.people.get(m));
                 Some(LeaseHolder {
                     path: lease_key(&unit.ws_rel(&l.path)),
                     device_id: l.device_id.clone(),
@@ -1679,9 +1586,7 @@ impl<R: Remote> Engine<R> {
             .iter()
             .filter(|(id, _)| id.as_str() != self.cfg.device_id)
             .map(|(id, e)| {
-                let person = e
-                    .member_id
-                    .as_deref()
+                let person = Some(e.member_id.as_str())
                     .filter(|m| Some(*m) != self.me.as_deref())
                     .and_then(|m| self.people.get(m));
                 let path = e.path.as_ref().and_then(|path| {
@@ -1707,11 +1612,7 @@ impl<R: Remote> Engine<R> {
     /// joined since it last probed. Ask once, under the same gap as a
     /// stranger in the manifest (`learn_people`).
     async fn learn_people_here(&mut self, poll: &PollResponse) {
-        let stranger = poll
-            .presence
-            .values()
-            .filter_map(|e| e.member_id.as_deref())
-            .any(|m| is_directory_id(m) && !self.people.contains_key(m));
+        let stranger = poll.presence.values().any(|e| !self.people.contains_key(&e.member_id));
         if !stranger || self.people_at.map(|at| at.elapsed() < DIRECTORY_MIN_GAP).unwrap_or(false) {
             return;
         }
@@ -1784,8 +1685,7 @@ impl<R: Remote> Engine<R> {
                         // A new path is owed a beat now; the poll is what
                         // carries it, so the poll comes forward. The frontend
                         // reports a path when the tab changes, not as you
-                        // type, so this is one request per switch — what the
-                        // beat's own route used to cost.
+                        // type, so this is one request per switch.
                         self.set_activity(p);
                         next_poll = next_poll.min(self.next_poll_after_cycle());
                     }
@@ -1813,7 +1713,7 @@ impl<R: Remote> Engine<R> {
                         cycle_now = true;
                     }
                     Some(EngineCmd::VersionsIndex { rel, reply }) => {
-                        let unit = self.place(&rel).map(|(id, _)| id).filter(|_| self.worker_has("versions"));
+                        let unit = self.place(&rel).map(|(id, _)| id);
                         let found = match unit.and_then(|id| self.units.get_mut(&id)) {
                             Some(unit) => unit.versions_index().await,
                             None => None,
@@ -1882,9 +1782,10 @@ impl<R: Remote> Engine<R> {
                 }
                 next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
-                if self.outdated.is_some() || self.key {
-                    // Waiting on a worker update, or on the key's trade: ask,
-                    // and resume the moment it has happened.
+                if !self.answered() {
+                    // Waiting on a worker update, or for the domain to say
+                    // who this device is — an engine that started offline:
+                    // ask, and resume the moment it answers.
                     self.probe_worker().await;
                     if self.can_cycle() {
                         let _ = self.cycle().await;

@@ -396,9 +396,7 @@ export default function CloudSetup({
     if (!probed) return null;
     const { workerVersion, bundledVersion } = probed.result;
     if (workerVersion < bundledVersion) {
-      return withKey
-        ? `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — if this stops, run the update script on it first, then try again.`
-        : `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — connect, then update it from the Cloud panel.`;
+      return `The worker is behind this app (v${workerVersion}, the app expects v${bundledVersion}) — connect, then update it from the Cloud panel.`;
     }
     if (workerVersion > bundledVersion) {
       return `The worker is newer than this app (v${workerVersion}) — update Doklin soon.`;

@@ -39,7 +39,7 @@ The team met on Tuesday to settle the **roadmap** for the next quarter. The shor
 ## What we agreed
 
 - Cloud sync goes to every workspace by the end of the month
-- The board view gets card excerpts and a cleaner header
+- The sidebar gets note excerpts and a cleaner header
 - Published pages pick up the same type as the app
 
 - [x] Draft the rollout note
@@ -50,7 +50,7 @@ The team met on Tuesday to settle the **roadmap** for the next quarter. The shor
 
 ### Open questions
 
-Do we keep \`excerpt: false\` as the only stored flag? The current answer is yes, because older builds rewrite unknown keys away.
+Do we keep the theme as the only stored setting? The current answer is yes, because every other choice is the document's own.
 
 \`\`\`ts
 export function resolveTheme(t: Theme): ResolvedTheme {

@@ -106,19 +106,9 @@ const failingPast = (pattern) => ({
   exec: (sql) => db.exec(sql),
 });
 
-/** Trade a key for a device sign-in as the superadmin (`email`'s person, or
- *  the one there is). */
+/** Trade a key for a device sign-in as the superadmin, `email`'s person. */
 const recover = (key, body = {}, bindings = env, device = DEVICE) =>
   call("/api/auth/recover", { method: "POST", token: key, device, body, bindings });
-
-/** The agent tables as a database had them at schema 5 and 6 (schema.ts). */
-const AGENT_TABLES_BEFORE_OWNERS = `
-    CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
-                         last_used_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE agent_codes (hash TEXT PRIMARY KEY, id TEXT NOT NULL, agent_id TEXT NOT NULL,
-                              created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
-    CREATE TABLE agent_tokens (hash TEXT PRIMARY KEY, id TEXT NOT NULL, agent_id TEXT NOT NULL, host TEXT NOT NULL,
-                               created_at INTEGER NOT NULL);`;
 
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const blobHash = (content) => sha256(content).slice(0, 16);
@@ -190,7 +180,7 @@ const fileEntry = (p, rev, seed) => ({
   hash: blobHash(seed),
   size: 42,
   mtime: 1700000000000,
-  // A member id since v3 — who changed it, not which Mac did.
+  // A member id — who changed it, not which Mac did.
   by: "m-1a2b3c4d",
 });
 const currentEtag = async () =>
@@ -212,9 +202,8 @@ let workerVersion;
 // life of the isolate: the cold-start postures can only be seen before one.
 await test("d1: no binding and a broken binding both still answer the probe", async () => {
   const none = await call("/api/meta", { token: KEY, bindings: { OWNER_TOKEN: KEY, DATA: fake } });
-  assert.equal(none.status, 200, "a domain deployed before the binding existed");
+  assert.equal(none.status, 200, "a deployment whose binding did not take");
   assert.equal(none.json.d1, null);
-  assert.ok(none.json.features.includes("sync"), "…and it is the same worker otherwise");
 
   const bad = await call("/api/meta", { token: KEY, bindings: { OWNER_TOKEN: KEY, DATA: fake, DB: brokenD1() } });
   assert.equal(bad.status, 200, "a database deleted under a deployed worker is not an outage");
@@ -247,9 +236,7 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
 await test("key: the domain's key is no sign-in — it trades, once, for the superadmin's own device", async () => {
   const meta = await call("/api/meta", { token: KEY });
   assert.equal(meta.status, 200, "the probe answers it, so the app can tell a fresh domain from a bound one");
-  assert.equal(meta.json.key, true);
-  assert.equal(meta.json.you, undefined, "the key is nobody");
-  assert.equal(meta.json.people, undefined);
+  assert.deepEqual(Object.keys(meta.json).sort(), ["d1", "version", "workspace"], "the key is nobody: no `you`, no people");
   for (const [path, method] of [
     ["/api/manifest", "GET"],
     ["/api/poll", "GET"],
@@ -268,10 +255,8 @@ await test("key: the domain's key is no sign-in — it trades, once, for the sup
   }
   assert.equal((await call("/api/auth/recover", { token: KEY })).status, 405);
 
-  // A domain nobody has set up has nobody to come back as.
-  const nobody = await recover(KEY);
-  assert.equal(nobody.status, 409);
-  assert.equal(nobody.json.code, "no_identity");
+  // A trade names who is at the keyboard.
+  assert.equal((await recover(KEY)).status, 400);
   assert.equal((await recover(KEY, { email: "not an address" })).status, 400);
   assert.equal(db.value("SELECT COUNT(*) FROM spent_keys"), 0, "a refused trade spends nothing");
 
@@ -305,7 +290,6 @@ await test("key: the domain's key is no sign-in — it trades, once, for the sup
   assert.equal(you.you.role, "superadmin");
   assert.equal(you.you.tokenId, traded.json.tokenId, "a row of the devices list, like any device");
   assert.deepEqual(you.superadmin, { id: traded.json.member.id, name: "Sherin" }, "and everyone is told who that is");
-  assert.equal(you.key, undefined);
 });
 
 /* ---------- People ---------- */
@@ -631,12 +615,6 @@ await test("auth: /api/meta rejects a missing or wrong token; owner and member g
   assert.equal(ok.status, 200);
   assert.ok(Number.isInteger(ok.json.version) && ok.json.version >= 1);
   workerVersion = ok.json.version;
-  assert.ok(ok.json.features.includes("sync"));
-  assert.ok(ok.json.features.includes("wipe"));
-  assert.ok(ok.json.features.includes("versions"), "this worker mirrors the version store");
-  assert.ok(ok.json.features.includes("members"), "…and mints per-person tokens");
-  assert.ok(ok.json.features.includes("presence"), "…takes a beat on the poll");
-  assert.ok(ok.json.features.includes("leases"), "…and a lease on the beat");
   assert.equal(ok.json.workspace, null, "a fresh domain holds nothing");
   assert.equal((await call("/api/meta", { token: MEMBER })).status, 200);
 });
@@ -769,8 +747,8 @@ await test("key: whoever trades a fresh one becomes the superadmin — the role'
   const people = async () => (await ask("/api/auth/members", ada.token)).json.members;
 
   // Ada lost every device: a fresh key, set on the account, and she is back
-  // as herself — no address needed — on a new device, the old one untouched.
-  const back = await trade("key-two", {});
+  // as herself on a new device, the old one untouched.
+  const back = await trade("key-two", { email: "ada@example.com" });
   assert.equal(back.status, 201);
   assert.equal(back.json.member.id, ada.member.id);
   assert.equal((await ask("/api/meta", ada.token)).json.you.role, "superadmin");
@@ -1085,204 +1063,6 @@ await test("removal: a credential an owner took away is told so — and no other
   assert.equal((await call("/api/meta", { token: again.token })).json.removed, true, "removing the person takes the new one too");
 });
 
-/** A database migrated through every step, then put back the way an older
- *  worker left it by `rewind` — run in a new isolate, it migrates again. */
-async function rewound(tag, rewind) {
-  const old = new FakeD1();
-  const bindings = { OWNER_TOKEN: `${tag}-key`, DATA: new FakeR2(), DB: old };
-  const probe = async (isolate) =>
-    (await isolate.fetch(new Request(`https://${tag}.example.com/api/meta`, { headers: { authorization: `Bearer ${tag}-key` } }), bindings)).json();
-  assert.equal((await probe(await anotherIsolate(`${tag}-fresh`))).d1, D1_SCHEMA);
-  old.db.exec(rewind);
-  const isolate = await anotherIsolate(`${tag}-upgrade`);
-  const recoverAs = async (email) => {
-    const res = await isolate.fetch(
-      new Request(`https://${tag}.example.com/api/auth/recover`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${tag}-key`, "content-type": "application/json" },
-        body: JSON.stringify(email ? { email } : {}),
-      }),
-      bindings,
-    );
-    return { status: res.status, json: await res.json() };
-  };
-  return { old, probe: () => probe(isolate), recoverAs };
-}
-
-await test("d1: a database boards left at schema 8 still gets its superadmin, and loses its board", async () => {
-  // Worker v12–v13 numbered boards 7 and step 7's tables 8: such a database
-  // holds all of step 7, plus `board_cards` and the creator, and is at 8.
-  const { old, probe, recoverAs } = await rewound("boards-era", `
-    DROP TABLE superadmin;
-    DROP TABLE spent_keys;
-    CREATE TABLE creator (id INTEGER PRIMARY KEY CHECK (id = 1), member_id TEXT NOT NULL);
-    CREATE TABLE board_cards (id TEXT PRIMARY KEY, title TEXT);
-    INSERT INTO board_cards VALUES ('c-1', 'an idea');
-    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
-    INSERT INTO creator VALUES (1, 'm-0000000a');
-    INSERT INTO agents (id, name, scopes, created_at, last_used_at, disabled, member_id)
-      VALUES ('a-0000000a', 'Terminal', 'read edit', 2, NULL, 0, NULL);
-    UPDATE meta SET schema_version = 8;
-  `);
-  assert.equal((await probe()).d1, D1_SCHEMA);
-  assert.deepEqual(old.tables(), D1_TABLES, "the same tables as a database that never had boards");
-  assert.equal(old.value("SELECT member_id FROM superadmin"), "m-0000000a", "the creator is the superadmin");
-  assert.equal(old.value("SELECT member_id FROM agents"), "m-0000000a", "and the creator's agent is hers");
-  const traded = await recoverAs(null);
-  assert.equal(traded.status, 201, "the key trades without being told who she is");
-  assert.equal(traded.json.member.role, "superadmin");
-});
-
-await test("d1: a database worker v11 left at schema 7 gets all of step 7 before step 9", async () => {
-  // Worker v11 numbered boards 7 and had nothing of what step 7 is now.
-  const { old, probe, recoverAs } = await rewound("v11", `
-    DROP TABLE superadmin;
-    DROP TABLE spent_keys;
-    DROP TABLE removed_tokens;
-    DROP TABLE spaces;
-    DROP TABLE space_members;
-    DROP TABLE addresses;
-    ALTER TABLE agents DROP COLUMN member_id;
-    CREATE TABLE board_cards (id TEXT PRIMARY KEY, title TEXT);
-    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
-    UPDATE meta SET schema_version = 7;
-  `);
-  assert.equal((await probe()).d1, D1_SCHEMA);
-  assert.deepEqual(old.tables(), D1_TABLES);
-  assert.ok(
-    old.rows("SELECT name FROM pragma_table_info('agents')").some((c) => c.name === "member_id"),
-    "agents belong to somebody",
-  );
-  const ada = await recoverAs("ada@example.com");
-  assert.equal(ada.status, 201);
-  assert.equal(ada.json.member.id, "m-0000000a");
-  assert.equal(ada.json.member.role, "superadmin");
-});
-
-await test("d1: a database from before roles learns who its creator was, and makes them the superadmin — once, and never from a later promotion", async () => {
-  // A second isolate over a database the previous worker left: schema 6, the
-  // one row that could carry the owner role, and a member beside it.
-  const old = new FakeD1();
-  old.db.exec(`
-    CREATE TABLE meta (key TEXT PRIMARY KEY, schema_version INTEGER NOT NULL);
-    INSERT INTO meta (key, schema_version) VALUES ('schema', 6);
-    CREATE TABLE members (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
-                          created_at INTEGER NOT NULL, last_seen_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE tokens (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL, device_id TEXT,
-                         device_name TEXT, created_at INTEGER NOT NULL);
-    CREATE TABLE invites (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL,
-                          created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
-    ${AGENT_TABLES_BEFORE_OWNERS}
-    CREATE TABLE search_text (fid TEXT PRIMARY KEY, folded TEXT);
-    CREATE TABLE search_state (key TEXT PRIMARY KEY, etag TEXT NOT NULL, held TEXT NOT NULL);
-    INSERT INTO search_state VALUES ('mirror', 'e-old', '{}');
-    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
-    INSERT INTO members VALUES ('m-0000000b', 'bob@example.com', 'Bob', 'member', 2, NULL, 0);
-    INSERT INTO agents VALUES ('a-0000000a', 'Old bot', 'read edit', 4, NULL, 0);
-  `);
-  old.run("INSERT INTO tokens VALUES (?, 't-0000000b', 'm-0000000b', 'd-bob', 'Air', 3)", sha256("bobs-token"));
-  old.run("INSERT INTO agent_tokens VALUES (?, 't-0000000a', 'a-0000000a', 'ci', 5)", sha256("dka_an-old-bots-token"));
-  const bindings = { OWNER_TOKEN: "old-domains-key", DATA: new FakeR2(), DB: old };
-  const fetch = async (isolate, path, token, init = {}) => {
-    const res = await isolate.fetch(
-      new Request(`https://old.example.com${path}`, {
-        ...init,
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      }),
-      bindings,
-    );
-    return { status: res.status, json: await res.json().catch(() => null) };
-  };
-
-  const first = await anotherIsolate("upgrade-1");
-  const meta = await fetch(first, "/api/meta", "old-domains-key");
-  assert.equal(meta.json.d1, D1_SCHEMA);
-  assert.equal(old.value("SELECT member_id FROM superadmin"), "m-0000000a", "the owner row of old was the creator's, and is the superadmin's");
-  assert.deepEqual(old.rows("SELECT name FROM sqlite_master WHERE name = 'creator'"), [], "the table it said so in is gone");
-  // An agent made before agents belonged to anybody was the creator's to
-  // make, and is now plainly hers.
-  assert.deepEqual(old.rows("SELECT id, member_id FROM agents"), [{ id: "a-0000000a", member_id: "m-0000000a" }]);
-  const oldBot = await fetch(first, "/api/agent/me", "dka_an-old-bots-token");
-  assert.equal(oldBot.status, 200, "its token still works");
-  assert.deepEqual(oldBot.json.person, { id: "m-0000000a", name: "Ada" }, "and it is Ada's");
-  assert.deepEqual(oldBot.json.sections, ["Private"], "so it sees her Private");
-  // The search mirror is derived: made again, by space, and empty.
-  assert.deepEqual(old.rows("SELECT * FROM search_state"), []);
-  assert.deepEqual(
-    old.rows("SELECT name FROM pragma_table_info('search_text') ORDER BY cid").map((c) => c.name),
-    ["space_id", "fid", "folded"],
-  );
-  // Bob's token used to authenticate as a member whatever his row said; it
-  // still does, because his row says member.
-  assert.equal((await fetch(first, "/api/meta", "bobs-token")).json.you.role, "member");
-
-  // The Mac that held the secret trades it for a sign-in of its own, as Ada,
-  // without being told who she is.
-  const traded = await fetch(first, "/api/auth/recover", "old-domains-key", { method: "POST", body: "{}" });
-  assert.equal(traded.status, 201);
-  assert.equal(traded.json.member.id, "m-0000000a");
-  assert.equal(traded.json.member.role, "superadmin");
-
-  // Bob is made an owner, and then a stale isolate — one that read schema 8
-  // before the bump — runs the step's move again. It is guarded by the
-  // version it migrates from, so it cannot crown whoever is an owner by then.
-  const promoted = await fetch(first, "/api/auth/members/m-0000000b", traded.json.token, {
-    method: "PATCH",
-    body: JSON.stringify({ role: "owner" }),
-  });
-  assert.equal(promoted.json.member.role, "owner");
-  old.run("DELETE FROM superadmin");
-  old.db.exec(`
-    CREATE TABLE IF NOT EXISTS creator (id INTEGER PRIMARY KEY CHECK (id = 1), member_id TEXT NOT NULL);
-    INSERT INTO creator VALUES (1, 'm-0000000b');
-    INSERT OR IGNORE INTO superadmin (id, member_id)
-      SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 9;
-    DROP TABLE creator;
-  `);
-  assert.equal(old.value("SELECT COUNT(*) FROM superadmin"), 0, "after the bump the move moves nothing");
-
-  // And a database that had no owner row has no superadmin until somebody
-  // trades a key with their address — and an agent there was nobody's to
-  // keep: it goes.
-  const blank = new FakeD1();
-  blank.db.exec(`
-    CREATE TABLE meta (key TEXT PRIMARY KEY, schema_version INTEGER NOT NULL);
-    INSERT INTO meta (key, schema_version) VALUES ('schema', 6);
-    CREATE TABLE members (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
-                          created_at INTEGER NOT NULL, last_seen_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE tokens (hash TEXT PRIMARY KEY, id TEXT NOT NULL, member_id TEXT NOT NULL, device_id TEXT,
-                         device_name TEXT, created_at INTEGER NOT NULL);
-    ${AGENT_TABLES_BEFORE_OWNERS}
-    INSERT INTO members VALUES ('m-0000000c', 'cy@example.com', 'Cy', 'member', 1, NULL, 0);
-    INSERT INTO agents VALUES ('a-0000000c', 'Nobody''s bot', 'read', 2, NULL, 0);
-  `);
-  blank.run("INSERT INTO agent_tokens VALUES (?, 't-0000000c', 'a-0000000c', 'ci', 3)", sha256("dka_nobodys-token"));
-  const second = await anotherIsolate("upgrade-2");
-  const blankBindings = { OWNER_TOKEN: "blank-key", DATA: new FakeR2(), DB: blank };
-  const ask = async (path, token, init = {}) => {
-    const res = await second.fetch(
-      new Request(`https://blank.example.com${path}`, {
-        ...init,
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      }),
-      blankBindings,
-    );
-    return { status: res.status, json: await res.json().catch(() => null) };
-  };
-  assert.equal((await ask("/api/meta", "blank-key")).json.d1, D1_SCHEMA);
-  assert.equal(blank.value("SELECT COUNT(*) FROM superadmin"), 0);
-  assert.equal(blank.value("SELECT COUNT(*) FROM agents"), 0, "the agent nobody owned is gone");
-  assert.equal(blank.value("SELECT COUNT(*) FROM agent_tokens"), 0, "…with its machines");
-  assert.equal((await ask("/api/agent/me", "dka_nobodys-token")).status, 401);
-  const nobody = await ask("/api/auth/recover", "blank-key", { method: "POST", body: "{}" });
-  assert.equal(nobody.status, 409);
-  assert.equal(nobody.json.code, "no_identity");
-  const cy = await ask("/api/auth/recover", "blank-key", { method: "POST", body: JSON.stringify({ email: "cy@example.com" }) });
-  assert.equal(cy.status, 201, "a refused trade spent nothing");
-  assert.equal(cy.json.member.id, "m-0000000c", "the person already here");
-  assert.equal(cy.json.member.role, "superadmin");
-});
-
 await test("meta: the probe says who the bearer is, and what everyone here is called", async () => {
   const owner = (await call("/api/meta", { token: OWNER })).json;
   assert.equal(owner.you.role, "superadmin");
@@ -1398,9 +1178,15 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
     [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), hash: "ZZZ" } }), /hash/],
     [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), size: -1 } }), /size/],
     [manifest(3, { "Bad Id": fileEntry("ok.md", 1, "a") }), /file id/],
+    // `by` is a person's or an agent's id, never a device's name.
+    [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), by: "Sherin's MacBook Pro" } }), /invalid by/],
+    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", rev: 2, ts: 1700000000000, by: "Sherin's MacBook Pro" } } }), /tombstone by/],
+    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", rev: 2, ts: 1700000000000 } } }), /tombstone by/],
+    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", ts: 1700000000000, by: "m-1a2b3c4d" } } }), /tombstone rev/],
+    [manifest(3, { "f-a": { ...fileEntry("ok.md", 1, "a"), by: undefined } }), /invalid by/],
     [manifest(3, {}, { tombstones: { "f-old": { path: "a/../b.md" } } }), /tombstone/],
     [manifest(3, {}, { tombstones: [] }), /tombstones/],
-    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", to: "the finance folder" } } }), /tombstone to/],
+    [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "the finance folder" } } }), /tombstone to/],
     [manifest(3, { "f-a": fileEntry("Private/diary.md", 1, "a") }), /kept for/],
     [manifest(3, { "f-a": fileEntry("restricted/Finance/q3.md", 1, "a") }), /kept for/],
     [manifest(-1, {}), /seq/],
@@ -1425,9 +1211,8 @@ await test("manifest: either side of a schema skew is 426, and the sentence says
   const newer = await putManifest(manifest(3, {}, { version: 5 }));
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
-  // An app still writing the version before — one that knows nothing of the
-  // reserved folders — is not corrupt, it is old, and 426 is the status that
-  // says so.
+  // An app writing an older version is not corrupt, it is behind, and 426 is
+  // the status that says so.
   const older = await putManifest(manifest(3, {}, { version: 3 }));
   assert.equal(older.status, 426);
   assert.match(older.json.error, /update the app/);
@@ -1441,12 +1226,13 @@ await test("manifest: the shared workspace holds nothing under Private or Restri
   assert.equal(near.status, 200, JSON.stringify(near.json));
   // A file that moved to a section is a tombstone that says so: a space's id, or "" for the shared workspace.
   const moved = await putManifest(
-    manifest(4, {}, { tombstones: { "f-near01": { path: "Private (shared)/diary.md", rev: 2, ts: 1700000000000, to: "p-0a1b2c3d" }, "f-near02": { path: "Docs/Private/x.md", rev: 2, ts: 1700000000000, to: "" } } }),
+    manifest(4, {}, { tombstones: { "f-near01": { path: "Private (shared)/diary.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "p-0a1b2c3d" }, "f-near02": { path: "Docs/Private/x.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "" } } }),
   );
   assert.equal(moved.status, 200, JSON.stringify(moved.json));
-  // A tombstone under a reserved name is history, not a file: an old one must not stop the next write.
-  const old = await putManifest(manifest(5, {}, { tombstones: { "f-old001": { path: "Private/gone.md", rev: 3, ts: 1700000000000 } } }));
-  assert.equal(old.status, 200, JSON.stringify(old.json));
+  // A tombstone is a path the shared workspace held, so never one under a reserved name.
+  const reserved = await putManifest(manifest(5, {}, { tombstones: { "f-res001": { path: "Private/gone.md", rev: 3, ts: 1700000000000, by: "m-1a2b3c4d" } } }));
+  assert.equal(reserved.status, 400);
+  assert.match(reserved.json.error, /Private and Restricted/);
   await putManifest(manifest(6, {}));
   assert.notEqual(await currentEtag(), etag);
 });
@@ -1455,12 +1241,12 @@ await test("manifest: the public map — slug grammar, reserved words, kinds, re
   const files = { "f-doc1": fileEntry("Projects/plan.md", 1, "v1"), "f-home": fileEntry("Home.md", 1, "home") };
   const good = manifest(4, files, {
     public: {
-      k7m2p9qx: { kind: "file", file: "f-doc1", path: "Projects/plan.md", by: "Sherin's MacBook Pro", at: 1757000000000 },
-      roadmap: { kind: "dir", path: "Projects/Roadmap", title: "Roadmap", desc: "What we're building" },
-      everything: { kind: "dir", path: "" },
-      home: { kind: "file", file: "f-home", path: "Home.md", root: true },
+      k7m2p9qx: { kind: "file", file: "f-doc1", path: "Projects/plan.md", by: "m-1a2b3c4d", at: 1757000000000 },
+      roadmap: { kind: "dir", path: "Projects/Roadmap", title: "Roadmap", desc: "What we're building", by: "a-1a2b3c4d", at: 1757000000000 },
+      everything: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 },
+      home: { kind: "file", file: "f-home", path: "Home.md", root: true, by: "m-1a2b3c4d", at: 1757000000000 },
       // Deleted last week; the page 404s until the file is back. Kept on purpose.
-      ghost: { kind: "file", file: "f-gone", path: "Scratch.md" },
+      ghost: { kind: "file", file: "f-gone", path: "Scratch.md", by: "m-1a2b3c4d", at: 1757000000000 },
     },
   });
   const ok = await putManifest(good);
@@ -1470,7 +1256,8 @@ await test("manifest: the public map — slug grammar, reserved words, kinds, re
 
   const etag = await currentEtag();
   const withPublic = (pub) => manifest(5, files, { public: pub });
-  const entry = { kind: "file", file: "f-doc1", path: "Projects/plan.md" };
+  const entry = { kind: "file", file: "f-doc1", path: "Projects/plan.md", by: "m-1a2b3c4d", at: 1757000000000 };
+  const { at: _at, ...undated } = entry;
   const bad = [
     [withPublic({ AB: entry }), /slug/],
     [withPublic({ ab: entry }), /slug/],
@@ -1486,7 +1273,9 @@ await test("manifest: the public map — slug grammar, reserved words, kinds, re
     [withPublic({ page: { ...entry, desc: "d".repeat(601) } }), /desc/],
     [withPublic({ page: { ...entry, root: "yes" } }), /root/],
     [withPublic({ page: { ...entry, at: -1 } }), /at/],
-    [withPublic({ one: { ...entry, root: true }, two: { kind: "dir", path: "", root: true } }), /root/],
+    [withPublic({ page: undated }), /at/],
+    [withPublic({ page: { ...entry, by: "Sherin's MacBook Pro" } }), /by/],
+    [withPublic({ one: { ...entry, root: true }, two: { kind: "dir", path: "", root: true, by: "m-1a2b3c4d", at: 1757000000000 } }), /root/],
     [withPublic([]), /public/],
   ];
   for (const [body, message] of bad) {
@@ -1567,17 +1356,6 @@ await test("blobs: content-addressed round-trip, list, delete; a re-put is a no-
   const tooBig = new Uint8Array(25 * 1024 * 1024 + 1);
   const rejected = await call(`/api/blobs/f-doc1/${"a".repeat(16)}`, { method: "PUT", token: OWNER, body: tooBig });
   assert.equal(rejected.status, 413);
-});
-
-await test("history: the three deprecated routes are gone, in every verb", async () => {
-  // The manifest has carried no revisions since the version store landed, and
-  // the compatibility rule is what let these go rather than linger as dead
-  // routes. A 404 is the whole answer: not a method error, not an empty
-  // archive — there is no such thing here any more.
-  for (const method of ["GET", "PUT", "DELETE"]) {
-    const res = await call("/api/history/f-doc1", { method, token: OWNER, body: method === "PUT" ? {} : undefined });
-    assert.equal(res.status, 404, method);
-  }
 });
 
 /* ---------- The version store ---------- */
@@ -1757,7 +1535,7 @@ await test("poll: a GET only reads; a POST is the same poll carrying this device
   assert.equal(beat.json.manifestEtag, await currentEtag(), "the etag is the poll's job either way");
   const mine = beat.json.presence[DEVICE];
   assert.equal(mine.name, "Sherin's MacBook Pro", "the Mac's own name");
-  assert.equal(mine.memberId, ownerId, "the owner's secret reads no row, so the beat takes the adopted one");
+  assert.equal(mine.memberId, ownerId, "the person whose device it is");
   assert.equal(mine.path, "Projects/plan.md");
   assert.ok(Date.now() - mine.ts < 5000);
 
@@ -1787,16 +1565,13 @@ await test("poll: a GET only reads; a POST is the same poll carrying this device
   assert.equal(traversal.json.presence[OTHER_DEVICE].path, undefined);
   assert.equal((await call("/api/poll", { method: "POST", token: OWNER, body: "not json" })).status, 400);
 
-  // The old routes are gone, and the poll answers two verbs.
-  assert.equal((await call("/api/presence", { method: "PUT", token: OWNER, body: { path: "Home.md" } })).status, 404);
-  assert.equal((await call("/api/presence", { method: "DELETE", token: OWNER })).status, 404);
+  // The poll answers two verbs.
   assert.equal((await call("/api/poll", { method: "PUT", token: OWNER, body: {} })).status, 405);
-  assert.equal(await fake.get("presence.json"), null, "and nothing writes the bucket for it");
 });
 
 await test("poll: a lapsed row falls out of the window, the next beat sweeps it, and a leave is immediate", async () => {
   db.run(
-    "INSERT INTO presence (device_id, member_id, device_name, path, ts) VALUES ('d-ghost', NULL, 'Ghost', 'Old.md', ?)",
+    "INSERT INTO presence (device_id, member_id, device_name, path, ts) VALUES ('d-ghost', 'm-0000dead', 'Ghost', 'Old.md', ?)",
     Date.now() - 10 * 60 * 1000,
   );
   const read = await call("/api/poll", { token: MEMBER });
@@ -1941,7 +1716,7 @@ await test("leases: the holder's beat renews, a non-holder's changes nothing, an
 await test("leases: a lapsed one is takeable and swept, and take claims a live one", async () => {
   db.run("DELETE FROM leases");
   db.run(
-    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('old.md', 'd-ghost', NULL, 'Ghost', ?)",
+    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('old.md', 'd-ghost', 'm-0000dead', 'Ghost', ?)",
     Date.now() - 1000,
   );
   const read = await call("/api/poll", { token: OWNER });
@@ -1950,7 +1725,7 @@ await test("leases: a lapsed one is takeable and swept, and take claims a live o
   assert.equal(holder(taken, "old.md"), OTHER_DEVICE, "a lapsed lease is free to claim, with no take");
 
   db.run(
-    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('gone.md', 'd-ghost', NULL, 'Ghost', ?)",
+    "INSERT INTO leases (path, device_id, member_id, device_name, until) VALUES ('gone.md', 'd-ghost', 'm-0000dead', 'Ghost', ?)",
     Date.now() - 1000,
   );
   await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Studio" } });
@@ -2129,7 +1904,7 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
     method: "PUT",
     token: MEMBER,
     headers: { "x-base-etag": etag1 },
-    body: { ...next, seq: 2, public: { front: { kind: "dir", path: "", root: true } } },
+    body: { ...next, seq: 2, public: { front: { kind: "dir", path: "", root: true, by: "m-1a2b3c4d", at: 1757000000000 } } },
   });
   assert.equal(home.status, 400);
   assert.ok(/home page/.test(home.json.error));
@@ -2341,7 +2116,6 @@ await test(`public: the landing page, robots, icons, the OG image, the mermaid a
   assert.equal(og.headers.get("content-type"), "image/png");
   assert.equal(og.bytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "a PNG");
   assert.ok(og.bytes.length > 10000, "the real image, not a placeholder");
-  assert.ok((await rawGet("/anything/og.png")).bytes.equals(og.bytes), "one static image for every page");
 
   const mermaid = await pub("/__web/abc123/mermaid.js");
   if (bundlePath) {
@@ -2818,9 +2592,6 @@ await test("agents: the owner adds one with its first code; the code is redeemed
   assert.deepEqual(login.json.scopes, ["read", "edit"]);
   assert.deepEqual(login.json.workspace, { id: here.id, name: here.name });
   assert.equal(login.json.version, workerVersion);
-  for (const feature of ["agents", "agent-docs", "agent-pages", "agent-comments", "agent-search"]) {
-    assert.ok(login.json.features.includes(feature), `the login says the worker has ${feature}`);
-  }
   const token = login.json.token;
   assert.equal(db.value("SELECT hash FROM agent_tokens WHERE agent_id = ?", agent.id), sha256(token), "only the hash is kept");
   assert.equal(db.value("SELECT COUNT(*) FROM agent_codes WHERE agent_id = ?", agent.id), 0, "redeeming spends the code");
@@ -2904,7 +2675,6 @@ await test("agents: the owner adds one with its first code; the code is redeemed
     sections: ["Private"],
     workspace: { id: here.id, name: here.name },
     version: workerVersion,
-    features: login.json.features,
   });
 
   // "Last used" is a date in a list: the first request writes it, and then
@@ -4222,13 +3992,21 @@ const appMeta = await (async () => {
   const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
   return import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 })();
-/** Whether the app, opening this document, finds it already in its normal
- *  form — nothing to migrate in the markdown, nothing to rewrite in the sidecar. */
+/** Whether the app, opening this document and saving it untouched, writes
+ *  back the same bytes: the markdown expands into the editor and extracts
+ *  back to itself, with every thread's record as it was, and the sidecar
+ *  serializes to itself. */
 const settled = (stem, mdExt = ".md") => {
   const metaText = textAt(`${stem}.meta.jsonl`) ?? "";
   const meta = appMeta.parseEntityMeta(metaText);
-  const result = appMeta.migrateEntity({ diskMd: mdExt ? textAt(`${stem}${mdExt}`) : null, meta });
-  return !result.mdChanged && !result.metaChanged && (metaText === "" || appMeta.serializeEntityMeta(meta) === metaText);
+  if (metaText !== "" && appMeta.serializeEntityMeta(meta) !== metaText) return false;
+  const md = mdExt ? textAt(`${stem}${mdExt}`) : null;
+  if (md === null) return true;
+  const expanded = appMeta.expandMarkdown(md, meta.mthreads);
+  const extracted = appMeta.extractMarkdown(expanded.md);
+  const orphans = new Set(expanded.orphanIds);
+  const saved = { ...meta, mthreads: [...extracted.mthreads, ...meta.mthreads.filter((t) => orphans.has(t.id))] };
+  return extracted.md === md && appMeta.serializeEntityMeta(saved) === appMeta.serializeEntityMeta(meta);
 };
 
 await test("comments: a markdown thread is a marker in the text and a record in the sidecar, written together; the words must be plain, and occur once in ordinary text", async () => {
@@ -4251,7 +4029,7 @@ await test("comments: a markdown thread is a marker in the text and a record in 
   ].join("\n");
   await freshWorkspace({
     "Talk/draft.md": DRAFT,
-    "Talk/old.md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there.\n",
+    "Talk/typed.md": "Hello {==typed words==}{>>a note somebody typed<<} there.\n",
     "Talk/chart.png": PIXEL_PNG,
   });
   const bot = await addAgent("Reviewer", ["comment", "edit"]);
@@ -4444,16 +4222,17 @@ await test("comments: a markdown thread is a marker in the text and a record in 
   assert.equal(textAt("Talk/draft.md"), DRAFT.replace("The crew is ready.", "The crew is rested."), "and the text is the text again");
   assert.deepEqual(await threads("Talk/draft"), []);
 
-  // A thread written inline, the way the app wrote them before the sidecar:
-  // read as it is, and normalized the first time it is changed.
-  const inline = await threads("Talk/old");
-  assert.deepEqual(inline, [
-    { id: "old111", version: "md", on: "old words", line: 1, comments: [{ author: "Alice", at: Date.parse("2026-01-01T10:00:00Z"), body: "an inline thread" }] },
-  ]);
-  assert.equal((await say({ path: "Talk/old", thread: "old111", body: "Still here." })).json.comments, 2);
-  assert.equal(textAt("Talk/old.md"), "Hello {==old words==}{>>#old111<<} there.\n", "the conversation moved out of the prose");
-  assert.deepEqual(recordsOf(textAt("Talk/old.meta.jsonl"))[0].comments.map((c) => c.body), ["an inline thread", "Still here."]);
-  assert.ok(settled("Talk/old"), "which is the migration the app itself would have made");
+  // A comment somebody typed by hand, with no id: a thread like any other,
+  // given its id and its record the first time it is changed, as the app's
+  // own save would give them.
+  const typed = await threads("Talk/typed");
+  assert.equal(typed.length, 1);
+  assert.match(typed[0].id, /^[a-z0-9]{8}$/);
+  assert.deepEqual(typed[0], { id: typed[0].id, version: "md", on: "typed words", line: 1, comments: [{ author: "", at: 0, body: "a note somebody typed" }] });
+  assert.equal((await say({ path: "Talk/typed", thread: typed[0].id, body: "Answered." })).json.comments, 2);
+  assert.equal(textAt("Talk/typed.md"), `Hello {==typed words==}{>>#${typed[0].id}<<} there.\n`, "the note moved out of the prose");
+  assert.deepEqual(recordsOf(textAt("Talk/typed.meta.jsonl"))[0].comments.map((c) => c.body), ["a note somebody typed", "Answered."]);
+  assert.ok(settled("Talk/typed"), "exactly as the app's own save would have left it");
 });
 
 await test("comments: an html thread sits on the element whose text begins with the words — the innermost one — and lives wholly in the sidecar", async () => {
@@ -4911,7 +4690,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   // The shared workspace cannot take an address a space holds — a Mac's write, or an agent's.
   const sharedEtag = await currentEtag();
   const cur = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
-  const clash = await putManifest({ ...cur, seq: cur.seq + 1, public: { ...cur.public, budget: { kind: "dir", path: "" } } });
+  const clash = await putManifest({ ...cur, seq: cur.seq + 1, public: { ...cur.public, budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } });
   assert.equal(clash.status, 409);
   assert.deepEqual(clash.json.taken, ["budget"]);
   assert.ok(/already taken/.test(clash.json.error));
@@ -4936,7 +4715,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     method: "PUT",
     ...jo,
     headers: { "x-base-etag": joPrivate.etag },
-    body: { version: 4, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "" } } },
+    body: { version: 4, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
   });
   assert.equal(second.status, 409, "the second claim is told it is taken");
   assert.deepEqual(second.json.taken, ["budget"]);
@@ -5016,7 +4795,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'budget'"), 0);
   assert.equal((await pub("/budget")).status, 404);
   const now = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
-  const taken = await putManifest({ ...now, seq: now.seq + 1, public: { ...now.public, budget: { kind: "dir", path: "" } } });
+  const taken = await putManifest({ ...now, seq: now.seq + 1, public: { ...now.public, budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } });
   assert.equal(taken.status, 200, taken.text);
   assert.deepEqual(
     db.rows("SELECT slug FROM addresses WHERE space_id = '' ORDER BY slug").map((r) => r.slug),
@@ -5039,7 +4818,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     token: OWNER,
     bindings: { OWNER_TOKEN: KEY, DATA: fake, DB: failingPast(/addresses/) },
     headers: { "x-base-etag": await currentEtag() },
-    body: { ...latest, seq: latest.seq + 1, public: { ...latest.public, quiet: { kind: "dir", path: "" } } },
+    body: { ...latest, seq: latest.seq + 1, public: { ...latest.public, quiet: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
   });
   assert.equal(unheard.status, 200, unheard.text);
   assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'quiet'"), 0);

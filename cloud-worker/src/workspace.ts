@@ -59,7 +59,7 @@ function readManifest(v: unknown): Manifest {
         hash: f.hash,
         size: num(f.size),
         ...(typeof f.mtime === "number" ? { mtime: f.mtime } : {}),
-        ...(typeof f.by === "string" ? { by: f.by } : {}),
+        by: typeof f.by === "string" ? f.by : "",
       };
     }
   }
@@ -71,8 +71,8 @@ function readManifest(v: unknown): Manifest {
         title: optText(e.title),
         desc: optText(e.desc),
         root: e.root === true,
-        by: optText(e.by),
-        at: typeof e.at === "number" ? e.at : undefined,
+        by: typeof e.by === "string" ? e.by : "",
+        at: num(e.at),
       };
       if (e.kind === "file" && typeof e.file === "string" && validPath(e.path)) {
         map[slug] = { kind: "file", file: e.file, path: e.path, ...common };

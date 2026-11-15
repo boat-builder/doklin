@@ -65,8 +65,8 @@ const openRail = async (path) => {
 await poll(async () => (await page.locator(".sidebar").count()) === 1);
 await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
 
-/* 1 — the entry point exists with nothing connected: history is not a cloud
-      feature any more. */
+/* 1 — the entry point exists with nothing connected: history is every
+      workspace's, cloud or not. */
 await page.locator('[data-tree-path="/docs/other.md"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
 const menuItems = await page.locator(".sidebar-menu-item").allTextContents();

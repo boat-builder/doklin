@@ -1,6 +1,6 @@
 // Mounts the REAL App (same StrictMode wrapper as src/main.tsx) on top of
-// the IPC stub in meta.html — the entity-meta drive walks migration,
-// expansion, body-only saves, orphans, and reload persistence.
+// the IPC stub in meta.html — the entity-meta drive walks expansion,
+// body-only saves, orphans, and reload persistence.
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";

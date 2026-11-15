@@ -8,7 +8,7 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ## Headers and auth
 
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
-- A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (D1 down, wiped domain, rotated secret) is a bare `401`.
+- A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (a wiped domain's, or one nobody ever held) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`; the iPhone's engine sends `ios/<version>`.
 - Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
 - Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`; the superadmin also `people.recover` and `workspace.manage`.
@@ -20,10 +20,10 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ## Engine routes (`src/api.ts`, `src/versions.ts`)
 
 ```
-GET  /api/meta  {version, features, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
+GET  /api/meta  {version, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
      you: {role, can: [actions], tokenId, memberId, email, name}, superadmin: {id, name}|null,
-     people: [{id, name}]}; people = members then agents. With the key: {version, features,
-     workspace, d1, key: true}. Runs the D1 migration (once per isolate).
+     people: [{id, name}]}; people = members then agents. With the key: {version, workspace,
+     d1}. Runs the D1 migration (once per isolate).
 POST /api/workspace  superadmin; {name, deviceName?} → 201 {id, name, createdAt, createdBy,
      manifestEtag}; 409 {workspace} when bound
 GET  /api/workspace  {id, name, createdAt, createdBy, files, bytes}
@@ -98,10 +98,10 @@ Owners only, except join, recover, `GET members`, the device routes and the agen
 ```
 POST   /api/auth/join  no bearer; {code, deviceId?, deviceName?} → 201 {token, tokenId, member};
        400 not a code; 401 unknown or expired (identical)
-POST   /api/auth/recover  the key; {email?, name?, deviceId?, deviceName?} → 201 {token, tokenId,
-       member}: a device sign-in as the superadmin — email's person (made if new, brought back if
-       removed, an owner), who becomes it; without one the superadmin there is. 409
-       {code: "no_identity"} when there is none; 401 {code: "key_spent"} the second time
+POST   /api/auth/recover  the key; {email, name?, deviceId?, deviceName?} → 201 {token, tokenId,
+       member}: a device sign-in as email's person (made if new, brought back if removed, an
+       owner), who becomes the superadmin; 400 without a valid email; 401 {code: "key_spent"} the
+       second time
 POST   /api/auth/invites  {email, name?, codeHash, expiresAt ≤ 30 d} → 201 {invite}; creates the
        member if new, re-enables a removed one, replaces their pending invite; 409 when somebody
        has signed in as that address (lastSeenAt set, or the superadmin's row) unless the caller is
@@ -126,7 +126,7 @@ DELETE /api/auth/session  a device ending its own sign-in: its row, presence and
        goes to removed_tokens
 POST   /api/auth/agents  anyone; {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}: the caller's
 GET    /api/auth/agents  anyone; the caller's agents, an owner everyone's: {agents: [{id, name, scopes,
-       createdAt, lastUsedAt, memberId|null, mine, machines: [{id, host, createdAt}],
+       createdAt, lastUsedAt, memberId, mine, machines: [{id, host, createdAt}],
        code: {id, createdAt, expiresAt}|null}]}; `code` only on the caller's own
 POST   /api/auth/agents/<id>  {name?, scopes?} → {updated: true}; its person only
 POST   /api/auth/agents/<id>/code  {codeHash, expiresAt} → 201 {code}; replaces a pending one; its
@@ -155,9 +155,9 @@ cover every section, opening at most 8 spaces a request (`notListed`,
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
-       name}|null, version, features}; 400 not a code; 401 unknown/used/expired (identical); 503
+       name}|null, version}; 400 not a code; 401 unknown/used/expired (identical); 503
 DELETE login  revoke this token (204)
-GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version, features}
+GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version}
 read:
 GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?, public?}],
     files: [{path, rev, size, changed, by, public?}]}; a version is {file, rev, size, changed,
@@ -170,7 +170,7 @@ GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{lin
     moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
     {indexing, pending}; limit ≤ 30
 GET pages  {pages: [{slug, url, kind: document|file|folder, path, title?, desc?, home?, by?, byName?,
-    at?, missing?}], notListed?}
+    at, missing?}], notListed?}
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version?,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
@@ -211,7 +211,7 @@ Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensiti
 /<dirSlug>/<rel/path>   nested note (md extension dropped, case-insensitive), …/raw, or image/PDF/html
                         a slug the shared map lacks is looked up in `addresses` and served from
                         that space (cache key carries its etag and id); held by nobody → 404, uncached
-/og.png · /<slug>/og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
+/og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
 /__web/<tag>/mermaid.js  immutable, content-tagged
 /__web/fonts/<file>      the app's bundled fonts
 anything else            404 page
@@ -234,7 +234,7 @@ Bind puts the empty manifest, then `workspace.json`, both
 `onlyIf: {etagDoesNotMatch: "*"}`: a bind dying midway leaves a free domain.
 Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
-`^[a-z0-9][a-z0-9_-]{2,63}$`. Old `presence.json` / `history/` are dead.
+`^[a-z0-9][a-z0-9_-]{2,63}$`.
 
 ## Manifest v4 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
 
@@ -252,12 +252,14 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 }
 ```
 
-- `by`: `m-` or `a-` + 8 hex; checked only as a bounded string (v2 device names survive).
+- Every file, tombstone and public entry has `by`: a member's id or an agent's
+  (`m-` or `a-` + 8 hex). A tombstone always has `rev` and `ts`, a public
+  entry `at`.
 - A tombstone may carry `to`: the file was moved to another section, not
   deleted — a space id, or `""` for the shared workspace.
 - The shared manifest holds no file under `Private/` or `Restricted/`, in any
   case (`RESERVED_FOLDERS`, `layout.ts` ⇄ `RESERVED_DIRS`, `space.rs`:
-  **change both**); a space's manifest may. Tombstones are not checked for it.
+  **change both**), tombstones included; a space's manifest may.
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
@@ -270,9 +272,9 @@ meta         (key PK, schema_version)          survives wipe
 members      (id m-…, email UNIQUE normalized, name, role, created_at, last_seen_at, disabled)
 tokens       (hash PK, id t-…, member_id → members CASCADE, device_id, device_name, created_at)
 invites      (hash PK, id i-…, member_id → members CASCADE, created_at, expires_at)
-presence     (device_id PK, member_id?, device_name, space_id '' = shared, path?, ts)
-leases       ((space_id, path) PK, path lowercased, device_id, member_id?, device_name, until)
-agents       (id a-…, name, scopes, created_at, last_used_at, disabled, member_id)
+presence     (device_id PK, member_id, device_name, space_id '' = shared, path?, ts)
+leases       ((space_id, path) PK, path lowercased, device_id, member_id, device_name, until)
+agents       (id a-…, name, scopes, created_at, last_used_at, member_id)
 agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expires_at)
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
 search_text  ((space_id, fid) PK, folded)   space_id '' = shared; md file id, else html; NULL past 1 MB
@@ -288,14 +290,15 @@ addresses     (slug PK, space_id)       which space a public address is; '' = sh
 `members.disabled = 1` is a removed person: no tokens, not listed, still in
 `/api/meta` `people`. `hash` columns are `sha256(token or code)`. Migrations: ordered `STEPS` run
 on `/api/meta`, idempotent `CREATE … IF NOT EXISTS`, then `UPDATE meta SET
-schema_version = <to> WHERE key = 'schema' AND schema_version = <to-1>` so
-concurrent isolates converge. A table that holds data never changes shape by
-`DROP`: a step lists the column under `columns`, and the runner adds it only
-when a read of it fails. Updates ship no migrations directory: add a
-step, never a wrangler migration. A step that has shipped is never
-renumbered or removed: a database stores only the number it reached, so a
-number that changes meaning makes the runner skip a step it never ran. Single-primary: no read replicas (a lease
-two Macs both believe they hold is worse than none).
+schema_version = <to> WHERE key = 'schema' AND schema_version = <the version read>`
+so concurrent isolates converge. A table that holds data never changes shape by
+`DROP`: a step that adds a column to one adds it only when a read of it fails
+(`ALTER TABLE … ADD COLUMN` is not idempotent). Updates ship no migrations
+directory: add a step, never a wrangler migration. A step that has shipped is
+never renumbered or removed: a database stores only the number it reached, so a
+number that changes meaning makes the runner skip a step it never ran.
+Single-primary: no read replicas (a lease two Macs both believe they hold is
+worse than none).
 
 ## Deploying
 

@@ -71,15 +71,14 @@ manifest, rendered by the worker from the synced files.
   - an unmarked folder under `Restricted/` → `POST /api/spaces` (only its maker in it);
   - renamed here → `PATCH` the name; renamed elsewhere → the folder follows (`names_space` tells the two apart);
   - a unit whose folder is gone → its state is wiped and the folder comes back whole. Never tombstones.
-- `spaces: null` in a poll changes nothing. Gated on the `spaces` feature.
+- `spaces: null` in a poll changes nothing.
 - A space's routes answering `404` stop that unit until the next poll says whether its person is still in it.
-- No space has a folder while the shared manifest holds a file under a reserved name (`reserved_clear`): that folder is renamed `Private (shared)` once, after the remote is applied and before the scan (`rescue_reserved`), so the files move rather than vanish.
 - A file directly under `Restricted/` is in no section and syncs nowhere.
 - The reserved names are reserved in any case (`space::top`); a section's paths are spelled as the disk spells its folder (`space::spelled`).
 - A folder's name on a Mac must be one `names_space` accepts for the space's name, or the next reconcile reads it as a rename and `PATCH`es the space. So only the engine names a new restricted folder (`free_restricted_dir`): the app asks it to (`make_space`), and never makes one under `Restricted/` itself.
 - `make_space` with a folder renames that folder into `Restricted/`: its files then leave their section as moves. It refuses while `spaces` is `None`: adding to a list the domain has not given would make every folder missing from it look left.
 - Leaving or deleting a folder on this Mac drops it from `spaces` and reconciles at once; other Macs learn from their poll. Either way the folder's going emits `cloud-space-left`.
-- `CloudStatus.spaces` is drawn from the units, so a Mac that started offline still lists its folders (no members, kind by where the folder is). `sections` is what tells the app that `Private` and `Restricted` are not shared folders.
+- `CloudStatus.spaces` is drawn from the units, so a Mac that started offline still lists its folders (no members, kind by where the folder is).
 
 **Sections in the app** (`Sidebar.tsx`, `App.tsx`, `src/cloud.ts`):
 - `placeOf(cloud, rel)` is the one answer to "who can open this path". `nowhere` = under a reserved name but in no space.
@@ -109,7 +108,7 @@ manifest, rendered by the worker from the synced files.
 - Tombstones expire after 30 days: `TOMBSTONE_TTL_MS` in `engine.rs` ⇄ `commit.ts`. **Change both.** A move keeps `mtime` in both (`staged.moves` ⇄ `Tx.move`).
 - Blob GC: every 20th cycle, unreferenced revisions older than a day only (a racing pusher may have uploaded ahead of its CAS).
 - `426` on PUT → `worker-outdated`: sync pauses, probing `/api/meta` each poll until a newer worker answers.
-- `by` ids: `is_directory_id` (`manifest.rs`) ⇄ `ENTITY_ID_RE` (`members.ts`) ⇄ `AGENT_ID_RE` (`agents.ts`). **Change all three.** An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); unresolved ids and pre-v3 device names show as they stand.
+- `by` is a member id (`ENTITY_ID_RE`, `members.ts`) or an agent id (`AGENT_ID_RE`, `agents.ts`). An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); an id it cannot name shows as it stands.
 
 ## Flows (`flows.rs`, `mod.rs`)
 
@@ -121,7 +120,6 @@ manifest, rendered by the worker from the synced files.
 - **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`.
 - **Disconnect**: stop the engine, end this Mac's sign-in, drop the `cloud.json` entry and state; folder, marker and cloud stay.
 - **Wipe** (`cloud_wipe`, superadmin): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
-- **A Mac whose `cloud.json` still holds the key** (connected while it was a sign-in): its probe answers `key: true`, the engine syncs nothing and asks the manager to trade it (`trade_key`, a one-time move). A domain with no superadmin to come back as cannot be traded silently; the engine's status says to recover instead.
 
 ## Local files
 
@@ -133,11 +131,11 @@ manifest, rendered by the worker from the synced files.
 
 ## Worker versions and updates
 
-- `cloud-worker/src/version.ts` is the one source of `WORKER_VERSION`, `WORKER_FEATURES`, `MANIFEST_VERSION`, `COMPATIBILITY_DATE`. Parsed, never copied, by `engine/build.rs`, `vite.config.ts` (`virtual:cloud-worker-version`) and the bundle script: keep the one-line shape `/^export const WORKER_VERSION = (\d+);$/m`.
+- `cloud-worker/src/version.ts` is the one source of `WORKER_VERSION`, `MANIFEST_VERSION`, `COMPATIBILITY_DATE`. Parsed, never copied, by `engine/build.rs`, `vite.config.ts` (`virtual:cloud-worker-version`) and the bundle script: keep the one-line shape `/^export const WORKER_VERSION = (\d+);$/m`.
 - **Bump `WORKER_VERSION` for every wire change and any change to how a public page looks** (renderer, theme, tokens, fonts). It drives the update badge; without it deployed domains never update.
-- A name in `WORKER_FEATURES` is a promise about behaviour, added only once it exists. The engine gates on `versions` (mirror), `presence` (beat; else plain `GET` polls), `leases` (claims), `spaces` (sections) and re-probes hourly while one is missing (`ASKED_AGAIN_FOR`). The CLI gates each command on its `agent-*` feature.
+- `WORKER_VERSION` is the one thing read off a worker about what it does: no feature list, nothing gated on one. The engine, app and CLI expect every route and field of the version they were built with.
 - Neither side must work with the other's next release; a skewed pair must say so (badge, `worker-outdated`, `426`) and never corrupt. So retired routes and fields are deleted, not kept.
 - Move `COMPATIBILITY_DATE` only on purpose: it changes every new deploy's runtime.
 - Bundle < 3 MB gzipped (the script fails past it; mermaid is most of it). The checked-in `cloud-worker/src/assets.ts` stays empty (`WEB_ASSETS` is `null`); the bundle script splices mermaid in.
-- **Update** = `scripts/doklin-cloud-update.sh <endpoint>` (release asset; `updateCommands`). Names from the endpoint (`deploymentNames`); confirms worker and bucket exist first (deploying a missing name creates a second worker); may create only the D1 database, under the conventional name; done when unauthenticated `/api/meta` answers `401`. Overrides `WORKER_NAME=`, `BUCKET_NAME=`, `D1_NAME=`. No secret.
+- **Update** = `scripts/doklin-cloud-update.sh <endpoint>` (release asset; `updateCommands`). Names from the endpoint (`deploymentNames`); confirms worker, bucket and D1 database exist first (deploying a missing name creates a second worker) and creates nothing; done when unauthenticated `/api/meta` answers `401`. Overrides `WORKER_NAME=`, `BUCKET_NAME=`, `D1_NAME=`. No secret.
 - **Setup prompt** checks names are free first (a same-name deploy silently replaces a worker) and that `/api/meta`'s `d1` is a number. **Teardown** runs after the wipe, never forces a non-empty bucket. `wrangler.toml` is never committed. `verify-harness/cloudprompts.test.mjs` pins prompts and script to the naming rule and compatibility date.

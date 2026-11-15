@@ -28,10 +28,6 @@ pub struct Workspace {
     #[serde(default)]
     pub agent: String,
     pub token: String,
-    /// What the domain's worker could do when it was last asked — refreshed
-    /// when a command needs something that is not listed.
-    #[serde(default)]
-    pub features: Vec<String>,
 }
 
 impl Workspace {

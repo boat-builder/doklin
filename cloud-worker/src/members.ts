@@ -1,7 +1,6 @@
 // People, and the credentials they hold.
 //
-// The shape everything here rests on is a separation the old design did not
-// make: an *identity* is not a *credential*.
+// The shape everything here rests on: an *identity* is not a *credential*.
 //
 //   member   permanent, one row per person, keyed by their normalized email.
 //            What the manifest, presence and leases name. Survives every
@@ -281,7 +280,7 @@ export async function listDirectory(env: Env): Promise<{ id: string; name: strin
         `SELECT id, name FROM (
            SELECT id, name, 0 AS kind, created_at FROM members
            UNION ALL
-           SELECT id, name, 1 AS kind, created_at FROM agents WHERE disabled = 0
+           SELECT id, name, 1 AS kind, created_at FROM agents
          ) ORDER BY kind, created_at, id`,
       )
       .all<{ id: string; name: string }>();
@@ -357,18 +356,17 @@ export async function findMemberByEmail(env: Env, email: string): Promise<Member
 }
 
 /** What trading the domain's key can come to besides a sign-in: the key
- *  was traded before, or nobody was named and there is no superadmin to be. */
-export type ClaimRefusal = "spent" | "no_identity";
+ *  was traded before. */
+export type ClaimRefusal = "spent";
 
 /**
  * Trade the domain's key for a device sign-in as the superadmin — how a
  * workspace gets its first device, and the way back in for whoever controls
  * the Cloudflare account after every device is lost.
  *
- * `email` names who is at the keyboard; null means the superadmin there is
- * now, coming back. Naming somebody else makes THEM the superadmin: setting
- * the key proved they control the account the workspace is stored on, and
- * that is what the role is. The person they replace keeps the owner role on
+ * `email` names who is at the keyboard, and makes THEM the superadmin:
+ * setting the key proved they control the account the workspace is stored
+ * on, and that is what the role is. The person they replace keeps the owner role on
  * their row. A person removed before is here again, an owner.
  *
  * The key is spent in the same batch, first: of two trades racing with one
@@ -377,7 +375,7 @@ export type ClaimRefusal = "spent" | "no_identity";
 export async function claimSuperadmin(
   env: Env,
   keyHash: string,
-  email: string | null,
+  email: string,
   name: string | null,
   deviceId: string | null,
   deviceName: string | null,
@@ -388,13 +386,6 @@ export async function claimSuperadmin(
     if (await db.prepare("SELECT 1 AS spent FROM spent_keys WHERE hash = ?").bind(keyHash).first()) {
       return "spent" as const;
     }
-    const who =
-      email ??
-      (await db
-        .prepare("SELECT m.email AS email FROM members m JOIN superadmin s ON s.member_id = m.id")
-        .first<string>("email"));
-    if (!who) return "no_identity" as const;
-
     const token = randomHex(32);
     const tokenId = `t-${randomHex(4)}`;
     await db.batch([
@@ -406,21 +397,21 @@ export async function claimSuperadmin(
            ON CONFLICT(email) DO UPDATE SET name = COALESCE(?5, members.name), role = 'owner', disabled = 0,
                                             last_seen_at = COALESCE(members.last_seen_at, ?4)`,
         )
-        .bind(memberId(), who, given ?? validName(null, who.split("@")[0] || "Member"), now, given),
+        .bind(memberId(), email, given ?? validName(null, email.split("@")[0] || "Member"), now, given),
       db
         .prepare(
           `INSERT INTO superadmin (id, member_id) SELECT 1, id FROM members WHERE email = ?
            ON CONFLICT(id) DO UPDATE SET member_id = excluded.member_id`,
         )
-        .bind(who),
+        .bind(email),
       db
         .prepare(
           `INSERT INTO tokens (hash, id, member_id, device_id, device_name, created_at)
            SELECT ?, ?, id, ?, ?, ? FROM members WHERE email = ?`,
         )
-        .bind(await sha256Hex(token), tokenId, deviceId, validName(deviceName, "A device"), now, who),
+        .bind(await sha256Hex(token), tokenId, deviceId, validName(deviceName, "A device"), now, email),
     ]);
-    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(who).first<MemberRow>();
+    const row = await db.prepare(`SELECT ${MEMBER_COLS} FROM members m WHERE m.email = ?`).bind(email).first<MemberRow>();
     if (!row) throw new Error("the superadmin's row did not land");
     return { token, tokenId, member: toMember(row) };
   });

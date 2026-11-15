@@ -505,8 +505,8 @@ const andList = (items: readonly string[]): string =>
  * A markdown thread's place is a marker in the text, `{==words==}{>>#id<<}`.
  * The new text must carry exactly the markers the old one did, each as it
  * was, words and all; it may move one with its words. Compared as written,
- * so a marker of any shape — a stray, a thread still written inline — is
- * kept like the rest.
+ * so a marker of any shape — a stray, a hand-written one — is kept like
+ * the rest.
  */
 function markersKept(before: string, after: string, stem: string): Refusal | null {
   const was = markersOf(before);

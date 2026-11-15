@@ -28,7 +28,7 @@ use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local, stat_pair,
     write_atomic, write_json, ScanEntry,
 };
-use super::space::{read_space_marker, reserved_top, RESERVED_DIRS, SHARED};
+use super::space::{reserved_top, RESERVED_DIRS, SHARED};
 use super::status::{Events, PublicPage, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
 // The cloud half of versioning. `crate::versions` is the local versioner —
 // this module only mirrors what that one wrote.
@@ -51,10 +51,6 @@ const GC_EVERY_N_CYCLES: u64 = 20;
 /// A blob must be at least this old before GC may take it (a racing pusher
 /// may have uploaded it moments ago, ahead of its manifest CAS).
 const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
-/// How many fileIds one poll of the legacy clean-up handles. Small enough
-/// that the pass is invisible beside the poll it rides on; a workspace of
-/// 5000 files finishes in about half an hour of polling.
-pub(crate) const LEGACY_BATCH: usize = 50;
 const CAS_ATTEMPTS: usize = 4;
 
 /* ---------- Local persistent state ---------- */
@@ -105,7 +101,6 @@ pub struct PendingPublic {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct WorkspaceState {
-    pub version: u32,
     /// Etag of the last manifest this device applied.
     pub manifest_etag: Option<String>,
     /// The manifest as of that etag — what remote diffs compare against.
@@ -121,45 +116,6 @@ pub struct WorkspaceState {
     /// device gets there first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cloud_sweep_ms: Option<u64>,
-    /// How far the one-time clean-up of the retired manifest history has
-    /// got. Absent only on a device that has not started it.
-    #[serde(default, skip_serializing_if = "LegacyCleanup::is_pristine")]
-    pub legacy_cleanup: LegacyCleanup,
-}
-
-/// The bookmark of the one-time clean-up of the retired manifest history:
-/// every file's retired revision blobs. It
-/// had a first pass over the `history/<fid>.json` archives too, until the
-/// routes it called were deleted.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LegacyCleanup {
-    /// What an older release wrote here when it finished deleting archives.
-    /// Kept under its own name so that a state file written by one is read
-    /// the way it meant it: false means that device's cursor belongs to a
-    /// pass that no longer exists, and the blob pass starts over.
-    #[serde(default)]
-    pub archives_done: bool,
-    /// Both passes are finished and this workspace never looks again. It is
-    /// written down and stays written down: a device that forgot it had
-    /// finished would walk the whole bucket again after every restart.
-    #[serde(default)]
-    pub done: bool,
-    /// The last fileId the running pass handled; the next poll starts after
-    /// it. `None` means "from the beginning", which is where each pass
-    /// starts and where the other one leaves it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-impl LegacyCleanup {
-    /// Nothing has happened yet, so there is nothing worth writing down —
-    /// which is what keeps this out of the state file of a workspace
-    /// connected after the manifest history was retired, with none to
-    /// retire in the first place. Every later state is persisted, the
-    /// finished one included.
-    fn is_pristine(&self) -> bool {
-        !self.archives_done && !self.done && self.cursor.is_none()
-    }
 }
 
 /* ---------- What a cycle decides ---------- */
@@ -306,16 +262,6 @@ pub(crate) struct Unit<R: Remote> {
     pub last_mirror_ms: Option<u64>,
 }
 
-/// The entry at the top of `root` called `name`, however it is spelled.
-fn top_dir(root: &Path, name: &str) -> Option<PathBuf> {
-    std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-}
-
 impl<R: Remote> Unit<R> {
     pub(crate) fn new(cfg: UnitConfig, remote: Arc<R>) -> Self {
         let _ = std::fs::create_dir_all(cfg.state_dir.join("base"));
@@ -422,9 +368,6 @@ impl<R: Remote> Unit<R> {
         for (fid, st) in &self.state.files {
             match scan.get(&st.path) {
                 Some(entry) => out.dirty |= entry.size != st.size || entry.mtime_ms != st.mtime_ms,
-                // Under a reserved name in the shared workspace: not gone,
-                // waiting for `rescue_reserved`.
-                None if self.is_shared() && reserved_top(&st.path).is_some() => out.dirty = true,
                 None => out.vanished.push((fid.clone(), st.hash.clone(), st.path.clone())),
             }
         }
@@ -438,50 +381,6 @@ impl<R: Remote> Unit<R> {
         }
         out.dirty |= !out.vanished.is_empty() || !out.news.is_empty();
         out
-    }
-
-    /// Whether the shared workspace holds nothing under a reserved name, as
-    /// far as this Mac knows. Until it does, no space has a folder here: the
-    /// folder a space would use is still shared content.
-    pub(crate) fn reserved_clear(&self) -> bool {
-        let reserved = |path: &str| reserved_top(path).is_some();
-        !self.state.files.values().any(|f| reserved(&f.path))
-            && !self.state.manifest.files.values().any(|f| reserved(&f.path))
-    }
-
-    /// The one-time rename of a shared folder called `Private` or
-    /// `Restricted`, from before those names were reserved: it becomes
-    /// `Private (shared)`, files and all, and the scan that follows reads
-    /// the rename as moves. Run after the remote manifest is applied — a Mac
-    /// that got there first has already renamed it, and then there is
-    /// nothing under the old name left to do.
-    fn rescue_reserved(&mut self) -> Result<(), String> {
-        if !self.is_shared() {
-            return Ok(());
-        }
-        for name in RESERVED_DIRS {
-            if !self.state.files.values().any(|f| reserved_top(&f.path) == Some(name)) {
-                continue;
-            }
-            let Some(dir) = top_dir(&self.root, name) else { continue };
-            // Never a folder that is a space's: that one was not shared, and
-            // must not become so.
-            let a_space = read_space_marker(&dir).is_some()
-                || std::fs::read_dir(&dir)
-                    .map(|entries| entries.flatten().any(|e| read_space_marker(&e.path()).is_some()))
-                    .unwrap_or(false);
-            if a_space {
-                continue;
-            }
-            let to = (1u32..)
-                .map(|n| if n == 1 { format!("{} (shared)", name) } else { format!("{} (shared) {}", name, n) })
-                .map(|candidate| self.root.join(candidate))
-                .find(|candidate| !candidate.exists())
-                .unwrap_or_else(|| self.root.join(format!("{} (shared)", name)));
-            std::fs::rename(&dir, &to)
-                .map_err(|e| format!("couldn't rename the shared folder \"{}\" out of the way: {}", name, e))?;
-        }
-        Ok(())
     }
 
     pub(crate) fn confirm_deletes(&mut self) {
@@ -555,10 +454,6 @@ impl<R: Remote> Unit<R> {
             //    deletions). Local-vs-remote overlap is decided inside.
             let applied = self.apply_remote(&remote_manifest, ctx).await?;
             changed_paths.extend(applied);
-
-            // 2½. A shared folder under a name that is now reserved moves out
-            //     of the way before the scan stops looking there.
-            self.rescue_reserved().map_err(RemoteError::Other)?;
 
             // 3. What changed locally?
             let scan = scan_local(&self.root, self.skip()).map_err(RemoteError::Other)?;
@@ -1142,11 +1037,9 @@ impl<R: Remote> Unit<R> {
     /// Fold the staged changes into `next` (a clone of the freshest remote
     /// manifest).
     ///
-    /// Everything this writes is signed with [`Engine::signature`] — a member
-    /// id since manifest v3. Entries it does not touch keep whatever they
-    /// carry, including the device names a v2 workspace was written with:
-    /// rewriting those would attribute somebody else's edit to whoever
-    /// happened to upgrade first.
+    /// Everything this writes is signed with `ctx.signature` — the member
+    /// id the domain says this device signs in as. Entries it does not touch
+    /// keep the `by` they carry.
     fn build_manifest(&self, next: &mut Manifest, staged: &Staged, ctx: &Ctx<'_>) {
         next.version = MANIFEST_VERSION;
         next.seq += 1;
@@ -1487,7 +1380,7 @@ impl<R: Remote> Unit<R> {
         self.sweep_blobs(&candidates).await;
     }
 
-    /// One page of "keep the current hash, drop the rest" over these files.
+    /// "Keep the current hash, drop the rest" over these files.
     /// A fileId the manifest no longer holds (a deleted file) keeps nothing.
     async fn sweep_blobs(&self, fids: &[String]) {
         for fid in fids {
@@ -1500,66 +1393,6 @@ impl<R: Remote> Unit<R> {
                 }
             }
         }
-    }
-
-    /* ----- the retired manifest history ----- */
-
-    /// Every fileId this workspace can name, sorted — live files and
-    /// tombstones both, because a deleted file's blobs are exactly what the
-    /// old system left in the bucket. Sorted, so a cursor into it means the
-    /// same thing on the next poll.
-    fn legacy_fids(&self) -> Vec<String> {
-        let m = &self.state.manifest;
-        let mut fids: BTreeSet<&String> = m.files.keys().collect();
-        fids.extend(m.tombstones.keys());
-        fids.into_iter().cloned().collect()
-    }
-
-    /// The one-time clean-up of what the manifest's history left behind:
-    /// every blob but each file's current one. `LEGACY_BATCH` fileIds per
-    /// poll, so it costs nothing on the hot path, and the bookmark is
-    /// persisted, so it survives a restart and is never done twice.
-    ///
-    /// This used to sweep the `history/<fid>.json` archives first. Those
-    /// routes are gone, and the archives with them:
-    /// a workspace whose first pass never finished keeps a few small objects
-    /// nothing reads, and the wipe takes them. The blobs are the part that
-    /// was worth the walk — a deep revision of a large file is megabytes —
-    /// and nothing else collects them: the per-cycle GC only looks at files
-    /// this device has touched, so a file never edited again would keep its
-    /// old revisions for ever.
-    pub(crate) async fn legacy_cleanup(&mut self) {
-        if self.state.legacy_cleanup.done {
-            return;
-        }
-        if !self.state.legacy_cleanup.archives_done {
-            // A device still deleting archives when this release arrived has
-            // a bookmark into a pass that no longer exists. The blob pass
-            // starts from the beginning rather than inheriting it — it is
-            // idempotent, and skipping part of the backlog is not.
-            self.state.legacy_cleanup.archives_done = true;
-            self.state.legacy_cleanup.cursor = None;
-            self.persist_state();
-        }
-        let after = self.state.legacy_cleanup.cursor.clone();
-        let batch: Vec<String> = self
-            .legacy_fids()
-            .into_iter()
-            .filter(|f| after.as_deref().map(|c| f.as_str() > c).unwrap_or(true))
-            .take(LEGACY_BATCH)
-            .collect();
-
-        if batch.is_empty() {
-            // Off the end of the list: this workspace never looks again.
-            self.state.legacy_cleanup.done = true;
-            self.state.legacy_cleanup.cursor = None;
-            self.persist_state();
-            return;
-        }
-
-        self.sweep_blobs(&batch).await;
-        self.state.legacy_cleanup.cursor = batch.last().cloned();
-        self.persist_state();
     }
 
     pub(crate) fn file_id_at(&self, rel: &str) -> Option<String> {

@@ -4,7 +4,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 
 ## Rules
 
-- Only `retain::sweep` deletes from a local store, by the ladder; besides it, only `stores::forget` (whole store, user-asked, refused while its folder is open), `cloud-cache/` pruning and the one-time `versions/drafts` removal in `untitled.rs`. File deletes, restores, disconnect and wipe never do. Bucket `versions/`: only the cloud sweep and a wipe.
+- Only `retain::sweep` deletes from a local store, by the ladder; besides it, only `stores::forget` (whole store, user-asked, refused while its folder is open) and `cloud-cache/` pruning. File deletes, restores, disconnect and wipe never do. Bucket `versions/`: only the cloud sweep and a wipe.
 - Stores live in `<app_data>/versions/`, never in a workspace.
 - In a connected workspace (the folder carries the cloud marker) `Private/` and `Restricted/` are never in the workspace's store (`space::shared_skip`). Each section's folder has a store and a versioner of its own (`cloud::section_roots`), mirrored to that space's own `versions/`. Otherwise a Private's content would reach the store everyone reads.
 - A space's folder that leaves this Mac takes its store with it (`forget_root`).
@@ -14,7 +14,6 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 - A snapshot restore checks every blob first, writes via `Host::write_file` (the app's own write path: `write_workspace_bytes` on the Mac; never through `String`), and trashes via `workspace::trash_or_remove` plus `Core::touched`.
 - The preview is a `readOnly` `Editor`: an old version can't be autosaved over the current one. `flushPendingAutosave` first.
 - The engine only reads a local store (it writes only `cloud-cache/`). Bucket `versions/` never references sync `blobs/<fid>/`; `gc_blobs` knows nothing of snapshots.
-- No `versions` worker feature: no mirror, null `CloudStatus.versions`, not an error; hourly re-probe.
 - `by` is the capturing Mac (`cloud::device_name`), not the author.
 
 ## Capture and retention
@@ -69,5 +68,3 @@ versions/blobs/<sha256>                       create-only, local gzip bytes
 - `versions/{status,history,workspace,stores}.rs` + commands in `versions/mod.rs` ⇄ `src/versions.ts` ⇄ the iPhone's `Payloads.swift` (status, history, workspace)
 - `cloud/versions.rs` ⇄ `cloud-worker/src/versions.ts` and `layout.ts`
 - `VersionsMirror` in `cloud/status.rs` ⇄ `src/cloud.ts`
-
-`WorkspaceState.legacy_cleanup` (`cloud/engine.rs`): one-time sweep of sync blobs the retired manifest `hist` left, `LEGACY_BATCH` fileIds per poll.

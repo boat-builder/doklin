@@ -14,12 +14,9 @@
 # worker, confirm the names, write wrangler.toml, deploy over the same name.
 # The app's "Update the worker" card hands an agent these same two commands.
 #
-# It is a code-only redeploy in every respect but one: the R2 bucket binding,
-# the OWNER_TOKEN secret and the domain routing all survive a same-name deploy,
-# so nothing in this file is secret. The exception is the D1 database the
-# worker now binds — a domain set up before Doklin
-# had one has none, and this is where it gets one: an empty database, free,
-# named after the worker. Nothing else on the account is touched.
+# It is a code-only redeploy: the R2 bucket, the D1 database, the OWNER_TOKEN
+# secret and the domain routing all survive a same-name deploy, so nothing in
+# this file is secret, and nothing else on the account is touched.
 #
 # The one thing it will not do is guess. Deploying under a name that doesn't
 # exist CREATES a second worker rather than updating yours, so the worker, its
@@ -250,11 +247,9 @@ while ! bucket_exists "$BUCKET"; do
   BUCKET="$answer"
 done
 
-# The database is the one resource that may legitimately not exist: a domain
-# set up before Doklin bound one has none. A miss under the conventional name
-# is therefore created, not refused — an empty D1 database is free and holds
-# nothing until people are invited. A name given with D1_NAME= is a pointer at
-# a database that already exists, so a miss there is a typo and stops here.
+# A database that is not there is a name that is wrong, as a bucket's is:
+# setup made it, and deploying without it would leave a worker nobody can
+# sign in to.
 #
 # `d1 list --json` goes to stdout and wrangler's chatter to stderr: `2>&1
 # >file` keeps the JSON clean for node and wrangler's own words in $probe.
@@ -292,25 +287,10 @@ if ! d1_uuid "$DATABASE"; then
     printf '%s\n' "$probe" | sed 's/^/  | /' >&2
     die "nothing deployed — $ENDPOINT keeps serving its old worker."
   fi
-  [ -z "${D1_NAME:-}" ] || die "no D1 database named \"$DATABASE\" on this account.
-       D1_NAME= names one that already exists; check it with
-       \`npx -y $WRANGLER d1 list\` and re-run. Nothing has been deployed."
-  say ""
-  say "No D1 database named \"$DATABASE\" — this domain predates Doklin's."
-  say "Creating it: an empty database on your account, free, holding nothing"
-  say "until people are invited. The worker builds its own schema."
-  created=$(npx -y "$WRANGLER" d1 create "$DATABASE" 2>&1) || {
-    printf '%s\n' "$created" | sed 's/^/  | /' >&2
-    die "couldn't create the database \"$DATABASE\".
-       Nothing has been deployed; $ENDPOINT keeps serving its old worker."
-  }
-  # `d1 create` prints the id in the toml snippet it suggests; the listing is
-  # the fallback if that output ever changes shape.
-  DATABASE_ID=$(printf '%s\n' "$created" |
-    grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
-  [ -n "$DATABASE_ID" ] || d1_uuid "$DATABASE" ||
-    die "created \"$DATABASE\" but couldn't read its id back. Run
-       \`npx -y $WRANGLER d1 info $DATABASE\` and re-run this script."
+  die "no D1 database named \"$DATABASE\" on this account.
+       The right name is in the dashboard, under the worker → Settings →
+       Bindings (the binding called DB); re-run with it, e.g.
+       D1_NAME=my-database sh $0 $ENDPOINT. Nothing has been deployed."
 fi
 say "  database \"$DATABASE\" · $DATABASE_ID"
 

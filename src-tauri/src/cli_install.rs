@@ -3,9 +3,9 @@
 //! `/usr/local/bin/doklin`, a folder every macOS shell has on its PATH. A
 //! link, not a copy, so each app update updates the command too.
 //!
-//! One `doklin` per Mac: whatever sits at that path (a copy the install
-//! script downloaded, an older link) is replaced, and a `doklin` the
-//! terminal would still find first is named, with an offer to remove it.
+//! One `doklin` per Mac: whatever sits at that path is replaced, and a
+//! `doklin` the terminal would find first is named, with an offer to remove
+//! it.
 //!
 //! Installing also logs the command in to every workspace connected here,
 //! and from then on connecting one does too (cloud/terminal.rs).

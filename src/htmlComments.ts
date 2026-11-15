@@ -122,13 +122,10 @@ export function deleteHtmlThread(threads: HtmlThread[], id: string): HtmlThread[
    on either side lands on both, and a deletion on either side sticks
    instead of resurrecting on the next write. */
 
-// Entry identity: two entries are the same when their eids match, or by
-// author+time when either side carries no eid (stable across body edits —
-// editing keeps `at`; only filling an empty draft freshens it, and drafts
-// are local). Two distinct stamped entries are never conflated, whatever
-// their timestamps.
+// Entry identity: author+time (stable across body edits — editing keeps
+// `at`; only filling an empty draft freshens it, and drafts are local).
 const sameEntry = (a: CommentEntry, b: CommentEntry): boolean =>
-  a.eid && b.eid ? a.eid === b.eid : a.author === b.author && a.at === b.at;
+  a.author === b.author && a.at === b.at;
 
 function mergeEntries(
   base: CommentEntry[],
@@ -141,9 +138,9 @@ function mergeEntries(
     const b = inBase(e);
     const t = theirs.find((x) => sameEntry(x, e));
     if (t) {
-      // Both sides have it: their copy carries any provenance stamps; the
-      // body follows whoever actually changed it (local edit wins a
-      // simultaneous rewrite — comment edits are rare and low-stakes).
+      // Both sides have it: the body follows whoever actually changed it
+      // (local edit wins a simultaneous rewrite — comment edits are rare and
+      // low-stakes).
       out.push({ ...t, body: b && e.body === b.body ? t.body : e.body });
     } else if (!b) {
       out.push(e); // my addition, not pushed yet

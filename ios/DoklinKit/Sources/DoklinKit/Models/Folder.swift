@@ -93,10 +93,10 @@ public final class FolderModel {
 
     /// A section's own folder is managed, not renamed, moved or removed.
     public func isManaged(_ entry: FolderEntry) -> Bool {
-        guard case .folder(let path) = entry, workspace.status?.sections == true else { return false }
+        guard case .folder(let path) = entry, let status = workspace.status else { return false }
         let lower = path.lowercased()
         return lower == "private" || lower == "restricted"
-            || (workspace.status?.spaces.contains { $0.path.lowercased() == lower } ?? false)
+            || status.spaces.contains { $0.path.lowercased() == lower }
     }
 
     /// Moving `entry` into `folder` lets more people see it: the sentence

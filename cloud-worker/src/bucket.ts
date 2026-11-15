@@ -1,7 +1,6 @@
 // Readers for the bucket's small JSON objects — the binding and the
 // manifest's totals — tolerant of a corrupt object (the worker answers with
-// what it can tell, never a 500 from someone else's bytes). Presence was one
-// of them until v7; it is a D1 table now (presence.ts).
+// what it can tell, never a 500 from someone else's bytes).
 
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_NAME_LEN, WORKSPACE_KEY } from "./layout";

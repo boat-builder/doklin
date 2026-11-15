@@ -171,7 +171,6 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
   ok(p.includes('"workspace" is null'), "…and that the domain holds nothing yet");
   ok(/"d1" is a number/.test(p), "…and that the database binding took");
   ok(p.includes("ENDPOINT: https://notes.example.com"), "prints the endpoint line");
-  ok(!p.includes("SHARE_TOKEN"), "nothing from the old stack");
 }
 
 /* ---------- setup, a workers.dev address ---------- */
@@ -303,14 +302,14 @@ eq(
   eq(overridden.bucket, "b", "BUCKET_NAME= overrides the bucket");
   eq(overridden.database, "d", "D1_NAME= overrides the database");
 
-  // The binding the whole phase exists to deploy, and the one resource the
-  // script may create: a domain set up before Doklin had a database has none.
+  // The binding the whole phase exists to deploy. The database is the
+  // domain's own: the script finds it and never makes one.
   ok(text.includes('binding = "DB"'), "the script writes the D1 binding");
   ok(text.includes('database_name = "$DATABASE"'), "…with the name it confirmed");
   ok(text.includes('database_id = "$DATABASE_ID"'), "…and the id it read off the account");
   ok(text.includes("d1 list --json"), "the id comes from the account, never from a guess");
-  ok(/d1 create/.test(text), "a missing database is created rather than refused");
-  ok(/D1_NAME= names one that already exists/.test(text), "…except when the name was given by hand");
+  ok(!/d1 create/.test(text), "a missing database is refused, never created");
+  ok(/no D1 database named/.test(text), "…and says which name it looked for");
 }
 
 /* ---------- teardown ---------- */
@@ -321,7 +320,6 @@ eq(
   ok(p.includes("wrangler@4 delete --name doklin-notes-example-com"), "deletes the worker");
   ok(p.includes("d1 delete doklin-notes-example-com"), "deletes the database");
   ok(p.includes("r2 bucket delete doklin-notes-example-com"), "deletes the bucket");
-  ok(/found no such database/.test(p), "a domain set up before the database is not an error");
   ok(/isn't empty, STOP/.test(p), "a non-empty bucket stops the agent");
   ok(p.includes("TORN DOWN: https://notes.example.com"));
   ok(!p.includes("curl -fsSL"), "nothing to download for a teardown");
@@ -335,8 +333,7 @@ eq(
   ok(p.includes("secret put OWNER_TOKEN --name doklin-notes-example-com"), "sets the one secret, by the worker's name — no wrangler.toml needed");
   ok(p.includes(`\n${KEY}\n`), "the key on its own line");
   ok(p.includes(`-H "Authorization: Bearer ${KEY}" https://notes.example.com/api/meta`), "verifies the key took");
-  ok(p.includes('"key" is true'), "…by what the worker answers a key");
-  ok(/update script first/.test(p), "a worker too old to recover with stops the agent");
+  ok(/must answer 200/.test(p), "…by the 200 the worker answers the new key");
   ok(p.includes("KEY SET: https://notes.example.com"));
   ok(!p.includes("npx -y wrangler@4 deploy`"), "deploys nothing");
   ok(!p.includes("r2 bucket create") && !p.includes("d1 create"), "…and creates nothing");

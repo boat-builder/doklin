@@ -24,7 +24,6 @@ use super::manifest::{clean_name, MAX_NAME_LEN};
 use crate::Secrets;
 use super::scan::{random_id, read_json, write_json};
 
-pub const CLOUD_FILE_VERSION: u32 = 1;
 pub const MARKER_DIR: &str = ".doklin";
 pub const MARKER_FILE: &str = "cloud.json";
 
@@ -48,7 +47,6 @@ pub struct WorkspaceEntry {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloudFile {
-    pub version: u32,
     pub device: Option<DeviceIdentity>,
     pub workspaces: Vec<WorkspaceEntry>,
     /// Entries whose sign-in the app's keeper could not read just now: not
@@ -64,7 +62,6 @@ impl CloudFile {
         self.workspaces.retain(|w| w.root != entry.root && w.domain != entry.domain);
         self.unread.retain(|w| w.root != entry.root && w.domain != entry.domain);
         self.workspaces.push(entry);
-        self.version = CLOUD_FILE_VERSION;
     }
 
     pub fn remove_root(&mut self, root: &str) {
@@ -106,13 +103,12 @@ pub fn read_cloud_file(data_dir: &Path, secrets: Option<&dyn Secrets>) -> CloudF
     // Tolerate a hand-edited file: entries missing what an engine needs are
     // nothing to sync.
     file.workspaces.retain(|w| {
-        !w.root.is_empty() && !w.endpoint.is_empty() && !w.ws_id.is_empty() && !w.token.is_empty()
+        !w.root.is_empty()
+            && !w.domain.is_empty()
+            && !w.endpoint.is_empty()
+            && !w.ws_id.is_empty()
+            && !w.token.is_empty()
     });
-    for w in &mut file.workspaces {
-        if w.domain.is_empty() {
-            w.domain = domain_of(&w.endpoint).unwrap_or_else(|| w.endpoint.clone());
-        }
-    }
     file
 }
 
@@ -172,7 +168,6 @@ pub fn ensure_device(
     }
     let d = DeviceIdentity { id: random_id("d"), name: clean_name(display_name, "This device") };
     file.device = Some(d.clone());
-    file.version = CLOUD_FILE_VERSION;
     let _ = write_cloud_file(data_dir, file, secrets);
     d
 }

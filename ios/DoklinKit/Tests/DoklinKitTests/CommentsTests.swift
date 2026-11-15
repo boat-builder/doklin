@@ -34,9 +34,7 @@ final class CommentsTests: XCTestCase {
     private func js(_ value: JSValue?) -> JSString? { value?.string }
 
     private func entry(_ value: JSValue) -> CommentEntry {
-        var entry = CommentEntry(author: value["author"]?.string ?? "", at: value["at"]?.number ?? .nan, body: value["body"]?.string ?? "")
-        entry.eid = value["eid"]
-        return entry
+        CommentEntry(author: value["author"]?.string ?? "", at: value["at"]?.number ?? .nan, body: value["body"]?.string ?? "")
     }
 
     private func entries(_ value: JSValue?) -> [CommentEntry] { value?.array?.map(entry) ?? [] }
@@ -123,21 +121,6 @@ final class CommentsTests: XCTestCase {
             let want = mthreads(c["mthreads"])
             XCTAssertEqual(r.mthreads.map(\.id), want.map(\.id), md.string)
             for (got, expected) in zip(r.mthreads, c["mthreads"]?.array ?? []) { assertEntries(got.comments, expected["comments"], md.string) }
-        }
-    }
-
-    func testMigration() {
-        for c in cases("migrate") {
-            let md = js(c["md"])
-            let before = text(c["meta"]).map(MetaFile.parse) ?? EntityMeta()
-            let r = MetaFile.migrate(md: md, meta: before)
-            let what = md?.string ?? "no markdown"
-            XCTAssertEqual(r.md, js(c["outMd"]), what)
-            XCTAssertEqual(MetaFile.serialize(r.meta), text(c["outMeta"]), what)
-            XCTAssertEqual(r.md != md, c["mdChanged"] == .bool(true), what)
-            XCTAssertEqual(MetaFile.serialize(r.meta) != MetaFile.serialize(before), c["metaChanged"] == .bool(true), what)
-            let again = MetaFile.migrate(md: r.md, meta: r.meta)
-            XCTAssertEqual(again.md != r.md || MetaFile.serialize(again.meta) != MetaFile.serialize(r.meta), c["againChanged"] == .bool(true), what)
         }
     }
 

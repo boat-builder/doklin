@@ -3,8 +3,8 @@
 // Why this needs a plugin at all: the document surface is `contenteditable`,
 // and browsers deliberately do NOT follow links there — a click places the
 // caret so the text stays editable. Crepe ships link chrome (the hover tooltip
-// with copy / edit / remove), but nothing that *follows* a link, so before
-// this a link in a note was decoration: clickable-looking, inert.
+// with copy / edit / remove), but nothing that *follows* a link, so without
+// this a link in a note would be decoration: clickable-looking, inert.
 //
 // Notion's model, which this mirrors:
 //
