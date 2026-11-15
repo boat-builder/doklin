@@ -74,7 +74,7 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: KEY, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 8;
+const D1_SCHEMA = 9;
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -1085,6 +1085,80 @@ await test("removal: a credential an owner took away is told so — and no other
   assert.equal((await call("/api/meta", { token: again.token })).json.removed, true, "removing the person takes the new one too");
 });
 
+/** A database migrated through every step, then put back the way an older
+ *  worker left it by `rewind` — run in a new isolate, it migrates again. */
+async function rewound(tag, rewind) {
+  const old = new FakeD1();
+  const bindings = { OWNER_TOKEN: `${tag}-key`, DATA: new FakeR2(), DB: old };
+  const probe = async (isolate) =>
+    (await isolate.fetch(new Request(`https://${tag}.example.com/api/meta`, { headers: { authorization: `Bearer ${tag}-key` } }), bindings)).json();
+  assert.equal((await probe(await anotherIsolate(`${tag}-fresh`))).d1, D1_SCHEMA);
+  old.db.exec(rewind);
+  const isolate = await anotherIsolate(`${tag}-upgrade`);
+  const recoverAs = async (email) => {
+    const res = await isolate.fetch(
+      new Request(`https://${tag}.example.com/api/auth/recover`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tag}-key`, "content-type": "application/json" },
+        body: JSON.stringify(email ? { email } : {}),
+      }),
+      bindings,
+    );
+    return { status: res.status, json: await res.json() };
+  };
+  return { old, probe: () => probe(isolate), recoverAs };
+}
+
+await test("d1: a database boards left at schema 8 still gets its superadmin, and loses its board", async () => {
+  // Worker v12–v13 numbered boards 7 and step 7's tables 8: such a database
+  // holds all of step 7, plus `board_cards` and the creator, and is at 8.
+  const { old, probe, recoverAs } = await rewound("boards-era", `
+    DROP TABLE superadmin;
+    DROP TABLE spent_keys;
+    CREATE TABLE creator (id INTEGER PRIMARY KEY CHECK (id = 1), member_id TEXT NOT NULL);
+    CREATE TABLE board_cards (id TEXT PRIMARY KEY, title TEXT);
+    INSERT INTO board_cards VALUES ('c-1', 'an idea');
+    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
+    INSERT INTO creator VALUES (1, 'm-0000000a');
+    INSERT INTO agents (id, name, scopes, created_at, last_used_at, disabled, member_id)
+      VALUES ('a-0000000a', 'Terminal', 'read edit', 2, NULL, 0, NULL);
+    UPDATE meta SET schema_version = 8;
+  `);
+  assert.equal((await probe()).d1, D1_SCHEMA);
+  assert.deepEqual(old.tables(), D1_TABLES, "the same tables as a database that never had boards");
+  assert.equal(old.value("SELECT member_id FROM superadmin"), "m-0000000a", "the creator is the superadmin");
+  assert.equal(old.value("SELECT member_id FROM agents"), "m-0000000a", "and the creator's agent is hers");
+  const traded = await recoverAs(null);
+  assert.equal(traded.status, 201, "the key trades without being told who she is");
+  assert.equal(traded.json.member.role, "superadmin");
+});
+
+await test("d1: a database worker v11 left at schema 7 gets all of step 7 before step 9", async () => {
+  // Worker v11 numbered boards 7 and had nothing of what step 7 is now.
+  const { old, probe, recoverAs } = await rewound("v11", `
+    DROP TABLE superadmin;
+    DROP TABLE spent_keys;
+    DROP TABLE removed_tokens;
+    DROP TABLE spaces;
+    DROP TABLE space_members;
+    DROP TABLE addresses;
+    ALTER TABLE agents DROP COLUMN member_id;
+    CREATE TABLE board_cards (id TEXT PRIMARY KEY, title TEXT);
+    INSERT INTO members VALUES ('m-0000000a', 'ada@example.com', 'Ada', 'owner', 1, NULL, 0);
+    UPDATE meta SET schema_version = 7;
+  `);
+  assert.equal((await probe()).d1, D1_SCHEMA);
+  assert.deepEqual(old.tables(), D1_TABLES);
+  assert.ok(
+    old.rows("SELECT name FROM pragma_table_info('agents')").some((c) => c.name === "member_id"),
+    "agents belong to somebody",
+  );
+  const ada = await recoverAs("ada@example.com");
+  assert.equal(ada.status, 201);
+  assert.equal(ada.json.member.id, "m-0000000a");
+  assert.equal(ada.json.member.role, "superadmin");
+});
+
 await test("d1: a database from before roles learns who its creator was, and makes them the superadmin — once, and never from a later promotion", async () => {
   // A second isolate over a database the previous worker left: schema 6, the
   // one row that could carry the owner role, and a member beside it.
@@ -1149,7 +1223,7 @@ await test("d1: a database from before roles learns who its creator was, and mak
   assert.equal(traded.json.member.id, "m-0000000a");
   assert.equal(traded.json.member.role, "superadmin");
 
-  // Bob is made an owner, and then a stale isolate — one that read schema 7
+  // Bob is made an owner, and then a stale isolate — one that read schema 8
   // before the bump — runs the step's move again. It is guarded by the
   // version it migrates from, so it cannot crown whoever is an owner by then.
   const promoted = await fetch(first, "/api/auth/members/m-0000000b", traded.json.token, {
@@ -1162,7 +1236,7 @@ await test("d1: a database from before roles learns who its creator was, and mak
     CREATE TABLE IF NOT EXISTS creator (id INTEGER PRIMARY KEY CHECK (id = 1), member_id TEXT NOT NULL);
     INSERT INTO creator VALUES (1, 'm-0000000b');
     INSERT OR IGNORE INTO superadmin (id, member_id)
-      SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 8;
+      SELECT 1, member_id FROM creator WHERE (SELECT schema_version FROM meta WHERE key = 'schema') < 9;
     DROP TABLE creator;
   `);
   assert.equal(old.value("SELECT COUNT(*) FROM superadmin"), 0, "after the bump the move moves nothing");

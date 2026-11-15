@@ -263,7 +263,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 8)
+## D1 (`src/schema.ts`, schema 9)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -292,7 +292,9 @@ schema_version = <to> WHERE key = 'schema' AND schema_version = <to-1>` so
 concurrent isolates converge. A table that holds data never changes shape by
 `DROP`: a step lists the column under `columns`, and the runner adds it only
 when a read of it fails. Updates ship no migrations directory: add a
-step, never a wrangler migration. Single-primary: no read replicas (a lease
+step, never a wrangler migration. A step that has shipped is never
+renumbered or removed: a database stores only the number it reached, so a
+number that changes meaning makes the runner skip a step it never ran. Single-primary: no read replicas (a lease
 two Macs both believe they hold is worse than none).
 
 ## Deploying
