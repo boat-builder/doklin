@@ -171,6 +171,13 @@ struct DocumentView: View {
                 Label("Share the text", systemImage: "square.and.arrow.up")
             }
         }
+        if [.markdown, .html, .text].contains(model.kind) {
+            Button {
+                route.append(.history(.note(model.path)))
+            } label: {
+                Label("Version history", systemImage: "clock.arrow.circlepath")
+            }
+        }
     }
 }
 

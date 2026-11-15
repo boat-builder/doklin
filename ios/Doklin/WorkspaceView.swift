@@ -14,6 +14,7 @@ struct WorkspaceView: View {
     @State private var confirmingUnsynced = false
     @State private var leaving = false
     @State private var failure: String?
+    @State private var toaster = Toaster()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -29,11 +30,20 @@ struct WorkspaceView: View {
                         DocumentView(workspace: workspace, path: file, route: $path)
                     case .search:
                         SearchView(workspace: workspace)
+                    case .history(let place):
+                        HistoryScreen(place: place, workspace: workspace, route: $path)
                     }
                 }
         }
         .safeAreaInset(edge: .top, spacing: 0) { notice }
-        .safeAreaInset(edge: .bottom, spacing: 0) { SyncLine(workspace: workspace) }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                ToastBar(toaster: toaster)
+                SyncLine(workspace: workspace)
+            }
+            .animation(.default, value: toaster.shown?.id)
+        }
+        .environment(toaster)
         .sheet(isPresented: $joining) {
             NavigationStack {
                 SignInView(canCancel: true)
@@ -93,6 +103,18 @@ struct WorkspaceView: View {
                     joining = true
                 } label: {
                     Label("Join another workspace", systemImage: "plus")
+                }
+            }
+            Section {
+                Button {
+                    path.append(.history(.timeline))
+                } label: {
+                    Label("Workspace history", systemImage: "clock.arrow.circlepath")
+                }
+                Button {
+                    path.append(.history(.deleted))
+                } label: {
+                    Label("Recently deleted", systemImage: "trash")
                 }
             }
             Section {
