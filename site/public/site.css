@@ -1,63 +1,89 @@
 /* doklin.cc — one stylesheet for the product page and its 404.
-   Colours are the app's own (src/styles/tokens.css): the light theme for
-   people, the pitch-black theme for agents. Newsreader is the app's bundled
-   copy; text and code use the app's system stacks, so the page loads nothing
-   from anyone else. */
+   The look is the app's: Inter text, Literata headings at weight 400,
+   Roboto Mono, a warm light theme and a #0b0b0b dark one, one blue accent.
+   The fonts are the app's bundled files, so the page loads nothing from
+   anyone else.
+
+   Colours are copied from the app's src/styles/tokens.css, each written as
+   light-dark(light, dark). The page follows the reader's appearance, and
+   anything set to color-scheme: dark (the agent bands, the terminal, the
+   markdown pane) takes the dark value on the light page too. */
 
 @font-face {
-  font-family: "Newsreader";
+  font-family: "Inter";
   font-style: normal;
-  font-weight: 200 800;
+  font-weight: 100 900;
   font-display: swap;
-  src: url("/fonts/newsreader-latin-opsz-normal.woff2") format("woff2-variations"),
-       url("/fonts/newsreader-latin-opsz-normal.woff2") format("woff2");
+  src: url("/fonts/inter/inter-latin-opsz-normal.woff2") format("woff2");
 }
 
 @font-face {
-  font-family: "Newsreader";
-  font-style: italic;
-  font-weight: 200 800;
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
   font-display: swap;
-  src: url("/fonts/newsreader-latin-opsz-italic.woff2") format("woff2-variations"),
-       url("/fonts/newsreader-latin-opsz-italic.woff2") format("woff2");
+  src: url("/fonts/literata/literata-latin-opsz-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Literata";
+  font-style: italic;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/literata/literata-latin-opsz-italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Roboto Mono";
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+  src: url("/fonts/roboto-mono/roboto-mono-latin-wght-normal.woff2") format("woff2");
 }
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
 
-  --serif: "Newsreader", ui-serif, "New York", Georgia, "Times New Roman", serif;
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --serif: "Literata", ui-serif, Georgia, "Times New Roman", serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: "Roboto Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  --ink: #1c222c;
-  --ink-2: #4f5662;
-  --ink-3: #686e79;
-  --line: #dee2e9;
-  --line-strong: #ced3db;
-  --sunken: #f4f7fb;
-  --canvas: #eef3fa;
-  --dots: #cbd3df;
-  --accent: #2267ee;
-  --accent-wash: rgba(34, 103, 238, 0.1);
-  --live-wash: rgba(15, 164, 77, 0.12);
-  --live-ink: #137738;
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 16px 40px rgba(16, 24, 40, 0.08);
-  --shadow-pop: 0 4px 12px rgba(16, 24, 40, 0.08), 0 12px 32px rgba(16, 24, 40, 0.12);
+  --canvas: light-dark(#f9f9f7, #0b0b0b);
+  --sheet: light-dark(#ffffff, #0b0b0b);
+  --raised: light-dark(#ffffff, #20201f);
+  --sunken: light-dark(#f5f3ed, #151515);
+  --hover: light-dark(rgba(31, 30, 29, 0.05), rgba(255, 255, 255, 0.06));
+  --border: light-dark(rgba(11, 11, 11, 0.1), rgba(255, 255, 255, 0.1));
+  --border-strong: light-dark(rgba(11, 11, 11, 0.2), rgba(255, 255, 255, 0.2));
 
-  --d-bg: #000000;
-  --d-raised: #0c0c0e;
-  --d-hover: #18181b;
-  --d-line: #232326;
-  --d-line-strong: #303034;
-  --d-ink: #ededef;
-  --d-ink-2: #a8a8ae;
-  --d-ink-3: #7d7d84;
-  --d-accent: #4d94ff;
-  --code-key: #7cb3ff;
-  --code-str: #9fd27f;
-  --code-flag: #f0ae73;
-  --code-mark: #d19bf5;
-  --code-dim: #8b8f98;
+  --text-1: light-dark(#1f1e1d, #f0efec);
+  --text-2: light-dark(#52514e, #c3c2b7);
+  --text-3: #898781;
+  /* Small meta text people read. The app's --text-3 is 3.6:1 on white,
+     decoration only, so on light it takes --text-2's value instead. */
+  --meta: light-dark(#52514e, #898781);
+
+  --accent: #2a78d6;
+  --link: light-dark(#256abf, #3987e5);
+  --on-fill: #ffffff;
+  --accent-wash: light-dark(rgba(42, 120, 214, 0.1), rgba(57, 135, 229, 0.16));
+  --selection: light-dark(rgba(42, 120, 214, 0.18), rgba(57, 135, 229, 0.3));
+  --live-ink: light-dark(#137738, #75d78d);
+  --live-wash: light-dark(rgba(15, 164, 77, 0.12), rgba(71, 200, 110, 0.16));
+  --dots: light-dark(#c3c2b7, #383835);
+
+  /* The terminal and the markdown pane are always dark: the app's dark
+     syntax colours. */
+  --code-def: #7cb3ff;
+  --code-string: #9fd27f;
+  --code-number: #f0ae73;
+  --code-keyword: #d19bf5;
+  --code-comment: #94928b;
+
+  --shadow-card: 0 1px 2px light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.5)),
+                 0 1px 3px light-dark(rgba(0, 0, 0, 0.06), transparent);
+  --shadow-pop: 0 8px 24px light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.32)),
+                0 2px 6px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.2));
 
   --pad-x: clamp(20px, 4vw, 56px);
   --pad-y: clamp(72px, 9vw, 120px);
@@ -65,9 +91,10 @@
 
 * { box-sizing: border-box; }
 
+/* The warm chrome around a white column, like a document in the app. */
 html {
   -webkit-text-size-adjust: 100%;
-  background: #ffffff;
+  background: var(--canvas);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -76,8 +103,8 @@ html {
 
 body {
   margin: 0;
-  background: #ffffff;
-  color: var(--ink);
+  background: var(--canvas);
+  color: var(--text-1);
   font-family: var(--sans);
   font-size: 16px;
   line-height: 1.6;
@@ -85,7 +112,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-::selection { background: rgba(34, 103, 238, 0.18); }
+::selection { background: var(--selection); }
 
 a { color: inherit; text-decoration: none; }
 
@@ -94,8 +121,6 @@ a { color: inherit; text-decoration: none; }
   outline-offset: 3px;
   border-radius: 4px;
 }
-
-.dark :focus-visible { outline-color: var(--d-accent); }
 
 h1, h2, h3, p { margin: 0; }
 
@@ -107,9 +132,9 @@ svg { flex: none; }
   top: -60px;
   z-index: 10;
   padding: 10px 16px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--accent);
-  color: #ffffff;
+  color: var(--on-fill);
   font-weight: 600;
 }
 
@@ -117,26 +142,25 @@ svg { flex: none; }
 
 /* ---------- Frame ---------- */
 
-.band { border-bottom: 1px solid var(--line); }
+.band { border-bottom: 1px solid var(--border); }
 
 .wrap {
   max-width: 1240px;
   margin: 0 auto;
-  border-left: 1px solid var(--line);
-  border-right: 1px solid var(--line);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   padding: var(--pad-y) var(--pad-x);
+  background: var(--sheet);
 }
 
 .dark {
-  background: var(--d-bg);
-  color: var(--d-ink);
+  color-scheme: dark;
+  background: var(--canvas);
+  color: var(--text-1);
 }
 
-.dark .wrap { border-color: var(--d-line); }
-
 .tint { background: var(--sunken); }
-
-.mono { font-family: var(--mono); }
+.tint .wrap { background: none; }
 
 /* ---------- Header ---------- */
 
@@ -161,8 +185,8 @@ svg { flex: none; }
 
 .brand span {
   font-family: var(--serif);
-  font-size: 24px;
-  font-weight: 500;
+  font-size: 23px;
+  font-weight: 400;
   letter-spacing: -0.01em;
 }
 
@@ -184,12 +208,12 @@ svg { flex: none; }
   align-items: center;
   gap: 6px;
   min-height: 44px;
-  color: var(--ink-2);
+  color: var(--text-2);
   transition: color 120ms ease;
 }
 
 .nav a:hover,
-.header-actions a:not(.btn):hover { color: var(--ink); }
+.header-actions a:not(.btn):hover { color: var(--text-1); }
 
 /* ---------- Buttons ---------- */
 
@@ -199,7 +223,7 @@ svg { flex: none; }
   gap: 10px;
   height: 52px;
   padding: 0 24px;
-  border-radius: 10px;
+  border-radius: 8px;
   font-size: 16px;
   font-weight: 600;
   white-space: nowrap;
@@ -210,19 +234,13 @@ svg { flex: none; }
   height: 44px;
   padding: 0 18px;
   font-size: 14px;
-  font-weight: 500;
 }
 
-.btn-primary { background: var(--accent); color: #ffffff; }
+.btn-primary { background: var(--accent); color: var(--on-fill); }
 .btn-primary:hover { filter: brightness(1.1); }
 
-.btn-ghost { border: 1px solid var(--line-strong); color: var(--ink); }
-.btn-ghost:hover { background: var(--sunken); }
-
-.dark .btn-primary { background: var(--d-accent); color: #000000; }
-
-.dark .btn-ghost { border-color: var(--d-line-strong); color: var(--d-ink); font-weight: 500; }
-.dark .btn-ghost:hover { background: var(--d-hover); }
+.btn-ghost { border: 1px solid var(--border-strong); color: var(--text-1); font-weight: 500; }
+.btn-ghost:hover { background: var(--hover); }
 
 .link-arrow {
   display: inline-flex;
@@ -234,7 +252,7 @@ svg { flex: none; }
   transition: color 120ms ease;
 }
 
-.link-arrow:hover { color: var(--accent); }
+.link-arrow:hover { color: var(--link); }
 
 /* ---------- Type ---------- */
 
@@ -246,48 +264,42 @@ svg { flex: none; }
   font-size: 12.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--meta);
 }
 
-.eyebrow b { font-weight: 400; color: var(--accent); }
-.dark .eyebrow { color: var(--d-ink-3); }
-.dark .eyebrow b { color: var(--d-accent); }
+.eyebrow b { font-weight: 400; color: var(--link); }
 
 .h2 {
   margin-top: 28px;
   font-family: var(--serif);
   font-weight: 400;
-  font-size: clamp(30px, 3.8vw, 52px);
-  line-height: 1.08;
-  letter-spacing: -0.02em;
+  font-size: clamp(30px, 3.6vw, 48px);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
   text-wrap: balance;
 }
 
 .h2 span { display: block; }
 
-.h2-pair { line-height: 1.16; }
+.h2-pair { line-height: 1.2; }
 
 .agent-voice {
   font-family: var(--mono);
   font-size: 0.72em;
-  letter-spacing: -0.045em;
-  color: var(--accent);
+  letter-spacing: -0.04em;
+  color: var(--link);
 }
-
-.dark .agent-voice { color: var(--d-accent); }
 
 .lead {
   margin-top: 24px;
   max-width: 520px;
   font-size: 17px;
   line-height: 1.65;
-  color: var(--ink-2);
+  color: var(--text-2);
   text-wrap: pretty;
 }
 
 .lead-wide { max-width: 680px; font-size: 18px; }
-
-.dark .lead { color: var(--d-ink-2); }
 
 .small-print {
   margin-top: 28px;
@@ -295,7 +307,7 @@ svg { flex: none; }
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--d-ink-3);
+  color: var(--meta);
 }
 
 .cursor {
@@ -335,7 +347,7 @@ svg { flex: none; }
 .points-4 { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 32px 40px; }
 
 .point {
-  border-top: 1px solid var(--line-strong);
+  border-top: 1px solid var(--border-strong);
   padding-top: 22px;
 }
 
@@ -349,11 +361,8 @@ svg { flex: none; }
   margin-top: 8px;
   font-size: 15px;
   line-height: 1.6;
-  color: var(--ink-2);
+  color: var(--text-2);
 }
-
-.dark .point { border-top-color: var(--d-line-strong); }
-.dark .point p { color: var(--d-ink-2); }
 
 .stack { display: flex; flex-direction: column; margin-top: 40px; }
 
@@ -394,9 +403,9 @@ svg { flex: none; }
   margin-top: 28px;
   font-family: var(--serif);
   font-weight: 400;
-  font-size: clamp(38px, 6.1vw, 84px);
-  line-height: 1.03;
-  letter-spacing: -0.025em;
+  font-size: clamp(38px, 5.6vw, 76px);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
 }
 
 .h1 > span { display: block; }
@@ -406,7 +415,7 @@ svg { flex: none; }
   max-width: 640px;
   font-size: clamp(17px, 1.4vw, 19px);
   line-height: 1.6;
-  color: var(--ink-2);
+  color: var(--text-2);
   text-wrap: pretty;
 }
 
@@ -421,10 +430,8 @@ svg { flex: none; }
 .note {
   font-family: var(--mono);
   font-size: 12.5px;
-  color: var(--ink-3);
+  color: var(--meta);
 }
-
-.dark .note { color: var(--d-ink-3); }
 
 .specs {
   display: grid;
@@ -437,7 +444,7 @@ svg { flex: none; }
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border-top: 1px solid var(--line-strong);
+  border-top: 1px solid var(--border-strong);
   padding-top: 18px;
 }
 
@@ -446,7 +453,7 @@ svg { flex: none; }
   font-size: 11.5px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--meta);
 }
 
 .specs dd {
@@ -458,9 +465,9 @@ svg { flex: none; }
 /* ---------- Terminal ---------- */
 
 .terminal {
-  background: var(--d-raised);
-  border: 1px solid var(--d-line);
-  border-radius: 14px;
+  background: var(--sunken);
+  border: 1px solid var(--border);
+  border-radius: 12px;
   overflow: hidden;
 }
 
@@ -472,8 +479,8 @@ svg { flex: none; }
   padding: 12px 18px;
   font-family: var(--mono);
   font-size: 12px;
-  color: var(--d-ink-3);
-  border-bottom: 1px solid var(--d-line);
+  color: var(--meta);
+  border-bottom: 1px solid var(--border);
 }
 
 .terminal pre {
@@ -483,19 +490,18 @@ svg { flex: none; }
   font-family: var(--mono);
   font-size: 14px;
   line-height: 28px;
-  color: var(--d-ink);
+  color: var(--text-1);
 }
 
-.t-dim { color: var(--d-ink-3); }
-.t-cmd { color: var(--code-key); }
-.t-str { color: var(--code-str); }
-.t-flag { color: var(--code-flag); }
+.t-dim { color: var(--code-comment); }
+.t-cmd { color: var(--code-def); }
+.t-str { color: var(--code-string); }
+.t-flag { color: var(--code-number); }
 
 .terminal .cursor {
   width: 8px;
   height: 16px;
   margin-left: 8px;
-  background: var(--d-accent);
   vertical-align: -2px;
 }
 
@@ -505,8 +511,8 @@ svg { flex: none; }
   display: flex;
   flex-wrap: wrap;
   margin-top: clamp(40px, 5vw, 64px);
-  border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
   overflow: hidden;
   box-shadow: var(--shadow-card);
 }
@@ -518,14 +524,14 @@ svg { flex: none; }
   justify-content: space-between;
   gap: 4px 16px;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border);
   background: var(--sunken);
   font-family: var(--mono);
   font-size: 12.5px;
-  color: var(--ink-2);
+  color: var(--text-2);
 }
 
-.pair-bar span + span { color: var(--ink-3); }
+.pair-bar span + span { color: var(--meta); }
 
 .pane { flex: 1 1 420px; min-width: 0; }
 
@@ -535,15 +541,21 @@ svg { flex: none; }
   justify-content: space-between;
   gap: 4px 16px;
   padding: 13px 24px;
+  border-bottom: 1px solid var(--border);
   font-family: var(--mono);
   font-size: 11.5px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: var(--meta);
 }
 
-.pane-md { background: var(--d-bg); color: var(--d-ink); }
-.pane-md .pane-head { border-bottom: 1px solid var(--d-line); color: var(--d-ink-3); }
-.pane-md .pane-head span:first-child { color: var(--d-ink-2); }
+.pane-head span:first-child { color: var(--text-2); }
+
+.pane-md {
+  color-scheme: dark;
+  background: var(--sunken);
+  color: var(--text-1);
+}
 
 .pane-md pre {
   margin: 0;
@@ -555,19 +567,17 @@ svg { flex: none; }
   word-break: break-word;
 }
 
-.md-dim { color: var(--code-dim); }
-.md-key { color: var(--code-key); }
-.md-val { color: var(--code-str); }
-.md-mark { color: var(--code-mark); }
+.md-dim { color: var(--code-comment); }
+.md-key { color: var(--code-def); }
+.md-val { color: var(--code-string); }
+.md-mark { color: var(--code-keyword); }
 .md-h { font-weight: 500; }
 
-.pane-page { background: #ffffff; }
-.pane-page .pane-head { border-bottom: 1px solid var(--line); color: var(--ink-3); }
-.pane-page .pane-head span:first-child { color: var(--ink-2); }
+.pane-page { background: var(--sheet); }
 
+/* The page an agent made from the markdown, set like a published page. */
 .page {
   padding: clamp(24px, 3vw, 36px) clamp(22px, 3vw, 40px) clamp(28px, 3vw, 40px);
-  font-family: var(--serif);
 }
 
 .page-meta {
@@ -575,9 +585,8 @@ svg { flex: none; }
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 14px;
-  font-family: var(--sans);
   font-size: 13px;
-  color: var(--ink-3);
+  color: var(--meta);
 }
 
 .pill {
@@ -590,32 +599,33 @@ svg { flex: none; }
 
 .page-title {
   margin-top: 18px;
-  font-size: clamp(36px, 3.4vw, 46px);
-  font-weight: 500;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
+  font-family: var(--serif);
+  font-size: clamp(34px, 3.2vw, 42px);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
 }
 
 .page-intro {
   margin-top: 10px;
-  font-size: 19px;
+  font-size: 18px;
   line-height: 1.55;
-  color: var(--ink-2);
+  color: var(--text-2);
 }
 
 .page-box {
   margin-top: 26px;
   padding: 22px 24px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
   background: var(--sunken);
 }
 
 .page-box-title {
-  font-size: 24px;
-  font-weight: 500;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1.3;
 }
 
 .checks {
@@ -625,39 +635,40 @@ svg { flex: none; }
   margin: 14px 0 0;
   padding: 0;
   list-style: none;
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.4;
 }
 
 .checks li { display: flex; align-items: center; gap: 10px; }
 
+.checks svg { color: var(--accent); }
+
 /* ---------- Editor illustration ---------- */
 
 .illus {
-  border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--sheet);
   box-shadow: var(--shadow-card);
 }
 
-.illus .pair-bar { border-bottom: 1px solid var(--line); }
-
+/* A note as the editor sets it: Inter text, a Literata title. */
 .sheet {
   padding: clamp(24px, 3vw, 36px) clamp(22px, 3vw, 40px) clamp(28px, 3vw, 40px);
-  font-family: var(--serif);
-  font-size: 18px;
-  line-height: 1.6;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 .sheet-title {
-  font-size: clamp(32px, 3vw, 40px);
-  font-weight: 500;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
+  font-family: var(--serif);
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
 }
 
-.sheet-p { margin-top: 12px; color: var(--ink-2); }
+.sheet-p { margin-top: 12px; color: var(--text-2); }
 
 .tasks {
   display: flex;
@@ -672,23 +683,23 @@ svg { flex: none; }
   width: 18px;
   height: 18px;
   border-radius: 5px;
-  border: 1.5px solid var(--line-strong);
+  border: 1.5px solid var(--border-strong);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
 }
 
-.box-on { background: var(--accent); border-color: var(--accent); }
+.box-on { background: var(--accent); border-color: var(--accent); color: var(--on-fill); }
 
-.task-done { color: var(--ink-3); }
+.task-done { color: var(--text-3); }
 
 .slash-line { margin-top: 18px; display: flex; align-items: center; }
 
 .caret {
   display: inline-block;
   width: 2px;
-  height: 22px;
+  height: 20px;
   margin-left: 2px;
   background: var(--accent);
   animation: blink 1.2s steps(1) infinite;
@@ -702,11 +713,10 @@ svg { flex: none; }
   width: min(250px, 100%);
   margin-top: 8px;
   padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
   box-shadow: var(--shadow-pop);
-  font-family: var(--sans);
   font-size: 14px;
 }
 
@@ -715,22 +725,21 @@ svg { flex: none; }
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
-  border-radius: 7px;
-  color: var(--ink);
+  border-radius: 6px;
 }
 
 .menu div:first-child { background: var(--accent-wash); }
 
-.menu svg { color: var(--ink-3); }
-.menu div:first-child svg { color: var(--accent); }
+.menu svg { color: var(--meta); }
+.menu div:first-child svg { color: var(--link); }
 
 /* ---------- Workspace diagram ---------- */
 
 .ws {
-  border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--sheet);
   box-shadow: var(--shadow-card);
 }
 
@@ -743,7 +752,7 @@ svg { flex: none; }
   padding: 24px 20px;
 }
 
-.ws-row + .ws-row { border-top: 1px solid var(--line); }
+.ws-row + .ws-row { border-top: 1px solid var(--border); }
 
 .ws-text { flex: 1 1 220px; min-width: 0; }
 
@@ -759,7 +768,7 @@ svg { flex: none; }
   margin-top: 4px;
   font-size: 14px;
   line-height: 1.5;
-  color: var(--ink-3);
+  color: var(--meta);
 }
 
 .faces { display: flex; align-items: center; gap: 5px; }
@@ -773,23 +782,25 @@ svg { flex: none; }
   justify-content: center;
   font-size: 11px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--sheet);
 }
 
-.f1 { background: var(--accent); }
-.f2 { background: var(--ink); }
-.f3 { background: var(--ink-2); }
-.f4 { background: var(--line); color: var(--ink); }
-.f5 { background: var(--canvas); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.f1 { background: var(--accent); color: var(--on-fill); }
+.f2 { background: var(--text-1); }
+.f3 { background: var(--text-2); }
+.f4 { background: var(--border-strong); color: var(--text-1); }
+.f5 { background: var(--canvas); color: var(--text-1); box-shadow: inset 0 0 0 1px var(--border-strong); }
 
 .agent-chip {
+  color-scheme: dark;
   height: 30px;
   padding: 0 10px;
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
-  background: var(--d-bg);
-  color: var(--d-ink);
+  background: var(--sunken);
+  color: var(--text-1);
   font-family: var(--mono);
   font-size: 11.5px;
 }
@@ -805,7 +816,7 @@ svg { flex: none; }
 .step-num {
   font-family: var(--mono);
   font-size: 12.5px;
-  color: var(--d-ink-3);
+  color: var(--meta);
 }
 
 .step h3 {
@@ -814,14 +825,13 @@ svg { flex: none; }
   font-size: 24px;
   font-weight: 400;
   line-height: 1.25;
-  letter-spacing: -0.01em;
 }
 
-.dark .step p { margin-top: 6px; }
+.step p { margin-top: 6px; }
 
-.dark .step-2 { border-top-color: var(--d-ink-3); }
-.dark .step-3 { border-top-color: var(--d-accent); }
-.step-3 .step-num { color: var(--d-accent); }
+.step-2 { border-top-color: var(--text-3); }
+.step-3 { border-top-color: var(--accent); }
+.step-3 .step-num { color: var(--link); }
 
 .closing-actions {
   display: flex;
@@ -835,7 +845,7 @@ svg { flex: none; }
 
 /* ---------- Footer ---------- */
 
-.site-footer { border-top: 1px solid var(--d-line); }
+.site-footer { border-top: 1px solid var(--border); }
 
 .site-footer .wrap {
   padding-top: 28px;
@@ -866,7 +876,7 @@ svg { flex: none; }
   transition: color 120ms ease;
 }
 
-.footer-links a:hover { color: var(--d-accent); }
+.footer-links a:hover { color: var(--link); }
 
 /* ---------- 404 ---------- */
 
