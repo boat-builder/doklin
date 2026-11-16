@@ -75,7 +75,7 @@ day. Every device keeps syncing until midnight UTC, on Cloudflare's free plan.
 One `WORKER_VERSION` bump (19 → 20), one D1 schema step (9 → 10),
 `MANIFEST_VERSION` stays 4.
 
-**Built 2026-11-16, not committed or shipped.** Rollout below still to do.
+**Built 2026-11-16.** The rollout below is done by hand, in order, after the merge.
 
 ### 1.1 Only md + html sync
 
