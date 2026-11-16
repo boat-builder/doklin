@@ -76,7 +76,7 @@ use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People,
-    Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
+    Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -1387,6 +1387,16 @@ pub async fn cloud_follow_link(core: &Arc<Core>, url: String) -> Result<String, 
     })?;
     let rel = ask(tx, |reply| EngineCmd::Follow { space: link.space, file: link.file, reply }).await?;
     Ok(Path::new(&root).join(rel).to_string_lossy().to_string())
+}
+
+/// What changed lately in the workspace at `root`: its documents by when
+/// their content last changed, newest first, at most `limit` — read off the
+/// manifests this device last applied and its own folder, so it asks the
+/// domain nothing.
+pub async fn cloud_recent(core: &Arc<Core>, root: String, limit: Option<usize>) -> Result<RecentFiles, String> {
+    let tx = engine_of(core, &root)?;
+    let limit = limit.unwrap_or(200).clamp(1, 2000);
+    ask(tx, |reply| EngineCmd::Recent { limit, reply }).await
 }
 
 /* ---------- Restricted folders ---------- */

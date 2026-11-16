@@ -185,6 +185,53 @@ pub struct PublicPage {
     pub root: bool,
 }
 
+/// `cloud_recent`: the workspace's documents by when their content last
+/// changed, newest first, across every section this device holds — what a
+/// phone's Home lists. Mirrored in ios/DoklinKit (`Payloads.swift`,
+/// `RecentFiles`) and src/cloud.ts (`CloudRecentFiles`): change all three.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentFiles {
+    pub files: Vec<RecentFile>,
+    /// The directory every `by` is read with: people, then agents with
+    /// whose they are.
+    pub people: Vec<DirectoryPerson>,
+    /// Who this device works as, by member id; null until the domain has said.
+    pub me: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentFile {
+    /// Workspace-relative, as this device's folders spell it.
+    pub path: String,
+    /// Null for a file made here that no manifest carries yet.
+    pub file_id: Option<String>,
+    /// The manifest's content address (`hash16`): the first 16 hex of the
+    /// sha256, so a prefix of the version store's. Null for a change made
+    /// here that has not synced.
+    pub hash: Option<String>,
+    /// When its content last changed, ms (a move is not a change).
+    pub mtime: u64,
+    /// Who changed it: a member id or an agent's.
+    pub by: String,
+    /// 1 is a file nobody has changed since it was made — or one moved here
+    /// from another section, which is a new file there. 0: not synced yet.
+    pub rev: u64,
+    /// The space it is in; null for the shared workspace.
+    pub section: Option<String>,
+}
+
+/// One row of the workspace's directory (`GET /api/meta` `people`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryPerson {
+    pub id: String,
+    pub name: String,
+    /// For an agent, whose it is (a member id).
+    pub person: Option<String>,
+}
+
 /// Another Mac here now. Resolved by the engine like every other `by`: the
 /// worker says whose Mac it is, the directory says what they are called.
 #[derive(Clone, Debug, Serialize)]

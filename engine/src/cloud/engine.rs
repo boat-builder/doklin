@@ -38,8 +38,8 @@ use super::remote::{Remote, RemoteError, RemoteResult};
 use super::scan::{hash16, now_ms, read_file_checked, rel_path};
 use super::space::{self, SpaceMarker, PRIVATE_DIR, SHARED};
 use super::status::{
-    emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, SpaceStatus, StatusTable,
-    UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
+    emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, RecentFiles,
+    SpaceStatus, StatusTable, UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
 use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
@@ -216,6 +216,11 @@ pub enum EngineCmd {
         file: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// `cloud_recent`: the documents by when they last changed, newest first.
+    Recent {
+        limit: usize,
+        reply: oneshot::Sender<Result<RecentFiles, String>>,
+    },
     Shutdown,
 }
 
@@ -370,6 +375,9 @@ pub struct Engine<R: Remote> {
     /// id → display name for everyone on this workspace, from the same
     /// answer. What a `by` is read with; a miss is shown as it stands.
     people: BTreeMap<String, String>,
+    /// Agent id → its person's member id, from the same answer: whose agent
+    /// changed something (`cloud_recent`).
+    owners: BTreeMap<String, String>,
     /// When the directory was last fetched, so meeting an id nobody can name
     /// asks again — once, not once a cycle (`DIRECTORY_MIN_GAP`).
     people_at: Option<Instant>,
@@ -449,6 +457,7 @@ impl<R: Remote> Engine<R> {
             removed: false,
             superadmin: None,
             people: BTreeMap::new(),
+            owners: BTreeMap::new(),
             people_at: None,
             last_hourly: None,
             activity: None,
@@ -551,6 +560,22 @@ impl<R: Remote> Engine<R> {
         let unit = self.units.get(space.unwrap_or(SHARED))?;
         let synced = unit.state.files.get(file)?;
         unit.root.join(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
+    }
+
+    /// `cloud_recent`: every section's documents by when their content last
+    /// changed, newest first, at most `limit` — with the directory their
+    /// `by`s are read with.
+    pub(crate) fn recent(&self, limit: usize) -> RecentFiles {
+        let me = self.me.as_deref().unwrap_or("");
+        let mut files: Vec<_> = self.units.values().flat_map(|unit| unit.recent(me)).collect();
+        files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+        files.truncate(limit);
+        let people = self
+            .people
+            .iter()
+            .map(|(id, name)| DirectoryPerson { id: id.clone(), name: name.clone(), person: self.owners.get(id).cloned() })
+            .collect();
+        RecentFiles { files, people, me: self.me.clone() }
     }
 
     /* ----- status ----- */
@@ -693,6 +718,7 @@ impl<R: Remote> Engine<R> {
                     self.can = you.can;
                 }
                 self.superadmin = meta.superadmin.map(|p| p.name);
+                self.owners = meta.people.iter().filter_map(|p| Some((p.id.clone(), p.person.clone()?))).collect();
                 self.people = meta.people.into_iter().map(|p| (p.id, p.name)).collect();
                 self.people_at = Some(Instant::now());
                 if let Some(seen_at) = self.outdated {
@@ -2203,6 +2229,9 @@ impl<R: Remote> Engine<R> {
                             })
                         };
                         let _ = reply.send(linked);
+                    }
+                    Some(EngineCmd::Recent { limit, reply }) => {
+                        let _ = reply.send(Ok(self.recent(limit)));
                     }
                     Some(EngineCmd::Follow { space, file, reply }) => {
                         if self.follow(space.as_deref(), &file).is_none() && self.can_cycle() {

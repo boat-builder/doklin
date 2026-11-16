@@ -7,7 +7,7 @@ use doklin_engine::cloud::config::Marker;
 use doklin_engine::cloud::invite::Pasted;
 use doklin_engine::cloud::remote::{AgentRecord, EveryPages, MemberRecord};
 use doklin_engine::cloud::status::{
-    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People, Probe, Redeemed,
+    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People, Probe, RecentFiles, Redeemed,
     Removed, SpaceStatus,
 };
 use tauri::{AppHandle, Manager};
@@ -305,6 +305,13 @@ pub(crate) async fn cloud_page_take_down(app: AppHandle, root: String, slug: Str
 #[tauri::command]
 pub(crate) async fn cloud_wipe(app: AppHandle, root: String) -> Result<u64, String> {
     cloud::cloud_wipe(&core(&app)?, root).await
+}
+
+/// What changed lately in a workspace: its documents by when they last
+/// changed, newest first (what the iPhone's Home lists).
+#[tauri::command]
+pub(crate) async fn cloud_recent(app: AppHandle, root: String, limit: Option<usize>) -> Result<RecentFiles, String> {
+    cloud::cloud_recent(&core(&app)?, root, limit).await
 }
 
 /// *Copy link*. Following one is the app's own (links.rs): a link reaches

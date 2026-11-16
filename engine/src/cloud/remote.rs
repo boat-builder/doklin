@@ -82,13 +82,17 @@ pub struct Identity {
     pub name: String,
 }
 
-/// One row of the directory: an id, and what to call it.
+/// One row of the directory: an id, and what to call it — and for an agent,
+/// whose it is.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Person {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
+    /// An agent's person, by member id. A worker before 23 says none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
 }
 
 /// What a won bind answers with.

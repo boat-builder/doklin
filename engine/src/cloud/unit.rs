@@ -30,7 +30,7 @@ use super::scan::{
     write_atomic, write_json, ScanEntry,
 };
 use super::space::{reserved_top, RESERVED_DIRS, SHARED};
-use super::status::{Events, PublicPage, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
+use super::status::{Events, PublicPage, RecentFile, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
 // The cloud half of versioning. `crate::versions` is the local versioner —
 // this module only mirrors what that one wrote.
 use super::versions as version_store;
@@ -621,6 +621,68 @@ impl<R: Remote> Unit<R> {
     }
 
     /* ----- status ----- */
+
+    /// This section's documents as `cloud_recent` lists them: what the last
+    /// manifest this device applied says of each — unless the file here has
+    /// changed since this device last synced it, or no manifest carries it
+    /// yet: then the change is this device's, signed `me`, at the file's own
+    /// time, with no hash until it syncs. Comment files are not documents,
+    /// and what is not on this device is not listed.
+    pub(crate) fn recent(&self, me: &str) -> Vec<RecentFile> {
+        let section = (!self.is_shared()).then(|| self.id.clone());
+        let is_document = |path: &str| !path.to_ascii_lowercase().ends_with(".meta.jsonl");
+        let disk = scan_local(&self.root, self.skip()).unwrap_or_default();
+        let mut listed: HashSet<&str> = HashSet::new();
+        let mut out = Vec::new();
+        for (fid, file) in &self.state.manifest.files {
+            if !is_document(&file.path) {
+                continue;
+            }
+            let Some(here) = disk.get(&file.path) else { continue };
+            listed.insert(file.path.as_str());
+            let untouched = self
+                .state
+                .files
+                .get(fid)
+                .is_some_and(|synced| synced.path == file.path && synced.size == here.size && synced.mtime_ms == here.mtime_ms);
+            out.push(if untouched {
+                RecentFile {
+                    path: self.ws_rel(&file.path),
+                    file_id: Some(fid.clone()),
+                    hash: Some(file.hash.clone()),
+                    mtime: file.mtime,
+                    by: file.by.clone(),
+                    rev: file.rev,
+                    section: section.clone(),
+                }
+            } else {
+                RecentFile {
+                    path: self.ws_rel(&file.path),
+                    file_id: Some(fid.clone()),
+                    hash: None,
+                    mtime: here.mtime_ms.max(file.mtime),
+                    by: me.to_string(),
+                    rev: file.rev,
+                    section: section.clone(),
+                }
+            });
+        }
+        for (rel, here) in &disk {
+            if listed.contains(rel.as_str()) || !is_document(rel) {
+                continue;
+            }
+            out.push(RecentFile {
+                path: self.ws_rel(rel),
+                file_id: None,
+                hash: None,
+                mtime: here.mtime_ms,
+                by: me.to_string(),
+                rev: 0,
+                section: section.clone(),
+            });
+        }
+        out
+    }
 
     /// This section's public pages as this device believes them, with paths
     /// as the workspace spells them.

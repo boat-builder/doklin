@@ -1146,7 +1146,7 @@ await test("meta: the probe says who the bearer is, and what everyone here is ca
   // devices, is a route of its own.
   assert.ok(mine.people.length >= 2);
   assert.deepEqual(
-    [...new Set(mine.people.map((p) => Object.keys(p).sort().join(",")))],
+    [...new Set(mine.people.filter((p) => p.id.startsWith("m-")).map((p) => Object.keys(p).sort().join(",")))],
     ["id,name"],
     "no address, no role, no device count",
   );
@@ -4854,7 +4854,11 @@ await test("directory: /api/meta names agents beside people, so every Mac can pu
   // The directory every Mac already asks for resolves it.
   const asMember = (await call("/api/meta", { token: MEMBER })).json;
   assert.ok(asMember.people.some((p) => p.id === bot.id && p.name === "Grok bot"));
-  assert.deepEqual([...new Set(asMember.people.map((p) => Object.keys(p).sort().join(",")))], ["id,name"], "a name, and nothing about what it may do");
+  const agentRows = asMember.people.filter((p) => p.id.startsWith("a-"));
+  assert.deepEqual([...new Set(agentRows.map((p) => Object.keys(p).sort().join(",")))], ["id,name,person"], "a name and whose it is, and nothing about what it may do");
+  const ownerId = (await call("/api/meta", { token: OWNER })).json.you.memberId;
+  assert.equal(asMember.people.find((p) => p.id === bot.id).person, ownerId, "whose agent it is, told to everyone");
+  assert.ok(agentRows.every((p) => asMember.people.some((q) => q.id === p.person)), "and that person is in the list");
   const firstAgent = asMember.people.findIndex((p) => p.id.startsWith("a-"));
   assert.ok(firstAgent > 0 && asMember.people.slice(0, firstAgent).every((p) => /^m-/.test(p.id)), "people first");
   assert.ok(asMember.people.slice(firstAgent).every((p) => /^a-[a-f0-9]{8}$/.test(p.id)), "then agents");
