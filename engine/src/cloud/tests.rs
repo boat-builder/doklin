@@ -473,13 +473,18 @@ impl Remote for FakeRemote {
                 .members
                 .values()
                 .find(|m| b.superadmin.as_deref() == Some(m.id.as_str()))
-                .map(|m| Person { id: m.id.clone(), name: m.name.clone() });
-            // People, then agents — `listDirectory` (cloud-worker/src/members.ts).
+                .map(|m| Person { id: m.id.clone(), name: m.name.clone(), person: None });
+            // People, then agents with whose they are (every agent here is
+            // the superadmin's) — `listDirectory` (cloud-worker/src/members.ts).
             let people = b
                 .members
                 .values()
-                .map(|m| Person { id: m.id.clone(), name: m.name.clone() })
-                .chain(b.agents.iter().map(|(id, name)| Person { id: id.clone(), name: name.clone() }))
+                .map(|m| Person { id: m.id.clone(), name: m.name.clone(), person: None })
+                .chain(
+                    b.agents
+                        .iter()
+                        .map(|(id, name)| Person { id: id.clone(), name: name.clone(), person: b.superadmin.clone() }),
+                )
                 .collect();
             let limits = b.limits.clone();
             Ok(Meta { version: b.worker_version, workspace: b.bound.clone(), you, superadmin, people, limits })
@@ -6836,4 +6841,57 @@ async fn a_picture_cannot_be_published() {
     let refused = a.publish("pic.png", PublicKind::File, None).unwrap_err();
     assert_eq!(refused, "Only markdown and html documents can be published.");
     assert!(a.publish("page.html", PublicKind::File, None).is_ok());
+}
+
+/// What changed lately: every section's documents by when their content
+/// last changed, newest first, signed by whoever changed them — an agent
+/// with whose it is — and a change made here that has not synced yet as
+/// this device's own. A move is not a change, and comment files are not
+/// documents.
+#[tokio::test]
+async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it() {
+    let be = fake_worker();
+    be.lock().unwrap().agents.insert(AGENT.into(), "Grok bot".into());
+    let mut a = device("Alice", &be);
+    a.write("old.md", "# Old\n");
+    a.write("old.meta.jsonl", "");
+    a.cycle().await;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    a.write("plan.md", "# Plan\n");
+    a.cycle().await;
+    let plan = fid_at(&be, "plan.md");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    worker_writes(&be, |tx| tx.write(&plan, "plan.md", "# Plan\n\nThe agent's words.\n"));
+    a.cycle().await;
+
+    let recent = a.engine.recent(50);
+    let paths: Vec<&str> = recent.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["plan.md", "old.md"], "newest first, and no comment file");
+    let top = &recent.files[0];
+    assert_eq!((top.by.as_str(), top.rev, top.file_id.as_deref()), (AGENT, 2, Some(plan.as_str())));
+    assert_eq!(top.hash.as_deref(), Some(hash16(b"# Plan\n\nThe agent's words.\n").as_str()));
+    assert_eq!(recent.files[1].rev, 1, "made and never changed");
+    assert_eq!(recent.me.as_deref(), Some(ADA));
+    let bot = recent.people.iter().find(|p| p.id == AGENT).expect("the agent is in the directory");
+    assert_eq!((bot.name.as_str(), bot.person.as_deref()), ("Grok bot", Some(ADA)), "named, with whose it is");
+    assert!(recent.people.iter().any(|p| p.id == ADA && p.person.is_none()));
+
+    // Typed here and not synced yet: this device's, at the file's own time.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    a.write("old.md", "# Old\n\nEdited here.\n");
+    a.write("new.md", "# New\n");
+    let recent = a.engine.recent(50);
+    let mine: Vec<(&str, &str, Option<&str>, u64)> =
+        recent.files.iter().take(2).map(|f| (f.path.as_str(), f.by.as_str(), f.hash.as_deref(), f.rev)).collect();
+    assert!(mine.contains(&("new.md", ADA, None, 0)), "a new file no manifest carries: {:?}", mine);
+    assert!(mine.contains(&("old.md", ADA, None, 1)), "an edit not synced yet: {:?}", mine);
+    assert_eq!(a.engine.recent(1).files.len(), 1, "at most the limit");
+
+    // A rename moves it, and changes nothing about when it last changed.
+    a.cycle().await;
+    let before = a.engine.recent(50).files.into_iter().find(|f| f.path == "plan.md").unwrap().mtime;
+    a.rename("plan.md", "Plans/plan.md");
+    a.cycle().await;
+    let moved = a.engine.recent(50).files.into_iter().find(|f| f.path == "Plans/plan.md").expect("moved");
+    assert_eq!(moved.mtime, before, "a move is not an edit");
 }

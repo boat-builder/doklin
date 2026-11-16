@@ -60,7 +60,12 @@ struct NoticeBar: View {
 enum Route: Hashable {
     case folder(String)
     case document(String)
-    case search
+    /// A note opened at the first place a search's words are in it — or, when
+    /// they span its markup, at the source line the search found.
+    case match(String, query: String, line: Int?)
+    /// A followed link's page, on its way to this iPhone.
+    case arriving
+    case settings
     case history(HistoryPlace)
     case people
     case devices

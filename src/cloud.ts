@@ -229,6 +229,35 @@ export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
  *  Payloads.swift): change all three. */
 export type CloudPageLink = { url: string; who: string };
 
+/** `cloudRecent`: a workspace's documents by when their content last
+ *  changed, newest first, across its sections, with the directory their
+ *  `by`s are read with — what the iPhone's Home lists. Mirrors `RecentFiles`
+ *  (engine/src/cloud/status.rs ⇄ Payloads.swift): change all three. */
+export type CloudRecentFiles = {
+  files: CloudRecentFile[];
+  /** People, then agents, each agent with whose it is (`person`). */
+  people: { id: string; name: string; person: string | null }[];
+  /** Who this device works as, by member id; null until the domain has said. */
+  me: string | null;
+};
+
+export type CloudRecentFile = {
+  /** Workspace-relative. */
+  path: string;
+  /** Null for a file made here that no manifest carries yet. */
+  fileId: string | null;
+  /** The manifest's content address; null for a change not synced yet. */
+  hash: string | null;
+  /** When its content last changed, ms. A move is not a change. */
+  mtime: number;
+  /** A member id or an agent's. */
+  by: string;
+  /** 1: made and never changed (or moved in from another section). 0: not synced yet. */
+  rev: number;
+  /** The space it is in; null for the shared workspace. */
+  section: string | null;
+};
+
 /** The two halves of an invite found in one paste — either may be missing,
  *  and the redeem screen fills what it finds. */
 export type CloudPastedInvite = { endpoint: string | null; code: string | null };
@@ -523,6 +552,10 @@ export const cloudPublish = (path: string, opts: { slug?: string; title?: string
 /** The link to the file at `path` (absolute). Waits a pass for a file made
  *  a moment ago, which has no id until one has taken it in. */
 export const cloudLink = (path: string) => invoke<CloudPageLink>("cloud_link", { path });
+
+/** What changed lately in the workspace at `root`, at most `limit` documents. */
+export const cloudRecent = (root: string, limit: number | null = null) =>
+  invoke<CloudRecentFiles>("cloud_recent", { root, limit });
 
 export const cloudUnpublish = (root: string, slug: string) => invoke<void>("cloud_unpublish", { root, slug });
 export const cloudSetRoot = (root: string, slug: string | null) => invoke<void>("cloud_set_root", { root, slug });

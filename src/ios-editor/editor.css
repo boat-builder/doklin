@@ -1,0 +1,148 @@
+/* The phone's editor looks like the phone's reader (ios/Doklin/MarkdownView
+   .swift), so turning a note editable changes nothing but the caret: the
+   system's faces at the reader's sizes, the Mac's colours (tokens.css). */
+
+:root {
+  --font-text: -apple-system, system-ui, sans-serif;
+  --font-ui: -apple-system, system-ui, sans-serif;
+  --font-heading: ui-serif, "New York", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--sheet);
+  color: var(--text-1);
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  padding: 16px 20px 120px;
+}
+
+#editor {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.milkdown {
+  --crepe-color-background: var(--sheet);
+  --crepe-color-on-background: var(--text-1);
+  --crepe-color-surface: var(--raised);
+  --crepe-color-surface-low: var(--sunken);
+  --crepe-color-on-surface: var(--text-1);
+  --crepe-color-on-surface-variant: var(--text-2);
+  --crepe-color-outline: var(--border-strong);
+  --crepe-color-primary: var(--accent);
+  --crepe-color-secondary: var(--hover);
+  --crepe-color-on-secondary: var(--text-1);
+  --crepe-color-inverse: var(--text-1);
+  --crepe-color-on-inverse: var(--sheet);
+  --crepe-color-inline-code: var(--code-ink);
+  --crepe-color-error: var(--error-ink);
+  --crepe-color-hover: var(--hover);
+  --crepe-color-selected: var(--selection);
+  --crepe-color-inline-area: var(--code-bg);
+  --crepe-font-default: var(--font-ui);
+  --crepe-font-title: var(--font-heading);
+  --crepe-font-code: var(--font-mono);
+  background: transparent;
+}
+
+.milkdown .ProseMirror {
+  padding: 0;
+  outline: none;
+  font-family: var(--font-text);
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--text-1);
+  caret-color: var(--accent);
+}
+
+.milkdown .ProseMirror > * + * {
+  margin-top: 16px;
+}
+
+.milkdown .ProseMirror p {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+.milkdown .ProseMirror h1,
+.milkdown .ProseMirror h2,
+.milkdown .ProseMirror h3,
+.milkdown .ProseMirror h4,
+.milkdown .ProseMirror h5,
+.milkdown .ProseMirror h6 {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-heading);
+  font-weight: 400;
+  color: var(--text-1);
+}
+
+.milkdown .ProseMirror h1 {
+  font-size: 34px;
+  line-height: 1.2;
+}
+
+.milkdown .ProseMirror h2 {
+  font-size: 22px;
+  line-height: 1.27;
+  padding-top: 8px;
+}
+
+.milkdown .ProseMirror h3 {
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.milkdown .ProseMirror h4 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.milkdown .ProseMirror h5,
+.milkdown .ProseMirror h6 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.milkdown .ProseMirror a {
+  color: var(--accent-ink, var(--accent));
+}
+
+.milkdown .ProseMirror blockquote {
+  margin: 0;
+  padding-left: 15px;
+  border-left: 3px solid var(--quote-bar, var(--border-strong));
+  color: var(--text-1);
+}
+
+.milkdown .ProseMirror code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--code-inline-bg, var(--code-bg));
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.milkdown .milkdown-code-block {
+  border-radius: 8px;
+  background: var(--code-bg);
+  font-size: 13px;
+}
+
+/* Words under a comment: marked, as the reader marks them. */
+.milkdown .ProseMirror .critic-comment,
+.milkdown .ProseMirror [data-critic] {
+  background: var(--mark);
+  border-radius: 2px;
+}
+
+.milkdown .crepe-placeholder::before {
+  color: var(--text-3);
+}

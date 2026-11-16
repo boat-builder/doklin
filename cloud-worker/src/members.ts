@@ -261,30 +261,35 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
   });
 }
 
+/** One row of the directory: a person, or an agent with whose it is. */
+export type DirectoryEntry = { id: string; name: string; person?: string };
+
 /**
  * Everyone's id and display name, and nothing else — what a `by` in the
  * manifest is read with. People first, then agents: an
  * agent signs what it changes with its own `a-` id (agents.ts), and a Mac has
- * to be able to put a name to that as well. A removed person is still listed:
- * what they wrote keeps their name.
+ * to be able to put a name to that as well — and, as `person`, whose agent
+ * it is, so an app can say "Maya's Research agent" to everyone in the
+ * workspace. A removed person is still listed: what they wrote keeps their
+ * name.
  *
  * It is served by `GET /api/meta`, the route every engine already asks, so
  * putting a name to an id never costs a request of its own. The People list
  * proper — addresses, roles, device counts — is `GET /api/auth/members`, and
- * an agent's permissions stay with whoever may manage agents.
+ * an agent's permissions and machines stay with whoever may manage agents.
  */
-export async function listDirectory(env: Env): Promise<{ id: string; name: string }[] | null> {
+export async function listDirectory(env: Env): Promise<DirectoryEntry[] | null> {
   return withDb(env, async (db) => {
     const { results } = await db
       .prepare(
-        `SELECT id, name FROM (
-           SELECT id, name, 0 AS kind, created_at FROM members
+        `SELECT id, name, person FROM (
+           SELECT id, name, NULL AS person, 0 AS kind, created_at FROM members
            UNION ALL
-           SELECT id, name, 1 AS kind, created_at FROM agents
+           SELECT id, name, member_id AS person, 1 AS kind, created_at FROM agents
          ) ORDER BY kind, created_at, id`,
       )
-      .all<{ id: string; name: string }>();
-    return results.map((r) => ({ id: r.id, name: r.name }));
+      .all<{ id: string; name: string; person: string | null }>();
+    return results.map((r) => (r.person ? { id: r.id, name: r.name, person: r.person } : { id: r.id, name: r.name }));
   });
 }
 

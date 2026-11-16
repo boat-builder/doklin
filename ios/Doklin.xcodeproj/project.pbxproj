@@ -88,6 +88,7 @@
 				D0C0000000000000000000D2 /* Sources */,
 				D0C0000000000000000000D1 /* Frameworks */,
 				D0C0000000000000000000D3 /* Resources */,
+				D0C0000000000000000000D8 /* Build the note editor */,
 			);
 			buildRules = (
 			);
@@ -149,6 +150,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "# The sync engine (engine/, Rust) as the static library this target links.\n\"$PROJECT_DIR/../scripts/ios-engine.sh\" \"$PLATFORM_NAME\"\n";
+		};
+		D0C0000000000000000000D8 /* Build the note editor */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build the note editor";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# The note editor (src/ios-editor/, the Mac's own Milkdown) into the app as Editor/.\n\"$PROJECT_DIR/../scripts/ios-editor.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -254,7 +274,7 @@
 					"DEBUG=1",
 					"$(inherited)",
 				);
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				ONLY_ACTIVE_ARCH = YES;
@@ -277,7 +297,7 @@
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_NO_COMMON_BLOCKS = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;

@@ -12,8 +12,9 @@
 //   GET    /api/meta                 {version, workspace|null, d1: schema version|null,
 //                                    you: who this bearer is — {role, memberId, email, name,
 //                                    tokenId, can: [what that role may do]}, superadmin: {id,
-//                                    name}|null, people: [{id, name}] — the directory a
-//                                    manifest's `by` is read with, limits}
+//                                    name}|null, people: [{id, name, person?}] — the directory a
+//                                    manifest's `by` is read with (`person`: an agent's, whose
+//                                    it is), limits}
 //   POST   /api/workspace            superadmin; bind this domain: body {name, deviceName?} → 201
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}

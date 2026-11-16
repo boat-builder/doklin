@@ -119,6 +119,20 @@ final class EngineLiveTests: XCTestCase {
         let search = SearchModel(workspace: workspace)
         await search.run("written on a device")
         XCTAssertEqual(search.results.map(\.path), ["From the phone.md"])
+        XCTAssertEqual(search.inText.map(\.path), ["From the phone.md"], "found by its words, not its name")
+
+        // Home: what changed, newest first — the note made here, by this
+        // person — and the seed's documents, by the people who wrote them.
+        let recent = RecentModel(workspace: workspace)
+        await recent.load()
+        let mine = try XCTUnwrap(recent.all.first { $0.path == made }, "the note made here, among what changed")
+        XCTAssertEqual(mine.who, "You")
+        XCTAssertTrue(mine.byMe)
+        XCTAssertFalse(mine.unread, "your own change is never unread")
+        XCTAssertTrue(recent.all.contains { $0.path == "Projects/plan.md" && $0.html == "Projects/plan.html" }, "the plan and its page, one row")
+        XCTAssertEqual(recent.all.map(\.changed), recent.all.map(\.changed).sorted(by: >), "newest first")
+        await note.shown()
+        XCTAssertNotNil(workspace.lastRead(made).seen, "shown, so read")
 
         // A link to that note opens it again, through the call iOS hands a
         // tapped link to; a link into a workspace this device is not in
@@ -136,7 +150,8 @@ final class EngineLiveTests: XCTestCase {
         device.opened(opening)
         XCTAssertNil(device.opening)
         await device.follow(try XCTUnwrap(URL(string: "https://doklin.cc/open#d=elsewhere.example.com&w=w-000000000000&f=f-000000000000")))
-        XCTAssertEqual(device.linkProblem, "That page is in elsewhere.example.com, which this iPhone isn't connected to.")
+        XCTAssertEqual(device.linkProblem, LinkWords.notJoined(domain: "elsewhere.example.com", kind: "iPhone"))
+        XCTAssertNil(device.arrivingPage, "a workspace not joined waits for nothing")
         device.dismissLinkProblem()
 
         // This device is one of its person's, and can add another.

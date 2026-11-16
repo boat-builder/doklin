@@ -279,6 +279,78 @@ public struct PageLinkCopy: Decodable, Equatable, Sendable {
     public let who: String
 }
 
+/// `cloud_recent`: a workspace's documents by when their content last
+/// changed, newest first, across its sections — what Home lists — with the
+/// directory their `by`s are read with. Mirrors `RecentFiles`
+/// (engine/src/cloud/status.rs ⇄ `CloudRecentFiles`, src/cloud.ts): change
+/// all three.
+public struct RecentFiles: Decodable, Equatable, Sendable {
+    public let files: [RecentFile]
+    /// People, then agents, each agent with whose it is.
+    public let people: [DirectoryPerson]
+    /// Who this device works as, by member id; null until the domain has said.
+    public let me: String?
+
+    public init(files: [RecentFile], people: [DirectoryPerson], me: String?) {
+        self.files = files
+        self.people = people
+        self.me = me
+    }
+}
+
+public struct RecentFile: Decodable, Hashable, Sendable {
+    /// Workspace-relative.
+    public let path: String
+    /// Null for a file made here that no manifest carries yet.
+    public let fileId: String?
+    /// The manifest's content address: the first 16 hex of the sha256, so a
+    /// prefix of a version's hash. Null for a change not synced yet.
+    public let hash: String?
+    /// When its content last changed, ms. A move is not a change.
+    public let mtime: Int
+    /// A member id (`m-…`) or an agent's (`a-…`); empty when this device's
+    /// own change was made before the domain said who it is.
+    public let by: String
+    /// 1: made and never changed — or moved in from another section, which
+    /// is a new file there. 0: not synced yet.
+    public let rev: Int
+    /// The space it is in; null for the shared workspace.
+    public let section: String?
+
+    public init(path: String, fileId: String?, hash: String?, mtime: Int, by: String, rev: Int, section: String?) {
+        self.path = path
+        self.fileId = fileId
+        self.hash = hash
+        self.mtime = mtime
+        self.by = by
+        self.rev = rev
+        self.section = section
+    }
+}
+
+/// `cloud_link_target`: which workspace a link to a page is in, and its
+/// folder here when this device has joined it. Mirrors `LinkTarget`
+/// (engine/src/cloud/status.rs).
+public struct PageLinkTarget: Decodable, Equatable, Sendable {
+    public let domain: String
+    public let wsId: String
+    public let root: String?
+}
+
+/// One row of the workspace's directory.
+public struct DirectoryPerson: Decodable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    /// For an agent, whose it is (a member id).
+    public let person: String?
+
+    public init(id: String, name: String, person: String?) {
+        self.id = id
+        self.name = name
+        self.person = person
+    }
+}
+
 /// `cloud_device_code`: a code for another device of yours.
 public struct DeviceCode: Decodable, Equatable, Sendable {
     public let code: String
