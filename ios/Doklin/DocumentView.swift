@@ -15,6 +15,8 @@ struct DocumentView: View {
     @State private var commentStart: CommentStart?
     @State private var publishing = false
     @Environment(\.openURL) private var openInSystem
+    @Environment(Workspaces.self) private var device
+    @Environment(Toaster.self) private var toaster
 
     init(workspace: Workspace, path: String, route: Binding<[Route]>) {
         _route = route
@@ -151,6 +153,20 @@ struct DocumentView: View {
         return "\(state.label) · /\(page.slug)"
     }
 
+    /// *Copy link*: a link that opens this document in Doklin, for anybody
+    /// who can see it — and who that is, said as it is copied.
+    private func copyLink() {
+        Task {
+            do {
+                let link = try await workspace.link(to: model.path)
+                UIPasteboard.general.string = link.url
+                toaster.show("Link copied. \(link.who)")
+            } catch {
+                model.problem = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+        }
+    }
+
     /// Follow a link written in the note, the way the Mac app does: another
     /// document opens, a heading scrolls into view, the web opens in the system.
     private func follow(_ href: String) {
@@ -167,7 +183,14 @@ struct DocumentView: View {
                 scrollTarget = heading.id
             }
         case .external(let address):
-            if let url = URL(string: address) { openInSystem(url) }
+            guard let url = URL(string: address) else { return }
+            // A link to a page opens here, not in a browser that would only
+            // hand it back.
+            if Workspaces.isPageLink(url) {
+                Task { await device.follow(url) }
+            } else {
+                openInSystem(url)
+            }
         case .nowhere:
             model.problem = "That link leads outside this workspace."
         }
@@ -226,6 +249,14 @@ struct DocumentView: View {
             ShareLink(item: CriticMarkup.stripComments(text)) {
                 Label("Share the text", systemImage: "square.and.arrow.up")
             }
+        }
+        if workspace.status != nil, model.isNote || model.kind == .html, workspace.audience(of: model.path) != .nowhere {
+            Button {
+                copyLink()
+            } label: {
+                Label("Copy link", systemImage: "link")
+            }
+            .accessibilityIdentifier("copy-link")
         }
         if [.markdown, .html, .text].contains(model.kind) {
             Button {

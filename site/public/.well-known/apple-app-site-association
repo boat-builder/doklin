@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["H7PXDFJXSP.com.sherin.doklin.ios"],
+        "components": [
+          { "/": "/open", "comment": "A link to a page: engine/src/cloud/link.rs PAGE" },
+          { "/": "/open/", "comment": "The same, as some apps rewrite it" }
+        ]
+      }
+    ]
+  }
+}

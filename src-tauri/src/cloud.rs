@@ -7,8 +7,8 @@ use doklin_engine::cloud::config::Marker;
 use doklin_engine::cloud::invite::Pasted;
 use doklin_engine::cloud::remote::{AgentRecord, EveryPages, MemberRecord};
 use doklin_engine::cloud::status::{
-    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, People, Probe, Redeemed, Removed,
-    SpaceStatus,
+    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People, Probe, Redeemed,
+    Removed, SpaceStatus,
 };
 use tauri::{AppHandle, Manager};
 
@@ -305,4 +305,11 @@ pub(crate) async fn cloud_page_take_down(app: AppHandle, root: String, slug: Str
 #[tauri::command]
 pub(crate) async fn cloud_wipe(app: AppHandle, root: String) -> Result<u64, String> {
     cloud::cloud_wipe(&core(&app)?, root).await
+}
+
+/// *Copy link*. Following one is the app's own (links.rs): a link reaches
+/// this Mac from macOS, or from a click in a note, never from a frontend call.
+#[tauri::command]
+pub(crate) async fn cloud_link(app: AppHandle, path: String) -> Result<PageLinkCopy, String> {
+    cloud::cloud_link(&core(&app)?, path).await
 }

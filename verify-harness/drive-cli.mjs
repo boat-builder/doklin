@@ -424,7 +424,7 @@ await check("open: paths on this disk, made absolute and checked, no login; refu
     // Where it runs is the folder itself (/private/var…), not the link to it
     // the temp folder's name goes through (/var…); a path given whole is kept.
     facts["a relative path is resolved where the command runs, a folder is fine too"] =
-      one.code === 0 && JSON.stringify(JSON.parse(one.out)) === JSON.stringify({ opened: false, paths: [realpathSync(file), SCRATCH] });
+      one.code === 0 && JSON.stringify(JSON.parse(one.out)) === JSON.stringify({ links: [], opened: false, paths: [realpathSync(file), SCRATCH] });
     facts["no path is the app itself"] = JSON.parse((await doklin(nobody, ["open", "--dry-run"])).out).paths.length === 0;
     facts["a path that is not there is exit 3"] = refused(await doklin(nobody, ["open", "--dry-run", "nope.md"]), 3, /there is no file or folder at "nope\.md"/);
     const tty = await doklin(nobody, ["open", "--dry-run", "open-me.md"], { tty: true });
@@ -715,6 +715,34 @@ await check("read: the text on stdout and what is known about it on stderr; --md
     "comment markers are kept": marked.out === SEED_FILES["Comments.md"] && marked.out.includes("{=="),
     "--clean drops them and keeps the words": clean.code === 0 && !/\{==|==\}|\{>>|<<\}/.test(clean.out) && clean.out.includes("a highlighted phrase"),
     "-o writes the file and prints nothing": toFile.code === 0 && toFile.out === "" && readFileSync(copy, "utf8") === SEED_FILES["Projects/plan.md"] && toFile.meta.rev === 1,
+  };
+});
+
+await check("a link to a page, as the app copies it, is taken wherever a document is named: the domain says where it leads, and the command runs in the link's workspace", async () => {
+  const ws = (await (await owner("/api/meta")).json()).workspace.id;
+  const link = (path, domain = DOMAIN) => `https://doklin.cc/open#d=${encodeURIComponent(domain)}&w=${ws}&f=${fidOf(path)}`;
+  const from = calls.length;
+  const read = await doklin(editorBox, ["read", link("Projects/plan.md")]);
+  const steps = asked(from);
+  const info = await doklin(editorBox, ["info", `<${link("Projects/plan.html")}>`]);
+  const comments = await doklin(editorBox, ["comments", link("Comments.md")]);
+  const wiped = `https://doklin.cc/open#d=${encodeURIComponent(DOMAIN)}&w=w-000000000000&f=${fidOf("Projects/plan.md")}`;
+  const opened = await doklin(nobody, ["open", "--dry-run", link("Projects/plan.md")]);
+  const forApp = link("Projects/plan.md").replace("https://doklin.cc/open", "doklin://open");
+  const handed =
+    process.platform === "darwin"
+      ? ["open hands a link to the app as it is registered for it", opened.code === 0 && same(JSON.parse(opened.out).links, [forApp])]
+      : ["off a Mac, open refuses a link as it refuses a path: there is no app here", refused(opened, 1, /open hands files to the Doklin app, which runs only on a Mac/)];
+  return {
+    "read takes it: the text, and the path it led to": read.code === 0 && read.out === SEED_FILES["Projects/plan.md"] && read.meta.path === "Projects/plan",
+    "one question first, then the read": same(steps, ["GET find → 200", "GET doc → 200"]),
+    "info takes it in a mail's angle brackets, by its html file too": info.code === 0 && info.json.path === "Projects/plan",
+    "and comments": comments.code === 0 && comments.json.path === "Comments",
+    "a page that is not there is exit 3": refused(await doklin(editorBox, ["read", link("Nope.md")]), 3, /no page at that link/),
+    "a link from before the domain was set up again is the same": refused(await doklin(editorBox, ["read", wiped]), 3, /no page at that link/),
+    "a link to a workspace this machine is not logged in to says which": refused(await doklin(editorBox, ["read", link("Projects/plan.md", "elsewhere.example.com")]), 6, /not logged in to elsewhere\.example\.com/),
+    "-w naming another workspace than the link's is bad usage": refused(await doklin(editorBox, ["read", link("Projects/plan.md"), "-w", "elsewhere.example.com"]), 2, /that link is to a page in localhost/),
+    [handed[0]]: handed[1],
   };
 });
 

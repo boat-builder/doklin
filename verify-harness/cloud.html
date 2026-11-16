@@ -1066,6 +1066,25 @@
             }
 
             /* ----- the public map, as the engine would keep it ----- */
+            // *Copy link*: the engine's answer, as engine/src/cloud/link.rs
+            // writes it — a file in no section has none.
+            case "cloud_link": {
+              const s = window.__cloud.statuses.find((st) => args.path.startsWith(`${st.root}/`));
+              if (!s) return Promise.reject("that file isn't in a workspace that syncs, so it has no link");
+              const rel = args.path.slice(s.root.length + 1);
+              const space = s.spaces.find((sp) => rel.toLowerCase().startsWith(`${sp.path.toLowerCase()}/`));
+              if (!space && ["private", "restricted"].includes(rel.split("/")[0].toLowerCase())) {
+                return Promise.reject("that file is in no section, so it syncs nowhere and has no link");
+              }
+              const who = !space
+                ? `Everyone in ${s.name} can open it.`
+                : space.kind === "private"
+                  ? "Only you can open it, on any device of yours."
+                  : `Only the people in “${space.name}” can open it.`;
+              const file = `f-${(rel.length * 7919).toString(16).padStart(12, "0").slice(-12)}`;
+              const url = `https://doklin.cc/open#d=${s.domain}&w=${s.wsId}${space ? `&s=${space.id}` : ""}&f=${file}`;
+              return Promise.resolve({ url, who });
+            }
             case "cloud_publish": {
               const s = window.__cloud.statuses.find(
                 (st) => args.path === st.root || args.path.startsWith(`${st.root}/`),

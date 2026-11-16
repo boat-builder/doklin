@@ -120,6 +120,25 @@ final class EngineLiveTests: XCTestCase {
         await search.run("written on a device")
         XCTAssertEqual(search.results.map(\.path), ["From the phone.md"])
 
+        // A link to that note opens it again, through the call iOS hands a
+        // tapped link to; a link into a workspace this device is not in
+        // says which one.
+        let link = try await workspace.link(to: made)
+        XCTAssertTrue(link.url.hasPrefix("https://doklin.cc/open#d="), link.url)
+        XCTAssertTrue(link.who.hasPrefix("Everyone in "), link.who)
+        XCTAssertTrue(Workspaces.isPageLink(try XCTUnwrap(URL(string: link.url))))
+        let handedOn = link.url.replacingOccurrences(of: "https://doklin.cc/open", with: "doklin://open")
+        await device.follow(try XCTUnwrap(URL(string: handedOn)))
+        XCTAssertNil(device.linkProblem)
+        let opening = try XCTUnwrap(device.opening)
+        XCTAssertEqual(opening.root, root)
+        XCTAssertEqual(opening.path, made)
+        device.opened(opening)
+        XCTAssertNil(device.opening)
+        await device.follow(try XCTUnwrap(URL(string: "https://doklin.cc/open#d=elsewhere.example.com&w=w-000000000000&f=f-000000000000")))
+        XCTAssertEqual(device.linkProblem, "That page is in elsewhere.example.com, which this iPhone isn't connected to.")
+        device.dismissLinkProblem()
+
         // This device is one of its person's, and can add another.
         let people: People = try await Engine.shared.call("cloud_people", ["root": .string(root)])
         XCTAssertEqual(people.role, "superadmin")
