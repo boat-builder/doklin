@@ -38,8 +38,6 @@ struct WorkspaceView: View {
             NeedsYouBar(workspace: workspace)
         }
         .animation(.default, value: toaster.shown?.id)
-        .environment(toaster)
-        .environment(shell)
         .modifier(SyncQuestions(workspace: workspace))
         .onChange(of: workspace.left) { _, left in
             if let left { close(left) }
@@ -66,6 +64,10 @@ struct WorkspaceView: View {
                 SignInView(canCancel: true)
             }
         }
+        // Outermost, so everything above — the bar over the tabs, the
+        // questions, the sheets — finds them.
+        .environment(toaster)
+        .environment(shell)
     }
 
     /// A restricted folder left this iPhone: every screen inside it closes,
