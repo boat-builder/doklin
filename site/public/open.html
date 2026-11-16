@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Open in Doklin</title>
+<meta name="description" content="This link opens a page in a Doklin workspace.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Doklin">
+<meta property="og:title" content="A page in Doklin">
+<meta property="og:description" content="This link opens a page in a Doklin workspace, for the people in it.">
+<meta property="og:image" content="https://doklin.cc/doklin.png">
+<meta name="twitter:card" content="summary">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/site.css">
+<style>
+  [hidden] { display: none !important; }
+  .small-print a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+</style>
+<!--
+  A link to a page: https://doklin.cc/open#d=<domain>&w=<workspace>&s=<space>&f=<file>.
+  Everything is after the "#", which no browser sends to a server, so this
+  page is all that doklin.cc ever serves for a link and it learns nothing of
+  it. An iPhone with the app never gets here (.well-known/apple-app-site-association);
+  anything else hands the link on to the app as doklin://open#…
+  The address, the scheme and the key names are engine/src/cloud/link.rs's
+  (PAGE, SCHEME): change both.
+-->
+</head>
+<body>
+<header class="band site-header">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/doklin.png" alt=""><span>Doklin</span></a>
+    <div class="header-actions">
+      <a class="btn btn-sm btn-ghost" href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download</a>
+    </div>
+  </div>
+</header>
+<main class="band lost">
+  <div class="wrap" id="link">
+    <p class="eyebrow"><b>Link</b>A page in Doklin</p>
+    <h1 class="h2">Open this page in Doklin.</h1>
+    <p class="lead">This link is to a page in <strong id="domain">a Doklin workspace</strong>. It opens in the Doklin app for anybody in that workspace who can see the page.</p>
+    <div class="actions">
+      <a class="btn btn-primary" id="open" href="doklin://open">Open in Doklin</a>
+    </div>
+    <p class="small-print">No Doklin yet? <a href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download it for your Mac</a>, and ask whoever sent this link to invite you to the workspace. Doklin for iPhone and iPad is coming soon: <a href="mailto:hello@boatbuilder.dev?subject=Doklin%20iPhone%20beta">email the team</a> to join the beta.</p>
+  </div>
+  <div class="wrap" id="cut" hidden>
+    <p class="eyebrow"><b>Link</b>A page in Doklin</p>
+    <h1 class="h2">This link is cut short.</h1>
+    <p class="lead">Part of it went missing on the way here. Ask whoever sent it to copy it again.</p>
+  </div>
+</main>
+<script>
+  (function () {
+    var hash = location.hash;
+    var link = new URLSearchParams(hash.slice(1));
+    var domain = link.get("d");
+    if (!domain || !link.get("w") || !link.get("f")) {
+      document.getElementById("link").hidden = true;
+      document.getElementById("cut").hidden = false;
+      return;
+    }
+    var app = "doklin://open" + hash;
+    document.getElementById("open").href = app;
+    document.getElementById("domain").textContent = domain;
+    // A Mac has no way into the app but this one: hand the link on as soon
+    // as the page is up, so the browser asks over a page that says what it
+    // is. A phone or a tablet that got here has no app to take it, or an
+    // in-app browser that kept it: there it waits for a tap, which never errors.
+    var touch = navigator.maxTouchPoints > 1;
+    if (/Macintosh/.test(navigator.userAgent) && !touch) {
+      addEventListener("load", function () {
+        location.href = app;
+      });
+    }
+  })();
+</script>
+</body>
+</html>

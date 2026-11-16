@@ -124,6 +124,18 @@ synced manifest, rendered by the worker from the synced files.
 - `426` on PUT → `worker-outdated`: sync pauses, probing `/api/meta` each poll until a newer worker answers.
 - `by` is a member id (`ENTITY_ID_RE`, `members.ts`) or an agent id (`AGENT_ID_RE`, `agents.ts`). An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); an id it cannot name shows as it stands.
 
+## Links (`link.rs`, `mod.rs`)
+
+*Copy link* gives a link that opens a document in Doklin for anybody who can see it, wherever it is clicked (only documents sync, so only they have one): `https://doklin.cc/open#d=<domain>&w=<wsId>&s=<space id>&f=<file id>` (`s` absent for the shared workspace).
+
+- **Everything is after the `#`**, which no browser sends to a server: doklin.cc, its logs and a chat app's preview bot never learn the workspace or the page. doklin.cc serves one static page for every link (`site/public/open.html`) and stores nothing.
+- **Ids, never a path or a title**: a rename or a move inside its section keeps the link. A move to another section gets a new file id, and the old link finds nothing.
+- **An address, never access.** Being in that section is what opens it; a link never carries a code. A space this person is not in, a deleted file and one that never was are one answer, so a restricted folder is never told apart from nothing.
+- `cloud_link` (absolute path → `{url, who}`) asks the engine for the file's section and id; a file with no id yet waits one pass. `cloud_follow_link` (link → absolute path) finds the workspace by `wsId` in `cloud.json` and the file in that section's synced state, offline; one not here yet waits one poll. Same domain, other `wsId` = the domain was set up again.
+- How a link reaches an app: an iPhone opens it straight from doklin.cc (`ios/Doklin.entitlements` + `site/public/.well-known/apple-app-site-association`); anything else gets the page, which hands it on as `doklin://open#…` (the scheme in `src-tauri/Info.plist`, `ios/Info.plist`) — at once on a Mac, on a tap elsewhere. A click on one inside a note never leaves the app (`open_external`, `src-tauri/src/links.rs`; `Workspaces.isPageLink` on the iPhone). `doklin` takes one wherever a document is named (`GET find`).
+- `doklin://` only ever navigates: any web page can fire it.
+- The address, scheme and keys are said in `link.rs`, `open.html`, both `Info.plist`s, the entitlements, `cli/src/link.rs` and `Workspaces.isPageLink`; the association file names the app as the Xcode project does. `link.rs`'s tests hold every one of them to it: **change all of them together.**
+
 ## Flows (`flows.rs`, `mod.rs`)
 
 - **Connect**: name + email asked first → mint key → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` (with the key) → `cloud_recover` trades it for this Mac's sign-in → `cloud_connect` binds with that, uploads, writes `cloud.json` + marker, spawns the engine.

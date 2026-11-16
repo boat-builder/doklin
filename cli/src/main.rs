@@ -14,6 +14,7 @@ mod commands;
 mod creds;
 mod help;
 mod http;
+mod link;
 mod open;
 mod text;
 mod usage;
@@ -77,6 +78,10 @@ pub struct Command {
 }
 
 const VERSION_FLAGS: &[&str] = &["md", "html"];
+
+/// The commands whose words name documents. Each also takes a link to a page
+/// there, and runs in the workspace the link is to (`commands::follow_links`).
+const TAKE_LINKS: &[&str] = &["info", "read", "comments", "comment", "reply", "write", "edit", "mv", "rm", "publish", "unpublish"];
 
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -200,8 +205,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "open",
-        usage: "doklin open [<path>…]",
-        about: "Open files or folders from this Mac in the Doklin app; with no path, open the app. A path inside a workspace opens in that workspace's window. Needs no login.",
+        usage: "doklin open [<path or link>…]",
+        about: "Open files or folders from this Mac, or links to pages, in the Doklin app; with neither, open the app. A path inside a workspace, or a link, opens in that workspace's window. Needs no login.",
         accepts: Accepts { values: &[], switches: &[] },
         run: open::open,
     },
@@ -241,12 +246,15 @@ fn run(raw: &[String], json: bool) -> Result<(), Failure> {
             format!("\"{}\" is not a doklin command — run `doklin help`", first)
         }));
     };
-    let args = args::parse(&raw[1..], &command.accepts)?;
+    let mut args = args::parse(&raw[1..], &command.accepts)?;
     if args.has("help") {
         help::command(command);
         return Ok(());
     }
-    let ctx = Ctx { json, dry_run: args.has("dry-run"), workspace: args.value("workspace").map(String::from) };
+    let mut ctx = Ctx { json, dry_run: args.has("dry-run"), workspace: args.value("workspace").map(String::from) };
+    if TAKE_LINKS.contains(&command.name) {
+        commands::follow_links(&mut args, &mut ctx)?;
+    }
     (command.run)(&args, &ctx)
 }
 

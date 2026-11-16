@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the app's own by Tauri. The `doklin` scheme is what the page
+     at doklin.cc/open hands a link to a page on as (engine/src/cloud/link.rs
+     SCHEME, ios/Info.plist, site/public/open.html: change all of them). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Doklin page link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>doklin</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

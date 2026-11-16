@@ -91,6 +91,20 @@ struct RootView: View {
         } message: {
             Text(removedWords)
         }
+        // A link to a page: from doklin.cc straight (Doklin.entitlements),
+        // or as the page there hands it on (`doklin://`, Info.plist).
+        .onOpenURL { url in
+            Task { await device.follow(url) }
+        }
+        .alert("Can't open that link", isPresented: linkProblemShown) {
+            Button("OK", role: .cancel) { device.dismissLinkProblem() }
+        } message: {
+            Text(device.linkProblem ?? "")
+        }
+    }
+
+    private var linkProblemShown: Binding<Bool> {
+        Binding(get: { device.linkProblem != nil }, set: { if !$0 { device.dismissLinkProblem() } })
     }
 
     private var removedShown: Binding<Bool> {

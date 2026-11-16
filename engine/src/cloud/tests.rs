@@ -6298,6 +6298,78 @@ async fn a_private_folder_is_found_however_the_disk_spells_it() {
     assert_eq!(alice.page("diary").unwrap().path, "private/diary.md");
 }
 
+/* ---------- Links ---------- */
+
+/// A link names a file by its section and id: the other person's Mac finds
+/// it wherever it is now, after a rename or a move inside its section, and
+/// the person who copied it is told who can open it.
+#[tokio::test]
+async fn a_link_finds_its_file_on_another_mac_after_a_rename() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.write("Plans/q3.md", "the plan\n");
+    assert_eq!(alice.engine.linked("Plans/q3.md"), None, "a file never synced has no id yet");
+    alice.sync().await;
+    let linked = alice.engine.linked("Plans/q3.md").expect("a link once it has synced");
+    assert_eq!(linked.space, None, "the shared workspace is no space");
+    assert_eq!(linked.who, "Everyone in Test can open it.");
+    assert!(manifest_of(&be).files.contains_key(&linked.file));
+
+    bob.sync().await;
+    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Plans/q3.md"));
+    alice.rename("Plans/q3.md", "Archive/Q3 plan.md");
+    alice.sync().await;
+    bob.sync().await;
+    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Archive/Q3 plan.md"));
+    assert_eq!(alice.engine.linked("Archive/Q3 plan.md"), Some(linked.clone()), "the same link as before");
+
+    alice.delete("Archive/Q3 plan.md");
+    alice.sync().await;
+    bob.sync().await;
+    assert_eq!(bob.engine.follow(None, &linked.file), None, "a deleted page is found nowhere");
+    assert_eq!(bob.engine.follow(None, "f-000000000000"), None);
+}
+
+/// A link into a restricted folder opens only for the people in it, and a
+/// link into somebody's Private only on their own devices. For everyone
+/// else it finds nothing, exactly as a link to a deleted page does.
+#[tokio::test]
+async fn a_link_opens_only_for_the_people_who_can_see_its_page() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    alice.write("Restricted/Finance/budget.md", "numbers\n");
+    alice.write("Private/diary.md", "dear diary\n");
+    alice.sync().await;
+    alice.sync().await;
+
+    let finance = folder_called(&be, "Finance");
+    let budget = alice.engine.linked("Restricted/Finance/budget.md").expect("a link");
+    assert_eq!(budget.space.as_deref(), Some(finance.as_str()));
+    assert_eq!(budget.who, "Only the people in “Finance” can open it.");
+    let diary = alice.engine.linked("Private/diary.md").expect("a link");
+    assert_eq!(diary.space, Some(private_of(&alice)));
+    assert_eq!(diary.who, "Only you can open it, on any device of yours.");
+    assert_eq!(alice.engine.linked("Restricted/loose.md"), None, "a path in no section has none");
+
+    bob.sync().await;
+    assert_eq!(bob.engine.follow(budget.space.as_deref(), &budget.file), None);
+    assert_eq!(bob.engine.follow(diary.space.as_deref(), &diary.file), None);
+    add_to(&be, &finance, &bob);
+    bob.engine.poll_for_test().await;
+    assert_eq!(
+        bob.engine.follow(budget.space.as_deref(), &budget.file).as_deref(),
+        Some("Restricted/Finance/budget.md")
+    );
+
+    let mut air = person_on(&be, "Alice", "Air").await;
+    air.sync().await;
+    assert_eq!(air.engine.follow(diary.space.as_deref(), &diary.file).as_deref(), Some("Private/diary.md"));
+}
+
 /* ---------- Release 1: what syncs, the runaway, pacing, the valves ---------- */
 
 /// Start a device's engine task, the way the app does. Answers the command

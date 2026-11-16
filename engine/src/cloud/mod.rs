@@ -17,6 +17,7 @@
 //! flows.rs      bind + upload, download, wipe — generic, tested
 //! invite.rs     the invite code and the paste blob — the grammar, and the
 //!               only place a code is ever in the clear
+//! link.rs       a link to a page — the grammar of what *Copy link* copies
 //! merge.rs      the three-way merge and conflict copies
 //! pace.rs       the request counter, the daily allowances, the bulk lane
 //! scan.rs       the local walk, hashing, atomic writes
@@ -33,6 +34,7 @@ pub mod config;
 mod engine;
 mod flows;
 pub mod invite;
+pub mod link;
 pub mod manifest;
 mod merge;
 pub mod pace;
@@ -73,7 +75,7 @@ use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, People,
+    emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People,
     Probe, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
@@ -444,14 +446,19 @@ fn with_inner<T>(core: &Core, f: impl FnOnce(&mut ManagerInner) -> Result<T, Str
 
 /// The engine whose root contains `path`, with the path made relative.
 fn route(inner: &ManagerInner, path: &str) -> Option<(mpsc::UnboundedSender<EngineCmd>, String)> {
+    route_from(inner, path).map(|(_, tx, rel)| (tx, rel))
+}
+
+/// `route`, with the root (as cloud.json spells it) of the workspace too.
+fn route_from(inner: &ManagerInner, path: &str) -> Option<(String, mpsc::UnboundedSender<EngineCmd>, String)> {
     let p = Path::new(path);
-    let handle = inner
+    let (root, handle) = inner
         .engines
-        .values()
-        .filter(|h| p.starts_with(&h.root))
-        .max_by_key(|h| h.root.as_os_str().len())?;
+        .iter()
+        .filter(|(_, h)| p.starts_with(&h.root))
+        .max_by_key(|(_, h)| h.root.as_os_str().len())?;
     let rel = rel_path(&handle.root, p)?;
-    Some((handle.tx.clone(), rel))
+    Some((root.clone(), handle.tx.clone(), rel))
 }
 
 /// Ask an engine something and wait for its answer.
@@ -1333,6 +1340,53 @@ pub async fn cloud_set_root(core: &Arc<Core>, root: String, slug: Option<String>
         inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
     })?;
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
+}
+
+/* ---------- Links ---------- */
+
+/// *Copy link* on the file at `path` (absolute): the link that opens it on
+/// any device of anybody who can see it, and who that is. A folder has none.
+pub async fn cloud_link(core: &Arc<Core>, path: String) -> Result<PageLinkCopy, String> {
+    if Path::new(&path).is_dir() {
+        return Err("only a file has a link, not a folder".into());
+    }
+    let (tx, rel, domain, ws_id) = with_inner(core, |inner| {
+        let (root, tx, rel) = route_from(inner, &path)
+            .ok_or_else(|| "that file isn't in a workspace that syncs, so it has no link".to_string())?;
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
+        let entry = file.by_root(&root).ok_or_else(|| "that workspace isn't connected".to_string())?;
+        Ok((tx, rel, entry.domain.clone(), entry.ws_id.clone()))
+    })?;
+    let linked = ask(tx, |reply| EngineCmd::LinkTo { rel, reply }).await?;
+    let url = link::PageLink { domain, ws_id, space: linked.space, file: linked.file }.url();
+    Ok(PageLinkCopy { url, who: linked.who })
+}
+
+/// A link followed — clicked anywhere, or handed to the app by the page it
+/// goes through: the absolute path of the file it names on this device.
+/// The refusal names why in words, and says the same of a page that was
+/// deleted, one in a section this person is not in and one that never was.
+pub async fn cloud_follow_link(core: &Arc<Core>, url: String) -> Result<String, String> {
+    let link = link::PageLink::parse(&url).ok_or_else(|| "that isn't a link to a page in Doklin".to_string())?;
+    let (tx, root) = with_inner(core, |inner| {
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
+        let entry = match file.workspaces.iter().find(|w| w.ws_id == link.ws_id) {
+            Some(entry) => entry,
+            None if file.workspaces.iter().any(|w| w.domain == link.domain) => {
+                return Err(format!("that link is from before {} was set up again, and its page is gone", link.domain));
+            }
+            None => {
+                return Err(format!(
+                    "that page is in {}, which this {} isn't connected to",
+                    link.domain, core.device_kind
+                ))
+            }
+        };
+        let handle = inner.engines.get(&entry.root).ok_or_else(|| "that workspace isn't syncing right now".to_string())?;
+        Ok((handle.tx.clone(), entry.root.clone()))
+    })?;
+    let rel = ask(tx, |reply| EngineCmd::Follow { space: link.space, file: link.file, reply }).await?;
+    Ok(Path::new(&root).join(rel).to_string_lossy().to_string())
 }
 
 /* ---------- Restricted folders ---------- */

@@ -50,6 +50,10 @@
 
 ## Windows and session
 
+- A link to a page (`doklin://open#…` from macOS, or a click in a note) is
+  turned into its file's path by the engine (`src-tauri/src/links.rs`) and
+  then opened like any external open; a link that opens nothing says why in a
+  dialog, since it can arrive with no window up.
 - External opens (Finder, `doklin open`, cold or warm start) are placed by
   `src-tauri/src/external_open.rs` against the connected roots in
   `cloud.json`. A path inside a connected workspace goes to that workspace's

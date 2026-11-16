@@ -28,6 +28,8 @@ mod edits;
 // Untitled notes: the buffers behind tabs that have no file yet.
 mod untitled;
 mod external_open;
+// A link to a page (engine/src/cloud/link.rs), followed on this Mac.
+mod links;
 #[cfg(target_os = "macos")]
 mod cli_install;
 
@@ -1589,7 +1591,13 @@ fn device_name() -> String {
 /// macOS-only, like `reveal_in_finder`; a cross-platform port would use
 /// xdg-open / `start`.
 #[tauri::command]
-fn open_external(url: String) -> Result<(), String> {
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    // A link to a page opens here, in its workspace's window, not in a
+    // browser that would only hand it back.
+    if links::is_page_link(&url) {
+        links::follow(&app, url);
+        return Ok(());
+    }
     let scheme_ok = ["https://", "http://", "mailto:"].iter().any(|prefix| {
         url.len() > prefix.len()
             // get(): a url starting with a multi-byte char must not panic the slice
@@ -1740,6 +1748,7 @@ pub fn run() {
             cloud::cloud_set_plan,
             cloud::cloud_set_activity,
             cloud::cloud_take_over,
+            cloud::cloud_link,
             cloud::cloud_publish,
             cloud::cloud_unpublish,
             cloud::cloud_set_root,
@@ -1835,6 +1844,11 @@ pub fn run() {
             // (which may create/focus a window) is safe to call directly.
             let paths = urls.iter().filter_map(|u| u.to_file_path().ok()).collect();
             external_open::handle_external_open(app, paths);
+            // Anything else macOS hands the app is a link to a page: the
+            // `doklin` scheme is the one it is registered for (Info.plist).
+            for url in urls.iter().filter(|u| u.scheme() != "file") {
+                links::follow(app, url.to_string());
+            }
         }
         match &event {
             // The quitting window set is exactly what the next launch restores:

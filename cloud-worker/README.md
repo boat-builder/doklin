@@ -201,6 +201,8 @@ GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -pa
     -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 → JSON
     row + {kind, comments}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
+GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
+    document by its stem. 404 for every page this agent cannot open, alike
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
     moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
     {indexing, pending}; limit ≤ 30

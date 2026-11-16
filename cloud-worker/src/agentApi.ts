@@ -50,7 +50,7 @@
 
 import { inSection, refuse, type AgentCaller, type Call } from "./agentCall";
 import { deleteComment, getComments, postComment } from "./agentComments";
-import { deleteDoc, getDoc, getTree, postMove, putDoc } from "./agentDocs";
+import { deleteDoc, getDoc, getFind, getTree, postMove, putDoc } from "./agentDocs";
 import { deletePage, getPages, putPage } from "./agentPages";
 import { Places } from "./agentPlace";
 import {
@@ -141,6 +141,7 @@ type PathIn = "query" | "body" | "self";
 /** Route → method → what it needs, what answers it, and where its path is. */
 const ROUTES: Record<string, Partial<Record<string, [Scope, Handler, PathIn]>>> = {
   tree: { GET: ["read", getTree, "self"] },
+  find: { GET: ["read", getFind, "self"] },
   doc: { GET: ["read", getDoc, "query"], PUT: ["edit", putDoc, "query"], DELETE: ["edit", deleteDoc, "query"] },
   move: { POST: ["edit", postMove, "self"] },
   comments: {
