@@ -7,8 +7,8 @@ use doklin_engine::cloud::config::Marker;
 use doklin_engine::cloud::invite::Pasted;
 use doklin_engine::cloud::remote::{AgentRecord, EveryPages, MemberRecord};
 use doklin_engine::cloud::status::{
-    AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People, Probe, RecentFiles, Redeemed,
-    Removed, SpaceStatus,
+    AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy, People, Probe, RecentFiles,
+    Redeemed, Removed, SpaceStatus,
 };
 use tauri::{AppHandle, Manager};
 
@@ -43,6 +43,11 @@ pub(crate) async fn cloud_probe(app: AppHandle, endpoint: String, token: String)
 #[tauri::command]
 pub(crate) fn cloud_marker(root: String) -> Option<Marker> {
     cloud::cloud_marker(root)
+}
+
+#[tauri::command]
+pub(crate) fn cloud_held(app: AppHandle, endpoint: String) -> Result<Option<HeldWorkspace>, String> {
+    cloud::cloud_held(&core(&app)?, endpoint)
 }
 
 #[tauri::command]

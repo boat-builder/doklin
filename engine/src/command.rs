@@ -50,6 +50,7 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         ),
         "cloud_probe" => json(cloud::cloud_probe(core, a.get("endpoint")?, a.get("token")?).await?),
         "cloud_marker" => json(cloud::cloud_marker(a.get("root")?)),
+        "cloud_held" => json(cloud::cloud_held(core, a.get("endpoint")?)?),
         "cloud_device_code" => json(cloud::cloud_device_code(core, a.get("root")?).await?),
         "cloud_invite" => {
             json(cloud::cloud_invite(core, a.get("root")?, a.get("email")?, a.get("name")?, a.get("days")?).await?)

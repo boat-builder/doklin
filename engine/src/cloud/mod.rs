@@ -75,8 +75,8 @@ use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
-    emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People,
-    LinkTarget, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
+    emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy,
+    People, LinkTarget, Phase, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -486,13 +486,37 @@ fn check_root_free(core: &Core, inner: &ManagerInner, root: &Path) -> Result<(),
 }
 
 fn check_domain_free(core: &Core, inner: &ManagerInner, domain: &str, root: &Path) -> Result<(), String> {
-    let file = read_cloud_file(&inner.data_dir, core.secrets());
-    if let Some(w) = file.workspaces.iter().find(|w| w.domain == domain) {
+    if let Some(w) = held_entry(core, inner, domain) {
         if Path::new(&w.root) != root {
-            return Err(format!("{} is already connected to \"{}\" on this {}", domain, w.root, core.device_kind));
+            return Err(format!("{}, in \"{}\" — stop syncing it there first.", already_syncs(core, &w), w.root));
         }
     }
     Ok(())
+}
+
+/// The workspace this device already syncs from `domain`: one per domain.
+fn held_entry(core: &Core, inner: &ManagerInner, domain: &str) -> Option<WorkspaceEntry> {
+    read_cloud_file(&inner.data_dir, core.secrets()).workspaces.into_iter().find(|w| w.domain == domain)
+}
+
+/// Refuse to trade a code or a key (`what`) for a domain this device already
+/// holds. Every step after the trade would refuse a second copy, so the
+/// question is asked first, while what is traded still works.
+fn refuse_held(core: &Core, inner: &ManagerInner, domain: &str, what: &str) -> Result<(), String> {
+    match held_entry(core, inner, domain) {
+        Some(w) => Err(format!(
+            "{}. Stop syncing it here first — the {} hasn't been used, so it still works.",
+            already_syncs(core, &w),
+            what
+        )),
+        None => Ok(()),
+    }
+}
+
+/// "This Mac already syncs Notes from notes.example.com": how every refusal
+/// of a second copy of a workspace begins.
+fn already_syncs(core: &Core, w: &WorkspaceEntry) -> String {
+    format!("This {} already syncs {} from {}", core.device_kind, w.name, w.domain)
 }
 
 fn record_and_spawn(core: &Arc<Core>, entry: WorkspaceEntry) -> Result<(), String> {
@@ -571,10 +595,13 @@ pub fn cloud_parse_invite(text: String) -> invite::Pasted {
 pub async fn cloud_redeem(core: &Arc<Core>, endpoint: String, code: String) -> Result<Redeemed, String> {
     let endpoint = normalize_endpoint(&endpoint)?;
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
+    let device = with_inner(core, |inner| {
+        refuse_held(core, inner, &domain, "code")?;
+        Ok(inner.device.clone())
+    })?;
     let Some(canonical) = invite::normalize_code(&code) else {
         return Err("that isn't a Doklin code — one looks like dkln-K7QM2-9XVR4-8TBHN-3WGYD".into());
     };
-    let device = with_inner(core, |inner| Ok(inner.device.clone()))?;
     // No token, on purpose: there is none yet, and the route that answers
     // this is the one above the worker's auth gate.
     let remote = HttpRemote::new(&endpoint, "", &device.id, &core.client);
@@ -617,7 +644,10 @@ pub async fn cloud_recover(
 ) -> Result<Redeemed, String> {
     let endpoint = normalize_endpoint(&endpoint)?;
     let domain = domain_of(&endpoint).unwrap_or_else(|| endpoint.clone());
-    let device = with_inner(core, |inner| Ok(inner.device.clone()))?;
+    let device = with_inner(core, |inner| {
+        refuse_held(core, inner, &domain, "key")?;
+        Ok(inner.device.clone())
+    })?;
     let remote = HttpRemote::new(&endpoint, key.trim(), &device.id, &core.client);
     let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let traded = remote
@@ -657,6 +687,25 @@ pub async fn cloud_probe(core: &Arc<Core>, endpoint: String, token: String) -> R
         worker_version: meta.version,
         bundled_version: BUNDLED_WORKER_VERSION,
         workspace: meta.workspace,
+    })
+}
+
+/// The copy of `endpoint`'s workspace this device already has, if any —
+/// what the setup wizard asks before it trades a code or a key, which
+/// `cloud_redeem` and `cloud_recover` would refuse to spend on it. None for
+/// an address that doesn't parse: the trade says what is wrong with it.
+pub fn cloud_held(core: &Arc<Core>, endpoint: String) -> Result<Option<HeldWorkspace>, String> {
+    let Ok(endpoint) = normalize_endpoint(&endpoint) else { return Ok(None) };
+    let domain = domain_of(&endpoint).unwrap_or(endpoint);
+    with_inner(core, |inner| {
+        let Some(w) = held_entry(core, inner, &domain) else { return Ok(None) };
+        let revoked = inner
+            .statuses
+            .lock()
+            .map(|table| table.get(&w.root).is_some_and(|s| s.phase == Phase::Revoked))
+            .unwrap_or(false);
+        let syncs = !revoked && Path::new(&w.root).is_dir();
+        Ok(Some(HeldWorkspace { root: w.root, name: w.name, domain: w.domain, syncs }))
     })
 }
 

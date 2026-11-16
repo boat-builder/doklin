@@ -1765,6 +1765,7 @@ pub fn run() {
             cloud::cloud_redeem,
             cloud::cloud_probe,
             cloud::cloud_marker,
+            cloud::cloud_held,
             cloud::cloud_device_code,
             cloud::cloud_invite,
             cloud::cloud_people,

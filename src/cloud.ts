@@ -219,6 +219,12 @@ export type CloudProbe = {
 /** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
 export type CloudMarker = { domain: string; wsId: string };
 
+/** `cloudHeld`: the copy of a domain's workspace this Mac already has. One
+ *  per domain, so a code or a key traded for a second would buy nothing.
+ *  `syncs` is false when that copy can't sync any more — the domain no
+ *  longer takes this Mac's sign-in, or its folder is gone. */
+export type CloudHeld = { root: string; name: string; domain: string; syncs: boolean };
+
 /** A fresh code for another device of this person's own, and the line that
  *  carries it — the line an invite is. Shown once. */
 export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
@@ -413,6 +419,10 @@ export const cloudProbe = (endpoint: string, token: string) =>
 
 /** The marker a folder carries, or null — the wizard's "resume" outcome. */
 export const cloudMarker = (root: string) => invoke<CloudMarker | null>("cloud_marker", { root });
+
+/** The copy of `endpoint`'s workspace this Mac already has, if any — asked
+ *  before a code or a key is traded, since the trade refuses one held here. */
+export const cloudHeld = (endpoint: string) => invoke<CloudHeld | null>("cloud_held", { endpoint });
 
 /** A one-time code for another device of this person's own. Whoever pastes
  *  its line joins as them, on a sign-in of its own. */
