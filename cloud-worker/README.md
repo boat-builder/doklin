@@ -25,7 +25,8 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ```
 GET  /api/meta  {version, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
      you: {role, can: [actions], tokenId, memberId, email, name}, superadmin: {id, name}|null,
-     people: [{id, name}], limits}; people = members then agents. With the key: {version,
+     people: [{id, name, person?}], limits}; people = members then agents, an agent with
+     `person`, whose it is. With the key: {version,
      workspace, d1}. Runs the D1 migration (once per isolate).
 POST /api/workspace  superadmin; {name, deviceName?} → 201 {id, name, createdAt, createdBy,
      manifestEtag}; 409 {workspace} when bound
