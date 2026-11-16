@@ -42,6 +42,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The app is for iOS 26.1 and later: the newest Xcode 26 the runner has.
+      - name: Xcode 26
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app | grep -iv beta | tail -n 1)"
+          echo "using $xcode"
+          sudo xcode-select -s "$xcode/Contents/Developer"
+
       - name: Toolchain
         run: xcodebuild -version && swift --version && cargo --version
 

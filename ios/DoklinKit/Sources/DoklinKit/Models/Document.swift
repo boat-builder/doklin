@@ -36,6 +36,8 @@ public final class DocumentModel {
     /// It changed since they read it, but that version is not kept here,
     /// so what changed can't be shown.
     public private(set) var changedUnmarked = false
+    /// Made since this person last looked, and not read here until now.
+    public private(set) var newToYou = false
 
     public init(workspace: Workspace, path: String) {
         self.workspace = workspace
@@ -101,6 +103,7 @@ public final class DocumentModel {
         try? await workspace.loadRecent()
         let (seen, now) = workspace.lastRead(path)
         let me = workspace.recent?.me
+        if let item = workspace.recentItem(path) { newToYou = item.created && item.unread }
         if isNote, let seen, let current = now?.hash, seen != current, now?.by != me, !(now?.by.isEmpty ?? true),
            let document {
             await compare(with: seen, now: document)

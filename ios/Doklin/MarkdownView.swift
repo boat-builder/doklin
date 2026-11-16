@@ -9,6 +9,28 @@ struct MarkdownActions {
     var toggleTask: ((Int) -> Void)?
     /// Start a comment on the block that begins on a line of the source.
     var comment: ((Int) -> Void)?
+    /// Edit the note here, at the top-level block of this index: a double tap.
+    var edit: ((Int) -> Void)?
+}
+
+/// What is laid over a note as it is read: the words a search found, with
+/// the one the find bar is on, and what changed since it was last read.
+struct ReaderMarks {
+    var find: FindResult?
+    var current: Int?
+    var changes: ChangeMarks?
+
+    func marks(_ container: String) -> [(range: Range<Int>, mark: RunMark)] {
+        (find?.marks(in: container, current: current) ?? []) + (changes?.words[container]?.marks ?? [])
+    }
+
+    func removals(_ container: String) -> [Removal] {
+        changes?.words[container]?.removed ?? []
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var readerMarks = ReaderMarks()
 }
 
 /// A link inside a note, as the URL a tap on it carries. A web address is
@@ -55,30 +77,127 @@ struct MarkdownView: View {
     let file: String
     let workspace: Workspace
     var actions = MarkdownActions()
+    /// Shown under the note's title (its first heading, when it starts with
+    /// one), above the rest: who made it, what changed.
+    var underTitle: AnyView?
+
+    @Environment(\.readerMarks) private var marks
+
+    /// Whether the note starts with a title of its own.
+    static func hasTitle(_ document: MarkdownDocument) -> Bool {
+        if case .heading(1, _)? = document.blocks.first?.block { return true }
+        return false
+    }
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 16) {
+            let titled = Self.hasTitle(document)
+            if titled, let first = document.blocks.first {
+                block(first, at: 0)
+            }
+            if let underTitle { underTitle }
             if let frontmatter = document.frontmatter {
                 FrontmatterView(text: frontmatter)
             }
-            ForEach(document.blocks) { node in
-                BlockView(node: node, file: file, workspace: workspace, actions: actions)
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.string = node.plainText
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
-                        }
-                        if let comment = actions.comment {
-                            Button {
-                                comment(node.line)
-                            } label: {
-                                Label("Comment", systemImage: "bubble.left")
-                            }
-                        }
-                    }
+            ForEach(Array(document.blocks.enumerated()).dropFirst(titled ? 1 : 0), id: \.element.id) { index, node in
+                block(node, at: index)
+            }
+            if let gone = marks.changes?.removedAtEnd, !gone.isEmpty {
+                RemovedBlocks(texts: gone)
             }
         }
+    }
+
+    private func block(_ node: BlockNode, at index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let gone = marks.changes?.removedBefore[node.id] {
+                RemovedBlocks(texts: gone)
+            }
+            BlockView(node: node, file: file, workspace: workspace, actions: actions)
+                .overlay(alignment: .leading) {
+                    if let kind = marks.changes?.blocks[node.id] {
+                        ChangeBar(kind: kind)
+                    }
+                }
+        }
+        .id(node.id)
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture(count: 2).onEnded { actions.edit?(index) }, including: actions.edit == nil ? .subviews : .all)
+        .contextMenu {
+            Button {
+                UIPasteboard.general.string = node.plainText
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            if let comment = actions.comment {
+                Button {
+                    comment(node.line)
+                } label: {
+                    Label("Comment", systemImage: "bubble.left")
+                }
+            }
+            if let edit = actions.edit {
+                Button {
+                    edit(index)
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+            }
+        }
+    }
+}
+
+/// The bar beside a block that changed since the note was last read.
+private struct ChangeBar: View {
+    let kind: ChangeMarks.Kind
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(kind == .inserted ? Theme.accent : Theme.accent.opacity(0.6))
+            .frame(width: 4)
+            .padding(.vertical, 2)
+            .offset(x: -12)
+            .accessibilityLabel(kind == .inserted ? "New since you read it" : "Changed since you read it")
+    }
+}
+
+/// Blocks gone since the note was last read: a line saying so, which opens
+/// to show what they said.
+private struct RemovedBlocks: View {
+    let texts: [String]
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation { open.toggle() }
+            } label: {
+                HStack(spacing: 10) {
+                    dash
+                    Text("\(texts.count) \(texts.count == 1 ? "paragraph" : "paragraphs") removed · \(open ? "Hide" : "Show")")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.text2)
+                        .fixedSize()
+                    dash
+                }
+            }
+            .buttonStyle(.plain)
+            if open {
+                ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
+                    Text(text)
+                        .strikethrough()
+                        .foregroundStyle(Theme.text2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private var dash: some View {
+        Rectangle()
+            .fill(Theme.accent.opacity(0.45))
+            .frame(height: 1.5)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -113,11 +232,11 @@ struct BlockView: View {
     var body: some View {
         switch node.block {
         case .heading(let level, let content):
-            InlineText(content)
+            InlineText(content, container: Find.container(node.id))
                 .font(.docHeading(level))
                 .padding(.top, level <= 2 ? 8 : 2)
         case .paragraph(let content):
-            InlineText(content)
+            InlineText(content, container: Find.container(node.id))
                 .font(.body)
                 .lineSpacing(3)
         case .blockquote(let blocks):
@@ -135,9 +254,9 @@ struct BlockView: View {
         case .list(let list):
             ListView(list: list, file: file, workspace: workspace, actions: actions)
         case .code(let language, let text):
-            CodeView(language: language, text: text)
+            CodeView(language: language, text: text, container: Find.container(node.id))
         case .table(let table):
-            TableView(table: table)
+            TableView(table: table, id: node.id)
         case .image(let source, let alt):
             DocImage(source: source, alt: alt, file: file, workspace: workspace)
         case .html(let text):
@@ -153,24 +272,33 @@ struct BlockView: View {
 }
 
 /// A run of styled text. Links are live: a web address opens in the system,
-/// the rest reach the document view through `openURL`.
+/// the rest reach the document view through `openURL`. What the reader's
+/// marks say of its container — a word found, a word written since it was
+/// read — is drawn over it.
 struct InlineText: View {
-    private let text: AttributedString
+    let content: [Inline]
+    var container: String?
 
-    init(_ content: [Inline]) {
-        text = InlineText.attributed(content.runs)
+    @Environment(\.readerMarks) private var marks
+
+    init(_ content: [Inline], container: String? = nil) {
+        self.content = content
+        self.container = container
     }
 
     var body: some View {
-        Text(text)
+        Text(InlineText.attributed(content.runs, marks: container.map(marks.marks) ?? [], removals: container.map(marks.removals) ?? []))
             .foregroundStyle(Theme.text1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    static func attributed(_ runs: [InlineRun]) -> AttributedString {
+    static func attributed(
+        _ runs: [InlineRun], marks: [(range: Range<Int>, mark: RunMark)] = [], removals: [Removal] = []
+    ) -> AttributedString {
         var out = AttributedString()
-        for run in runs {
+        for marked in RunMarks.apply(runs, marks: marks, removals: removals) {
+            let run = marked.run
             var piece = AttributedString(run.text)
             var intent: InlinePresentationIntent = []
             if run.bold { intent.insert(.stronglyEmphasized) }
@@ -190,6 +318,21 @@ struct InlineText: View {
                     piece.foregroundColor = Theme.text1
                 }
             }
+            switch marked.mark {
+            case .found?:
+                piece.backgroundColor = Theme.mark
+            case .current?:
+                piece.backgroundColor = Theme.mark
+                piece.underlineStyle = .thick
+                piece.underlineColor = Theme.warnInk
+            case .added?:
+                piece.backgroundColor = Theme.accentWash
+            case .removed?:
+                piece.strikethroughStyle = .single
+                piece.foregroundColor = Theme.text2
+            case nil:
+                break
+            }
             out.append(piece)
         }
         return out
@@ -202,6 +345,8 @@ private struct ListView: View {
     let workspace: Workspace
     let actions: MarkdownActions
 
+    @Environment(\.readerMarks) private var marks
+
     var body: some View {
         VStack(alignment: .leading, spacing: list.tight ? 6 : 12) {
             ForEach(Array(list.items.enumerated()), id: \.element.id) { index, item in
@@ -211,6 +356,11 @@ private struct ListView: View {
                         ForEach(item.blocks) { inner in
                             BlockView(node: inner, file: file, workspace: workspace, actions: actions)
                         }
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    if let kind = marks.changes?.items[item.line] {
+                        ChangeBar(kind: kind)
                     }
                 }
             }
@@ -248,6 +398,9 @@ private struct ListView: View {
 private struct CodeView: View {
     let language: String?
     let text: String
+    let container: String
+
+    @Environment(\.readerMarks) private var marks
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -257,7 +410,7 @@ private struct CodeView: View {
                     .foregroundStyle(Theme.text3)
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
+                Text(InlineText.attributed([InlineRun(text)], marks: marks.marks(container)))
                     .font(.docCode)
                     .foregroundStyle(Theme.text1)
                     .padding(12)
@@ -279,24 +432,27 @@ private struct CodeView: View {
 
 private struct TableView: View {
     let table: TableBlock
+    let id: Int
+
+    @Environment(\.readerMarks) private var marks
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(table.header.enumerated()), id: \.offset) { column, cell in
-                        cellView(cell, column)
+                        cellView(cell, column, row: -1)
                             .fontWeight(.semibold)
                     }
                 }
-                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { number, row in
                     Rectangle()
                         .fill(Theme.tableRule)
                         .frame(height: 1)
                         .gridCellUnsizedAxes(.horizontal)
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
-                            cellView(cell, column)
+                            cellView(cell, column, row: number)
                         }
                     }
                 }
@@ -308,8 +464,8 @@ private struct TableView: View {
         }
     }
 
-    private func cellView(_ content: [Inline], _ column: Int) -> some View {
-        Text(InlineText.attributed(content.runs))
+    private func cellView(_ content: [Inline], _ column: Int, row: Int) -> some View {
+        Text(InlineText.attributed(content.runs, marks: marks.marks(Find.container(table: id, row: row, column: column))))
             .font(.callout)
             .foregroundStyle(Theme.text1)
             .multilineTextAlignment(textAlignment(column))

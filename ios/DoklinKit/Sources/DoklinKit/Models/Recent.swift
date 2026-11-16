@@ -256,6 +256,14 @@ public enum RecentWords {
 
 /* ---------- Home ---------- */
 
+/// One day of Home's list.
+public struct RecentDay: Identifiable, Sendable {
+    public let label: String
+    public var items: [RecentItem]
+
+    public var id: String { label }
+}
+
 /// Home's list: what changed in one workspace, filtered, in days.
 @MainActor
 @Observable
@@ -275,14 +283,14 @@ public final class RecentModel {
     public var unreadCount: Int { all.filter(\.unread).count }
 
     /// The rows in days: Today, Yesterday, then each day before.
-    public func days(dates: HistoryDates = HistoryDates()) -> [(label: String, items: [RecentItem])] {
-        var out: [(label: String, items: [RecentItem])] = []
+    public func days(dates: HistoryDates = HistoryDates()) -> [RecentDay] {
+        var out: [RecentDay] = []
         for item in items {
             let label = dates.day(item.changed)
             if out.last?.label == label {
                 out[out.count - 1].items.append(item)
             } else {
-                out.append((label, [item]))
+                out.append(RecentDay(label: label, items: [item]))
             }
         }
         return out
