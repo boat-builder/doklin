@@ -32,8 +32,9 @@ final class DoklinUITests: UITestCase {
 
         // A folder opened in place in the tree, and a note in it, read.
         browse()
-        marked("entry-Projects").tap()
-        expect(marked("entry-plan"), "the plan, under Projects in the tree").tap()
+        let plan = marked("entry-plan")
+        if !plan.waitForExistence(timeout: 2) { marked("entry-Projects").tap() }
+        expect(plan, "the plan, under Projects in the tree").tap()
         expect(app.staticTexts["The plan"], "the plan's heading")
         expect(text(containing: "Ship it by June"), "the plan's first paragraph")
         record("a note, read")

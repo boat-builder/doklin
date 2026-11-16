@@ -341,7 +341,12 @@ public final class Workspaces {
     public func leave(_ root: String) async throws -> Bool {
         let wsId = status(root)?.wsId
         let deleted = try await Engine.shared.call("cloud_leave", ["root": .string(root)], as: Bool.self)
-        if let wsId { seen?.forget(wsId) }
+        if let wsId {
+            // Nothing of what was read, opened or searched for here stays.
+            seen?.forget(wsId)
+            TreeModel.forget(wsId, in: remembered)
+            RecentSearches.forget(wsId, in: remembered)
+        }
         open[root] = nil
         if selected == root { selected = nil }
         try? await Engine.shared.run("versions_reconcile")

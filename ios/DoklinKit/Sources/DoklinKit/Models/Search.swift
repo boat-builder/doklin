@@ -129,8 +129,15 @@ public struct RecentSearches: Sendable {
     private nonisolated(unsafe) let defaults: UserDefaults
 
     public init(wsId: String, defaults: UserDefaults = .standard) {
-        key = "recent-searches-\(wsId)"
+        key = Self.key(wsId)
         self.defaults = defaults
+    }
+
+    private static func key(_ wsId: String) -> String { "recent-searches-\(wsId)" }
+
+    /// A workspace left this device: its searches go too.
+    public static func forget(_ wsId: String, in defaults: UserDefaults) {
+        defaults.removeObject(forKey: key(wsId))
     }
 
     public var all: [String] { defaults.stringArray(forKey: key) ?? [] }

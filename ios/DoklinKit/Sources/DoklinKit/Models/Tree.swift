@@ -61,8 +61,15 @@ public final class TreeModel {
     public init(workspace: Workspace, defaults: UserDefaults = .standard) {
         self.workspace = workspace
         self.defaults = defaults
-        key = "tree-open-\(workspace.status?.wsId ?? workspace.root)"
+        key = Self.key(workspace.status?.wsId ?? workspace.root)
         open = Set(defaults.stringArray(forKey: key) ?? [])
+    }
+
+    private static func key(_ wsId: String) -> String { "tree-open-\(wsId)" }
+
+    /// A workspace left this device: what was open in its tree goes too.
+    public static func forget(_ wsId: String, in defaults: UserDefaults) {
+        defaults.removeObject(forKey: key(wsId))
     }
 
     public var isFiltering: Bool { !filter.trimmingCharacters(in: .whitespaces).isEmpty }

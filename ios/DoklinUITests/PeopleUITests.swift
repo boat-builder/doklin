@@ -161,7 +161,12 @@ final class PeopleUITests: UITestCase {
         open("Here now")
         expect(marked("here-alone"), "only this iPhone here")
         try ask("editing?path=Projects/plan.md")
-        expect(text(containing: "editing Projects/plan.md"), "the other device, editing the plan", timeout: 45)
+        // It is here once a poll has said so: pulling the list down asks now.
+        let editing = text(containing: "editing Projects/plan.md")
+        for _ in 0..<6 where !editing.waitForExistence(timeout: 10) {
+            app.collectionViews.firstMatch.swipeDown()
+        }
+        expect(editing, "the other device, editing the plan", timeout: 15)
         record("here now")
         let other = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sherin's Mac (drive)")).firstMatch
         let viewOnly = text(containing: "Open on your other device, Sherin's Mac (drive) — view only")
