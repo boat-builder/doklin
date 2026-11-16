@@ -1309,4 +1309,5 @@ ol.step-ui li::before { content: counter(ui); color: var(--link); }
 
 @media (max-width: 480px) {
   .header-actions a.gh { display: none; }
+  .pair-bar { font-size: 12px; }
 }
