@@ -97,6 +97,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 ## Search (`search.ts`)
 
 - `search_text`: per document, lower-cased text (markers or tags stripped) + comment bodies; too big → `notSearched`. A search catches up first (≤ 8 inline, else `202` after ≤ 36). API writes catch up via `ctx.waitUntil`; a Mac's PUT never does (no D1 write per save). Query `instr(folded, ?) > 0`.
+- A document's name (file name, extension and folders not included) matches from the manifest, never the mirror: a rename needs no catch-up, a name-only hit (`inName`, no lines) costs no blob read, and a too-big document found by name is a result, not `notSearched`. Named documents sort first. The Mac (`search_workspace`) and the iPhone (`WorkspaceFiles.search`) match the same name, html-only pages included.
 - One mirror per space (`space_id`, `''` shared), keyed `(space_id, fid)`: a file that changes section is in both manifests for a moment, and one section's catch-up must not drop the other's row. A search scans `space_id IN (…)` — the sections its person is in — and never another space's rows.
 
 ## CLI (`cli/`)

@@ -1,7 +1,7 @@
 import DoklinKit
 import SwiftUI
 
-/// Searching the text of every note this iPhone holds.
+/// Searching the names of the documents this iPhone holds, and the text of its notes.
 struct SearchView: View {
     @State private var model: SearchModel
     @State private var query = ""
@@ -43,7 +43,7 @@ struct SearchView: View {
         .overlay { state }
         .navigationTitle("Search")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Words in a note")
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "A name, or words in a note")
         .textInputAutocapitalization(.never)
         .task(id: query) {
             // Not a search a keystroke: wait until the typing pauses.
@@ -56,7 +56,7 @@ struct SearchView: View {
     @ViewBuilder private var state: some View {
         switch model.phase {
         case .idle:
-            ContentUnavailableView("Search the workspace", systemImage: "magnifyingglass", description: Text("Type a few words that are in what you are looking for."))
+            ContentUnavailableView("Search the workspace", systemImage: "magnifyingglass", description: Text("Type part of a name, or a few words that are in what you are looking for."))
         case .loading where model.results.isEmpty:
             ProgressView()
         case .loaded where model.results.isEmpty:

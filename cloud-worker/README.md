@@ -193,8 +193,8 @@ GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -pa
     row + {kind, comments}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
-    moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
-    {indexing, pending}; limit ≤ 30
+    moreLines?, inName?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
+    {indexing, pending}; limit ≤ 30; named documents first
 GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
     at, missing?}], notListed?}
 edit:

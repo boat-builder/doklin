@@ -139,6 +139,22 @@ final class FilesTests: XCTestCase {
         XCTAssertTrue(files.search("   ").isEmpty)
     }
 
+    func testSearchFindsADocumentByItsNameFirst() throws {
+        try put("aaa.md", "# First\n\nAn otter swam by.\n")
+        try put("otter.md", "# River\n\nNotes from the bank.\n")
+        try put("sea-otter-facts.md", "# Facts\n\nThe otter holds hands.\n")
+        try put("Otter Poster.html", "<p>Come and see.</p>")
+        try put("twin.md", "# Left\n")
+        try put("twin.html", "<p>An otter.</p>")
+        try put("Otter/zoo.md", "# Animals\n")
+        let found = files.search("OTTER")
+        // Named ones first, a page by its name alone; not a folder's name.
+        XCTAssertEqual(found.map(\.path), ["Otter Poster.html", "otter.md", "sea-otter-facts.md", "aaa.md"])
+        XCTAssertEqual(found.map { $0.hits.map(\.line) }, [[], [], [2], [2]])
+        XCTAssertEqual(files.search("twin").map(\.path), ["twin.md"], "the page beside a note is that note")
+        XCTAssertTrue(files.search(".md").isEmpty, "the extension is not part of the name")
+    }
+
     func testANotesCommentFileIsBesideItUnderItsStem() {
         XCTAssertEqual(DocLinks.metaFile(of: "Projects/plan.md"), "Projects/plan.meta.jsonl")
         XCTAssertEqual(DocLinks.metaFile(of: "page.html"), "page.meta.jsonl")

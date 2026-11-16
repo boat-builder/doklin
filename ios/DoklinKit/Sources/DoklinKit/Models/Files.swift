@@ -371,35 +371,44 @@ public struct WorkspaceFiles: Sendable {
 
     /* ---------- Search ---------- */
 
-    /// Every note whose text holds `query`, ignoring case: each line it is
-    /// on, trimmed. Notes only — not pages, not other files.
+    /// Every document called something holding `query`, or whose text holds
+    /// it, ignoring case — the ones named for it first: each line it is on,
+    /// trimmed. A note is read for its text; a page is found by its name
+    /// alone (the Mac's `search_workspace` and the worker's search match the
+    /// same name). Not other files.
     public func search(_ query: String, limit: Int = 2000) -> [SearchResult] {
         let wanted = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !wanted.isEmpty else { return [] }
-        var results: [SearchResult] = []
-        var notes: [String] = []
+        var named: [SearchResult] = []
+        var others: [SearchResult] = []
+        var documents: [DocumentRow] = []
         func walk(_ dir: String, depth: Int) {
-            guard depth < 12, notes.count < limit, let entries = try? list(dir) else { return }
+            guard depth < 12, documents.count < limit, let entries = try? list(dir) else { return }
             for entry in entries {
                 switch entry {
                 case .folder(let path): walk(path, depth: depth + 1)
-                case .document(let row) where !row.isHTML: notes.append(row.path)
+                case .document(let row): documents.append(row)
                 default: break
                 }
             }
         }
         walk("", depth: 0)
-        for path in notes.prefix(limit) {
-            guard let text = try? text(path) else { continue }
+        for row in documents.prefix(limit) {
             var hits: [SearchHit] = []
-            for (number, line) in MarkdownLines.split(text).enumerated() where line.lowercased().contains(wanted) {
-                hits.append(SearchHit(line: number, preview: String(line.trimmingCharacters(in: .whitespaces).prefix(200))))
-                if hits.count == 200 { break }
+            if !row.isHTML, let text = try? text(row.path) {
+                for (number, line) in MarkdownLines.split(text).enumerated() where line.lowercased().contains(wanted) {
+                    hits.append(SearchHit(line: number, preview: String(line.trimmingCharacters(in: .whitespaces).prefix(200))))
+                    if hits.count == 200 { break }
+                }
             }
-            if !hits.isEmpty || DocLinks.stem(of: DocLinks.name(of: path)).lowercased().contains(wanted) {
-                results.append(SearchResult(path: path, hits: hits))
+            let result = SearchResult(path: row.path, hits: hits)
+            if result.name.lowercased().contains(wanted) {
+                named.append(result)
+            } else if !hits.isEmpty {
+                others.append(result)
             }
         }
-        return results.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let byPath = { (a: SearchResult, b: SearchResult) in a.path.localizedStandardCompare(b.path) == .orderedAscending }
+        return named.sorted(by: byPath) + others.sorted(by: byPath)
     }
 }

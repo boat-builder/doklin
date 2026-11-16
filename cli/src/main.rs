@@ -124,7 +124,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "search",
         usage: "doklin search <text> [--in <folder>] [--limit <n>]",
-        about: "Documents containing the text, whatever its case, with the matching lines. With no --in, everywhere this agent can see.",
+        about: "Documents whose name or text holds the text, whatever its case — named ones first, with the matching lines. With no --in, everywhere this agent can see.",
         accepts: Accepts { values: &["in", "limit"], switches: &[] },
         run: commands::search,
     },

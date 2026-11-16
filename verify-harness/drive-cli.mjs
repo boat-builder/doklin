@@ -1236,7 +1236,7 @@ await check("search: the first search waits while the domain reads the workspace
   };
 });
 
-await check("search: whatever its case; a phrase, quoted or not; --in a folder; --limit; what was said in a comment; an html-only document; what a Mac just changed; nothing found is still exit 0", async () => {
+await check("search: whatever its case; a phrase, quoted or not; --in a folder; --limit; what was said in a comment; an html-only document; what a Mac just changed; nothing found is still exit 0; a name", async () => {
   await doklin(editorBox, ["write", "Drive/zebra-note"], { input: `${Array.from({ length: 7 }, (_, i) => `Line ${i + 1}: the Zebrafish again.`).join("\n")}\n` });
   const inDrive = (await doklin(editorBox, ["search", "ZEBRAFISH", "--in", "Drive"])).json;
   const inHerd = (await doklin(readerBox, ["search", "zebrafish", "--in", "Herd", "--limit", "30"])).json;
@@ -1248,6 +1248,7 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
   await macWrites({ "Scratch.md": "# Scratch\n\nThe halyard needs splicing.\n" });
   const fromMac = (await doklin(editorBox, ["search", "halyard"])).json;
   const nothing = await doklin(editorBox, ["search", "qqzzxxqq"]);
+  const byName = (await doklin(editorBox, ["search", "Zebra-Note"])).json;
   await doklin(editorBox, ["rm", "Drive/zebra-note"]);
   const afterRm = (await doklin(editorBox, ["search", "zebrafish", "--in", "Drive"])).json;
   const poster = htmlOnly.results.find((r) => r.path === "Drive/poster") ?? { matches: [{}] };
@@ -1261,6 +1262,7 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
     "an html-only document, by the text of its page": poster.version === "html" && poster.matches[0].text === "Regatta poster" && poster.matches[0].line === undefined,
     "what a Mac just changed": fromMac.total === 1 && same(fromMac.results[0], { path: "Scratch", version: "md", matches: [{ line: 3, text: "The halyard needs splicing." }] }),
     "nothing found is an answer, not a refusal": nothing.code === 0 && nothing.json.total === 0 && same(nothing.json.results, []),
+    "a document by its name": same(byName.results, [{ path: "Drive/zebra-note", version: "md", matches: [], inName: true }]),
     "a removed document is not found": afterRm.total === 0,
   };
 });
@@ -1486,6 +1488,7 @@ if (!canTty) {
     for (let i = 1; i <= 45; i += 1) flock[`Flock/bird-${String(i).padStart(2, "0")}.md`] = `# Bird ${i}\n\nA heron wades here.\n`;
     await macWrites(flock);
     const waited = await t(["search", "zebrafish"]);
+    const byName = await t(["search", "bird-07"]);
     return {
       "ls, in step": /^Pair  \[md · html\]$/m.test(inStep.out),
       reply: reply.out.includes("Answered thread #m4st01 in Pair — it has 2 comments now."),
@@ -1505,8 +1508,9 @@ if (!canTty) {
       "rm, of something published": rm.out.includes(`It stays published at ${WORKER}/pair-page — the page answers 404 until the document is back. Stop with \`doklin unpublish\`.`),
       unpublish: unpublish.out.includes(`Stopped publishing ${WORKER}/pair-page.`),
       "a plain file, refused in a sentence": file.code === 2 && file.out.includes('doklin: Doklin syncs markdown and html documents only — "pic.png" is neither. Name a document: plan, plan.md or plan.html.'),
-      "nothing found": nothing.code === 0 && nothing.out.includes('Nothing contains "qqzzxxqq".'),
-      "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents contain it; these are the first 20 — narrow it with --in <folder>, or raise --limit."),
+      "nothing found": nothing.code === 0 && nothing.out.includes('Nothing has "qqzzxxqq" in its name or its text.'),
+      "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents match; these are the first 20 — narrow it with --in <folder>, or raise --limit."),
+      "found by its name": byName.out.includes("Flock/bird-07 — in its name\n1 document."),
     };
   });
 

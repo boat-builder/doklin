@@ -4742,6 +4742,54 @@ await test("search: an agent's change is mirrored in the request that made it; a
   assert.deepEqual((await found("manatee")).results.map((r) => r.path), ["Lib/during"], "and the next search that can, catches up");
 });
 
+await test("search: a document is found by its name as well as its text — its own name, not its folders' or its extension — named ones first, and a name alone costs no read", async () => {
+  await freshWorkspace({
+    "Lib/otter.md": "# River\n\nNotes from the bank.\n",
+    "Lib/sea-otter-facts.md": "# Facts\n\nThe otter holds hands.\n",
+    "Lib/aaa.md": "# First\n\nAn otter swam by.\n",
+    "Lib/Otter Poster.html": "<p>Come and see.</p>\n",
+    "Lib/twin.md": "# Left\n\nMarkdown side.\n",
+    "Lib/twin.html": "<p>Page side.</p>\n",
+    "Otter/zoo.md": "# Animals\n\nNothing here.\n",
+  });
+  const bot = await addAgent("Namer", ["edit"]);
+  const api = as(bot);
+  const found = async (q, more = "") => (await api(searchUrl(q, more))).json;
+  assert.equal((await api(searchUrl("warm the mirror"))).status, 200);
+
+  const otter = await countingBlobReads(() => api(searchUrl("otter")));
+  assert.deepEqual(otter.res.json.results, [
+    { path: "Lib/Otter Poster", version: "html", matches: [], inName: true },
+    { path: "Lib/otter", version: "md", matches: [], inName: true },
+    { path: "Lib/sea-otter-facts", version: "md", matches: [{ line: 3, text: "The otter holds hands." }], inName: true },
+    { path: "Lib/aaa", version: "md", matches: [{ line: 3, text: "An otter swam by." }] },
+  ]);
+  assert.equal(otter.res.json.total, 4, "a folder's name is not its documents'");
+  assert.equal(otter.reads, 2, "only the documents whose lines are shown are read");
+  assert.deepEqual((await found("OTTER")).results, otter.res.json.results, "whatever the case");
+  const first = await found("otter", "&limit=1");
+  assert.deepEqual([first.results.map((r) => r.path), first.total, first.truncated], [["Lib/Otter Poster"], 4, true], "a name before a line, whatever the path order");
+  assert.equal((await found("otter", "&dir=Otter")).total, 0);
+  assert.deepEqual((await found("zoo", "&dir=Otter")).results, [{ path: "Otter/zoo", version: "md", matches: [], inName: true }]);
+  assert.deepEqual([(await found(".md")).total, (await found(".html")).total], [0, 0], "the extension is not part of the name");
+  assert.deepEqual((await found("twin")).results, [{ path: "Lib/twin", version: "md", matches: [], inName: true }], "the html beside a markdown is the same document");
+
+  // A rename is found at once, under the new name: the name is the manifest's, never the mirror's.
+  assert.equal((await api("/api/agent/move", { method: "POST", body: { from: "Lib/otter", to: "Lib/beaver" } })).status, 200);
+  const beaver = await countingBlobReads(() => api(searchUrl("beaver")));
+  assert.deepEqual([beaver.res.json.results, beaver.reads], [[{ path: "Lib/beaver", version: "md", matches: [], inName: true }], 0]);
+  assert.ok(!(await found("otter")).results.some((r) => r.path === "Lib/beaver"));
+
+  // Too large to mirror, but its name is still its name.
+  await macWrite((m, put) => {
+    put("Lib/leviathan-log.md", `# Log\n\n${"whale ".repeat(200_000)}\n`);
+  });
+  const big = await countingBlobReads(() => api(searchUrl("leviathan")));
+  assert.deepEqual([big.res.json.results, big.res.json.notSearched], [[{ path: "Lib/leviathan-log", version: "md", matches: [], inName: true }], undefined]);
+  assert.equal(big.reads, 0);
+  assert.deepEqual((await found("whale")).notSearched, ["Lib/leviathan-log"], "what it says still is not searched");
+});
+
 /* ---------- Who an `a-` id is ---------- */
 
 await test("directory: /api/meta names agents beside people, so every Mac can put a name to what an agent changed", async () => {
