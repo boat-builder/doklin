@@ -201,8 +201,16 @@ final class PeopleUITests: UITestCase {
         name.tap()
         name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money")
         app.alerts.buttons["Rename"].tap()
-        expect(marked("entry-Money"), "the folder, renamed").press(forDuration: 1.0)
-        expect(app.buttons["Manage access…"], "Manage access on the renamed folder").tap()
+        // Its access is the domain's: offered once the domain has the new name.
+        let money = expect(marked("entry-Money"), "the folder, renamed")
+        let manage = app.buttons["Manage access…"]
+        for _ in 0..<9 where !manage.exists {
+            money.press(forDuration: 1.0)
+            if manage.waitForExistence(timeout: 3) { break }
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+            Thread.sleep(forTimeInterval: 4)
+        }
+        expect(manage, "Manage access on the renamed folder, once the domain has the new name").tap()
         expect(app.navigationBars["Who can open “Money”"], "the folder's people, once the domain has the new name", timeout: 45)
         expect(words("2 people"), "Sherin and Bea in it")
         expect(marked("space-member-Bea"), "Bea in it")
