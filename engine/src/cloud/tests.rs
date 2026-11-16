@@ -6895,3 +6895,138 @@ async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it(
     let moved = a.engine.recent(50).files.into_iter().find(|f| f.path == "Plans/plan.md").expect("moved");
     assert_eq!(moved.mtime, before, "a move is not an edit");
 }
+
+/* ---------- One copy of a workspace a device ---------- */
+
+/// The app, as far as a command run on a whole `Core` needs one: nothing is
+/// drawn and no folder is open.
+struct QuietHost;
+
+impl crate::Host for QuietHost {
+    fn emit(&self, _event: &str, _payload: serde_json::Value) {}
+    fn open_folders(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        std::fs::write(path, bytes).map_err(|e| e.to_string())
+    }
+    fn trash(&self, _path: &Path) -> Result<(), String> {
+        Err("no trash here".into())
+    }
+}
+
+/// A worker that refuses every sign-in, as a domain does one it has
+/// forgotten. On a loopback address, which the engine speaks plain http to.
+fn refusing_worker() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"error":"unauthorized"}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    endpoint
+}
+
+/// A loopback address nothing answers on: the engine hears it offline.
+fn silent_endpoint() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}", listener.local_addr().unwrap())
+}
+
+/// A Mac whose cloud.json already has `endpoint`'s workspace, called
+/// company-os, in `root` — its engine started, as at boot.
+fn mac_holding(data: &Path, root: &str, endpoint: &str) -> Arc<crate::Core> {
+    let mut file = CloudFile::default();
+    file.upsert(WorkspaceEntry {
+        root: root.into(),
+        domain: super::config::domain_of(endpoint).unwrap(),
+        endpoint: endpoint.into(),
+        ws_id: "w-1".into(),
+        name: "company-os".into(),
+        token: "a sign-in from before".into(),
+    });
+    write_cloud_file(data, &file, None).unwrap();
+    let core = crate::Core::new(crate::Setup {
+        data_dir: data.to_path_buf(),
+        home: None,
+        join_dir: Some(data.join("joined")),
+        anchor: None,
+        client: "test".into(),
+        device_name: "Ada's Mac".into(),
+        device_kind: "Mac".into(),
+        watch: false,
+        runtime: tokio::runtime::Handle::current(),
+        host: Arc::new(QuietHost),
+    });
+    super::init(&core);
+    core
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_never_trades_a_code_or_a_key_for_a_domain_it_already_holds() {
+    let endpoint = refusing_worker();
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let root_str = root.path().to_string_lossy().to_string();
+    let core = mac_holding(data.path(), &root_str, &endpoint);
+
+    // The old copy's engine asks the domain, and hears its sign-in refused.
+    let phase = || super::cloud_status(&core).unwrap().into_iter().find(|s| s.root == root_str).map(|s| s.phase);
+    for _ in 0..200 {
+        if phase() == Some(Phase::Revoked) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(phase(), Some(Phase::Revoked));
+
+    // What the wizard asks first: where the copy is, and that it has stopped.
+    let held = super::cloud_held(&core, format!("{}/", endpoint)).unwrap().expect("this Mac holds the domain");
+    assert_eq!((held.root.as_str(), held.name.as_str()), (root_str.as_str(), "company-os"));
+    assert!(!held.syncs, "a copy whose sign-in is refused doesn't sync");
+    assert!(super::cloud_held(&core, "https://other.example.com".into()).unwrap().is_none());
+    assert!(super::cloud_held(&core, "not an address".into()).unwrap().is_none());
+
+    // Neither trade goes out — a redeem that did would hear the refusal and
+    // say so — and each says that what it would have spent still works.
+    let code = super::cloud_redeem(&core, endpoint.clone(), "dkln-K7QM2-9XVR4-8TBHN-3WGYD".into()).await.unwrap_err();
+    assert!(code.starts_with("This Mac already syncs company-os from 127.0.0.1:"), "{}", code);
+    assert!(code.ends_with("Stop syncing it here first — the code hasn't been used, so it still works."), "{}", code);
+    let key = super::cloud_recover(&core, endpoint.clone(), "k".repeat(64), "ada@example.com".into(), None)
+        .await
+        .unwrap_err();
+    assert!(key.ends_with("the key hasn't been used, so it still works."), "{}", key);
+
+    // Disconnected, the domain is free to trade for again: this time the
+    // redeem goes out, and the worker's refusal is what comes back.
+    super::cloud_disconnect(&core, root_str.clone()).await.unwrap();
+    assert!(super::cloud_held(&core, endpoint.clone()).unwrap().is_none());
+    let traded = super::cloud_redeem(&core, endpoint, "dkln-K7QM2-9XVR4-8TBHN-3WGYD".into()).await.unwrap_err();
+    assert!(traded.starts_with("that code doesn't work"), "{}", traded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_copy_whose_folder_is_gone_has_stopped() {
+    let endpoint = silent_endpoint();
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let root_str = root.path().to_string_lossy().to_string();
+    let core = mac_holding(data.path(), &root_str, &endpoint);
+
+    let held = super::cloud_held(&core, endpoint.clone()).unwrap().expect("held");
+    assert!(held.syncs, "in its folder, and only offline: it syncs again when the domain answers");
+    drop(root);
+    let held = super::cloud_held(&core, endpoint).unwrap().expect("still held");
+    assert!(!held.syncs, "its folder is gone");
+}

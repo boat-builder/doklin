@@ -32,6 +32,13 @@
 // is that workspace (it disconnected, and is back) is offered the resume
 // below instead of a second copy.
 //
+// A Mac holds one copy of a domain's workspace, and every step after a trade
+// refuses a second — so before a code or a key is traded, the wizard asks
+// whether this Mac already has that domain (`cloudHeld`). If it does, the
+// card says where: a copy that syncs is opened instead, and one that has
+// stopped (its sign-in refused, its folder gone) is disconnected first, with
+// what is to be traded still unspent.
+//
 // For the other two the probe — made with the key, which the worker answers
 // on that route alone — decides what the domain is, and the wizard says so in
 // words: fresh → "Connect & upload"; already holding a workspace → "Download
@@ -45,6 +52,8 @@ import {
   BUNDLED_WORKER_VERSION,
   WORKER_COMPATIBILITY_DATE,
   cloudConnect,
+  cloudDisconnect,
+  cloudHeld,
   cloudJoin,
   cloudMarker,
   cloudMintToken,
@@ -55,6 +64,7 @@ import {
   cloudResume,
   onCloudProgress,
   timeAgo,
+  type CloudHeld,
   type CloudMarker,
   type CloudProbe,
   type CloudProgressEvent,
@@ -106,6 +116,7 @@ export default function CloudSetup({
   root,
   onClose,
   onConnected,
+  onOpen,
 }: {
   mode: CloudSetupMode;
   /** The open workspace folder, if any: what "connect" uploads, what "resume" adopts. */
@@ -113,6 +124,8 @@ export default function CloudSetup({
   onClose: () => void;
   /** The workspace is syncing at `root` — the folder that was open, or the one a download created. */
   onConnected: (root: string, how: CloudSetupOutcome) => void;
+  /** Open a workspace this Mac already syncs, instead of joining it again. */
+  onOpen: (root: string) => void;
 }) {
   const withKey = mode !== "redeem";
   const [name, setName] = useState(root ? basename(root) : "Notes");
@@ -141,6 +154,10 @@ export default function CloudSetup({
   // cannot be traded twice, so nothing after that point may offer to trade
   // it again, only to go on with what it bought.
   const [joined, setJoined] = useState<Joined | null>(null);
+  // The copy of the domain this Mac already has, as asked for the address
+  // `at`: it answers for that address only, so editing it lets it go.
+  const [held, setHeld] = useState<{ at: string; copy: CloudHeld } | null>(null);
+  const [lettingGo, setLettingGo] = useState(false);
 
   // Nothing closes while a step is running.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -191,6 +208,7 @@ export default function CloudSetup({
   // is only known once wrangler prints it, so that one is pasted. A recovery
   // starts from the address.
   const endpoint = endpointTouched || mode !== "connect" ? endpointInput : (target && endpointOf(target)) ?? "";
+  const heldCopy = held && held.at === endpoint ? held.copy : null;
 
   const prompt = useMemo(() => {
     if (!key || !identityOk) return null;
@@ -227,11 +245,13 @@ export default function CloudSetup({
       setProbed(null);
       setProbing(true);
       try {
-        const [result, marker] = await Promise.all([
+        const [result, marker, copy] = await Promise.all([
           cloudProbe(at, bearer),
           root ? cloudMarker(root).catch(() => null) : Promise.resolve(null),
+          cloudHeld(at),
         ]);
         setProbed({ endpoint: at, result, marker });
+        setHeld(copy ? { at, copy } : null);
       } catch (e) {
         setError(errText(e));
       } finally {
@@ -301,6 +321,13 @@ export default function CloudSetup({
     setRedeeming(true);
     let got: Joined;
     try {
+      // Asked before the trade, which would refuse to spend the code on a
+      // domain this Mac already has.
+      const copy = await cloudHeld(endpoint);
+      if (copy) {
+        setHeld({ at: endpoint, copy });
+        return;
+      }
       const r = await cloudRedeem(endpoint, code);
       got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
       setJoined(got);
@@ -329,6 +356,27 @@ export default function CloudSetup({
     }
     await download(got.endpoint, got.token);
   }, [endpoint, code, download, root]);
+
+  /**
+   * Disconnect the copy that has stopped syncing, then go on: a join trades
+   * its code now, a key door shows what the probe offered. The folder stays
+   * where it is, as every Disconnect leaves it.
+   */
+  const letGo = useCallback(async () => {
+    if (!heldCopy) return;
+    setError(null);
+    setLettingGo(true);
+    try {
+      await cloudDisconnect(heldCopy.root);
+      setHeld(null);
+    } catch (e) {
+      setError(errText(e));
+      return;
+    } finally {
+      setLettingGo(false);
+    }
+    if (!withKey) await redeem();
+  }, [heldCopy, withKey, redeem]);
 
   /** One paste fills both boxes: the line as it was sent, the whole message
    *  around it, or one half on its own — whatever the engine can find in it. */
@@ -478,6 +526,42 @@ export default function CloudSetup({
         </div>
       )}
       {spentNote}
+    </div>
+  );
+
+  // A copy this Mac already has takes the place of the Join button and of the
+  // probe's outcome: nothing either offers could be done while it is here.
+  const traded = withKey ? "key" : "code";
+  const heldCard = heldCopy && !done && !work && (
+    <div className="cloud-card" data-testid="held-copy">
+      <div className="cloud-card-title">
+        {heldCopy.syncs
+          ? `This Mac already syncs “${heldCopy.name}”`
+          : `This Mac’s copy of “${heldCopy.name}” has stopped syncing`}
+      </div>
+      <p className="cloud-hint">
+        It’s in <code>{heldCopy.root}</code>. A Mac holds one copy of a workspace, so the {traded}{" "}
+        hasn’t been used.{" "}
+        {heldCopy.syncs
+          ? "Open that copy instead."
+          : `Disconnect it, and ${heldCopy.domain} comes down here afresh; the folder stays where it is.`}
+      </p>
+      <div className="modal-buttons">
+        {heldCopy.syncs ? (
+          <button className="modal-btn is-primary" data-testid="held-open" onClick={() => onOpen(heldCopy.root)}>
+            Open it
+          </button>
+        ) : (
+          <button
+            className="modal-btn is-primary"
+            data-testid="held-disconnect"
+            disabled={lettingGo}
+            onClick={() => void letGo()}
+          >
+            {lettingGo ? "Disconnecting…" : withKey ? "Disconnect it" : "Disconnect it and join"}
+          </button>
+        )}
+      </div>
     </div>
   );
 
@@ -666,6 +750,8 @@ export default function CloudSetup({
             </button>
           </div>
         </>
+      ) : heldCopy ? (
+        heldCard
       ) : (
         <div className="modal-buttons">
           <button
@@ -801,7 +887,7 @@ export default function CloudSetup({
                     {checkStep}
                   </>
                 )}
-                {outcome}
+                {heldCard || outcome}
                 {doneBlock}
               </li>
             </ol>
@@ -847,7 +933,7 @@ export default function CloudSetup({
                   {root ? " A folder that already is that workspace can be resumed in place instead." : ""}
                 </div>
                 {prompt && checkStep}
-                {outcome}
+                {heldCard || outcome}
                 {doneBlock}
               </li>
             </ol>

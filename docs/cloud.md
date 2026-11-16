@@ -145,6 +145,7 @@ synced manifest, rendered by the worker from the synced files.
 - **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
 - **Resume**: empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
 - **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`.
+- **Never trade for a domain this device holds.** One copy a device per domain, and every step after a trade refuses a second, so `cloud_redeem` and `cloud_recover` refuse first and what was to be spent still works. The wizard asks `cloud_held` before it trades: a copy that syncs is opened; one that has stopped (`revoked`, or its folder gone) is disconnected, then the trade goes on.
 - **Disconnect**: stop the engine, end this Mac's sign-in, drop the `cloud.json` entry and state; folder, marker and cloud stay.
 - **Wipe** (`cloud_wipe`, superadmin): erase via the worker, then disconnect **including the marker**, so nothing re-uploads into the freed domain; then the teardown prompt.
 

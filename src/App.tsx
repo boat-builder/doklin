@@ -5781,6 +5781,10 @@ export default function App() {
             setCloudSetup(null);
             if (how === "join") void openWorkspace(root);
           }}
+          onOpen={(root) => {
+            setCloudSetup(null);
+            void openWorkspace(root);
+          }}
         />
       )}
       {workerUpdateOpen && cloudForRoot && (

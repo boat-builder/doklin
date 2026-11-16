@@ -539,6 +539,16 @@
                 : Promise.resolve(window.__cloud.probe);
             case "cloud_marker":
               return Promise.resolve(window.__cloud.marker);
+            // The copy of the domain this Mac already has: a status of that
+            // domain's, stopped once its sign-in is refused (the engine also
+            // counts a folder that is gone).
+            case "cloud_held": {
+              const at = String(args.endpoint ?? "");
+              const s = window.__cloud.statuses.find((x) => x.domain === hostOf(at.includes("://") ? at : `https://${at}`));
+              return Promise.resolve(
+                s ? { root: s.root, name: s.name, domain: s.domain, syncs: s.phase !== "revoked" } : null,
+              );
+            }
             case "cloud_connect":
               return (async () => {
                 await progress(args.root, "upload", 3);

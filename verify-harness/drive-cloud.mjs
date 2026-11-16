@@ -10,7 +10,9 @@
 // through the manifest and restoring it, Add a
 // device, disconnect, the wipe → teardown prompt, the join flow
 // opening the downloaded folder, the invite door: one paste filling both
-// boxes, a refused code spending nothing, a download on the member's own
+// boxes, a refused code spending nothing, a code or a key for a domain this
+// Mac already has never traded (open that copy, or disconnect a stopped one
+// first), a download on the member's own
 // credential, the People view: the superadmin listed as you, inviting somebody, the
 // code shown once, and the three ways access goes away, and under the people
 // its Agents section: adding an agent with publishing off until it is ticked,
@@ -984,6 +986,37 @@ await page.screenshot({ path: SHOTS + "cloud-07-teardown.png" });
 await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Cloud").count()) === 0);
 
+/* 22a — a Mac that already has the domain's workspace is never asked to
+   trade a key for it: the probe's outcome offers nothing, and the card says
+   where the copy is and opens it */
+await setStatuses([status({ root: "/Users/me/Doklin/Notes", name: "Notes", wsId: "w-1" })]);
+await setCloud({ marker: null });
+await openPanelFromGear();
+await tid("recover-domain").click();
+await poll(async () => (await dialog("Recover a workspace").count()) === 1);
+await tid("endpoint-input").fill("https://notes.example.com");
+await tid("person-name-input").fill("Ada");
+await tid("person-email-input").fill("ada@example.com");
+await poll(async () => (await tid("setup-prompt").count()) === 1);
+const recoversBefore = (await calls("cloud_recover")).length;
+await tid("probe-button").click();
+await poll(async () => (await tid("held-copy").count()) === 1);
+const heldKeyText = (await tid("held-copy").textContent()).replace(/\s+/g, " ");
+step(
+  "recover, this Mac already syncing that domain: the probe's outcome offers no Download, and the card names the copy and its folder, says the key hasn't been used, and offers Open it",
+  (await tid("download-here").count()) === 0 &&
+    (await tid("held-open").count()) === 1 &&
+    heldKeyText.includes("This Mac already syncs “Notes”") &&
+    heldKeyText.includes("/Users/me/Doklin/Notes") &&
+    heldKeyText.includes("the key hasn’t been used") &&
+    (await calls("cloud_recover")).length === recoversBefore,
+  heldKeyText.slice(0, 120),
+);
+await page.screenshot({ path: SHOTS + "cloud-07a-held-key.png" });
+await dialog("Recover a workspace").getByLabel("Close").click();
+await poll(async () => (await dialog("Recover a workspace").count()) === 0);
+await setStatuses([]);
+
 /* 22 — recover: the address and who you are, a prompt that has an agent
    put a fresh key on the worker, the bound outcome, and one click trades the
    key and downloads into its own folder under ~/Doklin — no folder is asked
@@ -1124,6 +1157,73 @@ step(
   redeemedAs.trim(),
 );
 await page.screenshot({ path: SHOTS + "cloud-09-redeemed.png" });
+
+/* 23a — a code for a domain this Mac already has is never traded: a copy
+   that syncs is opened instead, and one that has stopped is disconnected
+   first, then the code is traded and the workspace comes down afresh */
+const joinedRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
+const openJoinDoor = async () => {
+  await page.locator(".sidebar-header-button").click();
+  await tid("sidebar-menu-join").click();
+  await poll(async () => (await dialog("Join a workspace").count()) === 1);
+  await paste("code-input", INVITE.blob);
+  await poll(async () => (await tid("endpoint-input").inputValue()) === INVITE.endpoint);
+};
+const tradesBefore = (await calls("cloud_redeem")).length;
+await openJoinDoor();
+await tid("redeem-button").click();
+await poll(async () => (await tid("held-copy").count()) === 1);
+const heldCodeText = (await tid("held-copy").textContent()).replace(/\s+/g, " ");
+const heldOffersOpen =
+  (await tid("held-open").count()) === 1 &&
+  (await tid("held-disconnect").count()) === 0 &&
+  (await tid("redeem-button").count()) === 0 &&
+  heldCodeText.includes("This Mac already syncs “Notes”") &&
+  heldCodeText.includes(joinedRoot) &&
+  heldCodeText.includes("the code hasn’t been used") &&
+  (await calls("cloud_redeem")).length === tradesBefore;
+await page.screenshot({ path: SHOTS + "cloud-09a-held-code.png" });
+await tid("held-open").click();
+await poll(async () => (await dialog("Join a workspace").count()) === 0);
+step(
+  "join, this Mac already syncing that domain: Join asks first and trades nothing — the card names the copy and its folder, says the code hasn't been used, and Open it closes the door on that workspace",
+  heldOffersOpen &&
+    (await calls("cloud_redeem")).length === tradesBefore &&
+    (await page.locator(".sidebar-header-name").textContent()) === "Notes",
+  heldCodeText.slice(0, 120),
+);
+
+// Its sign-in refused: disconnect it, then the code is traded after all.
+await setStatuses((await page.evaluate(() => window.__cloud.statuses)).map((s) => ({ ...s, phase: "revoked" })));
+const mark = (await page.evaluate(() => window.__cloud.calls.length));
+await openJoinDoor();
+await tid("redeem-button").click();
+await poll(async () => (await tid("held-disconnect").count()) === 1);
+const stoppedText = (await tid("held-copy").textContent()).replace(/\s+/g, " ");
+const stoppedOffers =
+  stoppedText.includes("This Mac’s copy of “Notes” has stopped syncing") &&
+  (await tid("held-disconnect").textContent()).trim() === "Disconnect it and join" &&
+  (await tid("held-open").count()) === 0 &&
+  (await calls("cloud_redeem")).length === tradesBefore;
+await page.screenshot({ path: SHOTS + "cloud-09a-held-stopped.png" });
+await tid("held-disconnect").click();
+await poll(async () => (await dialog("Join a workspace").count()) === 0);
+await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Notes");
+const order = await page.evaluate(
+  (from) => window.__cloud.calls.slice(from).map((c) => c.cmd).filter((c) => ["cloud_disconnect", "cloud_redeem", "cloud_join"].includes(c)),
+  mark,
+);
+const letGoOf = (await calls("cloud_disconnect")).at(-1);
+step(
+  "join, this Mac's copy stopped (its sign-in refused): the card says so and offers Disconnect it and join — which disconnects that copy, then trades the code and downloads",
+  stoppedOffers &&
+    order.join(",") === "cloud_disconnect,cloud_redeem,cloud_join" &&
+    letGoOf.args.root === joinedRoot &&
+    (await lastCall("cloud_redeem")).args.code === INVITE.code &&
+    (await lastCall("cloud_join")).args.token === INVITE.token &&
+    (await page.evaluate(() => window.__cloud.statuses.every((s) => s.phase !== "revoked"))),
+  `${stoppedText.slice(0, 80)} · ${order.join(",")}`,
+);
 
 /* 23b — the switcher: the workspace goes by its own name, and its menu lists
    the workspaces this Mac belongs to — the open one ticked, another one click

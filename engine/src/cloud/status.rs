@@ -322,6 +322,20 @@ pub struct Redeemed {
     pub name: String,
 }
 
+/// `cloud_held`: the copy of a domain's workspace this device already has.
+/// A device holds one per domain, so a code or a key traded for a second
+/// would buy a sign-in nothing could use.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldWorkspace {
+    pub root: String,
+    pub name: String,
+    pub domain: String,
+    /// False when that copy can't sync any more: the domain no longer takes
+    /// this device's sign-in, or its folder is gone.
+    pub syncs: bool,
+}
+
 /// `cloud_invite`: the invite the domain now holds, plus the code itself —
 /// the one moment it exists in the clear. The panel shows it once; nothing
 /// on this Mac or on the domain can produce it again.
