@@ -163,6 +163,9 @@ type Props = {
   onPublishFolder?: (dir: string) => void;
   onStopPublishing?: (page: PublicPage) => void;
   onCopyLink?: (url: string) => void;
+  // *Copy link*: a link that opens a file in Doklin, for anybody who can see
+  // it — published or not. Offered only in a connected workspace.
+  onCopyPageLink?: (path: string) => void;
 };
 
 /** A workspace this Mac belongs to, as the menu lists it: where its copy is
@@ -239,6 +242,7 @@ export default function Sidebar({
   onPublishFolder,
   onStopPublishing,
   onCopyLink,
+  onCopyPageLink,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -937,6 +941,18 @@ export default function Sidebar({
       label: "Reveal in Finder",
       onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
     });
+    // A file in one of the workspace's sections has a link of its own: it
+    // opens in Doklin for whoever can see it, wherever it is clicked.
+    if (
+      target.kind === "file" &&
+      target.openable !== false &&
+      cloud &&
+      onCopyPageLink &&
+      target.path.startsWith(`${root}/`) &&
+      placeOf(cloud, target.path.slice(root.length + 1)).kind !== "nowhere"
+    ) {
+      items.push({ label: "Copy link", onClick: () => onCopyPageLink(target.path) });
+    }
     // Every document has a history, connected or not.
     if (target.kind === "file" && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
@@ -1057,6 +1073,7 @@ export default function Sidebar({
     onPublishFolder,
     onStopPublishing,
     onCopyLink,
+    onCopyPageLink,
     onNewRestricted,
     onManageAccess,
     onShareWith,

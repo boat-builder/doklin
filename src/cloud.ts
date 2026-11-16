@@ -186,6 +186,12 @@ export type CloudMarker = { domain: string; wsId: string };
  *  carries it — the line an invite is. Shown once. */
 export type CloudDeviceCode = { code: string; blob: string; expiresAt: number };
 
+/** `cloudLink`: what *Copy link* puts on the clipboard — a link that opens
+ *  the file in Doklin for anybody who can see it — and who that is, as a
+ *  sentence. Mirrors `PageLinkCopy` (engine/src/cloud/status.rs ⇄
+ *  Payloads.swift): change all three. */
+export type CloudPageLink = { url: string; who: string };
+
 /** The two halves of an invite found in one paste — either may be missing,
  *  and the redeem screen fills what it finds. */
 export type CloudPastedInvite = { endpoint: string | null; code: string | null };
@@ -459,6 +465,10 @@ export const cloudPublish = (path: string, opts: { slug?: string; title?: string
     title: opts.title ?? null,
     desc: opts.desc ?? null,
   });
+
+/** The link to the file at `path` (absolute). Waits a pass for a file made
+ *  a moment ago, which has no id until one has taken it in. */
+export const cloudLink = (path: string) => invoke<CloudPageLink>("cloud_link", { path });
 
 export const cloudUnpublish = (root: string, slug: string) => invoke<void>("cloud_unpublish", { root, slug });
 export const cloudSetRoot = (root: string, slug: string | null) => invoke<void>("cloud_set_root", { root, slug });

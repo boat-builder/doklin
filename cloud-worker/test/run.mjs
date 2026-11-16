@@ -2886,6 +2886,7 @@ await test("agents: the gate — an agent's token is answered on /api/agent and 
     ["GET", "/api/agent/me"],
     ["DELETE", "/api/agent/login"],
     ["GET", "/api/agent/tree"],
+    ["GET", "/api/agent/find?workspace=w-000000000000&file=f-000000000000"],
     ["GET", "/api/agent/doc?path=Gate/note"],
     ["PUT", "/api/agent/doc?path=Gate/note&force=1", "# Replaced\n"],
     ["DELETE", "/api/agent/doc?path=Gate/note"],
@@ -2938,6 +2939,7 @@ await test("agents: each permission — every route and verb is refused without 
   // change is a dry run or names nothing, so "allowed" leaves no mark.
   const routes = [
     ["read", "GET", "/api/agent/tree", undefined, 200],
+    ["read", "GET", "/api/agent/find?workspace=w-000000000000&file=f-000000000000", undefined, 404],
     ["read", "GET", "/api/agent/doc?path=Perm/note", undefined, 200],
     ["read", "GET", "/api/agent/comments?path=Perm/note", undefined, 200],
     ["read", "GET", "/api/agent/search?q=plain", undefined, 200],
@@ -5166,6 +5168,51 @@ await test("sections: a move between sections writes where it goes first and lea
   // A reader's agent moves nothing anywhere.
   const reader = as(await addAgentFor(PAT.token, "Pat's second reader", []));
   assert.equal((await move(reader, { from: "Shared/idea", to: "Private/idea" })).status, 403);
+});
+
+await test("find: a link's ids lead an agent to the path its person names — and every page it cannot open is one answer", async () => {
+  const [pat, quinn, alice] = [as(PAT_BOT), as(QUINN_BOT), as(ALICE_BOT)];
+  const ws = JSON.parse(fake.store.get("workspace.json").bytes.toString("utf8")).id;
+  const find = (api, file, space = "", workspace = ws) =>
+    api(`/api/agent/find?workspace=${workspace}&space=${space}&file=${file}`);
+  assert.equal((await put(pat, "Linked/shared", "# Shared\n")).status, 201);
+  assert.equal((await put(pat, "Restricted/Deals/linked", "# Deal\n")).status, 201);
+  assert.equal((await put(pat, "Private/linked", "# Mine\n")).status, 201);
+  assert.equal((await put(pat, "Linked/chart.csv", "a,b\n")).status, 201);
+  const [shared] = entryAt(storedManifest(), "Linked/shared.md");
+  const [chart] = entryAt(storedManifest(), "Linked/chart.csv");
+  const [deal] = entryAt(spaceManifest(DEALS.id), "linked.md");
+  const [mine] = entryAt(spaceManifest(privateOf(PAT)), "linked.md");
+
+  // A document as the tree names it, a plain file in full, in the section the link says.
+  assert.deepEqual((await find(alice, shared)).json, { kind: "document", path: "Linked/shared" });
+  assert.deepEqual((await find(alice, chart)).json, { kind: "file", path: "Linked/chart.csv" });
+  assert.deepEqual((await find(quinn, deal, DEALS.id)).json, { kind: "document", path: "Restricted/Deals/linked" });
+  assert.deepEqual((await find(pat, mine, privateOf(PAT))).json, { kind: "document", path: "Private/linked" });
+  // A rename keeps the link.
+  const moved = await pat("/api/agent/move", { method: "POST", body: { from: "Linked/shared", to: "Linked/renamed" } });
+  assert.equal(moved.status, 200, moved.text);
+  assert.equal((await find(alice, shared)).json.path, "Linked/renamed");
+
+  // Somebody else's section, the wrong section, a page gone, a page never
+  // made and another workspace: one answer, which names none of them.
+  const refused = [
+    await find(alice, deal, DEALS.id),
+    await find(quinn, mine, privateOf(PAT)),
+    await find(pat, deal),
+    await find(pat, "f-000000000000"),
+    await find(pat, shared, "", "w-000000000000"),
+  ];
+  assert.deepEqual(refused.map((r) => r.status), [404, 404, 404, 404, 404]);
+  assert.equal(new Set(refused.map((r) => r.json.error)).size, 1, "all said alike");
+  assert.ok(!refused[0].json.error.includes("Deals"));
+  assert.equal((await pat(docUrl("Linked/renamed"), { method: "DELETE" })).status, 200);
+  assert.equal((await find(alice, shared)).status, 404, "deleted, it is found nowhere");
+
+  // What is not an id is a usage mistake, not a missing page.
+  assert.equal((await find(pat, "../plan")).status, 400);
+  assert.equal((await find(pat, shared, "Deals")).status, 400);
+  assert.equal((await pat(`/api/agent/find?file=${shared}`)).status, 400, "a link always names its workspace");
 });
 
 await test("sections: an agent goes with its person — removed from the workspace, every machine of every agent of theirs is refused, and inviting them again brings none back", async () => {

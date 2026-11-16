@@ -1,0 +1,4 @@
+# Apple reads the association file only as JSON, and it has no extension to
+# say so.
+/.well-known/apple-app-site-association
+  Content-Type: application/json

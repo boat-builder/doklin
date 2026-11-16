@@ -1,6 +1,7 @@
 //! `doklin open` — the one command about this Mac rather than a workspace:
-//! it hands files and folders on this disk to the Doklin app. Which
-//! workspace a path belongs to is the app's to know, not this program's.
+//! it hands files and folders on this disk, and links to pages, to the
+//! Doklin app. Which workspace a path or a link is in is the app's to know,
+//! not this program's.
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +9,7 @@ use serde_json::json;
 
 use crate::args::Args;
 use crate::commands::Ctx;
+use crate::link::PageLink;
 use crate::Failure;
 
 pub fn open(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
@@ -16,7 +18,13 @@ pub fn open(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     }
     let here = std::env::current_dir().map_err(|e| Failure::other(format!("could not tell which folder this is: {}", e)))?;
     let mut paths = Vec::new();
+    let mut links = Vec::new();
     for given in &args.positionals {
+        // A link to a page: the app finds it, in the workspace it is in.
+        if let Some(link) = PageLink::parse(given) {
+            links.push(link.for_app());
+            continue;
+        }
         let path = absolute(&here, given);
         if !path.exists() {
             return Err(Failure::not_found(format!("there is no file or folder at \"{}\"", given)));
@@ -25,16 +33,21 @@ pub fn open(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     }
     let shown: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     if ctx.dry_run {
-        ctx.answer(&json!({ "paths": shown, "opened": false }), || match args.positionals.as_slice() {
+        ctx.answer(&json!({ "paths": shown, "links": links, "opened": false }), || match args.positionals.as_slice() {
             [] => "Would open the Doklin app.".to_string(),
             given => format!("Would open {} in Doklin.", given.join(", ")),
         });
         return Ok(());
     }
-    hand_to_app(&paths)?;
+    if !paths.is_empty() || links.is_empty() {
+        hand_to_app(&paths)?;
+    }
+    for link in &links {
+        hand_link_to_app(link)?;
+    }
     // A launcher says nothing when it worked; a program still gets its answer.
     if ctx.json {
-        println!("{}", json!({ "paths": shown, "opened": true }));
+        println!("{}", json!({ "paths": shown, "links": links, "opened": true }));
     }
     Ok(())
 }
@@ -70,6 +83,22 @@ fn hand_to_app(paths: &[PathBuf]) -> Result<(), Failure> {
 
 #[cfg(not(target_os = "macos"))]
 fn hand_to_app(_paths: &[PathBuf]) -> Result<(), Failure> {
+    unreachable!("refused above: there is no app off a Mac")
+}
+
+/// macOS-only: a link goes to the app the way a click on one does, as the
+/// `doklin://` address it is registered for (src-tauri/Info.plist).
+#[cfg(target_os = "macos")]
+fn hand_link_to_app(link: &str) -> Result<(), Failure> {
+    let app = own_app().map(|p| p.into_os_string()).unwrap_or_else(|| "Doklin".into());
+    match std::process::Command::new("open").arg("-a").arg(&app).arg(link).status() {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err(Failure::other("could not open Doklin — is the app installed?")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hand_link_to_app(_link: &str) -> Result<(), Failure> {
     unreachable!("refused above: there is no app off a Mac")
 }
 

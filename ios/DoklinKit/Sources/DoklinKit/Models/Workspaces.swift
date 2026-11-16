@@ -7,6 +7,14 @@
 import Foundation
 import Observation
 
+/// A page a followed link asked to see: the screens of its workspace open it.
+public struct Opening: Identifiable, Equatable, Sendable {
+    public let id = UUID()
+    public let root: String
+    /// Workspace-relative.
+    public let path: String
+}
+
 /// Something sync said that a person should read once.
 public struct Notice: Identifiable, Equatable, Sendable {
     public let id = UUID()
@@ -35,6 +43,10 @@ public final class Workspaces {
     public private(set) var notices: [Notice] = []
     /// A workspace taken off this device, until the person has read so.
     public private(set) var removed: Removed?
+    /// The page a followed link asked to see, until its workspace has opened it.
+    public private(set) var opening: Opening?
+    /// Why a followed link opened nothing, as a sentence.
+    public private(set) var linkProblem: String?
 
     @ObservationIgnored private var open: [String: Workspace] = [:]
     @ObservationIgnored private let remembered: UserDefaults
@@ -128,6 +140,55 @@ public final class Workspaces {
         versions
             .filter { absolute == $0.root || absolute.hasPrefix($0.root + "/") }
             .max { $0.root.count < $1.root.count }
+    }
+
+    /* ---------- Links ---------- */
+
+    /// A link to a page (engine/src/cloud/link.rs), handed to the app by iOS
+    /// — straight from doklin.cc, or by the page there as `doklin://open#…`.
+    /// Its workspace is shown and opens the page (`opening`), or the person
+    /// is told why it can't be (`linkProblem`). A link that launched the app
+    /// waits for the engine first.
+    public func follow(_ url: URL) async {
+        for _ in 0..<100 where !ready {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        do {
+            let absolute: String = try await Engine.shared.call("cloud_follow_link", ["url": .string(url.absoluteString)])
+            let holder = { self.statuses.first { absolute.hasPrefix($0.root + "/") } }
+            if holder() == nil { await refresh() }
+            if let status = holder() {
+                select(status.root)
+                opening = Opening(root: status.root, path: String(absolute.dropFirst(status.root.count + 1)))
+            } else {
+                linkProblem = "That page's workspace isn't showing here yet. Try the link again in a moment."
+            }
+        } catch {
+            linkProblem = (error as? DoklinError)?.message ?? error.localizedDescription
+        }
+    }
+
+    /// Whether `url` is a link to a page, which the app follows rather than
+    /// a browser: the address and the scheme of engine/src/cloud/link.rs
+    /// (`PAGE`, `SCHEME`: change both). The engine reads the rest.
+    public nonisolated static func isPageLink(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "https", "http":
+            return url.host?.lowercased() == "doklin.cc" && ["/open", "/open/"].contains(url.path) && url.fragment != nil
+        case "doklin":
+            return url.host == "open"
+        default:
+            return false
+        }
+    }
+
+    /// The workspace opened the page a link asked for.
+    public func opened(_ done: Opening) {
+        if opening == done { opening = nil }
+    }
+
+    public func dismissLinkProblem() {
+        linkProblem = nil
     }
 
     /* ---------- Joining and leaving ---------- */
@@ -366,6 +427,13 @@ public final class Workspace: Identifiable {
         if absolute == root { return "" }
         guard absolute.hasPrefix(root + "/") else { return nil }
         return String(absolute.dropFirst(root.count + 1))
+    }
+
+    /// *Copy link* on the file at `path` (workspace-relative): the link
+    /// that opens it in Doklin for anybody who can see it, and who that is.
+    /// A file made a moment ago is synced first, so this can take a beat.
+    public func link(to path: String) async throws -> PageLinkCopy {
+        try await Engine.shared.call("cloud_link", ["path": .string(files.absolute(path))])
     }
 
     /// Who can open what is at a path.

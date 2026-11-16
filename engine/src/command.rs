@@ -106,6 +106,8 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
             cloud::cloud_space_member(core, a.get("root")?, a.get("id")?, a.get("memberId")?, a.get("add")?).await?,
         ),
         "cloud_space_delete" => json(cloud::cloud_space_delete(core, a.get("root")?, a.get("id")?).await?),
+        "cloud_link" => json(cloud::cloud_link(core, a.get("path")?).await?),
+        "cloud_follow_link" => json(cloud::cloud_follow_link(core, a.get("url")?).await?),
         "cloud_pages" => json(cloud::cloud_pages(core, a.get("root")?).await?),
         "cloud_page_take_down" => json(cloud::cloud_page_take_down(core, a.get("root")?, a.get("slug")?).await?),
         "cloud_wipe" => json(cloud::cloud_wipe(core, a.get("root")?).await?),

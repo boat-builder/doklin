@@ -249,6 +249,18 @@ pub struct DeviceCode {
     pub expires_at: u64,
 }
 
+/// `cloud_link`: what *Copy link* puts on the clipboard, and what it tells
+/// the person who copied it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLinkCopy {
+    /// The link (`cloud/link.rs`).
+    pub url: String,
+    /// Who can open it, as a sentence: "Only the people in “Finance” can
+    /// open it."
+    pub who: String,
+}
+
 /// `cloud_people`: everything the People view shows.
 ///
 /// Who this Mac is here, and what it may do, is asked rather than remembered:

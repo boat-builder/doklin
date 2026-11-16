@@ -213,6 +213,15 @@ public struct Invited: Decodable, Sendable {
     public let invite: InviteRecord
 }
 
+/// `cloud_link`: what *Copy link* puts on the clipboard — a link that opens
+/// the file in Doklin for anybody who can see it — and who that is, as a
+/// sentence. Mirrors `PageLinkCopy` (engine/src/cloud/status.rs ⇄
+/// `CloudPageLink`, src/cloud.ts): change all three.
+public struct PageLinkCopy: Decodable, Equatable, Sendable {
+    public let url: String
+    public let who: String
+}
+
 /// `cloud_device_code`: a code for another device of yours.
 public struct DeviceCode: Decodable, Equatable, Sendable {
     public let code: String

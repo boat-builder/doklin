@@ -44,7 +44,10 @@ const browser = await chromium.launch(
     ? { executablePath: "/opt/pw-browsers/chromium", args: ["--no-sandbox"] }
     : {},
 );
-const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+const context = await browser.newContext({
+  viewport: { width: 1400, height: 900 },
+  permissions: ["clipboard-read", "clipboard-write"],
+});
 const page = await context.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
@@ -145,6 +148,35 @@ step(
     historyRoot === "/docs/Restricted/Finance" &&
     deletedRoot === "/docs/Restricted/Finance",
   folderMenu.join(" · "),
+);
+
+/* 3b — Copy link: a note in a section copies the link that opens it in
+       Doklin, and says who can open it; a note in no section has none. */
+const copied = async (path) => {
+  await menuOn(row(path));
+  await pick("Copy link");
+  await poll(async () => (await page.locator(".toast").count()) === 1);
+  const toast = (await page.locator(".toast").textContent()).trim();
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  await page.locator(".toast-close").click();
+  await poll(async () => (await page.locator(".toast").count()) === 0);
+  return { toast, clip, asked: (await lastCall("cloud_link")).args.path };
+};
+const sharedLink = await copied("/docs/notes.md");
+const financeLink = await copied("/docs/Restricted/Finance/budget.md");
+const privateLink = await copied("/docs/Private/journal.md");
+const strayMenu = await menuOn(row("/docs/Restricted/stray.md"));
+await closeMenu();
+step(
+  "Copy link on a note: the link goes on the clipboard and the toast says who can open it — everyone, a folder's people, only you; a note in no folder has none",
+  sharedLink.asked === "/docs/notes.md" &&
+    sharedLink.clip.startsWith("https://doklin.cc/open#d=notes.example.com&w=w-1&f=f-") &&
+    sharedLink.toast.includes("Link copied. Everyone in Notes can open it.") &&
+    financeLink.clip.includes("&s=s-finance0&") &&
+    financeLink.toast.includes("Only the people in “Finance” can open it.") &&
+    privateLink.toast.includes("Only you can open it") &&
+    !strayMenu.includes("Copy link"),
+  [sharedLink.toast, financeLink.toast, privateLink.toast].join(" / "),
 );
 
 /* 4 — New restricted folder…: a name, and who is in it. */

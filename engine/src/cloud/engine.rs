@@ -158,7 +158,32 @@ pub enum EngineCmd {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// *Copy link*: the section and file id of `rel` (workspace-relative),
+    /// and who can open it. A file made a moment ago has no id until a pass
+    /// has taken it in, so one runs first when it has none.
+    LinkTo {
+        rel: String,
+        reply: oneshot::Sender<Result<Linked, String>>,
+    },
+    /// A link followed: where the file it names is on this device,
+    /// workspace-relative. What another device wrote a moment ago reaches
+    /// this one on a poll, so one runs first when it is not here.
+    Follow {
+        space: Option<String>,
+        file: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Shutdown,
+}
+
+/// What a link to one file needs from the engine that holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Linked {
+    /// The space the file is in; None is the shared workspace.
+    pub space: Option<String>,
+    pub file: String,
+    /// Who can open the link, as a sentence: "Everyone in Acme can open it."
+    pub who: String,
 }
 
 /// Why an engine's task ended.
@@ -399,6 +424,34 @@ impl<R: Remote> Engine<R> {
             .filter(|unit| !unit.is_shared())
             .find_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit.id.clone(), rel)))
             .or_else(|| self.shared().in_unit(ws_rel).map(|rel| (SHARED.to_string(), rel)))
+    }
+
+    /* ----- links ----- */
+
+    /// What a link to the file at `ws_rel` names, and who can open it. None
+    /// for a path in no section, and for a file with no id yet.
+    pub(crate) fn linked(&self, ws_rel: &str) -> Option<Linked> {
+        let (id, rel) = self.place(ws_rel)?;
+        let unit = self.units.get(&id)?;
+        let file = unit.file_id_at(&rel)?;
+        let who = if id == SHARED {
+            format!("Everyone in {} can open it.", self.cfg.name)
+        } else if id.starts_with("p-") {
+            "Only you can open it, on any device of yours.".to_string()
+        } else {
+            format!("Only the people in “{}” can open it.", unit.name)
+        };
+        Some(Linked { space: (id != SHARED).then_some(id), file, who })
+    }
+
+    /// Where the file a link names is here, workspace-relative: only one
+    /// this device holds and has on disk. A section this person is not in
+    /// is no unit here, so a link into it finds nothing — the same as one to
+    /// a page that was deleted, and as one to a page that never was.
+    pub(crate) fn follow(&self, space: Option<&str>, file: &str) -> Option<String> {
+        let unit = self.units.get(space.unwrap_or(SHARED))?;
+        let synced = unit.state.files.get(file)?;
+        unit.root.join(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
     }
 
     /* ----- status ----- */
@@ -1750,6 +1803,32 @@ impl<R: Remote> Engine<R> {
                     }
                     Some(EngineCmd::DeleteSpace { id, reply }) => {
                         let _ = reply.send(self.delete_space(&id).await);
+                    }
+                    Some(EngineCmd::LinkTo { rel, reply }) => {
+                        let linked = if self.place(&rel).is_none() {
+                            Err("that file is in no section, so it syncs nowhere and has no link".to_string())
+                        } else {
+                            if self.linked(&rel).is_none() && self.can_cycle() {
+                                let _ = self.pass(Which::Dirty).await;
+                                next_poll = self.next_poll_after_cycle();
+                            }
+                            self.linked(&rel).ok_or_else(|| {
+                                "that file hasn't synced yet, so it has no link: try again once it has".to_string()
+                            })
+                        };
+                        let _ = reply.send(linked);
+                    }
+                    Some(EngineCmd::Follow { space, file, reply }) => {
+                        if self.follow(space.as_deref(), &file).is_none() && self.can_cycle() {
+                            let _ = self.poll_and_maybe_cycle().await;
+                            next_poll = Instant::now() + POLL_INTERVAL;
+                        }
+                        let _ = reply.send(self.follow(space.as_deref(), &file).ok_or_else(|| {
+                            format!(
+                                "that page isn't one you can open in {}: it may have been deleted, or moved where you can't see it",
+                                self.cfg.name
+                            )
+                        }));
                     }
                 },
                 ev = fs_events.recv(), if watching => match ev {

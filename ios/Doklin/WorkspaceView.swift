@@ -51,6 +51,12 @@ struct WorkspaceView: View {
         .onChange(of: workspace.left) { _, left in
             if let left { close(left) }
         }
+        // A followed link's page opens over whatever is showing.
+        .onChange(of: device.opening, initial: true) { _, opening in
+            guard let opening, opening.root == workspace.root else { return }
+            device.opened(opening)
+            if path.last != .document(opening.path) { path.append(.document(opening.path)) }
+        }
         // What sync said, and what was just done, sit over the sync line, as
         // a Mac's notes sit at the bottom: at the top they would cover the
         // screen's navigation bar.

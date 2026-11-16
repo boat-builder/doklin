@@ -24,6 +24,7 @@
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
+import { readWorkspace } from "./bucket";
 import { Refusal, newFileId, type Tx } from "./commit";
 import {
   Index,
@@ -46,7 +47,7 @@ import {
 import type { Env } from "./env";
 import { anchorResolves, elementsOf } from "./htmlText";
 import { json, readJsonObject } from "./http";
-import { MAX_FILE_BYTES, blobKey } from "./layout";
+import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
@@ -209,6 +210,46 @@ export async function getTree(c: Call): Promise<Response> {
   listing.files.sort((a, b) => byName(a.path, b.path));
   // Said, never left out silently: list one of these on its own.
   return json({ ...listing, ...(notListed.length > 0 ? { notListed } : {}) });
+}
+
+/**
+ * Where a link to a page leads, as this agent's person names the path. A
+ * link (engine/src/cloud/link.rs) names its workspace, the space its file is
+ * in ("" the shared workspace) and the file's id — never a path, so that a
+ * rename keeps it and no folder's name is in it. A document comes back as
+ * the tree names it (its stem), a plain file in full.
+ *
+ * A space this person is not in, a file deleted, one that never was and a
+ * link from another workspace on this domain are all one answer, the same
+ * a Mac gives: a restricted folder is never told apart from nothing.
+ */
+export async function getFind(c: Call): Promise<Response> {
+  const q = c.url.searchParams;
+  const fid = q.get("file") ?? "";
+  const space = q.get("space") ?? "";
+  const workspace = q.get("workspace") ?? "";
+  if (!ID_RE.test(fid) || !ID_RE.test(workspace) || (space !== "" && !SPACE_ID_RE.test(space))) {
+    return json({ error: "a link names its workspace, its section and its file by their ids — pass them as the link has them" }, 400);
+  }
+  const nothing = json(
+    { error: "there is no page at that link this agent can open — it was deleted, or it is somewhere its person is not" },
+    404,
+  );
+  const bound = await readWorkspace(c.env);
+  if (!bound) return notBound();
+  if (bound.id !== workspace) return nothing;
+  const all = await c.places.all();
+  if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
+  const section = all.find((s) => s.space === space);
+  if (!section) return nothing;
+  const tree = await openTree(inSection(c, section));
+  if (!tree) return notBound();
+  const file = tree.manifest.files[fid];
+  if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) return nothing;
+  const named = nameOf(file.path);
+  if (named.version === null) return json({ kind: "file", path: file.path });
+  const alone = new Index(tree.manifest.files).doc(named.stem).mds.length <= 1;
+  return json({ kind: "document", path: alone ? named.stem : file.path });
 }
 
 /** Which version a read means: the one asked for, else the markdown, else the html. */

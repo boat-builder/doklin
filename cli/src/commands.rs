@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::args::Args;
 use crate::creds::{self, Workspace};
 use crate::http::{Body, Client, Reply};
+use crate::link::PageLink;
 use crate::text::{ago, list, plural, size, stamp, version_word};
 use crate::Failure;
 
@@ -48,6 +49,29 @@ fn session(ctx: &Ctx) -> Result<Session, Failure> {
     let ws = creds::pick(&all, ctx.workspace.as_deref())?.clone();
     let client = Client::new(&ws.endpoint, Some(&ws.token));
     Ok(Session { client, ws })
+}
+
+/// Every word that is a link to a page becomes the path it leads to, as this
+/// agent's person names it — asked of the domain the link is to, which is
+/// then the workspace the command runs in. A link only names ids; the domain
+/// says where they lead, and says the same of every page this agent cannot
+/// open.
+pub fn follow_links(args: &mut Args, ctx: &mut Ctx) -> Result<(), Failure> {
+    for i in 0..args.positionals.len() {
+        let Some(link) = PageLink::parse(&args.positionals[i]) else { continue };
+        if let Some(wanted) = ctx.workspace.as_deref() {
+            let wanted = creds::domain_of(wanted.trim_end_matches('/'));
+            if !wanted.eq_ignore_ascii_case(&link.domain) {
+                return Err(Failure::usage(format!("that link is to a page in {}, not in {}", link.domain, wanted)));
+            }
+        }
+        ctx.workspace = Some(link.domain.clone());
+        let s = session(ctx)?;
+        let query = [("workspace", link.ws_id.as_str()), ("space", link.space.as_str()), ("file", link.file.as_str())];
+        let found = s.client.send("GET", "find", &query, &[], None)?.json()?;
+        args.positionals[i] = text(&found, "path").to_string();
+    }
+    Ok(())
 }
 
 fn strings(v: &Value) -> Vec<String> {

@@ -16,6 +16,9 @@ You work as one person's agent, and see what they see. A path says where a thing
   Restricted/<folder>/…        only the people in that folder
   anything else                shared with everyone in the workspace
 
+Wherever a command takes a document, it also takes a link to one, as people copy it
+in the app (https://doklin.cc/open#…); the command then runs in that link's workspace.
+
 Getting in
   login <domain> <code>        log this machine in, with the line you were given
                                (on a Mac where Doklin is connected: Doklin → Install Command Line Tool)
@@ -42,7 +45,7 @@ Changing
   unpublish <doc, folder or address>
 
 This Mac
-  open [path…]                 open files or folders here in the Doklin app; no login
+  open [path or link…]         open files, folders or links here in the Doklin app; no login
 
 Everywhere
   -w <domain>     which workspace, when this machine is logged in to several

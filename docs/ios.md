@@ -17,6 +17,7 @@
 - **Comments are written as the Mac writes them**: bare markers in the markdown, bodies in `<stem>.meta.jsonl`, byte for byte — sync merges that file line by line with a Mac's. `Comments/` ports `src/criticMarkup.ts`, `src/metaFile.ts` and the worker's placement and html-anchor rules, held to `verify-harness/comments-fixture.json` with the TS (**change both**). Entries are stamped to the second; an emptied meta file is emptied, never deleted. The author is the engine's `device_name`.
 - **Rules the Mac's frontend states are ported, not re-invented**, and both sides say so: `timeAgo`/`timeUntil` (`Clock`), `widerAudience` (`Sections.wider`), `mayInviteAgain`, `buildAgentLoginPrompt` (`AgentPrompt`). An address (slug) is checked as the Mac checks it; the engine has the last word.
 - **History has no Trash either**: a moment's restore removes what the Mac would move to the Trash, so the moment kept before it is pinned (never thinned) and what went stays under Recently deleted. Recently deleted and the timeline read this iPhone's own stores, since it joined; a note's versions also include what other devices mirrored.
+- **A link to a page opens the app** (rules: [cloud.md](cloud.md) *Links*): from doklin.cc straight, by `applinks:doklin.cc` in `Doklin.entitlements`, or as `doklin://` (`Info.plist`), both through `onOpenURL` → `Workspaces.follow`, whose page the workspace's screens open (`opening`). A tap on one in a note stays in the app (`Workspaces.isPageLink`).
 - **The engine's sentences say what this device is** (`Setup::device_kind`, `UIDevice.current.model`: iPhone, iPad).
 - **Colours are generated, never typed**: `node scripts/ios-colors.mjs` writes every colour set in `Assets.xcassets` from `src/styles/tokens.css`, for the names `Theme.swift` asks for. `--check` runs in CI.
 - **`ios/Doklin/PrivacyInfo.xcprivacy` lists every "required reason" API the app calls, the engine's Rust included** (UserDefaults; file timestamps, which Rust's `stat` counts as): App Store Connect checks each upload's binary against it. A new one (a free-space check, `mach_absolute_time`) is an entry there too.
@@ -33,7 +34,8 @@
 | `ios/Doklin/` | SwiftUI views. UIKit only in `SourceEditor.swift` and `PlatformViews.swift` |
 | `ios/DoklinUITests/` | One class per journey through the real screens (`*UITests.swift`), each joining with a line of its own; run by `drive-ios.mjs --app`, skipped without it. `UITestCase.swift` asks the drive, at the address in `DOKLIN_TEST_DRIVE`, for what only the domain's side can do: `/line` (a device line, minted as the class starts: a person has one code waiting at a time), `/editing?path=` (another device editing), `/deleted?name=` (a restricted folder deleted elsewhere) |
 | `ios/Doklin.xcodeproj` | The app and its UI tests. Both folders are synchronized: a file added there is in the build, with no project edit |
-| `ios/Info.plist` | Only what build settings cannot say (plain http to a worker on this machine). The rest is `INFOPLIST_KEY_*` |
+| `ios/Info.plist` | Only what build settings cannot say (plain http to a worker on this machine, the `doklin` scheme). The rest is `INFOPLIST_KEY_*` |
+| `ios/Doklin.entitlements` | The associated domain links open from. The domain's side is `site/public/.well-known/apple-app-site-association`, which names the app by `DEVELOPMENT_TEAM` and `PRODUCT_BUNDLE_IDENTIFIER` (held to the project by `link.rs`'s tests) |
 
 ## Traps
 
@@ -42,7 +44,8 @@
 - The app gets about thirty seconds when it leaves the screen: `settle` flushes versions and syncs every workspace inside a background task. Nothing syncs while iOS has it suspended.
 - `UIDevice.current.name` is the generic model name ("iPhone") without Apple's user-assigned-name entitlement: that is what Devices, presence and comment authors show.
 - The sync line, the notices and the toast sit in one bottom inset of the `NavigationStack`; a pushed screen's own bottom bar would sit under it, so screens put their actions at the top.
-- `Info.plist` must stay outside `ios/Doklin/`: inside the synchronized folder it is copied as a resource too, and the build fails on two commands producing one file.
+- `Info.plist` and `Doklin.entitlements` stay outside `ios/Doklin/`: inside the synchronized folder a file is copied as a resource too, and the build fails on two commands producing one file.
+- Apple reads the association file from its own cache, refreshed when the app is installed: a change to it reaches phones only once doklin.cc is deployed (`cd site && wrangler deploy`), and then only on the next install. The archive that first carries the entitlement makes Xcode add *Associated Domains* to the App ID.
 - `"\r\n"` is one `Character` in Swift. Lines are split by `MarkdownLines.split`, and a ticked box changes one character in place, so a note's line endings survive.
 - A block's `line` is a line of the file, frontmatter included: `togglingTask` takes that number as it is.
 - `x-doklin-client` is `ios/<MARKETING_VERSION>`. The version is the project's, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.

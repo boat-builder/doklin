@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   cloudForWorkspace,
   cloudNeedsAttention,
+  cloudLink,
   cloudPublish,
   cloudRemoved,
   cloudSetActivity,
@@ -2312,6 +2313,21 @@ export default function App() {
       console.error("open external failed", e),
     );
   }, []);
+
+  // *Copy link* on a file: the link that opens it in Doklin, and who that is
+  // for. A file made a moment ago is synced first, so this can take a beat.
+  const copyPageLink = useCallback(
+    async (path: string) => {
+      try {
+        const link = await cloudLink(path);
+        await navigator.clipboard.writeText(link.url);
+        pushToast("done", `Link copied. ${link.who}`);
+      } catch (e) {
+        pushToast("error", `Couldn't copy a link to ${basename(path)}: ${errText(e)}.`);
+      }
+    },
+    [pushToast],
+  );
 
   // A link the reader clicked inside a note (see linkOpen.ts for which clicks
   // count as following one). Notion's split, applied to files: an external URL
@@ -5495,6 +5511,7 @@ export default function App() {
           onPublishFolder={cloudForRoot ? (dir) => setPublishFolder(dir) : undefined}
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
+          onCopyPageLink={cloudForRoot ? (path) => void copyPageLink(path) : undefined}
           onHistory={(path) => void openHistory(path)}
           onWorkspaceHistory={(dir) => setHistoryRoot(dir ?? workspaceRoot)}
           deletedCount={deletedFiles.length}
