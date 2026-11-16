@@ -112,30 +112,50 @@ final class EditorPage: NSObject {
     func open(_ markdown: String, meta: String?, folder: String, files: WorkspaceFiles, block: Int?, prefix: String?) async {
         await whenReady()
         self.files = files
-        let base = "/doc/" + (folder.isEmpty ? "" : folder.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/") + "/")
-        var input: [String: Any] = ["markdown": markdown, "base": base, "meta": meta ?? NSNull()]
-        input["block"] = block ?? NSNull()
-        input["prefix"] = prefix ?? NSNull()
-        _ = try? await view.callAsyncJavaScript("await window.doklin.load(input)", arguments: ["input": input], contentWorld: .page)
+        let folders = folder.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+        let base = "/doc/" + folders.map { $0 + "/" }.joined()
+        let nothing: Any = NSNull()
+        let input: [String: Any] = [
+            "markdown": markdown,
+            "base": base,
+            "meta": meta.map { $0 as Any } ?? nothing,
+            "block": block.map { $0 as Any } ?? nothing,
+            "prefix": prefix.map { $0 as Any } ?? nothing,
+        ]
+        _ = await run("await window.doklin.load(input)", ["input": input])
     }
 
     func command(_ name: String) {
-        Task { _ = try? await view.callAsyncJavaScript("window.doklin.command(name)", arguments: ["name": name], contentWorld: .page) }
+        Task { _ = await run("window.doklin.command(name)", ["name": name]) }
     }
 
     func editable(_ on: Bool) {
-        Task { _ = try? await view.callAsyncJavaScript("window.doklin.editable(on)", arguments: ["on": on], contentWorld: .page) }
+        Task { _ = await run("window.doklin.editable(on)", ["on": on]) }
     }
 
     /// What the note would hold if it were written now.
     func markdown() async -> String? {
         guard ready else { return nil }
-        return (try? await view.callAsyncJavaScript("return window.doklin.markdown()", arguments: [:], contentWorld: .page)) as? String
+        return await run("return window.doklin.markdown()") as? String
     }
 
     /// Put the keyboard away.
     func blur() {
-        Task { _ = try? await view.callAsyncJavaScript("window.doklin.blur()", arguments: [:], contentWorld: .page) }
+        Task { _ = await run("window.doklin.blur()") }
+    }
+
+    /// Run `body` in the page, as an async function of `arguments`; its
+    /// answer, or nil.
+    private func run(_ body: String, _ arguments: [String: Any] = [:]) async -> Any? {
+        let view = self.view
+        return await withCheckedContinuation { (done: CheckedContinuation<Any?, Never>) in
+            view.callAsyncJavaScript(body, arguments: arguments, in: nil, in: .page) { result in
+                switch result {
+                case .success(let value): done.resume(returning: value is NSNull ? nil : value)
+                case .failure: done.resume(returning: nil)
+                }
+            }
+        }
     }
 
     /// The message handler and navigation delegate, held weakly by the page
