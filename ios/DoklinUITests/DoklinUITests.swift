@@ -75,8 +75,9 @@ final class DoklinUITests: UITestCase {
 
         // Home has what was just changed here, by you.
         home()
-        expect(marked("recent-Phone list"), "the new note among what changed")
-        expect(text(containing: "You created"), "who made it")
+        // Made here and then changed here: the last change is the edit, by you.
+        let row = expect(marked("recent-Phone list"), "the new note among what changed")
+        XCTAssertTrue(row.label.contains("You edited"), "who changed it last, in \(row.label)")
         record("home, after the edits")
 
         // Search finds a note by words in it.

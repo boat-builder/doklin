@@ -169,7 +169,13 @@ class UITestCase: XCTestCase {
             _ = marked("line").waitForExistence(timeout: 10)
         }
         let field = expect(marked("line"), "the line field")
-        field.tap()
+        // Just after a removal the first screen is still settling, and a tap
+        // can land before the field takes the keyboard.
+        for _ in 0..<6 {
+            field.tap()
+            if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
+            Thread.sleep(forTimeInterval: 1)
+        }
         field.typeText(line)
         marked("join").tap()
         expect(marked("workspace-menu"), "Home, once joined", timeout: 60)

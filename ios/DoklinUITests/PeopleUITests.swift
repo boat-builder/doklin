@@ -209,10 +209,18 @@ final class PeopleUITests: UITestCase {
         // Its access is the domain's: offered once the domain has the new name.
         let money = expect(marked("entry-Money"), "the folder, renamed")
         let manage = app.buttons["Manage access…"]
+        // A tap above the menu shuts it; one that misses leaves the row covered.
+        let shutMenu = {
+            for _ in 0..<4 where !money.isHittable {
+                self.app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+                Thread.sleep(forTimeInterval: 1)
+            }
+        }
         for _ in 0..<9 where !manage.exists {
+            shutMenu()
             money.press(forDuration: 1.0)
             if manage.waitForExistence(timeout: 3) { break }
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+            shutMenu()
             Thread.sleep(forTimeInterval: 4)
         }
         expect(manage, "Manage access on the renamed folder, once the domain has the new name").tap()
