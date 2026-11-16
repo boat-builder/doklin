@@ -99,7 +99,7 @@ The deciding row is the second: Milkdown normalises markdown when it loads a doc
 - **The bar** is native, pinned to `keyboardLayoutGuide`, not the web view's input accessory. *Aa* swaps the keyboard for the *Turn into* panel.
 - **Warm and invisible.** One web view is made after the first frame and kept. *Edit* hands it the markdown and the top block in view (by block index, its line as a check) and cross-fades. Inter, Literata and Roboto Mono (OFL, in `src/assets/fonts`) are bundled into the app (`UIAppFonts`) and the native reader uses them too, so the two look the same.
 - **Leases**: taken on *Edit* (`model.editing(true)`), given back on *Done* and on leaving, as now. Reading takes none.
-- `SourceEditor.swift` stays behind *More → Edit as markdown* for the rare case, or goes.
+- **Only the rich editor, as on the Mac.** `SourceEditor.swift` and its keyboard bar go once this lands; there is no plain-markdown mode. What shows as text is what the Mac shows as text: a code block edits as code, a diagram block (```` ```mermaid ````, ```` ```svg ````) shows its source while the caret is in it, and the frontmatter is split off before the editor sees it and shown read-only above the note, every write putting it back byte for byte (`src/frontmatter.ts`, [architecture.md](architecture.md) *Frontmatter*). A page is read, commented on and shared, never edited, as on the Mac.
 - Risks to try early: ProseMirror with iOS autocorrect, dictation and IME input; the web content process's memory (tens of MB); a document of several thousand lines.
 
 ### 8. Docs and tests
@@ -115,7 +115,3 @@ The deciding row is the second: Milkdown normalises markdown when it loads a doc
 3. **Changed since you read it.**
 4. **Browse and iPad**: the tree, the filter, the sidebar.
 5. **The editor**: bundle, bridge, bar, fonts. Biggest, and independent of 1–4.
-
-## Open
-
-- *Edit as markdown*: keep the plain source editor behind *More*, for what the rich editor can't show as written (raw HTML in a note, unusual markdown an agent wrote), or drop it?
