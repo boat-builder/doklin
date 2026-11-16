@@ -114,13 +114,16 @@ pub struct MirrorReport {
 
 /// Upload what this device has captured and the cloud has not, then — once a
 /// day — thin what is up there. `last_sweep_ms` lives in the engine's
-/// persisted state.
+/// persisted state. `budget` is how many uploads this pass may make: the
+/// mirror is bulk work (`super::pace`), and a first mirror of a big folder
+/// goes up over several passes rather than in one burst.
 pub async fn mirror<R: Remote>(
     remote: &R,
     store: &Store,
     device_id: &str,
     last_sweep_ms: &mut Option<u64>,
     now_ms: u64,
+    budget: &mut usize,
 ) -> RemoteResult<MirrorReport> {
     let local = store.read_index();
     let mut held = load(remote).await?;
@@ -129,7 +132,7 @@ pub async fn mirror<R: Remote>(
     let mut sent = BTreeSet::new();
 
     for attempt in 0..CAS_ATTEMPTS {
-        match push(remote, store, &local, &mut held, device_id, &mut sent, now_ms).await {
+        match push(remote, store, &local, &mut held, device_id, &mut sent, now_ms, budget).await {
             Ok(()) => break,
             // Another device moved the index between our read and our write.
             // Start again from what it says now; our uploads still stand.
@@ -165,7 +168,8 @@ async fn load<R: Remote>(remote: &R) -> RemoteResult<Held> {
 /// the snapshot, then the index entry. Blobs before the snapshot and the
 /// snapshot before the index means an interrupted pass leaves unreferenced
 /// bytes (the sweep collects them) and never an index row pointing at
-/// nothing.
+/// nothing. Stops at a snapshot the budget cannot carry whole.
+#[allow(clippy::too_many_arguments)]
 async fn push<R: Remote>(
     remote: &R,
     store: &Store,
@@ -174,6 +178,7 @@ async fn push<R: Remote>(
     device_id: &str,
     sent: &mut BTreeSet<String>,
     now_ms: u64,
+    budget: &mut usize,
 ) -> RemoteResult<()> {
     // Read once there is something to send, from the index this attempt holds.
     let mut named: Option<BTreeSet<String>> = None;
@@ -191,10 +196,25 @@ async fn push<R: Remote>(
             continue;
         };
         let named = named.get_or_insert_with(|| named_blobs(store, &held.index, device_id));
-        for hash in snap.files.values().map(|f| f.h.clone()).collect::<BTreeSet<String>>() {
-            if named.contains(&hash) || sent.contains(&hash) {
-                continue;
+        let blobs: Vec<String> = snap
+            .files
+            .values()
+            .map(|f| f.h.clone())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .filter(|hash| !named.contains(hash) && !sent.contains(hash))
+            .collect();
+        // Its blobs, the snapshot and the index: what this one costs.
+        let cost = blobs.len() + 2;
+        if cost > *budget {
+            // Whatever is left goes on a later pass, from the oldest again —
+            // but a snapshot bigger than any budget still has to go some day.
+            if *budget < cost.min(super::pace::BATCH_FILES) {
+                break;
             }
+        }
+        *budget = budget.saturating_sub(cost);
+        for hash in blobs {
             let Some(blob) = store.read_blob_gz(&hash) else { continue };
             remote.put_version_blob(&hash, blob).await?;
             sent.insert(hash);

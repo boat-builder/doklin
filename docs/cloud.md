@@ -1,9 +1,9 @@
 # Cloud
 
 A workspace connects to one domain: a Cloudflare Worker + R2 bucket + D1
-database on the user's own account. Connected = the whole folder is backed
-up and synced on every Mac holding it; publishing is a flag in the synced
-manifest, rendered by the worker from the synced files.
+database on the user's own account. Connected = the folder's documents are
+backed up and synced on every Mac holding it; publishing is a flag in the
+synced manifest, rendered by the worker from the synced files.
 
 - [cloud-worker/README.md](../cloud-worker/README.md) — wire contract: routes, bucket, D1, manifest v4, auth.
 - [cloud-publishing.md](cloud-publishing.md) — public pages.
@@ -31,6 +31,8 @@ manifest, rendered by the worker from the synced files.
 7. **No accounts, dashboard or terminal for the user.** Setup and teardown are prompts for an agent running wrangler; the update is a script.
 8. **The worker imports only pure `src/` modules** — nothing touching Tauri or React.
 9. **The engine crate (`engine/`) knows nothing of the app around it**: no Tauri, no Swift, no `cfg` on which app. What differs is said once in `Setup` and asked through `Host` (`engine/src/host.rs`). A command is written once, in the engine; each app only reaches it.
+10. **Only documents sync**: markdown, html and each document's comments (`<stem>.meta.jsonl`) — `syncs` (`engine/src/lib.rs` ⇄ `cloud-worker/src/layout.ts`, **change both**). Everything else stays on its device: the scan, the edit bus, the version store and the export never see it, and the worker refuses it.
+11. **Only a client that does not send protects the account's day** (Workers Free: 100,000 requests a day for the whole account, reset 00:00 UTC; past it every request gets Cloudflare's 1027 page). A request the worker refuses is already counted. So the engine and the CLI pace themselves; the worker's `[[ratelimits]]` only catch loops.
 
 ## Who owns what
 
@@ -38,7 +40,7 @@ manifest, rendered by the worker from the synced files.
 | --- | --- |
 | Worker | `cloud-worker/src/`; bundled to one file by `scripts/bundle-worker.mjs`, released as `doklin-cloud-worker.js` |
 | Engine crate | `engine/`: `host.rs` `Core`, `Setup`, `Host` · `paths.rs` paths as written down · `command.rs` every command by name · `cloud/` · `versions/` ([versioning.md](versioning.md)) · `ffi/` the C interface for the iPhone ([ios.md](ios.md)) |
-| Engine | `engine/src/cloud/`: `mod.rs` manager, commands · `engine.rs` task, poll, presence, status, sections · `unit.rs` one section's cycle · `space.rs` sections on disk · `remote.rs` `Remote` + `HttpRemote` · `flows.rs` bind, download, wipe · `merge.rs` · `scan.rs` · `bus.rs` · `config.rs` · `invite.rs` · `manifest.rs` wire types · `status.rs` · `versions.rs` version mirror · `tests.rs` in-memory worker |
+| Engine | `engine/src/cloud/`: `mod.rs` manager, commands · `engine.rs` task, poll, presence, status, sections · `unit.rs` one section's cycle · `space.rs` sections on disk · `remote.rs` `Remote` + `HttpRemote` · `pace.rs` request count, allowances, bulk lane · `flows.rs` bind, download, wipe · `merge.rs` · `scan.rs` · `bus.rs` · `config.rs` · `invite.rs` · `manifest.rs` wire types · `status.rs` · `versions.rs` version mirror · `tests.rs` in-memory worker |
 | Mac app's side | `src-tauri/src/engine.rs` its `Setup` and `Host` · `cloud.rs`, `versions.rs` one Tauri command per engine command · `edits.rs` the edit bus (`Core::touched`) |
 | Frontend contract | `src/cloud.ts`: types, `invoke` wrappers, listeners, shared derivations |
 | Prompts, naming | `src/cloudPrompts.ts` (`build*Prompt`, `resourceName`, `deploymentNames`) |
@@ -47,18 +49,19 @@ manifest, rendered by the worker from the synced files.
 
 ## Engine ⇄ frontend contract
 
-- Commands: `cloud_*` in `engine/src/cloud/mod.rs`, each with a Tauri wrapper in `src-tauri/src/cloud.rs` and an arm in `engine/src/command.rs` (a test fails without the arm), wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
+- Commands: `cloud_*` in `engine/src/cloud/mod.rs`, each with a Tauri wrapper in `src-tauri/src/cloud.rs` and an arm in `engine/src/command.rs` (a test fails without the arm), wrapped in `src/cloud.ts`. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-pending-adds`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
 - Every path in a status or an event is workspace-relative, whichever section it is in (`Private/x.md`); a lease's `path` is that, lowercased.
 - Payload types: `status.rs` serde structs ⇄ `src/cloud.ts` ⇄ `ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift`. **Change all three.**
-- `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes revoked worker-outdated error`.
+- `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes pending-adds revoked worker-outdated limited error`. `usage` says what this device spent today and the mode it puts sync in (*Pacing*); its sentences are the surfaces', from `usage`, except `limited`'s, which is the engine's `error`.
+- The Mac reports window focus from Rust (`WindowEvent::Focused` → `cloud_set_focus`, the window's folder from the registry); the iPhone from `woke`/`settle`. No frontend code is involved.
 - A status `by` is already a name (resolved via `/api/meta` `people`).
 
 ## Engine behaviour
 
 **Inputs** (each wakes a cycle or a poll):
-- Edit bus: every app write command ends with `edits::touched(&app, &path)` (→ engine and versioner). A new write command must too. Settles 1.5 s (`TOUCH_SETTLE`). `scan::rel_for_touch` drops hidden segments and the engine's temp files.
+- Edit bus: every app write command ends with `edits::touched(&app, &path)` (→ engine and versioner). A new write command must too. Settles 1.5 s (`TOUCH_SETTLE`). `scan::rel_for_touch` drops hidden segments, the engine's temp files and files that do not sync.
 - Watcher (`notify`): settles 5 s (`FS_SETTLE`); optional — the other inputs still sync.
-- Poll every 15 s (`POLL_INTERVAL`): `GET /api/poll`, or `POST` when a presence beat is owed; a new etag — the shared manifest's or a space's, all in the one answer — triggers a pass, and so does a poll that gets through while the phase is `offline`.
+- Poll by attention (`Engine::poll_gap`): every 15 s (`POLL_INTERVAL`) while a window of the workspace is focused and used in the last 5 min; 60 s unfocused or idle 5–30 min; 5 min idle longer; a focus after a quiet spell polls at once. `GET /api/poll`, or `POST` when a presence beat is owed (at most every 45 s, `PRESENCE_BEAT`); the beat's `ttl` is 2.5 × the gap to the next one (90 s–15 min), so an idle device stays listed. A new etag — the shared manifest's or a space's, all in the one answer — triggers a pass, and so does a poll that gets through while the phase is `offline`.
 - Commands: `EngineCmd` in `engine.rs`.
 - Hints say *when*, never *what*: the cycle always walks the whole tree and decides from content.
 
@@ -86,7 +89,16 @@ manifest, rendered by the worker from the synced files.
 - A restricted folder's row is not dragged, cut or trashed: trashing it would only bring it back whole. It is left or deleted from *Manage access…*.
 - A note is never dropped straight under `Restricted/` (`canDrop`); a folder dropped there is a new restricted folder, and is confirmed.
 
-**A pass** (`Engine::pass`): survey every unit's folder (stat only, no request), then cycle the units that changed, were poked (a queued page, a confirmed deletion) or that the poll said moved. *Sync now* and first contact cycle all. With several units in a pass every manifest is fetched before any is applied.
+**A pass** (`Engine::pass`): survey every unit's folder (stat only, no request), then cycle the units that changed, were poked (a queued page, a confirmed deletion), owe bulk work, or that the poll said moved. *Sync now* and first contact cycle all. With several units in a pass every manifest is fetched before any is applied.
+
+**Pacing** (`pace.rs`; the numbers are the worker's, `limits` in `/api/meta` and every poll, per the plan setting — the engine has none of its own):
+- Every request with a bearer is counted in `HttpRemote::auth`, per UTC day, in `<state_dir>/usage.json`; every 15 min one carries `x-doklin-used`, and the poll's `limits.fleetToday` is everyone's sum.
+- Express lane: polls, manifest reads/writes, and a cycle's transfers while ≤ 50 (`EXPRESS`). Past that, the bulk lane: a batch (100 files / 8 MB) a cycle from a token bucket (200, refilling at `bulkPerSecond`); the app's own edits (the edit bus) always go express. Downloads too: what a cycle cannot take is `owed` (persisted), never pushed over or read as deleted until it arrives. The mirror and blob GC draw on the same bucket.
+- Modes: `bulk-waits` (this device past `deviceBulk`, liftable for the day by `cloud_lift_wait`; or everyone past `fleetBulkWaits`, not liftable) — bulk waits for 00:00 UTC; `slow` (past `deviceCeiling` or `fleetSlow`) — no bulk, a poll and a pass a minute at most.
+- A worker whose `/api/meta` carries no `limits` predates them: `worker-outdated` until it is updated.
+- A connect or a join is a person's own act and is not paced.
+
+**The retry clock** (`Engine::clock`): a failed pass, poll or probe pushes the next try out 15 s, 30 s, 1, 2, 5, then 10 min (±20 %); a success resets it; a touch during it waits for it; a command from the person does not. `429` (`RemoteError::Slowed`) waits at least its `Retry-After` and leaves the phase, with "The domain asked this Mac to slow down." Cloudflare's 1027 page (`RemoteError::DailyLimit`, recognised by a non-JSON body naming 1027): phase `limited`, nothing sent but a probe every 30 min until 00:00 UTC plus up to 10 min.
 
 **A move between sections:**
 - Here (`pair_moves`): a file gone from one unit and new in another with the same name and hash. The unit it went to cycles first; the source tombstone carries `to` and is written only once the destination holds the file; it never counts toward the mass-delete valve.
@@ -96,11 +108,13 @@ manifest, rendered by the worker from the synced files.
 **The cycle** (`Unit::cycle_inner`), one section's:
 1. fetch the manifest since our etag;
 2. `apply_remote`: downloads, renames, tombstoned deletions to the Trash; three-way merge (`merge.rs`, diffy) where both sides moved; conflict copy `Name (conflict — Alice, Jul 11 14.32).md` on overlap, binary content or no base. Identical bytes on both sides are adopted as synced, never merged;
-3. `scan_local` + `stage_local`; mass-delete valve: > 30 % of files and ≥ 5 gone in one scan → hold, phase `pending-deletes`, wait for `cloud_confirm_deletes`;
+3. `scan_local` + `stage_local`; mass-delete valve: > 30 % of files and ≥ 5 gone in one scan → hold, phase `pending-deletes`, wait for `cloud_confirm_deletes`. Many-new-documents valve (`Engine::weigh_new`, from the surveys, across units): `manyNew` (200) or more new documents in one pass — not renames, not moves between sections — are held, phase `pending-adds`, `cloud-pending-adds` once; `cloud_confirm_adds {sync: true}` sends them (and lifts this device's bulk wait for the day), `false` leaves them until more arrive or *Sync now*. Held in memory, found again after a restart;
 4. `build_manifest` + `fold_public`;
-5. upload blobs (idempotent), then CAS the manifest; a lost race refetches and redoes, 4 attempts.
+5. upload blobs, then CAS the manifest; a lost race refetches and redoes, 4 attempts. A new file's id is written down before its bytes go (`pending_new`) and each upload once it lands (`uploaded`, 12 h), so a lost race, a batch, a quit or a crash sends nothing twice and leaves nothing under an id no manifest names.
 
 **Traps.**
+- Leaving a manifest without a tombstone is a deletion (`apply_remote`). So anything a rule takes out of the manifests (the md + html rule) leaves every device's state first (`forget_out_of_scope`, on load), and every device updates before the worker.
+- A cycle that holds bulk work leaves `Unit::owes`; the task comes back for it when the bucket holds a batch (`bulk_due`), or at the reset while bulk waits.
 - Every fallible step lives in `cycle_inner` so every exit funnels through `pass`'s one status report; a `?` in `pass` skips offline/revoked reporting.
 - `409 {taken}` on a manifest (`RemoteError::Taken`): the queued page is dropped, `cloud-address-taken` says so, the rest of the cycle goes again.
 - A missing root (unmounted, renamed) touches nothing: phase `error`.

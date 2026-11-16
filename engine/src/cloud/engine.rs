@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
@@ -33,23 +33,57 @@ use super::manifest::{
     SpaceKind,
 };
 use super::merge::conflict_copy_path;
+use super::pace::{next_midnight_ms, Mode, Pacer, MIN_BATCH};
 use super::remote::{Remote, RemoteError, RemoteResult};
 use super::scan::{hash16, now_ms, read_file_checked, rel_path};
 use super::space::{self, SpaceMarker, PRIVATE_DIR, SHARED};
 use super::status::{
     emit_statuses, CloudStatus, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, SpaceStatus, StatusTable,
-    VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_SPACE_LEFT,
+    UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
-use super::unit::{Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
+use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
 use crate::versions::store::Snapshot as VersionSnapshot;
 
 /* ---------- Tunables ---------- */
 
-/// Poll cadence. Edits trigger cycles through the bus and the watcher, so
-/// this is the ceiling on how stale a quiet workspace can get, not the feel
-/// of sync.
+/// Poll cadence while a window of the workspace has focus and is in use.
+/// Edits trigger cycles through the bus and the watcher, so this is the
+/// ceiling on how stale a workspace someone is looking at can get, not the
+/// feel of sync. Attention sets the rest (`Engine::poll_gap`): every poll is
+/// a request against the account's day, and a Mac left on overnight need
+/// not spend thousands of them on a folder nobody is looking at.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// No window of it focused, or nothing done in it for `IDLE_AFTER`.
+pub(crate) const POLL_BACKGROUND: Duration = Duration::from_secs(60);
+/// Nothing done in it for `AWAY_AFTER`.
+pub(crate) const POLL_AWAY: Duration = Duration::from_secs(5 * 60);
+pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
+pub(crate) const AWAY_AFTER: Duration = Duration::from_secs(30 * 60);
+/// How long a beat says it holds (`Beat::Here::ttl`): two and a half of the
+/// gaps to the next one, so one lost beat is survivable, within the
+/// worker's bounds.
+const BEAT_TTL_MIN: Duration = Duration::from_secs(90);
+const BEAT_TTL_MAX: Duration = Duration::from_secs(15 * 60);
+/// The retry clock: how long after the n-th failure in a row the next try
+/// may go, each ±20 %. A success starts it again.
+const BACKOFF: [Duration; 6] = [
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+    Duration::from_secs(600),
+];
+/// While the account's daily requests are used up: one probe this often.
+const LIMITED_PROBE: Duration = Duration::from_secs(30 * 60);
+/// Devices come back after the daily reset spread over this long, rather
+/// than all in its first second.
+const LIMITED_SPREAD_MS: u64 = 10 * 60 * 1000;
+/// In slow mode, a pass at most this often (touches coalesce).
+const SLOW_PASS_GAP: Duration = Duration::from_secs(60);
+/// The most the version mirror sends in one pass.
+const MIRROR_BUDGET: usize = 200;
 /// Filesystem events (external editors, git, Finder) batch this long before
 /// a pass runs.
 pub const FS_SETTLE: Duration = Duration::from_millis(5000);
@@ -99,8 +133,14 @@ pub enum EngineCmd {
     /// The user chose *Take over* on a document another Mac holds (absolute
     /// path): the next beat claims it from whoever has it.
     TakeOver(String),
+    /// A window of this workspace gained focus, or none has it any more.
+    Focus(bool),
     Pause(bool),
     ConfirmDeletes,
+    /// The many-new-documents valve: true is *Sync them*, false *Not now*.
+    ConfirmAdds(bool),
+    /// *Send them now*: this device's bulk wait is lifted until 00:00 UTC.
+    LiftWait,
     Publish {
         req: PublishRequest,
         reply: oneshot::Sender<Result<String, String>>,
@@ -221,6 +261,35 @@ pub(crate) enum Which {
     Moved(BTreeSet<String>),
 }
 
+/// The account's daily requests are used up (`Phase::Limited`).
+struct Limited {
+    /// After the reset, spread: when sync goes again by itself.
+    until_ms: u64,
+    /// The next probe — sooner than that only if a plan upgrade lifted it.
+    next_try: Instant,
+}
+
+/// The many-new-documents valve: what the last pass found, and what the
+/// person said.
+#[derive(Default)]
+struct Adds {
+    /// New documents the last pass found, when that was enough to hold.
+    held: u32,
+    /// Where they are: workspace-relative folders, most first.
+    folders: Vec<(String, u32)>,
+    /// *Sync them*: they go, until a pass finds fewer than the threshold.
+    confirmed: bool,
+    /// *Not now*, said when this many were held: not asked again until more
+    /// arrive, or *Sync now*.
+    declined: Option<u32>,
+}
+
+impl Adds {
+    fn asking(&self) -> bool {
+        self.held > 0 && !self.confirmed && self.declined.map_or(true, |d| self.held > d)
+    }
+}
+
 /// A file that left one unit on this Mac and is the same file in another.
 struct CrossMove {
     from: String,
@@ -290,6 +359,23 @@ pub struct Engine<R: Remote> {
     leases: Option<Vec<LeaseEntry>>,
     /// A *Take over* waiting for the beat that carries it (workspace-relative).
     take_over: Option<String>,
+    /// The request count, the allowances, the bulk lane (pace.rs).
+    pacer: Mutex<Pacer>,
+    /// Workspace-relative paths the app wrote since they last went up: a
+    /// person's own edits, which go before any bulk work.
+    touched: HashSet<String>,
+    /// A window of this workspace has focus.
+    focused: bool,
+    /// When this device was last used here: an edit, a document opened, a
+    /// window focused. What the poll's cadence follows.
+    active_at: Instant,
+    /// The retry clock: failures in a row, and when the next try may go.
+    failures: u32,
+    retry_at: Option<Instant>,
+    limited: Option<Limited>,
+    adds: Adds,
+    /// When the last pass ran, for slow mode's one a minute.
+    last_pass_at: Option<Instant>,
 }
 
 impl<R: Remote> Engine<R> {
@@ -314,6 +400,7 @@ impl<R: Remote> Engine<R> {
                 .entry(marker.space.clone())
                 .or_insert_with(|| Self::space_unit(&cfg, &remote, &marker, held.dir, held.rel));
         }
+        let pacer = Mutex::new(Pacer::new(remote.usage().clone()));
         Engine {
             cfg,
             remote,
@@ -342,6 +429,15 @@ impl<R: Remote> Engine<R> {
             presence: Vec::new(),
             leases: None,
             take_over: None,
+            pacer,
+            touched: HashSet::new(),
+            focused: true,
+            active_at: Instant::now(),
+            failures: 0,
+            retry_at: None,
+            limited: None,
+            adds: Adds::default(),
+            last_pass_at: None,
         }
     }
 
@@ -455,6 +551,8 @@ impl<R: Remote> Engine<R> {
             last_sync_ms: self.last_sync_ms,
             error: self.error.clone(),
             pending_deletes: self.units.values().map(|u| u.held_deletes.len() as u32).sum(),
+            pending_adds: if self.adds.confirmed { 0 } else { self.adds.held },
+            usage: self.usage_status(),
             me: self.me.as_deref().map(|id| self.name_of(id)).unwrap_or_default(),
             me_id: self.me.clone(),
             can: self.can.clone(),
@@ -477,11 +575,55 @@ impl<R: Remote> Engine<R> {
         emit_statuses(self.events.as_ref(), &self.statuses);
     }
 
+    /// `CloudStatus.usage`.
+    fn usage_status(&self) -> UsageStatus {
+        let pacer = lock(&self.pacer);
+        let (mode, cause) = pacer.mode();
+        let limits = pacer.limits();
+        let resumes_at = match &self.limited {
+            Some(limited) => Some(limited.until_ms),
+            None => (mode != Mode::Normal).then(next_midnight_ms),
+        };
+        UsageStatus {
+            mode,
+            cause,
+            today: pacer.usage.today(),
+            fleet_today: pacer.fleet_today(),
+            cap: limits.and_then(|l| l.cap),
+            plan: limits.map(|l| l.plan),
+            resumes_at,
+            waiting: self.units.values().map(|u| u.waiting).sum(),
+            liftable: pacer.liftable(),
+            lifted: pacer.lifted(),
+        }
+    }
+
+    /// The phase a pass that went through leaves: what still waits on the
+    /// person, else idle.
+    fn settled_phase(&self) -> Phase {
+        if self.units.values().any(|u| !u.held_deletes.is_empty()) {
+            Phase::PendingDeletes
+        } else if self.adds.asking() {
+            Phase::PendingAdds
+        } else {
+            Phase::Idle
+        }
+    }
+
+    fn slow(&self) -> bool {
+        lock(&self.pacer).mode().0 == Mode::Slow
+    }
+
     /* ----- who the domain says this Mac is ----- */
 
     /// `/api/meta`: learn the worker's version — and, after a `426`, whether
     /// the worker has been updated since.
     pub(crate) async fn probe_worker(&mut self) {
+        let _ = self.probe().await;
+    }
+
+    /// The same, answering how it went — what the retry clock reads.
+    async fn probe(&mut self) -> RemoteResult<()> {
         match self.remote.meta().await {
             Ok(meta) => {
                 self.worker_version = Some(meta.version);
@@ -502,12 +644,34 @@ impl<R: Remote> Engine<R> {
                         self.outdated = None;
                     }
                 }
+                match meta.limits {
+                    Some(limits) => lock(&self.pacer).set_limits(limits),
+                    // A worker from before the request limits: everything this
+                    // engine sends assumes them, so it waits for the update.
+                    None if self.outdated.is_none() => {
+                        self.outdated = Some(meta.version);
+                        self.set_status(
+                            Phase::WorkerOutdated,
+                            Some(format!("this {}'s changes are waiting on a worker update", self.cfg.device_kind)),
+                        );
+                    }
+                    None => {}
+                }
+                Ok(())
             }
-            Err(RemoteError::Removed) => self.heard_removed(),
+            Err(RemoteError::Removed) => {
+                self.heard_removed();
+                Err(RemoteError::Removed)
+            }
             // Until the domain has answered once, the probe is the only
-            // request this engine makes, so its failure is the status.
-            Err(e) if self.me.is_none() => self.heard_failure(&e),
-            Err(_) => {}
+            // request this engine makes, so its failure is the status — and
+            // so is the account's daily limit, whenever it is heard.
+            Err(e) => {
+                if self.me.is_none() || matches!(e, RemoteError::DailyLimit) {
+                    self.heard_failure(&e);
+                }
+                Err(e)
+            }
         }
     }
 
@@ -588,10 +752,16 @@ impl<R: Remote> Engine<R> {
             .collect();
         let moves = pair_moves(&surveys);
         self.carry_pages(&moves);
+        let hold_new = self.weigh_new(&surveys, &moves);
+        let bulk_open = lock(&self.pacer).bulk_open();
+        self.last_pass_at = Some(Instant::now());
 
         // A pass after one that failed goes everywhere again: the phase it
         // left behind is only cleared by a pass that succeeds.
-        let recovering = !matches!(self.phase, Phase::Idle | Phase::Syncing | Phase::PendingDeletes | Phase::Paused);
+        let recovering = !matches!(
+            self.phase,
+            Phase::Idle | Phase::Syncing | Phase::PendingDeletes | Phase::PendingAdds | Phase::Paused
+        );
         let wanted = |id: &str| match &which {
             Which::All => true,
             Which::Dirty => recovering,
@@ -599,7 +769,9 @@ impl<R: Remote> Engine<R> {
         };
         let chosen: Vec<String> = surveys
             .iter()
-            .filter(|(id, survey)| wanted(id) || survey.dirty || self.units.get(*id).is_some_and(|u| u.poke))
+            .filter(|(id, survey)| {
+                wanted(id) || survey.dirty || self.units.get(*id).is_some_and(|u| u.poke || (u.owes && bulk_open))
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if chosen.is_empty() {
@@ -634,7 +806,7 @@ impl<R: Remote> Engine<R> {
                 self.units.values().filter(|u| u.poke && !u.gone && u.root.is_dir()).map(|u| u.id.clone()).collect()
             };
             for id in ids {
-                match self.cycle_unit(&id, &moves).await {
+                match self.cycle_unit(&id, &moves, hold_new).await {
                     Ok(paths) => {
                         changed.extend(paths);
                         cycled.insert(id);
@@ -681,11 +853,16 @@ impl<R: Remote> Engine<R> {
         match &failure {
             None => {
                 self.last_sync_ms = Some(now_ms());
-                let held = self.units.values().any(|u| !u.held_deletes.is_empty());
-                self.set_status(if held { Phase::PendingDeletes } else { Phase::Idle }, None);
+                // What the app wrote has gone — the express lane never waits.
+                self.touched.clear();
+                self.set_status(self.settled_phase(), None);
                 for id in &cycled {
-                    if let Some(unit) = self.units.get_mut(id).filter(|u| u.gc_due()) {
-                        unit.gc_blobs().await;
+                    let Some(want) = self.units.get(id).filter(|u| u.gc_due()).map(|u| u.gc_pending()) else {
+                        continue;
+                    };
+                    let budget = lock(&self.pacer).take(want);
+                    if let Some(unit) = self.units.get_mut(id) {
+                        unit.gc_blobs(budget).await;
                     }
                 }
                 if !changed.is_empty() {
@@ -696,6 +873,7 @@ impl<R: Remote> Engine<R> {
             }
             Some(e) => self.heard_failure(e),
         }
+        self.remote.usage().save();
         match failure {
             None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) => Ok(()),
             Some(e) => Err(e),
@@ -724,21 +902,111 @@ impl<R: Remote> Engine<R> {
                 Phase::Error,
                 Some(format!("{} no longer holds this workspace", self.cfg.domain)),
             ),
+            RemoteError::DailyLimit => self.enter_limited(),
+            // Heard from the domain, which is all it wants this Mac to know:
+            // the retry clock does the slowing down.
+            RemoteError::Slowed(_) => self.set_status(
+                self.settled_phase(),
+                Some(format!("The domain asked this {} to slow down.", self.cfg.device_kind)),
+            ),
             e => self.set_status(Phase::Error, Some(e.to_string())),
         }
+    }
+
+    /// The account's daily requests are used up: nothing goes until the
+    /// reset — spread, so every device does not come back in its first
+    /// second — but a probe every half hour, which a plan upgrade answers.
+    fn enter_limited(&mut self) {
+        if self.limited.is_none() {
+            let until_ms = next_midnight_ms() + jitter_ms(LIMITED_SPREAD_MS);
+            self.limited = Some(Limited { until_ms, next_try: Instant::now() + LIMITED_PROBE });
+        }
+        let until = self.limited.as_ref().map(|l| l.until_ms).unwrap_or_else(next_midnight_ms);
+        self.set_status(
+            Phase::Limited,
+            Some(format!("Today's Cloudflare requests are used up. Sync resumes at {}.", local_time(until))),
+        );
+    }
+
+    /// The retry clock, after a pass or a poll: a success starts it again;
+    /// a failure pushes the next try out along the ladder — or as far as the
+    /// domain asked, when it asked.
+    fn clock(&mut self, result: &RemoteResult<()>) {
+        let wait = match result {
+            Ok(()) | Err(RemoteError::Removed) | Err(RemoteError::DailyLimit) => {
+                if result.is_ok() {
+                    self.failures = 0;
+                    self.retry_at = None;
+                }
+                return;
+            }
+            Err(e) => {
+                self.failures += 1;
+                let step = BACKOFF[(self.failures as usize - 1).min(BACKOFF.len() - 1)];
+                let step = step.mul_f64(0.8 + 0.4 * unit_random());
+                match e {
+                    RemoteError::Slowed(secs) => step.max(Duration::from_secs(*secs)),
+                    _ => step,
+                }
+            }
+        };
+        self.retry_at = Some(Instant::now() + wait);
+    }
+
+    /// The many-new-documents valve, read off the surveys: how many
+    /// documents this pass would send for the first time — not the far side
+    /// of a rename, nor a file moving between sections. At the plan's
+    /// `manyNew` or more they wait for the person, who is asked once (the
+    /// event) and answers with `cloud_confirm_adds`. True while they wait.
+    fn weigh_new(&mut self, surveys: &BTreeMap<String, Survey>, moves: &[CrossMove]) -> bool {
+        let threshold = lock(&self.pacer).limits().map(|l| l.many_new).unwrap_or(u64::MAX);
+        let mut news: Vec<String> = Vec::new();
+        for (id, survey) in surveys {
+            let Some(unit) = self.units.get(id) else { continue };
+            let renamed: HashSet<&str> = survey.vanished.iter().map(|(_, hash, _)| hash.as_str()).collect();
+            for (path, hash) in &survey.news {
+                let arriving = moves.iter().any(|m| &m.to == id && &m.path == path);
+                if arriving || renamed.contains(hash.as_str()) || path.to_lowercase().ends_with(".meta.jsonl") {
+                    continue;
+                }
+                news.push(unit.ws_rel(path));
+            }
+        }
+        if (news.len() as u64) < threshold {
+            self.adds = Adds::default();
+            return false;
+        }
+        if self.adds.confirmed {
+            return false;
+        }
+        let count = news.len() as u32;
+        let was_asking = self.adds.asking() && self.adds.held == count;
+        self.adds.held = count;
+        self.adds.folders = folders_of(&news);
+        if self.adds.asking() && !was_asking {
+            let folders: Vec<serde_json::Value> =
+                self.adds.folders.iter().map(|(path, n)| json!({ "path": path, "count": n })).collect();
+            self.events.emit_json(EV_PENDING_ADDS, json!({ "root": self.root_key(), "count": count, "folders": folders }));
+        }
+        true
     }
 
     /// One unit's cycle. The unit is out of the map while it runs, so what
     /// the cycle is told about the rest of the workspace is read from the
     /// units that are in it. Answers the workspace-relative paths written.
-    async fn cycle_unit(&mut self, id: &str, moves: &[CrossMove]) -> RemoteResult<Vec<String>> {
+    async fn cycle_unit(&mut self, id: &str, moves: &[CrossMove], hold_new: bool) -> RemoteResult<Vec<String>> {
         let Some(mut unit) = self.units.remove(id) else { return Ok(Vec::new()) };
-        let result = self.cycle_taken(&mut unit, moves).await;
+        let result = self.cycle_taken(&mut unit, moves, hold_new).await;
         self.units.insert(id.to_string(), unit);
         result
     }
 
-    async fn cycle_taken(&mut self, unit: &mut Unit<R>, moves: &[CrossMove]) -> RemoteResult<Vec<String>> {
+    async fn cycle_taken(
+        &mut self,
+        unit: &mut Unit<R>,
+        moves: &[CrossMove],
+        hold_new: bool,
+    ) -> RemoteResult<Vec<String>> {
         // Nothing is written before the domain has said whom to sign it
         // with (`answered`, which the pass checks first).
         let Some(signature) = self.me.clone() else { return Ok(Vec::new()) };
@@ -765,6 +1033,8 @@ impl<R: Remote> Engine<R> {
             })
             .collect();
         let ws_root = self.root_key();
+        let own_edits: HashSet<String> =
+            self.touched.iter().filter_map(|p| unit.in_unit(p)).filter(|rel| !rel.is_empty()).collect();
         let ctx = Ctx {
             signature: &signature,
             people: &self.people,
@@ -773,6 +1043,9 @@ impl<R: Remote> Engine<R> {
             trash: self.cfg.trash.clone(),
             releasing: &releasing,
             moved_out: &moved_out,
+            pacer: &self.pacer,
+            touched: &own_edits,
+            hold_new,
         };
         let written = unit.cycle_inner(&ctx).await?;
         touched.extend(written.iter().map(|p| unit.ws_rel(p)));
@@ -1227,15 +1500,24 @@ impl<R: Remote> Engine<R> {
 
     /// Put this device's captured history in the bucket — every section's
     /// into its own store — and once a day thin what is up there.
+    ///
+    /// Bulk work: it waits while the bulk lane does, and sends no more than
+    /// the lane gives (`MIRROR_BUDGET` at most) — what is left goes on the
+    /// next pass that has room.
     pub(crate) async fn mirror_versions(&mut self) {
-        if self.paused || self.outdated.is_some() {
+        if self.paused || self.outdated.is_some() || self.limited.is_some() {
+            return;
+        }
+        let mut budget = lock(&self.pacer).take(MIRROR_BUDGET);
+        if budget == 0 {
             return;
         }
         self.last_hourly = Some(Instant::now());
         let mut landed = false;
         for unit in self.units.values_mut().filter(|u| !u.gone) {
-            landed |= unit.mirror_versions().await;
+            landed |= unit.mirror_versions(&mut budget).await;
         }
+        lock(&self.pacer).give_back(budget);
         if landed {
             self.refresh_status();
         }
@@ -1308,12 +1590,50 @@ impl<R: Remote> Engine<R> {
 
     pub(crate) fn set_activity(&mut self, abs_path: Option<String>) {
         self.activity = abs_path.map(|p| (p, Instant::now()));
+        self.active_at = Instant::now();
+    }
+
+    /// A window of this workspace gained focus, or none has it now. Gaining
+    /// it is being used again: the poll goes back to its quickest.
+    pub(crate) fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
+        if focused {
+            self.active_at = Instant::now();
+        }
+    }
+
+    /// How long until the next poll, by attention: quickest while a window
+    /// of the workspace is focused and in use, a minute while it is in the
+    /// background or idle, five once nobody has touched it for half an hour.
+    /// Never quicker than a minute in slow mode.
+    pub(crate) fn poll_gap(&self) -> Duration {
+        let idle = self.active_at.elapsed();
+        let gap = if idle >= AWAY_AFTER {
+            POLL_AWAY
+        } else if !self.focused || idle >= IDLE_AFTER {
+            POLL_BACKGROUND
+        } else {
+            POLL_INTERVAL
+        };
+        if self.slow() {
+            gap.max(POLL_BACKGROUND)
+        } else {
+            gap
+        }
+    }
+
+    /// How long the beat sent now holds, in ms (`Beat::Here::ttl`).
+    fn beat_ttl(&self) -> u64 {
+        let gap = self.poll_gap().max(PRESENCE_BEAT).mul_f64(2.5);
+        gap.clamp(BEAT_TTL_MIN, BEAT_TTL_MAX).as_millis() as u64
     }
 
     /// The app just wrote `rel`. When that is the document being edited, the
     /// editing is fresh again — typing is what keeps a document yours, not
     /// only having opened it.
     pub(crate) fn touch_activity(&mut self, rel: &str) {
+        self.active_at = Instant::now();
+        self.touched.insert(rel.to_string());
         let Some((abs, at)) = self.activity.as_mut() else { return };
         if rel_path(&self.cfg.root, Path::new(abs.as_str())).as_deref() == Some(rel) {
             *at = Instant::now();
@@ -1328,12 +1648,43 @@ impl<R: Remote> Engine<R> {
             return;
         };
         self.activity = Some((abs_path, Instant::now()));
+        self.active_at = Instant::now();
         self.take_over = Some(rel);
     }
 
     pub(crate) fn confirm_deletes(&mut self) {
         for unit in self.units.values_mut() {
             unit.confirm_deletes();
+        }
+    }
+
+    /// The person's answer to the many-new-documents question. *Sync them*
+    /// also lifts this device's bulk wait for the day: one question, never
+    /// two. *Not now* leaves them here until more arrive, or *Sync now*.
+    pub(crate) fn confirm_adds(&mut self, sync: bool) {
+        if sync {
+            self.adds.confirmed = true;
+            self.adds.declined = None;
+            let mut pacer = lock(&self.pacer);
+            if pacer.liftable() {
+                pacer.lift();
+            }
+        } else {
+            self.adds.declined = Some(self.adds.held);
+        }
+        if self.phase == Phase::PendingAdds && !self.adds.asking() {
+            self.set_status(self.settled_phase(), None);
+        } else {
+            self.refresh_status();
+        }
+    }
+
+    /// *Send them now*: this device's own bulk wait is lifted until 00:00
+    /// UTC. Never the ceiling, and never everyone's.
+    pub(crate) fn lift_wait(&mut self) {
+        let mut pacer = lock(&self.pacer);
+        if pacer.liftable() {
+            pacer.lift();
         }
     }
 
@@ -1408,7 +1759,7 @@ impl<R: Remote> Engine<R> {
     /// Not after a poll: one that failed leaves its beat owed, and pulling
     /// the next one forward would spin on a domain that is not answering.
     fn next_poll_after_cycle(&self) -> Instant {
-        let clock = Instant::now() + POLL_INTERVAL;
+        let clock = Instant::now() + self.poll_gap();
         if self.outdated.is_none() && !self.paused {
             clock.min(self.beat_deadline())
         } else {
@@ -1457,15 +1808,19 @@ impl<R: Remote> Engine<R> {
                 Some((id, rel)) => ((id != SHARED).then_some(id), Some(rel)),
                 None => (None, None),
             };
-            Beat::Here { name: self.cfg.device_name.clone(), space, path, take }
+            Beat::Here { name: self.cfg.device_name.clone(), space, path, take, ttl: self.beat_ttl() }
         });
         let editing = self.activity_rel();
         let sent = Instant::now();
         let poll = match self.remote.poll(beat.as_ref()).await {
             Ok(poll) => poll,
             Err(e) => {
-                if matches!(e, RemoteError::Removed) {
-                    self.heard_removed();
+                match e {
+                    RemoteError::Removed => self.heard_removed(),
+                    // What the account or the worker says of this device is
+                    // the status, whichever request heard it.
+                    RemoteError::DailyLimit | RemoteError::Slowed(_) => self.heard_failure(&e),
+                    _ => {}
                 }
                 // A lock nobody can confirm is no lock: an editor kept
                 // view-only by a lease this Mac can no longer hear about
@@ -1484,6 +1839,9 @@ impl<R: Remote> Engine<R> {
             if take {
                 self.take_over = None;
             }
+        }
+        if let Some(limits) = poll.limits.clone() {
+            lock(&self.pacer).set_limits(limits);
         }
         self.learn_people_here(&poll).await;
 
@@ -1625,6 +1983,11 @@ impl<R: Remote> Engine<R> {
     /// the poll clock; run a pass when something might have moved. It ends
     /// when it is told to, or the moment the domain says this Mac's access
     /// was removed — which any request it makes may be the one to hear.
+    ///
+    /// Three things can hold a pass or a poll back: the retry clock after a
+    /// failure, slow mode's one pass a minute, and Cloudflare's daily limit,
+    /// under which nothing goes but a probe. A command from the person —
+    /// *Sync now*, a page published — is not held by the first two.
     pub async fn run(
         mut self,
         mut cmds: mpsc::UnboundedReceiver<EngineCmd>,
@@ -1632,17 +1995,23 @@ impl<R: Remote> Engine<R> {
     ) -> Exit {
         // First contact: learn the worker, then a full pass brings a stale
         // device current.
-        self.probe_worker().await;
-        if self.can_cycle() && !self.removed {
-            let _ = self.cycle().await;
+        let probed = self.probe().await;
+        self.clock(&probed);
+        if self.can_cycle() && !self.removed && self.limited.is_none() {
+            let result = self.cycle().await;
+            self.clock(&result);
         } else {
             self.refresh_status();
         }
+        self.remote.usage().save();
         if self.removed {
             return Exit::Removed;
         }
         let mut fs_dirty_at: Option<Instant> = None;
         let mut touch_dirty_at: Option<Instant> = None;
+        // When the bulk lane is owed a pass (`Unit::owes`).
+        let mut bulk_at: Option<Instant> = self.bulk_due();
+        let mut polled_at: Option<Instant> = None;
         // A Mac that has never beaten owes one now, so it shows up as soon as
         // it has synced rather than a poll later.
         let mut next_poll = self.next_poll_after_cycle();
@@ -1653,7 +2022,7 @@ impl<R: Remote> Engine<R> {
         let mut watching = true;
 
         loop {
-            let wake = next_wake(next_poll, fs_dirty_at, touch_dirty_at);
+            let wake = self.wake_at(next_poll, fs_dirty_at, touch_dirty_at, bulk_at);
             let mut cycle_now = false;
             let mut everywhere = false;
 
@@ -1661,11 +2030,15 @@ impl<R: Remote> Engine<R> {
                 cmd = cmds.recv() => match cmd {
                     None | Some(EngineCmd::Shutdown) => {
                         self.leave().await;
+                        self.remote.usage().save();
                         return Exit::Shutdown;
                     }
                     Some(EngineCmd::SyncNow) => {
                         cycle_now = true;
                         everywhere = true;
+                        self.active_at = Instant::now();
+                        // Asked again, now that the person asked.
+                        self.adds.declined = None;
                     }
                     Some(EngineCmd::Probe) => {
                         let was_outdated = self.outdated.is_some();
@@ -1676,6 +2049,8 @@ impl<R: Remote> Engine<R> {
                         } else {
                             self.refresh_status();
                         }
+                        // A plan changed may have opened the bulk lane.
+                        bulk_at = self.bulk_due();
                     }
                     Some(EngineCmd::Touched(rel)) => {
                         self.touch_activity(&rel);
@@ -1695,9 +2070,28 @@ impl<R: Remote> Engine<R> {
                         self.take_over(p);
                         next_poll = next_poll.min(self.next_poll_after_cycle());
                     }
+                    Some(EngineCmd::Focus(focused)) => {
+                        let was = self.focused;
+                        self.set_focus(focused);
+                        if focused && !was {
+                            // Back at it: catch up now — unless a poll went
+                            // out moments ago, so that switching windows back
+                            // and forth costs nothing.
+                            let soonest = polled_at.map(|t| t + POLL_INTERVAL).unwrap_or_else(Instant::now);
+                            next_poll = next_poll.min(soonest);
+                        }
+                    }
                     Some(EngineCmd::Pause(p)) => self.set_paused(p),
                     Some(EngineCmd::ConfirmDeletes) => {
                         self.confirm_deletes();
+                        cycle_now = true;
+                    }
+                    Some(EngineCmd::ConfirmAdds(sync)) => {
+                        self.confirm_adds(sync);
+                        cycle_now = sync;
+                    }
+                    Some(EngineCmd::LiftWait) => {
+                        self.lift_wait();
                         cycle_now = true;
                     }
                     Some(EngineCmd::Publish { req, reply }) => {
@@ -1770,55 +2164,167 @@ impl<R: Remote> Engine<R> {
                 continue;
             }
             let now = Instant::now();
-            let touch_due = touch_dirty_at.map(|t| now >= t + TOUCH_SETTLE).unwrap_or(false);
-            let fs_due = fs_dirty_at.map(|t| now >= t + FS_SETTLE).unwrap_or(false);
-            if cycle_now || touch_due || fs_due {
+
+            if let Some(limited) = &self.limited {
+                // Nothing goes but the probe: at its half hour, at the reset,
+                // or when the person asks.
+                let due = cycle_now || now >= limited.next_try || now_ms() >= limited.until_ms;
+                if !due {
+                    continue;
+                }
+                if self.probe().await.is_err() {
+                    if let Some(limited) = self.limited.as_mut() {
+                        limited.next_try = Instant::now() + LIMITED_PROBE;
+                    }
+                    self.remote.usage().save();
+                    continue;
+                }
+                self.limited = None;
+                self.failures = 0;
+                self.retry_at = None;
+                cycle_now = true;
+                everywhere = true;
+            }
+
+            let pass_at = self.pass_at(fs_dirty_at, touch_dirty_at, bulk_at);
+            if cycle_now || pass_at.is_some_and(|at| now >= at) {
                 // One pass covers every pending hint: it looks at every
                 // section's folder, and cycles the ones that changed.
                 touch_dirty_at = None;
                 fs_dirty_at = None;
                 if self.can_cycle() {
-                    let _ = self.pass(if everywhere { Which::All } else { Which::Dirty }).await;
+                    let result = self.pass(if everywhere { Which::All } else { Which::Dirty }).await;
+                    self.clock(&result);
                 }
+                bulk_at = self.bulk_due();
                 next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
                 if !self.answered() {
                     // Waiting on a worker update, or for the domain to say
                     // who this device is — an engine that started offline:
                     // ask, and resume the moment it answers.
-                    self.probe_worker().await;
-                    if self.can_cycle() {
-                        let _ = self.cycle().await;
+                    let probed = self.probe().await;
+                    self.clock(&probed);
+                    if self.can_cycle() && self.limited.is_none() {
+                        let result = self.cycle().await;
+                        self.clock(&result);
                     } else {
                         self.refresh_status();
                     }
                 } else {
-                    let _ = self.poll_and_maybe_cycle().await;
+                    polled_at = Some(Instant::now());
+                    let result = self.poll_and_maybe_cycle().await;
+                    self.clock(&result);
                 }
                 if self.hourly_due() && !self.removed {
                     self.mirror_versions().await;
                 }
-                next_poll = Instant::now() + POLL_INTERVAL;
+                bulk_at = self.bulk_due();
+                next_poll = Instant::now() + self.poll_gap();
             }
+            if let Some(at) = self.retry_at {
+                next_poll = next_poll.max(at);
+            }
+            self.remote.usage().save();
             if self.removed {
                 return Exit::Removed;
             }
         }
     }
+
+    /// When a pass that is wanted may run: the soonest pending hint, held
+    /// back by the retry clock and by slow mode's one pass a minute.
+    fn pass_at(&self, fs_dirty_at: Option<Instant>, touch_dirty_at: Option<Instant>, bulk_at: Option<Instant>) -> Option<Instant> {
+        let wanted = [fs_dirty_at.map(|t| t + FS_SETTLE), touch_dirty_at.map(|t| t + TOUCH_SETTLE), bulk_at]
+            .into_iter()
+            .flatten()
+            .min()?;
+        let mut at = wanted;
+        if let Some(retry) = self.retry_at {
+            at = at.max(retry);
+        }
+        if let (true, Some(last)) = (self.slow(), self.last_pass_at) {
+            at = at.max(last + SLOW_PASS_GAP);
+        }
+        Some(at)
+    }
+
+    /// When the task next has something to do by itself: the poll clock, or
+    /// sooner for a pending hint — a touch settles in `TOUCH_SETTLE`, a
+    /// filesystem event in `FS_SETTLE` — within what holds passes back.
+    pub(crate) fn wake_at(
+        &self,
+        next_poll: Instant,
+        fs_dirty_at: Option<Instant>,
+        touch_dirty_at: Option<Instant>,
+        bulk_at: Option<Instant>,
+    ) -> Instant {
+        if self.paused {
+            // Only a command ends a pause.
+            return Instant::now() + POLL_AWAY;
+        }
+        if let Some(limited) = &self.limited {
+            let reset = Instant::now() + Duration::from_millis(limited.until_ms.saturating_sub(now_ms()));
+            return limited.next_try.min(reset);
+        }
+        let poll = match self.retry_at {
+            Some(retry) => next_poll.max(retry),
+            None => next_poll,
+        };
+        match self.pass_at(fs_dirty_at, touch_dirty_at, bulk_at) {
+            Some(pass) => poll.min(pass),
+            None => poll,
+        }
+    }
+
+    /// When the bulk lane is owed a pass: some unit left work for it — as
+    /// soon as the bucket holds a batch while the lane is open, and at the
+    /// reset (spread) while it waits.
+    fn bulk_due(&self) -> Option<Instant> {
+        if !self.units.values().any(|u| u.owes) {
+            return None;
+        }
+        let mut pacer = lock(&self.pacer);
+        if pacer.bulk_open() {
+            return Some(Instant::now() + pacer.wait_for(MIN_BATCH).max(Duration::from_secs(1)));
+        }
+        let reset = next_midnight_ms().saturating_sub(now_ms()) + jitter_ms(LIMITED_SPREAD_MS);
+        Some(Instant::now() + Duration::from_millis(reset))
+    }
 }
 
-/// When the task should next wake: the poll clock, or sooner for a pending
-/// hint — a touch settles in `TOUCH_SETTLE`, a filesystem event in
-/// `FS_SETTLE`. Pure, so the timing is testable without a runtime.
-pub(crate) fn next_wake(next_poll: Instant, fs_dirty_at: Option<Instant>, touch_dirty_at: Option<Instant>) -> Instant {
-    let mut wake = next_poll;
-    if let Some(t) = fs_dirty_at {
-        wake = wake.min(t + FS_SETTLE);
+/// A number in [0, 1), for the retry clock's jitter.
+fn unit_random() -> f64 {
+    let mut buf = [0u8; 4];
+    let _ = getrandom::getrandom(&mut buf);
+    u32::from_le_bytes(buf) as f64 / (u32::MAX as f64 + 1.0)
+}
+
+/// Up to `max` ms, at random.
+fn jitter_ms(max: u64) -> u64 {
+    (unit_random() * max as f64) as u64
+}
+
+/// An epoch-ms moment as this device's clock reads it: "05:30".
+fn local_time(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// Where new documents are, for the valve's question: each path's folder,
+/// two levels deep at most, counted — most first, five at most.
+fn folders_of(paths: &[String]) -> Vec<(String, u32)> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for path in paths {
+        let dirs: Vec<&str> = path.split('/').collect();
+        let dirs = &dirs[..dirs.len().saturating_sub(1)];
+        *counts.entry(dirs[..dirs.len().min(2)].join("/")).or_default() += 1;
     }
-    if let Some(t) = touch_dirty_at {
-        wake = wake.min(t + TOUCH_SETTLE);
-    }
-    wake
+    let mut out: Vec<(String, u32)> = counts.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(5);
+    out
 }
 
 /// The addresses a unit has queued giving up.

@@ -14,7 +14,12 @@ use super::manifest::{valid_rel_path, MAX_PATH_DEPTH};
 /// Mirrors the worker's caps (and the app's own tree caps) so the engine
 /// never builds a workspace the other side would reject.
 pub const MAX_SYNC_FILE_BYTES: u64 = 25 * 1024 * 1024;
+/// The documents one section may hold. Only files that sync count, so a
+/// cloned repository in the folder costs its markdown and nothing else.
 pub const MAX_SYNC_ENTRIES: usize = 5000;
+/// The files and folders one walk visits before it gives up: what bounds the
+/// walk itself, now that most of what it passes is never synced.
+pub const MAX_WALK_ENTRIES: usize = 100_000;
 /// The suffix of the engine's own in-flight writes; a scan never sees them.
 pub const TMP_SUFFIX: &str = ".doklin-sync-tmp";
 
@@ -27,18 +32,32 @@ pub struct ScanEntry {
 
 /// Walk the workspace with the same eyes as the sidebar tree: skip dotfiles
 /// and build junk (`crate::is_hidden_or_ignored` — which also hides the
-/// `.doklin/` marker), bounded depth and entry count — but include every
-/// file type (images and assets sync too), skipping only what the worker
-/// would refuse: oversized files and paths outside its grammar.
+/// `.doklin/` marker), bounded depth and entry count, and see only the files
+/// that sync (`crate::syncs`): everything else is invisible to the engine,
+/// the version store and the export alike, so it can never be uploaded,
+/// held as state, or read as deleted. Also invisible: what the worker would
+/// refuse — oversized files and paths outside its grammar.
+///
+/// Two bounds, both an error rather than a partial answer (a partial scan
+/// would read the rest as deleted): more than `MAX_SYNC_ENTRIES` documents,
+/// or more than `MAX_WALK_ENTRIES` entries visited.
 ///
 /// `skip` names folders at the top of `root` the walk never enters, whatever
 /// their case: the shared workspace passes the two reserved names
 /// (`space::RESERVED_DIRS`), because what is under them is another section's.
 pub fn scan_local(root: &Path, skip: &[&str]) -> Result<BTreeMap<String, ScanEntry>, String> {
     let mut out = BTreeMap::new();
-    let mut budget = MAX_SYNC_ENTRIES;
-    scan_dir(root, root, 1, skip, &mut budget, &mut out)?;
+    let mut walked = MAX_WALK_ENTRIES;
+    scan_dir(root, root, 1, skip, &mut walked, &mut out)?;
     Ok(out)
+}
+
+/// What a scan that gave up says.
+pub fn too_large_to_sync() -> String {
+    format!(
+        "this folder holds more than {} documents, or more than {} files in all — too large to sync",
+        MAX_SYNC_ENTRIES, MAX_WALK_ENTRIES
+    )
 }
 
 /// `depth` is the number of path segments a file directly in `dir` has.
@@ -47,7 +66,7 @@ fn scan_dir(
     dir: &Path,
     depth: usize,
     skip: &[&str],
-    budget: &mut usize,
+    walked: &mut usize,
     out: &mut BTreeMap<String, ScanEntry>,
 ) -> Result<(), String> {
     let entries = match std::fs::read_dir(dir) {
@@ -55,13 +74,10 @@ fn scan_dir(
         Err(_) => return Ok(()), // unreadable directory: skip, don't fail the scan
     };
     for entry in entries.flatten() {
-        if *budget == 0 {
-            return Err(format!(
-                "workspace has more than {} entries — too large to sync",
-                MAX_SYNC_ENTRIES
-            ));
+        if *walked == 0 {
+            return Err(too_large_to_sync());
         }
-        *budget -= 1;
+        *walked -= 1;
         let name = entry.file_name().to_string_lossy().to_string();
         if crate::is_hidden_or_ignored(&name) || name.ends_with(TMP_SUFFIX) {
             continue;
@@ -79,9 +95,12 @@ fn scan_dir(
         let path = entry.path();
         if ft.is_dir() {
             if depth < MAX_PATH_DEPTH {
-                scan_dir(root, &path, depth + 1, &[], budget, out)?;
+                scan_dir(root, &path, depth + 1, &[], walked, out)?;
             }
         } else if ft.is_file() {
+            if !crate::syncs(&name) {
+                continue; // stays on this device
+            }
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -99,6 +118,9 @@ fn scan_dir(
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+            if out.len() == MAX_SYNC_ENTRIES {
+                return Err(too_large_to_sync());
+            }
             out.insert(rel, ScanEntry { abs: path, size: meta.len(), mtime_ms });
         }
     }
@@ -107,8 +129,9 @@ fn scan_dir(
 
 /// The edit bus's filter: `abs` as a workspace-relative path, or None when
 /// it is not a file the scan would ever see — outside the root, the root
-/// itself, a hidden or ignored segment, one of our own temp files. The
-/// cloud's bus and the versioner's share it so they can't drift.
+/// itself, a hidden or ignored segment, one of our own temp files, a file
+/// that does not sync. The cloud's bus and the versioner's share it so they
+/// can't drift.
 pub fn rel_for_touch(root: &Path, abs: &Path) -> Option<String> {
     let rel = rel_path(root, abs)?;
     if rel.is_empty() {
@@ -117,7 +140,7 @@ pub fn rel_for_touch(root: &Path, abs: &Path) -> Option<String> {
     let bad = rel
         .split('/')
         .any(|seg| crate::is_hidden_or_ignored(seg) || seg.ends_with(TMP_SUFFIX));
-    if bad {
+    if bad || !crate::syncs(&rel) {
         None
     } else {
         Some(rel)

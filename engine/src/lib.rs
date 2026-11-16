@@ -32,3 +32,16 @@ pub fn is_hidden_or_ignored(name: &str) -> bool {
     }
     matches!(name, "node_modules" | "target" | "dist" | "build" | "__pycache__" | ".git")
 }
+
+/// The files Doklin syncs, versions and exports: markdown and html
+/// documents, and a document's comments (`<stem>.meta.jsonl`). Everything
+/// else — a picture, a PDF, a script an agent wrote, a cloned repository's
+/// sources — stays on its device and costs no request. Mirrored by the
+/// worker (`syncs`, cloud-worker/src/layout.ts), which refuses anything
+/// else: change both.
+pub fn syncs(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
+    SYNCED_SUFFIXES.iter().any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
+}
+
+const SYNCED_SUFFIXES: [&str; 6] = [".md", ".markdown", ".mdown", ".mkd", ".html", ".meta.jsonl"];

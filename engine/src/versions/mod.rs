@@ -47,7 +47,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::cloud::scan::{rel_for_touch, MAX_SYNC_ENTRIES};
+use crate::cloud::scan::rel_for_touch;
 use crate::cloud::status::Events;
 use crate::cloud::versions::VersionsEntry;
 use crate::Core;
@@ -178,10 +178,7 @@ impl Versioner {
             }
             Err(CaptureError::TooLarge) => {
                 self.phase = Phase::TooLarge;
-                self.error = Some(format!(
-                    "this folder holds more than {} files — too large to keep versions of",
-                    MAX_SYNC_ENTRIES
-                ));
+                self.error = Some(workspace::too_large());
                 None
             }
             Err(CaptureError::Io(message)) => {
