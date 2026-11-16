@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
 import { dragWindowFromGap } from "./windowDrag";
-import { isUnsaved, tabLabel, type Tab } from "./tabs";
+import { isUnsaved, isUnsupportedTab, tabLabel, type Tab } from "./tabs";
 
 // What hovering a tab says: where a file is, or that a note isn't one yet.
 const tabHint = (t: Tab) =>
@@ -237,7 +237,7 @@ export default function TabBar({
                   }
                 }}
                 onContextMenu={(e) => {
-                  if (!onHistory || t.kind !== "file") return;
+                  if (!onHistory || t.kind !== "file" || isUnsupportedTab(t)) return;
                   e.preventDefault();
                   setTabMenu({ x: e.clientX, y: e.clientY, path: t.path });
                 }}

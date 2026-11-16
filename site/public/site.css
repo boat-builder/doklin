@@ -1217,7 +1217,8 @@ mark.cm {
 
 .step-ui li {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 2px 10px;
   padding: 8px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1309,4 +1310,5 @@ ol.step-ui li::before { content: counter(ui); color: var(--link); }
 
 @media (max-width: 480px) {
   .header-actions a.gh { display: none; }
+  .pair-bar { font-size: 12px; }
 }

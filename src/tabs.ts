@@ -49,6 +49,13 @@ export const isUntitled = (t: Tab): t is UntitledTab => t.kind === "untitled";
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 
+/** Whether a file tab holds a file that is not a document — opened from the
+ *  tree, where every file can be clicked. Its tab says so instead of showing
+ *  it: nothing reads it, watches it or autosaves it, and it can't be split.
+ *  It is still a file tab, so ⌘⌫ trashes it like any other. */
+export const isUnsupportedTab = (t: Pick<Tab, "kind" | "path">): boolean =>
+  t.kind === "file" && !DOC_EXT_RE.test(t.path);
+
 /** The name a tab goes by: a document's file name without its extension, an
  *  untitled note's first line. */
 export const tabLabel = (t: Tab): string =>

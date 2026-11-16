@@ -202,6 +202,92 @@ const readShowAll = () => {
   }
 };
 
+// The three lists of a workspace in sections.
+type SectionId = "workspace" | "restricted" | "private";
+const SECTION_IDS: readonly string[] = ["workspace", "restricted", "private"] satisfies SectionId[];
+
+// How the tree was left, per workspace — a view preference kept on this Mac:
+// the folders open in it, and the sections folded away. A folder is closed
+// until it is opened, so a big workspace starts folded and a folder that
+// turns up later (synced, made in Finder) arrives closed; a section shows
+// until it is folded. Folders are stored as paths inside the workspace, the
+// record keyed by the workspace's.
+const TREE_VIEW_STORAGE_KEY = "doklin:sidebar-tree";
+type StoredTreeView = { open: string[]; folded: SectionId[] };
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s !== "") : [];
+const readAllTreeViews = (): Record<string, StoredTreeView> => {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(TREE_VIEW_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, StoredTreeView> = {};
+    for (const [root, v] of Object.entries(parsed)) {
+      if (!v || typeof v !== "object") continue;
+      const { open, folded } = v as { open?: unknown; folded?: unknown };
+      out[root] = {
+        open: strings(open),
+        folded: strings(folded).filter((s): s is SectionId => SECTION_IDS.includes(s)),
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+};
+const writeAllTreeViews = (all: Record<string, StoredTreeView>) => {
+  try {
+    localStorage.setItem(TREE_VIEW_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    /* private mode / quota — the tree still opens and folds for this session */
+  }
+};
+const readTreeView = (root: string) => {
+  const v = readAllTreeViews()[root];
+  return {
+    open: new Set((v?.open ?? []).map((rel) => `${root}/${rel}`)),
+    folded: new Set<SectionId>(v?.folded ?? []),
+  };
+};
+const writeTreeView = (root: string, open: Set<string>, folded: Set<SectionId>) => {
+  const all = readAllTreeViews();
+  const prefix = `${root}/`;
+  const rels = [...open].filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+  if (rels.length === 0 && folded.size === 0) delete all[root];
+  else all[root] = { open: rels, folded: [...folded] };
+  writeAllTreeViews(all);
+};
+// Drop how a workspace's tree was left: the workspace is gone from this Mac.
+export const forgetTreeView = (root: string) => {
+  const all = readAllTreeViews();
+  delete all[root];
+  writeAllTreeViews(all);
+};
+
+// The folders from just under `root` down to `dir`, `dir` included: what has
+// to be open for a row inside `dir` to show.
+const foldersDownTo = (root: string, dir: string) => {
+  const out: string[] = [];
+  for (let p = dir; p.startsWith(`${root}/`); ) {
+    out.push(p);
+    const up = dirname(p);
+    if (up === p) break;
+    p = up;
+  }
+  return out;
+};
+
+// The open set with the folder at `from` (and the open folders inside it) now
+// at `to`: a folder renamed or moved from the tree stays as open as it was.
+const movedOpen = (open: Set<string>, from: string, to: string) => {
+  const next = new Set<string>();
+  for (const p of open) {
+    if (p === from) next.add(to);
+    else if (p.startsWith(`${from}/`)) next.add(to + p.slice(from.length));
+    else next.add(p);
+  }
+  return next;
+};
+
 export default function Sidebar({
   root,
   cloud = null,
@@ -247,7 +333,19 @@ export default function Sidebar({
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // The open folders and folded sections, for the workspace they were read
+  // for: another root in this window reads its own.
+  const [initialView] = useState(() => readTreeView(root));
+  const [openDirs, setOpenDirs] = useState<Set<string>>(initialView.open);
+  const [folded, setFolded] = useState<Set<SectionId>>(initialView.folded);
+  const [viewRoot, setViewRoot] = useState(root);
+  if (viewRoot !== root) {
+    const view = readTreeView(root);
+    setViewRoot(root);
+    setOpenDirs(view.open);
+    setFolded(view.folded);
+  }
+  useEffect(() => writeTreeView(viewRoot, openDirs, folded), [viewRoot, openDirs, folded]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<MenuState | null>(null);
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
@@ -290,26 +388,12 @@ export default function Sidebar({
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
 
-  // Bring the folder an open from outside asked for into view: open the
-  // folders above it (and it), then scroll to its row once the tree has drawn
-  // it. A folder the tree never shows (a hidden one) simply never scrolls.
-  const revealedRef = useRef(0);
-  useEffect(() => {
-    if (!reveal || revealedRef.current === reveal.seq || !tree) return;
-    const target = reveal.path;
-    const holds = (dir: string) => target === dir || target.startsWith(`${dir}/`);
-    if ([...collapsed].some(holds)) {
-      setCollapsed((prev) => new Set([...prev].filter((dir) => !holds(dir))));
-      return; // this runs again once they are open
-    }
-    const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(target)}"]`);
-    if (!row) return;
-    revealedRef.current = reveal.seq;
-    row.scrollIntoView({ block: "nearest" });
-  }, [reveal, tree, collapsed]);
+  const openFolders = useCallback((dirs: string[]) => {
+    setOpenDirs((prev) => (dirs.every((d) => prev.has(d)) ? prev : new Set([...prev, ...dirs])));
+  }, []);
 
-  const toggleCollapsed = useCallback((path: string) => {
-    setCollapsed((prev) => {
+  const toggleOpen = useCallback((path: string) => {
+    setOpenDirs((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -352,25 +436,73 @@ export default function Sidebar({
   }, [cloud, root]);
   const hasPrivate = (cloud?.spaces ?? []).some((sp) => sp.kind === "private");
 
+  // Which list a path is in. A folder tree (no sections) is one list.
+  const sectionOf = useCallback(
+    (path: string): SectionId => {
+      const within = (dir: string) => path === dir || path.startsWith(`${dir}/`);
+      if (!sectioned) return "workspace";
+      if (within(privateDir)) return "private";
+      if (within(restrictedDir)) return "restricted";
+      return "workspace";
+    },
+    [sectioned, privateDir, restrictedDir],
+  );
+  const toggleSection = useCallback((id: SectionId) => {
+    setFolded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  // Unfold the list `path` is in, so a row about to show there does.
+  const unfoldSectionOf = useCallback(
+    (path: string) => {
+      const id = sectionOf(path);
+      setFolded((prev) => (prev.has(id) ? new Set([...prev].filter((s) => s !== id)) : prev));
+    },
+    [sectionOf],
+  );
+
+  // Bring the folder an open from outside asked for into view: unfold its
+  // list, open the folders above it (and it), then scroll to its row once the
+  // tree has drawn it. A folder the tree never shows (a hidden one) simply
+  // never scrolls.
+  const revealedRef = useRef(0);
+  useEffect(() => {
+    if (!reveal || revealedRef.current === reveal.seq || !tree) return;
+    const target = reveal.path;
+    const shut = foldersDownTo(root, target).filter((dir) => !openDirs.has(dir));
+    if (shut.length > 0 || folded.has(sectionOf(target))) {
+      openFolders(shut);
+      unfoldSectionOf(target);
+      return; // this runs again once they are open
+    }
+    const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(target)}"]`);
+    if (!row) return;
+    revealedRef.current = reveal.seq;
+    row.scrollIntoView({ block: "nearest" });
+  }, [reveal, tree, openDirs, folded, root, openFolders, sectionOf, unfoldSectionOf]);
+
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
-  // The rows in on-screen order, respecting collapsed folders — the universe
-  // a ⇧-click range spans.
+  // The rows in on-screen order, inside open folders and unfolded lists only
+  // — the universe a ⇧-click range spans.
   const visibleEntries = useMemo(() => {
     const out: SidebarSelection[] = [];
     const walk = (nodes: TreeNode[]) => {
       for (const c of nodes) {
         out.push({ path: c.path, kind: c.kind });
-        if (c.kind === "dir" && !collapsed.has(c.path)) walk(c.children);
+        if (c.kind === "dir" && openDirs.has(c.path)) walk(c.children);
       }
     };
     if (layout) {
-      walk(layout.shared);
-      walk(layout.restricted);
-      walk(layout.private);
+      if (!folded.has("workspace")) walk(layout.shared);
+      if (!folded.has("restricted")) walk(layout.restricted);
+      if (!folded.has("private")) walk(layout.private);
     }
     return out;
-  }, [layout, collapsed]);
+  }, [layout, openDirs, folded]);
 
   // The fixed end of a ⇧-click range: the row last plain- or ⌘-clicked.
   const selectionAnchorRef = useRef<string | null>(null);
@@ -458,10 +590,10 @@ export default function Sidebar({
   const suppressClickRef = useRef(false);
   const autoScrollRafRef = useRef<number | null>(null);
   const autoExpandRef = useRef<{ path: string; timer: number } | null>(null);
-  const collapsedRef = useRef(collapsed);
+  const openDirsRef = useRef(openDirs);
   useEffect(() => {
-    collapsedRef.current = collapsed;
-  }, [collapsed]);
+    openDirsRef.current = openDirs;
+  }, [openDirs]);
 
   // A drop is valid when it actually moves something: at least one entry
   // isn't already in the destination, and the destination is never inside a
@@ -524,22 +656,18 @@ export default function Sidebar({
         window.clearTimeout(pending.timer);
         autoExpandRef.current = null;
       }
-      if (hoveredDir && collapsedRef.current.has(hoveredDir) && !autoExpandRef.current) {
+      if (hoveredDir && !openDirsRef.current.has(hoveredDir) && !autoExpandRef.current) {
         const path = hoveredDir;
         autoExpandRef.current = {
           path,
           timer: window.setTimeout(() => {
             autoExpandRef.current = null;
-            setCollapsed((prev) => {
-              const next = new Set(prev);
-              next.delete(path);
-              return next;
-            });
+            openFolders([path]);
           }, AUTO_EXPAND_MS),
         };
       }
     },
-    [root, canDrop, setDropState],
+    [root, canDrop, setDropState, openFolders],
   );
 
   // Dragging near the tree's top/bottom edge scrolls it (rAF loop, so the
@@ -589,13 +717,17 @@ export default function Sidebar({
       const leaving = entries.filter((en) => dirname(en.path) !== toDir);
       if (onConfirmMove && !(await onConfirmMove(leaving, toDir))) return;
       const moved: SidebarSelection[] = [];
+      const movedDirs: [from: string, to: string][] = [];
       const errors: string[] = [];
       for (const entry of entries) {
         if (dirname(entry.path) === toDir) continue; // already lives here
         const to = `${toDir}/${basename(entry.path)}`;
         const err = await onMovePath(entry.path, to, entry.kind);
         if (err) errors.push(`"${basename(entry.path)}": ${err}`);
-        else moved.push({ path: to, kind: entry.kind });
+        else {
+          moved.push({ path: to, kind: entry.kind });
+          if (entry.kind === "dir") movedDirs.push([entry.path, to]);
+        }
       }
       if (errors.length === 1) {
         window.alert(`Could not move ${errors[0]}`);
@@ -604,15 +736,18 @@ export default function Sidebar({
       }
       if (moved.length === 0) return;
       onSelect(moved);
-      // Open the destination folder so the moved rows are visible where they landed.
-      setCollapsed((prev) => {
-        if (!prev.has(toDir)) return prev;
-        const next = new Set(prev);
-        next.delete(toDir);
-        return next;
+      // Moved folders stay as open as they were, and the destination opens
+      // (its list unfolds) so the moved rows are visible where they landed.
+      // A list's own folder has no row to open.
+      const listDir = toDir === root || toDir === restrictedDir || toDir === privateDir;
+      setOpenDirs((prev) => {
+        let next = prev;
+        for (const [from, to] of movedDirs) next = movedOpen(next, from, to);
+        return listDir || next.has(toDir) ? next : new Set([...next, toDir]);
       });
+      unfoldSectionOf(toDir);
     },
-    [onMovePath, onSelect, onConfirmMove],
+    [onMovePath, onSelect, onConfirmMove, root, restrictedDir, privateDir, unfoldSectionOf],
   );
 
   const onRowPointerDown = useCallback(
@@ -663,7 +798,7 @@ export default function Sidebar({
       const isOut =
         drag.entries.length === 1 &&
         drag.entries[0].kind === "file" &&
-        // A file the app can't open has no pane to tear out into.
+        // A file the app can't open has no document to split beside another.
         drag.entry.openable !== false &&
         onDragFileToEditor != null &&
         aside != null &&
@@ -760,8 +895,8 @@ export default function Sidebar({
 
   /* ---------- Create & rename ---------- */
 
-  // Begin inline creation inside `parentDir`, expanding it (and any collapsed
-  // ancestors) so the input row is actually visible.
+  // Begin inline creation inside `parentDir`, opening it (and the folders
+  // above it, and its list) so the input row is actually visible.
   const startCreate = useCallback(
     (kind: "file" | "dir", wantedDir: string) => {
       // Nothing is made straight under Restricted from here: a note there
@@ -770,19 +905,11 @@ export default function Sidebar({
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        let p = parentDir;
-        while (p.length >= root.length) {
-          next.delete(p);
-          if (p === root) break;
-          p = dirname(p);
-        }
-        return next;
-      });
+      openFolders(foldersDownTo(root, parentDir).filter((d) => d !== restrictedDir && d !== privateDir));
+      unfoldSectionOf(parentDir);
       setPendingCreate({ parentDir, kind });
     },
-    [root, sectioned, restrictedDir],
+    [root, sectioned, restrictedDir, privateDir, openFolders, unfoldSectionOf],
   );
 
   // Where "New File" / "New Folder" should land for a given target: inside a
@@ -859,6 +986,7 @@ export default function Sidebar({
       const err = await onMovePath(pr.path, to, pr.kind);
       if (err) return err;
       setPendingRename(null);
+      if (pr.kind === "dir") setOpenDirs((prev) => movedOpen(prev, pr.path, to));
       onSelect([{ path: to, kind: pr.kind }]);
       return null;
     },
@@ -903,6 +1031,7 @@ export default function Sidebar({
     return out;
   }, [cloud, root]);
   const showCreateAtRoot = pendingCreate?.parentDir === root;
+  const workspaceFolded = sectioned && folded.has("workspace");
   const showCreateInPrivate = sectioned && pendingCreate?.parentDir === privateDir;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
@@ -954,7 +1083,7 @@ export default function Sidebar({
       items.push({ label: "Copy link", onClick: () => onCopyPageLink(target.path) });
     }
     // Every document has a history, connected or not.
-    if (target.kind === "file" && onHistory) {
+    if (target.kind === "file" && target.openable !== false && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
     // Who can open it: a restricted folder's people; a folder everyone has,
@@ -1124,7 +1253,7 @@ export default function Sidebar({
       currentPath={currentPath}
       selection={selection}
       cutPaths={cutPaths}
-      collapsed={collapsed}
+      openDirs={openDirs}
       pendingCreate={pendingCreate}
       pendingRename={pendingRename}
       dragPaths={dragPaths}
@@ -1134,7 +1263,7 @@ export default function Sidebar({
       published={publishedByAbs}
       spaces={spacesByAbs}
       loose={loose}
-      onToggle={toggleCollapsed}
+      onToggle={toggleOpen}
       onOpenFile={onOpenFile}
       onRowClick={handleRowSelect}
       onRowMenu={openRowMenu}
@@ -1166,17 +1295,14 @@ export default function Sidebar({
         onOpenFolder={onOpenFolder}
         onOpenFile={onOpenFilePicker}
         onRevealInFinder={() => onRevealInFinder(root)}
-        onRefresh={() => void refresh()}
         showAll={showAll}
         onToggleShowAll={toggleShowAll}
         onSwitchToSearch={onSwitchToSearch}
         onNewFile={() => startCreate("file", createDirFor(primarySelection))}
-        onNewFolder={() => startCreate("dir", createDirFor(primarySelection))}
         onOpenCloud={onOpenCloud}
         onOpenPeople={onOpenPeople}
         onOpenDevices={onOpenDevices}
         onOpenAgents={onOpenAgents}
-        sectioned={sectioned}
       />
       <div
         ref={bodyRef}
@@ -1194,25 +1320,52 @@ export default function Sidebar({
           setCtxMenu({ x: e.clientX, y: e.clientY, target: { path: root, kind: "root" } });
         }}
       >
-        {error && <div className="sidebar-message sidebar-message-error">{error}</div>}
-        {!error && loading && !tree && (
-          <div className="sidebar-message">Loading…</div>
-        )}
-        {!error && layout && (
-          <div
-            className={`tree-section ${sectioned && dropDir === root ? "is-drop-section" : ""}`}
-            data-section-dir={root}
-            data-testid="section-workspace"
+        <div
+          className={`tree-section ${sectioned && dropDir === root ? "is-drop-section" : ""}`}
+          data-section-dir={root}
+          data-testid="section-workspace"
+        >
+          {/* A folder tree is one list, and its heading only names it; in
+              sections, each heading folds its list away. */}
+          <SectionHead
+            icon={sectioned ? <WorkspaceIcon /> : null}
+            label={sectioned ? "Workspace" : "Files"}
+            folded={workspaceFolded}
+            count={layout?.shared.length ?? 0}
+            onToggle={sectioned ? () => toggleSection("workspace") : undefined}
+            testid="workspace"
           >
-            {layout.shared.length === 0 && !showCreateAtRoot && <div className="sidebar-message">No files yet</div>}
-            {(layout.shared.length > 0 || showCreateAtRoot) && (
-              <ul className="tree" role="tree">
-                {showCreateAtRoot && pendingCreate && createRow}
-                {layout.shared.map((child) => renderItem(child, root, false))}
-              </ul>
-            )}
-          </div>
-        )}
+            <button
+              className="sidebar-section-btn"
+              onClick={() => startCreate("dir", createDirFor(primarySelection))}
+              title="New folder"
+              aria-label="New folder"
+            >
+              <NewFolderIcon />
+            </button>
+            <button
+              className="sidebar-section-btn"
+              onClick={() => void refresh()}
+              title="Refresh"
+              aria-label="Refresh file list"
+            >
+              <RefreshIcon />
+            </button>
+          </SectionHead>
+          {error && <div className="sidebar-message sidebar-message-error">{error}</div>}
+          {!error && loading && !tree && <div className="sidebar-message">Loading…</div>}
+          {!error && layout && !workspaceFolded && (
+            <>
+              {layout.shared.length === 0 && !showCreateAtRoot && <div className="sidebar-message">No files yet</div>}
+              {(layout.shared.length > 0 || showCreateAtRoot) && (
+                <ul className="tree" role="tree">
+                  {showCreateAtRoot && pendingCreate && createRow}
+                  {layout.shared.map((child) => renderItem(child, root, false))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
         {!error && layout && sectioned && (
           <>
             <div
@@ -1231,30 +1384,35 @@ export default function Sidebar({
                 });
               }}
             >
-              <div className="sidebar-section tree-section-head">
-                <span className="sidebar-section-label">Restricted</span>
+              <SectionHead
+                icon={<RestrictedIcon />}
+                label="Restricted"
+                folded={folded.has("restricted")}
+                count={layout.restricted.length}
+                onToggle={() => toggleSection("restricted")}
+                testid="restricted"
+              >
                 {onNewRestricted && (
-                  <span className="sidebar-section-actions">
-                    <button
-                      className="sidebar-section-btn"
-                      data-testid="new-restricted"
-                      onClick={() => onNewRestricted()}
-                      title="New restricted folder"
-                      aria-label="New restricted folder"
-                    >
-                      <PlusIcon />
-                    </button>
-                  </span>
+                  <button
+                    className="sidebar-section-btn"
+                    data-testid="new-restricted"
+                    onClick={() => onNewRestricted()}
+                    title="New restricted folder"
+                    aria-label="New restricted folder"
+                  >
+                    <PlusIcon />
+                  </button>
                 )}
-              </div>
-              {layout.restricted.length === 0 ? (
-                <div className="sidebar-message tree-section-hint">Folders only the people you choose can open.</div>
-              ) : (
-                <ul className="tree" role="tree">
-                  {/* Straight under Restricted a note is in no folder, so nobody else has it. */}
-                  {layout.restricted.map((child) => renderItem(child, restrictedDir, true))}
-                </ul>
-              )}
+              </SectionHead>
+              {!folded.has("restricted") &&
+                (layout.restricted.length === 0 ? (
+                  <div className="sidebar-message tree-section-hint">Folders only the people you choose can open.</div>
+                ) : (
+                  <ul className="tree" role="tree">
+                    {/* Straight under Restricted a note is in no folder, so nobody else has it. */}
+                    {layout.restricted.map((child) => renderItem(child, restrictedDir, true))}
+                  </ul>
+                ))}
             </div>
             <div
               className={`tree-section ${hasPrivate && dropDir === privateDir ? "is-drop-section" : ""}`}
@@ -1272,30 +1430,38 @@ export default function Sidebar({
                 });
               }}
             >
-              <div className="sidebar-section tree-section-head">
-                <span className="sidebar-section-label">Private</span>
+              <SectionHead
+                icon={<PrivateIcon />}
+                label="Private"
+                folded={folded.has("private")}
+                count={layout.private.length}
+                onToggle={() => toggleSection("private")}
+                testid="private"
+              >
                 {hasPrivate && (
-                  <span className="sidebar-section-actions">
-                    <button
-                      className="sidebar-section-btn"
-                      data-testid="new-private"
-                      onClick={() => startCreate("file", privateDir)}
-                      title="New private note"
-                      aria-label="New private note"
-                    >
-                      <PlusIcon />
-                    </button>
-                  </span>
+                  <button
+                    className="sidebar-section-btn"
+                    data-testid="new-private"
+                    onClick={() => startCreate("file", privateDir)}
+                    title="New private note"
+                    aria-label="New private note"
+                  >
+                    <PlusIcon />
+                  </button>
                 )}
-              </div>
-              {hasPrivate && layout.private.length === 0 && !showCreateInPrivate && (
-                <div className="sidebar-message tree-section-hint">Only you can see what you put here.</div>
-              )}
-              {(layout.private.length > 0 || showCreateInPrivate) && (
-                <ul className="tree" role="tree">
-                  {showCreateInPrivate && createRow}
-                  {layout.private.map((child) => renderItem(child, privateDir, !hasPrivate))}
-                </ul>
+              </SectionHead>
+              {!folded.has("private") && (
+                <>
+                  {hasPrivate && layout.private.length === 0 && !showCreateInPrivate && (
+                    <div className="sidebar-message tree-section-hint">Only you can see what you put here.</div>
+                  )}
+                  {(layout.private.length > 0 || showCreateInPrivate) && (
+                    <ul className="tree" role="tree">
+                      {showCreateInPrivate && createRow}
+                      {layout.private.map((child) => renderItem(child, privateDir, !hasPrivate))}
+                    </ul>
+                  )}
+                </>
               )}
             </div>
           </>
@@ -1348,17 +1514,14 @@ function SidebarHeader({
   onOpenFolder,
   onOpenFile,
   onRevealInFinder,
-  onRefresh,
   showAll,
   onToggleShowAll,
   onSwitchToSearch,
   onNewFile,
-  onNewFolder,
   onOpenCloud,
   onOpenPeople,
   onOpenDevices,
   onOpenAgents,
-  sectioned,
 }: {
   name: string;
   /** The folder this window has open — which of `workspaces` is this one. */
@@ -1371,20 +1534,16 @@ function SidebarHeader({
   onOpenFolder: () => void;
   onOpenFile: () => void;
   onRevealInFinder: () => void;
-  onRefresh: () => void;
   // Whether the tree lists every file (non-documents greyed out) or documents
   // only, and the toggle for it.
   showAll: boolean;
   onToggleShowAll: () => void;
   onSwitchToSearch: () => void;
   onNewFile: () => void;
-  onNewFolder: () => void;
   onOpenCloud?: () => void;
   onOpenPeople?: () => void;
   onOpenDevices?: () => void;
   onOpenAgents?: () => void;
-  // The tree below is in sections, and this row heads the first of them.
-  sectioned: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -1572,27 +1731,62 @@ function SidebarHeader({
           <PlusIcon />
         </button>
       </div>
-      <div className="sidebar-section">
-        <span className="sidebar-section-label">{sectioned ? "Workspace" : "Files"}</span>
-        <span className="sidebar-section-actions">
-          <button
-            className="sidebar-section-btn"
-            onClick={onNewFolder}
-            title="New folder"
-            aria-label="New folder"
-          >
-            <NewFolderIcon />
-          </button>
-          <button
-            className="sidebar-section-btn"
-            onClick={onRefresh}
-            title="Refresh"
-            aria-label="Refresh file list"
-          >
-            <RefreshIcon />
-          </button>
-        </span>
-      </div>
+    </div>
+  );
+}
+
+// A list's heading: its icon and name — which fold the list away, where it
+// can be folded — how many rows it holds while folded, and the list's own
+// actions. It pins to the top of the tree while the list's rows scroll under
+// it, so the list in view is always named.
+function SectionHead({
+  icon,
+  label,
+  folded,
+  count,
+  onToggle,
+  testid,
+  children,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  folded: boolean;
+  // The rows at the top of the list, shown while it is folded.
+  count: number;
+  onToggle?: () => void;
+  testid: string;
+  children?: React.ReactNode;
+}) {
+  const name = (
+    <>
+      {icon}
+      <span className="sidebar-section-label">{label}</span>
+    </>
+  );
+  return (
+    <div className="sidebar-section tree-section-head">
+      {onToggle ? (
+        <button
+          className={`tree-section-toggle ${folded ? "is-folded" : ""}`}
+          onClick={onToggle}
+          aria-expanded={!folded}
+          title={folded ? `Show ${label}` : `Hide ${label}`}
+          data-testid={`section-${testid}-toggle`}
+        >
+          {name}
+          <span className="tree-section-chevron">
+            <ChevronRightIcon />
+          </span>
+          {folded && count > 0 && (
+            <span className="tree-section-count" data-testid={`section-${testid}-count`}>
+              {count}
+            </span>
+          )}
+        </button>
+      ) : (
+        <span className="tree-section-toggle">{name}</span>
+      )}
+      <span className="sidebar-section-actions">{children}</span>
     </div>
   );
 }
@@ -1604,7 +1798,7 @@ function TreeItem({
   currentPath,
   selection,
   cutPaths,
-  collapsed,
+  openDirs,
   pendingCreate,
   pendingRename,
   dragPaths,
@@ -1630,7 +1824,8 @@ function TreeItem({
   selection: SidebarSelection[];
   // Roots of a pending Cut (dimmed until pasted or replaced).
   cutPaths: Set<string>;
-  collapsed: Set<string>;
+  // The folders showing their contents.
+  openDirs: Set<string>;
   pendingCreate: PendingCreate | null;
   pendingRename: PendingRename | null;
   // The dragged rows' paths (dimmed) and the highlighted destination folder.
@@ -1672,8 +1867,9 @@ function TreeItem({
 
   if (node.kind === "file") {
     // A file the app can't open (only ever listed in "Show all files"): the
-    // row exists so its presence is visible, greyed out and inert to clicks.
-    // Everything filesystem-level — select, move, rename, delete — still works.
+    // row exists so its presence is visible, greyed out. A click opens it
+    // like any file — its tab says it isn't a document — and everything
+    // filesystem-level (select, move, rename, delete) works as usual.
     const openable = isOpenable(node);
     if (renamingHere) {
       return (
@@ -1702,7 +1898,7 @@ function TreeItem({
           onClick={(e) => {
             if (dnd.suppressClick()) return;
             if (onRowClick(e, { path: node.path, kind: "file" })) return;
-            if (openable) onOpenFile(node.path);
+            onOpenFile(node.path);
           }}
           onPointerDown={(e) =>
             dnd.onPointerDown(e, { path: node.path, kind: "file", openable })
@@ -1742,11 +1938,11 @@ function TreeItem({
   }
 
   const space = spaces.get(node.path) ?? null;
-  const isCollapsed = collapsed.has(node.path);
+  const isOpen = openDirs.has(node.path);
   const creatingHere = pendingCreate?.parentDir === node.path;
   const isDropTarget = dropDir === node.path;
   return (
-    <li role="treeitem" aria-expanded={!isCollapsed} aria-selected={isSelected}>
+    <li role="treeitem" aria-expanded={isOpen} aria-selected={isSelected}>
       {renamingHere ? (
         <NameRow
           depth={depth}
@@ -1779,7 +1975,7 @@ function TreeItem({
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "dir" })}
           title={node.path}
         >
-          <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
+          <span className={`tree-chevron ${isOpen ? "" : "is-collapsed"}`}>
             <ChevronRightIcon />
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
@@ -1801,7 +1997,7 @@ function TreeItem({
           )}
         </button>
       )}
-      {!isCollapsed && (
+      {isOpen && (
         // --depth places the folder's indent guide under its chevron.
         <ul role="group" style={{ "--depth": depth } as React.CSSProperties}>
           {creatingHere && pendingCreate && (
@@ -1823,7 +2019,7 @@ function TreeItem({
               currentPath={currentPath}
               selection={selection}
               cutPaths={cutPaths}
-              collapsed={collapsed}
+              openDirs={openDirs}
               pendingCreate={pendingCreate}
               pendingRename={pendingRename}
               dragPaths={dragPaths}
@@ -2148,6 +2344,67 @@ function FolderIcon() {
       aria-hidden
     >
       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
+  );
+}
+
+// The lists' icons: everyone in the workspace, the people you choose, you.
+function WorkspaceIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function RestrictedIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <circle cx="12" cy="9.5" r="2.5" />
+      <path d="M8 16.5a4 4 0 0 1 8 0" />
+    </svg>
+  );
+}
+
+function PrivateIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
     </svg>
   );
 }

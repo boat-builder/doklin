@@ -29,6 +29,10 @@
   markdown inside.
 - `move_path` refuses to clobber an existing destination, except a case-only
   rename. `create_file`/`create_dir` fail if the name is taken.
+- A file tab that isn't markdown or html (a greyed "Show all files" row,
+  clicked) holds no document: nothing reads, watches or autosaves it
+  (`isUnsupportedTab`), and it can't be split. A rename that changes which it
+  is reloads the tab.
 
 ## Untitled notes
 
