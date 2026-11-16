@@ -102,7 +102,8 @@ const closedAtStart =
   (await row("/docs/Projects/plan.md").count()) === 0;
 await openFolder("/docs/Restricted/Finance");
 await openFolder("/docs/Projects");
-const storedOpen = await page.evaluate(() => localStorage.getItem("doklin:sidebar-open-folders"));
+const storedTree = () => page.evaluate(() => localStorage.getItem("doklin:sidebar-tree"));
+const storedOpen = await storedTree();
 await page.locator(".sidebar-search").click();
 await poll(async () => (await page.locator(".ws-search-input").count()) === 1);
 const treeGone = (await page.locator('aside[aria-label="File browser"]').count()) === 0;
@@ -111,7 +112,7 @@ await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
 step(
   "folders start closed; the ones opened are kept for the workspace and are still open when the tree is drawn again",
   closedAtStart &&
-    storedOpen === '{"/docs":["Restricted/Finance","Projects"]}' &&
+    storedOpen === '{"/docs":{"open":["Restricted/Finance","Projects"],"folded":[]}}' &&
     treeGone &&
     (await isOpen("/docs/Restricted/Finance")) &&
     (await isOpen("/docs/Projects")) &&
@@ -120,10 +121,41 @@ step(
   storedOpen,
 );
 
+/* 0b — a list's heading folds it away: its rows go, how many it holds
+      shows, and it stays folded when the tree is drawn again. The headings
+      pin to the top of the tree while their rows scroll under them. */
+const sharedRows = await tid("section-workspace").locator("ul.tree > li").count();
+await tid("section-workspace-toggle").click();
+await poll(async () => (await row("/docs/notes.md").count()) === 0);
+const foldedCount = (await tid("section-workspace-count").textContent()).trim();
+const foldedStored = await storedTree();
+await page.locator(".sidebar-search").click();
+await poll(async () => (await page.locator(".ws-search-input").count()) === 1);
+await page.locator('[title="Back to files"]').click();
+await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+const stillFolded =
+  (await row("/docs/notes.md").count()) === 0 &&
+  (await tid("section-workspace-toggle").getAttribute("aria-expanded")) === "false";
+await tid("section-workspace-toggle").click();
+await poll(async () => (await row("/docs/notes.md").count()) === 1);
+const pinned = await tid("section-private")
+  .locator(".tree-section-head")
+  .evaluate((el) => getComputedStyle(el).position);
+step(
+  "a heading folds its list away, shows how many rows it holds, and stays folded when the tree is drawn again; headings pin while scrolling",
+  sharedRows > 0 &&
+    foldedCount === String(sharedRows) &&
+    foldedStored === '{"/docs":{"open":["Restricted/Finance","Projects"],"folded":["workspace"]}}' &&
+    stillFolded &&
+    (await row("/docs/Projects/plan.md").count()) === 1 &&
+    pinned === "sticky",
+  `${foldedCount} rows folded · ${pinned}`,
+);
+
 /* 1 — three lists. On disk Private and Restricted are two folders at the top
       of the workspace; here they are headings, with no row of their own. */
 const headings = [
-  (await page.locator(".sidebar-head .sidebar-section-label").textContent()).trim(),
+  (await tid("section-workspace").locator(".sidebar-section-label").textContent()).trim(),
   (await tid("section-restricted").locator(".sidebar-section-label").textContent()).trim(),
   (await tid("section-private").locator(".sidebar-section-label").textContent()).trim(),
 ];
