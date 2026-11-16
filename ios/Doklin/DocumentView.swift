@@ -57,6 +57,7 @@ struct DocumentView: View {
             .toolbar(.hidden, for: .tabBar)
             .safeAreaInset(edge: .bottom, spacing: 0) { bottom }
             .onAppear {
+                shell.documents += 1
                 model.load()
                 comments.load()
             }
@@ -82,6 +83,7 @@ struct DocumentView: View {
                 if phase != .active, let session { Task { await session.save() } }
             }
             .onDisappear {
+                shell.documents = max(0, shell.documents - 1)
                 if let session { Task { await session.leave() } }
             }
             .onChange(of: model.html == nil) { _, gone in

@@ -163,8 +163,14 @@ final class PeopleUITests: UITestCase {
         try ask("editing?path=Projects/plan.md")
         expect(text(containing: "editing Projects/plan.md"), "the other device, editing the plan", timeout: 45)
         record("here now")
-        app.staticTexts["Sherin's Mac (drive)"].tap()
-        expect(text(containing: "Open on your other device, Sherin's Mac (drive) — view only"), "the plan, view only")
+        let other = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sherin's Mac (drive)")).firstMatch
+        let viewOnly = text(containing: "Open on your other device, Sherin's Mac (drive) — view only")
+        // The row is drawn again as the poll lands: a tap in between is tried once more.
+        for _ in 0..<3 where !viewOnly.exists {
+            expect(other, "the other device's row").tap()
+            _ = viewOnly.waitForExistence(timeout: 8)
+        }
+        expect(viewOnly, "the plan, view only")
         record("the plan, view only")
         marked("edit").tap()
         expect(app.buttons["Take over"], "Take over in the editor").tap()

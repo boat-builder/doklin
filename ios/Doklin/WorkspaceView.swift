@@ -34,7 +34,7 @@ struct WorkspaceView: View {
         }
         .tabViewStyle(.sidebarAdaptable)
         .tabBarMinimizeBehavior(.onScrollDown)
-        .tabViewBottomAccessory(isEnabled: NeedsYouBar.shows(workspace, device: device, toaster: toaster)) {
+        .tabViewBottomAccessory(isEnabled: NeedsYouBar.shows(workspace, device: device, toaster: toaster, shell: shell)) {
             NeedsYouBar(workspace: workspace)
         }
         .animation(.default, value: toaster.shown?.id)

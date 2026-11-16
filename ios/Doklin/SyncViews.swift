@@ -26,6 +26,9 @@ final class Shell {
     var reading: String?
     /// A row Browse should show, from *Show in Browse*.
     var revealing: String?
+    /// Documents on screen: they hide the tab bar, and with it the bar above
+    /// the tabs, so what was just done shows in their own bar instead.
+    var documents = 0
 
     /// Push `route` over whatever the showing tab has.
     func open(_ route: Route) {
@@ -119,11 +122,11 @@ struct SyncQuietLine: View {
                         .font(.footnote)
                         .foregroundStyle(Theme.text2)
                         .lineLimit(1)
-                        .accessibilityIdentifier("sync-status")
                 }
             }
             .buttonStyle(.plain)
             .accessibilityHint("Syncs now")
+            .accessibilityIdentifier("sync-status")
         }
     }
 }
@@ -138,15 +141,15 @@ struct NeedsYouBar: View {
     @Environment(Shell.self) private var shell
 
     /// Whether the bar has anything to say.
-    static func shows(_ workspace: Workspace, device: Workspaces, toaster: Toaster) -> Bool {
-        toaster.shown != nil
+    static func shows(_ workspace: Workspace, device: Workspaces, toaster: Toaster, shell: Shell) -> Bool {
+        (toaster.shown != nil && shell.documents == 0)
             || device.notices.contains { $0.root == workspace.root }
             || workspace.status.map(SyncWords.needsYou) == true
     }
 
     var body: some View {
         Group {
-            if let toast = toaster.shown {
+            if let toast = toaster.shown, shell.documents == 0 {
                 row(symbol: symbol(toast.tone), tint: tint(toast.tone), text: toast.text, id: "toast") {
                     if let action = toast.action {
                         Button(action.label) {

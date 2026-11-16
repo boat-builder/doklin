@@ -26,7 +26,7 @@ final class DoklinUITests: UITestCase {
 
         // Home: what changed, and how sync stands, quietly.
         home()
-        expect(text(containing: "Synced"), "the sync line")
+        expect(app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Synced")).firstMatch, "the sync line")
         expect(text(containing: "Recent changes"), "Home's title")
         record("home")
 
