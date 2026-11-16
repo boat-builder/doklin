@@ -728,6 +728,11 @@ await check("a link to a page, as the app copies it, is taken wherever a documen
   const comments = await doklin(editorBox, ["comments", link("Comments.md")]);
   const wiped = `https://doklin.cc/open#d=${encodeURIComponent(DOMAIN)}&w=w-000000000000&f=${fidOf("Projects/plan.md")}`;
   const opened = await doklin(nobody, ["open", "--dry-run", link("Projects/plan.md")]);
+  const forApp = link("Projects/plan.md").replace("https://doklin.cc/open", "doklin://open");
+  const handed =
+    process.platform === "darwin"
+      ? ["open hands a link to the app as it is registered for it", opened.code === 0 && same(JSON.parse(opened.out).links, [forApp])]
+      : ["off a Mac, open refuses a link as it refuses a path: there is no app here", refused(opened, 1, /open hands files to the Doklin app, which runs only on a Mac/)];
   return {
     "read takes it: the text, and the path it led to": read.code === 0 && read.out === SEED_FILES["Projects/plan.md"] && read.meta.path === "Projects/plan",
     "one question first, then the read": same(steps, ["GET find → 200", "GET doc → 200"]),
@@ -737,7 +742,7 @@ await check("a link to a page, as the app copies it, is taken wherever a documen
     "a link from before the domain was set up again is the same": refused(await doklin(editorBox, ["read", wiped]), 3, /no page at that link/),
     "a link to a workspace this machine is not logged in to says which": refused(await doklin(editorBox, ["read", link("Projects/plan.md", "elsewhere.example.com")]), 6, /not logged in to elsewhere\.example\.com/),
     "-w naming another workspace than the link's is bad usage": refused(await doklin(editorBox, ["read", link("Projects/plan.md"), "-w", "elsewhere.example.com"]), 2, /that link is to a page in localhost/),
-    "open hands a link to the app as it is registered for it": opened.code === 0 && same(JSON.parse(opened.out).links, [link("Projects/plan.md").replace("https://doklin.cc/open", "doklin://open")]),
+    [handed[0]]: handed[1],
   };
 });
 
